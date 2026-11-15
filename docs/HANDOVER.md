@@ -1,5 +1,16 @@
 # Mewtual; Handover
 
+The `chat-v2-founder-governed-runtime` continuation adds a library-only SAME-node
+private Add owner, exact Admission/Header data and a governed ordinary-member
+branch. All13 focused real-MLS tests and the affected123-case cohort passed,
+including two Adds/signing between them with the same Core verifier. Lifecycle34,
+MLS Add17, strict lint for the three edited crates, formatting and ambient passed.
+The mixed-source finding is fixed; read-only re-review has no remaining findings.
+Complete suites remain pending. Actual installation remains test-only. Root covering save, physical
+Current, durable formats and cancellation cleanup are unfinished; connecting a
+Runtime-held Add without cleanup would block UI retirement. Chat V2 remains OFF.
+[Boundary and required integration](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
 The separate native acceptance-fixture correction addresses hosted failures
 in PRs #130/#131: a temporary Capacity refusal was used as an Open-history
 baseline, and positive pre-body intake assumed no lock contention. The test
@@ -24,7 +35,8 @@ Strict native lint passed; Root strict lint retains556 inherited diagnostics
 (prior564), with no suppression. Final routing rechecks4+1+1, both formatting
 checks, native compile/build/startup and both dependency audits passed.
 Draft PR #132 contains the two separate runtime commits. Complete Root/native
-Linux/Windows CI run43703760738 is running at runtime head790e703a; later
+Linux/Windows CI run43703760738 has passed both native suites and the frontend;
+both Root jobs are still running at runtime head790e703a. Later
 receipt-only documentation does not change tested code. The one named catch-up
 cost case remains deferred. Real predecessor-binary evidence remains open.
 This creates no Source4, production Add/Header, joined source, archive or

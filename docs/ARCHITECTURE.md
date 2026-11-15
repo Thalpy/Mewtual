@@ -1,5 +1,11 @@
 # Mewtual; Architecture
 
+The library-only governed founder continuation retains the SAME warm node,
+private Add candidate and native custody. Actual SDK evidence is separate from
+original genesis provenance; the ordinary-member branch preserves its original
+Admission and runtime. Production installation, Root covering save and lock
+cleanup remain unfinished and unreachable. [Contract](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
 Completed private MLS Add work has an exclusive exact-receiver whole-pair
 handoff. It retains the replaced graph for disposal outside final writers;
 both installed halves remain independently paid and mutation-closed. The Root

@@ -40,6 +40,11 @@ pub use bootstrap_source::{
     MAX_CREATE_ENCRYPTED_PAYLOAD_BYTES, MAX_CREATE_ENVELOPE_BYTES, MAX_CREATE_PADDED_BYTES,
     V2_GENESIS_SEED_METADATA_BYTES,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use bootstrap_source::{
+    PreparedV2FounderGovernanceNode, V2FounderGovernanceNegative, V2InstalledFounderAddData,
+    FOUNDER_GOVERNANCE_DATA_BYTES,
+};
 
 const KEY_BINDING_DOMAIN: &str = "catcoms/private-chat-genesis-archive-key-binding/v1";
 /// Named logical original-package/encoding allowance, NOT a prepaid fee or SDK/whole-host cap.

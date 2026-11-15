@@ -1,5 +1,11 @@
 # Mewtual; Interfaces & Hooks Schema
 
+The library-only `PreparedV2FounderGovernanceNode` keeps one whole original warm
+node and private Add candidate. Both native cuts bind one retained source;
+actual End custody follows the candidate through cleanup. There is no public
+production install, Root covering receipt or native dispatcher. Existing
+genesis checks remain strict. [Contract and integration requirements](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
 `NativeTextVaultUpgrade::prepare_governance` consumes only its private,
 unexposed Selected3 owner. The resulting `NativeTextGovernanceUpgrade` retains
 the original UI/source/native close owners through declaration4 and its final

@@ -1,5 +1,14 @@
 # Threat model; client integrity & enforcement boundaries
 
+The library-only governed founder owner preserves immutable genesis provenance
+separately from actual installed SDK evidence. One pending Add owns both native
+cuts bound to the same original source and keeps real Ends after all private
+payloads. Constructor ambiguity cannot reset its debit; governing raw64 is
+cached before late checks. No Root/native path constructs this owner yet.
+Its future consumer requires durable outcome binding and cancelled-operation
+cleanup before UI/key drainage; End counting alone would deadlock lock/close.
+[Scope and remaining enforcement](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
 Combined governed-native startup authenticates exact index/marker frames and
 retains their original file identities across catalog declaration and final
 handoff. A matching namespace descriptor cannot authorize another mutable

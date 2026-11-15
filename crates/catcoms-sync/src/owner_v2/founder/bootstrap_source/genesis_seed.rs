@@ -20,7 +20,14 @@ use std::sync::{Arc, Weak};
 mod ordinary_append;
 mod ordinary_create;
 // The founder acting as an ORDINARY member; shares nothing with the Append lane above.
+#[cfg(not(target_arch = "wasm32"))]
+mod governance;
 mod ordinary_member;
+#[cfg(not(target_arch = "wasm32"))]
+pub use governance::{
+    PreparedV2FounderGovernanceNode, V2FounderGovernanceNegative, V2InstalledFounderAddData,
+    FOUNDER_GOVERNANCE_DATA_BYTES,
+};
 pub use ordinary_append::{
     DetachedV2AppendData, PreparedV2AppendData, V2AppendDataView, V2AppendPlanObservation,
     V2UnsignedAppendDataView, APPEND_DATA_BUFFER_BYTES,

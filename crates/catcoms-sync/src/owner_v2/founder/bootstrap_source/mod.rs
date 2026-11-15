@@ -9,6 +9,11 @@ use catcoms_rt::CryptoRngCore;
 
 mod codec;
 mod genesis_seed;
+#[cfg(not(target_arch = "wasm32"))]
+pub use genesis_seed::{
+    PreparedV2FounderGovernanceNode, V2FounderGovernanceNegative, V2InstalledFounderAddData,
+    FOUNDER_GOVERNANCE_DATA_BYTES,
+};
 mod s0;
 pub use codec::{
     open_bootstrap_source_data, BootstrapSourceDataView, OpenedBootstrapSourceData,

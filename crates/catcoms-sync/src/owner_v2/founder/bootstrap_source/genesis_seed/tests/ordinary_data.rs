@@ -14,7 +14,7 @@ use catcoms_replication::chat::{Body, SignedAction};
 use catcoms_storage::pad::{unpad, OP_PAD_CEILING, OP_PAD_FLOOR};
 use catcoms_wire::{Decoder, DocType};
 
-fn prepared_node(
+pub(in super::super) fn prepared_node(
     id: u64,
 ) -> (
     UnboundV2GenesisNode<MemNetwork, ChaCha20Rng>,

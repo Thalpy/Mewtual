@@ -2,6 +2,11 @@
 //! No production dispatcher, publisher, root acquisition, archive saver or positive issuer is
 //! enabled here. Public codec frames remain DATA until the actual host covers their originals.
 mod founder;
+#[cfg(not(target_arch = "wasm32"))]
+pub use founder::{
+    PreparedV2FounderGovernanceNode, V2FounderGovernanceNegative, V2InstalledFounderAddData,
+    FOUNDER_GOVERNANCE_DATA_BYTES,
+};
 // The live ordered source fence of a joined node: finalized transitions, contest/merge state
 // and final-admission custody. Observation and ordering only; it issues no authority.
 mod joined_fence;

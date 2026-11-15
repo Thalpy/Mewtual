@@ -723,6 +723,7 @@ dependencies = [
  "futures",
  "hex",
  "libp2p",
+ "openmls_memory_storage",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
  "sha2 0.10.9",
