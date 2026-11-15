@@ -42,9 +42,11 @@ pub use bootstrap_source::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use bootstrap_source::{
-    PreparedV2FounderGovernanceNode, V2FounderAddPreparationRefusal, V2FounderAddRequestData,
-    V2FounderGovernanceNegative, V2InstalledFounderAddData, FOUNDER_GOVERNANCE_DATA_BYTES,
-    MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES,
+    PreparedV2FounderGovernanceNode, PreparedV2FounderInviteData, RetiredV2FounderAddNativeCustody,
+    V2FounderAddNativeStage, V2FounderAddPreparationRefusal, V2FounderAddRequestData,
+    V2FounderGovernanceNegative, V2FounderInviteRequestData, V2InstalledFounderAddData,
+    FOUNDER_GOVERNANCE_DATA_BYTES, FOUNDER_INVITE_DATA_BYTES, MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES,
+    MAX_FOUNDER_INVITE_LIFETIME_MS,
 };
 
 const KEY_BINDING_DOMAIN: &str = "catcoms/private-chat-genesis-archive-key-binding/v1";

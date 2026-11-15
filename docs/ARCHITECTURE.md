@@ -1,5 +1,12 @@
 # Mewtual; Architecture
 
+Unsigned native V2 invitation preparation now follows the SAME retained
+Runtime/Host/member verifier and actual governed4 Current. Its output is only
+preimage-hash/expiry DATA. A separate Sync original caches Clock/nonce/spec/raw
+and supplies a distinct native key tail; the covering journal, SavedInvite and
+publication consumer remain unfinished. Chat V2 is OFF.
+[Actual path](communication-recovery/CHAT-V2-INVITE-ISSUER.md).
+
 The library-only governed founder continuation retains the SAME warm node,
 private Add candidate and native custody. Actual SDK evidence is separate from
 original genesis provenance; the ordinary-member branch preserves its original

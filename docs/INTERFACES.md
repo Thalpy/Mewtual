@@ -1,5 +1,16 @@
 # Mewtual; Interfaces & Hooks Schema
 
+The stage-lifetime continuation distinguishes actual admitted SDK work from
+closed cached DATA. `finish_admitted_add_data_native` needs the original real
+AddSdk End; closed retirement proves Cell completion, permanently blocks SDK
+continuation and returns cut metadata/Ends for outside-writer disposal.
+Fresh-stage cuts require exact source/purpose, never-entered/current admission
+and retained eligibility. Only an actual returned local refusal before a
+primitive may permit reauthorization; unknown native/key entry stays terminal.
+Root still must supply new saved-intent/current authorization and its original
+Runtime cleanup before counter waiting. No production caller is added here.
+[Contract](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
 The library governed Add request now freezes authenticated Invite/JoinRequest
 and bounded exact package bytes before native SDK entry. First execution uses
 the original retained Clock; exact retries reuse that admitted time and the
@@ -9064,3 +9075,13 @@ authority or reconstructs an opaque hot parent. `StaleTip` grants no retry IO.
 See [the exact contract](communication-recovery/CHAT-V2-SELECTED-HISTORY-PROOFS.md).
 Root durable record/node coupling, cold replay, historical custody and
 contradiction restoration remain unimplemented prerequisites for eviction.
+
+## Native V2 invite preparation (15 November)
+
+`NativeTextMemberJob::prepare_invite_intent(token,lifetime,negative)` retains
+the unsigned original on the SAME warm NativeRequired Host, using the original
+transport reservation, existing member verifier and actual Current4 proof.
+Its `(preimage hash, expiry)` return is DATA, not an invite or Saved receipt.
+Sync's separate `JoinInvite` key tail requires Root covering/current admission
+and is not called by this production preparation. The actual journal and
+publication remain unfinished. [Contract](communication-recovery/CHAT-V2-INVITE-ISSUER.md).

@@ -15,6 +15,13 @@ pub struct InviteBindingSpecData {
     pub public_routing_plan: [u8; 32],
 }
 impl InviteBindingSpecData {
+    /// Canonical unsigned DATA for the owning issuer to cover before its
+    /// separately authorized key edge. Identical to sign_using's preimage;
+    /// neither this encoding nor its signature proves persistence or permission.
+    pub fn signing_bytes_data(&self) -> Result<Vec<u8>, ChatError> {
+        self.validate()?;
+        Ok(self.semantic_bytes())
+    }
     pub(super) fn validate(&self) -> Result<(), ChatError> {
         self.anchor.validate()?;
         if self.nonce == [0; 16] {

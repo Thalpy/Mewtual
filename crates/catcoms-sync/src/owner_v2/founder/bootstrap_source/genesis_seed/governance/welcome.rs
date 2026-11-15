@@ -107,9 +107,12 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
         {
             return Err(unavailable());
         }
-        p.welcome_cut
-            .enter(&p.original, NativeChatKeyPurpose::JoinWelcome, &mut p.ends)
-            .map_err(|_| unavailable())?;
+        p.welcome_native.enter(
+            p.welcome_cut.as_mut().ok_or_else(unavailable)?,
+            &p.original,
+            NativeChatKeyPurpose::JoinWelcome,
+            &mut p.ends,
+        )?;
         w.entered = true;
         #[cfg(test)]
         test_cut(TestCut::WelcomeEntered);
@@ -176,5 +179,11 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
             .unwrap()
             .spec
             .sealed_routing_transfer[0] ^= 1;
+    }
+}
+
+impl PreparedWelcome {
+    pub(super) fn may_reauthorize_native_data(&self) -> bool {
+        !self.entered && self.raw.is_none() && self.signed.is_none()
     }
 }
