@@ -6,6 +6,7 @@ use crate::store::critical_namespaces::{self as critical, native_registry::prepa
 use catcoms_storage::kept::{session_at, session_id, SessionAt, SessionId};
 use critical::read_pool::CatalogReadReservation;
 pub(in crate::store) mod lifecycle;
+pub(in crate::store) mod network;
 pub(in crate::store) mod operational;
 
 fn denied() -> AppError {
@@ -160,6 +161,28 @@ impl HeldNativeInput {
     }
     pub(in crate::store) fn raw(&self) -> &[u8] {
         &self.raw
+    }
+}
+
+impl ServerStore {
+    /// Fixed tiny empty-admission read, paid by the native governance inventory.
+    /// No path/cap supplied by a renderer is accepted. The grammar verifier is
+    /// in chat_admission; this layer preserves exact file/name custody.
+    pub(in crate::store) fn read_native_empty_admission_frame(
+        &self,
+        cap: usize,
+    ) -> Result<HeldNativeInput, AppError> {
+        if cap > 256 {
+            return Err(denied());
+        }
+        HeldNativeInput::capture(&path(self, false, "chat-admissions.bin")?, cap)?
+            .ok_or_else(denied)
+    }
+    pub(in crate::store) fn require_native_empty_admission_frame(
+        &self,
+        held: &HeldNativeInput,
+    ) -> Result<(), AppError> {
+        held.require(&path(self, false, "chat-admissions.bin")?)
     }
 }
 

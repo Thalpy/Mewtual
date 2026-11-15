@@ -3425,7 +3425,7 @@ async function framedMedia(t: TestContext, low = true,
     assert.deepEqual(opened, expected.body);
     // Actual native Refused(Protocol(Capacity)), carried by this fixture's real AEAD.
     // A malformed receipt is not evidence that the legitimate refusal can recover.
-    if (mode === busy) return {kind:0,body:Uint8Array.of(1,3,7)};
+    if (mode === busy) return {kind:0,body:Uint8Array.of(9,2,2,7)};
     if (mode === 0) admitted = true;
     if (mode === 7) { assert.equal(remaining,0); indexed=true; }
     if (mode === 2 || mode === 5) closed = true;
@@ -3636,7 +3636,10 @@ for (const boundary of ["detached", "history", "compacted"] as const) test(`orig
     held.release(); await flight;
     const before = f.modes.length, tx = session.tx;
     f.lose(4); await f.media(); // Fixture loses the transport result before browser AEAD.
+    const beforeRefusedDecrypt = f.f.counts().steps.filter(step => step === "decrypt").length;
     f.busy(4); await f.media(); // Real encrypted Capacity response, not malformed DATA.
+    assert.equal(f.f.counts().steps.filter(step => step === "decrypt").length, beforeRefusedDecrypt + 1,
+      "the actual four-byte native-media Capacity was authenticated and decrypted");
     assert.equal(f.sdk.calls.closed, 0); assert.equal(broker.counts().bytes, paid);
     f.busy(-1); await f.media();
     assert.deepEqual(f.modes.slice(before), [4, 4, 4]);

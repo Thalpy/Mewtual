@@ -96,7 +96,7 @@ pub(super) async fn register(
     let session = require_ui_session_generation(&state, generation)
         .await
         .unwrap();
-    state.servers.lock().await.insert(
+    state.servers.lock().await.install_legacy_fixture(
         1,
         ServerEntry {
             files: keep_session::EntryOwner::new(),
@@ -211,7 +211,7 @@ pub(super) async fn register(
                         .servers
                         .lock()
                         .await
-                        .get(&1)
+                        .legacy(&1)
                         .map(|entry| entry.instance)
                         != Some(instance)
                     {
@@ -300,7 +300,7 @@ impl Running {
         bounded("event drain after close", self.drain.take().unwrap())
             .await
             .unwrap();
-        self.state.servers.lock().await.clear();
+        self.state.servers.lock().await.clear_legacy_fixture();
         self.state.reconnect_capture_signals.lock().unwrap().clear();
         self.state.persistence_signals.lock().unwrap().clear();
         self.state.store.lock().await.take();

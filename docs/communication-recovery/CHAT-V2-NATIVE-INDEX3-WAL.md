@@ -11,7 +11,26 @@ generation; other rows, migration origin, creation receipts and ID high-water
 stay unchanged. The closed `Index::successor_data` check requires exactly Rename.
 Legacy invite refresh now uses the same cell and recovery, with a separately tagged
 request and shared revision; see [the refresh contract](CHAT-V2-NATIVE-INDEX3-INVITE.md).
-Other operation producers and their recovery remain separate work.
+Founder-only Birth and activation now use that same cell and normal WAL.
+Birth freezes the whole original request, including the exact sealed network
+reservation, and assigns `last_issued_id + 1` with checked arithmetic. Activation
+matches the immutable receipt and rebases on the latest selected index, retaining
+neighboring names/revisions and other new rows. The public status is historical
+DATA; it cannot recreate a cold creator or install a runtime.
+
+The frozen-input invoice additionally covers the maximum 64 KiB network frame
+plus the 256-byte local name. Exact retained retries compare every tagged field
+and keep the same candidate ciphertext. An exact completed receipt can be
+observed without sealing again; a conflicting receipt refuses before new RNG.
+
+Joined/LegacyJoin Birth and activation, Abandon and Retire remain unimplemented
+writers/recovery operations. Valid authenticated stages of those kinds are
+preserved and refused. The private supported-transition classifier checks both
+authenticated indexes after general successor validation: accepting a generic
+Birth/Activate label alone would accidentally enable those future producers.
+
+The actual checked native command, retained whole driver/runtime and completed
+debt retirement consumer remain unfinished. Chat V2 stays disabled.
 
 ## Retained warm operation
 
@@ -63,7 +82,7 @@ Supported normal Stage cases are deliberately closed:
 
 | Actual Stage | Action |
 |---|---|
-| One authenticated Rename or Legacy invite-refresh successor of this exact framed parent | Promote and cover the same held Stage |
+| One authenticated founder Birth/Activate, Rename or Legacy invite-refresh successor of this exact framed parent | Promote and cover the same held Stage |
 | Byte-identical framed selected index | Cover selected data and remove the duplicate |
 | Attributable 0–39-byte Stage | Cover selected data and remove the incomplete Stage |
 | Bounded frame with an actual AEAD authentication failure | Cover selected data and remove the failed Stage |
@@ -85,7 +104,9 @@ after its original files, with no Store or Handler back-reference cycle.
 
 ## Observations and compatibility
 
-This metadata CAS has no durable invocation token log. After completion or
+Rename/Refresh metadata CAS has no durable invocation token log. Founder Birth
+retains a distinct immutable creation receipt; its DATA lookup is not runtime
+authority. After completion or
 restart, a stale revision refuses even when the desired name happens to match.
 Current revision plus equal name is an unchanged observation and draws no RNG.
 Neither observation acknowledges a prior native invocation by value equality.
