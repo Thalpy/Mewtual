@@ -206,7 +206,7 @@ async fn register_server(
     let group_id = server.group_id();
     let device_id = server.device_id();
     let (actor, events, task) = spawn(server);
-    state.servers.lock().await.insert(
+    state.servers.lock().await.install_legacy_fixture(
         12,
         ServerEntry {
             files: keep_session::EntryOwner::new(),

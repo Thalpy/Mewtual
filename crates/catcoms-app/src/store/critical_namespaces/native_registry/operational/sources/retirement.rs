@@ -5,26 +5,60 @@
 //! relinquishes its single capture slot, never the original bodies or evidence.
 use super::*;
 use catcoms_rt::NativeChatKeyDrain;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Weak;
+const PREPARATIONS_CLOSED: usize = 1 << (usize::BITS - 1);
+const MAX_PREPARATIONS: usize = 2;
 
 /// Fee-only collection control. Neither capture acknowledgements nor a future
 /// negative observer may retain the collection, an issuer or Physical here.
 pub(super) struct Control {
     captured: AtomicBool,
+    preparations: AtomicUsize,
     _payment: CatalogReadReservation,
 }
 impl Control {
     pub(super) fn new(payment: CatalogReadReservation) -> Self {
         Self {
             captured: AtomicBool::new(false),
+            preparations: AtomicUsize::new(0),
             _payment: payment,
         }
+    }
+    pub(super) fn enter_preparation(self: &Arc<Self>) -> Option<PreparationEnd> {
+        self.preparations
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                (value & PREPARATIONS_CLOSED == 0 && value < MAX_PREPARATIONS).then_some(value + 1)
+            })
+            .ok()?;
+        Some(PreparationEnd(self.clone()))
+    }
+    pub(super) fn close_preparations(&self) {
+        self.preparations
+            .fetch_or(PREPARATIONS_CLOSED, Ordering::SeqCst);
+    }
+    fn preparations_drained(&self) -> bool {
+        self.preparations.load(Ordering::SeqCst) == PREPARATIONS_CLOSED
+    }
+}
+
+/// Admission and closure share one packed atomic: no delayed increment can
+/// arrive behind CLOSED+zero. LAST after actual preparation custody leaves.
+pub(super) struct PreparationEnd(Arc<Control>);
+impl Drop for PreparationEnd {
+    fn drop(&mut self) {
+        let previous = self.0.preparations.fetch_sub(1, Ordering::SeqCst);
+        debug_assert!(previous & !PREPARATIONS_CLOSED != 0);
     }
 }
 
 pub(super) fn invoice<T: MeshTransport, R: CryptoRngCore>() -> usize {
     2 * std::mem::size_of::<NativeTextSourceRetirement<T, R>>()
+        + 2 * std::mem::size_of::<NativeTextSourceRetirementPreparation<T, R>>()
         + std::mem::size_of::<Control>()
+        // The Weak book can outlive Sources. Its real allocation header and
+        // Mutex/Vec metadata stay covered by the capture's Control fee tail.
+        + std::mem::size_of::<SourceBook<T, R>>() + 2 * std::mem::size_of::<usize>()
         + 4096 // fixed capture/ack and Arc allocation overlap
 }
 
@@ -91,12 +125,44 @@ pub struct NativeTextSourceRetirement<T: MeshTransport, R: CryptoRngCore> {
     // LAST: another worker cannot enter until all old cell/key pins are gone.
     _ack: CaptureAck,
 }
+/// Guard-safe negative capture. It has not yet visited/closed individual RT
+/// SourceOwners. Native must keep the SAME canonical Sources until finish and
+/// whole drainage; a successful capture alone establishes no SDK/key shutdown.
+pub struct NativeTextSourceRetirementPreparation<T: MeshTransport, R: CryptoRngCore> {
+    book: Weak<SourceBook<T, R>>,
+    #[cfg(test)]
+    weak_drop_order: Option<WeakDropOrder>,
+    // Slot acknowledgement follows real Weak/cell work. Busy has no slot but
+    // still owns the unconditional fee-only tail below.
+    ack: Option<CaptureAck>,
+    // LAST for EVERY capture, including Busy/Unknown. The original weak-book
+    // allocation must not outlive the actual CONTROL reservation paying it.
+    _control: Arc<Control>,
+}
+
+// Field immediately AFTER the actual Weak observes the exact debit's Drop
+// flag, including partial-move error returns. It is absent in production.
+#[cfg(test)]
+struct WeakDropOrder {
+    refunded: Arc<AtomicBool>,
+    observed: Arc<AtomicBool>,
+    covered: Arc<AtomicBool>,
+}
+#[cfg(test)]
+impl Drop for WeakDropOrder {
+    fn drop(&mut self) {
+        self.covered
+            .store(!self.refunded.load(Ordering::SeqCst), Ordering::SeqCst);
+        self.observed.store(true, Ordering::SeqCst);
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeTextSourceRetirementStatus {
     /// Retry the SAME canonical collection. Neither a timer nor an idle key
     /// counter proves SDK/body/network destruction.
     Pending,
-    /// All captured original rows passed the complete conjunction. The caller
+    /// All admitted preparations retired and original rows passed the complete
+    /// conjunction. No-End refusal metadata may remain. The caller
     /// must still destroy the original Sources/facade outside its own guards.
     Drained,
 }
@@ -112,6 +178,13 @@ impl<T: MeshTransport, R: CryptoRngCore> std::fmt::Debug for NativeTextSourceRet
         f.write_str("NativeTextSourceRetirement { .. }")
     }
 }
+impl<T: MeshTransport, R: CryptoRngCore> std::fmt::Debug
+    for NativeTextSourceRetirementPreparation<T, R>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NativeTextSourceRetirementPreparation { .. }")
+    }
+}
 
 impl<T: MeshTransport, R: CryptoRngCore> NativeTextSources<T, R> {
     /// Close original admission first, then acquire the one prepaid work slot.
@@ -120,18 +193,49 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSources<T, R> {
     pub fn prepare_retirement(
         &self,
     ) -> Result<NativeTextSourceRetirement<T, R>, NativeTextSourceRetirementRefusal> {
-        use NativeTextSourceRetirementRefusal as Error;
-        self.close_admission();
-        self.retirement
+        self.capture_retirement().finish()
+    }
+
+    /// Atomic/Weak-only, infallible owning capture under a short native guard.
+    /// Its caller has already fenced the actual UI generation. No entries lock,
+    /// RT owner/issuer lookup, payment release, SDK call or IO occurs here.
+    pub fn capture_retirement(&self) -> NativeTextSourceRetirementPreparation<T, R> {
+        self.scope.close_first();
+        self.retirement.close_preparations();
+        let ack = self
+            .retirement
             .captured
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .map_err(|_| Error::Busy)?;
-        // Ack exists before any fallible lock/capture. Local rows leave before
-        // Ack on refusal/unwind; no capacity or issuer gets dropped in a writer.
-        let ack = CaptureAck(self.retirement.clone());
+            .ok()
+            .map(|_| CaptureAck(self.retirement.clone()));
+        NativeTextSourceRetirementPreparation {
+            book: Arc::downgrade(&self.entries),
+            #[cfg(test)]
+            weak_drop_order: None,
+            ack,
+            _control: self.retirement.clone(),
+        }
+    }
+}
+
+impl<T: MeshTransport, R: CryptoRngCore> NativeTextSourceRetirementPreparation<T, R> {
+    /// Visit the SAME original book outside all native/Root guards. Close every
+    /// original source counter before returning body work. Slot custody moves
+    /// directly to the worker; lost finish/reply cannot briefly admit a second.
+    pub fn finish(
+        mut self,
+    ) -> Result<NativeTextSourceRetirement<T, R>, NativeTextSourceRetirementRefusal> {
+        use NativeTextSourceRetirementRefusal as Error;
+        if self.ack.is_none() {
+            return Err(Error::Busy);
+        }
         let mut rows = std::array::from_fn(|_| None);
+        let book = self.book.upgrade().ok_or(Error::Unknown)?;
         {
-            let entries = self.entries.try_lock().map_err(|_| Error::Busy)?;
+            let entries = book.try_lock().map_err(|_| Error::Busy)?;
+            for original in entries.iter() {
+                original.owner.close();
+            }
             for (target, original) in rows.iter_mut().zip(entries.iter()) {
                 *target = Some(Row {
                     cell: original.runtime.clone(),
@@ -139,6 +243,10 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSources<T, R> {
                 });
             }
         }
+        drop(book); // may be the final issuer book, always outside its writer
+                    // Only successful, infallible handoff takes the slot from self. On
+                    // every earlier error self drops Weak first, then slot/control last.
+        let ack = self.ack.take().expect("original retirement capture slot");
         Ok(NativeTextSourceRetirement { rows, _ack: ack })
     }
 }
@@ -151,7 +259,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSourceRetirement<T, R> {
     pub fn try_retire(
         &mut self,
     ) -> Result<NativeTextSourceRetirementStatus, NativeTextSourceRetirementRefusal> {
-        let mut pending = false;
+        let mut pending = !self._ack.0.preparations_drained();
         for row in self.rows.iter().flatten() {
             if !row.try_retire()? {
                 pending = true;

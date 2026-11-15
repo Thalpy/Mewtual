@@ -6,8 +6,13 @@ canonical controller, schedule cleanup, dispose the originals outside guards,
 and order the result against actual lock/close/publication. No native command,
 SDK restore, joined authoring or network acceptance is supplied by this API.
 
-`NativeTextSources::prepare_retirement` permanently closes the original Scope
-and every original RT source counter before capturing one prepaid work slot.
+`NativeTextSources::capture_retirement` permanently closes the original Scope
+and packed preparation admission, then captures one prepaid work slot using
+atomic/Weak operations only. Its outside-guard `finish` closes every actual RT
+source counter and snapshots the original rows before body work. The existing
+`prepare_retirement` is an outside-guard wrapper over both stages. Completion
+also requires that same original preparation counter CLOSED+zero, even with no
+rows. [Capture continuation and pending evidence](CHAT-V2-NATIVE-SOURCE-CAPTURE.md).
 The capture contains at most 64 original runtime-cell pins and key drains. It
 contains no Entry, affine SourceOwner or issuer. Its cell pins are **work
 custody**, not negative-only observations: cells can still own SDKs and Physical.

@@ -164,6 +164,28 @@ impl HeldNativeInput {
     }
 }
 
+impl ServerStore {
+    /// Fixed tiny empty-admission read, paid by the native governance inventory.
+    /// No path/cap supplied by a renderer is accepted. The grammar verifier is
+    /// in chat_admission; this layer preserves exact file/name custody.
+    pub(in crate::store) fn read_native_empty_admission_frame(
+        &self,
+        cap: usize,
+    ) -> Result<HeldNativeInput, AppError> {
+        if cap > 256 {
+            return Err(denied());
+        }
+        HeldNativeInput::capture(&path(self, false, "chat-admissions.bin")?, cap)?
+            .ok_or_else(denied)
+    }
+    pub(in crate::store) fn require_native_empty_admission_frame(
+        &self,
+        held: &HeldNativeInput,
+    ) -> Result<(), AppError> {
+        held.require(&path(self, false, "chat-admissions.bin")?)
+    }
+}
+
 /// Original pre-cleaner objects held continuously from classification through role issuance.
 /// A second pathname read, even of equal bytes, must not replace any of these observations.
 pub(in crate::store) struct NativeDeclarationInventory {

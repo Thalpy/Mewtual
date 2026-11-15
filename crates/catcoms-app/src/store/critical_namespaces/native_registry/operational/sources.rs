@@ -14,15 +14,31 @@ use catcoms_rt::{CryptoRngCore, MeshTransport, NativeChatSourceOwner};
 use std::marker::PhantomData;
 use std::sync::Mutex;
 use zeroize::Zeroizing;
+mod capture;
+mod invite;
+mod member;
 mod network;
+pub use member::{
+    NativeTextMemberAdmissionFailure, NativeTextMemberBudget, NativeTextMemberFinalPreparation,
+    NativeTextMemberHistoryItem, NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus,
+    NativeTextMemberJob, NativeTextMemberPreparation, NativeTextMemberSaveJob,
+};
+mod selection;
+pub use capture::{NativeTextCreationBudget, NativeTextCreationPreparation};
+pub use selection::NativeTextRuntimeSelection;
 mod retirement;
 pub use retirement::{
-    NativeTextSourceRetirement, NativeTextSourceRetirementRefusal, NativeTextSourceRetirementStatus,
+    NativeTextSourceRetirement, NativeTextSourceRetirementPreparation,
+    NativeTextSourceRetirementRefusal, NativeTextSourceRetirementStatus,
 };
 
 const MAX_SOURCES: usize = 64;
 const CONTROL_BYTES: usize = 64 * 1024;
 const ENTRY_BYTES: usize = 512 * 1024;
+
+/// Original affine-entry book. Captures keep only Weak; any temporary strong
+/// book/Entry pins must leave before IO or a runtime-cell writer.
+type SourceBook<T, R> = Mutex<Vec<Arc<Entry<T, R>>>>;
 
 /// Trusted local resource configuration. These fees cover named collection,
 /// runtime metadata and network-frame overlap, not opaque SDK or process RSS.
@@ -110,7 +126,7 @@ pub struct NativeTextSourceCommand {
 /// explicitly closes source counters BEFORE waiting for the runtime bodies.
 pub struct NativeTextSources<T: MeshTransport, R: CryptoRngCore> {
     scope: Arc<Scope>,
-    entries: Mutex<Vec<Arc<Entry<T, R>>>>,
+    entries: Arc<SourceBook<T, R>>,
     policy: NativeTextSourcePolicy,
     // Original physical custody and control payment remain until entries leave.
     work: SourceWork,
@@ -120,9 +136,20 @@ pub struct NativeTextSources<T: MeshTransport, R: CryptoRngCore> {
 struct Entry<T: MeshTransport, R: CryptoRngCore> {
     invocation: [u8; 32],
     request: [u8; 32],
-    // Outside the operation mutex. Revocation must never wait for SDK/file IO.
-    owner: NativeChatSourceOwner,
     runtime: Arc<RuntimeCell<T, R>>,
+    // LAST: the source counter owns the original runtime/cell payment. Keep
+    // that payer until actual cell/Notify/allocation destruction completes,
+    // even after retirement removed the body and all worker drains left.
+    owner: NativeChatSourceOwner,
+}
+
+impl<T: MeshTransport, R: CryptoRngCore> Drop for Entry<T, R> {
+    fn drop(&mut self) {
+        // Close new key entry BEFORE field destruction without releasing its
+        // payer or notifying Wakers. Actual owner Drop/notification is LAST.
+        // Entries must still be disposed outside native/control writers.
+        self.owner.close();
+    }
 }
 
 /// Fee-only custody. Never put a runtime/issuer, drain or registry in a source
@@ -146,6 +173,12 @@ struct Runtime<T: MeshTransport, R: CryptoRngCore> {
     group_rng: Option<R>,
     clock: Option<Box<dyn catcoms_rt::Clock + Send>>,
     network: Option<network::Reservation>,
+    // One paid canonical metadata allocation. Exact retries issue handles to
+    // this same selection rather than allocating again on the entry's debit.
+    selection: Option<NativeTextRuntimeSelection<T, R>>,
+    // Negative-only original key counter, captured before moving its issuer
+    // into Entry. Native row closure must not borrow this runtime or issuer.
+    source_close: catcoms_rt::NativeChatSourceClose,
     work: SourceWork,
     _metadata: Arc<RuntimeMetadata>,
 }
@@ -344,6 +377,26 @@ struct RuntimeSlot<T: MeshTransport, R: CryptoRngCore> {
 struct RuntimeCell<T: MeshTransport, R: CryptoRngCore> {
     state: Mutex<RuntimeSlot<T, R>>,
     returned: tokio::sync::Notify,
+    #[cfg(test)]
+    tail_probe: Mutex<Option<RuntimeCellTailProbe>>,
+}
+
+/// Non-paying witness AFTER actual state/Notify destruction. It observes the
+/// exact entry debit, so another retained source/selector cannot mask a refund.
+#[cfg(test)]
+struct RuntimeCellTailProbe {
+    refunded: Arc<std::sync::atomic::AtomicBool>,
+    observed: Arc<std::sync::atomic::AtomicBool>,
+    covered: Arc<std::sync::atomic::AtomicBool>,
+}
+#[cfg(test)]
+impl Drop for RuntimeCellTailProbe {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        self.covered
+            .store(!self.refunded.load(Ordering::SeqCst), Ordering::SeqCst);
+        self.observed.store(true, Ordering::SeqCst);
+    }
 }
 
 /// A finite worker moves its body OUT of the control mutex. SDK/file effects
@@ -385,6 +438,10 @@ fn runtime_invoice<T: MeshTransport, R: CryptoRngCore>() -> Option<usize> {
         std::mem::size_of::<RuntimeLoan<T, R>>(),
         std::mem::size_of::<NativeFounderKeys>(),
         std::mem::size_of::<NativeTextSourceCommand>(),
+        2 * std::mem::size_of::<NativeTextCreationPreparation<T, R>>(),
+        selection::invoice::<T, R>(),
+        member::invoice::<T, R>(),
+        8 * 1024, // finite original invite routing-plan scratch and return overlap
         2 * std::mem::size_of::<Entry<T, R>>(),
         // Original frame + Pending copy + retained activation dependency,
         // with bounded ciphertext/plaintext validation and reread overlap.
@@ -471,7 +528,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSourcePreparation<T, R> {
         if self.work.as_ref().is_none_or(|work| !work.is_live_cached()) || !self.scope.is_open() {
             return Err(Box::new(self));
         }
-        let entries = Vec::with_capacity(self.budget.policy.maximum);
+        let entries = Arc::new(Mutex::new(Vec::with_capacity(self.budget.policy.maximum)));
         if self.scope.claim_once().is_err() {
             return Err(Box::new(self));
         }
@@ -485,7 +542,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSourcePreparation<T, R> {
         } = self;
         Ok(NativeTextSources {
             scope,
-            entries: Mutex::new(entries),
+            entries,
             policy: budget.policy,
             work: work.expect("checked original source work"),
             retirement: Arc::new(retirement::Control::new(budget.metadata)),
@@ -494,6 +551,13 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSourcePreparation<T, R> {
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> NativeTextSources<T, R> {
+    /// Cached original-allocation comparison for native replacement refusal.
+    /// This remains true after closure. It supplies no UI authority, readiness,
+    /// key drainage or permission to substitute a different facade/collection.
+    pub fn is_from_original_vault_cached(&self, vault: &NativeTextVault) -> bool {
+        Arc::ptr_eq(&self.scope, &vault.sources.observe())
+    }
+
     /// Preparation may read the original native index and allocate; call only
     /// outside EVERY native/Root guard. Lookup precedes device/key generation.
     /// The native checked factory must already have captured the original UI
@@ -504,138 +568,18 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSources<T, R> {
         request: NativeTextCreationRequest,
         inputs: NativeTextCreationInputs<R>,
     ) -> Result<NativeTextCreationJob<T, R>, NativeTextCreationRefusal> {
-        use NativeTextCreationRefusal as Error;
-        self.require_command(&command)
-            .map_err(|_| Error::Unavailable)?;
-        let existing = {
-            let entries = self.entries.try_lock().map_err(|_| Error::Busy)?;
-            entries
-                .iter()
-                .find(|entry| entry.invocation == request.invocation)
-                .cloned()
-        };
-        let mut candidate = None;
-        let selected = if let Some(entry) = existing {
-            if entry.request != request.digest {
-                return Err(Error::Conflict);
-            }
-            entry
-        } else {
-            self.work
-                .require_native_founder_configuration()
-                .map_err(|_| Error::Unavailable)?;
-            if self
-                .work
-                .lookup_creation(request.invocation, request.digest)
-                .map_err(|_| Error::Storage)?
-                .is_some()
-            {
-                return Err(Error::ExistingRequiresRestore);
-            }
-            // Fee-only source counter custody, never a runtime/cell/issuer.
-            let metadata = Arc::new(RuntimeMetadata {
-                pool: self.policy.pool.clone(),
-                _debit: self
-                    .policy
-                    .pool
-                    .try_reserve(ENTRY_BYTES)
-                    .map_err(|_| Error::Busy)?,
-            });
-            let work = self
-                .work
-                .for_paid_runtime(&metadata)
-                .ok_or(Error::Unavailable)?;
-            let owner =
-                NativeChatSourceOwner::for_trusted_source(&command.ui.command, metadata.clone())
-                    .map_err(|_| Error::Unavailable)?;
-            let entry = Arc::new(Entry {
-                invocation: request.invocation,
-                request: request.digest,
-                owner,
-                runtime: Arc::new(RuntimeCell {
-                    state: Mutex::new(RuntimeSlot {
-                        body: Some(Runtime {
-                            founder_policy: self.policy.founder,
-                            request: Some(request),
-                            device_started: false,
-                            driver: None,
-                            device: None,
-                            transport: None,
-                            rng: Some(inputs.rng),
-                            group_rng: Some(inputs.group_rng),
-                            clock: Some(inputs.clock),
-                            network: None,
-                            work,
-                            _metadata: metadata,
-                        }),
-                        running: false,
-                        interrupted: false,
-                        poisoned: false,
-                        retiring: false,
-                        retirement: retirement::BodyState::new(),
-                    }),
-                    returned: tokio::sync::Notify::new(),
-                }),
-            });
-            candidate = Some(entry);
-            let result = {
-                let mut entries = self.entries.try_lock().map_err(|_| Error::Busy)?;
-                let current = candidate.as_ref().unwrap();
-                if !self.scope.is_open() {
-                    Err(Error::Unavailable)
-                } else if let Some(old) = entries
-                    .iter()
-                    .find(|old| old.invocation == current.invocation)
-                {
-                    if old.request != current.request {
-                        Err(Error::Conflict)
-                    } else {
-                        Ok(old.clone())
-                    }
-                } else if entries.len() >= self.policy.maximum {
-                    Err(Error::Busy)
-                } else {
-                    entries.push(current.clone());
-                    Ok(current.clone())
-                }
-            };
-            result?
-        };
-        // Source-owner/issuer pins are transient and leave BEFORE runtime/Root
-        // writers. Preparing cuts here does not enter a primitive or spend it.
-        let prepared = NativeFounderKeys::prepare(&selected.owner, &command.ui.command);
-        let cell = selected.runtime.clone();
-        drop(selected);
-        drop(candidate); // a racing unused candidate may own real files/payment
-        let keys = prepared.map_err(|_| Error::Unavailable)?;
-        #[cfg(test)]
-        retirement::tests::after_key_preparation();
-        let body = {
-            let mut state = cell.state.try_lock().map_err(|_| Error::Busy)?;
-            if state.retiring || !self.scope.is_open() {
-                return Err(Error::Unavailable);
-            }
-            if state.running || state.poisoned {
-                return Err(Error::Busy);
-            }
-            let body = state.body.take().ok_or(Error::Unavailable)?;
-            state.running = true;
-            body
-        };
-        Ok(NativeTextCreationJob {
-            loan: RuntimeLoan {
-                body: Some(body),
-                cell,
-                recorded: false,
-            },
-            keys,
-            command,
-        })
+        let budget = self
+            .policy
+            .prepare_creation::<T, R>()
+            .map_err(|_| NativeTextCreationRefusal::Busy)?;
+        self.capture_creation(command, request, inputs, budget)
+            .finish()
     }
     /// SC gate first. The short entries guard only visits affine source owners;
     /// it never takes an operation writer or drops/awaits any runtime here.
     pub fn close_admission(&self) {
         self.scope.close_first();
+        self.retirement.close_preparations();
         let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         for entry in entries.iter() {
             entry.owner.close();
@@ -659,4 +603,4 @@ impl<T: MeshTransport, R: CryptoRngCore> Drop for NativeTextSources<T, R> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
