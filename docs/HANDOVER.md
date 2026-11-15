@@ -21,7 +21,20 @@ re-signing, including after lock/lost reply. All34 native-key,13 join-binding
 and26 Add tests pass; strict/downstream checks are in progress. Two LOW review
 findings (scratch wording and an independent wrong-purpose control) are fixed;
 the short re-review has no findings. No Root covering or release authority is
-supplied by that signature.
+supplied by that signature. The136-case Sync cohort, native compilation and
+strict native all-target/all-feature lint also pass. The same556 Root lint
+diagnostics remain; paired complete execution is still pending.
+
+A separate native test correction handles the PR #134 SDK-binding assertion:
+real maintenance contention can return pre-effect Capacity before validating
+the deliberately wrong sequence. The fixture now retains that same invalid
+body, proves SDK preparation/installation stay absent and requires eventual
+Unauthorized. Its held-original-row regression exercises real recovery;
+production Admit/Release and deadlines are unchanged. The affected case and
+all9 SDK-custody cases pass. PR #133's separate missing-Finish stall remains
+undiagnosed: its test passes locally, and a failed paired pump now records BOTH
+original endpoints before teardown. That successful run is not a diagnosis.
+Read-only reviews of correction and diagnostics have no findings.
 
 The `chat-v2-governed-current-admission` continuation adds the original mounted4
 physical proof to the actual constructor-selected governed-native Current group
