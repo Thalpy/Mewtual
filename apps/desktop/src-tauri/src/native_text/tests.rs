@@ -110,9 +110,11 @@ fn success(reply: tauri::ipc::InvokeResponse) {
     let tauri::ipc::InvokeResponse::Ok(body) = reply else {
         panic!("actual unlock refused");
     };
-    assert_eq!(
-        body.deserialize::<serde_json::Value>().unwrap(),
-        serde_json::json!([])
+    let restored = body.deserialize::<serde_json::Value>().unwrap();
+    assert_eq!(restored["backend"], "text-v2");
+    assert!(
+        restored["servers"].is_array(),
+        "native session has its own closed envelope, including zero rows"
     );
 }
 fn refused(reply: tauri::ipc::InvokeResponse) {
@@ -142,6 +144,325 @@ fn found_value(reply: tauri::ipc::InvokeResponse) -> serde_json::Value {
         tauri::ipc::InvokeResponse::Ok(body) => body.deserialize().unwrap(),
         tauri::ipc::InvokeResponse::Err(error) => panic!("native founding refused: {error:?}"),
     }
+}
+
+fn resume_request(window: &tauri::WebviewWindow<MockRuntime>) -> Reply {
+    resume_request_with_reply(window, false)
+}
+fn resume_request_with_reply(
+    window: &tauri::WebviewWindow<MockRuntime>,
+    panic_on_reply: bool,
+) -> Reply {
+    let mut request = request(window, "1", SECRET);
+    request.cmd = "resume_session".into();
+    request.body = InvokeBody::Json(serde_json::json!({}));
+    let (tx, rx) = oneshot::channel();
+    let view: &tauri::Webview<MockRuntime> = window.as_ref();
+    view.clone().on_message(
+        request,
+        Box::new(move |_, _, result, _, _| {
+            if panic_on_reply {
+                panic!("actual listing resolver unwind");
+            }
+            let _ = tx.send(result);
+        }),
+    );
+    rx
+}
+
+async fn listing_warning_seen(
+    app: &tauri::App<MockRuntime>,
+    main: &tauri::WebviewWindow<MockRuntime>,
+    queue: &Queue,
+) {
+    let bad = snapshot_request(main, Some(r#"{"version":999}"#));
+    run(queue).await;
+    assert!(snapshot_result(bad.await.unwrap())["continuity_error"].is_string());
+    let generation = app
+        .state::<AppState>()
+        .ui_session_generation
+        .load(Ordering::SeqCst)
+        .to_string();
+    let warning = invoke(main, &generation, SECRET);
+    run(queue).await;
+    let tauri::ipc::InvokeResponse::Err(error) = warning.await.unwrap() else {
+        panic!("expected actual screen-state warning")
+    };
+    assert!(error.0.as_str().unwrap().contains("Unlock again"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_listing_busy_reply_cannot_consume_the_actual_authenticated_acknowledgement() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &main, &queue).await;
+    listing_warning_seen(&app, &main, &queue).await;
+    let state = app.state::<AppState>();
+    let held = [
+        state
+            .native_text
+            .listing
+            .prepare(&state.native_text.ui_budget)
+            .unwrap(),
+        state
+            .native_text
+            .listing
+            .prepare(&state.native_text.ui_budget)
+            .unwrap(),
+    ];
+    let generation = state
+        .ui_session_generation
+        .load(Ordering::SeqCst)
+        .to_string();
+    let busy = invoke(&main, &generation, SECRET);
+    run(&queue).await;
+    refused(busy.await.unwrap());
+    assert!(
+        state
+            .native_text
+            .ui_state
+            .snapshots
+            .close_decision(None)
+            .notice
+            .is_some(),
+        "a rejected listing must retain the acknowledgement"
+    );
+    drop(held);
+    let admitted = invoke(&main, &generation, SECRET);
+    run(&queue).await;
+    success(admitted.await.unwrap());
+    assert!(
+        state
+            .native_text
+            .ui_state
+            .snapshots
+            .close_decision(None)
+            .notice
+            .is_none(),
+        "only genuine successful restoration consumes it"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_listing_actual_resolver_unwind_and_lost_results_drop_outside_guards_with_original_payment(
+) {
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let state = app.state::<AppState>();
+    let watch = Arc::new(listing::DropWatch {
+        commit: state.ui_session_commit.clone(),
+        store: state.store.clone(),
+        table: state.servers.clone(),
+        observed: std::sync::atomic::AtomicUsize::new(0),
+        outside: AtomicBool::new(true),
+    });
+    *state.native_text.listing_drop_watch.lock().unwrap() = Some(watch.clone());
+    for _ in 0..3 {
+        let reply = resume_request_with_reply(&main, true);
+        let task = tokio::spawn(queue.lock().unwrap().pop().unwrap());
+        assert!(task.await.unwrap_err().is_panic());
+        assert!(reply.await.is_err());
+    }
+    for _ in 0..3 {
+        drop(resume_request(&main));
+        run(&queue).await;
+    }
+    let reply = resume_request(&main);
+    run(&queue).await;
+    assert_eq!(found_value(reply.await.unwrap())["backend"], "text-v2");
+    assert_eq!(watch.observed.load(Ordering::SeqCst), 7);
+    assert!(watch.outside.load(Ordering::SeqCst));
+    *state.native_text.listing_drop_watch.lock().unwrap() = None;
+    let one = state
+        .native_text
+        .listing
+        .prepare(&state.native_text.ui_budget)
+        .unwrap();
+    let two = state
+        .native_text
+        .listing
+        .prepare(&state.native_text.ui_budget)
+        .unwrap();
+    drop((one, two));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_listing_empty_unlock_and_two_real_rows_resume_with_exact_contexts() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    let locked = resume_request(&main);
+    assert_eq!(found_value(locked.await.unwrap()), serde_json::Value::Null);
+    assert!(queue.lock().unwrap().is_empty());
+    let unlocked = invoke(&main, "1", SECRET);
+    run(&queue).await;
+    let empty = found_value(unlocked.await.unwrap());
+    assert_eq!(empty, serde_json::json!({"backend":"text-v2","servers":[]}));
+    let mut found = Vec::new();
+    for (id, name) in [(1, "First"), (2, "Second")] {
+        let reply = found_request(&main, id, name);
+        run(&queue).await;
+        found.push(found_value(reply.await.unwrap()));
+    }
+    let resumed = resume_request(&main);
+    run(&queue).await;
+    let resumed = found_value(resumed.await.unwrap());
+    assert_eq!(resumed["backend"], "text-v2");
+    assert_eq!(resumed["servers"].as_array().unwrap().len(), 2);
+    for created in &found {
+        let row = resumed["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["server"] == created["server"])
+            .unwrap();
+        assert_eq!(row["context"], created["context"]);
+        assert_eq!(row["channel"], created["channel"]);
+        assert_eq!(row["display_name"], "Founder");
+    }
+    let state = app.state::<AppState>();
+    lock_session_outcome_inner(&state, None).await;
+    assert_eq!(
+        found_value(resume_request(&main).await.unwrap()),
+        serde_json::Value::Null
+    );
+    let generation = state
+        .ui_session_generation
+        .load(Ordering::SeqCst)
+        .to_string();
+    let reauthenticated = invoke(&main, &generation, SECRET);
+    run(&queue).await;
+    assert_eq!(found_value(reauthenticated.await.unwrap()), resumed);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_listing_empty_snapshot_cannot_omit_a_later_genuine_row_or_adopt_a_new_generation() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let state = app.state::<AppState>();
+    let edge = AdmissionBarrier::new();
+    *state.native_text.listing_reply_edge.lock().unwrap() = Some(edge.clone());
+    let empty = resume_request(&main);
+    let task = tokio::spawn(queue.lock().unwrap().pop().unwrap());
+    timeout(Duration::from_secs(60), edge.arrived.notified())
+        .await
+        .unwrap();
+    let created = found_request(&main, 1, "Inserted");
+    run(&queue).await;
+    found_value(created.await.unwrap());
+    edge.release.notify_one();
+    task.await.unwrap();
+    refused(empty.await.unwrap());
+    *state.native_text.listing_reply_edge.lock().unwrap() = None;
+    let old = resume_request(&main);
+    lock_session_outcome_inner(&state, None).await;
+    // Unlock is an independent authoring admission, not the listing slot. Poll
+    // the newer unlock before the deliberately unpolled original resume.
+    unlock_current(&app, &main, &queue).await;
+    run(&queue).await;
+    refused(old.await.unwrap());
+    let valid = resume_request(&main);
+    run(&queue).await;
+    assert_eq!(
+        found_value(valid.await.unwrap())["servers"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_listing_same_id_replacement_and_whole_close_with_held_output_refuse_stale_reply() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("vault");
+    let (app, main, queue) = app(path.clone(), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let created = found_request(&main, 1, "Original");
+    run(&queue).await;
+    let created = found_value(created.await.unwrap());
+    let state = app.state::<AppState>();
+    let edge = AdmissionBarrier::new();
+    *state.native_text.listing_reply_edge.lock().unwrap() = Some(edge.clone());
+    let old = resume_request(&main);
+    let task = tokio::spawn(queue.lock().unwrap().pop().unwrap());
+    timeout(Duration::from_secs(60), edge.arrived.notified())
+        .await
+        .unwrap();
+    let replacement = replacement_table(&state, &created).await;
+    let original = {
+        let mut table = state.servers.lock().await;
+        std::mem::replace(&mut *table, replacement)
+    };
+    edge.release.notify_one();
+    task.await.unwrap();
+    refused(old.await.unwrap());
+    let replacement = {
+        let mut table = state.servers.lock().await;
+        std::mem::replace(&mut *table, original)
+    };
+    let edge = AdmissionBarrier::new();
+    *state.native_text.listing_reply_edge.lock().unwrap() = Some(edge.clone());
+    let old = resume_request(&main);
+    let task = tokio::spawn(queue.lock().unwrap().pop().unwrap());
+    timeout(Duration::from_secs(60), edge.arrived.notified())
+        .await
+        .unwrap();
+    let close = register_vault_close(&state).await.unwrap();
+    timeout(
+        Duration::from_secs(60),
+        sources::close_server_rows(&state, &SystemClock),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    catcoms_storage::acquire_vault_session(&path).unwrap();
+    edge.release.notify_one();
+    task.await.unwrap();
+    refused(old.await.unwrap());
+    drop((close, replacement));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_listing_unlock_keeps_its_actual_authentication_when_a_live_foreign_mount_replaces_it(
+) {
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("original"), None, true);
+    let (foreign, other, other_queue) = self::app(root.path().join("foreign"), None, true);
+    unlock_current(&app, &main, &queue).await;
+    unlock_current(&foreign, &other, &other_queue).await;
+    listing_warning_seen(&app, &main, &queue).await;
+    let state = app.state::<AppState>();
+    let foreign_state = foreign.state::<AppState>();
+    let generation = state
+        .ui_session_generation
+        .load(Ordering::SeqCst)
+        .to_string();
+    let edge = AdmissionBarrier::new();
+    *state.native_text.reply_edge.lock().unwrap() = Some(edge.clone());
+    let reply = invoke(&main, &generation, SECRET);
+    let task = tokio::spawn(queue.lock().unwrap().pop().unwrap());
+    timeout(Duration::from_secs(60), edge.arrived.notified())
+        .await
+        .unwrap();
+    let moved = foreign_state.store.lock().await.take().unwrap();
+    let original = state.store.lock().await.replace(moved).unwrap();
+    edge.release.notify_one();
+    task.await.unwrap();
+    refused(reply.await.unwrap());
+    let moved = state.store.lock().await.replace(original).unwrap();
+    *foreign_state.store.lock().await = Some(moved);
+    assert!(
+        state
+            .native_text
+            .ui_state
+            .snapshots
+            .close_decision(None)
+            .notice
+            .is_some(),
+        "stale listing cannot consume its acknowledgement"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -233,7 +554,7 @@ async fn native_text_send_reply_rechecks_installed_row_without_relying_on_owner_
     run(&queue).await;
     let saved = found_value(retry.await.unwrap());
     assert_eq!(saved["disposition"], "saved-local");
-    assert_eq!(saved["ordinal"], 0);
+    assert_eq!(saved["ordinal"], "0");
     drop(replacement); // outside guards, AFTER exact retry; closes its Source
 }
 
@@ -341,7 +662,7 @@ async fn native_text_history_reads_actual_saved_originals_and_keeps_first_end_ac
     assert_eq!(first["items"][0]["body"]["text"], "First original");
     let late = native_send_request(&main, &found, 6, "Later original");
     run(&queue).await;
-    assert_eq!(found_value(late.await.unwrap())["ordinal"], 2);
+    assert_eq!(found_value(late.await.unwrap())["ordinal"], "2");
     let second = native_history_request(&main, &found, "1", Some("2"), 1);
     run(&queue).await;
     let second = found_value(second.await.unwrap());
@@ -464,6 +785,49 @@ async fn native_text_history_real_resolver_unwind_and_lost_observers_release_ori
     .unwrap();
     catcoms_storage::acquire_vault_session(&path).unwrap();
     drop(close);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_ui_state_critical4_real_sealed_roundtrip_and_lock_preserve_exact_retry_data() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("vault");
+    let (app, main, queue) = app(path.clone(), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let token = "01".repeat(32);
+    // Deliberately not an actual row's context: this journal stores caller DATA
+    // and cannot grant signing authority. The native send factory remains the
+    // independent original-object/generation enforcement boundary.
+    let json=serde_json::json!({"version":4,"drafts":{},"readMarks":{},"nativeTextIntents":{token.clone():{"kind":"create","token":token,"server":7,"channel":"9","expectedContext":"02".repeat(32),"text":"exact original\n🐈"}}}).to_string();
+    let saved = ui_request(&main, "save_ui_state", Some(&json));
+    run(&queue).await;
+    assert!(matches!(
+        saved.await.unwrap(),
+        tauri::ipc::InvokeResponse::Ok(_)
+    ));
+    assert_eq!(read_ui(&main, &queue).await, json);
+    let state = app.state::<AppState>();
+    let outcome = lock_session_outcome_inner(&state, Some(json.clone())).await;
+    assert!(outcome.continuity_error.is_none());
+    unlock_current(&app, &main, &queue).await;
+    assert_eq!(read_ui(&main, &queue).await, json);
+    let ciphertext = std::fs::read(path.join("ui-state.bin")).unwrap();
+    for malformed in [
+        serde_json::json!({"version":5,"drafts":{},"readMarks":{}}),
+        serde_json::json!({"version":4,"drafts":{},"readMarks":{},"nativeTextIntents":{token.clone():{"kind":"future","token":token}}}),
+        serde_json::json!({"version":3,"drafts":{},"readMarks":{},"nativeTextIntents":{}}),
+    ] {
+        let malformed = malformed.to_string();
+        let refused_write = ui_request(&main, "save_ui_state", Some(&malformed));
+        if !queue.lock().unwrap().is_empty() {
+            run(&queue).await;
+        }
+        refused(refused_write.await.unwrap());
+        assert_eq!(
+            std::fs::read(path.join("ui-state.bin")).unwrap(),
+            ciphertext
+        );
+        assert_eq!(read_ui(&main, &queue).await, json);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -615,7 +979,7 @@ async fn native_text_found_router_installs_two_original_rows_retries_and_release
     run(&queue).await;
     let post = found_value(post.await.unwrap());
     assert_eq!(post["disposition"], "saved-local");
-    assert_eq!(post["ordinal"], 0);
+    assert_eq!(post["ordinal"], "0");
     let retry = native_send_request(&main, &first, 9, "First native message");
     run(&queue).await;
     assert_eq!(found_value(retry.await.unwrap()), post);
@@ -626,7 +990,7 @@ async fn native_text_found_router_installs_two_original_rows_retries_and_release
     run(&queue).await;
     let other = found_value(other.await.unwrap());
     assert_eq!(other["disposition"], "saved-local");
-    assert_eq!(other["ordinal"], 0);
+    assert_eq!(other["ordinal"], "0");
     assert_ne!(other["message_id"], post["message_id"]);
     let exhausted = found_request(&main, 3, "Third");
     run(&queue).await;
@@ -799,7 +1163,7 @@ async fn native_text_send_lost_observer_keeps_actual_admitted_io_ahead_of_lock_c
     run(&queue).await;
     let saved = found_value(retry.await.unwrap());
     assert_eq!(saved["disposition"], "saved-local");
-    assert_eq!(saved["ordinal"], 0);
+    assert_eq!(saved["ordinal"], "0");
     let again = native_send_request(&main, &found, 5, "Saved despite lost reply");
     run(&queue).await;
     assert_eq!(found_value(again.await.unwrap()), saved);

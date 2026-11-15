@@ -29,6 +29,26 @@ pub(crate) struct OriginalFounderObservation {
     negative: RequestCancellation,
 }
 impl OriginalFounderObservation {
+    /// Original process life and immutable founder labels ONLY. A governed
+    /// receiver keeps these same owners after Add, but must independently
+    /// prove its installed SDK epoch/authenticator and saved governing head.
+    /// This deliberately takes no SDK group and grants no currentness, key,
+    /// native admission or permission to reconstruct a genesis observation.
+    pub(crate) fn matches_governed_origin_life(
+        &self,
+        source: &VerifiedFreshChatAdmission,
+        original_group: &[u8],
+        original_signer: &[u8; 32],
+    ) -> bool {
+        !self.negative.is_cancelled()
+            && self
+                .identity
+                .upgrade()
+                .is_some_and(|identity| Arc::ptr_eq(&identity, &source.origin.identity))
+            && matches!(source.kind, FreshKind::Found { .. })
+            && source.group.as_slice() == original_group
+            && &source.signer == original_signer
+    }
     /// Allocation-free, negative-only comparison for the closed V2 genesis pairing phase.
     /// Its private constructor already bound the immutable restored device's full signer;
     /// here use borrowed group/own-leaf fields rather than the generic allocating comparison.
@@ -72,6 +92,69 @@ mod tests {
     use catcoms_rt::{Hub, ManualClock};
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
+
+    #[test]
+    fn governed_origin_life_survives_real_add_without_widening_genesis_currentness() {
+        // Real MLS transition, but no native factory or governed Current is
+        // constructed here. A lifetime negative is not a live source proof.
+        let mut node = ChannelSync::found(
+            Hub::new().join(PeerId::from_u64(0x2f25)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(0x2f25),
+            Box::new(ManualClock::new(1_000)),
+        )
+        .unwrap();
+        let source = node.take_fresh_chat_admission().unwrap();
+        let original = source
+            .observe_original_founder(&node.group, &node.device)
+            .unwrap();
+        let group = node.group.group_id_ref().to_vec();
+        let signer = source.signer;
+        assert!(original.matches_genesis_restored(&source, &node.group, &signer));
+        let joiner = MlsDevice::generate().unwrap();
+        node.group
+            .add_member(&node.device, joiner.key_package().unwrap())
+            .unwrap();
+        assert_eq!(node.group.epoch(), 1);
+        assert!(!original.matches_genesis_restored(&source, &node.group, &signer));
+        assert!(!original.matches(&source, &node.group, &node.device));
+        assert!(original.matches_governed_origin_life(&source, &group, &signer));
+        assert!(!original.matches_governed_origin_life(&source, b"other group", &signer));
+        assert!(!original.matches_governed_origin_life(&source, &group, &[0; 32]));
+        drop(source);
+        assert!(original.negative.is_cancelled());
+        assert!(original.identity.upgrade().is_none());
+    }
+
+    #[test]
+    fn governed_origin_life_refuses_equal_labels_from_another_original() {
+        let mut node = ChannelSync::found(
+            Hub::new().join(PeerId::from_u64(0x2f26)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(0x2f26),
+            Box::new(ManualClock::new(1_000)),
+        )
+        .unwrap();
+        let source = node.take_fresh_chat_admission().unwrap();
+        let original = source
+            .observe_original_founder(&node.group, &node.device)
+            .unwrap();
+        // Child-test access for a counterfeit label control: replace ONLY the
+        // other token's labels, never its actual independent affine origin.
+        let mut other = ChannelSync::found(
+            Hub::new().join(PeerId::from_u64(0x2f27)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(0x2f27),
+            Box::new(ManualClock::new(1_000)),
+        )
+        .unwrap()
+        .take_fresh_chat_admission()
+        .unwrap();
+        other.group = source.group.clone();
+        other.signer = source.signer;
+        assert!(!original.matches_governed_origin_life(&other, &source.group, &source.signer));
+        assert!(original.matches_governed_origin_life(&source, &source.group, &source.signer));
+    }
 
     #[test]
     fn actual_founder_observation_does_not_keep_the_taken_original_token_owner_alive() {

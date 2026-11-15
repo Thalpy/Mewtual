@@ -6,7 +6,9 @@ use super::native_ui::{
 use super::*;
 pub(super) mod upgrade;
 use std::sync::atomic::{AtomicBool, AtomicU64};
-pub use upgrade::{NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal};
+pub use upgrade::{
+    NativeTextGovernanceUpgrade, NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal,
+};
 
 /// The affine mounted native backend. Install only through the native factory,
 /// which authenticates its window/session and supplies the actual AppState

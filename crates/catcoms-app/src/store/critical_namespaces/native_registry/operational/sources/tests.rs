@@ -99,6 +99,63 @@ fn selected_configured(
     (upgrade.into_vault().unwrap(), budget)
 }
 
+/// Genuine empty1 -> index2 -> private3 -> governed4 startup, before any Source
+/// exists. Retain the same whole native/UI/index owner through every barrier;
+/// this is not a policy flag attached to an already exposed ordinary facade.
+pub(in crate::store::critical_namespaces::native_registry::operational) fn selected_governed(
+    path: &std::path::Path,
+) -> (NativeTextVault, NativeUiInvocationBudget) {
+    use crate::store::critical_namespaces::native_registry::preparation::tests::{
+        current_policy, SECRET,
+    };
+    use crate::store::{
+        NativeIndexPolicy, NativeIndexUpgrade, NativeRegistryInstallation, NativeRegistryPolicy,
+    };
+    let mut rng = ChaCha20Rng::seed_from_u64(0xcd04);
+    let mut current = current_policy();
+    current.archive = current
+        .archive
+        .with_checkpoint_join_execution(2, 10_000)
+        .unwrap();
+    let registry_policy = NativeRegistryPolicy::new(
+        CriticalCatalogReadPool::new(NativeRegistryPolicy::required_capacity()).unwrap(),
+        NativeRegistryPolicy::required_persistent_capacity(),
+    )
+    .unwrap();
+    let mut registry =
+        NativeRegistryInstallation::prepare_fresh(path, SECRET, &mut rng, current, registry_policy)
+            .unwrap();
+    registry.retry().unwrap();
+    let index_policy = NativeIndexPolicy::new(
+        CriticalCatalogReadPool::new(NativeIndexPolicy::required_capacity()).unwrap(),
+        NativeIndexPolicy::required_persistent_capacity(),
+    )
+    .unwrap();
+    let mut index = NativeIndexUpgrade::prepare(
+        registry.into_native_registry().unwrap(),
+        index_policy,
+        &mut rng,
+    )
+    .unwrap();
+    index.retry().unwrap();
+    let budget = NativeUiInvocationBudget::new(
+        CriticalCatalogReadPool::new(NativeUiInvocationBudget::required_capacity()).unwrap(),
+    )
+    .unwrap();
+    let mut upgrade = crate::store::NativeTextVaultUpgrade::prepare(
+        index.into_index_store().unwrap(),
+        Arc::new(AtomicU64::new(7)),
+        Arc::new(AtomicU64::new(7)),
+        Arc::new(AtomicBool::new(false)),
+        budget.clone(),
+    )
+    .unwrap();
+    upgrade.retry(&mut rng).unwrap();
+    let mut governance = upgrade.prepare_governance().unwrap();
+    governance.retry(&mut rng).unwrap();
+    (governance.into_vault().unwrap(), budget)
+}
+
 #[test]
 fn native_sources_original_vault_comparison_survives_close_and_refuses_foreign_facade() {
     let first = tempfile::tempdir().unwrap();

@@ -24,6 +24,8 @@ import { gate7FlowExpression } from "./gate7-flow.mjs";
 import { keptFlowExpression } from "./kept-flow.mjs";
 import { privateDownloadFlowExpression } from "./private-download-flow.mjs";
 import { chatAdminLedgerFlowExpression } from "./chat-admin-ledger-flow.mjs";
+import { nativeTextFlowExpression } from "./native-text-flow.mjs";
+import { nativeTextRemountFlowExpression } from "./native-text-remount-flow.mjs";
 
 const PORT = Number(process.env.FLOW_PORT ?? 5177);
 const URL_UNDER_TEST = `http://localhost:${PORT}/?fixture=chat`;
@@ -207,7 +209,7 @@ class Cdp {
       // not a failure, and letting it escape turned an ordinary race into an intermittent red run
       // whose message pointed nowhere near the cause.
       try {
-        state = await this.eval("({ ready: document.documentElement?.dataset.visualReady ?? '', url: location.href, document: document.readyState, appChildren: document.getElementById('app')?.children.length ?? -1 })");
+        state = await this.eval("({ ready: document.documentElement?.dataset.visualReady ?? '', url: location.href, document: document.readyState, appChildren: document.getElementById('app')?.children.length ?? -1, text: document.body?.innerText.slice(0, 2000) ?? '' })");
         if (state?.ready === "chat") return;
       } catch {
         /* not navigated yet */
@@ -659,7 +661,24 @@ try {
   // A private debugger endpoint plus our exact navigation prevents touching an existing app.
   await cdp.navigate(URL_UNDER_TEST);
 
-  if (process.env.FLOW_SCENARIO === "chat-ledger") {
+  if (process.env.FLOW_SCENARIO === "native-text") {
+    await cdp.send("Emulation.setDeviceMetricsOverride", { width: 900, height: 640, deviceScaleFactor: 1, mobile: false });
+    for (const mode of ["1", "empty"]) {
+      await cdp.navigate(URL_UNDER_TEST + "&nativeText=" + mode);
+      await cdp.waitReady();
+      const result = await cdp.eval(nativeTextFlowExpression);
+      failed |= !assertEqual("Native Text local save and entry: " + mode, result, mode === "empty"
+        ? { localEntry:true, created:true, ownHistory:true, noLegacy:true, noUnavailableControls:true }
+        : { localScope:true, saved:true, sealedFirst:true, composerRetired:true, noLegacy:true, noUnavailableControls:true, noOverflow:true });
+      if(mode==="1"){
+        const remount=await cdp.eval(nativeTextRemountFlowExpression);
+        failed |= !assertEqual("Native Text remount preserves the new journal and warm session",remount,
+          {warmSession:true,oldCleanupDidNotSeal:true,journalUnchanged:true,newDraftRetained:true,newIntentRetained:true});
+      }
+      const capture = await cdp.send("Page.captureScreenshot", { format: "png" });
+      if (capture.result?.data) writeFileSync(new URL(`../../../target/chat-v2-native-${mode}.png`, import.meta.url), Buffer.from(capture.result.data, "base64"));
+    }
+  } else if (process.env.FLOW_SCENARIO === "chat-ledger") {
     await cdp.send("Emulation.setDeviceMetricsOverride", { width: 900, height: 640, deviceScaleFactor: 1, mobile: false });
     await cdp.waitReady();
     const result = await cdp.eval(chatAdminLedgerFlowExpression);
@@ -845,7 +864,7 @@ try {
   console.error(`FAIL harness: ${e.message}`);
   if (!connected && process.env.FLOW_CDP_TRACE === "1" && browserOutput) console.error(`Edge setup: ${browserOutput}`);
   const failureImage = { gate7: "gate7-pixa-failure", kept: "pr48-kept-failure",
-    "private-download": "pr48-private-download-failure", "chat-ledger": "chat-v2-admin-history-failure" }[process.env.FLOW_SCENARIO];
+    "private-download": "pr48-private-download-failure", "chat-ledger": "chat-v2-admin-history-failure", "native-text":"chat-v2-native-failure" }[process.env.FLOW_SCENARIO];
   if (failureImage && connected) {
     try { const capture = await connected.send("Page.captureScreenshot", { format: "png" }); if (capture.result?.data) writeFileSync(new URL(`../../../target/${failureImage}.png`, import.meta.url), Buffer.from(capture.result.data, "base64")); } catch { /* preserve original failure */ }
   }

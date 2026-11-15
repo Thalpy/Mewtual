@@ -497,7 +497,7 @@ async fn execute(state: &AppState, invocation: &Invocation) -> Result<String, St
     }
     match outcome {
         V2MemberSaveOutcome::Saved{action,ordinal}=>Ok(serde_json::json!({"backend":"text-v2","disposition":"saved-local",
-            "message_id":hex::encode(action.as_bytes()),"ordinal":ordinal,"retry_token":hex::encode(invocation.intent.token)}).to_string()),
+            "message_id":hex::encode(action.as_bytes()),"ordinal":ordinal.to_string(),"retry_token":hex::encode(invocation.intent.token)}).to_string()),
         V2MemberSaveOutcome::Ready=>Err("The message outcome is still being checked. Retry with the same message token.".into()),
     }
 }

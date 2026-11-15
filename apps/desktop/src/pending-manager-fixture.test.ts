@@ -6,6 +6,11 @@ import { MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity } fr
 import { persistenceWarning, sendAndRefresh, sendOutcome } from "./message-send.ts";
 import { closeContinuityAcknowledgement, NativeVaultLockCoordinator } from "./window-close.ts";
 import { VideoReviewQueue } from "./video-review.ts";
+import { createNativeTextDriver } from "./native-text-driver.ts";
+import { readNativeOriginals } from "./native-text-history.ts";
+import { PendingSendRetry } from "./pending-send-retry.ts";
+import { decodeRestoredChatSession } from "./native-text-session.ts";
+import { sessionContinuationCurrent } from "./viewscope.ts";
 
 export function deferred<T = void>() {
   let resolve!: (value: T) => void, reject!: (reason: unknown) => void;
@@ -27,16 +32,32 @@ function productionCloseCallback() {
   assert.ok(from >= 0 && to > from, "register the actual production close callback");
   return ts.transpile("[" + source.slice(from, to) + "];", { target: ts.ScriptTarget.ES2022 });
 }
+function productionRetryUpdate(){
+  const match=source.match(/\$effect\(\(\) => \{\s*(pendingSendRetry\.update\([\s\S]*?)\s*\}\);/);
+  assert.ok(match,"exercise actual App retry scheduler inputs");
+  return ts.transpile(`function syncRetrySchedule(){${match[1]}}`,{target:ts.ScriptTarget.ES2022});
+}
 
+/** One simulated warm native store, optionally shared across App instances.
+ * This models serialized saved bytes, not native authentication or credentials. */
+export function pendingManagerBackend(initial:unknown){return{sealed:JSON.stringify(sanitizeUiContinuity(initial)),nativeWrites:Promise.resolve(),nativeLocked:false,nativeGeneration:1};}
 /** Shared test fixture for real App save queue, hydration, decisions and submit/retry. */
-export function pendingManagerApp(initial: unknown) {
-  const dependencies = { initial, addPendingSend, durableStopOriginal, durableStopTerminal, retiredStopWarning, matchingPendingMutation, matchingPendingSend, samePendingIntent, pendingSendRetryBlock, resolvePendingSend, recoverQuarantinedIntent, quarantinedPendingIntent, validateMutationPayload, validateSendPayload, pendingContinuityVersion, sendRefusedUnaccepted,
-    MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity, persistenceWarning, sendAndRefresh, sendOutcome, NativeVaultLockCoordinator, closeContinuityAcknowledgement, VideoReviewQueue };
+export function pendingManagerApp(initial: unknown, backend=pendingManagerBackend(initial)) {
+  const dependencies = { initial, backend, addPendingSend, durableStopOriginal, durableStopTerminal, retiredStopWarning, matchingPendingMutation, matchingPendingSend, samePendingIntent, pendingSendRetryBlock, resolvePendingSend, recoverQuarantinedIntent, quarantinedPendingIntent, validateMutationPayload, validateSendPayload, pendingContinuityVersion, sendRefusedUnaccepted,
+    MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity, persistenceWarning, sendAndRefresh, sendOutcome, NativeVaultLockCoordinator, closeContinuityAcknowledgement, VideoReviewQueue, createNativeTextDriver, readNativeOriginals, PendingSendRetry, decodeRestoredChatSession, sessionContinuationCurrent };
   return new Function(...Object.keys(dependencies), `
-    let locked = false, uiStateReady = false, uiStateLoadGeneration = 1, uiStateHydrationAttempt = 0, uiStateSaveTimer;
+    let locked = false, uiStateReady = false, uiStateLoadGeneration = 1, uiStateHydrationAttempt = 0, uiStateSaveTimer,uiSessionRetired=false;
     let uiStateSaveChain = Promise.resolve(), uiStateSaveFailed = false, uiStateFailureToast = 0;
-    let pendingSends = {}, recoveredSendDrafts = {}, pendingSendErrors = {}, pendingSendResolution = null, uiContinuityVersion = 1;
+    let pendingSends = {}, recoveredSendDrafts = {}, nativeTextIntents = {}, pendingSendErrors = {}, pendingSendResolution = null, uiContinuityVersion = 1;
     let retryingPendingSends = false, pendingManagerOpen = false, sending = false;
+    let chatBackend = "legacy", nativeOriginals = [], nativeCursor = null, nativeHistoryLoading = false, nativeHistoryLoaded = false, nativeHistoryError = null, nativeHistoryRevision = 0, nativeRetryGeneration = null, viewGeneration = 1;
+    let nativePages = [], nativeHistoryCalls = [];
+    let busy=false,showAdd=false,startTab="join";
+    let displayName="Catte",newServerName="Group",advertise="",relay="",rendezvous="";
+    const studioExit={begin(){const generation=viewGeneration;return{current:()=>generation===viewGeneration};}};
+    // The navigation's dispatch decision is tested separately against the
+    // actual switchServer. Here retain the real history read after selection.
+    async function switchServer(id,_then,route){if(route&&!route.current())return false;activeServerId=id;cur=servers.find(row=>row.id===id);await refreshNativeHistory();return true;}
     let windowCloseInFlight = false, unlocking = false, unlockAttempt = 0, closeAfterContinuityError = false, closeContinuityRevision = null;
     // This fixture is an already-known vault; lifecycle tests exercise actual gate reads.
     const vaultExists = true, refreshVaultGate = () => { throw new Error("unexpected startup gate read"); };
@@ -50,16 +71,19 @@ export function pendingManagerApp(initial: unknown) {
     let servers = [], cur = null, activeServerId = null, draft = "", replyingTo = "", draftRevisions = {};
     let pendingSendNonce = 0, mentionQuery = null, chatStickToBottom = false, tailLoaded = false;
     let messageWindowScope = "", messages = [], pageTotal = 0, replyingToRow, error = "", warnings = [];
-    let sealed = JSON.stringify(sanitizeUiContinuity(initial)), writes = [], savesFail = false, gates = [], readGates = [], submissions = [], stops = [];
-    let nativeWrites = Promise.resolve(), nativeLocked = false, nativeGeneration = 1;
+    let writes = [], savesFail = false, gates = [], readGates = [], submissions = [], stops = [];
     let closeHandler, closeCalls = [], destroyCalls = 0, restartCalls = 0, closeTimers = new Map();
     const hostSetTimeout = globalThis.setTimeout, hostClearTimeout = globalThis.clearTimeout;
+    const saveTimers=new Map();
     const setTimeout = (callback, delay) => {
       if (delay === 10000) { const key = {}; closeTimers.set(key, callback); return key; }
+      if (delay === 250) { const key={};saveTimers.set(key,callback);return key; }
       return hostSetTimeout(callback, delay);
     };
-    const clearTimeout = handle => { if (!closeTimers.delete(handle)) hostClearTimeout(handle); };
-    const pendingSendRetry = { cancel() {} };
+    const clearTimeout = handle => { if (!closeTimers.delete(handle)&&!saveTimers.delete(handle)) hostClearTimeout(handle); };
+    const retryTimers = new Map();
+    const pendingSendRetry = new PendingSendRetry(async session=>{if(!locked && uiStateReady && session===uiStateLoadGeneration)await retryPendingSends(true);},
+      {setTimeout(callback,delay){const key={};retryTimers.set(key,{callback,delay});return key;},clearTimeout(key){retryTimers.delete(key);}});
     const callLifecycleSession = { invalidate() {} }, micCaptureSession = callLifecycleSession;
     const videoCaptureSession = callLifecycleSession, screenAudioCaptureSession = callLifecycleSession;
     const inCall = false, leaveVoice = () => {};
@@ -73,38 +97,45 @@ export function pendingManagerApp(initial: unknown) {
     const chatScopeKey = (s,c) => s + ":" + c;
     const chanKey = () => activeServerId === null || !cur?.active ? null : chatScopeKey(activeServerId,cur.active);
     const invoke = async (command, args) => {
-      if (command === "get_ui_state") { const captured = sealed; const gate = readGates.shift(); if (gate) await gate; return captured; }
+      if(command === "get_message_page") { nativeHistoryCalls.push(structuredClone(args));const next=nativePages.shift();if(next instanceof Error)throw next;return await(next ?? {backend:"text-v2",scope:"own-saved-originals",next:"0",end_exclusive:"0",items:[]}); }
+      if (command === "get_ui_state") { const captured = backend.sealed; const gate = readGates.shift(); if (gate) await gate; return captured; }
       if (command === "durable_send_context") { contextCalls++; if (contextGate) await contextGate; return "a".repeat(64); }
       if (command === "durable_mutation_context") { contextCalls++; if (contextGate) await contextGate; return {context: "a".repeat(64), target: "b".repeat(64)}; }
       if (command === "close_vault_window" || command === "lock_session") {
         if (command === "close_vault_window") closeCalls.push(structuredClone(args));
-        const write = nativeWrites.then(() => {
-          if (args.uiStateJson !== null) sealed = args.uiStateJson;
-          nativeLocked = true; nativeGeneration++;
+        const write = backend.nativeWrites.then(() => {
+          if (args.uiStateJson !== null) backend.sealed = args.uiStateJson;
+          backend.nativeLocked = true; backend.nativeGeneration++;
           return { continuity_error: null, deferred: false, destroy_error: null };
         });
-        nativeWrites = write.catch(() => {}); return write;
+        backend.nativeWrites = write.catch(() => {}); return write;
       }
       if (command !== "save_ui_state") throw new Error("unexpected command " + command);
-      const generation = nativeGeneration;
-      const write = nativeWrites.then(async () => {
-        if (nativeLocked || generation !== nativeGeneration) throw new Error("native session changed");
+      const generation = backend.nativeGeneration;
+      const write = backend.nativeWrites.then(async () => {
+        if (backend.nativeLocked || generation !== backend.nativeGeneration) throw new Error("native session changed");
         writes.push(JSON.parse(args.json));
         const gate = gates.shift();
         if (gate) await gate;
         if (savesFail) throw new Error("injected disk failure");
         if (new TextEncoder().encode(args.json).length > 1024*1024) throw new Error("UI state exceeds vault size limit");
-        sealed = args.json;
+        backend.sealed = args.json;
       });
-      nativeWrites = write.catch(() => {}); return write;
+      backend.nativeWrites = write.catch(() => {}); return write;
     };
     const invokeDebugged = async (command, args) => {
-      const call = { command, args: structuredClone(args), sealed: JSON.parse(sealed) };
+      const call = { command, args: structuredClone(args), sealed: JSON.parse(backend.sealed) };
       if (command === "stop_durable_chat") { stops.push(call); return { value: await stopAnswer(args) }; }
       submissions.push(call);
       return { value: await submitAnswer(args) };
     };
     ${production("  function queueUiStateSave(", "  function chanKey(")}
+    ${production("  function resetNativeTextForLock(", "  function nativeTextDriver(")}
+    ${production("  function nativeTextDriver(", "  async function found(")}
+    ${production("  async function found(", "  async function join(")}
+    ${production("  function restoreReloaded(", "  async function unlock(")}
+    ${production("  function retireUiSessionOnUnmount(", "</script>")}
+    ${productionRetryUpdate()}
     ${production("  async function submitPendingSend(", "  // Inline edit of one of your own messages.")}
     ${production("  // Inline edit of one of your own messages.", "  // Emoji reactions:").replaceAll('$state(', '(')}
     const nativeVaultLock = new NativeVaultLockCoordinator(snapshot => invoke("lock_session", { uiStateJson: snapshot }));
@@ -116,7 +147,7 @@ export function pendingManagerApp(initial: unknown) {
       if (!nativeAlreadyLocked) void nativeVaultLock.begin(uiStateReady ? continuityJson() : null);
       locked = true; uiStateReady = false; uiStateLoadGeneration++; pendingSendResolution = null;
       cancelEdit(); // the actual lock path calls this through clearServerView
-      pendingSends = {}; recoveredSendDrafts = {}; drafts = {}; draft = "";
+      pendingSends = {}; recoveredSendDrafts = {}; drafts = {}; draft = "";resetNativeTextForLock();
     }
     ${productionCloseCallback()}
     return {
@@ -125,7 +156,7 @@ export function pendingManagerApp(initial: unknown) {
       submit: token => submitPendingSend(pendingSends[token], uiStateLoadGeneration), retry: retryPendingSends, send,
       save: () => queueUiStateSave(continuityJson),
       saveImmediately: saveUiStateImmediately,
-      replaceSealed(value) { sealed = JSON.stringify(value); },
+      replaceSealed(value) { backend.sealed = JSON.stringify(value); },
       holdSave: promise => gates.push(promise), failSaves: yes => savesFail = yes,
       holdLoad: promise => readGates.push(promise),
       holdContext: promise => contextGate = promise,
@@ -135,6 +166,21 @@ export function pendingManagerApp(initial: unknown) {
       edit(text) { editDraft = text; editRevision++; },
       manager: value => pendingManagerOpen = value,
       conversation(server, channel) { activeServerId = server; cur = channel === null ? null : { active: channel }; draft = chanKey() ? drafts[chanKey()] ?? "" : ""; },
+      nativeConversation(server,channel,context) {chatBackend="text-v2";activeServerId=server;cur={id:server,backend:"text-v2",active:channel,context};servers=[cur];draft=drafts[chanKey()]??"";},
+      nativeHistory(...pages) {nativePages=pages;},
+      nativeRefresh: refreshNativeHistory,
+      nativeRetry: retryNativeTextRequests,
+      nativeFound: found,
+      dispose:retireUiSessionOnUnmount,
+      debounce:scheduleUiStateSave,
+      pendingDebounce:()=>saveTimers.values().next().value,
+      // Only native auth/rendering are replaced: exercise the same production
+      // native redaction, then establish a new UI generation as lock/restore do.
+      retireFoundUiForReauth(){resetNativeTextForLock();uiStateLoadGeneration++;viewGeneration++;chatBackend="text-v2";},
+      restoreNative(value){locked=true;return restoreReloaded(value);},
+      syncRetry: syncRetrySchedule,
+      retryTimers:()=>[...retryTimers.values()].map(value=>value.delay),
+      fireRetry(){const first=retryTimers.entries().next().value;if(first){retryTimers.delete(first[0]);first[1].callback();}},
       type(text) { draft = text; const key = chanKey(); if (key) { drafts[key] = text; draftRevisions[key] = (draftRevisions[key] ?? 0) + 1; } },
       reply(id) { replyingTo = id; },
       add(intent) { pendingSends = addPendingSend(pendingSends, intent); },
@@ -144,9 +190,9 @@ export function pendingManagerApp(initial: unknown) {
       review(file) { return videoReviews.request(file, { index: 1, count: 1 }, "open", "chat"); },
       expireCloseWait() { for (const callback of [...closeTimers.values()]) callback(); },
       replaceUiGeneration() { uiStateLoadGeneration++; },
-      async unlock() { await nativeVaultLock.settle(); nativeVaultLock.reset(); nativeLocked = false; nativeGeneration++; locked = false; uiStateLoadGeneration++; return loadUiContinuity(uiStateLoadGeneration); },
-      done() { clearTimeout(uiStateSaveTimer); },
-      state() { return { pendingSends: structuredClone(pendingSends), recoveredSendDrafts: structuredClone(recoveredSendDrafts), drafts: structuredClone(drafts), draft, editingId, editDraft, sealed: JSON.parse(sealed), writes, submissions, stops, warnings, pendingSendResolution, locked, error, closeCalls, windowCloseInFlight, destroyCalls, restartCalls, contextCalls, uiStateReady, videoScopeEpoch, videoReview: videoReviews.current }; }
+      async unlock() { await nativeVaultLock.settle(); nativeVaultLock.reset(); backend.nativeLocked = false; backend.nativeGeneration++; locked = false; uiStateLoadGeneration++; return loadUiContinuity(uiStateLoadGeneration); },
+      done() { clearTimeout(uiStateSaveTimer);pendingSendRetry.cancel(); },
+      state() { return { uiSessionRetired,busy,activeServerId,startTab,nativeHistoryLoading,nativeRetryGeneration,uiStateLoadGeneration,nativeHistoryLoaded,nativeHistoryError,nativeCursor,nativeOriginals:structuredClone(nativeOriginals),nativeHistoryCalls,nativeTextIntents: structuredClone(nativeTextIntents), uiContinuityVersion, pendingSends: structuredClone(pendingSends), recoveredSendDrafts: structuredClone(recoveredSendDrafts), drafts: structuredClone(drafts), draft, editingId, editDraft, sealed: JSON.parse(backend.sealed), writes, submissions, stops, warnings, pendingSendResolution, locked, error, closeCalls, windowCloseInFlight, destroyCalls, restartCalls, contextCalls, uiStateReady, videoScopeEpoch, videoReview: videoReviews.current }; }
     };
   `)(...Object.values(dependencies));
 }
