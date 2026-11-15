@@ -466,7 +466,7 @@ impl crate::store::ServerStore {
         if let NativeRegistryHandler::Operational(handler) = handler {
             return handler.inspect_storage(self);
         }
-        if let NativeRegistryHandler::Lifecycle(handler) = handler {
+        if let Some(handler) = handler.lifecycle() {
             return handler.inspect_storage(self);
         }
         crate::store::persistence::native_registry::operational::refuse_upgrade_debt(self)?;

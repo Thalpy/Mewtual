@@ -1,0 +1,63 @@
+/** Native own-original pages are not Legacy channel projections. Never turn
+ * their context-wide ordinals into group totals, unread counts or receipts. */
+export type NativeOriginal = {
+  ordinal: string; action: string; signer: string; channel: string; presented_ms: string;
+  status: "pending" | "submitted" | "held";
+  body: { kind: "create"; text: string; reply_to: string | null } | { kind: "edit"; create: string; text: string }
+    | { kind: "delete" | "join"; create: string };
+};
+export type NativeOriginalPage = { backend: "text-v2"; scope: "own-saved-originals"; next: string; end_exclusive: string; items: NativeOriginal[] };
+const fail = (): never => { throw new Error("Saved messages could not be read. Try again."); };
+const object = (value: unknown): Record<string, unknown> => { if (!value || typeof value !== "object" || Array.isArray(value)) return fail(); return value as Record<string, unknown>; };
+function fields(value: Record<string, unknown>, expected: string[]) { if (Object.keys(value).length !== expected.length || expected.some(key => !Object.hasOwn(value, key))) fail(); }
+function decimal(value: unknown, bits = 64): string { if (typeof value !== "string" || value.length > (bits === 64 ? 20 : 39) || !/^(0|[1-9][0-9]*)$/.test(value) || BigInt(value) > (1n << BigInt(bits)) - 1n) return fail(); return value; }
+function hex(value: unknown): string { if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)) return fail(); return value; }
+const encoder = new TextEncoder();
+function text(value: unknown): string {
+  if (typeof value !== "string" || value.length > 65536) return fail();
+  for(let i=0;i<value.length;i++){const unit=value.charCodeAt(i);if(unit>=0xd800&&unit<=0xdbff){const next=value.charCodeAt(++i);if(!(next>=0xdc00&&next<=0xdfff))return fail();}else if(unit>=0xdc00&&unit<=0xdfff)return fail();}
+  if(encoder.encode(value).length>65536)return fail();
+  return value;
+}
+export function decodeNativeOriginalPage(value: unknown, start: string, end: string | null, channel: string): NativeOriginalPage {
+  const root = object(value); fields(root, ["backend", "scope", "next", "end_exclusive", "items"]);
+  const next = decimal(root.next), exclusive = decimal(root.end_exclusive);
+  if (root.backend !== "text-v2" || root.scope !== "own-saved-originals" || !Array.isArray(root.items) || root.items.length > 8
+    || (end !== null && exclusive !== end) || BigInt(next) < BigInt(start) || BigInt(next) > BigInt(exclusive)
+    || (BigInt(start) < BigInt(exclusive) && next === start)) return fail();
+  let previous: bigint | null = null;
+  const items = root.items.map(raw => {
+    const row = object(raw); fields(row, ["ordinal", "action", "signer", "channel", "presented_ms", "status", "body"]);
+    const ordinal = decimal(row.ordinal), actualChannel = decimal(row.channel, 128), presented_ms = decimal(row.presented_ms);
+    if (actualChannel !== channel || BigInt(ordinal) < BigInt(start) || BigInt(ordinal) >= BigInt(next) || (previous !== null && BigInt(ordinal) <= previous)
+      || typeof row.status !== "string" || !["pending", "submitted", "held"].includes(row.status)) return fail();
+    previous = BigInt(ordinal);
+    const body = object(row.body); let parsed: NativeOriginal["body"];
+    if (body.kind === "create") { fields(body, ["kind", "text", "reply_to"]); const value = text(body.text); if (!value) return fail(); parsed = { kind: "create", text: value, reply_to: body.reply_to === null ? null : hex(body.reply_to) }; }
+    else if (body.kind === "edit") { fields(body, ["kind", "create", "text"]); parsed = { kind: "edit", create: hex(body.create), text: text(body.text) }; }
+    else if (body.kind === "delete" || body.kind === "join") { fields(body, ["kind", "create"]); parsed = { kind: body.kind, create: hex(body.create) }; }
+    else return fail();
+    return { ordinal, action: hex(row.action), signer: hex(row.signer), channel: actualChannel, presented_ms,
+      status: row.status as NativeOriginal["status"], body: parsed };
+  });
+  return { backend: "text-v2", scope: "own-saved-originals", next, end_exclusive: exclusive, items };
+}
+/** At most16 native requests/128 originals per batch. Empty channel pages keep
+ * advancing the original context cursor; a finite first end is reused exactly. */
+export async function readNativeOriginals(
+  invoke: (command: string, args: Record<string, unknown>) => Promise<unknown>,
+  target: { server: number; channel: string; context: string }, current: () => boolean,
+  cursor: { next: string; end: string } | null = null,
+): Promise<{ items: NativeOriginal[]; next: string; end: string } | null> {
+  let next = cursor?.next ?? "0", end: string | null = cursor?.end ?? null;
+  const items: NativeOriginal[] = [];
+  for (let page = 0; page < 16; page++) {
+    if (!current()) return null;
+    const raw = await invoke("get_message_page", { server: target.server, channel: target.channel, expectedContext: target.context, start: next, endExclusive: end, limit: 8 });
+    if (!current()) return null;
+    const result = decodeNativeOriginalPage(raw, next, end, target.channel);
+    next = result.next; end = result.end_exclusive; items.push(...result.items);
+    if (next === end) break;
+  }
+  return { items, next, end: end! };
+}

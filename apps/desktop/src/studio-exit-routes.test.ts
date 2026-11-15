@@ -239,7 +239,7 @@ function production<T>(names: string[], state: object): T {
 test("App's direct Inbox route stays put while window close is draining state", async () => {
   for (const view of ["studio", "chat"]) {
     let loads = 0;
-    const state = { view, windowCloseInFlight: true, inboxView: false, dmHome: true,
+    const state = { chatBackend:"legacy", view, windowCloseInFlight: true, inboxView: false, dmHome: true,
       newsUnseen: false, inboxMode: "mentions", loadNews: () => { loads++; }, loadInbox: () => { loads++; },
       leaveStudioThen: null as unknown as ReturnType<typeof createStudioExit>["leaveThen"] };
     state.leaveStudioThen = createStudioExit({ onStudio: () => state.view === "studio", hasWork: () => false,
@@ -323,7 +323,7 @@ test("a channel-open completion cannot add its channel to a replacement server",
   for (const replacement of ["server", "unlock", "route", "close"] as const) {
     const opened = deferred<string>();
     let current = true, switches = 0;
-    const state = { newChannel: "new-channel", activeServerId: 7, viewGeneration: 1, locked: false, windowCloseInFlight: false, error: "",
+    const state = { chatBackend:"legacy", newChannel: "new-channel", activeServerId: 7, viewGeneration: 1, locked: false, windowCloseInFlight: false, error: "",
       cur: { channels: [{ id: "original", name: "original" }] },
       studioExit: createStudioExit({ onStudio: () => false, hasWork: () => false, closing: () => false,
         claim: () => () => current, save: async () => true }),
@@ -593,6 +593,7 @@ function productionOpenServerSettings() {
   const studio = scriptedStudio(() => true);
   const loaded = deferred<void>();
   const state = {
+    chatBackend:"legacy",servers,
     activeServerId: 1 as number | null, communicationMode: "stale" as string | null, communicationModeError: "stale",
     serverNameDraft: "", sharedNameDraft: "", serverSettingsPage: "overview", setSearch: "x", showServerSettings: false,
     liveryLoaded: false, livery: { name: "" }, liveryDraft: null as unknown, liveryDraftFor: null as unknown, inviteRevealed: null as unknown,

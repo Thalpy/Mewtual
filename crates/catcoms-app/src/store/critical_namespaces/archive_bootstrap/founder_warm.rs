@@ -150,6 +150,24 @@ impl<T: MeshTransport, R: CryptoRngCore> Drop for PreparedFreshV2TextFounder<T, 
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
+    /// Preserve the actual NativeRequired whole Host while preparing only an
+    /// unsigned original. No library fallback, key or Saved receipt is issued.
+    pub(in crate::store) fn prepare_native_invite_intent_data(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        request: catcoms_sync::owner_v2::V2FounderInviteRequestData,
+        routing_plan: &[u8],
+        keys: &mut super::founder::NativeFounderKeys,
+    ) -> Result<([u8; 32], u64), AppError> {
+        keys.preflight(&self.origin)?;
+        if !self.is_ready_data() {
+            return Err(refused());
+        }
+        self.host
+            .as_mut()
+            .ok_or_else(refused)?
+            .prepare_native_invite_intent_data(layout, request, routing_plan, keys)
+    }
     /// Additional driver/Box/refusal storage only. Existing creator, source,
     /// source-read, restored SDK and Current fees remain independently live.
     fn invoice() -> Result<usize, AppError> {
@@ -376,6 +394,29 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
             .prepare_member_save_with_access(layout, request, negative, rng, access)
     }
 
+    /// Read setup/recovery on the genuine retained Host, never a recreated
+    /// library-origin owner. This produces saved-original DATA only.
+    pub(in crate::store) fn prepare_member_history_with_access(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        read: crate::store::persistence::v2_member_outbox::MemberHistoryRead,
+        negative: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+        access: FounderAccess<'_>,
+    ) -> Result<crate::store::persistence::v2_member_outbox::MemberHistoryPage, V2MemberSaveRefusal>
+    {
+        access
+            .require(&self.origin)
+            .map_err(|_| V2MemberSaveRefusal::Unavailable)?;
+        if !self.is_ready_data() {
+            return Err(V2MemberSaveRefusal::Unavailable);
+        }
+        self.host
+            .as_mut()
+            .ok_or(V2MemberSaveRefusal::Unavailable)?
+            .prepare_member_history_with_access(layout, read, negative, rng, access)
+    }
+
     /// No IO/wait is added at the existing finite final edge. The actual
     /// native factory must still authenticate and retain its supplied custody.
     pub fn admit_member_save(
@@ -422,6 +463,19 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
             Some(host) => host.cancel_and_drain_admitted_promotion(),
             None => Ok(()),
         }
+    }
+
+    /// Test only: retain a genuine member-save source End while the whole
+    /// driver attempts to close. No key/signing/save authorization is tested.
+    #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(in crate::store) fn hold_member_save_source_for_test(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+    ) -> Result<Box<dyn Send>, AppError> {
+        self.host
+            .as_mut()
+            .ok_or_else(refused)?
+            .hold_member_save_source_for_test(layout)
     }
 }
 

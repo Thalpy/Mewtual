@@ -370,7 +370,7 @@ async fn execute_confirmation(
         let servers = live.servers.lock().await;
         let binding = selected.binding();
         servers
-            .get(&binding.server)
+            .legacy(&binding.server)
             .filter(|entry| entry.instance == binding.instance && entry.group_id == binding.group)
             .map(|entry| entry.actor.clone())
             .ok_or(Refused::Closed)?
@@ -434,7 +434,7 @@ pub(in crate::voice_handoff) fn observation_actor(
     let servers = live.servers.try_lock().map_err(|_| VoiceError::Capacity)?;
     let binding = selected.binding();
     let actor = servers
-        .get(&binding.server)
+        .legacy(&binding.server)
         .filter(|entry| entry.instance == binding.instance && entry.group_id == binding.group)
         .map(|entry| entry.actor.clone())
         .ok_or(Refused::Closed)?;
@@ -466,7 +466,7 @@ async fn discover(
         let servers = live.servers.try_lock().map_err(|_| VoiceError::Capacity)?;
         let binding = selected.binding();
         let actor = servers
-            .get(&binding.server)
+            .legacy(&binding.server)
             .filter(|entry| entry.instance == binding.instance && entry.group_id == binding.group)
             .map(|entry| entry.actor.clone())
             .ok_or(Refused::Closed)?;
@@ -520,7 +520,7 @@ async fn execute_selected(worker: &Worker, selector: PairSelector) -> Result<Row
         let servers = context.servers.lock().await;
         let binding = selected.binding();
         servers
-            .get(&binding.server)
+            .legacy(&binding.server)
             .filter(|entry| entry.instance == binding.instance && entry.group_id == binding.group)
             .map(|entry| entry.actor.clone())
             .ok_or(Refused::Closed)?

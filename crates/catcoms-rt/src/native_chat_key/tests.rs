@@ -3,6 +3,7 @@
 use super::*;
 use std::future::Future;
 use std::task::{Context, Poll, Wake, Waker};
+mod source_close;
 
 struct Fixture {
     binding: NativeChatUiBinding,
@@ -121,6 +122,86 @@ fn native_chat_key_distinct_purposes_are_bound_to_the_original_source() {
     drop(ends);
     assert_eq!(ui.original.counter.state.load(Ordering::SeqCst), 0);
     assert_eq!(source.original.counter.state.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn native_chat_key_governing_purposes_refuse_bootstrap_member_and_each_other() {
+    use NativeChatKeyPurpose::*;
+    for purpose in [AddSdk, GoverningHeader, JoinWelcome, JoinInvite] {
+        let fixture = Fixture::new();
+        let ui = fixture.session();
+        let source = fixture.source(&ui);
+        let mut cut = source.prepare_cut(&ui.observe(), purpose).unwrap();
+        let mut ends = NativeChatKeyEnds::new();
+        for wrong in [
+            Device,
+            FounderSdk,
+            BootstrapProfile,
+            BootstrapHeader,
+            MemberAction,
+            AddSdk,
+            GoverningHeader,
+            JoinWelcome,
+            JoinInvite,
+        ] {
+            if wrong == purpose {
+                continue;
+            }
+            assert_eq!(
+                cut.preflight(&source.observe(), wrong),
+                Err(NativeChatKeyRefusal::WrongPurpose)
+            );
+            assert_eq!(
+                cut.enter(&source.observe(), wrong, &mut ends),
+                Err(NativeChatKeyRefusal::WrongPurpose)
+            );
+            assert!(ends.slots.iter().all(Option::is_none));
+        }
+        cut.enter(&source.observe(), purpose, &mut ends).unwrap();
+        assert_eq!(ui.original.counter.state.load(Ordering::SeqCst), 1);
+        drop(ends);
+        assert_eq!(ui.original.counter.state.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[test]
+fn native_chat_key_governing_ends_do_not_alias_existing_slots_and_hold_source_drain() {
+    use NativeChatKeyPurpose::*;
+    let fixture = Fixture::new();
+    let ui = fixture.session();
+    let source = fixture.source(&ui);
+    let mut ends = NativeChatKeyEnds::new();
+    for purpose in [
+        Device,
+        FounderSdk,
+        BootstrapProfile,
+        BootstrapHeader,
+        MemberAction,
+        AddSdk,
+        GoverningHeader,
+        JoinWelcome,
+        JoinInvite,
+    ] {
+        let mut cut = source.prepare_cut(&ui.observe(), purpose).unwrap();
+        cut.enter(&source.observe(), purpose, &mut ends).unwrap();
+    }
+    assert_eq!(ui.original.counter.state.load(Ordering::SeqCst), 9);
+    assert_eq!(source.original.counter.state.load(Ordering::SeqCst), 9);
+    let drain = source.observe_retirement();
+    source.close_handle().close();
+    let mut wait = Box::pin(drain.wait());
+    assert!(
+        pending(wait.as_mut()),
+        "closure cannot retire actual admitted work"
+    );
+    drop(ends);
+    assert!(drain.is_drained());
+    assert!(matches!(
+        wait.as_mut()
+            .poll(&mut Context::from_waker(&Waker::from(Arc::new(NoWake)))),
+        Poll::Ready(())
+    ));
+    assert_eq!(ui.original.counter.state.load(Ordering::SeqCst), 0);
 }
 
 #[test]
@@ -963,4 +1044,94 @@ fn native_chat_mount_identity_distinguishes_hosts_even_with_shared_ui_atomics() 
     assert!(!original.is_open());
     assert!(!original.same_original(&replacement.observe_mount()));
     assert!(replacement.observe_mount().is_open());
+}
+
+#[test]
+fn retained_admission_and_never_entered_are_exact_negative_data_not_fresh_permission() {
+    let fixture = Fixture::new();
+    let ui = fixture.session();
+    let source = fixture.source(&ui);
+    let foreign = fixture.source(&ui);
+    let original = source.observe();
+    let mut cut = source
+        .prepare_cut(&ui.observe(), NativeChatKeyPurpose::AddSdk)
+        .unwrap();
+    let mut ends = NativeChatKeyEnds::new();
+    assert!(!ends.holds_admitted_purpose_data(&original, NativeChatKeyPurpose::AddSdk));
+    assert_eq!(
+        cut.require_never_entered_data(&original, NativeChatKeyPurpose::AddSdk),
+        Ok(())
+    );
+    assert_eq!(
+        cut.require_never_entered_data(&foreign.observe(), NativeChatKeyPurpose::AddSdk),
+        Err(NativeChatKeyRefusal::Foreign)
+    );
+    assert_eq!(
+        cut.require_never_entered_data(&original, NativeChatKeyPurpose::JoinWelcome),
+        Err(NativeChatKeyRefusal::WrongPurpose)
+    );
+    cut.enter(&original, NativeChatKeyPurpose::AddSdk, &mut ends)
+        .unwrap();
+    assert!(ends.holds_admitted_purpose_data(&original, NativeChatKeyPurpose::AddSdk));
+    assert!(!ends.holds_admitted_purpose_data(&foreign.observe(), NativeChatKeyPurpose::AddSdk));
+    assert!(!ends.holds_admitted_purpose_data(&original, NativeChatKeyPurpose::JoinWelcome));
+    assert_eq!(
+        cut.require_never_entered_data(&original, NativeChatKeyPurpose::AddSdk),
+        Err(NativeChatKeyRefusal::AlreadyEntered)
+    );
+    fixture.lock();
+    source.close();
+    assert!(ends.holds_admitted_purpose_data(&original, NativeChatKeyPurpose::AddSdk));
+    assert!(cut
+        .preflight(&original, NativeChatKeyPurpose::AddSdk)
+        .is_err());
+    let outer = std::mem::take(&mut ends);
+    assert!(!ends.holds_admitted_purpose_data(&original, NativeChatKeyPurpose::AddSdk));
+    assert!(outer.holds_admitted_purpose_data(&original, NativeChatKeyPurpose::AddSdk));
+    assert!(!source.observe_retirement().is_drained());
+    drop(outer);
+    assert!(source.observe_retirement().is_drained());
+}
+
+#[test]
+fn partial_native_admission_is_neither_never_entered_nor_an_admitted_source_unit() {
+    let fixture = Fixture::new();
+    let ui = fixture.session();
+    let source = fixture.source(&ui);
+    let original = source.observe();
+    let mut cut = source
+        .prepare_cut(&ui.observe(), NativeChatKeyPurpose::AddSdk)
+        .unwrap();
+    let close = source.close_handle();
+    CUT_BOUNDARY.with(|slot| {
+        *slot.borrow_mut() = Some((CutBoundary::AfterUiCounter, Box::new(move || close.close())))
+    });
+    let mut ends = NativeChatKeyEnds::new();
+    assert_eq!(
+        cut.enter(&original, NativeChatKeyPurpose::AddSdk, &mut ends),
+        Err(NativeChatKeyRefusal::Unavailable)
+    );
+    assert!(CUT_BOUNDARY.with(|slot| slot.borrow().is_none()));
+    assert_eq!(
+        cut.require_never_entered_data(&original, NativeChatKeyPurpose::AddSdk),
+        Err(NativeChatKeyRefusal::AlreadyEntered)
+    );
+    assert!(!ends.holds_admitted_purpose_data(&original, NativeChatKeyPurpose::AddSdk));
+    assert_eq!(ui.original.counter.state.load(Ordering::SeqCst), 1);
+    drop(ends);
+    assert_eq!(ui.original.counter.state.load(Ordering::SeqCst), 0);
+    // A closed never-entered cut can still be classified as such; that DATA
+    // must never be mistaken for permission to enter it on a closed source.
+    let other = fixture.source(&ui);
+    let unused = other
+        .prepare_cut(&ui.observe(), NativeChatKeyPurpose::JoinWelcome)
+        .unwrap();
+    other.close();
+    assert_eq!(
+        unused.require_never_entered_data(&other.observe(), NativeChatKeyPurpose::JoinWelcome),
+        Ok(())
+    );
+    assert!(unused
+        .preflight(&other.observe(), NativeChatKeyPurpose::JoinWelcome)
+        .is_err());
 }

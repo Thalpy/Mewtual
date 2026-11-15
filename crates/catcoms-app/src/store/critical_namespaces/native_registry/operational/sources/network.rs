@@ -8,6 +8,25 @@ use catcoms_wire::Encoder;
 const TAG: &[u8] = b"catcoms/native-founder-network/v1\0";
 const MAX_PLAIN: usize = 64 * 1024 - 40;
 
+/// Passive original custody, not source/key/native authorization. It has no
+/// path back to the runtime, issuer or transport. Net stores it on actual tasks
+/// and Executor owners, NEVER on the metadata-only drain observation.
+struct NativeTransportCustody {
+    _work: SourceWork,
+    _metadata: Arc<RuntimeMetadata>,
+    _attempt: Arc<NativeTransportPayment>,
+}
+struct NativeTransportPayment {
+    _debit: CatalogReadReservation,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TransportBuild {
+    Fresh,
+    Entered,
+    ObservedErr,
+    Returned,
+}
+
 pub(super) struct Reservation {
     context: ([u8; 32], [u8; 32]),
     signer: [u8; 32],
@@ -24,12 +43,74 @@ pub(super) struct Reservation {
     active: Option<crate::store::NativeCreationStatusData>,
     actual_peer: Option<String>,
     factory_started: bool,
+    tcp: Option<catcoms_net::NativeTcpPreparation>,
+    transport_build: TransportBuild,
     activation: Option<
         std::sync::Arc<crate::store::persistence::native_registry::network::NetworkDependency>,
     >,
     io: Option<crate::store::persistence::native_registry::network::NetworkIo>,
 }
 impl Reservation {
+    /// Canonical public reservation DATA, not a reachable contact. Wildcard
+    /// listening and configured advertise/relay/rendezvous strings prove no
+    /// external address or relay reservation, so this initial profile encodes
+    /// ZERO certified contacts. Addressed join transport remains unfinished.
+    pub(super) fn invite_routing_plan_data(
+        &self,
+        binding: &crate::store::FreshV2TextFounderBinding,
+    ) -> Result<Vec<u8>, AppError> {
+        let public = self.public.as_ref().ok_or_else(refused)?;
+        let active = self.active.ok_or_else(refused)?;
+        let pending = self.pending.as_ref().ok_or_else(refused)?;
+        if self.context
+            != (
+                *binding.vault_layout_data().0,
+                *binding.vault_layout_data().1,
+            )
+            || binding.signer_data() != &self.signer
+            || active.state != crate::store::NativeCreationStateData::Founder
+            || active.identity != self.identity
+            // Native row identity is random and is NOT the transport-key
+            // commitment. The immutable Birth binds that independent domain.
+            || pending.identity != self.identity
+            || pending.birth.kind != founder::BirthKind::NativeFounder
+            || pending.birth.signer != self.signer
+            || pending.birth.network != public.commitment_data()
+            || self.actual_peer.as_deref() != Some(public.peer_id_data())
+            || self.transport_build != TransportBuild::Returned
+            || self.port == 0
+            || binding.group_data().is_empty()
+            || binding.group_data().len() > 256
+            || public.peer_id_data().len() > 128
+        {
+            return Err(refused());
+        }
+        let mut plan = Encoder::with_capacity(1024);
+        plan.put_bytes(b"mewtual/chat/native-invite-routing-plan/v2\0")
+            .map_err(|_| refused())?;
+        plan.put_u16(2);
+        for bytes in [
+            binding.group_data(),
+            public.public_key_data().as_slice(),
+            public.peer_id_data().as_bytes(),
+            public.commitment_data().as_slice(),
+        ] {
+            plan.put_bytes(bytes).map_err(|_| refused())?;
+        }
+        plan.put_u16(1); // TCP reservation; this is not a verified dial address
+        plan.put_u16(self.port);
+        plan.put_u32(0); // no certified public contact addresses
+        let plan = plan.finish();
+        if plan.len() > 1024 || plan.capacity() > 1024 {
+            return Err(refused());
+        }
+        Ok(plan)
+    }
+    /// Negative-only observation of this original preparation. No transport,
+    /// constructor or passive physical custody is exposed to cleanup.
+    pub(super) fn observe_tcp(&self) -> Option<catcoms_net::NativeTcpDrain> {
+        self.tcp.as_ref().map(|tcp| tcp.observe_drain())
+    }
     fn new(context: ([u8; 32], [u8; 32]), signer: [u8; 32]) -> Self {
         Self {
             context,
@@ -47,6 +128,8 @@ impl Reservation {
             active: None,
             actual_peer: None,
             factory_started: false,
+            tcp: None,
+            transport_build: TransportBuild::Fresh,
             activation: None,
             io: None,
         }
@@ -90,6 +173,63 @@ impl Reservation {
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> NativeTextCreationJob<T, R> {
+    /// Issue a paid association from the genuine retained stored runtime, not
+    /// a renderer row ID or a recovered index entry. This is blocking work:
+    /// perform it outside all native/Root control and UI commit guards.
+    pub fn select_stored_runtime(
+        mut self,
+    ) -> Result<NativeTextRuntimeSelection<T, R>, NativeTextCreationRefusal> {
+        use NativeTextCreationRefusal as Error;
+        self.require_current()?;
+        let body = self.loan.body.as_ref().ok_or(Error::Unavailable)?;
+        let request = body.request.as_ref().ok_or(Error::Unavailable)?;
+        let network = body.network.as_ref().ok_or(Error::Unavailable)?;
+        let active = network.active.ok_or(Error::Unavailable)?;
+        if active.state != crate::store::NativeCreationStateData::Founder
+            || active.identity != network.identity
+            || body
+                .driver
+                .as_ref()
+                .is_none_or(|driver| !driver.is_ready_data())
+            || body
+                .work
+                .lookup_creation(request.invocation, request.digest)
+                .map_err(|_| Error::Storage)?
+                != Some(active)
+        {
+            return Err(Error::Unavailable);
+        }
+        self.require_current()?;
+        if self.loan.body.as_ref().unwrap().selection.is_none() {
+            let selection = NativeTextRuntimeSelection::from_stored(&self, active);
+            self.loan.body.as_mut().unwrap().selection = Some(selection);
+        }
+        let selection = self
+            .loan
+            .body
+            .as_ref()
+            .unwrap()
+            .selection
+            .as_ref()
+            .unwrap()
+            .clone();
+        let body = self.loan.body.as_ref().unwrap();
+        let request = body.request.as_ref().unwrap();
+        if selection.original.status != active
+            || selection.original.invocation != request.invocation
+            || selection.original.request != request.digest
+            || !Arc::ptr_eq(&selection.original.scope, &self.command.scope)
+            || !std::sync::Weak::ptr_eq(
+                &selection.original.runtime,
+                &Arc::downgrade(&self.loan.cell),
+            )
+        {
+            return Err(Error::Unavailable);
+        }
+        self.loan.recorded = true;
+        Ok(selection)
+    }
+
     /// Separate Device-purpose entry from the earlier MLS-device job. There
     /// is exactly one retained seed attempt and one initial seal attempt; an
     /// unwind/unknown outcome never draws or seals a replacement on retry.
@@ -226,7 +366,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextCreationJob<T, R> {
         Ok(NativeTextCreationProgress::PendingCovered)
     }
 
-    fn require_current(&self) -> Result<(), NativeTextCreationRefusal> {
+    pub(super) fn require_current(&self) -> Result<(), NativeTextCreationRefusal> {
         if !self.command.scope.is_open()
             || !self.command.ui.is_current_cached()
             || self
@@ -433,16 +573,46 @@ impl<R: CryptoRngCore> NativeTextCreationJob<catcoms_net::MeshService, R> {
             .map_err(|_| Error::Storage)?;
         let public = network.public.as_ref().ok_or(Error::Unavailable)?;
         if body.transport.is_none() && body.driver.is_none() {
+            match network.transport_build {
+                TransportBuild::Fresh => {}
+                TransportBuild::ObservedErr => {
+                    // This is a PROVEN local constructor Err with no returned
+                    // Mesh and no SDK entry, not a general handoff refund.
+                    // Its original tasks must all die before a fresh admission.
+                    if !network
+                        .tcp
+                        .as_ref()
+                        .ok_or(Error::Unavailable)?
+                        .observe_drain()
+                        .is_drained()
+                    {
+                        return Err(Error::Busy);
+                    }
+                    drop(network.tcp.take()); // original executor/custody, outside guards
+                    network.transport_build = TransportBuild::Fresh;
+                }
+                TransportBuild::Entered | TransportBuild::Returned => {
+                    // Neither missing cached Mesh nor CLOSED+zero can turn an
+                    // unknown/returned outcome into a proven local refusal.
+                    return Err(Error::NetworkOutcomeUnknown);
+                }
+            }
             let port = network.port;
             let listen = [
                 format!("/ip4/0.0.0.0/tcp/{port}"),
                 format!("/ip6/::/tcp/{port}"),
-                format!("/ip4/0.0.0.0/udp/{port}/quic-v1"),
-                format!("/ip6/::/udp/{port}/quic-v1"),
             ]
             .iter()
             .map(|address| address.parse().map_err(|_| Error::Unavailable))
             .collect::<Result<Vec<_>, _>>()?;
+            #[cfg(test)]
+            let listen = if tests::refuse_constructor_once() {
+                let mut listen = listen;
+                listen.push("/memory/1".parse().unwrap());
+                listen
+            } else {
+                listen
+            };
             let relay = &body
                 .request
                 .as_ref()
@@ -454,17 +624,65 @@ impl<R: CryptoRngCore> NativeTextCreationJob<catcoms_net::MeshService, R> {
             } else {
                 vec![relay.parse().map_err(|_| Error::Unavailable)?]
             };
+            if network.tcp.is_none() {
+                // Never reuse the runtime's debit for an overlapping old task
+                // allocation. Each attempt's fee follows its own metadata too.
+                let attempt = Arc::new(NativeTransportPayment {
+                    _debit: body
+                        ._metadata
+                        .pool
+                        .try_reserve(catcoms_net::NATIVE_TCP_LIFETIME_BYTES)
+                        .map_err(|_| Error::Busy)?,
+                });
+                let work = body
+                    .work
+                    .for_paid_runtime(&body._metadata)
+                    .ok_or(Error::Unavailable)?;
+                network.tcp = Some(catcoms_net::NativeTcpPreparation::new(
+                    NativeTransportCustody {
+                        _work: work,
+                        _metadata: body._metadata.clone(),
+                        _attempt: attempt.clone(),
+                    },
+                    attempt,
+                ));
+            }
             self.keys.enter_device().map_err(|_| Error::Unavailable)?;
+            #[cfg(test)]
+            tests::after_transport_device_entry();
+            // The RT cut fences Host/UI/source counters, not independent
+            // index/mount revocation. Repeat those original cached negatives
+            // at actual transport admission, after all fallible preparation.
+            // The entered End remains owned on refusal; no primitive is refunded.
+            if !self.command.scope.is_open()
+                || !self.command.ui.is_current_cached()
+                || !body.work.is_live_cached()
+            {
+                return Err(Error::Unavailable);
+            }
             let key =
                 catcoms_net::keypair_from_seed(*network.seed).map_err(|_| Error::Unavailable)?;
-            // This concrete builder's Err precedes actor spawn (Net's
-            // listen_dial_spawn); no returned transport or SDK exists then.
-            // Retry uses the SAME retained seed/port, never another identity.
+            // Concrete Err precedes returned Mesh/SDK, but constructor dials
+            // may already own key tasks. Preserve that original drain first.
             #[cfg(test)]
             tests::transport_construction();
-            let (transport, actual, _) =
-                catcoms_net::MeshService::new_tcp_with_key_and_port_mapping(key, &listen, &dial)
-                    .map_err(|_| Error::Storage)?;
+            network.transport_build = TransportBuild::Entered;
+            let built = network
+                .tcp
+                .as_mut()
+                .unwrap()
+                .build_with_port_mapping(key, &listen, &dial);
+            let (transport, actual, _) = match built {
+                Ok(returned) => {
+                    network.transport_build = TransportBuild::Returned;
+                    returned
+                }
+                Err(_) => {
+                    // Cache the concrete result BEFORE every late negative.
+                    network.transport_build = TransportBuild::ObservedErr;
+                    return Err(Error::Storage);
+                }
+            };
             body.transport = Some(transport); // cache before every late check
             network.actual_peer = Some(actual.to_string());
         }
@@ -483,4 +701,4 @@ impl<R: CryptoRngCore> NativeTextCreationJob<catcoms_net::MeshService, R> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
