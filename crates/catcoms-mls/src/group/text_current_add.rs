@@ -1,6 +1,7 @@
 //! PRIVATE, independently paid Add candidate. Its parent stays immutable and
-//! mutation-closed. No raw device/group/provider, mutable SDK loan, Source,
-//! governance, save, install, transport or publication authority is returned.
+//! mutation-closed. The exact-receiver installation seam moves only a completed
+//! whole pair; Root Source/governance/save/native admission remains separate.
+//! No raw device/group/provider, mutable SDK getter or publication is returned.
 use super::*;
 use crate::device::text_add_package::{self, PackageBudget, ValidatedTextAddPackage};
 use crate::persist::text_current_add::{self, CandidateGraph, TextCurrentAddAdmission};
@@ -9,11 +10,19 @@ use std::sync::Arc;
 use zeroize::Zeroizing;
 #[cfg(test)]
 mod faults;
+mod installation;
 mod invoice;
 pub(super) mod observation;
 mod work;
+pub(crate) use installation::metadata_layout_bytes as installation_metadata_layout_bytes;
+pub use installation::{PreparedTextCurrentAddInstallation, RetiredTextCurrentAdd};
+mod result;
 #[cfg(test)]
 use faults::TestCut;
+pub(crate) use result::metadata_layout_bytes as completed_result_metadata_layout_bytes;
+pub use result::{
+    CompletedTextCurrentAddData, TextCurrentAddParentView, TextCurrentAddRequestView,
+};
 
 fn bad() -> MlsError {
     MlsError::Internal("unsupported bounded private text Add")
@@ -130,6 +139,7 @@ enum Phase {
     MergeEntered,
     Merged,
     Complete,
+    Installed,
     Failed,
 }
 struct SdkOutputs {

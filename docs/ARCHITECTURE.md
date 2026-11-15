@@ -1,5 +1,11 @@
 # Mewtual; Architecture
 
+Completed private MLS Add work has an exclusive exact-receiver whole-pair
+handoff. It retains the replaced graph for disposal outside final writers;
+both installed halves remain independently paid and mutation-closed. The Root
+governing-save/native/Source consumer is still unfinished.
+[Ownership boundary](communication-recovery/CHAT-V2-ADD-OWNERSHIP.md).
+
 Independent V2 join binding DATA codecs now separate accepted-anchor/request/
 package/Welcome commitments and exact governing Add issuer linkage. They have
 no transport/native consumer or source constructor. The actual owning join,

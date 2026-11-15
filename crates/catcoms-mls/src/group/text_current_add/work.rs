@@ -19,7 +19,7 @@ impl PreparedTextCurrentAdd {
     pub fn execute_private(&mut self) -> Result<(), MlsError> {
         if matches!(
             self.phase,
-            Phase::Failed | Phase::AddEntered | Phase::MergeEntered
+            Phase::Failed | Phase::AddEntered | Phase::MergeEntered | Phase::Installed
         ) {
             return Err(bad());
         }

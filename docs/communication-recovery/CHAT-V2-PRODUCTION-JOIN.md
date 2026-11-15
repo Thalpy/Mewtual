@@ -117,6 +117,10 @@ Predecessor tests must use a real prior binary with positive open controls.
 
 ## Founder operation and whole-node handoff
 
+The MLS exact-receiver pair handoff and registered completed-result view are
+implemented under final validation. They provide no Root save/Source/native
+admission. [Ownership boundary and remaining integration](CHAT-V2-ADD-OWNERSHIP.md).
+
 Retain one actual founder Add operation under its original request, selected
 parent and native/Source custody. The existing independently paid
 `PreparedTextCurrentAdd` candidate is an input, not covering save or Header

@@ -1,5 +1,11 @@
 # Mewtual; Interfaces & Hooks Schema
 
+`PreparedTextCurrentAdd::prepare_install_into` keeps exclusive original receiver
+and candidate-slot loans after full SDK preflight. `install` only swaps whole
+halves and returns opaque retired custody; caller must dispose outside writers.
+This library API grants no Source, native or covering-save authority.
+[Contract](communication-recovery/CHAT-V2-ADD-OWNERSHIP.md).
+
 Core now has independent V2 invite/request/Welcome binding DATA codecs under
 validation. They separate wire-KP/reference/credential and public-plan/sealed-
 transfer domains, and bind Welcome to the actual signed Add issuer. They create

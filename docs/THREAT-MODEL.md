@@ -1,5 +1,11 @@
 # Threat model; client integrity & enforcement boundaries
 
+The completed MLS Add ownership seam refuses foreign/stale receiver pairs and
+keeps exclusive loans through its no-fail swaps. The returned retired owner
+cannot execute or extract SDK state; the installed provider stays closed.
+Root covering-save, Source and native admission remain independent and are
+not implemented by this seam. [Boundary](communication-recovery/CHAT-V2-ADD-OWNERSHIP.md).
+
 The new V2 join binding codecs are bounded cryptographic DATA only. A valid
 signature or matching tuple neither selects a root nor establishes an MLS
 Add/current source. Every representation is verified before link/duplicate use;

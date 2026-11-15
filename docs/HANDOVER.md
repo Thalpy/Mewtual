@@ -1,5 +1,14 @@
 # Mewtual; Handover
 
+Continuation `chat-v2-founder-governed-add` combines the pushed join bindings
+and renderer-retirement correction. The completed MLS Add now has a two-phase
+exact-original receiver handoff and deferred opaque old-graph disposal. The17
+focused cases, complete MLS crate, five final doctests, strict crate lint,
+native check, frontend3,485, static gates and both audits passed; final review
+is clear. Complete Root/native CI remains pending. No Root consumer, production Add or Welcome
+publication is implemented. Chat V2 remains OFF and incomplete.
+[Current boundary and gaps](communication-recovery/CHAT-V2-ADD-OWNERSHIP.md).
+
 Active continuation is `chat-v2-production-join`, based on PR #128 `ad0af06b`,
 in the SAME isolated `target/cv2-native-text-history` worktree. Independent
 Core invite/request/Welcome DATA codecs and links are implemented under

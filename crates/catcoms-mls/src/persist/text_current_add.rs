@@ -128,7 +128,9 @@ impl TextCurrentAddAdmission {
                 4 * std::mem::size_of::<
                     Result<crate::group::text_current_add::PreparedTextCurrentAdd, MlsError>,
                 >(),
-            )
+            )?
+            .checked_add(crate::group::text_current_add::installation_metadata_layout_bytes()?)?
+            .checked_add(crate::group::text_current_add::completed_result_metadata_layout_bytes()?)
     }
     pub fn new<G: TextCurrentAddReservation>(reservation: G) -> Result<Self, MlsError> {
         // Compile-time SDK profile DATA, not a caller switch. Refuse before
