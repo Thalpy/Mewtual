@@ -262,7 +262,7 @@ async fn invoke_with_context<V>(
         let _commit = require_ui_session_generation(state, generation).await?;
         let servers = state.servers.lock().await;
         if servers
-            .get(&server)
+            .legacy(&server)
             .is_none_or(|entry| entry.instance != instance)
         {
             return Err("server changed during Studio operation".into());
@@ -370,7 +370,7 @@ fn authorize(
     drop(resumable);
     let servers = state.servers.clone().try_lock_owned().map_err(|_| busy())?;
     if servers
-        .get(&server)
+        .legacy(&server)
         .is_none_or(|entry| entry.instance != instance)
     {
         return Err("server changed before Studio commit".into());
@@ -420,7 +420,7 @@ async fn drive_receiver(
             .servers
             .lock()
             .await
-            .get(&server)
+            .legacy(&server)
             .is_none_or(|e| e.instance != instance)
         {
             break;
@@ -484,7 +484,10 @@ pub(crate) async fn forward_if_current(
     }
     let entries = state.servers.lock().await;
     let _event = state.ui_event_commit.lock().await;
-    if entries.get(&server).is_none_or(|e| e.instance != instance) {
+    if entries
+        .legacy(&server)
+        .is_none_or(|e| e.instance != instance)
+    {
         return false;
     }
     if ui_session_closed(state) || state.ui_session_generation.load(Ordering::SeqCst) != generation

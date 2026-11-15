@@ -11,6 +11,10 @@ mod catalog;
 mod cell;
 pub(super) mod data;
 mod facade;
+mod governed;
+pub use governed::NativeTextGovernedStorage;
+mod history_response;
+pub use history_response::{NativeTextHistoryResponseBudget, NativeTextHistoryResponseCredit};
 mod interlock;
 mod mount;
 mod native_ui;
@@ -21,9 +25,12 @@ mod sources;
 pub use sources::{
     NativeTextCreationBudget, NativeTextCreationInputs, NativeTextCreationJob,
     NativeTextCreationPreparation, NativeTextCreationProgress, NativeTextCreationRefusal,
-    NativeTextCreationRequest, NativeTextCreationSettings, NativeTextSourceBudget,
-    NativeTextSourceCommand, NativeTextSourcePolicy, NativeTextSourcePreparation,
-    NativeTextSourceRetirement, NativeTextSourceRetirementPreparation,
+    NativeTextCreationRequest, NativeTextCreationSettings, NativeTextMemberAdmissionFailure,
+    NativeTextMemberBudget, NativeTextMemberFinalPreparation, NativeTextMemberHistoryItem,
+    NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus, NativeTextMemberJob,
+    NativeTextMemberPreparation, NativeTextMemberSaveJob, NativeTextRuntimeSelection,
+    NativeTextSourceBudget, NativeTextSourceCommand, NativeTextSourcePolicy,
+    NativeTextSourcePreparation, NativeTextSourceRetirement, NativeTextSourceRetirementPreparation,
     NativeTextSourceRetirementRefusal, NativeTextSourceRetirementStatus, NativeTextSources,
 };
 mod ui_state;
@@ -32,8 +39,8 @@ pub use work_retirement::{NativeTextWorkRetirement, NativeTextWorkRetirementPrep
 mod upgrade;
 pub(in crate::store::critical_namespaces) mod upgrade_source;
 pub use facade::{
-    NativeTextVault, NativeTextVaultAuthentication, NativeTextVaultAuthenticationCheck,
-    NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal,
+    NativeTextGovernanceUpgrade, NativeTextVault, NativeTextVaultAuthentication,
+    NativeTextVaultAuthenticationCheck, NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal,
 };
 pub use mount::{NativeCreationStateData, NativeCreationStatusData, NativeIndexStore};
 pub use native_ui::{NativeUiInvocationBudget, NativeUiInvocationMetadata};
@@ -160,7 +167,9 @@ impl crate::store::ServerStore {
                 super::preparation::NativeRegistryHandler::Operational(handler) => {
                     handler.require_index_idle_cached()?
                 }
-                super::preparation::NativeRegistryHandler::Lifecycle(handler) => {
+                super::preparation::NativeRegistryHandler::Lifecycle(handler)
+                | super::preparation::NativeRegistryHandler::GovernedLifecycle(handler)
+                | super::preparation::NativeRegistryHandler::GovernanceOpening(handler) => {
                     handler.require_idle_cached()?
                 }
                 super::preparation::NativeRegistryHandler::Migration(_) => {}

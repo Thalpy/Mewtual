@@ -125,7 +125,7 @@ pub(super) async fn for_actor(
 ) -> Option<RequestCancellation> {
     let account = current(state, expected)?;
     let servers = state.servers.lock().await;
-    let entry = servers.get(&server)?;
+    let entry = servers.legacy(&server)?;
     if !entry.actor.same_instance(actor) || account.is_cancelled() {
         return None;
     }
@@ -723,11 +723,11 @@ mod read_tests {
         let state = AppState::default();
         let (old, old_task, old_drain) = leaving::tests::running(941);
         let actor = old.actor.clone();
-        state.servers.lock().await.insert(1, old);
+        state.servers.lock().await.install_legacy_fixture(1, old);
         let original = for_actor(&state, 1, &actor, 0).await.unwrap();
         let (new, new_task, new_drain) = leaving::tests::running(942);
         let replacement_actor = new.actor.clone();
-        drop(state.servers.lock().await.insert(1, new));
+        drop(state.servers.lock().await.install_legacy_fixture(1, new));
         assert!(original.is_cancelled());
         assert!(for_actor(&state, 1, &actor, 0).await.is_none());
         let replacement = for_actor(&state, 1, &replacement_actor, 0).await.unwrap();

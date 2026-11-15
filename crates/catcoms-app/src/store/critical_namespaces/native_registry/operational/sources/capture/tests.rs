@@ -375,3 +375,59 @@ fn native_sources_capture_empty_retirement_cannot_clear_unentered_original_physi
     );
     drop(open().unwrap()); // negative fee-only retirement can remain alive
 }
+
+#[test]
+fn native_runtime_selection_entry_payer_outlives_actual_retired_cell_without_observer() {
+    let directory = tempfile::tempdir().unwrap();
+    let (vault, budget) = selected(directory.path());
+    let owner = sources(&vault);
+    let refunded = Arc::new(AtomicBool::new(false));
+    let observed = Arc::new(AtomicBool::new(false));
+    let covered = Arc::new(AtomicBool::new(false));
+    let mut payment = owner.policy.prepare_creation().unwrap();
+    Arc::get_mut(&mut payment.metadata)
+        .unwrap()
+        ._debit
+        .observe_drop_for_test(refunded.clone());
+    owner
+        .capture_creation(
+            command(&vault, &budget),
+            request(1, "Original"),
+            inputs(),
+            payment,
+        )
+        .finish()
+        .unwrap()
+        .prepare_device()
+        .unwrap();
+    {
+        let entries = owner.entries.lock().unwrap();
+        *entries[0].runtime.tail_probe.lock().unwrap() = Some(RuntimeCellTailProbe {
+            refunded: refunded.clone(),
+            observed: observed.clone(),
+            covered: covered.clone(),
+        });
+    }
+    let mut retirement = owner.prepare_retirement().unwrap();
+    assert_eq!(
+        retirement.try_retire().unwrap(),
+        NativeTextSourceRetirementStatus::Drained
+    );
+    assert!(owner.entries.lock().unwrap()[0]
+        .runtime
+        .state
+        .lock()
+        .unwrap()
+        .body
+        .is_none());
+    drop(retirement); // no key-drain/cell payer may survive and mask the old order
+    assert!(!refunded.load(Ordering::SeqCst));
+    assert!(!observed.load(Ordering::SeqCst));
+    drop(owner); // actual original Entry and RuntimeCell destruction
+    assert!(observed.load(Ordering::SeqCst));
+    assert!(
+        covered.load(Ordering::SeqCst),
+        "entry debit refunded before actual retired cell tail"
+    );
+    assert!(refunded.load(Ordering::SeqCst));
+}
