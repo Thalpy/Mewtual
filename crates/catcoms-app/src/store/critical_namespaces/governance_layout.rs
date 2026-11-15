@@ -1,14 +1,17 @@
-//! Concrete private offline migration of an already settled Current3 namespace to4.
+//! Concrete governance declaration over a settled Current3 namespace.
 //!
-//! This first profile refuses new vaults, ID2-only catalogs and old declaration debts.
-//! The resulting opaque wrapper grants only namespace validation and the existing paid
-//! historical bootstrap DATA reader. It cannot yield a ServerStore, Current3 wrapper,
-//! Scope/Current owner, saved request, signer, SDK operation or publication capability.
+//! The public offline profile refuses new vaults, ID2-only catalogs and old declaration
+//! debts; its opaque wrapper grants only namespace validation and historical DATA reads.
+//! A separate constructor-private native family keeps the original unexposed Selected3
+//! owner through declaration and returns it only after a final same-held-file proof.
+//! Neither profile itself grants a Scope/Current group owner, saved request, signer,
+//! SDK operation, native-command credential or publication capability.
 use super::*;
 use governance_namespace_codec::capability::GovernanceCapabilityData;
 
 pub(in crate::store) mod codec;
 mod declaration;
+pub(in crate::store::critical_namespaces) mod native;
 #[cfg(test)]
 mod tests;
 
@@ -29,6 +32,33 @@ thread_local! {
         std::cell::RefCell::new(None);
     static AFTER_DECLARATION_CAPTURE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         std::cell::RefCell::new(None);
+    static AFTER_NATIVE_TORN_CLASSIFICATION: std::cell::RefCell<Option<NativeTornHook>> =
+        std::cell::RefCell::new(None);
+}
+#[cfg(test)]
+type NativeTornHook = Box<dyn FnOnce(&ServerStore)>;
+#[cfg(test)]
+pub(in crate::store) fn set_native_torn_hook_for_test(hook: NativeTornHook) {
+    AFTER_NATIVE_TORN_CLASSIFICATION.with(|slot| *slot.borrow_mut() = Some(hook));
+}
+#[cfg(test)]
+pub(in crate::store) fn after_native_torn_classification_for_test(store: &ServerStore) {
+    let hook = AFTER_NATIVE_TORN_CLASSIFICATION.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook(store);
+    }
+}
+#[cfg(test)]
+pub(in crate::store) fn set_marker_verification_hook_for_test(hook: Box<dyn FnOnce()>) {
+    AFTER_MARKER_VERIFICATION.with(|slot| *slot.borrow_mut() = Some(hook));
+}
+#[cfg(test)]
+pub(in crate::store) fn set_stage_selection_hook_for_test(hook: Box<dyn FnOnce()>) {
+    BEFORE_STAGE_SELECTION.with(|slot| *slot.borrow_mut() = Some(hook));
+}
+#[cfg(test)]
+pub(in crate::store) fn set_declaration_tail_hook_for_test(hook: Box<dyn FnOnce()>) {
+    AT_DECLARATION_TAIL_DROP.with(|slot| *slot.borrow_mut() = Some(hook));
 }
 #[cfg(test)]
 pub(in crate::store) fn after_declaration_capture_for_test() {
@@ -91,6 +121,8 @@ pub(in crate::store) fn refuse_unsupported_storage(dir: &Path) -> Result<(), App
 pub struct V2GovernanceLayoutPolicy {
     pub(in crate::store) current: current_layout::V2CurrentLayoutPolicy,
     persistent_capacity: usize,
+    pub(in crate::store) family: super::governance_namespace_codec::GovernanceCatalogFamily,
+    pub(in crate::store) native_pool: Option<CriticalCatalogReadPool>,
 }
 impl std::fmt::Debug for V2GovernanceLayoutPolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -107,9 +139,26 @@ impl V2GovernanceLayoutPolicy {
         let value = Self {
             current,
             persistent_capacity,
+            family: super::governance_namespace_codec::GovernanceCatalogFamily::Standard,
+            native_pool: None,
         };
         value.require_persistent_capacity()?;
         Ok(value)
+    }
+    /// Only the private native startup/cold constructor selects this family.
+    /// It does not change an exposed mount or authorize a native caller.
+    pub(in crate::store::critical_namespaces) fn for_native(
+        current: current_layout::V2CurrentLayoutPolicy,
+    ) -> Result<Self, AppError> {
+        let mut policy = Self::new(current, codec::PERSISTENT_MINIMUM)?;
+        if policy.current.member_outbox.is_none() {
+            return Err(refused());
+        }
+        policy.family = super::governance_namespace_codec::GovernanceCatalogFamily::NativeLifecycle;
+        policy.native_pool = Some(CriticalCatalogReadPool::new(
+            crate::store::persistence::native_registry::lifecycle::governed::INVENTORY_FEE,
+        )?);
+        Ok(policy)
     }
     pub(in crate::store) fn require_persistent_capacity(&self) -> Result<(), AppError> {
         self.current.require_persistent_capacity()?;
@@ -117,6 +166,35 @@ impl V2GovernanceLayoutPolicy {
             return Err(refused());
         }
         Ok(())
+    }
+    pub(in crate::store) fn open_seed(
+        &self,
+        key: &[u8; 32],
+        raw: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, AppError> {
+        match self.family {
+            super::governance_namespace_codec::GovernanceCatalogFamily::Standard => {
+                codec::open_seed(key, raw)
+            }
+            super::governance_namespace_codec::GovernanceCatalogFamily::NativeLifecycle => {
+                codec::open_native_seed(key, raw).map_err(codec::NativeSeedReadError::into_error)
+            }
+        }
+    }
+    pub(in crate::store) fn parse_seed<'a>(
+        &self,
+        key: &[u8; 32],
+        domain: &[u8; 32],
+        plain: &'a [u8],
+    ) -> Result<codec::OpenedSeedData<'a>, AppError> {
+        match self.family {
+            super::governance_namespace_codec::GovernanceCatalogFamily::Standard => {
+                codec::parse_seed(key, domain, plain)
+            }
+            super::governance_namespace_codec::GovernanceCatalogFamily::NativeLifecycle => {
+                codec::parse_native_seed(key, domain, plain)
+            }
+        }
     }
 }
 
@@ -140,6 +218,8 @@ pub(in crate::store) struct Declaration {
     // exact duplicate for cleanup, retaining its original File across all waits.
     pub(in crate::store) captured_duplicate_stage: Option<pending_join::CreatedStage>,
     pub(in crate::store) marker_file: Option<pending_join::CreatedStage>,
+    pub(in crate::store) native:
+        Option<super::native_registry::lifecycle::VerifiedGovernanceNative>,
     #[cfg(test)]
     pub(in crate::store) _tail_drop: DeclarationTailDrop,
 }
@@ -175,7 +255,39 @@ pub(in crate::store) struct MountedGovernanceLayout {
     pub(in crate::store) mount: Arc<()>,
     pub(in crate::store) negative: RequestCancellation,
     // LAST: file/control metadata drains before its independent account.
-    pub(in crate::store) _fee: CatalogReadReservation,
+    pub(in crate::store) control: Arc<GovernanceMountControl>,
+}
+/// Fee-only original mounted identity. Cached tails can outlive the actual
+/// marker, but never its independently paid metadata or irreversible close.
+pub(in crate::store) struct GovernanceMountControl {
+    live: std::sync::atomic::AtomicBool,
+    pub(in crate::store) fee: CatalogReadReservation,
+}
+impl GovernanceMountControl {
+    pub(in crate::store) fn new(fee: CatalogReadReservation) -> Arc<Self> {
+        Arc::new(Self {
+            live: std::sync::atomic::AtomicBool::new(true),
+            fee,
+        })
+    }
+}
+impl Drop for MountedGovernanceLayout {
+    fn drop(&mut self) {
+        self.control.live.store(false, Ordering::SeqCst);
+    }
+}
+pub(in crate::store) struct GovernanceCachedNegative {
+    control: Arc<GovernanceMountControl>,
+}
+impl GovernanceCachedNegative {
+    pub(in crate::store) fn is_live_cached(&self) -> bool {
+        self.control.live.load(Ordering::SeqCst)
+    }
+    pub(in crate::store) fn from_mounted(mounted: &MountedGovernanceLayout) -> Self {
+        Self {
+            control: mounted.control.clone(),
+        }
+    }
 }
 /// Keeps the exact first-probed marker object across older inspector/account waits.
 /// Byte-equal replacement cannot be adopted by a later metadata installation.
@@ -188,6 +300,9 @@ pub(in crate::store) struct GovernanceMarkerCapture {
     pub(in crate::store) fee: CatalogReadReservation,
 }
 pub(in crate::store) const MOUNTED_FEE: usize = 2 * std::mem::size_of::<MountedGovernanceLayout>()
+    + 4 * std::mem::size_of::<GovernanceCachedNegative>()
+    + 2 * std::mem::size_of::<GovernanceMountControl>()
+    + 8 * std::mem::size_of::<usize>()
     + 2 * std::mem::size_of::<GovernanceMarkerCapture>()
     + 8 * std::mem::size_of::<File>()
     + 4 * std::mem::size_of::<std::fs::Metadata>()
@@ -232,7 +347,66 @@ pub struct PreparedV2GovernanceLayoutStore {
     store: Option<Box<ServerStore>>,
     declaration_fee: Option<CatalogReadReservation>,
     complete: bool,
+    native_initial: Option<super::native_registry::lifecycle::VerifiedGovernanceNative>,
+    native_observed: bool,
     _wrapper_fee: CatalogReadReservation,
+}
+impl PreparedV2GovernanceLayoutStore {
+    /// Private native cold preparation. Preserve overlapping original native
+    /// leaves across consumption of the old cold observation; no recapture gap
+    /// can adopt an equal replacement before a fresh declaration.
+    pub(in crate::store::critical_namespaces) fn open_native(
+        dir: impl AsRef<Path>,
+        passphrase: &[u8],
+        rng: &mut impl CryptoRngCore,
+        policy: V2GovernanceLayoutPolicy,
+    ) -> Result<Self, AppError> {
+        if policy.family != governance_namespace_codec::GovernanceCatalogFamily::NativeLifecycle {
+            return Err(refused());
+        }
+        let mut owner = Self::open(dir, passphrase, rng, policy)?;
+        let store = owner.store.as_ref().ok_or_else(refused)?;
+        let policy = store
+            .governance_layout_policy
+            .as_ref()
+            .ok_or_else(refused)?;
+        let missing = store
+            .governance_layout
+            .lock()
+            .map_err(|_| refused())?
+            .is_none();
+        if missing {
+            let inventory=crate::store::persistence::native_registry::lifecycle::governed::NativeGovernanceInventory::capture(store,policy.native_pool.as_ref().ok_or_else(refused)?)?;
+            inventory.require_original_catalog(store)?;
+            let original = Zeroizing::new(inventory.catalog().to_vec());
+            owner.native_initial =
+                Some(super::native_registry::lifecycle::verify_governance_native(
+                    store, inventory, &original, None,
+                )?);
+        }
+        // A refusal after observation consumption is terminal to THIS open;
+        // never retry finish or infer success from an empty cold slot.
+        if let Some(initial) = owner.native_initial.as_ref() {
+            super::native_registry::lifecycle::finish_governance_opening(store)?;
+            initial.require_initial_catalog(store)?;
+        } else {
+            // Existing4 needs no catalog mutation. Keep the actual original
+            // native observation until the installed owner's LAST read, so a
+            // later equal-file replacement cannot be adopted by row_count.
+            owner.native_observed = true;
+        }
+        Ok(owner)
+    }
+    /// A negative cut against the actual declaration writer; no raw Store or capability
+    /// escapes to the native7 predecessor-interleaving regression.
+    #[cfg(test)]
+    pub(in crate::store) fn native_claim_fault_for_test(&self, point: u8) {
+        self.store
+            .as_deref()
+            .unwrap()
+            .critical_namespace_fault
+            .store(point, Ordering::SeqCst);
+    }
 }
 impl std::fmt::Debug for PreparedV2GovernanceLayoutStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -254,7 +428,39 @@ impl PreparedV2GovernanceLayoutStore {
 /// no checked_store/Deref/into-Current3 conversion: a Source4 factory is not paired.
 pub struct V2GovernanceLayoutStore {
     store: Box<ServerStore>,
+    native_tail: Option<NativeColdTail>,
     _wrapper_fee: CatalogReadReservation,
+}
+
+/// Constructor-private original completion custody. This is neither a ready
+/// bit nor a fresh snapshot: the observed case consumes the handler's actual
+/// cold files, and the declared case retains the original complete witness.
+pub(in crate::store::critical_namespaces) enum NativeColdTail {
+    Observed,
+    Declared {
+        declaration: Box<Declaration>,
+        fee: CatalogReadReservation,
+    },
+}
+impl NativeColdTail {
+    pub(in crate::store::critical_namespaces) fn finish(
+        &self,
+        store: &ServerStore,
+    ) -> Result<(), AppError> {
+        match self {
+            Self::Observed => {
+                super::native_registry::lifecycle::finish_governed_cold_observation(store)
+            }
+            Self::Declared { declaration, fee } => {
+                let policy = store
+                    .governance_layout_policy
+                    .as_ref()
+                    .ok_or_else(refused)?;
+                fee.validate(&policy.current.archive.pending.pool, codec::DECLARATION_FEE)?;
+                store.require_native_governance_selection(declaration)
+            }
+        }
+    }
 }
 impl std::fmt::Debug for V2GovernanceLayoutStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -290,11 +496,14 @@ impl PreparedV2GovernanceLayoutStore {
             declaration: None,
             declaration_fee: None,
             complete: false,
+            native_initial: None,
+            native_observed: false,
             _wrapper_fee: fee,
         })
     }
-    /// No RNG/reseal follows a cached complete declaration. Cold torn first seeds
-    /// remain preserved/Held; only this SAME warm owner can finish its own prefix.
+    /// No RNG/reseal follows a cached complete declaration. The standard cold
+    /// profile preserves torn first seeds; the separate native family may only
+    /// abort those claims on its independently pristine native3 baseline.
     pub fn retry(&mut self, rng: &mut impl CryptoRngCore) -> Result<(), AppError> {
         let store = self.store.as_ref().ok_or_else(refused)?;
         let policy = store
@@ -322,10 +531,18 @@ impl PreparedV2GovernanceLayoutStore {
                 );
             }
             if self.declaration.is_none() {
-                let prepared = store.prepare_governance_layout_declaration(
-                    self.declaration_fee.as_ref().ok_or_else(refused)?,
-                    rng,
-                )?;
+                let fee = self.declaration_fee.as_ref().ok_or_else(refused)?;
+                let prepared = match policy.family {
+                    governance_namespace_codec::GovernanceCatalogFamily::Standard => {
+                        store.prepare_governance_layout_declaration(fee, rng)?
+                    }
+                    governance_namespace_codec::GovernanceCatalogFamily::NativeLifecycle => store
+                        .prepare_governance_layout_declaration_with_native(
+                        fee,
+                        rng,
+                        &mut self.native_initial,
+                    )?,
+                };
                 self.declaration = Some(Box::new(prepared));
             }
             let declaration = self.declaration.as_mut().ok_or_else(refused)?;
@@ -338,6 +555,9 @@ impl PreparedV2GovernanceLayoutStore {
                 declaration.marker_file.as_ref().ok_or_else(refused)?,
             )?;
             store.install_governance_layout_marker(marker)?;
+            if declaration.native.is_some() {
+                store.require_native_governance_selection(declaration)?;
+            }
             let mut current = store.pending_join_catalog.lock().map_err(|_| refused())?;
             let current = current.as_mut().ok_or_else(refused)?;
             if current.pending.is_some()
@@ -352,8 +572,10 @@ impl PreparedV2GovernanceLayoutStore {
         // Exact declaration selection/marker/parent barriers are complete. Its
         // potentially large original/candidate/seed copies drop outside all writers
         // BEFORE a separately funded canonical inventory read starts below.
-        drop(self.declaration.take());
-        drop(self.declaration_fee.take());
+        if policy.family == governance_namespace_codec::GovernanceCatalogFamily::Standard {
+            drop(self.declaration.take());
+            drop(self.declaration_fee.take());
+        }
         // Namespace5 after 4 (or already present before it): declared only when this opener
         // carries the concrete member handler, serially after governance's own debt drained.
         // Declaring 5 here grants nothing to governance and needs nothing from it.
@@ -377,6 +599,40 @@ impl PreparedV2GovernanceLayoutStore {
         {
             return Err(self);
         }
+        let native_family = self
+            .store
+            .as_ref()
+            .and_then(|s| s.governance_layout_policy.as_ref())
+            .is_some_and(|p| {
+                p.family == governance_namespace_codec::GovernanceCatalogFamily::NativeLifecycle
+            });
+        if native_family
+            && !self.native_observed
+            && (self.declaration.is_none() || self.declaration_fee.is_none())
+        {
+            return Err(self);
+        }
+        if native_family && self.native_observed && self.declaration.is_some() {
+            return Err(self);
+        }
+        let native_tail = if native_family {
+            Some(if self.native_observed {
+                NativeColdTail::Observed
+            } else {
+                NativeColdTail::Declared {
+                    declaration: self
+                        .declaration
+                        .take()
+                        .expect("retained native declaration"),
+                    fee: self
+                        .declaration_fee
+                        .take()
+                        .expect("retained declaration payment"),
+                }
+            })
+        } else {
+            None
+        };
         let Some(store) = self.store.take() else {
             return Err(self);
         };
@@ -387,19 +643,48 @@ impl PreparedV2GovernanceLayoutStore {
             declaration,
             declaration_fee,
             complete: _,
+            native_initial,
+            native_observed: _,
             _wrapper_fee,
         } = self;
         drop(member_declaration);
+        drop(native_initial);
         drop(member_declaration_fee);
         drop(declaration);
         drop(declaration_fee);
         Ok(V2GovernanceLayoutStore {
             store,
+            native_tail,
             _wrapper_fee,
         })
     }
 }
 impl V2GovernanceLayoutStore {
+    /// Closed physical-owner conversion used only by the concrete native
+    /// governed constructor. Public standard4 still has no Current escape.
+    pub(in crate::store::critical_namespaces) fn into_native_current(
+        self,
+    ) -> Result<(current_layout::V2CurrentLayoutStore, NativeColdTail), AppError> {
+        if self
+            .store
+            .governance_layout_policy
+            .as_ref()
+            .is_none_or(|p| {
+                p.family != governance_namespace_codec::GovernanceCatalogFamily::NativeLifecycle
+            })
+        {
+            return Err(refused());
+        }
+        let Self {
+            store,
+            native_tail,
+            _wrapper_fee,
+        } = self;
+        let tail = native_tail.ok_or_else(refused)?;
+        let current = current_layout::V2CurrentLayoutStore::from_native_governed_store(store)?;
+        drop(_wrapper_fee);
+        Ok((current, tail))
+    }
     /// Already-paid historical saved-bootstrap DATA, with actual3+4 mounted
     /// marker checks before/after. This cannot mint a Source/Scope/Current owner.
     pub fn read_saved_bootstrap_source_data(

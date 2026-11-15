@@ -28,9 +28,31 @@ finish across bounded phases. The original public saved-proof decoder remains
 unchanged. Optional vendor counters are enabled only by a dev-dependency to
 prove that recovery performs no change reconstruction or value decoding.
 
-Storage and join/retirement actual-diff re-reviews found no remaining blocker,
-high or medium in their scopes. Final recovery re-review and CI execution are
-pending. Static formatting, raw-filesystem and ambient gates pass locally.
+Storage, join/retirement and final recovery actual-diff re-reviews found no
+remaining blocker, high or medium in their scopes. Static formatting,
+raw-filesystem and ambient gates pass locally.
+
+The [corrected-source focused run](https://github.com/Thalpy/Mewtual/actions/runs/43323677107)
+at `ac25f840d61725d7f60ce26b7edfdc88df5a272f` completed successfully on Linux
+and Windows. Both executed the 82 joined/recovery/selected-history controls and
+69 member-storage cases, plus the real predecessor gate (23 fixtures against
+10 original openers and four head round trips). Windows also executed the
+last-slot retirement case and all 19 member-save cases. Linux passed all 3,437
+frontend tests, Svelte checking with zero errors/warnings and the production
+build. Root formatting and strict all-target/all-feature Clippy for Sync and
+Replication passed on both operating systems. These are scoped checks, not
+workspace-wide strict or complete-suite acceptance.
+
+The first corrected execution stopped because the harness expected four old
+saved-local controls, while five passed. The expectation is now five; no test
+or assertion was removed. Re-review also corrected the optional ordering test
+to use distinct genuine one-use Drafts before its fork assertions.
+
+PR #85's merged marker is not sign-off: an accidental push briefly advanced its
+base to the aggregate correction head. The base was restored to the scoped #84
+head, and #89 replaces #85 because GitHub cannot reopen a merged PR. No intended
+merge into main occurred. The reviewed stack remains #84 -> #89 -> #86 -> #87 ->
+#88; native acceptance fixture corrections continue separately in #90.
 
 Negative retirement is still lane-incarnation support: a restart cannot infer
 cancellation from an absent outbox entry. The full save path reports exhausted
@@ -39,6 +61,10 @@ or durable disk pressure. Normal saved traffic has no 64-message lifetime cap.
 Production durable negative records, joined-source/native routing, governing
 transport/archive/restart and activation remain separate implementation work.
 
-Existing App strict-Clippy debt, dependency audit findings and native acceptance
-failures remain merge blockers until resolved. Focused tests cannot waive them.
+Existing App strict-Clippy debt, dependency audit findings and complete
+current-source acceptance remain merge blockers. The earlier integration head
+`e1b7e34a` passed all 1,042 native library tests and six command-ACL tests on
+both operating systems in run43313807311; that evidence predates these fixes.
+PR #90's forced-contention/current-observation regressions and native checking
+are executing on its own source. Focused tests cannot waive complete gates.
 The unchanged slow catch-up cost case remains deferred until final acceptance.

@@ -1948,13 +1948,11 @@ fn pin_folder(
 fn extended_acl_present(dir: &File) -> bool {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
-        // An empty buffer asks only for the value's size; the value itself is never read.
-        let mut size_only: [u8; 0] = [];
-        acl_present_from(rustix::fs::fgetxattr(
-            dir,
-            "system.posix_acl_access",
-            &mut size_only[..],
-        ))
+        // Query explicitly: rustix>=1.1.6 makes zero-length buffered reads
+        // return an empty result instead of a size (RUSTSEC-2026-0486). The
+        // attribute's value is never read; every error except proven absence
+        // or unsupported xattrs still leaves the folder classified as shared.
+        acl_present_from(rustix::fs::fgetxattr_query(dir, "system.posix_acl_access"))
     }
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
