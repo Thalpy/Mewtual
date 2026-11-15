@@ -53,7 +53,8 @@ pub(super) async fn mount_with_voice_clock(
     } else {
         AppState::default()
     });
-    *state.store.lock().await = Some(ServerStore::open(path, PASSWORD, &mut OsCryptoRng).unwrap());
+    *state.store.lock().await =
+        Some((ServerStore::open(path, PASSWORD, &mut OsCryptoRng).unwrap()).into());
     *state.session_resumable.lock().await = true;
     state
 }
@@ -64,6 +65,8 @@ pub(super) async fn network(state: &AppState) -> ServerNet {
         .lock()
         .await
         .as_ref()
+        .unwrap()
+        .as_legacy()
         .unwrap()
         .load_server_net(1)
         .unwrap()
@@ -89,11 +92,11 @@ pub(super) async fn register(
     } = restored;
     // Match production registration: retain real pre-registration custody while awaiting
     // the original UI generation, and publish the registry row before releasing absence custody.
-    let generation = state.ui_session_generation.load(Ordering::Acquire);
+    let generation = state.ui_session_generation.load(Ordering::SeqCst);
     let session = require_ui_session_generation(&state, generation)
         .await
         .unwrap();
-    state.servers.lock().await.insert(
+    state.servers.lock().await.install_legacy_fixture(
         1,
         ServerEntry {
             files: keep_session::EntryOwner::new(),
@@ -208,7 +211,7 @@ pub(super) async fn register(
                         .servers
                         .lock()
                         .await
-                        .get(&1)
+                        .legacy(&1)
                         .map(|entry| entry.instance)
                         != Some(instance)
                     {
@@ -273,7 +276,7 @@ impl Running {
         // resume the actor and report busy; retrying that result keeps the real close race here.
         self.state
             .session_lock_requested
-            .store(true, Ordering::Release);
+            .store(true, Ordering::SeqCst);
         let barrier = bounded("native close barrier", async {
             loop {
                 match shutdown::freeze_servers(&self.state).await {
@@ -297,7 +300,7 @@ impl Running {
         bounded("event drain after close", self.drain.take().unwrap())
             .await
             .unwrap();
-        self.state.servers.lock().await.clear();
+        self.state.servers.lock().await.clear_legacy_fixture();
         self.state.reconnect_capture_signals.lock().unwrap().clear();
         self.state.persistence_signals.lock().unwrap().clear();
         self.state.store.lock().await.take();

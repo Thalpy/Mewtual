@@ -170,7 +170,7 @@ async fn prepare(
         let servers = context.servers.lock().await;
         let binding = selected.binding();
         servers
-            .get(&binding.server)
+            .legacy(&binding.server)
             .filter(|entry| entry.instance == binding.instance && entry.group_id == binding.group)
             .map(|entry| entry.actor.clone())
             .ok_or(Refused::Closed)?

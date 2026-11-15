@@ -5,6 +5,8 @@ use super::*;
 use crate::store::critical_namespaces::{self as critical, native_registry::preparation as native};
 use catcoms_storage::kept::{session_at, session_id, SessionAt, SessionId};
 use critical::read_pool::CatalogReadReservation;
+pub(in crate::store) mod lifecycle;
+pub(in crate::store) mod network;
 pub(in crate::store) mod operational;
 
 fn denied() -> AppError {
@@ -42,6 +44,7 @@ pub(in crate::store) fn refuse_unsupported_storage(dir: &Path) -> Result<(), App
     }
     absent(&dir.join(native::SEED_NAME))?;
     absent(&dir.join(operational::UPGRADE_SEED_NAME))?;
+    absent(&dir.join(lifecycle::UPGRADE_SEED_NAME))?;
     let root = dir.join(critical::ARCHIVE_BOOTSTRAP_ROOT);
     for name in [
         native::MARKER_NAME,
@@ -49,6 +52,8 @@ pub(in crate::store) fn refuse_unsupported_storage(dir: &Path) -> Result<(), App
         native::INDEX_STAGE_NAME,
         operational::UPGRADE_INDEX_NAME,
         operational::UPGRADE_MARKER_NAME,
+        lifecycle::UPGRADE_INDEX_NAME,
+        lifecycle::UPGRADE_MARKER_NAME,
     ] {
         absent(&root.join(name))?;
     }
@@ -156,6 +161,28 @@ impl HeldNativeInput {
     }
     pub(in crate::store) fn raw(&self) -> &[u8] {
         &self.raw
+    }
+}
+
+impl ServerStore {
+    /// Fixed tiny empty-admission read, paid by the native governance inventory.
+    /// No path/cap supplied by a renderer is accepted. The grammar verifier is
+    /// in chat_admission; this layer preserves exact file/name custody.
+    pub(in crate::store) fn read_native_empty_admission_frame(
+        &self,
+        cap: usize,
+    ) -> Result<HeldNativeInput, AppError> {
+        if cap > 256 {
+            return Err(denied());
+        }
+        HeldNativeInput::capture(&path(self, false, "chat-admissions.bin")?, cap)?
+            .ok_or_else(denied)
+    }
+    pub(in crate::store) fn require_native_empty_admission_frame(
+        &self,
+        held: &HeldNativeInput,
+    ) -> Result<(), AppError> {
+        held.require(&path(self, false, "chat-admissions.bin")?)
     }
 }
 
