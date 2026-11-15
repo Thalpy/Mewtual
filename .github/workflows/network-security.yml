@@ -66,9 +66,9 @@ jobs:
               ('vendor-regressions', ['--manifest-path', 'vendor/libp2p-gossipsub/Cargo.toml', '--lib', 'mewtual_'], 6),
               ('vendor-protocol', ['--manifest-path', 'vendor/libp2p-gossipsub/Cargo.toml', '--lib', 'protocol::'], 9),
               ('vendor-library', ['--manifest-path', 'vendor/libp2p-gossipsub/Cargo.toml', '--lib'], 159),
-              # Compiled inventory on the extracted main-based tree; later
-              # native identity/owner tests from the stacked PR are not here.
-              ('net', ['-p', 'catcoms-net', '--lib'], 171),
+              # The171-case security prerequisite plus the three existing
+              # reviewed publication-authority cases from the foundations.
+              ('net', ['-p', 'catcoms-net', '--lib'], 174),
               ('protocol-rng', ['-p', 'catcoms-rt', '--lib', 'protocol_rng::tests'], 3),
           )
           for label, arguments, count in cohorts:
