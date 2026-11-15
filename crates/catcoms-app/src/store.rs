@@ -47,6 +47,7 @@ pub(crate) fn studio_refused(
     }
 }
 
+mod chat_fences;
 mod creative_references;
 mod epoch_draft_archive;
 mod epoch_intents;
@@ -1270,6 +1271,42 @@ mod persistence {
         /// These deliberately do **not** rotate `inventory_generation`. None of them belongs to an
         /// inventoried family, and rotating for them would invalidate a captured inventory every
         /// time the UI saved a preference.
+        pub(super) fn write_chat_fences_record(&self, bytes: &[u8]) -> Result<(), AppError> {
+            #[cfg(test)]
+            if self
+                .chat_fence_pre_rename_failure
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return atomic_write_with_hook(
+                    &self.dir.join("chat-stop-fences.bin"),
+                    bytes,
+                    |phase, staged| {
+                        if phase == AtomicWritePhase::TempSynced {
+                            fs::remove_file(staged)
+                                .expect("fault removes actual synced staging file before rename");
+                        }
+                    },
+                );
+            }
+
+            #[cfg(test)]
+            if self
+                .chat_parent_sync_failure
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return atomic_write_with_hook_and_sync(
+                    &self.dir.join("chat-stop-fences.bin"),
+                    bytes,
+                    |_, _| {},
+                    |_| {
+                        Err(std::io::Error::other(
+                            "injected chat fence parent-sync failure after actual rename",
+                        ))
+                    },
+                );
+            }
+            atomic_write(&self.dir.join("chat-stop-fences.bin"), bytes)
+        }
         pub(super) fn write_ui_state_record(&self, bytes: &[u8]) -> Result<(), AppError> {
             atomic_write(&self.ui_state_path(), bytes)
         }
@@ -1291,6 +1328,22 @@ mod persistence {
             atomic_write(&self.pairing_ledger_path(), bytes)
         }
         pub(super) fn write_server_record(&self, id: u64, bytes: &[u8]) -> Result<(), AppError> {
+            #[cfg(test)]
+            if self
+                .chat_parent_sync_failure
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return atomic_write_with_hook_and_sync(
+                    &self.server_path(id),
+                    bytes,
+                    |_, _| {},
+                    |_| {
+                        Err(std::io::Error::other(
+                            "injected chat parent-sync failure after actual rename",
+                        ))
+                    },
+                );
+            }
             atomic_write(&self.server_path(id), bytes)
         }
         pub(super) fn write_cache_setting_record(
@@ -1503,6 +1556,11 @@ pub struct ServerStore {
     // stage. On the store rather than the cursor, so a job's restarts keep it (C-3 runtime 14.6).
     #[cfg(test)]
     detach_every_validation: bool,
+    // One-shot destination-bound fault: the actual rename succeeds before parent sync fails.
+    #[cfg(test)]
+    chat_parent_sync_failure: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    chat_fence_pre_rename_failure: std::sync::atomic::AtomicBool,
     creative_protection: creative_references::SharedProtection,
     // Stable only for this physical mount, unlike the rotating intent-inventory token. Replay
     // passes are local work cursors, not authority across reopen or the native UI-lock boundary.
@@ -1548,6 +1606,10 @@ impl ServerStore {
             studio_rotation_interruption: None,
             #[cfg(test)]
             detach_every_validation: false,
+            #[cfg(test)]
+            chat_parent_sync_failure: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            chat_fence_pre_rename_failure: std::sync::atomic::AtomicBool::new(false),
             replay_mount: std::sync::Arc::new(()),
             _session: session,
         };
@@ -1783,6 +1845,14 @@ impl ServerStore {
             fs::read(self.pairing_ledger_path()).map_err(|e| AppError::Io(e.to_string()))?;
         let sealed = unframe(&bytes)?;
         Ok(unseal(&self.keys.db_key()?, &sealed)?)
+    }
+
+    /// Arm one real post-rename failure on this mount's next server-snapshot write. This is
+    /// test-only, affects no other destination and uses the production staging/rename path.
+    #[cfg(test)]
+    pub(crate) fn fail_next_chat_parent_sync(&self) {
+        self.chat_parent_sync_failure
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Seal + atomically write a server's snapshot.

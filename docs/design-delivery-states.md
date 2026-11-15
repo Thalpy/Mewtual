@@ -9,17 +9,21 @@ recipient can confirm delivery.
 ## What "delivered" means here
 
 A message is a signed op in the channel's Automerge document. There is no server to acknowledge
-it; "delivered to X" can only mean "X's member device attested that it holds the exact op". A
+it; "delivered to X" means that X's member device confirmed receipt of the exact op. A
 newly applied remote op therefore queues a connected-only, member-authenticated receipt bound to
 its document and change hash. A later signed change whose dependency graph descends from the op is
-also valid compatibility evidence. Neither path says the content was displayed or read.
+also compatibility evidence. Both are signed claims: a modified member can acknowledge a known
+hash without retaining the contents. Neither path proves that the content was displayed, read,
+saved to disk or remains stored after a crash. The UI describes historical receipt, not current
+custody. A stronger receiver-durability contract would need distinct versioned evidence; delaying
+our own existing receipts would not upgrade old peers' receipts or the causal fallback.
 
 ## States (per own message)
 
 - **saving**; the send has not yet been accepted by the local actor.
 - **sent; awaiting confirmation**; the op is committed locally, but no other member has yet
-  authored causal evidence that proves it holds the message.
-- **held by n peers**; n other members either sent an authenticated receipt or authored causal
+  confirmed receipt.
+- **received by n peers**; n other members either sent an authenticated receipt or authored causal
   descendant evidence. The UI does not compare that holder count with the separate live-route
   count: without the identities' intersection, an offline holder could stand in for a different,
   unconfirmed connected member.
@@ -33,7 +37,7 @@ they must be opt-in-per-server and symmetric (you only see read marks if you pub
 ## Trust and honesty caveats
 
 - A modified current member can send an attributable receipt without displaying the content or can
-  withhold every receipt. The UI wording stays factual: "held by n peers", never "read".
+  withhold every receipt. The UI reports receipt confirmation, never "read" or saved custody.
 - Confirmed-heads knowledge may reset across restarts depending on what sync state is
   persisted (9-series persisted whole-server sync state; verify granularity). If per-peer
   confirmed heads don't survive restart, old messages simply show no delivery line;
@@ -89,16 +93,16 @@ membership changes; `0` means "no proof yet", never "failed".
 | Verdict | Shown when |
 |---|---|
 | `pending` ◌ | the op has not been acknowledged locally yet; labelled `saving…` |
-| `waiting` ◌ | sent, nobody has proved they hold it, and a live peer previously proved it could serve authenticated group catch-up; labelled `sent · awaiting confirmation`, never `sending` |
-| `partial` ~ | at least one member proved it, but not all |
-| `everyone` ✓✓ | every other member of the roster proved it |
-| `queued` ✕ | nobody holds it **and** no live peer has previously served authenticated group catch-up |
+| `waiting` ◌ | sent with no receipt confirmation; the latest message has no report yet, or the reported live-path state is not false; labelled `sent · awaiting confirmation`, never `sending` |
+| `partial` ~ | at least one member confirmed receipt, but not all |
+| `everyone` ✓✓ | every other member of the roster confirmed receipt |
+| `queued` ✕ | no recorded receipt confirmation **and** a measured lack of a live peer that previously served authenticated group catch-up |
 | *(nothing)* | alone in the group, or no report exists for a message that is not the newest |
 
 Three rules keep it honest, each of which was a real false alarm before it existed:
 
 1. **Evidence outranks the network.** Any `delivered > 0` result can never be shown as a failure. A
-   peer that confirmed and then dropped still holds the message; letting a connection flap repaint
+   peer that confirmed and then dropped still received the message; letting a connection flap repaint
    a delivered message red was the loudest version of this bug.
 2. **Infrastructure and descriptor claims are not delivery paths by themselves.** `reachable`
    resolves live connections through each member's signed but self-asserted peer record; it is a

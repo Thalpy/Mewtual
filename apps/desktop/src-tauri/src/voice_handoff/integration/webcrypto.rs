@@ -356,7 +356,7 @@ impl Endpoint {
         let answer = self.step(json!({"tag":"step", "name":"pump"})).await;
         assert_eq!(answer, json!({"kind":"observed"}));
         assert!(automatic_terminal(
-            &self.state,
+            &self.state.voice_handoff,
             &self.selected(),
             self.callbacks.expected_parent
         ));
@@ -1490,7 +1490,11 @@ async fn drive_streams_inner(
                                 .ok()
                         })
                         .is_some_and(|selected| {
-                            automatic_terminal(state, &selected, callbacks.expected_parent)
+                            automatic_terminal(
+                                &state.voice_handoff,
+                                &selected,
+                                callbacks.expected_parent,
+                            )
                         });
                 let refuse = match method {
                     Method::PublishKey => {
@@ -1577,8 +1581,8 @@ async fn drive_streams_inner(
 /// Independent original native history, not the pump's public metadata or JS progress.
 /// Both endpoints must retain exactly one Derived parent and three original confirmation
 /// actions, with actual terminal receipt, exact ACK, settlement and ordinary Return.
-fn automatic_terminal(
-    state: &AppState,
+pub(in crate::voice_handoff) fn automatic_terminal(
+    handoff: &Arc<ledger::Ledger>,
     selected: &SelectedHandoffOwner,
     expected: Option<ledger::RowId>,
 ) -> bool {
@@ -1587,7 +1591,14 @@ fn automatic_terminal(
     let mut parent = None;
     let mut children = 0;
     while from < 32 {
-        let projection = state.voice_handoff.project_work(selected, from).unwrap();
+        let projection = match handoff.project_work(selected, from) {
+            Ok(projection) => projection,
+            // The live scheduler can hold an original row while this passive oracle
+            // samples it. An explicitly refused observation proves no completion; let
+            // the same bounded browser pump retry without inventing terminal success.
+            Err(catcoms_sync::voice_v2::VoiceError::Capacity) => return false,
+            Err(error) => panic!("native confirmation history observation refused: {error:?}"),
+        };
         from = projection.next_slot;
         let Some(metadata) = projection.metadata.as_ref() else {
             continue;
@@ -1602,8 +1613,7 @@ fn automatic_terminal(
                 continue;
             }
         }
-        let row = state
-            .voice_handoff
+        let row = handoff
             .resolve(selected, metadata.purpose, metadata.row)
             .unwrap();
         let status = row.status().unwrap();

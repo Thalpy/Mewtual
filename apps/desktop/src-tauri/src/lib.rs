@@ -8,6 +8,9 @@
 //! a `u64` server id. Every command takes a `server` id selecting which one to act on, and
 //! every forwarded event is tagged with its server id so the UI routes it correctly.
 
+#[cfg(all(test, target_os = "windows", target_env = "msvc"))]
+mod native_test_manifest;
+
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io::{Read, Write};
@@ -518,6 +521,9 @@ struct AppState {
     /// The lock-request atomic closes new IPC immediately; this mutex makes it impossible for a
     /// reply event or server registration to occur after `lock_session` itself has completed.
     ui_session_commit: Arc<Mutex<()>>,
+    /// Bounded global custody for orphan chat Stops and a restored Actor's pre-registration
+    /// window. It does not allocate a map entry for arbitrary missing numeric server IDs.
+    chat_orphan_commit: Arc<Mutex<()>>,
     /// Short fence for synchronous actor-event emission only. Event consumers must not wait for
     /// `ui_session_commit`: its holder can be waiting for this same bounded event sink to drain.
     /// Never retain this guard across actor/store/registry awaits; lock crosses it separately.
@@ -3704,7 +3710,7 @@ async fn persist_captured(
     actor: ServerActor,
 ) -> PersistOutcome {
     let lock = persist_lock_for(state, server);
-    let _writing = lock.lock().await;
+    let writing = lock.lock_owned().await;
     // Two questions, now that this writer holds the id's lock. Is the entry still the one this
     // request belongs to; and did a write that started after this ticket already carry it?
     let covering = {
@@ -3722,6 +3728,59 @@ async fn persist_captured(
         }
         entry.persist.requested
     };
+    // Hidden post-rename chat candidates must be reconciled before an ordinary snapshot.
+    // Ready owns this same Actor; transfer this original serializer guard and acquire only
+    // try-locks afterward. This negative history save deliberately works while the UI is locked.
+    match actor.prepare_durable_chat_repair().await {
+        Ok(Some(ready)) => {
+            let store = match state.store.clone().try_lock_owned() {
+                Ok(store) if store.is_some() => store,
+                _ => {
+                    return PersistOutcome::Pending {
+                        reason: PersistFailure::StoreUnavailable,
+                    }
+                }
+            };
+            let registry = match state.servers.clone().try_lock_owned() {
+                Ok(registry) => registry,
+                Err(_) => {
+                    return PersistOutcome::Pending {
+                        reason: PersistFailure::SnapshotFailed,
+                    }
+                }
+            };
+            if registry
+                .get(&server)
+                .is_none_or(|entry| entry.instance != instance)
+            {
+                return PersistOutcome::Superseded;
+            }
+            let lease = catcoms_app::durable_chat::DurableSendLease::new(
+                store,
+                server,
+                (writing, registry),
+            );
+            if let Err(error) = ready.commit(lease).await {
+                tracing::error!(target:"catcoms_app",server,error=%error,"VAULT.CHAT_REPAIR.FAILED");
+                return PersistOutcome::Pending {
+                    reason: PersistFailure::WriteFailed,
+                };
+            }
+            if let Some(entry) = state.servers.lock().await.get_mut(&server) {
+                if entry.instance == instance {
+                    entry.persist.completed_through(covering);
+                }
+            }
+            return PersistOutcome::Durable;
+        }
+        Ok(None) => {}
+        Err(_) => {
+            return PersistOutcome::Pending {
+                reason: PersistFailure::SnapshotFailed,
+            }
+        }
+    }
+    let _writing = writing;
     let bytes = match actor.snapshot().await {
         Ok(b) => b,
         Err(e) => {
@@ -12126,10 +12185,14 @@ fn validate_ui_state_json(json: &str) -> Result<(), String> {
     let object = value
         .as_object_mut()
         .ok_or_else(|| "UI continuity state must be an object".to_string())?;
-    if object.get("version").and_then(serde_json::Value::as_u64) != Some(1)
-        || !object
-            .get("drafts")
-            .is_some_and(serde_json::Value::is_object)
+    if !matches!(
+        object.get("version").and_then(serde_json::Value::as_u64),
+        // v3 protects exact retained Send copies that old v2 frontends silently omitted.
+        // This gates only the sealed UI envelope; native authoring/Stop limits stay intact.
+        Some(1..=3)
+    ) || !object
+        .get("drafts")
+        .is_some_and(serde_json::Value::is_object)
         || !object
             .get("readMarks")
             .is_some_and(serde_json::Value::is_object)
@@ -12649,6 +12712,7 @@ struct SendMessageResult {
     persistence: PersistOutcome,
     message_id: Option<String>,
     replayed: bool,
+    disposition: &'static str,
 }
 
 /// Send a chat message to a channel (by id).
@@ -12697,16 +12761,20 @@ async fn send_message(
     .await
 }
 
-/// Edit one of your own messages (by message id) in a channel.
+/// Edit crosses the same encrypted snapshot barrier as a post; a retry keeps its exact token.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn edit_message(
     state: State<'_, AppState>,
     server: u64,
     channel: String,
-    msg_id: String,
+    id: String,
     text: String,
+    retry_token: String,
+    expected_context: String,
+    target: String,
     trace: Option<String>,
-) -> Result<(), AppError> {
+) -> Result<SendMessageResult, AppError> {
     let op = Operation::start(
         trace,
         catcoms_diagnostics::Section::Channels,
@@ -12714,25 +12782,36 @@ async fn edit_message(
         server,
         Some(&channel),
     );
-    let (id, actor) = channel_target(&state, &op, server, &channel).await?;
-    actor
-        .edit_message(id, msg_id, text)
+    let generation = unlocked_ui_session_generation(&state)
         .await
-        .map_err(|e| op.fail(codes::CHAT_EDIT_REJECTED, e))?;
-    persist_server(&state, server).await;
-    op.succeeded("CHANNEL.EDIT.PERSISTED");
-    Ok(())
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
+    durable_chat::mutation(
+        &state,
+        &op,
+        server,
+        &channel,
+        id,
+        catcoms_app::durable_chat::DurableMutationAction::Edit { text },
+        retry_token,
+        expected_context,
+        target,
+        generation,
+    )
+    .await
 }
-
-/// Delete one of your own messages (by message id) from a channel.
+/// Moderation deletion also retains a sealed caller intent; no non-durable production fallback.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn delete_message(
     state: State<'_, AppState>,
     server: u64,
     channel: String,
-    msg_id: String,
+    id: String,
+    retry_token: String,
+    expected_context: String,
+    target: String,
     trace: Option<String>,
-) -> Result<(), AppError> {
+) -> Result<SendMessageResult, AppError> {
     let op = Operation::start(
         trace,
         catcoms_diagnostics::Section::Channels,
@@ -12740,14 +12819,22 @@ async fn delete_message(
         server,
         Some(&channel),
     );
-    let (id, actor) = channel_target(&state, &op, server, &channel).await?;
-    actor
-        .delete_message(id, msg_id)
+    let generation = unlocked_ui_session_generation(&state)
         .await
-        .map_err(|e| op.fail(codes::CHAT_DELETE_REJECTED, e))?;
-    persist_server(&state, server).await;
-    op.succeeded("CHANNEL.DELETE.PERSISTED");
-    Ok(())
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
+    durable_chat::mutation(
+        &state,
+        &op,
+        server,
+        &channel,
+        id,
+        catcoms_app::durable_chat::DurableMutationAction::Delete,
+        retry_token,
+        expected_context,
+        target,
+        generation,
+    )
+    .await
 }
 
 /// Toggle this member's emoji reaction on a message (by message id) in a channel.
@@ -13303,7 +13390,31 @@ struct ReloadedServer {
 /// Transport-independent half of vault reload. Keeping this seam below Tauri's concrete runtime
 /// lets the lifecycle test exercise the exact restore, blob attachment, route restoration and
 /// actor startup used in production with a deterministic in-memory transport.
+/// Cancellation owns an actual Actor abort and leaves custody in that same task until actual
+/// completion. Plain JoinHandle Drop detaches; releasing the absence guard there would let a
+/// retired Stop race an unregistered publisher. Only final registry installation disarms it.
+struct PreRegistrationChatOwner {
+    custody: Arc<std::sync::Mutex<Option<tokio::sync::OwnedMutexGuard<()>>>>,
+    abort: Option<tokio::task::AbortHandle>,
+}
+impl PreRegistrationChatOwner {
+    fn installed(mut self) {
+        self.abort = None;
+        self.custody
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+    }
+}
+impl Drop for PreRegistrationChatOwner {
+    fn drop(&mut self) {
+        if let Some(abort) = self.abort.take() {
+            abort.abort();
+        }
+    }
+}
 struct RestoredActor {
+    chat_fence_commit: PreRegistrationChatOwner,
     actor: ServerActor,
     events: mpsc::Receiver<catcoms_app::TracedEvent>,
     task: tokio::task::JoinHandle<()>,
@@ -13333,6 +13444,31 @@ where
 {
     let mut server = Server::restore(snapshot, transport, rng, clock, &record.display_name)
         .map_err(|error| error.to_string())?;
+    let chat_fence_commit = state.chat_orphan_commit.clone().lock_owned().await;
+    {
+        let mounted = state.store.lock().await;
+        let store = mounted
+            .as_ref()
+            .ok_or_else(|| "vault is not mounted during chat fence restore".to_string())?;
+        let registry = state.servers.lock().await;
+        // An actual fence may require a covering server save. Never let this private older
+        // restore overwrite the snapshot of a currently mounted live incarnation.
+        server.apply_retired_chat_fences(store, record.id, |bytes, rng| {
+            if registry.contains_key(&record.id) {
+                return Err(catcoms_sync::durable_chat::ChatSaveError::NotReplaced(
+                    "live conversation superseded fenced restore".into(),
+                ));
+            }
+            store
+                .save_server(record.id, bytes, rng)
+                .map_err(|error| match error {
+                    catcoms_app::AppError::CommittedButNotDurable(e) => {
+                        catcoms_sync::durable_chat::ChatSaveError::ReplacedNotDurable(e)
+                    }
+                    e => catcoms_sync::durable_chat::ChatSaveError::NotReplaced(e.to_string()),
+                })
+        })?;
+    }
     server.set_endpoint_dial_scheduler(state.endpoint_dials.clone());
     // A newer network record can outlive a failed/older core snapshot. Its enum is provenance,
     // never a substitute for the authenticated group policy pin inside that snapshot.
@@ -13399,9 +13535,15 @@ where
 
     let group_id = server.group_id();
     let device_id = server.device_id();
-    let (actor, events, task) = spawn(server);
+    let custody = Arc::new(std::sync::Mutex::new(Some(chat_fence_commit)));
+    let (actor, events, task) = catcoms_app::spawn_with_lifetime(server, Box::new(custody.clone()));
+    let chat_fence_commit = PreRegistrationChatOwner {
+        custody,
+        abort: Some(task.abort_handle()),
+    };
     actor.open_channel(channel_id("general")).await;
     Ok(RestoredActor {
+        chat_fence_commit,
         actor,
         events,
         task,
@@ -13531,6 +13673,7 @@ async fn reload_one(
     let rz_vec: Vec<String> = rz_target.iter().map(|t| t.addr.to_string()).collect();
 
     let RestoredActor {
+        chat_fence_commit,
         actor,
         events,
         task,
@@ -13648,6 +13791,9 @@ async fn reload_one(
     );
     drop(servers);
     drop(commit);
+    // Registration is now visible to orphan Stop. Only here can the global absence fence
+    // be released; earlier release would let a new fence race autonomous restored publication.
+    chat_fence_commit.installed();
     supervise("server_actor", record.id, task);
     admission_storage::prune_stale_pending(state).await;
     install_persistence_worker(app, record.id, instance).await;
@@ -16162,6 +16308,26 @@ async fn finalize_unlock_session_with_voice(
     Ok(servers)
 }
 
+#[cfg(test)]
+#[path = "unlock_generation_tests.rs"]
+mod unlock_generation_tests;
+
+/// Parse the exact native lock-barrier generation without accepting alternate spellings or
+/// allocating proportional to attacker input. This is stale-work correlation, not a capability:
+/// passphrase authentication and all existing final commit checks still apply.
+fn parse_unlock_generation(value: &str) -> Result<u64, &'static str> {
+    if value.is_empty()
+        || value.len() > 20
+        || (value.len() > 1 && value.starts_with('0'))
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err("unlock requires a canonical native lock generation");
+    }
+    value
+        .parse()
+        .map_err(|_| "unlock requires a canonical native lock generation")
+}
+
 /// Unlock the on-disk store with `passphrase` and reload every persisted server. Called once
 /// at launch. A wrong passphrase fails (the vault won't open); a first-ever launch just
 /// creates the vault and returns no servers. Returns the reloaded servers for the rail.
@@ -16170,8 +16336,38 @@ async fn unlock(
     app: AppHandle,
     state: State<'_, AppState>,
     passphrase: String,
+    expected_ui_generation: String,
     trace: Option<String>,
 ) -> Result<Vec<ReloadedServer>, AppError> {
+    let native = &*state;
+    unlock_authentication(
+        native,
+        passphrase,
+        expected_ui_generation,
+        trace,
+        |generation, voice_ticket, op, passphrase| {
+            unlock_cold(app, native, passphrase, generation, voice_ticket, op)
+        },
+    )
+    .await
+}
+
+/// The actual RPC's shared authentication/admission path. A cold continuation is trusted native
+/// code, invoked only after the exact generation gate and real mounted-vault authentication have
+/// run. The SAME mount guard spans the entire continuation; neither tests nor callers receive a
+/// bare success flag or a replacement generation. Owned inputs avoid a second authorization seam.
+/// Tests can hold this production future completely unpolled without constructing a Wry window.
+async fn unlock_authentication<C, CF>(
+    state: &AppState,
+    passphrase: String,
+    expected_ui_generation: String,
+    trace: Option<String>,
+    cold: C,
+) -> Result<Vec<ReloadedServer>, AppError>
+where
+    C: FnOnce(u64, SessionTicket, Operation, String) -> CF,
+    CF: Future<Output = Result<Vec<ReloadedServer>, AppError>>,
+{
     // Unlock is the one operation whose failures a user meets before anything else works, and the
     // three of them are entirely different: the passphrase is wrong, the vault is unreadable, or it
     // opened and some servers did not come back. All three were one string.
@@ -16182,19 +16378,28 @@ async fn unlock(
         None,
         None,
     );
-    // Capture before the first await. Any lock command that starts after this unlock invalidates
-    // its generation, even if the unlock was queued behind another mount or expensive KDF work.
-    let unlock_generation = state.ui_session_generation.load(Ordering::Acquire);
-    let voice_ticket = voice_runtime(&state).session_ticket();
+    // Bind to the generation returned by the caller's completed native lock barrier. Tauri
+    // schedules async command futures independently, so sampling current here could let an old,
+    // entirely unpolled unlock adopt a newer cancellation lock. Check the original value before
+    // ANY await/authentication/KDF and retain it through every existing finalization barrier.
+    let unlock_generation = parse_unlock_generation(&expected_ui_generation)
+        .map_err(|error| op.fail(codes::SESSION_LOCKED, error))?;
+    if state.ui_session_generation.load(Ordering::Acquire) != unlock_generation {
+        return Err(op.fail(
+            codes::SESSION_LOCKED,
+            "unlock was superseded by a newer lock request; try again",
+        ));
+    }
+    let voice_ticket = voice_runtime(state).session_ticket();
     // This lock covers both the already-mounted authentication path and first reload. Without it,
     // two concurrent webview mounts can both observe `None` and start duplicate actors.
     let _mount = state.vault_mount.lock().await;
-    if authenticate_mounted_store(&state, passphrase.as_bytes())
+    if authenticate_mounted_store(state, passphrase.as_bytes())
         .await
         .map_err(|e| op.fail(codes::VAULT_LOCKED_OUT, e.to_string()))?
     {
         let servers =
-            finalize_unlock_session_with_voice(&state, unlock_generation, true, &voice_ticket)
+            finalize_unlock_session_with_voice(state, unlock_generation, true, &voice_ticket)
                 .await
                 .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?
                 .expect("the mounted-store path requests a running-server projection");
@@ -16202,6 +16407,20 @@ async fn unlock(
         return Ok(servers);
     }
 
+    cold(unlock_generation, voice_ticket, op, passphrase).await
+}
+
+/// Unchanged real first-mount work, reachable only under `unlock_authentication`'s original
+/// mount custody. Production always supplies the actual AppHandle; there is no missing-app,
+/// skip-reload or test-success fallback. All reload/finalization uses the SAME expected generation.
+async fn unlock_cold(
+    app: AppHandle,
+    state: &AppState,
+    passphrase: String,
+    unlock_generation: u64,
+    voice_ticket: SessionTicket,
+    op: Operation,
+) -> Result<Vec<ReloadedServer>, AppError> {
     let dir = app
         .path()
         .app_data_dir()
@@ -16264,24 +16483,17 @@ async fn unlock(
             failed += 1;
             continue;
         };
-        if let Err(e) = reload_one(
-            &app,
-            &state,
-            bytes,
-            record,
-            unlock_generation,
-            &voice_ticket,
-        )
-        .await
+        if let Err(e) =
+            reload_one(&app, state, bytes, record, unlock_generation, &voice_ticket).await
         {
             tracing::error!(target: "catcoms_app", server = record.id, error = %e, "VAULT.SERVER.RESTORE_FAILED");
             failed += 1;
             continue;
         }
-        let actor = actor_of_unchecked(&state, record.id)
+        let actor = actor_of_unchecked(state, record.id)
             .await
             .map_err(|e| op.fail(codes::SERVER_UNAVAILABLE, e))?;
-        let reconnect_warning = member_reconnect::saved_warning(&state, record.id, &actor).await;
+        let reconnect_warning = member_reconnect::saved_warning(state, record.id, &actor).await;
         reloaded.push(ReloadedServer {
             server: record.id,
             name: record.display_name.clone(),
@@ -16292,7 +16504,7 @@ async fn unlock(
             reconnect_warning,
         });
     }
-    finalize_unlock_session_with_voice(&state, unlock_generation, false, &voice_ticket)
+    finalize_unlock_session_with_voice(state, unlock_generation, false, &voice_ticket)
         .await
         .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
     // The summary that makes a partial unlock visible.
@@ -16373,15 +16585,24 @@ async fn resume_session(state: State<'_, AppState>) -> Result<Option<Vec<Reloade
 async fn lock_session(
     state: State<'_, AppState>,
     ui_state_json: Option<String>,
-) -> Result<LockSessionOutcome, String> {
+) -> Result<RegisteredLockSessionOutcome, String> {
     // Tauri requires async commands borrowing `State` to use a `Result` return. The outer error is
     // reserved for bridge/dispatch failure; application-level continuity failure stays inside the
     // resolved outcome so the webview knows native locking completed.
     Ok(lock_session_outcome_inner(&state, ui_state_json).await)
 }
 
-/// IPC-visible lock completion. A continuity error is data-loss evidence, not evidence that the
-/// security boundary remained open, so it must not be collapsed into a rejected command.
+/// IPC-visible completion of one ACTUAL registered lock, even if its continuity save failed.
+/// Decimal text preserves every u64 bit across JavaScript. It correlates a later authenticated
+/// unlock with this exact barrier; it grants no permission and is never inferred from UI state.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct RegisteredLockSessionOutcome {
+    continuity_error: Option<String>,
+    generation: String,
+}
+
+// Close policy may replay an earlier latched failure without registering a new lock. Keep that
+// internal report separate so it cannot manufacture a fresh unlock correlation token.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 struct LockSessionOutcome {
     continuity_error: Option<String>,
@@ -16390,9 +16611,11 @@ struct LockSessionOutcome {
 async fn lock_session_outcome_inner(
     state: &AppState,
     ui_state_json: Option<String>,
-) -> LockSessionOutcome {
-    LockSessionOutcome {
-        continuity_error: lock_session_inner(state, ui_state_json).await.err(),
+) -> RegisteredLockSessionOutcome {
+    let (generation, result) = lock_session_with_generation_inner(state, ui_state_json).await;
+    RegisteredLockSessionOutcome {
+        continuity_error: result.err(),
+        generation: generation.to_string(),
     }
 }
 
@@ -16524,6 +16747,7 @@ async fn close_vault_window(
 /// Testable core of the explicit lock operation. Closing the command boundary is unconditional:
 /// malformed continuity state or a vault write failure is reported, but must never leave the
 /// sensitive webview session open as a side effect of that error.
+#[cfg(test)]
 async fn lock_session_inner(state: &AppState, ui_state_json: Option<String>) -> Result<(), String> {
     lock_session_with_generation_inner(state, ui_state_json)
         .await
@@ -18985,6 +19209,8 @@ pub fn run() {
             revoke_device,
             send_message,
             durable_chat::durable_send_context,
+            durable_chat::durable_mutation_context,
+            durable_chat::stop_durable_chat,
             edit_message,
             delete_message,
             toggle_reaction,
@@ -24806,6 +25032,9 @@ mod tests {
                     persist: PersistCounters::default(),
                 },
             );
+            // This fixture has actually installed the row; finish the same pre-registration
+            // owner as production instead of dropping it and aborting the now-visible actor.
+            restored.chat_fence_commit.installed();
             (state, actor, restored.events, restored.task)
         }
 
@@ -26539,7 +26768,13 @@ mod tests {
             r#"{"version":1,"drafts":{"1:2":"hello"},"readMarks":{"1:2":9}}"#
         )
         .is_ok());
-        assert!(validate_ui_state_json(r#"{"version":2,"drafts":{},"readMarks":{}}"#).is_err());
+        // Mutation/Stop continuity uses minimum v2. Expanded retained Send recovery needs
+        // critical sticky v3 because old v2 readers silently dropped those payloads. Only
+        // these known envelopes are readable; the next unknown successor still refuses.
+        assert!(validate_ui_state_json(r#"{"version":2,"drafts":{},"readMarks":{}}"#).is_ok());
+        assert!(validate_ui_state_json(r#"{"version":3,"drafts":{},"readMarks":{}}"#).is_ok());
+        assert!(validate_ui_state_json(r#"{"version":0,"drafts":{},"readMarks":{}}"#).is_err());
+        assert!(validate_ui_state_json(r#"{"version":4,"drafts":{},"readMarks":{}}"#).is_err());
         assert!(validate_ui_state_json(r#"{"version":1,"drafts":[],"readMarks":{}}"#).is_err());
         assert!(validate_ui_state_json("not json").is_err());
         assert!(validate_ui_state_json(&"x".repeat(MAX_UI_STATE_BYTES + 1)).is_err());

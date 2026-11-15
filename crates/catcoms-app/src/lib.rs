@@ -71,17 +71,18 @@ pub mod store;
 pub mod studio;
 pub mod studio_exchange;
 pub use actor::{
-    spawn, voice_context_queue_bytes, voice_initial_media_rpc_bytes, voice_sdp_delivery_rpc_bytes,
-    voice_sdp_engine_rpc_bytes, voice_sdp_input_rpc_bytes, voice_sdp_rpc_bytes, AppCommand,
-    AppEvent, DownloadExportEdge, DownloadExportTransition, DownloadPreflight, DownloadReady,
-    Envelope, InitialSdpCompletion, InitialSdpPending, ServerActor, Trace, TracedEvent,
-    VoiceConfirmationBody, VoiceConfirmationCompletion, VoiceContextPending, VoiceEndpointCommand,
-    VoiceEndpointError, VoiceInitialMediaPublisher, VoiceInitialMediaWork, VoiceSdpBody,
-    VoiceSdpBodyRefusal, VoiceSdpCompletion, VoiceSdpDeliveryPublisher, VoiceSdpDeliveryWork,
-    VoiceSdpEnginePublisher, VoiceSdpEngineWork, VoiceSdpInputPublisher, VoiceSdpInputWork,
-    VoiceSdpPending, VoiceSdpPublication, VoiceSdpRecordedInput, VoiceSdpRecordedQueue,
-    VoiceSdpResult, VoiceSdpResultInput, VoiceSdpResultPublisher, VoiceSdpResultQueue,
-    INITIAL_SDP_RPC_BYTES, VOICE_CONFIRMATION_BODY_METADATA_BYTES, VOICE_INITIAL_MEDIA_RPC_BYTES,
+    spawn, spawn_with_lifetime, voice_context_queue_bytes, voice_initial_media_rpc_bytes,
+    voice_sdp_delivery_rpc_bytes, voice_sdp_engine_rpc_bytes, voice_sdp_input_rpc_bytes,
+    voice_sdp_rpc_bytes, AppCommand, AppEvent, DownloadExportEdge, DownloadExportTransition,
+    DownloadPreflight, DownloadReady, Envelope, InitialSdpCompletion, InitialSdpPending,
+    ServerActor, Trace, TracedEvent, VoiceConfirmationBody, VoiceConfirmationCompletion,
+    VoiceContextPending, VoiceEndpointCommand, VoiceEndpointError, VoiceInitialMediaPublisher,
+    VoiceInitialMediaWork, VoiceSdpBody, VoiceSdpBodyRefusal, VoiceSdpCompletion,
+    VoiceSdpDeliveryPublisher, VoiceSdpDeliveryWork, VoiceSdpEnginePublisher, VoiceSdpEngineWork,
+    VoiceSdpInputPublisher, VoiceSdpInputWork, VoiceSdpPending, VoiceSdpPublication,
+    VoiceSdpRecordedInput, VoiceSdpRecordedQueue, VoiceSdpResult, VoiceSdpResultInput,
+    VoiceSdpResultPublisher, VoiceSdpResultQueue, INITIAL_SDP_RPC_BYTES,
+    VOICE_CONFIRMATION_BODY_METADATA_BYTES, VOICE_INITIAL_MEDIA_RPC_BYTES,
     VOICE_SDP_DELIVERY_RPC_BYTES, VOICE_SDP_ENGINE_RPC_BYTES, VOICE_SDP_INPUT_RPC_BYTES,
     VOICE_SDP_RPC_FIXED_BYTES, VOICE_SDP_RPC_METADATA_BYTES,
 };
@@ -3686,13 +3687,14 @@ pub const MAX_TRACKED_OWN_MESSAGES: usize = 50;
 pub struct DeliveryState {
     /// The message id, as it appears in [`ChatMessage::id`].
     pub id: String,
-    /// How many **other current-roster** members have proved they hold this message. Evidence is
+    /// How many **other current-roster** members have confirmed receipt. Evidence is
     /// positive and one-sided, but the count may fall when membership changes. `0` means "no proof
     /// yet", *not* "not delivered", so a renderer must not turn it into a failure by itself.
     pub delivered: usize,
     /// How many current members claim a transport peer connected here; the same self-asserted
     /// projection that drives [`Server::online_members`]. Independent of `delivered`, which can
-    /// exceed it (a member that received the message and has since disconnected still holds it).
+    /// exceed it (disconnecting does not undo the historical receipt). Neither count proves
+    /// continuing custody or a receiver disk save.
     pub reachable: usize,
     /// Whether this node has a live peer that previously served a roster-verified signed catch-up.
     /// This is intentionally stricter than `reachable`: a self-asserted descriptor claim or bare

@@ -355,8 +355,18 @@ impl Scenario {
                 // as a real desktop, installed before any actor can create file bytes.
                 attach_blob_store(&state, &mut server).await;
             }
-            let (actor, events, task) = spawn(server);
+            // Fresh admission uses the same real absence custody as restored production
+            // actors. Cancellation cannot release it while an unregistered actor still runs.
+            let guard = state.chat_orphan_commit.clone().lock_owned().await;
+            let custody = Arc::new(StdMutex::new(Some(guard)));
+            let (actor, events, task) =
+                catcoms_app::spawn_with_lifetime(server, Box::new(custody.clone()));
+            let chat_fence_commit = PreRegistrationChatOwner {
+                custody,
+                abort: Some(task.abort_handle()),
+            };
             let restored = RestoredActor {
+                chat_fence_commit,
                 actor,
                 events,
                 task,

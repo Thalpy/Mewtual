@@ -1,5 +1,113 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Native unlock generation contract (30 October)
+
+`lock_session` returns `{ continuity_error, generation }`, where `generation` is the canonical
+unsigned-u64 decimal text captured by that exact native lock registration, including when the
+continuity save reports an error. `unlock` requires `expectedUiGeneration` as a String alongside
+the unchanged passphrase and optional trace. Missing, noncanonical or out-of-range values refuse;
+there is no fallback to the native generation current when the task finally starts. The value
+correlates stale work and is not a capability: real passphrase verification still applies.
+
+The first poll checks the supplied original generation before any await/authentication/KDF, and
+that same value and original voice ticket flow through mounted authentication and cold restore's
+existing final barriers. Cold first entry must establish a real native lock barrier too. The
+frontend first joins and validates any prior barrier before retiring it, then obtains one fresh native
+barrier with a null snapshot for each authentication. Null preserves native pending continuity bytes.
+Only the still-current UI attempt may consume that completed generation; a rejected bridge result
+retains the original JavaScript snapshot, and a malformed present result never falls back to a new
+proof. Native scheduling order is not inferred from JavaScript call order. Close's internal saved
+error report does not mint an unlock token, so its surviving window cannot reuse a cached old token.
+
+## Critical UI continuity v3 (30 October)
+
+This is the local sealed UI envelope, not a chat wire or typed-ledger protocol version. Native
+accepts only versions1,2,3; unknown successors refuse. Native Send/Edit/Delete/Stop validation and
+their retry bindings are unchanged. Ordinary mutation/Stop custody requires minimumv2.
+
+Version3 protects retained Send payloads and reply IDs that older v2 frontends silently omitted.
+The updated reader retains recognizable original requests within the existing count/aggregate
+budgets, quarantines native-invalid payloads without positive/Stop dispatch, and supports explicit
+lossless movement to nonretry saved copies. Native-valid replies beyond the older reader's128
+UTF-16-unit bound also requirev3 before sealing. New admission validates complete native payload
+bounds and well-formed Unicode before context/queue admission; it does not rewrite old originals.
+
+When loading requiresv3, the original root's version is upgraded and a covering write through the
+existing continuity-save chain must succeed before UI readiness or new frontend dispatch. Every
+already-v3 load repeats that write: merely reading bytes left by a failed post-rename save is not
+durability evidence. Failure preserves the sealed original for retry. Captured-session checks and
+the ordered save chain prevent a superseded load from installing stale state. Later mutation/Stop
+saves cannot downgradev3, including after its queues empty. This gate does not retract or fence
+native publication of an original request that was already admitted independently.
+Version3 is consumed by this recovery grammar; a future critical admin-review journal must use
+a further successor or a separately sealed format that existing writers cannot overwrite.
+
+## Durable chat covering-transaction effects (30 October)
+
+Sync effect-aware commit/Stop/repair/fence APIs return ephemeral `ChatCommitEffects` only after a
+covering snapshot is durably saved and its complete candidate installed. This includes implicit
+repairs outside the selected request's channel. Exact newly committed Send metadata carries original
+token/binding/context/channel/message ID/real change hash; no text, payload, new receipt or permission.
+The application installs both recent-message and receipt-target bookkeeping synchronously before
+lease release/reply/publication. Actor refreshes every affected channel, filtering unchanged actual
+projections. Failed writes return no successful effects while retaining SnapshotNeeded repair work.
+Existing public compatibility wrappers/native replies/persisted and signing bytes remain unchanged.
+Receipt capacity counts the distinct live/possibly-installed token union, including never-authored
+uncertain Stops. New tokens are refused at the cap, while exact existing negative retries and repair
+remain admissible; covering merge and encoder independently enforce the decoder's existing count
+limit before candidate/output allocation. No receipt is evicted or reclassified as absent.
+Tracking is still bounded/session-local and intentionally forgotten after restart. Real Store/Actor/
+quiet-peer effects regressions passed in the primary's five-test focused run, followed by the seven-
+test app effects/cap batch and the sync cap regression. Actual effects reviews are clear. Current
+complete-suite results and limitations are recorded in [HANDOVER.md](HANDOVER.md).
+
+## Inactive exact Delete approval contract (29 October; validation pending)
+
+`ChatLedger::approve_delete(ActionId, VerifiedDeleteApproval)` attaches one opaque externally
+verified positive decision to an already imported exact semantic Delete. It binds that action's
+Create target, realm, full signer, basis and grant. Mismatches and unknown actions refuse without
+state changes; identical normalized facts are equivalent duplicates. A missing approval is
+`Pending(ModerationApproval)` and approval alone grants no ordinary member permission. Cross-author
+Delete additionally requires ordinary SELF_DELETE and all existing dependency/causal checks; own
+Delete keeps its existing SELF_DELETE or bare DELETE_ANY behavior. The unchanged three-argument
+restore API does not restore approvals; callers supply them again before bounded advance can admit
+moderation. No signing/snapshot/wire bytes or production constructor/decoder are introduced.
+
+
+## Inactive typed-chat restore contract (29 October)
+
+`chat::ChatLedger::restore(bytes, limits, &[(ActionId, VerifiedAuthorityBasis)])`
+imports original signed evidence, applies externally verified authority to each exact
+action, then requires explicit bounded `advance`. A missing parent's coverage stays
+with its action; unrelated actions' coverage is never combined into one capped witness.
+Decoding cannot construct authority. Snapshots are plaintext at this internal API;
+native sealed persistence, certificate producers and live dispatch do not exist yet.
+This typed-core API does not change legacy wire/persistence readers.
+[Full contract and limits](communication-recovery/CHAT-TYPED-CORE.md).
+
+## Durable local chat mutations (29 October; validation in progress)
+
+Desktop edit/delete now require a retained caller token, original `expectedContext` and immutable
+`target` returned by `durable_mutation_context`. Their responses use the send result envelope
+and a closed disposition: `committed`, `stopped-before-commit`, `stopped-after-commit`, or `stopped-retired`.
+`accepted` requires a durable committed operation/no-op. A pending storage reply never authorizes
+renderer acceptance or a PERSISTED diagnostic. Exact saved receipts replay before target/role
+reads, while every ordinary uncommitted mutation repeats current membership, target and permission.
+
+`stop_durable_chat` binds the complete original send/edit/delete request. It saves its terminal
+before releasing the native reservation. Saved operations remain additive history. A same-text edit
+saves real frontier heads and creates no signed change or edited timestamp. Durable-chat storage
+stays v1 byte-for-byte for legacy send-only rows and becomes sticky v2 for mutation/no-op/explicit
+Stop. UI continuity v2 is likewise sticky, so older readers reject rather than replay edit text as
+a post. A `stopped-retired` result means a vault-sealed numeric-server/exact-token retry fence was durably saved after the
+original Actor was absent; whether the original request committed is unknown. Its history may
+already have been sent/applied. Retired fences survive Leave and are globally bounded/non-evicting.
+Positive native final custody checks them, and restored matching saved publication/reservations are
+stopped and saved before Actor spawn. Malformed fence state refuses admission/restore. A visible
+post-rename fence is rewritten before any durable Stop acknowledgement. The low-level
+`Server::edit_message/delete_message` APIs remain non-durable compatibility APIs.
+
+
 ## Owned microphone device setting (27 October; inactive)
 
 The capture helper materializes admitted device IDs in bounded numeric UTF16 chunks after

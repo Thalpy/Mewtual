@@ -23,17 +23,19 @@ test("actual close retires the open video review before a held continuity save f
 });
 
 for (const action of ["cancel", "recover"] as const) {
-  test(`actual close callback waits for ${action} save and memory commit before its final snapshot`, async () => {
+  test(`actual close drains the ${action} Stop seal and preserves it for exact retry after reopening`, async () => {
     const app = pendingManagerApp(initial()); await app.hydrate();
     const gate = deferred(); app.holdSave(gate.promise);
     const decision = app.resolve(token, action); await settle();
-    assert.equal(app.state().writes[0].pendingSends[token], undefined, "candidate is already inside native persistence");
+    assert.equal(app.state().writes[0].pendingSends[token].resolution, action, "the candidate retains exact custody until native Stop is durable");
     assert.ok(app.state().pendingSends[token], "logical transaction has not committed yet");
     const closing = app.close(); await settle();
+    const rejected = assert.rejects(decision, /being resolved or its session changed/);
     const closeDispatchedBeforeDecision = app.state().closeCalls.length;
-    gate.resolve(); await Promise.all([decision, closing]);
+    gate.resolve(); await Promise.all([rejected, closing]);
     assert.equal(closeDispatchedBeforeDecision, 0, "close may not capture/dispatch a competing old snapshot");
-    assert.deepEqual(JSON.parse(app.state().closeCalls[0].uiStateJson).pendingSends, {});
+    assert.equal(JSON.parse(app.state().closeCalls[0].uiStateJson).pendingSends[token].resolution, action);
+    assert.equal(app.state().stops.length, 0, "close fences new native Stop dispatch after draining its seal");
     await app.unlock(); await app.retry(true);
     assert.deepEqual(app.state().pendingSends, {});
     assert.equal(app.state().submissions.length, 0, "successful resolution cannot become automatic publication after reopening");
@@ -65,6 +67,7 @@ test("close drains admitted ordinary/decision saves but refuses new decisions an
   const gate = deferred(); app.holdSave(gate.promise);
   const preceding = app.save(); await settle();
   const decision = app.resolve(token, "recover");
+  const rejected = assert.rejects(decision, /being resolved or its session changed/);
   const following = app.save();
   const closing = app.close(); await settle();
   await assert.rejects(app.save(), /window is closing/);
@@ -74,13 +77,16 @@ test("close drains admitted ordinary/decision saves but refuses new decisions an
   assert.equal(app.state().contextCalls, 0);
   assert.equal(app.state().submissions.length, 0);
   assert.equal(app.state().closeCalls.length, 0);
-  gate.resolve(); await Promise.all([preceding, decision, following, closing]);
+  gate.resolve(); await Promise.all([preceding, rejected, following, closing]);
   assert.equal(app.state().writes.length, 3, "every admitted queue entry runs under the close fence");
-  assert.deepEqual(app.state().writes[2].pendingSends, {});
+  assert.equal(app.state().writes[2].pendingSends[token].resolution, "recover");
   const final = JSON.parse(app.state().closeCalls[0].uiStateJson);
-  assert.deepEqual(final.pendingSends, {});
-  assert.equal(final.recoveredSendDrafts[token].text, item.text);
+  assert.equal(final.pendingSends[token].resolution, "recover");
+  assert.deepEqual(final.recoveredSendDrafts, {}, "no text recovery is claimed before native Stop");
   assert.equal(final.drafts["77:9"], "a different draft");
+  await app.unlock(); await app.retry(true);
+  assert.equal(app.state().recoveredSendDrafts[token].text, item.text);
+  assert.equal(app.state().stops.length, 1);
   app.done();
 });
 

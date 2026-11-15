@@ -10,6 +10,11 @@ export const VISUAL_FIXTURE_NOW = Date.UTC(2026, 7, 20, 12, 0, 0);
 const ME = "a4f29c110b7d8365a4f29c110b7d8365";
 const JUNIPER = "62e80f475ac4931162e80f475ac49311";
 const MOSS = "9b31d5a277c04efa9b31d5a277c04efa";
+const CHAT_CHANNELS = [
+  { id: "1", name: "general" },
+  { id: "2", name: "design" },
+  { id: "3", name: "field-notes" },
+];
 
 type Message = {
   id: string;
@@ -172,11 +177,22 @@ const BRIDGED = "LOG.TRACING.EVENT";
  * call fail loudly. That is preferable to a screenshot which looks plausible while silently
  * omitting a newly-added backend dependency.
  */
-export function visualFixtureResponse(command: string, payload: InvokeArgs = {}, studio = false, transfers = false): unknown {
+export function visualFixtureResponse(command: string, payload: InvokeArgs = {}, studio = false, transfers = false, pendingRecovery = false): unknown {
   const args: Record<string, unknown> =
     Array.isArray(payload) || payload instanceof ArrayBuffer || payload instanceof Uint8Array
       ? {}
       : payload;
+  // Explicit screenshot opt-in for the old oversized-edit recovery path. Preserve the default
+  // fixture and the complete original request; production never installs these IPC mocks.
+  if (pendingRecovery && command === "get_ui_state") {
+    const ordinary = JSON.parse(visualFixtureResponse(command, payload) as string);
+    const token = "0a".repeat(16);
+    return JSON.stringify({ ...ordinary, version: 2, pendingSends: {
+      [token]: { kind: "edit", token, server: 1, channel: "35", expectedContext: "a".repeat(64),
+        messageId: "original-edit", target: "b".repeat(64), text: "Saved edit text. ".repeat(4097),
+        replyTo: "", acceptance: "ambiguous", resolution: "recover" },
+    } });
+  }
   // `transfers=1`: one private download row in every Transfers state (Transfers UX, PR #51).
   if (transfers) {
     const response = visualTransfersResponse(command, args,
@@ -186,8 +202,8 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
   if (studio) {
     const response = visualStudioFixtureResponse(command, args, VISUAL_FIXTURE_NOW);
     if (response.handled) return response.value;
-    // Existing chat fixture ids are descriptive strings; native Studio deliberately requires
-    // canonical decimal channels. The explicit opt-in remaps the fixture, never its parser.
+    // Studio and ordinary chat both use native decimal channel identities. Keep the opt-in
+    // response independent so mutating one screenshot's roster cannot alter the default.
     if (command === "resume_session") {
       const servers = visualFixtureResponse(command, payload) as Array<{ server: number; channel: string; channels: { id: string; name: string }[] }>;
       for (const server of servers) if (server.server === 1) { server.channel = "1"; server.channels = server.channels.map((channel, index) => ({ ...channel, id: String(index + 1) })); }
@@ -202,7 +218,10 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
     return visualFixtureResponse(command, { ...args, ...(channel === undefined ? {} : { channel }) });
   }
   const server = Number(args.server ?? 1);
-  const channel = String(args.channel ?? "general");
+  // Human-readable keys are internal fixture lookup names only. IPC responses use the same
+  // canonical decimal IDs as native, including before the frontend's new Send preflight.
+  const rawChannel = String(args.channel ?? "1");
+  const channel = ({ "1": "general", "2": "design", "3": "notes" } as Record<string, string>)[rawChannel] ?? rawChannel;
 
   switch (command) {
     // The visual fixture has no router. It still explicitly models controller acquisition so
@@ -222,20 +241,16 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
           server: 1,
           name: "Lantern Room",
           invite: "fixture-invite-not-for-pairing",
-          channel: "general",
-          channels: [
-            { id: "general", name: "general" },
-            { id: "design", name: "design" },
-            { id: "notes", name: "field-notes" },
-          ],
+          channel: "1",
+          channels: CHAT_CHANNELS,
           is_dm: false,
         },
         {
           server: 2,
           name: "Juniper",
           invite: "",
-          channel: "dm",
-          channels: [{ id: "dm", name: "Juniper" }],
+          channel: "1",
+          channels: [{ id: "1", name: "Juniper" }],
           is_dm: true,
         },
       ]);
@@ -244,18 +259,36 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
     case "get_ui_state":
       return JSON.stringify({
         version: 1,
-        drafts: { "1:general": "A deterministic composer draft" },
-        readMarks: { "1:general": VISUAL_FIXTURE_NOW - 25 * 60_000 },
+        drafts: { "1:1": "A deterministic composer draft" },
+        readMarks: { "1:1": VISUAL_FIXTURE_NOW - 25 * 60_000 },
       });
     case "save_ui_state":
       return null;
+    case "get_channels":
+      return clone(server === 2 ? [{ id: "1", name: "Juniper" }] : CHAT_CHANNELS);
+    // Existing native lock metadata, with a fixed opaque generation for this UI fixture.
+    // This mock does not establish native command polling or persistence guarantees.
+    case "lock_session":
+      return { continuity_error: null, generation: "7" };
+    // Explicit metadata/result mocks keep the real queue available in visual validation.
+    // They model a durable local terminal, never a peer delivery acknowledgement.
+    case "durable_send_context":
+      return "a".repeat(64);
+    case "durable_mutation_context":
+      return { context: "a".repeat(64), target: "b".repeat(64) };
+    case "send_message":
+    case "edit_message":
+    case "delete_message":
+      return { accepted: true, persistence: { status: "durable" }, message_id: String(args.id ?? "fixture-message"), replayed: false, disposition: "committed" };
+    case "stop_durable_chat":
+      return { accepted: false, persistence: { status: "durable" }, message_id: "", replayed: false, disposition: "stopped-before-commit" };
     case "get_inbox":
       return clone([
         {
           server: 1,
           server_name: "Lantern Room",
           is_dm: false,
-          channel: "general",
+          channel: "1",
           message_id: "msg-4",
           author: JUNIPER,
           author_name: "Juniper",
@@ -798,14 +831,6 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
         ],
         reason: "This device has an advertised public or relayed candidate route it can offer.",
       });
-    case "get_channels":
-      return server === 1
-        ? clone([
-            { id: "general", name: "general" },
-            { id: "design", name: "design" },
-            { id: "notes", name: "field-notes" },
-          ])
-        : clone([{ id: "dm", name: "Juniper" }]);
     case "plugin:window|is_maximized":
       return false;
     case "plugin:updater|check":
@@ -823,15 +848,16 @@ export function installVisualFixture(name: string): void {
 
   mockWindows("main");
   // The existing DEV+localhost entry point still owns availability and readiness. Nothing in
-  // production recognizes this flag, and default chat fixtures remain byte-for-byte unchanged.
+  // production recognizes these flags; displayed chat content, clock and readiness stay stable.
   const studio = new URLSearchParams(window.location.search).get("studio") === "1";
   const transfers = new URLSearchParams(window.location.search).get("transfers") === "1";
+  const pendingRecovery = new URLSearchParams(window.location.search).get("pending") === "oversized";
   const uploads = studio ? createVisualFileUploads(ME.repeat(2)) : null;
   mockIPC(
     (command, payload) => {
       const args = payload as Record<string, unknown> ?? {};
       const fileResponse = uploads?.response(command, args);
-      let response = fileResponse?.handled ? fileResponse.value : visualFixtureResponse(command, payload, studio, transfers);
+      let response = fileResponse?.handled ? fileResponse.value : visualFixtureResponse(command, payload, studio, transfers, pendingRecovery);
       if (uploads && command === "get_files") {
         const list = response as { files: unknown[]; has_peers: boolean };
         response = { ...list, files: [...list.files, ...uploads.files(Number(args.server))] };

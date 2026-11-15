@@ -40,7 +40,7 @@
     type MessagePage, type PageAnchor, type PageRequest, type PagedRowContext, type UnreadSummary,
   } from "./message-paging";
   import { persistenceWarning, sendAndRefresh, sendOutcome, type SendMessageResult, type SendOutcome } from "./message-send";
-  import { addPendingSend, matchingPendingSend, pendingSendRetryBlock, resolvePendingSend, sendRefusedUnaccepted, type PendingResolution, type PendingSend, type PendingSends } from "./pending-sends";
+  import { addPendingSend, durableStopOriginal, durableStopTerminal, retiredStopWarning, matchingPendingSend, matchingPendingMutation, samePendingIntent, pendingActionLabel, pendingSendRetryBlock, resolvePendingSend, recoverQuarantinedIntent, quarantinedPendingIntent, validateMutationPayload, validateSendPayload, pendingContinuityVersion, sendRefusedUnaccepted, type PendingResolution, type PendingSend, type PendingSends } from "./pending-sends";
   import PendingSendManager from "./PendingSendManager.svelte";
   import { PendingSendRetry } from "./pending-send-retry";
   import { ImageSrcCache } from "./image-src";
@@ -1525,6 +1525,9 @@
   let locked = $state(true);
   let passphrase = $state("");
   let unlocking = $state(false);
+  // Attempt ownership is separate from UI generation: a successful restore advances
+  // the latter, while only the owning authentication may release its busy flag.
+  let unlockAttempt = 0;
   type VaultChangeStep = "" | "current" | "new" | "confirm";
   let vaultChangeStep = $state<VaultChangeStep>("");
   let vaultChangeCurrent = $state("");
@@ -1689,6 +1692,7 @@
   // What Enter (and the primary button) means on the gate, which is not always "unlock": during
   // setup the same keystroke must advance the wizard, never write the vault early.
   function gateSubmit() {
+    if (!locked || unlocking || windowCloseInFlight) return;
     if (!unlockSecret()) return;
     if (!inSetup) {
       unlock();
@@ -1705,13 +1709,16 @@
   }
   // Last step: this is the call that writes the vault. Everything before it is reversible.
   async function setupFinish() {
-    if (!setupFirst) return;
-    syncIntent = setupPath === "sync";
-    await unlock(setupFirst);
-    if (!locked) {
+    if (!setupFirst || !locked || unlocking || windowCloseInFlight) return;
+    const requestedSync = setupPath === "sync";
+    const opened = await unlock(setupFirst);
+    // An old setup continuation cannot complete somebody else's newer unlock.
+    if (opened && opened.attempt === unlockAttempt && opened.generation === uiStateLoadGeneration
+      && !locked && !windowCloseInFlight) {
       setupFirst = "";
       vaultExists = true;
-      if (syncIntent) pairBegin(); // the companion's half of the ceremony, ready to hand over
+      syncIntent = requestedSync;
+      if (requestedSync) pairBegin(); // the companion's half of the ceremony, ready to hand over
     }
   }
 
@@ -3547,6 +3554,7 @@
   // completes asynchronously after unlock.
   let uiStateReady = $state(false);
   let pendingSends = $state<PendingSends>({});
+  let uiContinuityVersion: 1 | 2 | 3 = 1;
   let recoveredSendDrafts = $state<PendingSends>({});
   // Holds submissions/result mutations while a user's explicit resolution crosses the vault barrier.
   let pendingSendResolution = $state<string | null>(null);
@@ -3556,13 +3564,14 @@
   let uiStateSaveFailed = $state(false);
   let uiStateFailureToast = 0;
   let uiStateLoadGeneration = 0;
+  let uiStateHydrationAttempt = 0;
   const pendingSendRetry = new PendingSendRetry(async (session) => {
     if (!locked && uiStateReady && session === uiStateLoadGeneration) await retryPendingSends(true);
   });
   $effect(() => {
     pendingSendRetry.update(
       !locked && uiStateReady && !windowCloseInFlight ? uiStateLoadGeneration : null,
-      Object.values(pendingSends).some(intent => !intent.retryBlock),
+      Object.values(pendingSends).some(intent => !quarantinedPendingIntent(intent) && (intent.resolution || !intent.retryBlock)),
       sending || retryingPendingSends || pendingManagerOpen || pendingSendResolution !== null,
     );
   });
@@ -3601,7 +3610,7 @@
     }
   }
   function continuityJson(): string {
-    return JSON.stringify({ version: 1, drafts, readMarks, statusCursors, fileTrustPolicies, latePast, embedAutoLoad, pendingSends, recoveredSendDrafts,
+    return JSON.stringify({ version: uiContinuityVersion, drafts, readMarks, statusCursors, fileTrustPolicies, latePast, embedAutoLoad, pendingSends, recoveredSendDrafts,
       studioDraft: studioSnapshot?.() ?? restoredStudioDraft });
   }
   /**
@@ -3639,18 +3648,45 @@
     }, 250);
   }
   async function loadUiContinuity(generation: number) {
+    if (generation !== uiStateLoadGeneration || locked) return;
+    const attempt = ++uiStateHydrationAttempt;
+    const current = () => generation === uiStateLoadGeneration && attempt === uiStateHydrationAttempt && !locked;
+    // studio-exit: forced edge. Only restoreReloaded calls this reader during initial mount or
+    // completed unlock, when Studio is absent; lock has already captured its owned draft queue.
+    uiStateReady = false;
     let loaded = false;
     try {
-      let next = sanitizeUiContinuity(JSON.parse(await invoke<string>("get_ui_state")));
-      if (generation !== uiStateLoadGeneration || locked) return;
+      // A reload must read after previously admitted writes. Only the newest load in
+      // this session may expose its snapshot; an older get/covering write can finish late.
+      await uiStateSaveChain;
+      if (!current()) return;
+      const original = JSON.parse(await invoke<string>("get_ui_state"));
+      let next = sanitizeUiContinuity(original);
+      if (!current()) return;
+      if (uiContinuityVersion > next.version) next = { ...next, version: uiContinuityVersion };
+      if (next.version === 3) {
+        // Preserve the complete original root, not a sanitized replacement. Old v2 native
+        // readers must reject before their frontend silently drops these Send copies.
+        // Re-save even already-v3 roots: a preceding rename may have succeeded while its
+        // parent-sync acknowledgement failed. Only this actual barrier opens the UI.
+        await queueUiStateSave(() => {
+          if (!current()) throw new Error("The continuity load was replaced before its upgrade could be saved.");
+          return JSON.stringify({ ...original, version: 3 });
+        });
+        if (!current()) return;
+      }
       // Older builds kept read positions in plaintext localStorage. Migrate that one app-owned
       // key only when the sealed record has none, and erase it only after the native save succeeds.
       // A failed save leaves the legacy copy recoverable for the next launch.
       try {
         const migration = planLegacyReadMarkMigration(next, localStorage.getItem("catcoms.readmarks"));
         if (migration.saveBeforeRemoval) {
-          await queueUiStateSave(JSON.stringify(migration.state));
+          await queueUiStateSave(() => {
+            if (!current()) throw new Error("The continuity load changed before read marks could be saved.");
+            return JSON.stringify(migration.state);
+          });
         }
+        if (!current()) return;
         if (migration.removeLegacy) {
           localStorage.removeItem("catcoms.readmarks");
         }
@@ -3658,8 +3694,9 @@
       } catch (migrationError) {
         console.warn("Legacy read-mark migration failed", migrationError);
       }
-      if (generation !== uiStateLoadGeneration || locked) return;
+      if (!current()) return;
       pendingSends = next.pendingSends;
+      uiContinuityVersion = next.version;
       recoveredSendDrafts = next.recoveredSendDrafts;
       drafts = next.drafts;
       readMarks = next.readMarks;
@@ -3671,14 +3708,14 @@
       if (restoredStudioDraft && studioRestore) { studioRestore(restoredStudioDraft); restoredStudioDraft = null; }
       loaded = true;
     } catch (e) {
-      if (generation !== uiStateLoadGeneration || locked) return;
+      if (!current()) return;
       console.warn("UI continuity load failed", e);
       // Preserve the last sealed record and block replacements until a successful load.
       // An unreadable record may contain the only retry identity for an accepted message.
       embedAutoLoad = false; // an unreadable record is not permission to start contacting anyone
       error = `Durable history could not be authenticated and was not loaded: ${e}`;
     } finally {
-      if (generation === uiStateLoadGeneration && !locked) {
+      if (current()) {
         uiStateReady = loaded;
         // Anything marked read while this was in flight was held rather than written, because the
         // assignments above would have overwritten it. Replay it now, against what actually loaded.
@@ -4196,7 +4233,7 @@
   }
   function setTextEffectValue(target: TextEffectTarget, value: string) {
     if (target === "chat") { draft = value; saveDraftFor(chanKey()); }
-    else if (target === "chat-edit") editDraft = value;
+    else if (target === "chat-edit") { editDraft = value; editRevision += 1; }
     else if (target === "announcement") statusDraft = value;
     else if (target === "wiki") { wikiBody = value; wikiDirty = true; }
     else if (target === "bio") pDescription = value;
@@ -4558,16 +4595,11 @@
       return;
     }
     try {
-      // One trace for the whole sweep rather than one per message: a moderator deleting eleven
-      // messages performed one action, and eleven unrelated traces would hide that the failure on
-      // the ninth belonged to the same operation as the eight that worked.
-      const sweep = traceSource.next();
+      // Admit each deletion through the same sealed queue as an ordinary local delete.
+      // Pause the sweep on uncertainty; the retained exact intent will retry on its own.
       for (const message of selected) {
-        await invokeDebugged(
-          "delete_message",
-          { server, channel: message.channel, msgId: message.id },
-          { trace: sweep },
-        );
+        const result = await queueMessageMutation(server, message.channel, message.id, "delete", "");
+        if (result.persistence.status !== "durable") throw new Error("A deletion is awaiting its history save. Review Pending messages before continuing the sweep.");
       }
       moderationSelected = new Set();
       moderationDeleteArmed = false;
@@ -6493,7 +6525,20 @@
 
   // Unlock the vault with the entered passphrase and reload persisted servers (9f). A wrong
   // passphrase fails (the vault won't decrypt) and we stay locked, showing the error.
+  async function refreshVaultGate() {
+    const generation = uiStateLoadGeneration, attempt = unlockAttempt;
+    const current = () => generation === uiStateLoadGeneration && attempt === unlockAttempt
+      && locked && !unlocking && !windowCloseInFlight;
+    if (!current()) return;
+    try {
+      const exists = await invoke<boolean>("vault_exists");
+      if (current()) vaultExists = exists;
+    } catch { if (current()) vaultExists = true; }
+  }
   function restoreReloaded(reloaded: Reloaded[]) {
+    // Restoration is an entry edge, never an in-session refresh. In particular it
+    // must not reset readiness underneath a live Studio and its retained work.
+    if (!locked || windowCloseInFlight) return false;
     servers = reloaded.map((r) => ({
       id: r.server,
       name: r.name,
@@ -6534,32 +6579,65 @@
     refreshAllDmRequests();
     loadInbox();
     refreshAllServerIcons();
+    return true;
   }
 
-  async function unlock(secret = unlockSecret()) {
-    if (!secret) return;
+  async function unlock(secret = unlockSecret()): Promise<{ attempt: number; generation: number } | null> {
     // Close and unlock are competing generation changes. The close handler sets this before its
     // first await, so an unlock can never reopen native IPC underneath an older close operation.
-    if (windowCloseInFlight) return;
+    if (!locked || unlocking || windowCloseInFlight || !secret) return null;
+    const attempt = ++unlockAttempt;
+    const generation = uiStateLoadGeneration;
+    const current = () => attempt === unlockAttempt && generation === uiStateLoadGeneration
+      && locked && !windowCloseInFlight;
     unlocking = true;
     error = "";
     // The summon starts alongside the KDF call and never gates it: the animation fills
     // latency that exists anyway, and a failed unlock aborts it below.
-    if (unlockMethod === "sigil") startSummon();
     try {
+      if (unlockMethod === "sigil") startSummon();
       // Ctrl+L clears the webview immediately but native persistence can still be finishing. Join
       // that exact request before authenticating a new generation; otherwise a late old lock could
       // invalidate the session immediately after this unlock appears to succeed.
-      await nativeVaultLock.settle();
+      const requireGeneration = (outcome: NativeVaultLockOutcome | null): string => {
+        const generation = outcome?.generation;
+        if (typeof generation !== "string" || !/^(0|[1-9][0-9]{0,19})$/.test(generation)
+          || BigInt(generation) > (1n << 64n) - 1n) {
+          throw new Error("Could not confirm this unlock session. Restart Mewtual and try again.");
+        }
+        return generation;
+      };
+      const prior = await nativeVaultLock.settle();
+      if (!current()) return null;
+      if (prior !== null) {
+        // Join and validate original custody BEFORE retiring it. A malformed present
+        // result must not silently fall through to a replacement/guessed generation.
+        requireGeneration(prior);
+        nativeVaultLock.reset();
+      }
+      // A confirmed window close may have registered another native lock without a
+      // reusable token. Establish one fresh barrier for THIS authentication rather
+      // than submit an otherwise valid cached generation which is now stale. A null
+      // snapshot preserves native pending bytes; never reset a newer pending JS lock.
+      nativeVaultLock.begin(null);
+      const barrier = await nativeVaultLock.settle();
+      if (!current()) return null;
+      const expectedUiGeneration = requireGeneration(barrier);
+      // Retire only this fulfilled fresh lock, before auth leaves this JS turn.
+      // A fresh Ctrl+L can now issue its own null-snapshot native lock. Native
+      // command admission must check THIS barrier generation at first poll and final
+      // publication, rather than adopt its then-current generation. The UI ticket also
+      // refuses stale replies. Never reset a newer lock or substitute local UI counters.
+      // Fulfilled valid-snapshot IO debt is retained by native pending_ui_lock_snapshot
+      // and retried before native unlock opens IPC. Rejected bridges keep JS custody.
+      nativeVaultLock.reset();
       // The passphrase is an argument and never a recorded field: invokeDebugged records the
       // command name and its outcome, not what it was called with.
-      const { value: reloaded } = await invokeDebugged<Reloaded[]>("unlock", { passphrase: secret });
-      // The prior session's native lock promise (settled or otherwise) must never be reused after
-      // an authenticated unlock establishes a new command generation.
-      nativeVaultLock.reset();
+      const { value: reloaded } = await invokeDebugged<Reloaded[]>("unlock", { passphrase: secret, expectedUiGeneration });
+      if (!current()) return null;
       closeAfterContinuityError = false;
       passphrase = "";
-    revealPassphrase = false; // never leave a lock screen showing the next thing typed into it
+      revealPassphrase = false; // never leave a lock screen showing the next thing typed into it
       sigilStrokes = [];
       sigilDrawing = [];
       sigilColors = Array(19).fill(0);
@@ -6567,14 +6645,23 @@
       sigilWord = "";
       stopPlayback();
       melodySeq = [];
-      restoreReloaded(reloaded);
+      if (!restoreReloaded(reloaded)) return null;
+      return { attempt, generation: uiStateLoadGeneration };
     } catch (e) {
+      if (!current()) return null;
       abortSummon(); // wrong secret ⇒ no cat: the failure must read as a failure
       // `unlock` returns a typed AppError. Stringifying that object produces only
       // "[object Object]"; the shared reader preserves its useful message, code and trace.
       error = vaultUnlockErrorText(e);
+      return null;
     } finally {
-      unlocking = false;
+      // The successful restore itself advances UI generation. Ticket ownership,
+      // rather than the pre-restore predicate, releases only this attempt's busy state.
+      if (attempt === unlockAttempt) {
+        unlocking = false;
+        // A manual attempt may have superseded startup before its gate query landed.
+        if (locked && vaultExists === null && !windowCloseInFlight) void refreshVaultGate();
+      }
     }
   }
 
@@ -6584,6 +6671,9 @@
   // passphrase again. Re-entering calls `unlock`, which no-ops on an already-open vault and hands
   // back the registered servers, so no actor or transport is duplicated.
   function lockScreen(nativeAlreadyLocked = false) {
+    unlockAttempt += 1;
+    unlocking = false;
+    abortSummon();
     pendingSendRetry.cancel();
     callMappingSession.resetController();
     // Lock also cancels calls still waiting on a native permission prompt; those have not yet set
@@ -6596,7 +6686,22 @@
     storageHealthCache.clear();
     imageSrcCache.clear(); // avatars and icons are member content; do not retain them behind lock
     stopSearchWorker(); // likewise its copy of the searched history
-    if (locked) return;
+    if (locked) {
+      // Ctrl+L can arrive during settle/auth while the gate is still visible. Revoke
+      // both UI and native entry; a later unlock must join this exact negative call.
+      uiStateLoadGeneration += 1;
+      // studio-exit: forced edge. Already locked; any former Studio queue was captured by its first lock.
+      uiStateReady = false;
+      clearUnlockEntry();
+      try { sessionStorage.setItem("catcoms.explicit-lock", "1"); } catch { /* best effort */ }
+      if (!nativeAlreadyLocked) void nativeVaultLock.begin(null).then(
+        (outcome) => { if (outcome.continuity_error) console.warn("Session locked; final UI continuity save failed", outcome.continuity_error); },
+        (e) => console.warn("Could not confirm the native session lock", e),
+      );
+      // Canceling an initial startup read must not leave a permanently blank gate.
+      if (vaultExists === null && !windowCloseInFlight) void refreshVaultGate();
+      return;
+    }
     // Lock wins over an in-progress secret change and drops every transient secret first.
     vaultChangeCurrent = "";
     vaultChangeFirst = "";
@@ -7119,6 +7224,9 @@
   // the previous group's messages, roster, files and branding stay on screen for the whole
   // round-trip, which reads as the switch not having taken.
   function clearServerView() {
+    // Inline edit plaintext belongs to this view. Lock/switch/removal must drop it
+    // and invalidate old admission callbacks, including after a failed first seal.
+    cancelEdit();
     view = "chat";
     moderationSelected = new Set();
     moderationDeleteArmed = false;
@@ -8088,7 +8196,7 @@
       latest: isLatestOwn(mi),
     };
   }
-  // The gutter tick for one of your messages: ✕ nobody reachable · ◌ no proof yet · ~ held by
+  // The gutter tick for one of your messages: ✕ nobody reachable · ◌ no proof yet · ~ received by
   // part of the roster · ✓✓ the whole roster confirmed. We intentionally do not infer "all live
   // peers confirmed" from two unrelated counts. Shown on EVERY message of yours
   // the actor still has evidence for, not only the newest: the point of a per-message tick is to
@@ -20701,6 +20809,9 @@
   // `onDispatch` is told just before the request leaves for the native side: from then on it may
   // have committed whatever comes back (see `send`).
   async function submitPendingSend(intent: PendingSend, session: number, originalDraftRevision: number | undefined = undefined, onDispatch: () => void = () => {}): Promise<SendMessageResult> {
+    // Native Stop validates the original mutation too. Never dispatch this old invalid
+    // payload, including a previously sealed resolution, or rewrite its diagnostics.
+    if (quarantinedPendingIntent(intent)) throw new Error("Open Pending messages to recover this saved request. It cannot be retried.");
     const draftKey = chatScopeKey(intent.server, intent.channel);
     const draftRevision = originalDraftRevision ?? draftRevisions[draftKey] ?? 0;
     let result: SendMessageResult;
@@ -20708,21 +20819,39 @@
       if (!pendingSubmissionCurrent(intent, session)) throw new Error("This pending request is being resolved or its session changed.");
       // Seal uncertainty before dispatch, even on retry. Native errors and token conflicts do
       // not prove absence: a previous invocation may already have committed this identity.
-      pendingSends[intent.token] = { ...pendingSends[intent.token], acceptance: "ambiguous" };
+      if (!intent.resolution) pendingSends[intent.token] = { ...pendingSends[intent.token], acceptance: "ambiguous" };
       // Also covers retry after an earlier continuity-write failure. No native authoring
       // request may outlive the only copy of its caller identity.
       if (!(await saveUiStateImmediately()) || !pendingSubmissionCurrent(intent, session)) {
         throw new Error("Save the pending message in this vault before retrying it.");
       }
       onDispatch();
-      result = (await invokeDebugged<SendMessageResult>("send_message", {
-        server: intent.server, channel: intent.channel, text: intent.text, replyTo: intent.replyTo,
-        retryToken: intent.token, expectedContext: intent.expectedContext,
-      })).value;
+      const common = { server: intent.server, channel: intent.channel,
+        retryToken: intent.token, expectedContext: intent.expectedContext };
+      // A saved negative decision always wins. Errors/restarts cannot turn Stop back
+      // into the positive operation, even when the original reply was never observed.
+      if (intent.resolution) {
+        result = (await invokeDebugged<SendMessageResult>("stop_durable_chat", {
+          server: intent.server, original: durableStopOriginal(intent),
+        })).value;
+      } else if (intent.kind === "edit") {
+        result = (await invokeDebugged<SendMessageResult>("edit_message", {
+          ...common, id: intent.messageId, target: intent.target,
+          text: intent.text,
+        })).value;
+      } else if (intent.kind === "delete") {
+        result = (await invokeDebugged<SendMessageResult>("delete_message", {
+          ...common, id: intent.messageId, target: intent.target,
+        })).value;
+      } else {
+        result = (await invokeDebugged<SendMessageResult>("send_message", {
+          ...common, text: intent.text, replyTo: intent.replyTo,
+        })).value;
+      }
     } catch (failure) {
       if (pendingSubmissionCurrent(intent, session)) {
         pendingSendErrors[intent.token] = errorText(failure);
-        const block = pendingSendRetryBlock(errorText(failure));
+        const block = intent.resolution ? undefined : pendingSendRetryBlock(errorText(failure));
         const current = pendingSends[intent.token];
         if (current && current.retryBlock !== block) {
           pendingSends[intent.token] = { ...current, retryBlock: block };
@@ -20731,22 +20860,61 @@
       }
       throw failure;
     }
-    if (pendingSubmissionCurrent(intent, session) && result.persistence.status === "superseded") {
+    if (!intent.resolution && result.disposition === "stopped-retired" && durableStopTerminal(result)
+      && pendingSubmissionCurrent(intent, session)) {
+      // A stale positive continuity copy can encounter a native fence saved by a
+      // different session. The synced negative terminal grants no new authoring.
+      // Seal negative custody before removal so lock/cleanup failure can only
+      // repeat Stop. Keep send/edit text for explicit recovery rather than lose it.
+      let resolving: PendingSend | undefined;
+      await savePendingDecision(intent.token, () => {
+        if (!samePendingIntent(pendingSends[intent.token], intent)) throw new Error("The retired request changed before its Stop decision was saved.");
+        resolving = { ...pendingSends[intent.token], acceptance: "ambiguous",
+          resolution: intent.kind === "delete" ? "cancel" : "recover" };
+        const next = { ...pendingSends, [intent.token]: resolving };
+        if (uiContinuityVersion < 2) uiContinuityVersion = 2;
+        return { json: JSON.stringify({ ...JSON.parse(continuityJson()), pendingSends: next }),
+          commit: () => { pendingSends = next; } };
+      });
+      if (resolving && pendingSubmissionCurrent(resolving, session)) intent = resolving;
+    }
+    if (!intent.resolution && pendingSubmissionCurrent(intent, session) && result.persistence.status === "superseded") {
       pendingSends[intent.token] = { ...pendingSends[intent.token], retryBlock: "context_changed" };
       await saveUiStateImmediately();
     } else if (pendingSubmissionCurrent(intent, session) && result.persistence.status !== "durable" && pendingSends[intent.token]?.retryBlock) {
       pendingSends[intent.token] = { ...pendingSends[intent.token], retryBlock: undefined };
       await saveUiStateImmediately();
     }
-    if (pendingSubmissionCurrent(intent, session) && result.accepted && result.persistence.status === "durable") {
+    if (intent.resolution && pendingSubmissionCurrent(intent, session)) {
+      if (durableStopTerminal(result)) {
+        // Native has saved an exact-token terminal. Only now may continuity release
+        // its slot; a failed cleanup write safely replays the same Stop after reload.
+        await savePendingDecision(intent.token, () => {
+          if (!samePendingIntent(pendingSends[intent.token], intent)) throw new Error("The pending Stop decision changed.");
+          // A retired-server fence establishes only future non-publication. Preserve
+          // historical ambiguity in any recovered copy, even for a legacy fresh marker.
+          const pending = result.disposition === "stopped-retired"
+            ? { ...pendingSends, [intent.token]: { ...pendingSends[intent.token], acceptance: "ambiguous" as const } }
+            : pendingSends;
+          const next = resolvePendingSend(pending, recoveredSendDrafts, intent.token, intent.resolution!);
+          return { json: JSON.stringify({ ...JSON.parse(continuityJson()), pendingSends: next.pending, recoveredSendDrafts: next.recovered }),
+            commit: () => { pendingSends = next.pending; recoveredSendDrafts = next.recovered; delete pendingSendErrors[intent.token]; } };
+        });
+        if (result.disposition === "stopped-retired" && !locked && session === uiStateLoadGeneration) toast(retiredStopWarning(intent), "warn", 12000);
+      }
+    } else if (pendingSubmissionCurrent(intent, session) && result.accepted && result.persistence.status === "durable" && result.disposition !== "stopped-retired"
+      && ((intent.kind !== "edit" && intent.kind !== "delete") || result.disposition === "committed")) {
       delete pendingSends[intent.token];
       delete pendingSendErrors[intent.token];
-      const key = chatScopeKey(intent.server, intent.channel);
-      const sameDraft = (draftRevisions[key] ?? 0) === draftRevision;
-      if (sameDraft && drafts[key]?.trim() === intent.text) delete drafts[key];
-      if (sameDraft && activeServerId === intent.server && cur?.active === intent.channel && draft.trim() === intent.text) {
-        draft = "";
-        replyingTo = "";
+      // Mutations never own the composer, even when their text happens to match it.
+      if (intent.kind !== "edit" && intent.kind !== "delete") {
+        const key = chatScopeKey(intent.server, intent.channel);
+        const sameDraft = (draftRevisions[key] ?? 0) === draftRevision;
+        if (sameDraft && drafts[key]?.trim() === intent.text) delete drafts[key];
+        if (sameDraft && activeServerId === intent.server && cur?.active === intent.channel && draft.trim() === intent.text) {
+          draft = "";
+          replyingTo = "";
+        }
       }
       // If cleanup cannot persist, replaying the still-sealed token is safe on next unlock.
       await saveUiStateImmediately();
@@ -20757,8 +20925,7 @@
   function pendingSubmissionCurrent(intent: PendingSend, session: number): boolean {
     const current = pendingSends[intent.token];
     return !locked && uiStateReady && !windowCloseInFlight && session === uiStateLoadGeneration && pendingSendResolution === null
-      && !!current && current.server === intent.server && current.channel === intent.channel
-      && current.text === intent.text && current.replyTo === intent.replyTo && current.expectedContext === intent.expectedContext;
+      && !!current && samePendingIntent(current, intent);
   }
 
   /** A resolution owns this queue entry until both the sealed write and local commit finish. */
@@ -20789,13 +20956,38 @@
   }
 
   async function resolvePendingMessage(token: string, action: PendingResolution): Promise<void> {
+    if (pendingSends[token] && quarantinedPendingIntent(pendingSends[token])) {
+      if (action !== "recover") throw new Error("Open Pending messages to recover this saved request. This request will stay paused.");
+      // This local custody move makes no claim about the original native outcome.
+      // Failure keeps BOTH shelves unchanged; the saved original is never truncated.
+      await savePendingDecision(token, () => {
+        const next = recoverQuarantinedIntent(pendingSends, recoveredSendDrafts, token);
+        return { json: JSON.stringify({ ...JSON.parse(continuityJson()), pendingSends: next.pending, recoveredSendDrafts: next.recovered }),
+          commit: () => { pendingSends = next.pending; recoveredSendDrafts = next.recovered; delete pendingSendErrors[token]; } };
+      });
+      return;
+    }
+    const session = uiStateLoadGeneration;
+    // First seal the irreversible choice with the complete original request. No native
+    // Stop may outlive this recovery identity, and no later retry may author positively.
     await savePendingDecision(token, () => {
-      const next = resolvePendingSend(pendingSends, recoveredSendDrafts, token, action);
+      const original = pendingSends[token];
+      if (!original) throw new Error("This pending message has already been resolved.");
+      if (original.resolution && original.resolution !== action) throw new Error("This request already has a saved Stop decision.");
+      // Check recovery capacity before committing Stop: retain the requested full copy.
+      resolvePendingSend(pendingSends, recoveredSendDrafts, token, action);
+      if (uiContinuityVersion < 2) uiContinuityVersion = 2;
+      const next = { ...pendingSends, [token]: { ...original, resolution: action } };
       return {
-        json: JSON.stringify({ ...JSON.parse(continuityJson()), pendingSends: next.pending, recoveredSendDrafts: next.recovered }),
-        commit: () => { pendingSends = next.pending; recoveredSendDrafts = next.recovered; delete pendingSendErrors[token]; },
+        json: JSON.stringify({ ...JSON.parse(continuityJson()), pendingSends: next }),
+        commit: () => { pendingSends = next; },
       };
     });
+    const intent = pendingSends[token];
+    if (!intent || !pendingSubmissionCurrent(intent, session)) throw new Error("This pending request is being resolved or its session changed. The saved Stop decision is retained.");
+    const result = await submitPendingSend(intent, session);
+    if (locked || session !== uiStateLoadGeneration) throw new Error("The UI session changed while Stop was awaiting confirmation. Reopen Pending messages after unlocking.");
+    if (pendingSends[token]) throw new Error(`Stop is still awaiting a durable confirmation (${result.persistence.status}). Its saved decision will retry.`);
   }
 
   async function removeRecoveredSendDraft(token: string): Promise<void> {
@@ -20811,7 +21003,7 @@
   async function useRecoveredSendDraft(token: string): Promise<void> {
     await savePendingDecision(token, () => {
       const item = recoveredSendDrafts[token], key = chanKey();
-      if (!item || !key || activeServerId === null || !cur?.active) throw new Error("Open a conversation before using this saved text.");
+      if (!item || item.kind === "delete" || !key || activeServerId === null || !cur?.active) throw new Error("Open a conversation before using this saved text.");
       if (draft.trim() && draft !== item.text) throw new Error("Keep or clear the current composer draft first.");
       if (item.text.length > MAX_DRAFT_CHARS) throw new Error("This text exceeds the composer draft limit. Copy the saved text instead; the full copy remains here.");
       const revision = draftRevisions[key] ?? 0;
@@ -20843,13 +21035,16 @@
       for (const intent of Object.values(pendingSends)) {
         if (locked || windowCloseInFlight || session !== uiStateLoadGeneration || pendingSendResolution !== null || (automatic && pendingManagerOpen)) return;
         if (!pendingSubmissionCurrent(intent, session)) continue;
-        if (automatic && intent.retryBlock) continue;
+        if (quarantinedPendingIntent(intent)) continue;
+        if (automatic && intent.retryBlock && !intent.resolution) continue;
         // A refusal now cannot establish absence of an older invocation whose reply was lost.
         const priorMayHaveGone = intent.acceptance !== "not_accepted";
         try {
           const result = await submitPendingSend(intent, session);
           if (locked || session !== uiStateLoadGeneration) return;
-          const warning = persistenceWarning(result, priorMayHaveGone);
+          const warning = intent.resolution
+            ? (pendingSends[intent.token] ? "Stop is awaiting a durable confirmation. Its saved decision will retry; an already saved change cannot be retracted." : null)
+            : persistenceWarning(result, priorMayHaveGone);
           if (warning) error = warning;
         } catch (failure) {
           if (locked || session !== uiStateLoadGeneration) return;
@@ -20887,6 +21082,8 @@
     try {
       intent = matchingPendingSend(pendingSends, server, channel, text, reply_to);
       if (intent) priorMayHaveGone = intent.acceptance !== "not_accepted";
+      validateSendPayload(server, channel, text, reply_to);
+      if (intent?.resolution) throw new Error("This exact request is awaiting Stop confirmation. Review Pending messages before sending it again.");
       if (!intent) {
         const expectedContext = await invoke<string>("durable_send_context", { server });
         if (!sessionCurrent() || pendingSendResolution !== null || pendingManagerOpen) return "refused";
@@ -20894,6 +21091,7 @@
           text, replyTo: reply_to, expectedContext, acceptance: "not_accepted" };
         pendingSends = addPendingSend(pendingSends, intent);
       }
+      if (pendingContinuityVersion(intent) === 3) uiContinuityVersion = 3;
       // Keep the composer intact until its retry identity and payload have crossed the vault
       // barrier. A lock at either await captures the draft or this resumable intent.
       clearTimeout(uiStateSaveTimer);
@@ -20944,7 +21142,7 @@
       const kept = intent ? pendingSends[intent.token] : undefined;
       const provenUnaccepted = sendRefusedUnaccepted(errorText(e));
       const outcome: SendOutcome = !intent ? "failed"
-        : !sessionCurrent() || (kept && !kept.retryBlock) ? "uncertain"
+        : !sessionCurrent() || (kept && !kept.retryBlock && !quarantinedPendingIntent(kept)) ? "uncertain"
         : priorMayHaveGone ? "uncertain"
         : mayHaveGone && !provenUnaccepted ? "uncertain"
         : "failed";
@@ -20967,37 +21165,85 @@
     }
   }
 
+  /** All production edit/delete callers share send custody, capacity and retry scheduling. */
+  async function queueMessageMutation(server: number, channel: string, messageId: string,
+    kind: "edit" | "delete", text: string, onSealed: () => void = () => {}): Promise<SendMessageResult> {
+    if (locked || !uiStateReady || windowCloseInFlight || sending || retryingPendingSends || pendingSendResolution !== null || pendingManagerOpen) {
+      throw new Error("Wait until the vault is ready before changing this message.");
+    }
+    // Reject before context lookup or queue insertion so an editor admission error
+    // cannot strand continuity behind a request that even native Stop will refuse.
+    validateMutationPayload(server, channel, messageId, kind, text);
+    const session = uiStateLoadGeneration;
+    const operation = ++pendingSendNonce;
+    sending = true;
+    try {
+      // Reuse ambiguous original custody before looking up a now-deleted target or a
+      // changed epoch. A failed reply never licenses a new token for the same request.
+      let intent = matchingPendingMutation(pendingSends, server, channel, messageId, undefined, kind, text);
+      if (intent?.resolution) throw new Error("This exact change is awaiting Stop confirmation. Review Pending messages before changing it again.");
+      if (!intent) {
+        const metadata = await invoke<{ context: string; target: string }>("durable_mutation_context", { server, channel, id: messageId });
+        if (locked || windowCloseInFlight || session !== uiStateLoadGeneration || pendingSendResolution !== null) throw new Error("The UI session changed before the message intent was saved.");
+        if (!/^[a-f0-9]{64}$/.test(metadata.context) || !/^[a-f0-9]{64}$/.test(metadata.target)) throw new Error("Invalid native mutation context.");
+        intent = { token: crypto.randomUUID().replaceAll("-", ""), server, channel, expectedContext: metadata.context,
+          kind, messageId, target: metadata.target, text, replyTo: "", acceptance: "not_accepted" } as PendingSend;
+        pendingSends = addPendingSend(pendingSends, intent);
+      }
+      // Sticky v2 must cross the sealed barrier before any mutation dispatch. Old native
+      // strict-v1 readers will reject this envelope instead of posting recovered edit text.
+      if (uiContinuityVersion < 2) uiContinuityVersion = 2;
+      clearTimeout(uiStateSaveTimer);
+      await queueUiStateSave(continuityJson);
+      if (!pendingSubmissionCurrent(intent, session)) throw new Error("The message intent was taken over before dispatch.");
+      onSealed();
+      const result = await submitPendingSend(intent, session);
+      if (!locked && session === uiStateLoadGeneration && activeServerId === server && cur?.active === channel) {
+        const warning = persistenceWarning(result, intent.acceptance !== "not_accepted");
+        if (warning) error = warning;
+        await refresh();
+      }
+      return result;
+    } finally {
+      if (pendingSendNonce === operation) sending = false;
+    }
+  }
+
   // Inline edit of one of your own messages.
   let editingId = $state("");
   let editDraft = $state("");
+  let editRevision = 0;
   function startEdit(m: Msg) {
+    editRevision += 1;
     editingId = m.id;
     editDraft = m.text;
   }
   function cancelEdit() {
+    editRevision += 1;
     editingId = "";
     editDraft = "";
   }
   async function saveEdit(m: Msg) {
     const text = editDraft.trim();
     const ch = cur?.active;
-    if (!text || activeServerId === null || !ch) {
-      cancelEdit();
-      return;
-    }
-    cancelEdit();
-    if (text === m.text) return; // no change
+    const server = activeServerId, messageId = m.id, revision = editRevision, session = uiStateLoadGeneration;
+    if (!text || server === null || !ch) return;
     try {
-      await invokeDebugged("edit_message", { server: activeServerId, channel: ch, msgId: m.id, text });
+      await queueMessageMutation(server, ch, messageId, "edit", text, () => {
+        // Admission owns this old editor only; later typing/opening survives any late reply.
+        if (session === uiStateLoadGeneration && activeServerId === server && cur?.active === ch
+          && editingId === messageId && editRevision === revision && editDraft.trim() === text) cancelEdit();
+      });
     } catch (e) {
       error = errorText(e);
     }
   }
   async function deleteMessage(m: Msg) {
     const ch = cur?.active;
-    if (activeServerId === null || !ch) return;
+    const server = activeServerId, messageId = m.id;
+    if (server === null || !ch) return;
     try {
-      await invokeDebugged("delete_message", { server: activeServerId, channel: ch, msgId: m.id });
+      await queueMessageMutation(server, ch, messageId, "delete", "");
     } catch (e) {
       error = errorText(e);
     }
@@ -22237,18 +22483,20 @@
     // the ordinary vault gate.
     let explicitlyLocked = false;
     try { explicitlyLocked = sessionStorage.getItem("catcoms.explicit-lock") === "1"; } catch { /* best effort */ }
-    const chooseGate = () => invoke<boolean>("vault_exists")
-      .then((v) => (vaultExists = v))
-      .catch(() => (vaultExists = true));
-    if (explicitlyLocked) chooseGate();
-    else invoke<Reloaded[] | null>("resume_session")
+    const resumeGeneration = uiStateLoadGeneration, resumeAttempt = unlockAttempt;
+    const resumeCurrent = () => resumeGeneration === uiStateLoadGeneration && resumeAttempt === unlockAttempt
+      && locked && !unlocking && !windowCloseInFlight;
+    const chooseGate = () => { if (resumeCurrent()) return refreshVaultGate(); };
+    if (explicitlyLocked) void chooseGate();
+    else if (resumeCurrent()) void invoke<Reloaded[] | null>("resume_session")
       .then((running) => {
+        if (!resumeCurrent()) return;
         if (running) {
           vaultExists = true;
           restoreReloaded(running);
         } else chooseGate();
       })
-      .catch(chooseGate);
+      .catch(() => { if (resumeCurrent()) void chooseGate(); });
     // Where the stream is, before listening to it. Read first on purpose: anything emitted between
     // this answer and the listeners going live is genuinely missed, and seeding is what makes that
     // a detected gap rather than an invisible one. Unseeded, the tracker takes whatever it sees
@@ -22275,13 +22523,22 @@
           return;
         }
         windowCloseInFlight = true;
+        // A close may later be refused and clear its flag. Startup work captured
+        // before that boundary must stay retired rather than become current again.
+        unlockAttempt += 1;
+        const releaseClose = () => {
+          windowCloseInFlight = false;
+          // Startup may have yielded to closing before its gate query completed.
+          // A surviving locked window needs its own fresh read after that barrier.
+          if (locked && vaultExists === null && !unlocking) void refreshVaultGate();
+        };
         // Cancel review ownership immediately, before Studio/native close can await or snapshot.
         // A refused close cannot revive an earlier batch even if the derived key returns to open.
         videoScopeEpoch++;
         videoReviews.rescope(videoEditorScope);
         if (!locked) {
           try { studioBeginClose?.(); await studioSave?.(); }
-          catch (e) { windowCloseInFlight = false; if (!locked) error = String(e); return; }
+          catch (e) { releaseClose(); if (!locked) error = String(e); return; }
         }
         pendingSendRetry.cancel();
         const closingGeneration = uiStateLoadGeneration;
@@ -22295,7 +22552,7 @@
         // afterSave commit. Keep that logical transaction alive, then take fresh state. A stalled
         // bridge defers this close attempt; it is not a reason to destroy the webview below.
         if (!(await drainUiStateForClose())) {
-          windowCloseInFlight = false;
+          releaseClose();
           if (!locked && closingGeneration === uiStateLoadGeneration) {
             error = "Vault state is still saving. The window remains open; wait and try closing again.";
           }
@@ -22305,7 +22562,7 @@
           // Ctrl+L can interrupt a decision and a replacement session has different authority.
           // Neither may reuse this close attempt. An already-locked fresh close below reuses the
           // lock coordinator's exact snapshot; it never reads the cleared UI state as a snapshot.
-          windowCloseInFlight = false;
+          releaseClose();
           return;
         }
         const finalContinuityJson = locked
@@ -22322,7 +22579,7 @@
           // A response means the window deliberately remained alive (continuity warning or native
           // destroy failure) and native locking is confirmed, so frontend teardown is now safe.
           lockScreen(true);
-          windowCloseInFlight = false;
+          releaseClose();
           if (result.history_error) {
             closeAfterContinuityError = false;
             error = `The vault is locked, but message history has not finished saving. ${result.history_error}`;
@@ -22344,7 +22601,7 @@
             try {
               await relaunch();
             } catch (restartError) {
-              windowCloseInFlight = false;
+              releaseClose();
               error = `Mewtual could not confirm the native vault lock or close this window. Treat this session as unlocked; save your work and try again. Lock error: ${errorText(e)}. Window error: ${errorText(destroyError)}. Restart error: ${errorText(restartError)}.`;
             }
           }
@@ -27980,6 +28237,7 @@
                     <textarea
                       bind:this={editMessageEl}
                       bind:value={editDraft}
+                      oninput={() => { editRevision += 1; }}
                       rows="2"
                       onselect={() => onTextEffectSelection("chat-edit")}
                       onkeydown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); saveEdit(m); } else if (e.key === "Escape") { e.preventDefault(); cancelEdit(); } }}
@@ -28120,7 +28378,8 @@
                 <summary>{Object.keys(pendingSends).length} message(s) awaiting save confirmation</summary>
                 <p>Pending messages keep their original identity. Temporary save failures retry automatically while unlocked.</p>
                 {#each Object.values(pendingSends).filter((item) => item.server === activeServerId) as item (item.token)}
-                  <p>{item.text}</p>
+                  <p>{pendingActionLabel(item)}{quarantinedPendingIntent(item) ? " · Saved request needs recovery" : item.resolution ? " · Stop awaiting confirmation" : ""}</p>
+                  {#if item.kind !== "delete"}<p>{item.text}</p>{/if}
                   {#if item.retryBlock}<p>Automatic retry paused. Review this message before retrying.</p>{/if}
                   {#if pendingSendErrors[item.token]}
                     <p>{pendingSendErrors[item.token]}</p>

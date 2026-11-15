@@ -2,6 +2,12 @@
 export interface NativeVaultLockOutcome {
   /** Present only when native locking completed but the last UI snapshot could not be saved. */
   continuity_error: string | null;
+  /**
+   * Canonical decimal u64 from the actual registered native lock barrier. Real
+   * lock_session responses always supply it; optional only for legacy non-auth mocks.
+   * Active authentication must refuse an absent/malformed value, never guess one.
+   */
+  generation?: string;
 }
 
 /** Result returned only when native close deliberately leaves the window alive or cannot destroy it. */
@@ -67,7 +73,14 @@ export class NativeVaultLockCoordinator {
     }
   }
 
-  /** A successful unlock starts a new UI session and therefore permits one new lock request. */
+  /**
+   * Retire a fulfilled, validated lock under the current UI unlock attempt before
+   * registering its fresh null-snapshot barrier; retire that fresh result immediately
+   * before authentication dispatch (no intervening await). Never call after rejected
+   * settlement, malformed proof or a stale reply, or to discard a pending newer lock.
+   * Native retains valid failed-continuity bytes across a fulfilled warning and retries
+   * them before opening IPC; this does not promise retention of malformed JSON.
+   */
   reset(): void {
     this.inFlight = null;
     this.capturedSnapshot = undefined;

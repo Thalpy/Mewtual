@@ -1,5 +1,52 @@
 # Mewtual; Architecture
 
+## Inactive exact moderation approval (29 October; validation pending)
+
+The separate typed chat ledger now distinguishes ordinary historical authority from one exact
+positive Delete approval. Cross-author Delete needs ordinary SELF_DELETE, existing causal coverage
+and an opaque action/Create/realm/full-signer/basis/grant-bound `VerifiedDeleteApproval`.
+Reusable DELETE_ANY is sufficient only for the original Create signer. A missing exact approval
+stays pending and can arrive before or after ordinary authority. One constant-size normalized
+approval slot is covered by each existing retained-entry quota; no unknown-action cache exists.
+Snapshots retain only their original signed action bytes and require approval resupply after restore.
+No live producer, archive, native dispatch or activation is added; production R6 remains open.
+
+
+## Separate typed chat action core (29 October; inactive)
+
+`catcoms-replication::chat` retains a content-addressed semantic DAG separately from
+legacy Automerge history. Full signer keys and exact Create IDs bind actions; causal
+edit alternatives, pending dependencies and authorized tombstones survive additive
+merge. The realm is deterministic from group/channel/profile. Snapshot restore needs
+externally verified, action-bound historical witnesses and never trusts stored status.
+There is no live producer/dispatch, authority archive, migration or encryption adapter
+yet; legacy R6 remains open. [Scope and evidence](communication-recovery/CHAT-TYPED-CORE.md).
+
+## Durable local chat transaction boundary (29 October; validation in progress)
+
+An absent-Actor Stop instead saves a globally bounded vault-sealed numeric-server/exact-token retry fence and returns
+`stopped-retired`, with historical acceptance unknown. The same constant orphan serializer guards
+pre-spawn restore processing through final native registration. Before any autonomous publication,
+a restored matching receipt is negatively stopped in a real covering server save; unrelated graphs
+receive no old tombstone. Native positive final leases check the same complete fence binding under
+mounted-store and registry custody. Retired fence files survive per-server Leave cleanup.
+
+
+The desktop's post/edit/delete requests share private native preparations and the Actor Ready/lease
+barrier. The synchronous transaction constructs a candidate by adding its exact saved local signed
+operation to the latest received graph, saves one encrypted server snapshot containing history,
+retry receipt and publication obligation, then installs it without an intervening await. No-op edits
+and exact-token Stop use explicit metadata effects rather than fake change hashes.
+
+Storage distinguishes failures before replacement from a renamed candidate whose parent sync failed.
+The latter hides and retains the whole possible terminal, including no-op and Stop. Ordinary server
+snapshots refuse while that history is hidden. The persistence worker asks the same Actor for a repair
+Ready before snapshot capture; with its original per-id serializer plus current mounted-store and
+exact-incarnation lease it can save the latest receive union while UI is locked. This negative
+repair grants no fresh role, membership, authoring or publication authority. Callback unwind restores
+the old live graph and conservatively retains the complete possible terminal.
+
+
 ## Owned microphone device setting (27 October; inactive)
 
 The capture helper materializes admitted device IDs in bounded numeric UTF16 chunks after

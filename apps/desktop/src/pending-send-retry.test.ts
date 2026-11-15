@@ -3,7 +3,7 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 import ts from "typescript";
 import { PendingSendRetry, type RetryClock } from "./pending-send-retry.ts";
-import { MAX_PENDING_SEND_BYTES, pendingSendRetryBlock, sanitizePendingSends, sendRefusedUnaccepted, type PendingSend } from "./pending-sends.ts";
+import { MAX_PENDING_SEND_BYTES, samePendingIntent, pendingSendRetryBlock, quarantinedPendingIntent, sanitizePendingSends, sendRefusedUnaccepted, type PendingSend } from "./pending-sends.ts";
 import { persistenceWarning } from "./message-send.ts";
 
 class FakeClock implements RetryClock {
@@ -111,11 +111,11 @@ const intent: PendingSend = { token: "1".repeat(32), server: 3, channel: "9",
   expectedContext: "a".repeat(64), text: "retain exactly this message", replyTo: "parent" };
 
 /** Actual App scheduling effect + submit/retry functions. Only I/O and Svelte reactivity differ. */
-function appFixture(clock: FakeClock, failure: string | null = null) {
+function appFixture(clock: FakeClock, failure: string | null = null, initial: PendingSend = intent) {
   class ScheduledRetry extends PendingSendRetry {
     constructor(run: (session: number) => Promise<void>) { super(run, clock); }
   }
-  const app = new Function("PendingSendRetry", "pendingSendRetryBlock", "persistenceWarning", "sanitizePendingSends", "intent", "initialFailure", `
+  const app = new Function("PendingSendRetry", "samePendingIntent", "pendingSendRetryBlock", "quarantinedPendingIntent", "persistenceWarning", "sanitizePendingSends", "intent", "initialFailure", `
     let locked = false, uiStateReady = true, uiStateLoadGeneration = 1, sending = false;
     let pendingSends = { [intent.token]: structuredClone(intent) }, pendingSendErrors = {}, retryingPendingSends = false;
     let recoveredSendDrafts = {}, pendingSendResolution = null, pendingManagerOpen = false;
@@ -146,11 +146,11 @@ function appFixture(clock: FakeClock, failure: string | null = null) {
       loseAcknowledgement() { lostAcknowledgement = true; },
       setError(value) { pendingSendErrors[intent.token] = value; },
       lock() { pendingSendRetry.cancel(); locked = true; uiStateReady = false; uiStateLoadGeneration++; pendingSends = {}; pendingSendErrors = {}; },
-      unlock() { locked = false; uiStateReady = true; uiStateLoadGeneration++; pendingSends = sanitizePendingSends(writes.at(-1)); },
+      unlock() { locked = false; uiStateReady = true; uiStateLoadGeneration++; pendingSends = sanitizePendingSends(writes.at(-1), intent.kind === "edit" || intent.kind === "delete" ? 2 : 1); },
       unhydrated() { uiStateReady = false; },
       state() { return { pendingSends, submissions, writes, authored: authored.size, error, draft }; }
     };
-  `)(ScheduledRetry, pendingSendRetryBlock, persistenceWarning, sanitizePendingSends, intent, failure);
+  `)(ScheduledRetry, samePendingIntent, pendingSendRetryBlock, quarantinedPendingIntent, persistenceWarning, sanitizePendingSends, initial, failure);
   clock.afterMicrotask = () => app.sync();
   app.sync();
   return app;
@@ -225,6 +225,19 @@ test("actual scheduling neither invokes nor writes while locked or continuity is
     assert.equal(app.state().submissions.length, 0);
     assert.equal(app.state().writes.length, 0);
     assert.equal(clock.timers.size, 0);
+  }
+});
+
+test("actual scheduler does not spin or dispatch quarantined edits even with a saved Stop decision", async () => {
+  for (const resolution of [undefined, "cancel", "recover"] as const) {
+    const clock = new FakeClock();
+    const app = appFixture(clock, null, { ...intent, kind: "edit", messageId: "message", target: "b".repeat(64),
+      text: "😀".repeat(16_385), replyTo: "", ...(resolution ? { resolution } : {}) });
+    await clock.advance(120_000);
+    assert.equal(clock.timers.size, 0);
+    await app.retry();
+    assert.equal(app.state().submissions.length, 0); assert.equal(app.state().writes.length, 0);
+    assert.equal(app.state().pendingSends[intent.token].resolution, resolution);
   }
 });
 

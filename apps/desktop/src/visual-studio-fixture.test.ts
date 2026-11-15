@@ -22,10 +22,10 @@ test("visual repair status has no invented fault authority and all repair/Closin
   for (const command of ["studio_fault_repair", "studio_closing_overlay_save_begin", "studio_closing_overlay_save"]) assert.throws(() => response(command, { object: t.object }), /does not implement/);
 });
 
-test("Studio opt-in remaps channels without changing the default chat fixture or its readiness contract", () => {
+test("Studio and chat fixtures share native channel IDs without changing displayed content", () => {
   const base = visualFixtureResponse("resume_session") as { channel: string; channels: { id: string }[] }[];
   const studio = visualFixtureResponse("resume_session", {}, true) as { channel: string; channels: { id: string; name: string }[] }[];
-  assert.equal(base[0].channel, "general"); assert.deepEqual(base[0].channels.map(c => c.id), ["general", "design", "notes"]);
+  assert.equal(base[0].channel, "1"); assert.deepEqual(base[0].channels.map(c => c.id), ["1", "2", "3"]);
   assert.equal(studio[0].channel, "1"); assert.deepEqual(studio[0].channels.map(c => c.id), ["1", "2", "3"]); assert.equal(studio[0].channels[0].name, "general");
   assert.deepEqual(response("get_channels"), studio[0].channels);
   assert.deepEqual(response("get_messages"), visualFixtureResponse("get_messages", { server: 1, channel: "general" }));
