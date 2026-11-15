@@ -92,12 +92,19 @@ use zeroize::Zeroizing;
 type DirectoryData<'a> = (&'a Path, &'a File, catcoms_storage::kept::SessionId);
 type PinData<'a> = (&'a File, catcoms_storage::kept::SessionId, &'a [u8]);
 
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "linux")))]
 std::thread_local! {
     // The real full source proof has completed. A replacement here must still be caught
     // by the following real ID3 proof, not an observation sampled before source IO.
     static AFTER_ORIGINAL_SOURCE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
+}
+
+/// Negative disk-race seam after the ACTUAL original source proof. It does not
+/// create a Source/Current, and cannot fire in an earlier metadata-only opener.
+#[cfg(all(test, any(windows, target_os = "linux")))]
+pub(in crate::store) fn set_after_original_source_hook_for_test(hook: Box<dyn FnOnce()>) {
+    AFTER_ORIGINAL_SOURCE.with(|slot| *slot.borrow_mut() = Some(hook));
 }
 
 /// Checked in the actual physical read/capture invoice before reservation/allocation.
@@ -205,7 +212,7 @@ fn require_pin_bytes(path: &Path, pin: PinData<'_>) -> Result<(), AppError> {
 impl<'guard, 'writer> V2TextCurrentGroupGuard<'guard, 'writer> {
     #[cfg(all(test, windows))]
     pub(in crate::store) fn after_original_source_for_test(&self, hook: Box<dyn FnOnce()>) {
-        AFTER_ORIGINAL_SOURCE.with(|slot| *slot.borrow_mut() = Some(hook));
+        set_after_original_source_hook_for_test(hook);
     }
 
     pub(in crate::store) fn store(&self) -> &ServerStore {
@@ -305,13 +312,27 @@ impl<'guard, 'writer> V2TextCurrentGroupGuard<'guard, 'writer> {
         self.source()
             .source()
             .validate_under_archive_root(self.store(), self.archive_root())?;
-        #[cfg(all(test, windows))]
+        #[cfg(all(test, any(windows, target_os = "linux")))]
         if let Some(hook) = AFTER_ORIGINAL_SOURCE.with(|slot| slot.borrow_mut().take()) {
             hook();
         }
         self.store()
             .validate_mounted_current_layout_under_archive_root(self.archive_root())?;
-        // Only final held/named objects and cached negatives after the full S0/ID3 waits.
+        // This discriminator is the constructor-selected steady native family,
+        // never a descriptor parsed from disk or temporary GovernanceOpening.
+        // Standard Current3 and ordinary native3 retain their separate grammar.
+        if self
+            .store()
+            .current_layout_policy
+            .as_ref()
+            .and_then(|policy| policy.native_registry.as_ref())
+            .is_some_and(|handler| handler.is_governed())
+        {
+            self.store()
+                .validate_mounted_governance_layout_under_archive_root(self.archive_root())?;
+        }
+        // Only final held/named objects and cached negatives after S0/ID3/ID4
+        // waits. In particular do not validate4 via an outer Root-locking API.
         require_pin_name(&pin_path, self.pin)?;
         let (target, target_file, target_id) = self.target_directory_data();
         crate::store::persistence::v2_genesis_activation::require_directory_name(

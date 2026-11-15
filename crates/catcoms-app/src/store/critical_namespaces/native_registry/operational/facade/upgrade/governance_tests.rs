@@ -365,6 +365,28 @@ fn native_governance_cached_negative_follows_actual_mounted_owner_without_locks(
 }
 
 #[test]
+fn native_governance_proof_borrows_held_root_and_refuses_missing_mounted_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xcb04);
+    let mut plan = original(dir.path(), &mut rng).prepare_governance().unwrap();
+    plan.retry(&mut rng).unwrap();
+    let store = actual(&plan);
+    let root = store.archive_bootstrap_root.lock().unwrap();
+    let root = root.as_ref().unwrap();
+    store
+        .validate_mounted_governance_layout_under_archive_root(root)
+        .unwrap();
+    let mounted = store.governance_layout.lock().unwrap().take().unwrap();
+    assert!(store
+        .validate_mounted_governance_layout_under_archive_root(root)
+        .is_err());
+    *store.governance_layout.lock().unwrap() = Some(mounted);
+    store
+        .validate_mounted_governance_layout_under_archive_root(root)
+        .unwrap();
+}
+
+#[test]
 fn native_governance_steady_parser_rejects_original_catalog_without_namespace4() {
     let dir = tempfile::tempdir().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(0xcc01);

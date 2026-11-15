@@ -42,6 +42,26 @@ These library DATA interfaces do not themselves authenticate that Root paid.
 
 ## Required production integration
 
+The concrete native `GovernedLifecycle` Current group guard now also verifies
+the ORIGINAL installed governance4 marker/owner after its existing Source and
+Current3 proofs. Its inner validator borrows the already-held Root; it does not
+relock it. Root/governance metadata serialization keeps marker/read/AEAD scratch
+under the original separate mounted payment. Final pin/directory and Source
+negatives follow those reads. Ordinary Current3/native3 handlers retain their
+existing path; temporary opening handlers cannot select the new check.
+
+Three real NativeRequired founder/member tests passed: healthy admission while
+Root is held, missing/equal-replaced marker refusal, and late same-inode marker
+mutation refusal after authentication. Faults are installed only after the
+actual original Source proof; their hooks are asserted, so an earlier opener
+refusal cannot pass vacuously. The same restored original file/request succeeds.
+The affected native member cohort passed20 cases; missing mounted custody and
+same-owner restoration passed, and all three standard Current families passed
+their existing control. Formatting, ambient/raw-fs gates and native compilation
+passed. Root strict lint still reports the same556 inherited diagnostics.
+Complete workspace execution remains pending for this continuation.
+This additional physical negative supplies no Source4 or Add admission.
+
 The Root Host must retain its ONE existing member lane/verifier/domain/views.
 Before freezing the Add parent it must wait for the exact existing unsigned,
 raw, lent or unresolved member request to finish through normal authenticated

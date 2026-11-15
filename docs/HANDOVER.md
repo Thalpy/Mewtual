@@ -1,5 +1,16 @@
 # Mewtual; Handover
 
+The `chat-v2-governed-current-admission` continuation adds the original mounted4
+physical proof to the actual constructor-selected governed-native Current group
+guard, borrowing its held Root to preserve lock order. All3 new genuine native
+founder/member tests passed, including late missing/replaced/in-place marker
+faults and same-owner recovery. The member20, missing-metadata1 and standard
+three-family control1 cohorts passed, as did format/static/native compile gates.
+Root strict lint retains the same556 inherited diagnostics; complete suites are
+pending. Read-only review has no findings. No Add journal, Source4, production
+SDK installation or activation is supplied by this extra namespace negative.
+[Contract and remaining work](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
 The `chat-v2-founder-governed-runtime` continuation adds a library-only SAME-node
 private Add owner, exact Admission/Header data and a governed ordinary-member
 branch. All13 focused real-MLS tests and the affected123-case cohort passed,

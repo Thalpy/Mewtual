@@ -1,6 +1,8 @@
 //! Original physical namespace3 declaration and opaque historical DATA reader. Neither the
 //! descriptor nor this wrapper grants a Current scope, group writer or runnable SDK/server.
 use super::*;
+#[cfg(all(test, any(windows, target_os = "linux")))]
+pub(in crate::store) use text::set_after_original_source_hook_for_test;
 pub(in crate::store) use text::{
     AdmittedV2TextCompletedWorkspaceRead, BoundV2TextCompletedCreatePredecessor,
     PreparedV2TextCompletedWorkspaceReadCapture, V2TextCompletedWorkspaceSourceSlot,

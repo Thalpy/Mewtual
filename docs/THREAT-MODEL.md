@@ -1,5 +1,13 @@
 # Threat model; client integrity & enforcement boundaries
 
+Governed-native Current admission now revalidates its actual mounted4 owner,
+retained marker and final same-file bytes under the already-held Root. A
+missing marker, equal-byte replacement or post-authentication in-place mutation
+cannot pass that additional check. Only the constructor-selected steady native
+family enters it; parsed4 or temporary opening state cannot create authority.
+This remains a namespace negative, not Source4 or a governing save receipt.
+[Boundary and evidence](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
 The library-only governed founder owner preserves immutable genesis provenance
 separately from actual installed SDK evidence. One pending Add owns both native
 cuts bound to the same original source and keeps real Ends after all private

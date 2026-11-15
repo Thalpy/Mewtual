@@ -7,6 +7,7 @@ use catcoms_net::MeshService;
 use catcoms_replication::chat::Body;
 use rand_chacha::ChaCha20Rng;
 mod admission;
+mod governance;
 mod history;
 
 type Owner = NativeTextSources<MeshService, ChaCha20Rng>;

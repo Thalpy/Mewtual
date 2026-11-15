@@ -1,5 +1,11 @@
 # Mewtual; Interfaces & Hooks Schema
 
+The constructor-selected governed-native Current group guard rechecks actual
+mounted4 via `validate_mounted_governance_layout_under_archive_root`, borrowing
+its SAME held Root before final pin/directory/Source negatives. This preserves
+the original marker identity/content and lock order without creating Source4
+or Add authority. [Contract and evidence](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
 The library-only `PreparedV2FounderGovernanceNode` keeps one whole original warm
 node and private Add candidate. Both native cuts bind one retained source;
 actual End custody follows the candidate through cleanup. There is no public
