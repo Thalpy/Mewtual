@@ -9,7 +9,9 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 mod boot;
 mod boot_lifetime;
+mod founding;
 pub(super) mod retirement;
+mod sending;
 pub(super) mod sources;
 #[cfg(test)]
 mod tests;
@@ -38,6 +40,14 @@ pub(super) struct Registry {
     source_work_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
     #[cfg(test)]
     source_work_waiting: tokio::sync::Notify,
+    #[cfg(test)]
+    found_publication_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
+    #[cfg(test)]
+    send_final_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
+    #[cfg(test)]
+    send_io_edge: StdMutex<Option<Arc<tests::BlockingIoBarrier>>>,
+    #[cfg(test)]
+    source_retirement_waiting: tokio::sync::Notify,
     #[cfg(test)]
     reply_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
     #[cfg(test)]
@@ -91,6 +101,14 @@ impl Default for Registry {
             source_work_edge: StdMutex::new(None),
             #[cfg(test)]
             source_work_waiting: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            found_publication_edge: StdMutex::new(None),
+            #[cfg(test)]
+            send_final_edge: StdMutex::new(None),
+            #[cfg(test)]
+            send_io_edge: StdMutex::new(None),
+            #[cfg(test)]
+            source_retirement_waiting: tokio::sync::Notify::new(),
             #[cfg(test)]
             reply_edge: StdMutex::new(None),
             #[cfg(test)]
@@ -202,6 +220,12 @@ fn router<R: tauri::Runtime>(
         }
         if enabled && matches!(invoke.message.command(), "get_ui_state" | "save_ui_state") {
             return ui_state::route(invoke, &spawn);
+        }
+        if enabled && invoke.message.command() == "found_server" {
+            return founding::route(invoke, &spawn);
+        }
+        if enabled && invoke.message.command() == "send_message" {
+            return sending::route(invoke, &spawn);
         }
         if !enabled || invoke.message.command() != "unlock" {
             return fallback(invoke);

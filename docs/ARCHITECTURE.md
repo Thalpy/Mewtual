@@ -1,5 +1,12 @@
 # Mewtual; Architecture
 
+Native warm text now has real tagged server rows and plain local-message
+dispatch behind the disabled switch. Native final admission holds actual UI
+custody through the file job; whole-close drains without Legacy's held guards.
+Two native rows actually saved in focused tests. Own-history/frontend, joined
+sources, transport/projection/cold restore and full acceptance remain unfinished.
+[Current scope and pending checks](communication-recovery/CHAT-V2-NATIVE-DISPATCH.md).
+
 Native row integration now has an original negative Source-counter fence. The
 paid runtime selection can close that counter through SC atomics without
 borrowing its book, runtime or issuer. This neither completes Leave/Retired nor

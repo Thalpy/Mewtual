@@ -1,5 +1,16 @@
 # Threat model; client integrity & enforcement boundaries
 
+The disabled native sender uses original row/selection/incarnation/mount and full
+account cancellation, independently of renderer correlation IDs. Its actual owned
+UI guard survives local IO and lost observers. Counted final preparation never
+awaits native guards; refusal releases native custody before Root restoration.
+Native whole-close publishes irreversible global closure before fallible probes,
+retains fenced rows across retries, and drains without Legacy UI/table guards.
+Plaintext and payment share one whole blocking-work object, including unrun and
+unwind paths. This supplies local-save enforcement only: transport, complete group
+projection, cold operational restore and Chat V2 activation remain unfinished.
+[Current boundary and evidence](communication-recovery/CHAT-V2-NATIVE-DISPATCH.md).
+
 Native row closure must fence the original primitive counter, independently of
 watch cancellation. Its opaque negative close handle retains that counter and
 the original trusted payer, without an issuer/Host backlink; the actual Root

@@ -1,5 +1,13 @@
 # Mewtual; Interfaces & Hooks Schema
 
+The disabled native founder route takes a stable 32-byte request ID; plain send
+takes a stable 32-byte retry token plus exact context/channel/body. These differ
+from Legacy's retry grammar and cannot silently fall through to its actor.
+Actual native row/mount/generation/full-account checks authorize final local
+save; the returned context is only correlation DATA. Whole-close keeps native
+rows until original Source/SDK/physical drainage completes outside native guards.
+[Contract and pending validation](communication-recovery/CHAT-V2-NATIVE-DISPATCH.md).
+
 `NativeChatSourceOwner::close_handle` issues only the original negative counter
 fence. Root's paid runtime selection exposes `close_original_cached`; it performs
 no IO, allocation, wait or notification and confers no positive authority.

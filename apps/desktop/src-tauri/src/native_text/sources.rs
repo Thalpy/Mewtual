@@ -55,6 +55,98 @@ pub(super) struct Controller {
     pub(super) boot: Arc<boot_lifetime::Control>,
 }
 impl Controller {
+    /// Same guard-safe finite capture as founding, selected only by the actual
+    /// native row. Caller checks its incarnation while holding the table guard.
+    pub(super) fn capture_member(
+        &self,
+        store: &Option<MountedVault>,
+        ui: &mut Option<catcoms_app::store::NativeTextUiObservation>,
+        row: &server_table::NativeSelection,
+        budget: &mut Option<
+            catcoms_app::store::NativeTextMemberBudget<catcoms_net::MeshService, OsCryptoRng>,
+        >,
+        output: &mut Option<
+            catcoms_app::store::NativeTextMemberPreparation<catcoms_net::MeshService, OsCryptoRng>,
+        >,
+    ) -> Result<(), &'static str> {
+        let record = self
+            .record
+            .try_lock()
+            .map_err(|_| "Chat is busy. Retry with the same message.")?;
+        if record.phase != Phase::Live
+            || self.boot.is_closed_cached()
+            || output.is_some()
+            || budget.is_none()
+        {
+            return Err("The chat session changed. Retry with the same message.");
+        }
+        record.require_pair(store)?;
+        let vault = store
+            .as_ref()
+            .and_then(MountedVault::as_text_v2)
+            .ok_or("The original native vault is unavailable.")?;
+        let sources = record
+            .sources
+            .as_ref()
+            .ok_or("The original chat owner is unavailable.")?;
+        let command = vault
+            .bind_native_source_command(ui)
+            .map_err(|_| "The chat session changed. Retry with the same message.")?;
+        *output = Some(sources.capture_member(row, command, budget.take().unwrap()));
+        Ok(())
+    }
+    /// Capture one finite founder job from the SAME original mounted pair.
+    /// All paid inputs and owning output live in caller's outer slots; neither
+    /// refusal nor controller-guard destruction disposes those resources here.
+    pub(super) fn capture_creation(
+        &self,
+        store: &Option<MountedVault>,
+        ui: &mut Option<catcoms_app::store::NativeTextUiObservation>,
+        request: &mut Option<catcoms_app::store::NativeTextCreationRequest>,
+        inputs: &mut Option<catcoms_app::store::NativeTextCreationInputs<OsCryptoRng>>,
+        budget: &mut Option<
+            catcoms_app::store::NativeTextCreationBudget<catcoms_net::MeshService, OsCryptoRng>,
+        >,
+        output: &mut Option<
+            catcoms_app::store::NativeTextCreationPreparation<
+                catcoms_net::MeshService,
+                OsCryptoRng,
+            >,
+        >,
+    ) -> Result<(), &'static str> {
+        let record = self
+            .record
+            .try_lock()
+            .map_err(|_| "Chat setup is busy. Try again.")?;
+        if record.phase != Phase::Live
+            || self.boot.is_closed_cached()
+            || output.is_some()
+            || request.is_none()
+            || inputs.is_none()
+            || budget.is_none()
+        {
+            return Err("Chat setup was interrupted. Retry with the same request.");
+        }
+        record.require_pair(store)?;
+        let vault = store
+            .as_ref()
+            .and_then(MountedVault::as_text_v2)
+            .ok_or("The original native vault is unavailable.")?;
+        let sources = record
+            .sources
+            .as_ref()
+            .ok_or("The original chat owner is unavailable.")?;
+        let command = vault
+            .bind_native_source_command(ui)
+            .map_err(|_| "Chat setup was interrupted. Retry with the same request.")?;
+        *output = Some(sources.capture_creation(
+            command,
+            request.take().unwrap(),
+            inputs.take().unwrap(),
+            budget.take().unwrap(),
+        ));
+        Ok(())
+    }
     #[cfg(test)]
     pub(super) fn retains_original(&self, vault: &MountedVault) -> bool {
         let record = self.record.lock().unwrap();
@@ -90,10 +182,11 @@ impl Controller {
         .expect("fixed owning founder policy");
         let policy = NativeTextSourcePolicy::new(
             CriticalCatalogReadPool::new(
-                NativeTextSourcePolicy::required_capacity(64).expect("fixed source capacity"),
+                NativeTextSourcePolicy::required_capacity(server_table::NATIVE_ROWS)
+                    .expect("fixed source capacity"),
             )
             .expect("fixed source pool"),
-            64,
+            server_table::NATIVE_ROWS,
             founder,
         )
         .expect("fixed source policy");
@@ -255,8 +348,46 @@ impl Record {
 /// Irreversible native close, called only after continuity permits destruction.
 /// No worker owns AppState, Sources or a facade. Lost finite work is retried
 /// from the SAME canonical collection, never from FAILED + idle key counters.
+/// Native-only whole-close composition. Called after the real irreversible
+/// close prelude. Keep row owners in their canonical table across every
+/// incomplete Source/SDK/work close, without holding UI or table guards while
+/// draining. This is vault shutdown, never a durable per-conversation Leave.
+pub(crate) async fn close_server_rows(
+    state: &AppState,
+    clock: &dyn catcoms_rt::Clock,
+) -> Result<(), String> {
+    {
+        let mut table = state.servers.lock().await;
+        if table.legacy_iter().next().is_some() {
+            return Err("Legacy servers still require their shutdown barrier.".into());
+        }
+        // Publish the global irreversible fence BEFORE per-row closure and
+        // before any fallible controller lookup. Otherwise a contended close
+        // could leave closed rows behind an apparently reopenable bootstrap.
+        state.native_text.sources.boot.close();
+        table
+            .fence_native_for_shutdown()
+            .expect("pure-native table validated under the same guard");
+    }
+    close(state, clock).await?;
+    let mut removed = None;
+    {
+        let mut table = state.servers.lock().await;
+        table
+            .extract_native_for_shutdown(&mut removed)
+            .map_err(str::to_owned)?;
+    }
+    // The actual Root owners have now drained, and every native guard has
+    // left. Only here may watch cancellation/payment/weak tails be destroyed.
+    drop(removed);
+    Ok(())
+}
+
 pub(crate) async fn close(state: &AppState, clock: &dyn catcoms_rt::Clock) -> Result<(), String> {
     let controller = &state.native_text.sources;
+    // All callers of this function have admitted irreversible whole-close.
+    // Even the first fallible cached lookup must leave that fence published.
+    controller.boot.close();
     {
         let store = state.store.lock().await;
         if controller.is_disposed(&store)? {
@@ -299,6 +430,8 @@ pub(crate) async fn close(state: &AppState, clock: &dyn catcoms_rt::Clock) -> Re
             match result.map_err(|_| "Chat shutdown could not be verified. Try closing again.")? {
                 NativeTextSourceRetirementStatus::Drained => break,
                 NativeTextSourceRetirementStatus::Pending => {
+                    #[cfg(test)]
+                    state.native_text.source_retirement_waiting.notify_one();
                     clock.sleep(Duration::from_millis(20)).await
                 }
             }
@@ -366,3 +499,53 @@ const _: () = assert!(
         + 512
         <= 4096
 );
+
+#[cfg(test)]
+mod close_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn native_close_controller_contention_still_publishes_irreversible_fence() {
+        let state = Arc::new(AppState::default());
+        let controller = &state.native_text.sources;
+        let held_state = state.clone();
+        let (entered, ready) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let worker = std::thread::spawn(move || {
+            let _guard = held_state.native_text.sources.record.lock().unwrap();
+            entered.send(()).unwrap();
+            // Sender destruction also releases this real lock on test unwind.
+            let _ = held.recv();
+        });
+        ready.recv().unwrap();
+        assert!(close_server_rows(&state, &SystemClock).await.is_err());
+        assert!(controller.boot.is_closed_cached());
+        assert!(
+            controller.boot.enter().is_err(),
+            "a refused close must not reopen bootstrap admission"
+        );
+        assert!(state.servers.lock().await.is_empty());
+        drop(release);
+        worker.join().unwrap();
+        close_server_rows(&state, &SystemClock).await.unwrap();
+        close_server_rows(&state, &SystemClock).await.unwrap();
+        assert!(controller.is_disposed(&*state.store.lock().await).unwrap());
+    }
+
+    #[tokio::test]
+    async fn native_close_refuses_legacy_before_any_global_or_row_fence() {
+        let state = AppState::default();
+        let (entry, task, drain) = leaving::tests::running(13);
+        let (account, signal) = watch::channel(false);
+        let scope = entry.files.scope(RequestCancellation::new(signal, None));
+        state.servers.lock().await.install_legacy_fixture(1, entry);
+        assert!(close_server_rows(&state, &SystemClock).await.is_err());
+        assert!(!state.native_text.sources.boot.is_closed_cached());
+        assert!(!scope.is_cancelled());
+        assert_eq!(state.servers.lock().await.legacy(&1).unwrap().instance, 13);
+        drop(state);
+        drop(account);
+        task.abort();
+        drain.abort();
+    }
+}

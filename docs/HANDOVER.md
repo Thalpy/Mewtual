@@ -1,19 +1,27 @@
 # Mewtual; Handover
 
 Active continuation: `chat-v2-native-text-dispatch` in its isolated worktree,
-based on PR #124. The per-row original counter fence is written and statically
-reviewed clear; RT74, selector5, actual loan1 and all 79 affected Source cases
-passed, as did strict RT Clippy. Full continuation gates remain pending. An
-unwired native table draft exists but has no validation or caller acceptance.
-No native backend/factory/frontend integration or
-usable Leave/Retired transition exists yet. Native boot's one member-context
-policy also needs a decision before two-row saves can be accepted. Chat V2 is
-off and incomplete.
-The shutdown survey found a required ordering constraint: Legacy close retains
-both UI commit and the full server-map guard while draining Sources. Native
-final preparation retains counted physical work and must never await that
-commit; use fail-fast owned acquisition. Native table shutdown must not
-reacquire its already-held table guard or drop removed owners under guards.
+based on PR #124. The actual tagged table, native founding and plain local send
+are wired behind the OFF switch. Four initial founder cases passed in 29.85 seconds,
+including actual saves in both funded native contexts, retry/conflict, old
+unpolled invocation, lost reply and whole-close/publication ordering. Table4,
+close-refusal2, retained-output drainage1 and stopped-incarnation1 also passed.
+All 62 focused native-text cases passed in 229.12 seconds, including the later
+closure-payment repair and native send/close/IO races. The final probe-only
+atomic-observation change still awaits execution. Legacy-box cleanup compiled
+under strict native Clippy (all targets/features, 3m40s) and native check (1m17s).
+Frontend 3,446 passed (124.90 seconds), Svelte 0/0, build 47.53 seconds, both audits and
+static gates passed. Complete current Root/native suites and startup remain
+pending. No frontend integration, own-history route,
+usable Leave/Retired, joined source, transport, projection or cold operational
+restore is complete. Chat V2 stays off and incomplete.
+Native close now bypasses Legacy's UI/table-owning freeze barrier, publishes
+irreversible bootstrap closure before fallible probes, and retains fenced rows
+until actual Source/SDK/physical drainage. Final save preparation uses TRY-only
+persist/UI/Store/table admission, with genuinely checked owned native custody
+through IO and payment behind runtime restoration. Read-only reviews found one
+MEDIUM closure-capture lifetime gap; the concrete whole-input work wrapper and
+fee-tailed mapping repair are statically clear. New probes remain pending.
 [Current scope](communication-recovery/CHAT-V2-NATIVE-DISPATCH.md).
 
 `chat-v2-native-text-operations` continues in the controller worktree on a new
@@ -24,7 +32,8 @@ gates are pending; the strengthened exact receipt regression passed separately
 (one case, 8.94 seconds). Both dependency audits, formatting and static self-checks
 passed. Native check (1m39s) and strict native Clippy (3m30s) passed; Root strict
 Clippy retains 564 existing errors. Runtime commit 502b565e is pushed in draft
-PR #124, with full CI run 43658076181 queued. The validation follow-up changes
+PR #124, with full CI run 43658076181: native Linux/Windows passed; Root on both
+platforms is still running. The validation follow-up changes
 documentation only; Chat V2 remains off and incomplete.
 A real Entry payment-tail regression failed before its fix
 and passed afterward. Root member saving now reaches the retained NativeRequired
@@ -976,7 +985,7 @@ and actual-diff review reports no remaining source findings; scoped lock drift
 was removed and native locked metadata passes.
 
 Windows20 storage cases,98 renderer/wiki/infobox cases, full3438 frontend tests,
-Svelte0/0, build and actual browser flows pass after the dependency updates.
+Svelte 0/0, build and actual browser flows pass after the dependency updates.
 Native compilation, Linux syscall/large-xattr execution and complete current-
 source Rust validation remain pending. Npm audit improves10 ->3LOW; both Cargo
 audits improve10 ->9 Hickory findings. No new ignore/waiver or clean-audit claim.
@@ -6502,7 +6511,7 @@ affine writer; production native action handlers and Row installation do not yet
 Slot tests distinguish never-entered command loss from entered uncertainty, preserve actual
 IO collection independently of a negative result, prevent a finished old token corrupting
 a retried writer, and fence a close racing writer reservation. Positive history survives
-actual input/join teardown. All624 focused Root voice-v2 tests pass (16.39s), including actual
+actual input/join teardown. All 624 focused Root voice-v2 tests pass (16.39s), including actual
 LOW/Open/HIGH publication, profile races and cached-mode rejection. The new actual recorded
 Actor/collection-waker blocked-TCP case passed before the final timeout/accounting revision
 (9.56s; exact current rerun pending): unpolled drop, stopped Actor,
@@ -8282,7 +8291,7 @@ substitution, independent byte copies and malformed metadata. Svelte reports zer
 Before the Result increment,252 focused native handoff tests and both actual TCP confirmation
 tests pass. Input/admission/cleanup run as authenticated frames. Scoping the synchronous
 decoder before later serialization keeps the complete measured Control peak12,252B/12,288B.
-All2,597 frontend tests, Svelte0/0 and production build pass. Native Result changes below have
+All2,597 frontend tests, Svelte 0/0 and production build pass. Native Result changes below have
 not yet compiled; their enlarged graph must pass the same unchanged bounds. A fresh complete
 Root suite is running separately on identical Root inputs; no second heavy Cargo is started.
 
@@ -8357,7 +8366,7 @@ active Keep/private-download recovery after B restart, outside this handoff diff
 an isolated serial rerun2/2 in25.39s; this does not erase the full-run failures or establish their
 cause. File recovery implementation remains the other agent's area. Native sign-off stays open
 pending reconciliation under combined load; no timeout or assertion was relaxed. Native check
-and strict all-target/all-feature Clippy pass. Full frontend2,577, current Svelte0/0 and production
+and strict all-target/all-feature Clippy pass. Full frontend2,577, current Svelte 0/0 and production
 build pass; both formatting and ambient gates pass. Current Root sources/manifests remain
 unchanged from the previously validated3,310-test checkpoint; a fresh complete Root run remains
 pending. No startup/flow rerun is required for this inactive, non-setup/non-chat increment.
@@ -10299,7 +10308,7 @@ Tauri continues to own native rebuilds. The regression exercises the actual conf
 watcher predicate; OS file-notification delivery and the historical F-drive activity are not
 established by that test. The test fixture opens no HMR WebSocket listener.
 
-Integration validation passes2,067 frontend cases,427 native library +5 ACL cases, Svelte0/0,
+Integration validation passes2,067 frontend cases,427 native library +5 ACL cases, Svelte 0/0,
 production frontend build, native check/build/startup, ten standard browser flows and the separate
 private-download, retained-copy and Gate7 Studio/playback/close flows. The root Rust sources are
 identical at the original UI merge to the 3,033-pass checkpoint. The subsequent native transaction

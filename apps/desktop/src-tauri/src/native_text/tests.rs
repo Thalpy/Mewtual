@@ -118,6 +118,289 @@ fn success(reply: tauri::ipc::InvokeResponse) {
 fn refused(reply: tauri::ipc::InvokeResponse) {
     assert!(matches!(reply, tauri::ipc::InvokeResponse::Err(_)));
 }
+
+fn found_request(window: &tauri::WebviewWindow<MockRuntime>, id: u8, name: &str) -> Reply {
+    let mut request = request(window, "1", SECRET);
+    request.cmd = "found_server".into();
+    request.body = InvokeBody::Json(serde_json::json!({
+        "requestId":hex::encode([id;32]), "displayName":"Founder", "serverName":name,
+        "advertise":"", "relay":"", "rendezvous":"", "isDm":false,
+    }));
+    let (tx, rx) = oneshot::channel();
+    let view: &tauri::Webview<MockRuntime> = window.as_ref();
+    view.clone().on_message(
+        request,
+        Box::new(move |_, _, result, _, _| {
+            let _ = tx.send(result);
+        }),
+    );
+    rx
+}
+
+fn found_value(reply: tauri::ipc::InvokeResponse) -> serde_json::Value {
+    match reply {
+        tauri::ipc::InvokeResponse::Ok(body) => body.deserialize().unwrap(),
+        tauri::ipc::InvokeResponse::Err(error) => panic!("native founding refused: {error:?}"),
+    }
+}
+
+fn native_send_request(
+    window: &tauri::WebviewWindow<MockRuntime>,
+    found: &serde_json::Value,
+    token: u8,
+    text: &str,
+) -> Reply {
+    let mut request = request(window, "1", SECRET);
+    request.cmd = "send_message".into();
+    request.body = InvokeBody::Json(
+        serde_json::json!({"server":found["server"],"channel":found["channel"],
+        "expectedContext":found["context"],"retryToken":hex::encode([token;32]),"text":text,"replyTo":null}),
+    );
+    let (tx, rx) = oneshot::channel();
+    let view: &tauri::Webview<MockRuntime> = window.as_ref();
+    view.clone().on_message(
+        request,
+        Box::new(move |_, _, result, _, _| {
+            let _ = tx.send(result);
+        }),
+    );
+    rx
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_found_router_installs_two_original_rows_retries_and_releases_real_files() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("vault");
+    let (app, main, queue) = app(path.clone(), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let first_reply = found_request(&main, 1, "First");
+    run(&queue).await;
+    let first = found_value(first_reply.await.unwrap());
+    assert_eq!(first["backend"], "text-v2");
+    let id = first["server"].as_u64().unwrap();
+    let state = app.state::<AppState>();
+    let (instance, selection) = {
+        let table = state.servers.lock().await;
+        assert_eq!(table.len(), 1);
+        assert!(
+            table.legacy(&id).is_none(),
+            "no dummy actor backs native text"
+        );
+        let row = table.native(&id).unwrap().data();
+        (row.instance, row.selection.clone())
+    };
+    let retry = found_request(&main, 1, "First");
+    run(&queue).await;
+    assert_eq!(found_value(retry.await.unwrap()), first);
+    {
+        let table = state.servers.lock().await;
+        let row = table.native(&id).unwrap().data();
+        assert_eq!(row.instance, instance);
+        assert!(row.selection.same_original(&selection));
+    }
+    let conflict = found_request(&main, 1, "Changed");
+    run(&queue).await;
+    refused(conflict.await.unwrap());
+    let second = found_request(&main, 2, "Second");
+    run(&queue).await;
+    let second = found_value(second.await.unwrap());
+    assert_ne!(second["server"], first["server"]);
+    assert_eq!(state.servers.lock().await.native_iter().count(), 2);
+    // Both rows must really sign/save using the production funded two-context
+    // mount. Installing two UI rows alone establishes no such capacity.
+    let post = native_send_request(&main, &first, 9, "First native message");
+    run(&queue).await;
+    let post = found_value(post.await.unwrap());
+    assert_eq!(post["disposition"], "saved-local");
+    assert_eq!(post["ordinal"], 0);
+    let retry = native_send_request(&main, &first, 9, "First native message");
+    run(&queue).await;
+    assert_eq!(found_value(retry.await.unwrap()), post);
+    let changed = native_send_request(&main, &first, 9, "Changed text");
+    run(&queue).await;
+    refused(changed.await.unwrap());
+    let other = native_send_request(&main, &second, 9, "Other native context");
+    run(&queue).await;
+    let other = found_value(other.await.unwrap());
+    assert_eq!(other["disposition"], "saved-local");
+    assert_eq!(other["ordinal"], 0);
+    assert_ne!(other["message_id"], post["message_id"]);
+    let exhausted = found_request(&main, 3, "Third");
+    run(&queue).await;
+    refused(exhausted.await.unwrap());
+    assert_eq!(state.servers.lock().await.len(), 2);
+    let close = register_vault_close(&state).await.unwrap();
+    sources::close_server_rows(&state, &SystemClock)
+        .await
+        .unwrap();
+    assert!(state.store.lock().await.is_none());
+    assert!(state.servers.lock().await.is_empty());
+    // A retained paid selector cannot retain the SDK or actual Physical owner.
+    catcoms_storage::acquire_vault_session(&path).unwrap();
+    drop(close);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_found_final_publication_cannot_cross_actual_whole_close() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("vault");
+    let (app, main, queue) = app(path.clone(), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let edge = AdmissionBarrier::new();
+    let state = app.state::<AppState>();
+    *state.native_text.found_publication_edge.lock().unwrap() = Some(edge.clone());
+    let reply = found_request(&main, 1, "Paused");
+    let task = queue.lock().unwrap().pop().unwrap();
+    let task = tokio::spawn(task);
+    timeout(Duration::from_secs(60), edge.arrived.notified())
+        .await
+        .unwrap();
+    assert!(state.servers.lock().await.is_empty());
+    let close = register_vault_close(&state).await.unwrap();
+    timeout(
+        Duration::from_secs(60),
+        sources::close_server_rows(&state, &SystemClock),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    catcoms_storage::acquire_vault_session(&path).unwrap();
+    edge.release.notify_one();
+    task.await.unwrap();
+    refused(reply.await.unwrap());
+    assert!(state.servers.lock().await.is_empty());
+    drop(close);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_found_old_unpolled_invoke_and_lost_reply_keep_exact_original_custody() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("vault");
+    let (app, main, queue) = app(path.clone(), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let state = app.state::<AppState>();
+    let before = index(&path);
+    let old = found_request(&main, 1, "Original");
+    assert_eq!(queue.lock().unwrap().len(), 1);
+    lock_session_outcome_inner(&state, None).await;
+    run(&queue).await;
+    refused(old.await.unwrap());
+    assert_eq!(
+        index(&path),
+        before,
+        "old unpolled founding must perform no birth"
+    );
+    assert!(state.servers.lock().await.is_empty());
+    unlock_current(&app, &main, &queue).await;
+
+    let observer = found_request(&main, 1, "Original");
+    drop(observer); // native job still owns all work despite the lost reply
+    run(&queue).await;
+    let (id, instance, original) = {
+        let table = state.servers.lock().await;
+        assert_eq!(table.native_iter().count(), 1);
+        let (id, row) = table.native_iter().next().unwrap();
+        (*id, row.data().instance, row.data().selection.clone())
+    };
+    let retry = found_request(&main, 1, "Original");
+    run(&queue).await;
+    assert_eq!(found_value(retry.await.unwrap())["server"], id);
+    let table = state.servers.lock().await;
+    assert_eq!(table.len(), 1);
+    let row = table.native(&id).unwrap().data();
+    assert_eq!(row.instance, instance);
+    assert!(row.selection.same_original(&original));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_send_counted_final_preparation_retires_without_waiting_for_close_commit() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("vault");
+    let (app, main, queue) = app(path.clone(), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let found = found_request(&main, 1, "Original");
+    run(&queue).await;
+    let found = found_value(found.await.unwrap());
+    let state = app.state::<AppState>();
+    let edge = AdmissionBarrier::new();
+    *state.native_text.send_final_edge.lock().unwrap() = Some(edge.clone());
+    let reply = native_send_request(&main, &found, 4, "Before close");
+    let send = tokio::spawn(queue.lock().unwrap().pop().unwrap());
+    timeout(Duration::from_secs(60), edge.arrived.notified())
+        .await
+        .unwrap();
+    let prelude = register_vault_close(&state).await.unwrap();
+    let handle = app.handle().clone();
+    let closing = tokio::spawn(async move {
+        sources::close_server_rows(&handle.state::<AppState>(), &SystemClock).await
+    });
+    // This signal follows an actual Root try_retire -> Pending, not merely a
+    // task scheduling pause. The prepared Source work still belongs to send.
+    timeout(
+        Duration::from_secs(60),
+        state.native_text.source_retirement_waiting.notified(),
+    )
+    .await
+    .unwrap();
+    assert!(!closing.is_finished());
+    assert!(state.ui_session_commit.try_lock().is_ok());
+    assert!(state.servers.try_lock().is_ok());
+    assert_eq!(
+        state.servers.lock().await.len(),
+        1,
+        "retain the same fenced row during incomplete drainage"
+    );
+    edge.release.notify_one();
+    send.await.unwrap();
+    refused(reply.await.unwrap());
+    timeout(Duration::from_secs(60), closing)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(state.servers.lock().await.is_empty());
+    catcoms_storage::acquire_vault_session(&path).unwrap();
+    drop(prelude);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_send_lost_observer_keeps_actual_admitted_io_ahead_of_lock_completion() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let found = found_request(&main, 1, "Original");
+    run(&queue).await;
+    let found = found_value(found.await.unwrap());
+    let state = app.state::<AppState>();
+    let (edge, release) = BlockingIoBarrier::new();
+    *state.native_text.send_io_edge.lock().unwrap() = Some(edge.clone());
+    let observer = native_send_request(&main, &found, 5, "Saved despite lost reply");
+    let send = tokio::spawn(queue.lock().unwrap().pop().unwrap());
+    timeout(Duration::from_secs(60), edge.arrived.notified())
+        .await
+        .unwrap();
+    drop(observer);
+    // The real admitted file job owns both guards before any IO starts. The
+    // pause supplies no authority; releasing it executes actual encrypted IO.
+    assert!(state.ui_session_commit.try_lock().is_err());
+    let locking = lock_session_outcome_inner(&state, None);
+    tokio::pin!(locking);
+    pending_once(locking.as_mut()).await;
+    assert!(state.session_lock_requested.load(Ordering::SeqCst));
+    drop(release);
+    send.await.unwrap();
+    locking.await;
+    *state.native_text.send_io_edge.lock().unwrap() = None;
+    unlock_current(&app, &main, &queue).await;
+    let retry = native_send_request(&main, &found, 5, "Saved despite lost reply");
+    run(&queue).await;
+    let saved = found_value(retry.await.unwrap());
+    assert_eq!(saved["disposition"], "saved-local");
+    assert_eq!(saved["ordinal"], 0);
+    let again = native_send_request(&main, &found, 5, "Saved despite lost reply");
+    run(&queue).await;
+    assert_eq!(found_value(again.await.unwrap()), saved);
+}
 async fn assert_locked(state: &AppState) {
     assert!(require_unlocked_session(state).await.is_err());
     assert!(!*state.session_resumable.lock().await);
@@ -251,10 +534,9 @@ async fn native_text_sources_ui_output_and_unlock_waiting_prelude_do_not_deadloc
         "real unlock holds mount while awaiting prelude"
     );
     let handle = app.handle().clone();
-    let closing =
-        tokio::spawn(
-            async move { sources::close(&handle.state::<AppState>(), &SystemClock).await },
-        );
+    let closing = tokio::spawn(async move {
+        sources::close_server_rows(&handle.state::<AppState>(), &SystemClock).await
+    });
     timeout(
         Duration::from_secs(60),
         state.native_text.source_work_waiting.notified(),
@@ -264,6 +546,14 @@ async fn native_text_sources_ui_output_and_unlock_waiting_prelude_do_not_deadloc
     assert!(
         !closing.is_finished(),
         "the actual original UiWork keeps close Pending"
+    );
+    assert!(
+        state.ui_session_commit.try_lock().is_ok(),
+        "native work drain must not hold UI commit"
+    );
+    assert!(
+        state.servers.try_lock().is_ok(),
+        "native work drain must not hold the server table"
     );
     assert!(matches!(
         catcoms_storage::acquire_vault_session(&path),

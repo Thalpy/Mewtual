@@ -45,7 +45,7 @@ fn current_policy() -> Result<V2CurrentLayoutPolicy, catcoms_app::AppError> {
         256,
         256 * 1024 * 1024,
         1 << 20,
-        1,
+        super::super::server_table::NATIVE_ROWS,
         1024 * 1024 * 1024,
     )?)
 }

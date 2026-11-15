@@ -119,7 +119,16 @@ async fn check_preview_conversion(expire_after_conversion: bool) {
         } else {
             assert_eq!(result.unwrap()["awaitingTenureReceipt"], true);
         }
-        assert_eq!(state.servers.lock().await[&fixture::SERVER].instance, 1);
+        assert_eq!(
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&fixture::SERVER)
+                .expect("Legacy fixture row")
+                .instance,
+            1
+        );
         f.shutdown().await;
     }
 }
