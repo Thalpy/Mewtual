@@ -713,6 +713,7 @@ version = "0.0.0"
 dependencies = [
  "blake3",
  "catcoms-crypto",
+ "catcoms-rt",
  "catcoms-wire",
  "openmls",
  "openmls_basic_credential",

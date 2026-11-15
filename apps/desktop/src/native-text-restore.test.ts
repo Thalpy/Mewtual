@@ -17,7 +17,7 @@ test("actual restore sequences first native read before retry and preserves empt
  for(const rows of [[row],[]]){
   const gate=deferred();const calls:string[]=[];
   const f=new Function("decodeRestoredChatSession","createStudioExit","gate","calls",`
-    let locked=true,windowCloseInFlight=false,servers=[],chatBackend=null,uiStateLoadGeneration=0,startTab="join";
+    let locked=true,windowCloseInFlight=false,servers=[],chatBackend=null,uiStateLoadGeneration=0,startTab="join",uiSessionRetired=false;
     let studioNavigation=0,view="chat",studioHasWork=null,studioClaimNavigation=null,studioSave=null;
     ${actualExit}
     const callMappingSession={claimController(){calls.push("legacy-call");}},toast=()=>{},sessionStorage={removeItem(){}};

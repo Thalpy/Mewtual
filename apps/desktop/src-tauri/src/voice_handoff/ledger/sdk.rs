@@ -190,6 +190,46 @@ impl ResolvedRow {
                 .released(),
         )
     }
+    /// Test-only original-state observation. No request can construct a new
+    /// SDK obligation through this getter; fixtures call it outside writers.
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn sdk_test_preparation_state(&self) -> Option<(bool, bool)> {
+        let state = self.row.state.lock().unwrap_or_else(|e| e.into_inner());
+        let storage = state
+            .plan()?
+            .transition
+            .as_ref()?
+            .key
+            .as_ref()?
+            .sdp
+            .as_ref()?;
+        Some((storage.sdk_preparing, storage.sdk.is_some()))
+    }
+
+    /// Prove the actual recovery path refuses BEFORE inspecting a deliberately
+    /// invalid request when its original row is held by maintenance. Then the
+    /// caller observes that SAME bad request after releasing this guard.
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn sdk_test_bad_recovery_with_parent_locked(
+        &self,
+        session: &Arc<SessionIdentity>,
+        original: &Request,
+        invalid: &Request,
+    ) {
+        let state = self.row.state.lock().unwrap_or_else(|e| e.into_inner());
+        let original_storage = storage(self, &state, session, original).unwrap();
+        let before = (
+            original_storage.sdk_preparing,
+            original_storage.sdk.is_some(),
+        );
+        let result = self.recover_sdk(session, invalid);
+        let storage = storage(self, &state, session, original).unwrap();
+        let after = (storage.sdk_preparing, storage.sdk.is_some());
+        drop(state);
+        assert!(matches!(result, Err(VoiceError::Capacity)));
+        assert_eq!(before, (false, false));
+        assert_eq!(after, before);
+    }
     /// Recover one immutable original obligation before current-authority checks. An End,
     /// expired old Claim, or collected physical position cannot manufacture its Release.
     pub(in crate::voice_handoff) fn recover_sdk(

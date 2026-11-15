@@ -154,7 +154,27 @@ impl ServerStore {
             .pending_join_policy
             .as_ref()
             .and_then(|policy| policy.execution.as_ref());
+        if let Some(handler) = self
+            .current_layout_policy
+            .as_ref()
+            .and_then(|p| p.native_registry.as_ref())
+            .filter(|h| h.is_governed())
+        {
+            if self.governance_layout_policy.as_ref().is_none_or(|p|p.family != super::governance_namespace_codec::GovernanceCatalogFamily::NativeLifecycle) {
+                return Err(refused());
+            }
+            return handler.parse_layout(plain, &domain, execution.is_some());
+        }
         if let Some(policy) = self.governance_layout_policy.as_ref() {
+            if policy.family
+                == super::governance_namespace_codec::GovernanceCatalogFamily::NativeLifecycle
+            {
+                return super::pending_join_codec::parse_native_governance_family(
+                    plain,
+                    &domain,
+                    execution.is_some(),
+                );
+            }
             return super::pending_join_codec::parse_governance_layout(plain, &domain, policy);
         }
         if let Some(policy) = self.current_layout_policy.as_ref() {

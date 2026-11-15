@@ -1,5 +1,65 @@
 # Mewtual; Interfaces & Hooks Schema
 
+The stage-lifetime continuation distinguishes actual admitted SDK work from
+closed cached DATA. `finish_admitted_add_data_native` needs the original real
+AddSdk End; closed retirement proves Cell completion, permanently blocks SDK
+continuation and returns cut metadata/Ends for outside-writer disposal.
+Fresh-stage cuts require exact source/purpose, never-entered/current admission
+and retained eligibility. Only an actual returned local refusal before a
+primitive may permit reauthorization; unknown native/key entry stays terminal.
+Root still must supply new saved-intent/current authorization and its original
+Runtime cleanup before counter waiting. No production caller is added here.
+[Contract](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
+The library governed Add request now freezes authenticated Invite/JoinRequest
+and bounded exact package bytes before native SDK entry. First execution uses
+the original retained Clock; exact retries reuse that admitted time and the
+same candidate. Routing plaintext binds original L0/policy and the signed
+request, and seals under the real merged candidate's epoch key with the same
+retained RNG. This supplies no Root invitation/nonce authorization, covering
+save, joined Source or production installation.
+[Exact framing and ownership](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
+The constructor-selected governed-native Current group guard rechecks actual
+mounted4 via `validate_mounted_governance_layout_under_archive_root`, borrowing
+its SAME held Root before final pin/directory/Source negatives. This preserves
+the original marker identity/content and lock order without creating Source4
+or Add authority. [Contract and evidence](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
+The library-only `PreparedV2FounderGovernanceNode` keeps one whole original warm
+node and private Add candidate. All three native cuts bind one retained source;
+actual End custody follows the candidate through cleanup. There is no public
+production install, Root covering receipt or native dispatcher. Existing
+genesis checks remain strict. [Contract and integration requirements](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
+Its Welcome signature uses separate purpose slot7. The spec/preimage derive
+only from that pending request, actual Cell and materialized Add. Core's pure
+unsigned encoder grants no signing permission. Raw64 is cached at the bounded
+native primitive; materialization/retries use it without another key call.
+Root covering intent/final response release remain unimplemented.
+
+`NativeTextVaultUpgrade::prepare_governance` consumes only its private,
+unexposed Selected3 owner. The resulting `NativeTextGovernanceUpgrade` retains
+the original UI/source/native close owners through declaration4 and its final
+consuming proof; an arbitrary empty facade cannot enter this path.
+`NativeTextGovernedStorage::open` explicitly selects combined4/5/native3 cold
+metadata handling and exposes only a row count. It supplies no signer, Source,
+SDK, native-command admission or cold operational facade. Ordinary native3
+and standard governance openers retain their stricter, separate grammars.
+[Recovery and ownership contract](communication-recovery/CHAT-V2-GOVERNED-NATIVE-STORAGE.md).
+
+`PreparedTextCurrentAdd::prepare_install_into` keeps exclusive original receiver
+and candidate-slot loans after full SDK preflight. `install` only swaps whole
+halves and returns opaque retired custody; caller must dispose outside writers.
+This library API grants no Source, native or covering-save authority.
+[Contract](communication-recovery/CHAT-V2-ADD-OWNERSHIP.md).
+
+Core now has independent V2 invite/request/Welcome binding DATA codecs under
+validation. They separate wire-KP/reference/credential and public-plan/sealed-
+transfer domains, and bind Welcome to the actual signed Add issuer. They create
+no pin, prefix selection, SDK outcome, native or Source authority and have no
+registered consumer. [Contract and pending evidence](communication-recovery/CHAT-V2-JOIN-BINDINGS.md).
+
 Native unlock/resume has a closed `text-v2` envelope even for zero rows; Legacy
 keeps its existing array. Native save receipts now encode u64 ordinals as
 decimal strings. The App seals critical4 native intents before dispatch and
@@ -9015,3 +9075,13 @@ authority or reconstructs an opaque hot parent. `StaleTip` grants no retry IO.
 See [the exact contract](communication-recovery/CHAT-V2-SELECTED-HISTORY-PROOFS.md).
 Root durable record/node coupling, cold replay, historical custody and
 contradiction restoration remain unimplemented prerequisites for eviction.
+
+## Native V2 invite preparation (15 November)
+
+`NativeTextMemberJob::prepare_invite_intent(token,lifetime,negative)` retains
+the unsigned original on the SAME warm NativeRequired Host, using the original
+transport reservation, existing member verifier and actual Current4 proof.
+Its `(preimage hash, expiry)` return is DATA, not an invite or Saved receipt.
+Sync's separate `JoinInvite` key tail requires Root covering/current admission
+and is not called by this production preparation. The actual journal and
+publication remain unfinished. [Contract](communication-recovery/CHAT-V2-INVITE-ISSUER.md).

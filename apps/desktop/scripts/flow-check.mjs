@@ -25,6 +25,7 @@ import { keptFlowExpression } from "./kept-flow.mjs";
 import { privateDownloadFlowExpression } from "./private-download-flow.mjs";
 import { chatAdminLedgerFlowExpression } from "./chat-admin-ledger-flow.mjs";
 import { nativeTextFlowExpression } from "./native-text-flow.mjs";
+import { nativeTextRemountFlowExpression } from "./native-text-remount-flow.mjs";
 
 const PORT = Number(process.env.FLOW_PORT ?? 5177);
 const URL_UNDER_TEST = `http://localhost:${PORT}/?fixture=chat`;
@@ -669,6 +670,11 @@ try {
       failed |= !assertEqual("Native Text local save and entry: " + mode, result, mode === "empty"
         ? { localEntry:true, created:true, ownHistory:true, noLegacy:true, noUnavailableControls:true }
         : { localScope:true, saved:true, sealedFirst:true, composerRetired:true, noLegacy:true, noUnavailableControls:true, noOverflow:true });
+      if(mode==="1"){
+        const remount=await cdp.eval(nativeTextRemountFlowExpression);
+        failed |= !assertEqual("Native Text remount preserves the new journal and warm session",remount,
+          {warmSession:true,oldCleanupDidNotSeal:true,journalUnchanged:true,newDraftRetained:true,newIntentRetained:true});
+      }
       const capture = await cdp.send("Page.captureScreenshot", { format: "png" });
       if (capture.result?.data) writeFileSync(new URL(`../../../target/chat-v2-native-${mode}.png`, import.meta.url), Buffer.from(capture.result.data, "base64"));
     }
