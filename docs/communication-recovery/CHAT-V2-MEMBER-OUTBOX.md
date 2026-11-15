@@ -1,14 +1,24 @@
 # Chat V2 ordinary-member durable outbox
 
-Storage integration checkpoint, 11 November. The storage engine in
-`crates/catcoms-app/src/store/persistence/v2_member_outbox/` passes all 31 focused
-tests: 27 storage cases, including both pressure corrections, and four genuine Core
-plan-to-signed-original constructor cases. The production signed-input constructor
-now exists and is consumed by the founder-as-member host. **Production activation
-is incomplete**: the real member-source save admission, parent-directory provisioning
-and transport wiring remain open. Only cfg(test) fixtures can currently construct
-the parent directory and save admission. The module's explicit dead-code allowance
-must be removed when the real wiring is complete. HANDOVER records the broader gates.
+Storage integration checkpoint, 15 November. The storage engine in
+`crates/catcoms-app/src/store/persistence/v2_member_outbox/` passed all 38 focused
+cases, including six new bounded-history regressions. Namespace5 provisions the
+real parent directory and the founder-as-member host supplies production save
+admission. The native-aware retained-runtime save/read adapters are under
+validation. **Production activation is incomplete**: the checked native command
+factory, joined-member source, transport and UI integration remain open. The
+existing dead-code allowance still covers the unused publication half and must
+be removed when its real wiring is complete. HANDOVER records broader gates.
+
+The bounded history reader includes settled entries that publication debt omits.
+Each page contains at most eight exact originals, with an independent 5 MiB
+logical payment retained after its plaintext. A fixed exclusive end ordinal
+keeps a multi-page read finite while new appends arrive. Dispositions are local
+observations from each page's head; they do not prove peer receipt. Missing or
+corrupt storage fails the whole read. The engine itself performs no recovery or
+write. Original-host preparation can initialize an authenticated empty context
+or recover an existing admitted transaction without signing or clearing unsaved
+custody. [Native boundary](CHAT-V2-NATIVE-TEXT-OPERATIONS.md).
 
 This implements the "Independently durable outbox" section of
 [CHAT-V2-ORDINARY-MEMBER-PATH.md](CHAT-V2-ORDINARY-MEMBER-PATH.md). It is independent of

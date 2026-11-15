@@ -8,7 +8,7 @@ const CLOSE_SAVE_DEADLINE: Duration = Duration::from_secs(10);
 pub(super) struct ShutdownBarrier {
     frozen: Vec<FrozenServer>,
     _session: OwnedMutexGuard<()>,
-    _registry: OwnedMutexGuard<HashMap<u64, ServerEntry>>,
+    _registry: OwnedMutexGuard<ServerTable>,
 }
 
 impl ShutdownBarrier {
@@ -40,7 +40,7 @@ fn lease(
     if !state.session_lock_requested.load(Ordering::SeqCst)
         || state.ui_session_generation.load(Ordering::SeqCst) != generation
         || registry
-            .get(&id)
+            .legacy(&id)
             .is_none_or(|entry| entry.instance != instance)
     {
         return Err("The vault or group changed while closing; retry closing.".into());
@@ -61,7 +61,7 @@ pub(super) async fn freeze_servers(state: &AppState) -> Result<ShutdownBarrier, 
             .servers
             .lock()
             .await
-            .iter()
+            .legacy_iter()
             .map(|(id, entry)| (*id, entry.instance, entry.actor.clone()))
             .collect();
         actors.sort_unstable_by_key(|(id, _, _)| *id);
@@ -88,7 +88,7 @@ pub(super) async fn freeze_servers(state: &AppState) -> Result<ShutdownBarrier, 
             || registry.len() != actors.len()
             || actors.iter().any(|(id, instance, _)| {
                 registry
-                    .get(id)
+                    .legacy(id)
                     .is_none_or(|entry| entry.instance != *instance)
             })
         {

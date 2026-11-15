@@ -174,7 +174,15 @@ fn lifecycle3_wal_rename_proof_binds_this_inventory_and_rejects_two_simultaneous
         panic!("one rename")
     };
     let frame = seal_plain(store, &candidate.encode_data().unwrap(), &mut rng);
-    let warm = verify_warm_rename(store, &original, &candidate, &frame).unwrap();
+    assert!(verify_warm_metadata(
+        store,
+        &original,
+        &candidate,
+        &frame,
+        Change::RefreshLegacyInvite
+    )
+    .is_err());
+    let warm = verify_warm_metadata(store, &original, &candidate, &frame, Change::Rename).unwrap();
     assert!(!warm.has_stage());
     warm.require_inventory(&original).unwrap();
     drop(original);
@@ -201,4 +209,43 @@ fn lifecycle3_wal_rename_proof_binds_this_inventory_and_rejects_two_simultaneous
     assert!(classify(store, &both).is_err());
     assert_eq!(fs::read(stage(dir.path())).unwrap(), frame);
     assert_eq!(fs::read(catalog_stage).unwrap(), current);
+}
+
+#[test]
+fn lifecycle3_wal_refresh_proof_requires_the_actual_sealed_operation_kind() {
+    use super::super::refresh;
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xca51);
+    let owner = mounted(dir.path(), &mut rng);
+    let store = owner.actual_store_for_test().unwrap();
+    let (pool, paid) = invoice();
+    let original = UpgradeInventory::capture(store, &paid, &pool).unwrap();
+    let (selected, _) = preparation::decode_selected_data(store, &original).unwrap();
+    let row = &selected.rows[0];
+    let request = refresh::Request {
+        id: row.id,
+        identity: row.identity,
+        expected_revision: row.metadata_revision,
+        invite: "new invite".into(),
+    };
+    let rename::Plan::Change { candidate, .. } = refresh::prepare(
+        selected,
+        &request,
+        *blake3::hash(original.index()).as_bytes(),
+    )
+    .unwrap() else {
+        panic!("refresh")
+    };
+    let frame = seal_plain(store, &candidate.encode_data().unwrap(), &mut rng);
+    assert!(verify_warm_metadata(store, &original, &candidate, &frame, Change::Rename).is_err());
+    let proof = verify_warm_metadata(
+        store,
+        &original,
+        &candidate,
+        &frame,
+        Change::RefreshLegacyInvite,
+    )
+    .unwrap();
+    assert_eq!(proof.decision(), Decision::RefreshLegacyInvite);
+    proof.require_inventory(&original).unwrap();
 }

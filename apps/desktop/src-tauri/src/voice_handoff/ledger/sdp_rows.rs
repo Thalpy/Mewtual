@@ -269,6 +269,52 @@ fn capture_locked(
 }
 
 impl ResolvedRow {
+    /// Fixture-only observation of nonblocking preparation. No Begin, row,
+    /// publication or SDK-release operation is retried here. The same borrowed
+    /// input/session and original Ready deadline survive every local refusal.
+    #[cfg(test)]
+    pub(in crate::voice_handoff) async fn sdp_test_candidate_after_capacity<'a>(
+        &self,
+        session: &Arc<SessionIdentity>,
+        request: &'a Request<'a>,
+        intent: &InitialSdpIntent,
+        clock: &dyn catcoms_rt::Clock,
+    ) -> Result<Candidate<'a>, VoiceError> {
+        let wall = clock.now_ms();
+        let mono = clock.monotonic_ms();
+        let deadline = mono.saturating_add(intent.remaining_at(wall, mono).unwrap_or(0));
+        for attempt in 0..32 {
+            let result = self.sdp_action_candidate(session, request);
+            if !matches!(result, Err(VoiceError::Capacity))
+                || attempt == 31
+                || clock.monotonic_ms() >= deadline
+            {
+                return result;
+            }
+            let remaining = deadline - clock.monotonic_ms().min(deadline);
+            clock
+                .sleep(std::time::Duration::from_millis(remaining.min(10)))
+                .await;
+        }
+        unreachable!("last bounded candidate attempt returns its original result")
+    }
+
+    /// Deterministic oracle against the SAME actual parent row mutex. This
+    /// acquires no candidate, funding or row and releases the guard before the
+    /// caller can retry the actual constructor or enter native admission.
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn sdp_test_candidate_with_parent_locked<'a>(
+        &self,
+        session: &Arc<SessionIdentity>,
+        request: &'a Request<'a>,
+    ) -> Result<Candidate<'a>, VoiceError> {
+        let _state = self
+            .row
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        self.sdp_action_candidate(session, request)
+    }
     #[cfg(test)]
     pub(in crate::voice_handoff) fn sdp_test_outcome(&self) -> Arc<Outcome> {
         let state = self.row.state.lock().unwrap();

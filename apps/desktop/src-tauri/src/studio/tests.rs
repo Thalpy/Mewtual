@@ -332,7 +332,7 @@ pub(super) async fn install(
     device_id: DeviceId,
     instance: u64,
 ) {
-    state.servers.lock().await.insert(
+    state.servers.lock().await.install_legacy_fixture(
         7,
         ServerEntry {
             files: keep_session::EntryOwner::new(),
@@ -575,10 +575,10 @@ async fn native_studio_save_restart_reopen_real_blob_and_complete_projection() {
     drain.await.unwrap();
     let (group_id, device_id) = {
         let entries = state.servers.lock().await;
-        let e = &entries[&7];
+        let e = entries.legacy(&7).expect("Legacy fixture row");
         (e.group_id.clone(), e.device_id)
     };
-    state.servers.lock().await.clear();
+    state.servers.lock().await.clear_legacy_fixture();
     drop(state.store.lock().await.take());
     *state.store.lock().await =
         Some((ServerStore::open(root.path(), b"studio-native", &mut rng()).unwrap()).into());
@@ -721,7 +721,7 @@ async fn native_studio_ready_refuses_every_busy_or_stale_fence_without_waiting()
             state.ui_session_generation.fetch_add(1, Ordering::SeqCst);
         }
         if mode == 2 {
-            state.servers.lock().await.get_mut(&7).unwrap().instance = 2;
+            state.servers.lock().await.legacy_mut(&7).unwrap().instance = 2;
         }
         assert!(authorize(&state, 7, 1, generation).is_err());
         drop(ready);

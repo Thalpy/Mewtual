@@ -47,6 +47,8 @@ const KEY: [u8; 32] = [0x4b; 32];
 const GROUP: &[u8] = b"member-outbox-test-group";
 const CHANNEL: u128 = 7;
 
+mod history;
+
 fn token(n: u8) -> MemberRequestToken {
     MemberRequestToken::from_bytes([n; 32])
 }

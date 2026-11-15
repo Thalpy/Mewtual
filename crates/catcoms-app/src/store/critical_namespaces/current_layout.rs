@@ -1,6 +1,8 @@
 //! Original physical namespace3 declaration and opaque historical DATA reader. Neither the
 //! descriptor nor this wrapper grants a Current scope, group writer or runnable SDK/server.
 use super::*;
+#[cfg(all(test, any(windows, target_os = "linux")))]
+pub(in crate::store) use text::set_after_original_source_hook_for_test;
 pub(in crate::store) use text::{
     AdmittedV2TextCompletedWorkspaceRead, BoundV2TextCompletedCreatePredecessor,
     PreparedV2TextCompletedWorkspaceReadCapture, V2TextCompletedWorkspaceSourceSlot,
@@ -300,6 +302,7 @@ impl std::fmt::Debug for PreparedV2CurrentLayoutStore {
 /// server factory, group-write, Current scope, governor, SDK or native capability is public.
 pub struct V2CurrentLayoutStore {
     store: Box<ServerStore>,
+    governance: Option<super::governance_layout::GovernanceCachedNegative>,
     _wrapper_fee: CatalogReadReservation,
 }
 impl std::fmt::Debug for V2CurrentLayoutStore {
@@ -308,6 +311,32 @@ impl std::fmt::Debug for V2CurrentLayoutStore {
             .finish_non_exhaustive()
     }
 }
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::store::critical_namespaces) enum NativeFreshEdge {
+    LowerOpened,
+    CriticalActivated,
+    NativePrepared,
+}
+#[cfg(test)]
+type NativeFreshHook = Box<dyn FnMut(NativeFreshEdge, &ServerStore)>;
+#[cfg(test)]
+thread_local! {
+    pub(in crate::store::critical_namespaces) static NATIVE_FRESH_HOOK:
+        std::cell::RefCell<Option<NativeFreshHook>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+pub(in crate::store::critical_namespaces) fn native_fresh_test_edge(
+    edge: NativeFreshEdge,
+    store: &ServerStore,
+) {
+    let hook = NATIVE_FRESH_HOOK.with(|slot| slot.borrow_mut().take());
+    if let Some(mut hook) = hook {
+        hook(edge, store);
+        NATIVE_FRESH_HOOK.with(|slot| *slot.borrow_mut() = Some(hook));
+    }
+}
+
 impl PreparedV2CurrentLayoutStore {
     pub fn open(
         dir: impl AsRef<Path>,
@@ -330,6 +359,42 @@ impl PreparedV2CurrentLayoutStore {
             Some(policy.archive.clone()),
             Some(policy),
         )?);
+        Self::from_private_open(store, fee)
+    }
+
+    /// Initial native chain only. Public open remains already-critical strict.
+    /// Both wrapper payment and the caller's native invoices precede KDF/IO.
+    pub(in crate::store::critical_namespaces) fn create_for_native_registry(
+        dir: &Path,
+        secret: &[u8],
+        rng: &mut impl CryptoRngCore,
+        policy: V2CurrentLayoutPolicy,
+    ) -> Result<Self, AppError> {
+        policy.require_persistent_capacity()?;
+        if dir.as_os_str().len() > MAX_OPEN_BASE_PATH {
+            return Err(refused());
+        }
+        let fee = policy.archive.pending.pool.try_reserve(WRAPPER_FEE)?;
+        let store = ServerStore::create_private_for_native_registry(dir, secret, rng)?;
+        #[cfg(test)]
+        native_fresh_test_edge(NativeFreshEdge::LowerOpened, &store);
+        let mut store = store.into_critical_namespace_store(secret, rng)?;
+        #[cfg(test)]
+        native_fresh_test_edge(NativeFreshEdge::CriticalActivated, &store);
+        // This owner has NEVER been exposed. Its existing admission/pin tables
+        // remain unchanged; initialize only the absent configured catalog mount.
+        store.catalog_read_pool = Some(policy.archive.pending.pool.clone());
+        store.pending_join_policy = Some(policy.archive.pending.clone());
+        store.archive_bootstrap_policy = Some(policy.archive.clone());
+        store.current_layout_policy = Some(policy);
+        store.attach_created_empty_catalog()?;
+        Self::from_private_open(Box::new(store), fee)
+    }
+
+    fn from_private_open(
+        store: Box<ServerStore>,
+        fee: CatalogReadReservation,
+    ) -> Result<Self, AppError> {
         let archive_ready = store
             .archive_bootstrap_root
             .lock()
@@ -471,11 +536,75 @@ impl PreparedV2CurrentLayoutStore {
         drop(declaration_fee);
         Ok(V2CurrentLayoutStore {
             store,
+            governance: None,
             _wrapper_fee,
         })
     }
 }
 impl V2CurrentLayoutStore {
+    /// Fault injection only: inspect a private constructor during an
+    /// intentionally incomplete declaration. This bypasses readiness solely
+    /// in tests and cannot be called by any production consumer.
+    #[cfg(test)]
+    pub(in crate::store) fn constructor_store_for_test(&self) -> &ServerStore {
+        &self.store
+    }
+    pub(in crate::store::critical_namespaces) fn from_native_governed_store(
+        mut store: Box<ServerStore>,
+    ) -> Result<Self, AppError> {
+        let policy = store
+            .governance_layout_policy
+            .as_ref()
+            .ok_or_else(refused)?;
+        if policy.family
+            != super::governance_namespace_codec::GovernanceCatalogFamily::NativeLifecycle
+        {
+            return Err(refused());
+        }
+        let fee = policy
+            .current
+            .archive
+            .pending
+            .pool
+            .try_reserve(WRAPPER_FEE)?;
+        let negative = store.capture_governance_cached_negative()?;
+        let handler = store
+            .current_layout_policy
+            .as_ref()
+            .and_then(|p| p.native_registry.as_ref())
+            .and_then(|h| h.lifecycle())
+            .ok_or_else(refused)?
+            .clone();
+        let governed =
+            super::native_registry::preparation::NativeRegistryHandler::GovernedLifecycle(handler);
+        store
+            .current_layout_policy
+            .as_mut()
+            .ok_or_else(refused)?
+            .native_registry = Some(governed.clone());
+        store
+            .governance_layout_policy
+            .as_mut()
+            .ok_or_else(refused)?
+            .current
+            .native_registry = Some(governed);
+        let value = Self {
+            store,
+            governance: Some(negative),
+            _wrapper_fee: fee,
+        };
+        value.checked_store()?;
+        Ok(value)
+    }
+    /// Closed same-owner receiver, callable only by the unexposed native
+    /// startup continuation. No callback or mutable Store loan escapes.
+    pub(in crate::store::critical_namespaces) fn advance_native_governance(
+        &mut self,
+        receiver: &mut super::governance_layout::native::Startup,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        receiver.advance(&mut self.store, &mut self.governance, rng)
+    }
     /// Closed owning index3 handoff only. The controller cannot extract Store
     /// or submit a callback: this concrete edge owns the catalog critical
     /// section and repeats its original physical and affine-claim proofs.
@@ -550,7 +679,23 @@ impl V2CurrentLayoutStore {
         Ok(source)
     }
     pub(in crate::store) fn checked_store(&self) -> Result<&ServerStore, AppError> {
+        #[cfg(test)]
+        CHECKED_STORE_ENTRIES.with(|entries| entries.set(entries.get().saturating_add(1)));
         self.store.validate_mounted_current_layout()?;
+        if self
+            .store
+            .governance_layout_policy
+            .as_ref()
+            .is_some_and(|p| {
+                p.family
+                    == super::governance_namespace_codec::GovernanceCatalogFamily::NativeLifecycle
+            })
+        {
+            self.store.validate_mounted_governance_layout()?;
+            if self.governance.as_ref().is_none_or(|g| !g.is_live_cached()) {
+                return Err(refused());
+            }
+        }
         Ok(&self.store)
     }
     /// Cached negatives ONLY, for a final edge that must perform no IO (the member-save
@@ -563,14 +708,33 @@ impl V2CurrentLayoutStore {
         }
         Ok(&self.store)
     }
+    /// Capture from THIS original Store while finite physical work owns it.
+    /// No logical lookup, new observer, sender custody or replacement is used.
+    pub(in crate::store::critical_namespaces) fn capture_cached_physical_negative(
+        &self,
+    ) -> chat_admission::CachedPhysicalMountNegative {
+        self.store.chat_mount.capture_cached_physical_negative()
+    }
     /// Fixed negative for capture under a native guard. Borrow the already-owned
     /// revocation atomic directly: no observer, weak upgrade, watch/account lock,
     /// IO, allocation or formatted refusal. Original file/row/command checks
     /// remain independently necessary before any actual operation.
     pub(in crate::store::critical_namespaces) fn physical_mount_is_live_cached(&self) -> bool {
-        self.store.chat_mount.is_live_cached()
+        self.store.chat_mount.is_live_cached() && (!self.store.governance_layout_policy.as_ref().is_some_and(|p|p.family==super::governance_namespace_codec::GovernanceCatalogFamily::NativeLifecycle)
+            || self.governance.as_ref().is_some_and(|g|g.is_live_cached()))
     }
 }
 
 #[cfg(test)]
 mod tests;
+
+// Count the actual entry, before its first marker/file read. Thread-local test
+// observation cannot supply a Store, skip a check or affect another test's IO.
+#[cfg(test)]
+thread_local! {
+    static CHECKED_STORE_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+pub(in crate::store::critical_namespaces) fn take_checked_store_entries_for_test() -> usize {
+    CHECKED_STORE_ENTRIES.with(|entries| entries.replace(0))
+}

@@ -15,6 +15,7 @@ fn worker(context: &Context, route: &Route, selector: PairSelector) -> Worker {
         )
         .unwrap();
     Worker {
+        original: FixtureOriginalRequest::Exact(selector),
         context: Some(context.clone()),
         selector: Selection::Exact(selector),
         custody: NativeCustody {

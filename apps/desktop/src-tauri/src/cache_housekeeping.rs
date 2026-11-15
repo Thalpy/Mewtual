@@ -394,7 +394,7 @@ async fn studio_scan_once(app: AppHandle) {
             .servers
             .lock()
             .await
-            .values()
+            .legacy_values()
             .map(|entry| entry.actor.clone())
             .collect();
         for actor in actors {
@@ -534,7 +534,7 @@ pub(super) async fn sweep_leaving(state: &AppState, generation: Option<u64>) {
         // attach that starts after this point waits for the claim.
         let claim = {
             let servers = state.servers.lock().await;
-            if servers.values().any(|entry| entry.group_id == group) {
+            if servers.legacy_values().any(|entry| entry.group_id == group) {
                 continue;
             }
             state.cache.claim(&group)
@@ -573,7 +573,7 @@ pub(super) async fn claim_for_leave(state: &AppState, server: u64) -> Option<Cle
     loop {
         let group = {
             let servers = state.servers.lock().await;
-            let group = servers.get(&server)?.group_id.clone();
+            let group = servers.legacy(&server)?.group_id.clone();
             // Claimed under the servers lock, as the sweep does, so the two cannot interleave.
             if let Some(claim) = state.cache.claim(&group) {
                 return Some(claim);
@@ -655,7 +655,7 @@ async fn set_cache_limit_in_session(
             .ok_or_else(|| "The vault is locked.".to_string())?;
         let servers = state.servers.lock().await;
         let entry = servers
-            .get(&server)
+            .legacy(&server)
             .filter(|entry| entry.instance == instance && entry.actor.same_instance(&actor))
             .ok_or_else(|| {
                 "That server changed while the cache setting was waiting.".to_string()

@@ -60,6 +60,13 @@ declare -A allowed=(
   # destination is re-proved after large reads before rename; selection/unlink
   # phases are cached before covering barriers. These are not epoch-file permits.
   ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|abandon_first_torn|fs::remove_file(&seed_path).map_err(io)?;']=1
+  # Immutable initial native network output: held original file/parents only.
+  ['crates/catcoms-app/src/store/persistence/native_registry/network.rs|cover|self.servers.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/network.rs|cover|self.vault.file.sync_all().map_err(io)?;']=1
+  # Retained native activation dependency: original file and both parents.
+  ['crates/catcoms-app/src/store/persistence/native_registry/network/dependency.rs|require|self.output.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/network/dependency.rs|require|self.servers.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/network/dependency.rs|require|self.vault.file.sync_all().map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|abandon_first_torn|fs::remove_file(&stage_path).map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|abandon_first_torn|self.base.vault.file.sync_all().map_err(io)?;']=2
   ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|advance_upgrade|fs::remove_file(&seed).map_err(io)?;']=1
@@ -113,6 +120,15 @@ declare -A allowed=(
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure_legacy_stage_fence|let file = OpenOptions::new()']=1
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure_legacy_stage_fence|.create_new(true)']=1
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure_legacy_stage_fence|original.file.sync_all().map_err(io)?;']=1
+  # Native-family constructor only: claim attribution precedes the shared
+  # fence. Abort-only cleanup reauthenticates the pristine native3 baseline,
+  # compares bytes AND held identity again, and covers/reproves Stage absence
+  # before retiring the claim. No native/G/Source authority is produced.
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure_native_claim|let file = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure_native_claim|.create_new(true)']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure_native_claim|original.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|cleanup_native_governance_torn|fs::remove_file(&stage_path).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|cleanup_native_governance_torn|fs::remove_file(&seed_path).map_err(io)?;']=1
   # Private offline Current4 metadata declaration only. Complete authenticated TWO-frame
   # seed and exact original native objects precede promotion; no arbitrary path, Source,
   # SDK/key entry or epoch-family effect. Preserve partial/foreign evidence on refusal.
@@ -235,7 +251,7 @@ declare -A allowed=(
   ['crates/catcoms-app/src/store/persistence/v2_text/transaction/work/io.rs|write_complete_only|.create_new(true)']=1
   ['crates/catcoms-app/src/store/persistence/v2_text/transaction/work/io.rs|write_complete_only|file.sync_all().map_err(io)?;']=1
   # Both public open APIs use this one private constructor before any token/cursor exists.
-  ['crates/catcoms-app/src/store.rs|open_with_catalog_policies|fs::create_dir_all(dir.join("servers")).map_err(|e| AppError::Io(e.to_string()))?;']=1
+  ['crates/catcoms-app/src/store.rs|open_catalog_in_session|fs::create_dir_all(dir.join("servers")).map_err(|e| AppError::Io(e.to_string()))?;']=1
   # remove_server unlinks only the non-family {id}.bin, .net and .cache files (I-4 audit:
   # correctly not rotating).
   ['crates/catcoms-app/src/store.rs|remove_server|fs::remove_file(p).map_err(|e| AppError::Io(e.to_string()))?;']=1
