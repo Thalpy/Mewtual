@@ -27,7 +27,7 @@ function entry(initialNativeGeneration = 6n) {
   const close = ts.transpile("[" + source.slice(closeStart, closeEnd) + "];", { target: ts.ScriptTarget.ES2022 });
   return new Function("NativeVaultLockCoordinator", "rows", "initialNativeGeneration", "decodeRestoredChatSession", `
     let locked = true, unlocking = false, unlockAttempt = 0, windowCloseInFlight = false;
-    let uiStateLoadGeneration = 0, uiStateReady = false, vaultExists = true, error = "";
+    let uiStateLoadGeneration = 0, uiStateReady = false, vaultExists = true, error = "",uiSessionRetired=false;
     let chatBackend=null,startTab="join",nativeOriginals=[],nativeCursor=null,nativeHistoryLoading=false,nativeHistoryLoaded=false,nativeHistoryError=null,nativeHistoryRevision=0,nativeRetryGeneration=null;
     const studioExit={begin:()=>({current:()=>true})};
     let passphrase = "first secret", revealPassphrase = true, unlockMethod = "sigil";

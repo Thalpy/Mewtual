@@ -28,6 +28,11 @@ pub struct TextCurrentAddLimits {
     pub sdk_typed_bytes: usize,
     pub sdk_work: usize,
     pub output_bytes: usize,
+    /// Independent routing export/AEAD inventory. Zero keeps the original
+    /// no-routing library mode; the explicit routing constructor requires its
+    /// complete separately named invoice before copying secret plaintext.
+    pub routing_typed_bytes: usize,
+    pub routing_work: usize,
 }
 impl TextCurrentAddLimits {
     /// Buffer inventory only. The concrete Resource<G>/Cell/move layouts below
@@ -44,9 +49,18 @@ impl TextCurrentAddLimits {
             .checked_add(self.operation.max_provider_bytes)?
             .checked_add(self.sdk_typed_bytes)?
             .checked_add(self.output_bytes)
+            .and_then(|n| n.checked_add(self.routing_typed_bytes))
             .filter(|n| *n <= isize::MAX as usize)
     }
     fn require_supported(&self) -> Result<(), MlsError> {
+        let routing_disabled = self.routing_typed_bytes == 0 && self.routing_work == 0;
+        if !routing_disabled
+            && (self.routing_typed_bytes
+                < crate::group::text_current_add::TEXT_ADD_ROUTING_TYPED_BYTES
+                || self.routing_work < crate::group::text_current_add::TEXT_ADD_ROUTING_WORK)
+        {
+            return Err(bad());
+        }
         let fields = [
             self.max_snapshot_bytes,
             self.max_provider_backing_bytes,
@@ -128,7 +142,9 @@ impl TextCurrentAddAdmission {
                 4 * std::mem::size_of::<
                     Result<crate::group::text_current_add::PreparedTextCurrentAdd, MlsError>,
                 >(),
-            )
+            )?
+            .checked_add(crate::group::text_current_add::installation_metadata_layout_bytes()?)?
+            .checked_add(crate::group::text_current_add::completed_result_metadata_layout_bytes()?)
     }
     pub fn new<G: TextCurrentAddReservation>(reservation: G) -> Result<Self, MlsError> {
         // Compile-time SDK profile DATA, not a caller switch. Refuse before
@@ -162,6 +178,14 @@ impl TextCurrentAddAdmission {
     }
     pub(crate) fn limits(&self) -> TextCurrentAddLimits {
         self.limits
+    }
+    /// Cached resource-mode DATA only. The consuming constructor repeats the
+    /// complete invoice checks. This grants no SDK/native/Root authority and
+    /// never calls the original reservation while a host holds its writers.
+    pub fn supports_routing_data(&self) -> bool {
+        self.limits.routing_typed_bytes
+            >= crate::group::text_current_add::TEXT_ADD_ROUTING_TYPED_BYTES
+            && self.limits.routing_work >= crate::group::text_current_add::TEXT_ADD_ROUTING_WORK
     }
     pub(crate) fn lease(&self) -> OwnerSdkGraphLease {
         self.lease.clone()

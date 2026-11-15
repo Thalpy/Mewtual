@@ -124,7 +124,10 @@ function appFixture(clock: FakeClock, failure: string | null = null, initial: Pe
     let draft = intent.text, drafts = { room: intent.text }, draftRevisions = {}, replyingTo = intent.replyTo;
     let cur = { active: intent.channel }, activeServerId = intent.server, error = "";
     let savesFail = false, failure = initialFailure, lostAcknowledgement = false, writes = [], submissions = [], authored = new Set();
+    // This scheduler-only fixture excludes Svelte teardown. ui-remount.test.ts
+    // separately runs the actual retirement helper and real destroy ordering.
     const effects = [], $effect = effect => effects.push(effect), onMount = () => {};
+    const onDestroy = () => {}, retireUiSessionOnUnmount = () => {};
     const chatScopeKey = () => "room", errorText = String, refresh = async () => {};
     const saveUiStateImmediately = async () => {
       if (savesFail || locked || !uiStateReady) return false;

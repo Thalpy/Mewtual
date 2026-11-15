@@ -83,3 +83,15 @@ test("external history and a new selection wait for a send or retry's actual nat
   assert.equal(app.state().nativeHistoryCalls[0].expectedContext,replacement);app.done();
  }
 });
+
+test("a delayed old Found cannot release its replacement generation's busy owner",async()=>{
+ const app=pendingManagerApp({});await app.hydrate();app.nativeConversation(7,"9",context);
+ const oldReply=deferred<unknown>(),newReply=deferred<unknown>();let calls=0;
+ app.answer(async()=>++calls===1?oldReply.promise:newReply.promise);
+ const old=app.nativeFound();await settle();assert.equal(app.state().submissions.length,1);assert.equal(app.state().busy,true);
+ app.retireFoundUiForReauth();assert.equal(app.state().busy,false,"production native lock redaction releases the old UI immediately");
+ const current=app.nativeFound();await settle();assert.equal(app.state().submissions.length,2);assert.equal(app.state().busy,true);
+ const response=(index:number)=>({backend:"text-v2",server:8,context:app.state().submissions[index].args.requestId,channel:"9",is_dm:false});
+ oldReply.resolve(response(0));await old;assert.equal(app.state().busy,true,"old finally must preserve the live replacement owner");
+ newReply.resolve(response(1));await current;assert.equal(app.state().busy,false);app.done();
+});

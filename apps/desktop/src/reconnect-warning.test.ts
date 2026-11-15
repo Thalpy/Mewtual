@@ -15,7 +15,7 @@ const restore = ts.transpileModule(source.slice(start, end), {
 function reopen(reloaded: object[]) {
   return new Function("reloaded", "decodeRestoredChatSession", `
     let servers = [], locked = true, windowCloseInFlight = false, uiStateLoadGeneration = 0;
-    let chatBackend=null,startTab="join";
+    let chatBackend=null,startTab="join",uiSessionRetired=false;
     const studioExit={begin:()=>({current:()=>true})};
     const warnings = [];
     let callControllerClaims = 0;
