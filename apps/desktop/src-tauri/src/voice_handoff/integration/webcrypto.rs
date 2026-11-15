@@ -311,6 +311,27 @@ impl Endpoint {
             .clone()
     }
 
+    /// Read only this original endpoint's existing bounded observers after a
+    /// paired pump failed. No replacement row selection, Actor await, locking
+    /// pool getter, retry or protocol mutation is introduced by diagnostics.
+    pub(crate) fn automatic_diagnostic(&self) -> String {
+        let selected = self.selected();
+        let (selector, ledger) = self
+            .state
+            .voice_handoff
+            .fixture_sdp_diagnostic(&selected, self.callbacks.expected_parent);
+        let native = selector.map(|selector| {
+            self.state
+                .voice_channels
+                .fixture_native_diagnostic(&selected, selector)
+        });
+        let session = self
+            .state
+            .voice_channels
+            .fixture_sdp_session_diagnostic(&selected);
+        format!("{ledger}; {native:?}; independent {session}")
+    }
+
     async fn step(&mut self, value: Value) -> Value {
         // Borrow the actual process streams without cloning or creating another reader.
         drive_streams(
@@ -1162,7 +1183,22 @@ impl Endpoint {
         assert!(receipt.admitted && !receipt.current && !receipt.closed && !receipt.released);
         // Drop the successful observation. Exact repetition recovers completed tombstone,
         // without requiring any of its erased rows or pretending Session collection.
-        let recovered = target.retire_history().unwrap();
+        // Even a completed tombstone read uses nonblocking Index/entry checks.
+        // Force that exact local refusal, then recover ONLY this same target
+        // under the already-latched limit; no SDK Release/other effect retries.
+        assert!(matches!(
+            target.retire_history_with_state_locked_for_test(),
+            Err(VoiceError::Capacity)
+        ));
+        let recovered = loop {
+            match target.retire_history() {
+                Ok(receipt) => break receipt,
+                Err(VoiceError::Capacity) if clock.monotonic_ms() < limit => {
+                    clock.sleep(std::time::Duration::from_millis(5)).await
+                }
+                Err(error) => panic!("same completed history observation failed: {error:?}"),
+            }
+        };
         assert_eq!(receipt.proof, recovered.proof);
         assert!(ledger
             .lookup_original(&selected, ledger::Purpose::Derive(selector))

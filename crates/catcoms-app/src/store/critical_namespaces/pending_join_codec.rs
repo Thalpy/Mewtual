@@ -101,6 +101,10 @@ pub(super) struct Parsed<'a> {
         Option<super::member_outbox_namespace_codec::MemberOutboxCapabilityData>,
     pub(super) member_outbox_payload: Option<&'a [u8]>,
     pub(super) native_registry_payload: Option<&'a [u8]>,
+    // Captured only after the matching closed reader validates this actual
+    // entry. JOIN must conserve its version as well as its descriptor bytes;
+    // choosing the writer's historical default would relabel index2 as1.
+    pub(super) native_registry_version: Option<u32>,
 }
 
 /// Fixed, inert classification retained after dropping a complete plaintext. Digest equality
@@ -290,6 +294,45 @@ pub(super) fn parse_lifecycle_native_registry_layout<'a>(
     )
 }
 
+/// Steady-state grammar selected only by the concrete governed native owner.
+/// None of its three critical handlers is optional. The declaration's original
+/// no4 parent is parsed separately, never as a steady-state fallback.
+pub(super) fn parse_governed_native_registry_layout<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+    executing: bool,
+) -> Result<Parsed<'a>, AppError> {
+    let parsed = parse_native_governance_family(plain, domain, executing)?;
+    if parsed.governance.is_none()
+        || parsed.member_outbox.is_none()
+        || parsed.native_registry_payload.is_none()
+    {
+        return Err(refused());
+    }
+    Ok(parsed)
+}
+
+/// Declaration-only native3 family. The actual unexposed continuation or cold
+/// declaration verifier must classify its exact parent/seed pair before use.
+pub(super) fn parse_native_governance_family<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+    executing: bool,
+) -> Result<Parsed<'a>, AppError> {
+    let parsed = parse_known(
+        plain,
+        domain,
+        SupportedLayout::GOVERNANCE_LAYOUT
+            .executing(executing)
+            .member_outbox(true)
+            .native_registry(Some(3)),
+    )?;
+    if parsed.member_outbox.is_none() || parsed.native_registry_payload.is_none() {
+        return Err(refused());
+    }
+    Ok(parsed)
+}
+
 /// Only the concrete Current-layout physical inspector may select this grammar. The default,
 /// Pending and ID2-only inspectors still reject namespace3 in EITHER fixed source before old
 /// cleanup. No parsed label or external flag can install this actual constructor policy.
@@ -437,6 +480,7 @@ fn parse_known<'a>(
             member_outbox: None,
             member_outbox_payload: None,
             native_registry_payload: None,
+            native_registry_version: None,
         });
     }
     let mut rows = std::array::from_fn(|_| None);
@@ -451,6 +495,7 @@ fn parse_known<'a>(
     let mut member_outbox = None;
     let mut member_outbox_payload = None;
     let mut native_registry_payload = None;
+    let mut native_registry_version = None;
     for index in 0..envelope.count {
         let entry = envelope.entry(index)?;
         match entry.id {
@@ -530,6 +575,7 @@ fn parse_known<'a>(
                     expected,
                 )?;
                 native_registry_payload = Some(entry.payload);
+                native_registry_version = Some(entry.version);
             }
             7 if layout.native_registry == Some(2) && entry.version == 2 => {
                 super::native_registry::operational::validate_descriptor_data(
@@ -538,6 +584,7 @@ fn parse_known<'a>(
                     current_payload.ok_or_else(refused)?,
                 )?;
                 native_registry_payload = Some(entry.payload);
+                native_registry_version = Some(entry.version);
             }
             7 if layout.native_registry == Some(3) && entry.version == 3 => {
                 super::native_registry::lifecycle::validate_descriptor_data(
@@ -546,6 +593,7 @@ fn parse_known<'a>(
                     current_payload.ok_or_else(refused)?,
                 )?;
                 native_registry_payload = Some(entry.payload);
+                native_registry_version = Some(entry.version);
             }
             _ => return Err(refused()),
         }
@@ -566,6 +614,7 @@ fn parse_known<'a>(
         member_outbox,
         member_outbox_payload,
         native_registry_payload,
+        native_registry_version,
     })
 }
 

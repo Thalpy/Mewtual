@@ -42,6 +42,112 @@ fn file(path: &Path, name: &str) -> std::path::PathBuf {
 }
 
 #[test]
+fn native_index2_warm_retry_recovers_output_barrier_before_catalog_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0x792a);
+    let old = original(dir.path(), &mut rng);
+    let mut upgrade = NativeIndexUpgrade::prepare(old, policy(), &mut rng).unwrap();
+    let original_catalog = upgrade.output.original.clone();
+    let expected_catalog = upgrade.output.catalog.clone();
+    let expected_marker = upgrade.output.marker.clone();
+    io::arm_fault(io::Fault::UpgradeMarkerRename);
+    assert!(upgrade.retry().is_err());
+    assert!(io::take_fault_seen());
+    let catalog_name = file(
+        dir.path(),
+        crate::store::critical_namespaces::Slot::Current.name(),
+    );
+    assert_eq!(
+        fs::read(&catalog_name).unwrap(),
+        original_catalog.as_slice()
+    );
+    assert_eq!(
+        fs::read(file(dir.path(), previous::MARKER_NAME)).unwrap(),
+        expected_marker.as_slice()
+    );
+    io::reset_output_root_covers();
+    io::before_target_proof(
+        io::RenameTarget::UpgradeCatalog,
+        Box::new(move || {
+            assert!(
+                io::output_root_covers() > 0,
+                "the renamed outputs must be covered again before selecting the catalog"
+            );
+            assert_eq!(fs::read(catalog_name).unwrap(), original_catalog.as_slice());
+        }),
+    );
+    upgrade.retry().unwrap();
+    assert!(io::take_rename_hook_seen());
+    drop(upgrade.into_index_store().unwrap());
+    assert_eq!(
+        fs::read(file(
+            dir.path(),
+            crate::store::critical_namespaces::Slot::Current.name()
+        ))
+        .unwrap(),
+        expected_catalog.as_slice()
+    );
+}
+
+#[test]
+fn native_index2_cold_retry_recovers_output_barrier_before_catalog_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0x792b);
+    let old = original(dir.path(), &mut rng);
+    let mut upgrade = NativeIndexUpgrade::prepare(old, policy(), &mut rng).unwrap();
+    let original_catalog = upgrade.output.original.clone();
+    let expected_catalog = upgrade.output.catalog.clone();
+    let expected_index = upgrade.output.index.clone();
+    let expected_marker = upgrade.output.marker.clone();
+    io::arm_fault(io::Fault::UpgradeMarkerRename);
+    assert!(upgrade.retry().is_err());
+    assert!(io::take_fault_seen());
+    drop(upgrade);
+    io::reset_output_root_covers();
+    let catalog_name = file(
+        dir.path(),
+        crate::store::critical_namespaces::Slot::Current.name(),
+    );
+    io::before_target_proof(
+        io::RenameTarget::UpgradeCatalog,
+        Box::new(move || {
+            assert!(
+                io::output_root_covers() > 0,
+                "cold mixed-tuple recovery must cover outputs before selecting the catalog"
+            );
+            assert_eq!(fs::read(catalog_name).unwrap(), original_catalog.as_slice());
+        }),
+    );
+    let mounted = NativeIndexStore::open(
+        dir.path(),
+        SECRET,
+        &mut NeverRng,
+        current_policy(),
+        policy(),
+    )
+    .unwrap();
+    assert!(io::take_rename_hook_seen());
+    assert_eq!(mounted.row_count_data().unwrap(), 1);
+    assert_eq!(
+        fs::read(file(
+            dir.path(),
+            crate::store::critical_namespaces::Slot::Current.name()
+        ))
+        .unwrap(),
+        expected_catalog.as_slice()
+    );
+    assert_eq!(
+        fs::read(file(dir.path(), previous::INDEX_NAME)).unwrap(),
+        expected_index.as_slice()
+    );
+    assert_eq!(
+        fs::read(file(dir.path(), previous::MARKER_NAME)).unwrap(),
+        expected_marker.as_slice()
+    );
+    assert!(!file(dir.path(), io::UPGRADE_SEED_NAME).exists());
+}
+
+#[test]
 fn native_index2_real_opaque_upgrade_and_cold_reopen_keep_legacy_data_exact() {
     let dir = tempfile::tempdir().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(0x7920);

@@ -166,7 +166,7 @@ pub(super) async fn persist_with_proofs(
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .filter(|entry| entry.instance == instance)
         .and_then(|entry| entry.mesh.as_ref().map(MeshHandle::local_peer))
         .ok_or_else(|| "group changed during reconnect finalization".to_string())?;
@@ -299,7 +299,7 @@ pub(super) async fn persist_with_proofs(
         .ok_or_else(|| "vault is not mounted".to_string())?;
     let registry = state.servers.lock().await;
     if registry
-        .get(&server)
+        .legacy(&server)
         .is_none_or(|entry| entry.instance != instance)
     {
         return Err("group changed during reconnect finalization".into());
@@ -393,7 +393,7 @@ pub(super) async fn before_shutdown(state: &AppState) -> Result<(), String> {
         .servers
         .lock()
         .await
-        .iter()
+        .legacy_iter()
         .map(|(id, entry)| (*id, entry.instance, entry.actor.clone(), entry.mesh.clone()))
         .collect();
     for (id, instance, actor, mesh) in entries {
@@ -423,7 +423,7 @@ pub(super) async fn run_capture_worker(
             .servers
             .lock()
             .await
-            .get(&server)
+            .legacy(&server)
             .is_none_or(|entry| entry.instance != instance)
         {
             break;

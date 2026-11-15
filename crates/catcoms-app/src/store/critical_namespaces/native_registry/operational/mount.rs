@@ -41,6 +41,15 @@ impl std::fmt::Debug for NativeIndexStore {
     }
 }
 impl NativeIndexStore {
+    /// Real mounted storage access for the genuine JOIN regression only.
+    /// Absent from production; no native command or source authority is issued.
+    #[cfg(test)]
+    pub(in crate::store) fn actual_store_for_test(
+        &self,
+    ) -> Result<&crate::store::ServerStore, AppError> {
+        self.physical.current.cached_store()
+    }
+
     pub fn open(
         dir: impl AsRef<Path>,
         passphrase: &[u8],
