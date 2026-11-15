@@ -20,7 +20,14 @@ async fn native_recovery_export_conversion_holds_fences_and_suppresses_a_late_lo
             .await
             .unwrap()
             .unwrap();
-        let group = state.servers.lock().await[&7].group_id.clone();
+        let group = state
+            .servers
+            .lock()
+            .await
+            .legacy(&7)
+            .expect("Legacy fixture row")
+            .group_id
+            .clone();
         let logical = target().document(&group).unwrap();
         let saved = StudioRecovery::snapshot(
             &view.projection,

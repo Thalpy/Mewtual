@@ -28,6 +28,12 @@ pub struct NativeUiInvocationBudget {
     pool: CriticalCatalogReadPool,
 }
 impl NativeUiInvocationBudget {
+    /// Actual affine metadata debit, as policy DATA only. Native buffer
+    /// envelopes use this quote so a future price change cannot silently make
+    /// their combined credit insufficient. This grants no UI/Source authority.
+    pub const fn metadata_bytes() -> usize {
+        INVOCATION_BYTES
+    }
     /// Process policy DATA; this minimum funds one mounted host and the bounded
     /// independent candidate overlap. It grants no capture or native access.
     pub const fn required_capacity() -> usize {
@@ -451,6 +457,17 @@ pub struct UiCapture {
     record: Arc<RetirementRecord>,
     original: Weak<Registry>,
     _invocation: Arc<Fee>,
+}
+impl UiCapture {
+    /// Cached negatives only. The owning concrete factory still has to check
+    /// this capture against its original facade and source collection.
+    pub(super) fn is_current_cached(&self) -> bool {
+        !self
+            .record
+            .retiring
+            .load(std::sync::atomic::Ordering::SeqCst)
+            && self.current.is_current()
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// Key-work-only retirement status, never whole native lock completion.

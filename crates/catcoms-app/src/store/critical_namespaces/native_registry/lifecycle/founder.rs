@@ -3,12 +3,15 @@
 //! network reservation and whole founder driver before installing a runtime.
 use super::super::data::FounderBindingData;
 use super::{
-    data::{Backend, Birth, BirthKind, Change, Index, Row},
+    data::{Backend, Change, Index, Row},
     metadata::{Outcome, Plan},
     *,
 };
 use crate::store::{NativeCreationStateData, NativeCreationStatusData};
 use zeroize::Zeroizing;
+// Closed immutable receipt DATA for the owning native network producer. Do
+// not expose the index/row parser or any generic mutation authority with it.
+pub(in crate::store::critical_namespaces::native_registry) use super::data::{Birth, BirthKind};
 
 pub(super) const MAX_NETWORK_FRAME: usize = 64 * 1024;
 
@@ -39,7 +42,7 @@ impl Pending {
     pub(super) fn require_bounded(&self) -> Result<(), AppError> {
         if self.name.len() > super::super::data::MAX_NAME
             || !(40..=MAX_NETWORK_FRAME).contains(&self.network_frame.len())
-            || self.birth.kind != BirthKind::Founder
+            || !self.birth.kind.is_founder()
             || self.birth.join_context.is_some()
         {
             return Err(refused());
@@ -88,7 +91,7 @@ impl Pending {
 
 impl Activate {
     pub(super) fn require_bounded(&self) -> Result<(), AppError> {
-        if self.birth.kind != BirthKind::Founder
+        if !self.birth.kind.is_founder()
             || self.birth.join_context.is_some()
             || self.binding.group.is_empty()
             || self.binding.group.len() > 256
@@ -154,7 +157,7 @@ fn successor(selected: &Index, parent: [u8; 32]) -> Result<Index, AppError> {
 /// not silently acquire a founder result or be interpreted as an absent token.
 pub(super) fn status(row: &Row) -> Result<NativeCreationStatusData, AppError> {
     let state = match &row.backend {
-        Backend::Pending { birth, .. } if birth.kind == BirthKind::Founder => {
+        Backend::Pending { birth, .. } if birth.kind.is_founder() => {
             NativeCreationStateData::Pending
         }
         Backend::Founder { .. } => NativeCreationStateData::Founder,

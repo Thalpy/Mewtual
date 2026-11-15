@@ -1,5 +1,169 @@
 # Threat model; client integrity & enforcement boundaries
 
+The stage-lifetime continuation permits a completed closed SDK snapshot to
+remain resident after its finite native key work drains. That is not Source,
+SDK-body, physical-work or key-erasure completion. A partial resumable Cell
+must retain its actual original AddSdk End; a spent cut alone is insufficient.
+Retirement also releases old cut metadata to avoid pinning UI-generation fees.
+Fresh native-stage authorization cannot reset request/SDK/key attempt state:
+Attempting is set before RT entry, only returned Busy/Unavailable may prove a
+known local pre-primitive refusal, and unknown/native/key entry cannot be
+laundered by retry. Root must prove the same saved operation and current
+parent/source for every new command. Its real cleanup/covering consumers are
+still absent. [Exact boundary](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
+The disabled governed Add library now freezes both authenticated signed join
+inputs and bounded exact package bytes before native SDK entry. The actual
+retained Clock supplies first-admission time; cached retries cannot substitute
+renderer time, different credential expectations or new routing randomness.
+The original L0/file key and supported pinned policy are sealed only by the
+same merged candidate. This is cryptographic/source consistency, not Root
+invitation authorization, consumed-nonce evidence, saved membership, Welcome
+release or joined Source provenance. A future joiner must strictly verify the
+tagged V2 plaintext and every binding with no Legacy fallback.
+[Contract and remaining boundaries](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
+Governed-native Current admission now revalidates its actual mounted4 owner,
+retained marker and final same-file bytes under the already-held Root. A
+missing marker, equal-byte replacement or post-authentication in-place mutation
+cannot pass that additional check. Only the constructor-selected steady native
+family enters it; parsed4 or temporary opening state cannot create authority.
+This remains a namespace negative, not Source4 or a governing save receipt.
+[Boundary and evidence](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
+The library-only governed founder owner preserves immutable genesis provenance
+separately from actual installed SDK evidence. One pending Add owns three native
+cuts bound to the same original source and keeps real Ends after all private
+payloads. Constructor ambiguity cannot reset its debit; governing raw64 is
+cached before late checks. No Root/native path constructs this owner yet.
+
+The response uses a separate `JoinWelcome` purpose (appended slot7), never the
+governing Header's spent cut. Its unsigned canonical preimage is frozen from
+the same request/Cell/materialized Add; raw64 is cached before verification or
+late cancellation. An uncertain entered key call cannot sign again. Root must
+durably cover WelcomeIntent before entry and the actual installed response
+before release; these library DATA interfaces implement neither authority.
+Its future consumer requires durable outcome binding and cancelled-operation
+cleanup before UI/key drainage; End counting alone would deadlock lock/close.
+[Scope and remaining enforcement](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
+Combined governed-native startup authenticates exact index/marker frames and
+retains their original file identities across catalog declaration and final
+handoff. A matching namespace descriptor cannot authorize another mutable
+index. Native seed2 has its own AEAD domain and no seed1 fallback. First-torn
+cleanup only aborts on a separately verified pristine native3 baseline;
+authenticated invalid/future data and changed/nonempty evidence are preserved.
+The cold constructor keeps its actual observation or completed declaration
+through final reads. Cached4 revocation follows the original mounted owner
+without IO or locks. These storage checks establish no live membership,
+Source4, native credential, signer or operational restart authority.
+[Scope and acceptance](communication-recovery/CHAT-V2-GOVERNED-NATIVE-STORAGE.md).
+
+The completed MLS Add ownership seam refuses foreign/stale receiver pairs and
+keeps exclusive loans through its no-fail swaps. The returned retired owner
+cannot execute or extract SDK state; the installed provider stays closed.
+Root covering-save, Source and native admission remain independent and are
+not implemented by this seam. [Boundary](communication-recovery/CHAT-V2-ADD-OWNERSHIP.md).
+
+The new V2 join binding codecs are bounded cryptographic DATA only. A valid
+signature or matching tuple neither selects a root nor establishes an MLS
+Add/current source. Every representation is verified before link/duplicate use;
+Welcome's governing issuer is checked independently of inviter/forwarder.
+No consumer or protocol activation exists. [Scope and tests](communication-recovery/CHAT-V2-JOIN-BINDINGS.md).
+
+A destroyed renderer component permanently refuses further continuity and
+Native Text driver work. Retirement precedes potentially throwing cleanup.
+This prevents old callbacks submitting stale journals after a warm remount;
+it grants no native authority and does not cancel already-admitted work.
+[Boundary and tests](communication-recovery/CHAT-V2-UI-RETIREMENT.md).
+
+Native session listings retain the actual authentication/installed-object
+association and independent copy payment through final delivery. Busy/stale
+post-auth listing errors do not consume warning acknowledgement. The App keeps
+backend mode independently of empty rows and seals exact native intents before
+dispatch. Its local original list establishes neither shared history nor peer
+delivery. [Current boundary, tests and remaining gaps](communication-recovery/CHAT-V2-NATIVE-SESSION.md).
+
+Native retry continuity is caller DATA under sticky critical4, with whole-queue
+refusal instead of lossy sanitization. It cannot reconstruct a cold signer or
+replace native object/generation checks. [Scope and pending evidence](communication-recovery/CHAT-V2-NATIVE-CONTINUITY.md).
+
+Native history plaintext is paid independently from its Root page before work,
+serialized under a fixed cap and withheld after original mount/row/generation
+replacement. The same final installed-object checks protect founder/send replies.
+Local saved originals confer no publication, receipt or shared-projection claim.
+[Boundary and pending checks](communication-recovery/CHAT-V2-NATIVE-HISTORY.md).
+
+The disabled native sender uses original row/selection/incarnation/mount and full
+account cancellation, independently of renderer correlation IDs. Its actual owned
+UI guard survives local IO and lost observers. Counted final preparation never
+awaits native guards; refusal releases native custody before Root restoration.
+Native whole-close publishes irreversible global closure before fallible probes,
+retains fenced rows across retries, and drains without Legacy UI/table guards.
+Plaintext and payment share one whole blocking-work object, including unrun and
+unwind paths. This supplies local-save enforcement only: transport, complete group
+projection, cold operational restore and Chat V2 activation remain unfinished.
+[Current boundary and evidence](communication-recovery/CHAT-V2-NATIVE-DISPATCH.md).
+
+Native row closure must fence the original primitive counter, independently of
+watch cancellation. Its opaque negative close handle retains that counter and
+the original trusted payer, without an issuer/Host backlink; the actual Root
+producer supplies fee-only custody. SC close runs no Waker and is not a
+Leave/Retired, SDK-release or physical-erasure certificate. The backend/native
+factory consumer remains unfinished and Chat V2 stays off.
+[Scope and tests](communication-recovery/CHAT-V2-NATIVE-DISPATCH.md).
+
+Native text member preparation selects the original runtime through fresh index
+evidence and the original Entry's member cut. Numeric IDs, recovered row DATA
+and erased custody boxes confer no signing or native UI authority. The owning
+save/refusal frames release actual native custody before runtime restoration or
+notification, retaining original payments throughout. The Root mutex tests do
+not authenticate native AppState credentials; the checked native factory and
+complete send/read integration remain unfinished and Chat V2 stays off.
+Bounded history returns only this member's stored originals, including settled
+items; empty publication debt never establishes empty history. Page ordinals
+are DATA, statuses are local observations, and returned plaintext grants no
+current source/UI authority. Host setup/recovery preserves unsaved custody and
+does not sign, admit or publish on behalf of a read.
+[Boundary and tests](communication-recovery/CHAT-V2-NATIVE-TEXT-OPERATIONS.md).
+
+Native source-controller validation now separates actual bootstrap work and
+returned plans from complete unlock tasks. Irreversible close follows continuity
+admission, rejects replacement owners at each stage, and acknowledges disposal
+after outside-guard destructors. Native authoring, joined authority and wider
+Chat V2 acceptance remain open. [Boundary and pending evidence](communication-recovery/CHAT-V2-NATIVE-SOURCE-CONTROLLER.md).
+
+Original metadata/authentication and UI-state work now have a distinct closed
+drain under validation. Nine focused cases passed, including a post-CAS capture
+wakeup race fixed after review. This is separate from Source/SDK/TCP and actual
+facade disposal; native close integration and Chat V2 remain unfinished.
+[Contract and pending checks](communication-recovery/CHAT-V2-NATIVE-WORK-DRAIN.md).
+
+Native text creation and retirement now have owning two-phase work captures
+under validation. Admitted preparations participate in original closure even
+when no row exists. Ten new regressions and all 56 affected source tests passed;
+the native controller/commands
+and wider Chat V2 remain unfinished and disabled.
+[Contract and pending checks](communication-recovery/CHAT-V2-NATIVE-SOURCE-CAPTURE.md).
+
+Whole native text Source retirement is under validation. Cleanup now separates
+original key work, whole SDK/body destruction and original TCP drainage, retaining
+the same canonical evidence across lost workers. All 46 affected source tests
+passed; adversarial review is clear. The native consumer and wider
+Chat V2 remain unfinished and disabled.
+[Contract and pending checks](communication-recovery/CHAT-V2-NATIVE-SOURCE-RETIREMENT.md).
+
+Native text transport now retains actual TCP key-task custody through teardown.
+The affected networking package passed 208 tests and strict Clippy; the Root
+source/admission cohort passed 37 cases. Native commands, canonical
+retirement, joined sources and Chat V2 acceptance remain unfinished and disabled.
+[Scope and evidence](communication-recovery/CHAT-V2-NATIVE-TCP-LIFETIME.md).
+
+Native text authoring is adding the original device/network/whole founder and
+Native4 activation dependencies. The current source cohort passed 33 local
+regressions; broader gates and the actual native command consumer remain open.
+Chat V2 stays disabled and incomplete. [Scope and pending acceptance](communication-recovery/CHAT-V2-NATIVE-AUTHORING.md).
+
 Native lock snapshots now have bounded synchronous DATA custody, original-mount
 retry, exact close acknowledgements and response-bound warning receipts under
 adversarial validation. Chat V2 stays off; operational text authoring and
@@ -6570,3 +6734,17 @@ archive: malicious omission can still deny progress, and Root must implement
 bounded authenticated export, selected-write coupling and contradiction replay
 before evicting hot evidence or claiming restart-safe fork detection. See
 [the detailed boundary](communication-recovery/CHAT-V2-SELECTED-HISTORY-PROOFS.md).
+
+## Native V2 invitation boundary (15 November)
+
+Unsigned invite preparation now derives anchor/policy/draws from the same warm
+node and route DATA from its actual retained transport reservation. A random
+row identity is distinct from the transport-key commitment authenticated by
+Birth. Current4 and the original founder Admission/selected G1 are rechecked
+before and after draw. Zero certified contacts are encoded; a wildcard listener
+or configured relay string is never treated as reachable-route evidence.
+The separate native JoinInvite tail caches raw64 before late checks and cannot
+renew unknown Clock/RNG/key entry. This supplies no SavedInvite/current Add or
+publication authority. Durable KeyAttempt/cold no-resign, persistent quotas and
+covering journal/IO admission remain unfinished. Chat V2 stays OFF.
+[Detailed limits](communication-recovery/CHAT-V2-INVITE-ISSUER.md).

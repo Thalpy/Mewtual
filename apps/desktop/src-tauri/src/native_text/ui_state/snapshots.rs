@@ -63,6 +63,17 @@ pub(crate) struct Notice {
     target: Option<Target>,
     kind: NoticeKind,
 }
+impl Notice {
+    /// Listing Busy/STALE is neither the original warning nor a successful
+    /// authentication reply. It must not acknowledge lost screen state.
+    pub(crate) fn delivered_by_unlock(&self, original_error: bool, success: bool) -> bool {
+        match self.kind {
+            NoticeKind::Warn => original_error,
+            NoticeKind::Acknowledge => success,
+            NoticeKind::Close => false,
+        }
+    }
+}
 
 struct Payload {
     generation: u64,
@@ -476,6 +487,13 @@ impl Snapshots {
         }
     }
     pub(crate) async fn notice_is_current(&self, state: &AppState, notice: &Notice) -> bool {
+        if matches!(notice.kind, NoticeKind::Close) {
+            return self.notice_revision_current(state, notice);
+        }
+        let store = state.store.lock().await;
+        self.notice_is_current_in_store(state, notice, &store)
+    }
+    fn notice_revision_current(&self, state: &AppState, notice: &Notice) -> bool {
         let matches = self
             .state
             .lock()
@@ -489,11 +507,23 @@ impl Snapshots {
         if !matches {
             return false;
         }
+        true
+    }
+    /// The final reply already holds Store. Check the newest original receipt
+    /// and target here, rather than sample them before an awaited guard.
+    pub(crate) fn notice_is_current_in_store(
+        &self,
+        state: &AppState,
+        notice: &Notice,
+        store: &Option<MountedVault>,
+    ) -> bool {
+        if !self.notice_revision_current(state, notice) {
+            return false;
+        }
         if matches!(notice.kind, NoticeKind::Close) {
             return true;
         }
         if let Some(target) = &notice.target {
-            let store = state.store.lock().await;
             store
                 .as_ref()
                 .and_then(MountedVault::as_text_v2)

@@ -4,9 +4,11 @@ use super::native_ui::{
     UiAdmissionOwner, UiCandidate, UiCapture, UiGarbage, UiPreparation, UiRetirement,
 };
 use super::*;
-mod upgrade;
+pub(super) mod upgrade;
 use std::sync::atomic::{AtomicBool, AtomicU64};
-pub use upgrade::{NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal};
+pub use upgrade::{
+    NativeTextGovernanceUpgrade, NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal,
+};
 
 /// The affine mounted native backend. Install only through the native factory,
 /// which authenticates its window/session and supplies the actual AppState
@@ -18,12 +20,15 @@ pub struct NativeTextVault {
     // FIRST, outside physical work custody. Drop's synchronous fences below run
     // before this registry can destroy owners/fees and wake arbitrary waiters.
     ui: UiAdmissionOwner,
-    index: IndexOwner,
+    // Negative only. Actual generic SourceOwners/runtimes are closed and
+    // drained separately; this bit cannot stand in for their return.
+    pub(super) sources: super::source_admission::SourceAdmission,
+    pub(super) index: IndexOwner,
 }
 // Version2 remains a compatibility/testing owner. The real native factory
 // explicitly consumes its upgrade continuation to obtain selected3; this enum
 // never guesses a backend/version from decoded files or an opener error.
-enum IndexOwner {
+pub(super) enum IndexOwner {
     Version2(mount::NativeIndexStore),
     Version3(super::upgrade_source::owning::Store),
 }
@@ -134,18 +139,21 @@ impl NativeTextVault {
         budget: NativeUiInvocationBudget,
     ) -> Result<Self, AppError> {
         let ui = UiAdmissionOwner::new(generation, authorized, requested, budget)?;
+        let sources = super::source_admission::SourceAdmission::new(ui.observe_mount())?;
         Ok(Self {
             ui,
+            sources,
             index: IndexOwner::Version2(index),
         })
     }
 
-    /// Whole-vault admission only. Always fence Host first, original index
-    /// second, before taking any registry, operation or physical writer lock.
+    /// Whole-vault admission only. Fence Host, source admission, then the
+    /// original index before taking registry, operation or physical writers.
     /// This is SC/atomic bookkeeping, with no notification, IO or destruction.
     /// UI lock and one-row Leave use their distinct, narrower retirement paths.
     pub fn close_admission(&self) {
         self.ui.close_first();
+        self.sources.close_first();
         match &self.index {
             IndexOwner::Version2(index) => index.close_index_admission(),
             IndexOwner::Version3(index) => index.close_admission(),
@@ -218,6 +226,11 @@ impl NativeTextVault {
 
     pub(super) fn observe_ui_mount(&self) -> catcoms_rt::NativeChatUiMountObservation {
         self.ui.observe_mount()
+    }
+    /// Original caller-credit policy only; this private clone grants no work,
+    /// UI or owner authority and performs no account lock/allocation.
+    pub(super) fn ui_invocation_budget(&self) -> NativeUiInvocationBudget {
+        self.ui.invocation_budget()
     }
     /// Capture only the original dedicated UI slot. No index-WAL/Idle proof is
     /// substituted for local sidecar ownership. Native authenticates the caller.

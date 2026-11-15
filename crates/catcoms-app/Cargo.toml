@@ -10,6 +10,9 @@ catcoms-rt = { path = "../catcoms-rt" }
 catcoms-crypto = { path = "../catcoms-crypto" }
 catcoms-discovery = { path = "../catcoms-discovery" }
 catcoms-mls = { path = "../catcoms-mls" }
+# The native owning founder constructs and verifies its actual transport here;
+# a caller-provided transport/identity receipt is not native source provenance.
+catcoms-net = { path = "../catcoms-net" }
 catcoms-replication = { path = "../catcoms-replication" }
 catcoms-sync = { path = "../catcoms-sync" }
 catcoms-storage = { path = "../catcoms-storage" }
@@ -50,7 +53,6 @@ catcoms-replication = { path = "../catcoms-replication", features = ["test-count
 # The product layer is transport-generic, so almost every test here runs on the in-memory mesh.
 # `tcp_product_e2e` is the exception: connect/disconnect only exist on a real transport, and
 # presence is defined in terms of them, so that one test needs a real libp2p node.
-catcoms-net = { path = "../catcoms-net" }
 catcoms-log = { path = "../catcoms-log" }
 libp2p = { version = "0.57.1", features = ["tokio"] }
 rand_chacha = "0.3"

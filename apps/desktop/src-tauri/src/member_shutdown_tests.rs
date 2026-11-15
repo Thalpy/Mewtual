@@ -167,7 +167,7 @@ async fn native_close_saves_history_and_pending_admission_without_waiting_for_of
             .stop();
         running.task.await.unwrap();
         running.drain.await.unwrap();
-        state.servers.lock().await.clear();
+        state.servers.lock().await.clear_legacy_fixture();
         drop(running.mesh);
         drop(local_tcp);
         drop(state.store.lock().await.take());
