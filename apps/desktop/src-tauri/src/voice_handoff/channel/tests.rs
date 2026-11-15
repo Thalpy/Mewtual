@@ -1,4 +1,5 @@
 use super::*;
+use crate::voice_handoff::channel::SessionRef;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
@@ -39,19 +40,34 @@ fn native_diagnostic_contention_is_nonblocking_and_marks_missing_observations() 
 fn native_diagnostics_retain_no_session_or_credit_owner() {
     let resources = Arc::new(Resources::default());
     let (session, _) = session(resources.clone(), [3; 32]);
-    let weak = Arc::downgrade(&session);
+    let weak = session.downgrade();
     let identity_owners = Arc::strong_count(&session.identity);
     session.fixture_native_started(0);
     session.fixture_sdp_stage([5; 16], 1, 5);
     session.fixture_sdp_finished(Some(crate::voice_handoff::factory::Refused::Protocol(
         catcoms_sync::voice_v2::VoiceError::Capacity,
     )));
+    let mut observation = None;
+    assert!(resources
+        .reserve_recording_refusal(
+            [3; 32],
+            catcoms_sync::voice_v2::resources::GROUP_BYTES + 1,
+            &mut observation
+        )
+        .is_err());
+    session.fixture_sdp_reservation_refusal([5; 16], 1, observation.unwrap());
     assert_eq!(Arc::strong_count(&session.identity), identity_owners);
     drop(session);
     assert!(
         weak.upgrade().is_none(),
         "harness observations retain no Session"
     );
+    assert_eq!(
+        resources.counts(),
+        (BOOTSTRAP_BYTES, 0),
+        "the test's own weak allocation still has its original tail payer"
+    );
+    drop(weak);
     assert_eq!(
         resources.counts(),
         Resources::default().counts(),
@@ -215,7 +231,7 @@ fn concurrent_native_acquisition_has_one_actual_owner_without_spending_a_nonce()
     assert!(session.native_hold().is_ok());
 }
 
-fn session(resources: Arc<Resources>, group: [u8; 32]) -> (Arc<Session>, Keys) {
+fn session(resources: Arc<Resources>, group: [u8; 32]) -> (SessionRef, Keys) {
     Session::fixture_prepare_native_diagnostics();
     use catcoms_rt::RngCore;
     let mut rng = ChaCha20Rng::from_seed([37; 32]);
@@ -232,7 +248,7 @@ fn session(resources: Arc<Resources>, group: [u8; 32]) -> (Arc<Session>, Keys) {
 /// deterministic real MAC/AEAD bytes, never an asserted authentication boolean or a forged
 /// AuthenticatedRequest. Its allocations are fixtures, not application copy-bound evidence.
 pub(in crate::voice_handoff) struct FixtureChannel {
-    pub(in crate::voice_handoff) session: Arc<Session>,
+    pub(in crate::voice_handoff) session: SessionRef,
     browser: Keys,
 }
 impl FixtureChannel {
@@ -297,7 +313,7 @@ fn request(
     (header, wire)
 }
 fn incoming(
-    session: &Arc<Session>,
+    session: &SessionRef,
     bytes: &[u8],
     phase: Option<&Arc<Phase>>,
 ) -> Result<Incoming, Refused> {
@@ -335,9 +351,11 @@ fn paid_fixed_storage_and_original_control_lane_cover_codec_peak() {
         super::super::sdp_delivery::layout_bytes(),
         super::super::media::layout_bytes(),
         super::super::sdp_result::layout_bytes(),
+        super::super::negotiation_admission::layout_bytes(),
+        super::super::negotiation_capacity::layout_bytes(),
     ];
     eprintln!(
-        "adapter graphs pending/history/final/input/admission/settlement/plan-final/key-session/transition/child-history/child-input/child-admission/child-settlement/child-result/child-begin/sdp-http/sdp-input/sdp-engine/sdp-delivery/media/sdp-result: {adapters:?}"
+        "adapter graphs pending/history/final/input/admission/settlement/plan-final/key-session/transition/child-history/child-input/child-admission/child-settlement/child-result/child-begin/sdp-http/sdp-input/sdp-engine/sdp-delivery/media/sdp-result/negotiation-admission/negotiation-capacity: {adapters:?}"
     );
     let state = std::mem::size_of::<HeaderWorker>()
         .max(std::mem::size_of::<AuthenticatedRequest>())
@@ -548,7 +566,7 @@ fn completed_output_keeps_the_original_credit_after_all_outer_session_waiters_dr
         (CONTROL_BYTES + BOOTSTRAP_BYTES + BROWSER_CONTROL_BYTES, 1),
         "the original control lane stays prepaid through actual output collection"
     );
-    let weak = Arc::downgrade(&session);
+    let weak = session.downgrade();
     drop(session);
     assert!(weak.upgrade().is_some());
     assert_eq!(pool.counts(), held);
@@ -557,6 +575,8 @@ fn completed_output_keeps_the_original_credit_after_all_outer_session_waiters_dr
     assert_eq!(pool.counts(), held);
     drop(ready_but_uncollected);
     assert!(weak.upgrade().is_none());
+    assert_eq!(pool.counts(), (BOOTSTRAP_BYTES, 0));
+    drop(weak);
     assert_eq!(pool.counts(), (0, 0));
 }
 
@@ -994,12 +1014,14 @@ fn actual_detached_hold_keeps_the_original_session_busy_after_header_cancellatio
     assert!(matches!(session.header(), Err(Refused::Capacity)));
     assert_eq!(session.fixture_counts(), (true, 0, 0));
     let paid = pool.counts();
-    let weak = Arc::downgrade(&session);
+    let weak = session.downgrade();
     drop(session);
     assert!(weak.upgrade().is_some());
     assert_eq!(pool.counts(), paid);
     drop(hold);
     assert!(weak.upgrade().is_none());
+    assert_eq!(pool.counts(), (BOOTSTRAP_BYTES, 0));
+    drop(weak);
     assert_eq!(pool.counts(), (0, 0));
 }
 

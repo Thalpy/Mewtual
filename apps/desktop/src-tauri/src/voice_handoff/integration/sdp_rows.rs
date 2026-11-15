@@ -117,7 +117,25 @@ fn decode<'a>(
 /// local Capacity means this synchronous call did not admit a producer. Retry the SAME
 /// candidate, with fresh sanctioned clock samples, within the existing fixture bound;
 /// never retry another refusal or discard an already successful Factory/Existing row.
-async fn current<T>(
+pub(super) async fn current<T>(
+    state: &AppState,
+    context: &context::Context,
+    route: &bootstrap::Route,
+    intent: &InitialSdpIntent,
+    apply: impl FnMut(
+        &crate::voice_handoff::transition::Admission<'_>,
+        u64,
+        u64,
+    ) -> Result<T, VoiceError>,
+) -> Result<T, factory::Refused> {
+    current_after_refusal(state, context, route, intent, apply, || {}).await
+}
+
+/// Deterministic fixture seam: a refusal hook may release the actual competing
+/// guard only after the entire failed admission returned and released its own
+/// native/Index/State guards. It cannot turn another refusal or an Ok(None) into
+/// success. The default helper above has no hook or additional retry allowance.
+pub(super) async fn current_after_refusal<T>(
     state: &AppState,
     context: &context::Context,
     route: &bootstrap::Route,
@@ -127,6 +145,7 @@ async fn current<T>(
         u64,
         u64,
     ) -> Result<T, VoiceError>,
+    mut after_refusal: impl FnMut(),
 ) -> Result<T, factory::Refused> {
     let clock = crate::voice_runtime(state).clock();
     let wall = clock.now_ms();
@@ -148,7 +167,8 @@ async fn current<T>(
         {
             return result;
         }
-        // No native guard survives this wait. Original Ready/intent deadlines and all
+        after_refusal();
+        // The failed admission holds no guard across this wait. Original Ready/intent deadlines and all
         // protocol/security refusals remain enforced by the actual admission path.
         clock
             .sleep(std::time::Duration::from_millis(
@@ -157,6 +177,63 @@ async fn current<T>(
             .await;
     }
     unreachable!("last bounded attempt returns its exact result")
+}
+
+/// Negative historical closure has no positive-current/intent deadline gate.
+/// Maintenance may hold any real Index/parent/row try-lock, including after the
+/// idempotent purpose latch changed. Retry ONLY its actual local Capacity using
+/// the SAME original parent/Session/request/purpose and the fixture's existing
+///32-observation/10ms scheduling bound; never ask Root for a new action or grant.
+///
+/// Every call forces its first real Index refusal. The barrier is released
+/// before any Clock wait, proving the fixture can recover from actual contention
+/// rather than merely hoping the unforced full test schedules that ordering.
+async fn close_original(
+    state: &AppState,
+    route: &bootstrap::Route,
+    parent: &ledger::ResolvedRow,
+    request: &requests::sdp_action::Begin<'_>,
+    purpose: NativeRowPurpose,
+) -> Result<Option<ledger::ResolvedRow>, VoiceError> {
+    let clock = crate::voice_runtime(state).clock();
+    // This synchronous frame cannot carry the actual mutex guard into a Clock
+    // wait, including the acquisition loop's contended branch.
+    let refuse_once = || {
+        let blocked = state.voice_handoff.fixture_try_hold_index()?;
+        let refused = state.voice_handoff.close_sdp_original(
+            parent,
+            route.selected(),
+            route.session().identity(),
+            request,
+            purpose,
+        );
+        drop(blocked);
+        assert!(matches!(refused, Err(VoiceError::Capacity)));
+        Ok::<(), VoiceError>(())
+    };
+    for attempt in 0..32 {
+        match refuse_once() {
+            Ok(()) => break,
+            Err(VoiceError::Capacity) if attempt < 31 => {
+                clock.sleep(std::time::Duration::from_millis(10)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    for attempt in 0..32 {
+        let result = state.voice_handoff.close_sdp_original(
+            parent,
+            route.selected(),
+            route.session().identity(),
+            request,
+            purpose,
+        );
+        if !matches!(result, Err(VoiceError::Capacity)) || attempt == 31 {
+            return result;
+        }
+        clock.sleep(std::time::Duration::from_millis(10)).await;
+    }
+    unreachable!("the final bounded observation returns its exact result")
 }
 
 // These are independently admitted original native objects, not reconstructed identifiers.
@@ -187,6 +264,18 @@ pub(super) async fn exercise(
         .sdp_action_candidate(route.session().identity(), &request)
         .unwrap();
     let funding = candidate.funding();
+    // The actual independent SDP allocator shares the parent-claim namespace.
+    // A regression to rows.position(None) would steal precisely this first
+    // vacant slot despite successful real PC/intent/current-Root authorization.
+    let parent_claim = state
+        .voice_handoff
+        .reserve_parent(
+            route.selected().clone(),
+            route.session().identity().clone(),
+            1,
+        )
+        .unwrap();
+    let reserved_parent_id = parent_claim.fixture_id();
     let before = state.voice_handoff.sdp_test_rows(parent.id());
     // An outer Capacity occurs BEFORE this closure. Keep the complete successful batch,
     // including its affine Factory, then retry only individual LOCAL refusals below.
@@ -258,6 +347,16 @@ pub(super) async fn exercise(
     let ticket = factory.expect("one Factory plus seven exact existing rows");
     assert_eq!(ids.len(), 8);
     assert!(ids.iter().all(|id| *id == ticket.id()));
+    assert!(ids
+        .iter()
+        .all(|id| id.logical()[..8] != reserved_parent_id.logical()[..8]));
+    assert!(state
+        .voice_handoff
+        .fixture_parent_reserved(reserved_parent_id));
+    drop(parent_claim);
+    assert!(!state
+        .voice_handoff
+        .fixture_parent_reserved(reserved_parent_id));
     assert!(
         outcomes.iter().all(|slot| Arc::ptr_eq(slot, &outcomes[0])),
         "every competing candidate observes the ONE actually installed outcome"
@@ -453,15 +552,8 @@ pub(super) async fn exercise(
         // Close wins with a genuine command already queued. It cannot erase that command
         // or assume no publication; the late exact Action is captured even while closed.
         if mismatch_mode != 3 {
-            let closed = state
-                .voice_handoff
-                .close_sdp_original(
-                    parent,
-                    route.selected(),
-                    route.session().identity(),
-                    &request,
-                    NativeRowPurpose::Seal,
-                )
+            let closed = close_original(state, route, parent, &request, NativeRowPurpose::Seal)
+                .await
                 .unwrap()
                 .unwrap();
             assert_eq!(closed.id(), row.id());
@@ -523,15 +615,8 @@ pub(super) async fn exercise(
                     "open IO forbids historical adoption"
                 );
                 assert!(row.status().unwrap().action.is_none());
-                state
-                    .voice_handoff
-                    .close_sdp_original(
-                        parent,
-                        route.selected(),
-                        route.session().identity(),
-                        &request,
-                        NativeRowPurpose::Seal,
-                    )
+                close_original(state, route, parent, &request, NativeRowPurpose::Seal)
+                    .await
                     .unwrap();
                 assert!(funding.is_collected());
                 assert!(row.status().unwrap().action.is_none());
@@ -591,15 +676,8 @@ pub(super) async fn exercise(
     } else {
         // HIGH has no applied incoming Offer in this fixture. Close an actually unstarted
         // native purpose, never ask Root to fabricate an Answer or an input token.
-        state
-            .voice_handoff
-            .close_sdp_original(
-                parent,
-                route.selected(),
-                route.session().identity(),
-                &request,
-                NativeRowPurpose::Seal,
-            )
+        close_original(state, route, parent, &request, NativeRowPurpose::Seal)
+            .await
             .unwrap();
         assert!(!row.try_compact_sdp().unwrap());
         drop(ticket);
@@ -673,17 +751,12 @@ pub(super) async fn exercise(
         retained.unstarted = Some(open_row);
         return retained;
     }
-    assert!(state
-        .voice_handoff
-        .close_sdp_original(
-            parent,
-            route.selected(),
-            route.session().identity(),
-            &open,
-            NativeRowPurpose::Open
-        )
-        .unwrap()
-        .is_none());
+    assert!(
+        close_original(state, route, parent, &open, NativeRowPurpose::Open)
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(
         current(state, &context, route, intent, |admission, wall, mono| {
             state.voice_handoff.begin_sdp_action(

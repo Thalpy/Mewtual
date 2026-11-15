@@ -4,6 +4,7 @@ use super::*;
 use voice_v2::crypto_actions::{CryptoAction, CryptoInput};
 use voice_v2::presence::{LocalJoin, WatchAuthority};
 use voice_v2::JoinKey;
+mod admission;
 mod derivation;
 mod pair;
 mod progress;

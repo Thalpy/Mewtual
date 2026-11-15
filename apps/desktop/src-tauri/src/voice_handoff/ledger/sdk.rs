@@ -1,9 +1,10 @@
 //! Separately released browser SDK custody. Closing native storage or collecting its HTTP
 //! Session says nothing about a browser promise. This record owns fixed provenance only.
-use super::super::channel::{PhysicalHold, Session};
+use super::super::channel::PhysicalHold;
 use super::super::requests::sdk::Request;
 use super::transition::try_lock;
 use super::*;
+use crate::voice_handoff::channel::SessionRef;
 use catcoms_sync::voice_v2::chain::sdp_handoff::EffectObserver;
 use sha2::{Digest, Sha256};
 
@@ -162,7 +163,7 @@ impl ResolvedRow {
         &self,
         admission: &super::super::transition::Admission<'_>,
         physical: &PhysicalHold,
-        session: &Arc<Session>,
+        session: &SessionRef,
         request: &Request,
     ) -> Result<Option<Preparation>, VoiceError> {
         if !physical.belongs_to(session)

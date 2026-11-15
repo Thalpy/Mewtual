@@ -145,6 +145,17 @@ impl Preparation {
         self.phase = Some(self.custody.prepare_sdp_handoff()?);
         Ok(())
     }
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn prepare_recording_refusal(
+        &mut self,
+        observation: &mut Option<catcoms_sync::voice_v2::resources::ReservationRefusal>,
+    ) -> Result<(), VoiceError> {
+        self.phase = Some(
+            self.custody
+                .prepare_sdp_handoff_recording_refusal(observation)?,
+        );
+        Ok(())
+    }
 }
 impl Drop for Preparation {
     fn drop(&mut self) {

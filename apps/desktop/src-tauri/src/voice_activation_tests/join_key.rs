@@ -84,10 +84,12 @@ async fn selected_join_key_real_root_capacity_retries_the_original_point() {
     let pressure = resources
         .charge(
             group,
-            GROUP_BYTES - resources.counts().0,
+            GROUP_BYTES - resources.group_counts(group).unwrap().0,
             catcoms_sync::voice_v2::resources::ResourceKind::Retained,
         )
         .unwrap();
+    // Fixed process indexes must not leave ordinary group headroom here.
+    assert_eq!(resources.group_counts(group).unwrap().0, GROUP_BYTES);
     assert!(
         publish_inner(&f.state, &owner, &executor(), &admitted.permit, point())
             .await

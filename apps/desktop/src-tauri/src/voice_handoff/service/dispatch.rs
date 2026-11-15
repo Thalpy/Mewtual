@@ -13,11 +13,12 @@ use crate::voice_handoff::{
 /// is synchronous, so also inventory its broad lookup context and immutable proof on top
 /// of that future rather than assuming that an inline helper has no temporary ownership.
 pub(super) fn admission_layout_bytes() -> usize {
-    std::mem::size_of::<crate::voice_handoff::context::LiveContext>()
+    let existing = std::mem::size_of::<crate::voice_handoff::context::LiveContext>()
         + std::mem::size_of::<channel::AuthenticatedRequest>()
         + std::mem::size_of::<Option<Arc<crate::voice_handoff::custody::Phase>>>()
             .max(std::mem::size_of::<channel::sdp::Permit>())
-        + 128
+        + 128;
+    existing.max(crate::voice_handoff::bootstrap::admitted_control_layout_bytes())
 }
 
 /// Authenticate once before selecting an existing prepaid Data Phase. No unauthenticated
@@ -123,6 +124,14 @@ pub(super) async fn respond(
     route: &Route,
     incoming: Incoming,
 ) -> Result<CompletedReply, Refused> {
+    if incoming.operation() == Operation::NegotiationCapacity {
+        return crate::voice_handoff::negotiation_capacity::apply(context, route, incoming)
+            .map_err(|_| Refused::Body);
+    }
+    if incoming.operation() == Operation::NegotiationAdmission {
+        return crate::voice_handoff::negotiation_admission::apply(route, incoming)
+            .map_err(|_| Refused::Body);
+    }
     if incoming.operation() == Operation::Media {
         return crate::voice_handoff::media::apply(context, route, incoming)
             .await

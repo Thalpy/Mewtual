@@ -51,7 +51,7 @@ struct Fixture {
     runtime: Arc<Runtime>,
     clock: Arc<ManualClock>,
     actor: ActorOwner,
-    helper: Arc<HelperLedger>,
+    helper: super::super::runtime::HelperOwner,
     context: Context,
     room: RoomAuthority,
     routes: Vec<BoundRoute>,
@@ -743,7 +743,7 @@ fn helper_actor_replacement_keeps_protection_but_refuses_fresh_custody_ack_for_r
     new.sync_view(view(7, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]))
         .unwrap();
     f.actor = new;
-    assert!(Arc::ptr_eq(&f.helper, &f.actor.helper().unwrap()));
+    assert!(f.helper.is_same(&f.actor.helper().unwrap()));
     // Contract correction: retained bytes still protect the original identity/budget, but
     // their first actor is retired. Returning a current HelperQueued receipt would falsely
     // claim actionable custody under the new actor; a duplicate must now refuse.

@@ -40,19 +40,27 @@ mod file_transfers;
 mod member_maintenance;
 mod member_reconnect;
 mod voice_endpoint;
+use voice_endpoint::ActorInbox;
 pub use voice_endpoint::{
-    voice_context_queue_bytes, voice_initial_media_rpc_bytes, voice_sdp_delivery_rpc_bytes,
-    voice_sdp_engine_rpc_bytes, voice_sdp_input_rpc_bytes, voice_sdp_rpc_bytes,
-    InitialSdpCompletion, InitialSdpPending, VoiceConfirmationBody, VoiceConfirmationCompletion,
-    VoiceContextPending, VoiceEndpointCommand, VoiceEndpointError, VoiceInitialMediaPublisher,
-    VoiceInitialMediaWork, VoiceSdpBody, VoiceSdpBodyRefusal, VoiceSdpCompletion,
-    VoiceSdpDeliveryPublisher, VoiceSdpDeliveryWork, VoiceSdpEnginePublisher, VoiceSdpEngineWork,
-    VoiceSdpInputPublisher, VoiceSdpInputWork, VoiceSdpPending, VoiceSdpPublication,
-    VoiceSdpRecordedInput, VoiceSdpRecordedQueue, VoiceSdpResult, VoiceSdpResultInput,
-    VoiceSdpResultPublisher, VoiceSdpResultQueue, INITIAL_SDP_RPC_BYTES,
-    VOICE_CONFIRMATION_BODY_METADATA_BYTES, VOICE_INITIAL_MEDIA_RPC_BYTES,
-    VOICE_SDP_DELIVERY_RPC_BYTES, VOICE_SDP_ENGINE_RPC_BYTES, VOICE_SDP_INPUT_RPC_BYTES,
-    VOICE_SDP_RPC_FIXED_BYTES, VOICE_SDP_RPC_METADATA_BYTES,
+    control_layout_bytes, voice_admission_rpc_bytes, voice_admitted_admission_rpc_bytes,
+    voice_admitted_presence_rpc_bytes, voice_admitted_support_rpc_bytes,
+    voice_call_activation_rpc_bytes, voice_context_queue_bytes, voice_initial_media_rpc_bytes,
+    voice_sdp_delivery_rpc_bytes, voice_sdp_engine_rpc_bytes, voice_sdp_input_rpc_bytes,
+    voice_sdp_rpc_bytes, InitialSdpCompletion, InitialSdpPending, PreparedVoiceCall,
+    VoiceActivationControl, VoiceAdmissionPublisher, VoiceAdmissionWork,
+    VoiceAdmittedAdmissionPublisher, VoiceAdmittedAdmissionResult, VoiceAdmittedAdmissionWork,
+    VoiceAdmittedPresencePublisher, VoiceAdmittedPresenceResult, VoiceAdmittedPresenceWork,
+    VoiceAdmittedSupportPublisher, VoiceAdmittedSupportResult, VoiceAdmittedSupportWork,
+    VoiceCallActivationPublisher, VoiceCallActivationResult, VoiceCallActivationWork,
+    VoiceConfirmationBody, VoiceConfirmationCompletion, VoiceContextPending, VoiceEndpointCommand,
+    VoiceEndpointError, VoiceInitialMediaPublisher, VoiceInitialMediaWork, VoiceSdpBody,
+    VoiceSdpBodyRefusal, VoiceSdpCompletion, VoiceSdpDeliveryPublisher, VoiceSdpDeliveryWork,
+    VoiceSdpEnginePublisher, VoiceSdpEngineWork, VoiceSdpInputPublisher, VoiceSdpInputWork,
+    VoiceSdpPending, VoiceSdpPublication, VoiceSdpRecordedInput, VoiceSdpRecordedQueue,
+    VoiceSdpResult, VoiceSdpResultInput, VoiceSdpResultPublisher, VoiceSdpResultQueue,
+    INITIAL_SDP_RPC_BYTES, VOICE_ACTIVATION_CONTROL_BYTES, VOICE_CONFIRMATION_BODY_METADATA_BYTES,
+    VOICE_INITIAL_MEDIA_RPC_BYTES, VOICE_SDP_DELIVERY_RPC_BYTES, VOICE_SDP_ENGINE_RPC_BYTES,
+    VOICE_SDP_INPUT_RPC_BYTES, VOICE_SDP_RPC_FIXED_BYTES, VOICE_SDP_RPC_METADATA_BYTES,
 };
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
@@ -1622,7 +1630,9 @@ pub enum AppEvent {
         from_fp: String,
         payload: Vec<u8>,
     },
-    /// The actor has stopped (transport closed or shutdown requested).
+    /// Terminal effects are fenced (transport closed or shutdown requested).
+    /// Delivery is not proof that pre-close command permits, callbacks or the Actor
+    /// task have actually returned; normal task completion separately joins them.
     Closed,
 }
 
@@ -4376,6 +4386,9 @@ impl ServerActor {
     /// Dropping a queued request cancels it. Once the handler observes a live waiter, stopping
     /// is irreversible even if the ACK is lost during teardown. A timed-out caller must keep
     /// local state and may retry this idempotent operation; a closed mailbox is safely stopped.
+    /// This ACK certifies first-effects closure, not command/callback/task return. Normal
+    /// Actor task completion separately joins every pre-close mailbox permit; an ordinary
+    /// handle may remain alive through that negative-only drainage.
     pub async fn stop_and_wait(&self) -> Result<(), String> {
         let (stopped, result) = oneshot::channel();
         if self
@@ -4654,7 +4667,8 @@ where
     T: MeshTransport + Send + 'static,
     R: CryptoRngCore + Send + 'static,
 {
-    let (cmd_tx, mut cmd_rx) = mpsc::channel::<Envelope>(64);
+    let (cmd_tx, receiver) = mpsc::channel::<Envelope>(64);
+    let mut cmd_rx = ActorInbox::new(receiver, &cmd_tx);
     let (raw_events, event_rx) = mpsc::channel::<TracedEvent>(256);
     #[cfg(test)]
     let test_events = raw_events.downgrade();
@@ -5615,7 +5629,7 @@ where
                     Some(AppCommand::VoiceCallGrant { room, reply }) => {
                         let _ = reply.send(server.voice_call_grant(room));
                     }
-                    Some(AppCommand::VoiceEndpoint(command)) => command.apply(&mut server),
+                    Some(AppCommand::VoiceEndpoint(command)) => command.apply(&mut server, cmd_rx.control()),
                     Some(AppCommand::MediaKey { call_id, reply }) => {
                         let res = server
                             .media_key(call_id)
@@ -6294,8 +6308,10 @@ where
                         // a NEW generation; saved Keep allowance and intent remain unchanged.
                         file_transfers.retire();
                         if crate::shutdown::save_and_freeze(&mut server, ready).await {
+                            cmd_rx.close_activation();
                             server.sync.retire_voice_actor();
-                            drop(cmd_rx);
+                            cmd_rx.close();
+                            while let Ok(command) = cmd_rx.try_recv() { drop(command); }
                             let _ = event_tx.send(AppEvent::Closed).await;
                             break;
                         }
@@ -6303,25 +6319,27 @@ where
                     }
                     Some(AppCommand::StopAndWait { stopped }) => {
                         if admit_terminal_stop(stopped, || {
+                            cmd_rx.close_activation();
                             file_transfers.retire();
                             server.sync.retire_voice_actor();
                             // Wake waiting producers and reject/drop already queued replies
-                            // before ACK. Drop the receiver itself below before the event await,
-                            // including permits acquired by a producer before close.
+                            // before ACK. Keep THIS closed receiver through Closed delivery:
+                            // a pre-close Permit may still send after the event await begins.
                             cmd_rx.close();
                             while let Ok(command) = cmd_rx.try_recv() {
                                 drop(command);
                             }
                         }) {
-                            drop(cmd_rx);
                             let _ = event_tx.send(AppEvent::Closed).await;
                             break;
                         }
                     }
                     Some(AppCommand::Shutdown) | None => {
+                        cmd_rx.close_activation();
                         file_transfers.retire();
                         server.sync.retire_voice_actor();
-                        drop(cmd_rx);
+                        cmd_rx.close();
+                        while let Ok(command) = cmd_rx.try_recv() { drop(command); }
                         let _ = event_tx.send(AppEvent::Closed).await;
                         break;
                     }
@@ -6620,15 +6638,26 @@ where
                         }
                     }
                     _ => {
+                        cmd_rx.close_activation();
                         file_transfers.retire();
                         server.sync.retire_voice_actor();
-                        drop(cmd_rx);
+                        cmd_rx.close();
+                        while let Ok(command) = cmd_rx.try_recv() { drop(command); }
                         let _ = event_tx.send(AppEvent::Closed).await;
                         break;
                     }
                 } },
             }
         }
+        // Tokio Permit::send may publish after close, even after Receiver drop. Dropping
+        // this receiver first can therefore strand a late command while an ordinary
+        // Sender survives. A CLOSED recv returns None only after all pre-close permits
+        // send or return; no final Sender drop is needed. Never dispatch here: original
+        // file/Root fences are already retired, and ordered refusal/argument destruction
+        // must run outside every native/Group/Policy guard before normal task completion.
+        // Explicit abort/unwind and the panic-derived early returns above cannot execute
+        // this asynchronous continuation and remain a separate inherited limitation.
+        while let Some(command) = cmd_rx.recv().await { drop(command); }
     });
     (
         ServerActor {

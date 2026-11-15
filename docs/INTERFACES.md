@@ -1,5 +1,327 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Admitted operation31 draft (29 October; uncompiled)
+
+The admitted physical profile has separate version12 SetupAck/Register/Observe/
+Cancel Control and fixed10/59-byte request/response codecs. SetupAck is g0 only;
+all other kinds are nonzero. It never routes through old Status/operations1–30.
+The separate Slot retains affine Root/native capacity, not role/Ready/SDK-return
+authority. Native guards/tests/review remain pending; the trusted driver sender
+is not connected. [Exact grammar and custody](communication-recovery/VOICE-ADMITTED-SLOT.md).
+
+## Distinct admitted native ledger claim (29 October; inactive)
+
+`reserve_admitted_parent` reserves one actual32-slot ledger position/serial for
+the original admitted published key, physical Session identity and generation.
+The affine claim has no Existing lookup, Row or effect API. Future Slot attachment
+must separately recheck NativeActive/UI/current selection; future consumption
+must move the SAME stamp/payments. [Exact scope](communication-recovery/VOICE-ADMITTED-NATIVE-PARENT.md).
+
+## Admitted protocol support (29 October; focused draft, OFF)
+
+Root has distinct endpoint and direct-helper ensure/refresh/observe APIs. Only the
+actual selected NativeActive original/Presence may create a query; endpoint evidence
+comes from its original Watcher. Opaque refresh identity closes q1 before q2 source
+publication. Observed feature bits are historical observations, never Availability,
+consent or reservation. Twelve focused cases pass. Opaque HelperOwner/SourceOwner
+aliases now retain the SAME outside Group payer; they dereference the ledger body,
+never its Arc. Actual body/header destruction precedes payment return. The complete
+Group graph prepays4KiB, including empty-ledger and counter-backing custody, even
+while OFF. Focused ownership checks pass; strict lint/full integration remain pending.
+[Exact API ownership and pending gates](communication-recovery/VOICE-CONTROL-QUERY-SUPPORT.md).
+
+## Voice route ownership (29 October; focused passes)
+
+First fallible Root voice attachment prepays4KiB for the shared64-row route registry
+before publishing VoiceRuntime; subsequent attachment reuses it. No wire or public
+Source API changes. Route rows retain the original Lower/verification sponsor until
+actual route destruction, then release it outside guards. The plain registry fee
+survives Vec deallocation. Prepared/driver owners keep the SAME payer after authority
+even after Root retirement; public rt signatures and wire bytes are unchanged. Quiet
+housekeeping releases idle process-wide Crypto custody. Crypto/Forward/route caps stay unchanged; see
+[the exact scope and pending validation](communication-recovery/VOICE-ROUTE-REGISTRY-CUSTODY.md).
+## Inert admitted neutral preparation (29 October; inactive)
+
+`ChannelSync::prepare_admitted_voice_admission_step` accepts the actual original
+admitted grant/activation, optional exact admitted observer, generation and original
+RPC payment. It takes no peer/role. `AdmittedAdmissionPrepared::into_parts` returns
+the affine registration independently of a later neutral-capacity refusal; native
+must retain it for exact retry. `None` requests a new registration and does not
+recover a lost native reply. These types cannot become an Existing HIGH preclaim.
+No public consume, role binding, Availability, Ready or RTC permission is supplied.
+See [the exact contract and remaining consumers](communication-recovery/VOICE-NEUTRAL-ADMISSION.md).
+
+## Admitted native key commands (29 October; inactive call path)
+
+The main webview has seven distinct commands: `prepare_admitted_voice_owner`,
+`activate_admitted_voice_owner`, `acknowledge_admitted_voice_activation`,
+`admit_admitted_voice_join_key`, `publish_admitted_voice_join_key`,
+`acknowledge_admitted_voice_key_publication` and `settle_admitted_voice_join_key`.
+They select only the issuer-sealed admitted profile. Existing command names cannot
+adopt these owners, keys or grants. Admission freezes one executor/permit/join and
+publication validates and freezes the original uncompressed P-256 public point.
+
+Publication returns a closed JSON union tagged `kind`: `accepted`, `rejected`,
+`closed` or `not-started`. Every variant identifies the original owner, executor,
+permit and join; accepted additionally carries `keyRef`. Known Root refusal is
+distinct from work that closed without a known outcome. A missing record proves
+nothing. Historical accepted output does not grant present-time admission or RTC
+permission. Explicit result acknowledgement precedes SDK settlement in the browser,
+so a lost acknowledgement reply can recover the original retained cell.
+
+Broker ABI52's `selectAdmittedJoinKey` uses a distinct opaque key handle and the
+exact branded `voiceAdmittedJoinKeyNative` adapter, sharing the existing bounded
+provider queue and ledger. The brand prevents accidental mixing, not hostile code
+in the same JavaScript realm. No private key crosses IPC. These commands and the
+browser adapter do not implement the operational agreement/KDF/Ready/RTC path.
+See [native custody](communication-recovery/VOICE-ADMITTED-KEY.md) and
+[browser custody](communication-recovery/VOICE-ADMITTED-BROWSER-KEY.md).
+
+## Admitted key presence (29 October; draft, inactive)
+
+Trusted Root `start_admitted_voice_presence(grant, original, join, point)` accepts
+only the exact current selected NativeActive original and canonical native tuple.
+Exact retries return an opaque historical AdmittedPresenceReceipt; changed tuples
+refuse. Its `matches` authenticates original/Weak grant/tuple identity without granting
+present-time permission. Native supplies prior on-curve validation and rechecks its
+current Handle before a positive reply. Shared discovery adds no wire profile claim,
+renderer signer or old packet authority. Full operational round consumption remains
+open; see [the scoped contract](communication-recovery/VOICE-ADMITTED-PRESENCE.md).
+
+## Trusted call activation (29 October; inactive call path)
+
+`ServerActor::prepare_admitted_voice_call` returns one original inert Root pair and its
+paid exact-Actor control. Selection/clear publish canonical outcomes through original Work
+and real retirement, not an invoke waiter's lifetime. The distinct native commands
+above now connect this adapter. Existing key/endpoint APIs cannot consume its admitted
+grant. These APIs supply no operation31, agreement, Ready or SDP/RTC permission.
+
+Native result recovery reuses one canonical Cell. Explicit ACK and actual Root/argument/
+execution return are separate requirements for Forget. Recovery requires equality with
+the exact current checked serial on one shared return stamp; future/stale values and
+overflow refuse. `Closed` and Stop ACK mean terminal effects are fenced, not physical
+task/permit return. See [the activation contract](communication-recovery/VOICE-CALL-ACTIVATION.md)
+and [mailbox contract](communication-recovery/ACTOR-MAILBOX-RETIREMENT.md).
+
+## Normal Actor stop versus command return (29 October; focused checks pass)
+
+`ServerActor::stop_and_wait` acknowledges terminal first-effects closure. `AppEvent::Closed`
+also does not certify mailbox, callback or task return. Normal Actor task completion joins
+the SAME closed mailbox's outstanding pre-close permits and drops late commands through
+their existing negative destructors, even while ordinary handles remain alive. No command
+is applied during this final drain. No API/wire/payment limit changes. Abort/panic cleanup
+does not gain that join guarantee; see [the custody note](communication-recovery/ACTOR-MAILBOX-RETIREMENT.md).
+
+## Exact media request closure (29 October; inactive)
+
+Positive native media requests carry a private exact-peer/driver snapshot into the
+existing physical framing checks. It is not renderer/native wire input or new authority.
+Individual Close fences queued or encrypting requests before first fetch, while original
+Close/Release/history recovery and indexed siblings retain their existing routes.
+Retained broker ABI51 refuses ABI50 and earlier without publishing a second pool or
+waking incompatible work; original cleanup remains callable. Public method signatures,
+native command/wire formats, deadlines and caps are unchanged. See
+[the scoped contract and tests](communication-recovery/VOICE-MEDIA-PEER-FENCE.md).
+
+## Admitted wire codec draft (29 October; no public interface)
+
+The private `voice_v2::admitted_wire` leaf implements borrowed signature/syntax views
+for proposed tags7/8/9, fixed A503/R and transcript/KDF input bytes. It adds no production
+signer, envelope/Source adapter, IPC operation or native admission proof. Existing enums,
+tags1-6, SDP profile1 and their canonical encoders are unchanged. New profile2 is accepted
+only inside this inactive separate grammar. See [the codec note](communication-recovery/VOICE-ADMITTED-WIRE-CODEC.md)
+for exact draft Terminal allocations, limits and unimplemented operational contracts.
+
+## Local V2 budget and native parent claim (28 October; inactive)
+
+`voiceBrowserBudget(groupKiB)` accepts safe integer KiB values from 256 through 1024.
+The default is 512 KiB/group; the aggregate stays 2 MiB and an individual generic job
+stays at most 256 KiB. Copy caller fields once into the original immutable ledger policy
+before work allocation. `windowVoiceCryptoBroker` ABI51 refuses older brokers or a changed
+requested policy without replacing the original ledger. Original cleanup remains callable.
+No settings UI/persistence or live resizing is provided. Peer/server metadata is not a
+source for this local policy. `nativeConfiguredAdmissionAppCalls` selects admission mode
+before channel construction and preclaims after the original29/30 pre-ACK probe; its
+App `ready` still asserts bootstrap only.
+
+`Ledger::reserve_parent` is native-only and returns an affine inert claim bound to exact
+Ledger, selected allocation, physical Session and generation. It holds a checked serial,
+one of the same32 ledger positions, Row2,304 bytes and the original PreparedPhase2KiB.
+It supplies no selector, Action or consumption API. Every allocator excludes its stamp;
+actual owners/payments return before reuse. Current native Reserved requires this claim
+and original Root capacity. Version11 bytes are unchanged, so an older version11 Reserved
+reply cannot establish support for future operational native-row consumption.
+
+`ReservationRefusal` is fixed historical diagnostic data from the deciding Resources
+mutex: requested bytes, original group/process counts/limits and cap/table/invalid flags.
+It contains no group identifier or owner and is never serialized to peers/renderer.
+The observing SDP preparation preserves all existing admission and ownership checks.
+Native harness records it only after unlocking, keyed to original parent and physical
+request; absent/contended observations confer no result. It grants no admission/refund.
+
+## Local native capacity Control (28 October; implementation draft, V2 inactive)
+
+Physical operation30/version11 is distinct from mode-only operation29. Its exact10-byte
+request is version11, kind0/Register or1/Observe or2/Cancel, then a nonzero big-endian u64
+capacity generation. Header admission requires Control class, the SAME physical Session
+logical ID and26 ciphertext bytes before counters or RowId parsing. The encrypted body
+uses only version11; no mode/legacy decoder fallback exists.
+
+The59-byte response is version11, state, echoed requested generation, canonical generation,
+cancellation floor (three big-endian u64s), incarnation-present0/1 and32 public Root-RNG
+incarnation bytes. Absent bytes are zero; present all-zero randomness is valid. States are
+0/Unstarted,1/Preparing,2/Waiting,3/Reserved,4/Closing,5/Returned,6/Closed,7/Uncertain,
+8/Superseded. This is a capacity observation, not Ready, peer orientation, a native ledger
+position, bilateral agreement or RTC permission. Mode29 continues to use ordinal1;
+capacity30 uses its independently advancing generation.
+
+All30 requests require an existing admission-mode pin. Register additionally requires an
+uncanceled pin and completed setup ACK. Observe creates no work and never selects a mode.
+Cancel/Observe remain available before ACK, after canceled pin and after End. Register's
+local capacity refusal projects retained state; it does not manufacture a return receipt.
+Skipped/future/wrapped ordinals refuse before floor mutation; a previously staged immediate
+successor remains observable when whole-session close wins before Pending installation.
+
+Reserved refers only to requested==canonical, current matching original capacity and no
+reclamation. Returned requires the requested generation's actual owned work/output/capacity
+return plus its cancellation fence. Superseded requires requested<canonical and floor>=requested;
+canonical advancement already certified that old return. Closed requires terminal fencing
+AND Slot collection. Closing/Uncertain, Unstarted and Waiting are not return certificates.
+None of these certificates proves browser SDK/IO drainage or task/Actor payer refund.
+
+Browser codecs bind the echoed request and full-width ordinals, reject changed present
+incarnations, and allow omitted destroyed identities only on negative snapshots. The retained
+owner must preserve its remembered identity across omission. Intrinsic fixed views and32-byte
+numeric copying prevent caller properties/subarray/species from substituting unauthenticated
+or unbounded input. Shared Rust/TypeScript vectors are included in the container context.
+`VoiceCryptoBroker.nativeAdmissionChannel` fixes mode before constructor publication and
+completes/recover mode29 before ACK9 in the same serialized turn. Remounts coalesce only
+the exact selected key/native adapter/transport/mode; a retained pilot cannot be upgraded
+or vice versa. `preclaimNativeNegotiation` installs its paired kind/ordinal before any
+subscription callout on this mode. `nativeNegotiationCapacity` exposes only the current
+authenticated capacity snapshot. Public retirement detaches immediately; its private
+negative driver retains the original128KiB and twelve rows until native Returned,
+Superseded or Closed AND actual physical/driver/cell/unsubscribe return. Closing/Uncertain
+never refund. The SAME separately paid8KiB Session coordinator keeps the remembered
+incarnation across omitted negative identities and increments only after actual return.
+Unstarted retries Register at the same ordinal; no observation buys a new native task.
+Mode29 End cancellation always uses ordinal1 before capacity30 cancellation. Fresh Register
+rechecks original owner/claim/ordinal before first fetch and after every SDK await. Only
+negative operations retain post-retirement routing. Pilot conversion/work/lifecycle refuse
+this mode. Retained broker ABI49 uses the unchanged window symbol. Signed Ready, native
+ledger/SDP/RTC integration and production activation remain open.
+
+Before ACK the admission constructor also requires a pure30/Observe1 probe with exact
+Unstarted/request1/canonical0/floor0/absent-incarnation. Mode29 support alone does not
+establish capacity30 support. Lost/unsupported/malformed probes cannot ACK or charge
+a128KiB/twelve-row preclaim; the original channel remains recoverable/closable. Probe
+success is capability metadata, never capacity, Work, Ready or future availability.
+ABI49 refuses retained pre-probe48 producers without replacing their original cleanup.
+
+The admission coordinator pays separate one-shot cadence/IO-deadline custody. Unknown
+schedule results retain their original callback; failed cancellation retains its original
+handle. Only IO terminal finally publishes its cancellation retry guard, so availability
+cannot disarm a live5s deadline. A separate fault observer promptly fences positive work
+and aborts the captured original controller; notification does not join timer or fetch
+cancellation. Frame return joins both. Inline/invalid cadence waits for explicit availability
+instead of certifying elapsed time. Clock faults permit one immediate negative recovery
+transition, then no automatic polling until availability/End. Pre-ACK faults close the
+original channel even when no browser preclaim exists.
+
+## Native admission custody draft (28 October; V2 inactive)
+
+The bootstrap Row now retains a canonical generation, cancellation floor, exact Actor Work,
+one original affine outcome and the same Root registration across capacity retries. This
+API is exposed by the fixed Control adapter above. One persistent8KiB task owns the
+physical Session's actual native position. Repeated Register observations coalesce; local
+Busy retains the same candidate and host nudges do not requeue an accepted invocation.
+Per-generation Returned certifies that generation's work/capacity return, not task refund.
+
+Final attachment rechecks actual mounted/unlocked state, selected owner, original server
+instance and exact Session/generation under UI -> Coordinator -> Row. Ordinary Cancel
+preserves the registration for the next canonical generation. Whole-mode/End closure is
+terminal. End fences first effects before collection and preserves authenticated Control
+while original work remains. Unexpected task destruction retains its same position/funding;
+negative recovery and shutdown drain original owners outside native guards before release.
+
+Operation29/version10 remains mode-only. The operation30/version11 adapter is described above;
+native ledger reservation and signed Ready remain open. Existing
+Row metadata was8KiB at this draft; the29 October complete retired-Session
+inventory correction now prepays10KiB. Control12KiB and all group/process limits
+remain unchanged. V2 stays OFF.
+
+## Local admission mode selection (28 October; V2 inactive)
+
+Physical Control operation29/version10 uses the exact Session as its header logical ID,
+with10 plaintext bytes: version10, mode0/Register or1/Observe or2/Cancel, then big-endian
+u64 ordinal. Canonical native admission currently accepts only ordinal1. The18-byte reply
+is version10, state0/unselected or1/pinned or2/canceled or3/closed, selected ordinal and
+cancellation floor as big-endian u64s. It proves neither Root registration nor capacity,
+native ledger availability, peer orientation, signed Ready or protocol effect.
+
+First Register OR Cancel selects admission only before original setup ACK. Selection and
+ACK serialize under the same native Row.state. A first post-ACK selection refuses without
+mutation; exact existing selection survives retry/ACK/cancellation. Observe never selects.
+Pilot producers require ACK completed and admission unselected at final publication.
+The capacity-only browser constructor above selects this mode; production activation
+remains off. This local operation number is not a P2P wire kind.
+
+## Actor admission invocation draft (28 October; not native IPC)
+
+`AdmissionRpcPermit` reserves a fixed4KiB from the canonical selected group/pool.
+Root checks exact pool/scope before minting. `prepare_voice_admission_step` returns an
+affine registration independently of HIGH capacity failure; an existing observer never
+requests a replacement registration. Neither output is native permission.
+
+`ServerActor::try_queue_voice_admission` is nonblocking. Publisher `accepted(work)` must
+install exact custody before enqueue. `completed(result, work)` stages the same original
+outcome synchronously outside Root Group/Policy guards. `refused(error, Some(work))`
+marks never-entered queued/prepared destruction; None marks pre-enqueue refusal. Actual
+retirement follows that callback. `VoiceAdmissionWork` gives exact identity and callback
+retirement observations only. The native Publisher's Drop after Root entry must preserve
+uncertainty; it cannot report absence or remint. Native must separately validate the
+concrete Publisher inventory, canonical Session/generation and final UI fence. The
+canonical native capacity adapter and its wire grammar remain unimplemented; mode-only
+operation29 above supplies neither capacity nor live readiness.
+
+## Root admission preparation (28 October; draft leaf, not live IPC)
+
+`ChannelSync::prepare_voice_admission_session(grant)` mints an opaque affine
+`RootAdmissionSession` for the actual current participant. Native canonical Pending
+must coalesce that call and retain the same owner across lost replies; calling it
+again intentionally creates a different registration. `observer()` retains the
+same paid core. Scope/local identity, join/key, leases, epoch and concrete pool
+identity come from the Root, never a renderer. Owner Drop closes registration.
+
+`reserve_voice_high_preclaim(grant, observer, generation)` reserves HIGH layout
+only after reborrowing current LocalJoin pools and rechecking the original registration.
+The result has no action/effect/consume API. `cancel_through(g)` is a negative-only
+monotone fence; native must validate its canonical expected ordinal first. Zero refuses,
+MAX exhausts registration, and stale cancellation cannot clear a later generation.
+Neither cancellation nor a false current observation proves actual capacity return.
+
+No Actor/IPC command, signed availability, native ledger row, bilateral round or
+production call is implemented by these APIs. HIGH capacity does not establish the
+future requester's DeviceId orientation. The separate3KiB payment covers a measured2,168B
+Windows graph including complete watch allocations. All86 focused admission tests
+and strict Root Clippy pass; complete suites remain pending. Existing wire grammars
+and Broker46 remain unchanged on this Root-only leaf.
+## Browser preclaim contract (28 October; Broker47, V2 inactive)
+
+`preclaimNativeNegotiation(owner, channel, key)` returns an opaque inert capacity
+handle with only pure state inspection and negative retirement. It coalesces the
+original allocation; no deadline, timer or native availability follows. Existing
+128KiB/twelve-row/group intake capacity is paid before publication/subscription.
+`nativeDerivationFromPreclaim` accepts only that broker's exact original handle and
+selected key/channel/negotiation. It transfers the same envelope into the ordinary
+authenticated Input path; it cannot manufacture a native Action or bypass its checks.
+Validation refusal leaves an unstarted claim reusable. Successful conversion starts
+one original15s window and returns its actual Intake handle; subsequent retries retain
+that Intake. The old preclaim handle becomes detached and cannot close its replacement.
+End joins actual conversion/callback dispatch before refunding. Native canonical
+Session/ordinal registration and signed bilateral admission remain separate requirements.
+The retained broker ABI is47 on the same window symbol; older ownership requires reload.
+
 ## Compact local media encoding (28 October; App V2 inactive)
 
 `VoiceMediaEncoding` stores a private canonical226-byte original request and an

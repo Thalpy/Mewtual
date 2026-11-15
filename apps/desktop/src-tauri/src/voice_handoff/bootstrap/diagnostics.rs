@@ -15,7 +15,11 @@ impl Registry {
                 .rows
                 .iter()
                 .flatten()
-                .find(|row| std::ptr::eq(row.selected.as_ref(), selected))
+                .find(|row| {
+                    row.selected
+                        .existing()
+                        .is_some_and(|value| std::ptr::eq(value.as_ref(), selected))
+                })
                 .ok_or("selected channel absent")?;
             let state = row.state.try_lock().map_err(|_| "channel row contended")?;
             Ok(state
@@ -43,7 +47,11 @@ impl Registry {
                 .rows
                 .iter()
                 .flatten()
-                .find(|row| std::ptr::eq(row.selected.as_ref(), selected))
+                .find(|row| {
+                    row.selected
+                        .existing()
+                        .is_some_and(|value| std::ptr::eq(value.as_ref(), selected))
+                })
                 .ok_or("selected channel absent")?;
             let state = row.state.try_lock().map_err(|_| "channel row contended")?;
             let flags = (
