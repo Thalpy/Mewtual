@@ -2,7 +2,9 @@
 
 Chat V2 remains disabled and incomplete. PR #124 adds original-runtime member
 save/read operations. This continuation now connects real native founder rows
-and plain local message saving. Frontend integration, own-history dispatch,
+and plain local message saving. The separate history continuation adds the
+own-history route and final installed-object reply checks under validation:
+[current contract](CHAT-V2-NATIVE-HISTORY.md). Frontend integration,
 transport and operational restart remain unfinished. The shipping switch stays
 off; the real Tauri fixture selects the same native implementation for tests.
 
@@ -53,7 +55,7 @@ Clippy passed all targets/features (3m40s) and the explicit native check passed
 (1m17s). All 3,446 frontend tests passed (124.90 seconds), Svelte reported 0/0,
 and its production build passed (47.53 seconds). Both dependency audits and the
 ambient/raw-fs/exact-count static gates passed. Full current Root/native suites
-and final native startup remain pending; these focused results do not close
+remain pending; these focused results do not close
 Chat V2 acceptance.
 
 The native build (4m36s), actual startup marker and all real frontend flow checks

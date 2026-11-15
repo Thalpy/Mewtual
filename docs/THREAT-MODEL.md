@@ -1,5 +1,11 @@
 # Threat model; client integrity & enforcement boundaries
 
+Native history plaintext is paid independently from its Root page before work,
+serialized under a fixed cap and withheld after original mount/row/generation
+replacement. The same final installed-object checks protect founder/send replies.
+Local saved originals confer no publication, receipt or shared-projection claim.
+[Boundary and pending checks](communication-recovery/CHAT-V2-NATIVE-HISTORY.md).
+
 The disabled native sender uses original row/selection/incarnation/mount and full
 account cancellation, independently of renderer correlation IDs. Its actual owned
 UI guard survives local IO and lost observers. Counted final preparation never

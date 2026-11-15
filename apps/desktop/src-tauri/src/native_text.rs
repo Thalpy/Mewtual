@@ -3,13 +3,16 @@
 //! The warm fixture uses this SAME synchronous router and authentication flow;
 //! its trusted Rust policy selects implementation, never grants authority.
 use super::*;
-use catcoms_app::store::{NativeTextVaultAuthenticationCheck, NativeUiInvocationBudget};
+use catcoms_app::store::{
+    NativeTextHistoryResponseBudget, NativeTextVaultAuthenticationCheck, NativeUiInvocationBudget,
+};
 use tauri::ipc::{Invoke, InvokeBody};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 mod boot;
 mod boot_lifetime;
 mod founding;
+mod history;
 pub(super) mod retirement;
 mod sending;
 pub(super) mod sources;
@@ -26,6 +29,9 @@ pub(super) struct Registry {
     inflight: Arc<Semaphore>,
     bootstrap: Arc<StdMutex<Option<boot::Bootstrap>>>,
     ui_budget: NativeUiInvocationBudget,
+    history_budget: NativeTextHistoryResponseBudget,
+    #[cfg(test)]
+    history_drop_watch: StdMutex<Option<Arc<history::DropWatch>>>,
     pub(super) ui_state: ui_state::Controller,
     retirement: retirement::Coalescer,
     pub(super) preludes: Arc<retirement::Prelude>,
@@ -42,6 +48,8 @@ pub(super) struct Registry {
     source_work_waiting: tokio::sync::Notify,
     #[cfg(test)]
     found_publication_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
+    #[cfg(test)]
+    text_reply_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
     #[cfg(test)]
     send_final_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
     #[cfg(test)]
@@ -82,11 +90,19 @@ impl Default for Registry {
                 .prepare()
                 .expect("source lifecycle control payment"),
         );
+        let history_budget = NativeTextHistoryResponseBudget::new(
+            CriticalCatalogReadPool::new(NativeTextHistoryResponseBudget::required_capacity())
+                .expect("fixed history response policy"),
+        )
+        .expect("fixed history response capacity");
         Self {
             selected: false,
             inflight: Arc::new(Semaphore::new(1)),
             bootstrap: Arc::new(StdMutex::new(Some(boot::Bootstrap::Fresh))),
             ui_budget,
+            history_budget,
+            #[cfg(test)]
+            history_drop_watch: StdMutex::new(None),
             ui_state,
             retirement,
             preludes,
@@ -103,6 +119,8 @@ impl Default for Registry {
             source_work_waiting: tokio::sync::Notify::new(),
             #[cfg(test)]
             found_publication_edge: StdMutex::new(None),
+            #[cfg(test)]
+            text_reply_edge: StdMutex::new(None),
             #[cfg(test)]
             send_final_edge: StdMutex::new(None),
             #[cfg(test)]
@@ -226,6 +244,9 @@ fn router<R: tauri::Runtime>(
         }
         if enabled && invoke.message.command() == "send_message" {
             return sending::route(invoke, &spawn);
+        }
+        if enabled && invoke.message.command() == "get_message_page" {
+            return history::route(invoke, &spawn);
         }
         if !enabled || invoke.message.command() != "unlock" {
             return fallback(invoke);

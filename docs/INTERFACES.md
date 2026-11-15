@@ -1,5 +1,10 @@
 # Mewtual; Interfaces & Hooks Schema
 
+Native `get_message_page` now has a distinct own-saved-originals response. Its
+u64 cursors are decimal strings; channel filtering never changes the underlying
+context-wide continuation. Actual installed-object checks gate final replies.
+[Contract and pending validation](communication-recovery/CHAT-V2-NATIVE-HISTORY.md).
+
 The disabled native founder route takes a stable 32-byte request ID; plain send
 takes a stable 32-byte retry token plus exact context/channel/body. These differ
 from Legacy's retry grammar and cannot silently fall through to its actor.

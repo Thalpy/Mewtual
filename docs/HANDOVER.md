@@ -1,5 +1,16 @@
 # Mewtual; Handover
 
+Active continuation: `chat-v2-native-text-history`, based on PR #125 runtime
+`9c16563b`. Native own-history dispatch and final installed-object reply checks
+are under validation. All 71 native-text cases passed (163.22s), including
+stronger replacement and real roundtrip cases; Root response-credit3 passed.
+Final review's test-only whole-close/Drop-observation extensions and native
+strict lint/check remain in the focused queue. The compiled registry332/4
+fixture inventory pins normal328 in its guard; static gates passed.
+PR #125 full CI run 43673752928 is still running, with frontend tests/type/build
+passed in its Linux job. No current full-suite success is claimed yet.
+Chat V2 stays off and incomplete. [Scope](communication-recovery/CHAT-V2-NATIVE-HISTORY.md).
+
 CI follow-up: PR #124 full run 43658076181 completed with Linux Root and both
 native jobs passing; Windows Root failed one Sync retirement classification
 race (Capacity versus Unauthorized). The separate correction classifies only

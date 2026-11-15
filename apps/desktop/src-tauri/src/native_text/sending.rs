@@ -189,11 +189,35 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
     spawn(Box::pin(async move {
         let state = app.state::<AppState>();
         let result = execute(&state, &captured).await;
+        #[cfg(test)]
+        {
+            let edge = state.native_text.text_reply_edge.lock().unwrap().clone();
+            if let Some(edge) = edge {
+                edge.wait_once().await;
+            }
+        }
         let _commit = state.ui_session_commit.lock().await;
+        // Cancellation/cached target liveness cannot identify a still-live
+        // original parked outside a replaced Store/table. Repeat the actual
+        // installed-object checks through the real resolver call.
+        let store = state.store.lock().await;
+        let table = state.servers.lock().await;
+        let original_mount = store
+            .as_ref()
+            .and_then(MountedVault::as_text_v2)
+            .is_some_and(|vault| captured.target.is_for_original_vault(vault));
+        let original_row = table.native(&captured.intent.server).is_some_and(|row| {
+            row.matches(&captured.selection, captured.instance, &captured.target)
+                && row.data().request == captured.intent.context
+                && row.data().channel == captured.intent.channel
+        });
         if state.ui_session_generation.load(Ordering::SeqCst) != captured.generation
             || ui_session_closed(&state)
             || !captured.target.is_live_cached()
             || captured.scope.is_cancelled()
+            || state.native_text.sources.is_closing_cached()
+            || !original_mount
+            || !original_row
         {
             resolver.reject(STALE);
         } else {

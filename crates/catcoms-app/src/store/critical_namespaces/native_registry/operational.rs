@@ -11,6 +11,8 @@ mod catalog;
 mod cell;
 pub(super) mod data;
 mod facade;
+mod history_response;
+pub use history_response::{NativeTextHistoryResponseBudget, NativeTextHistoryResponseCredit};
 mod interlock;
 mod mount;
 mod native_ui;

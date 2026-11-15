@@ -1,5 +1,11 @@
 # Mewtual; Architecture
 
+The disabled native route now reads bounded pages of the current member's
+actual saved originals, with independent response payment and final checks
+against installed vault/row objects. It is not a shared group projection;
+frontend integration and Chat V2 activation remain unfinished.
+[Contract and pending validation](communication-recovery/CHAT-V2-NATIVE-HISTORY.md).
+
 Native warm text now has real tagged server rows and plain local-message
 dispatch behind the disabled switch. Native final admission holds actual UI
 custody through the file job; whole-close drains without Legacy's held guards.
