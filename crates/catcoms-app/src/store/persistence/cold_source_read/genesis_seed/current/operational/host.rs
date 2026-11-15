@@ -32,6 +32,7 @@ mod create;
 // never the founder A/I/S/B certification lane. Mutually exclusive with founder Create.
 mod member;
 // Member save: the two-phase production path into the Store's member outbox.
+mod invite;
 mod member_save;
 mod projection;
 // Request DATA types travel to the regression tests only until the primary's native
@@ -82,6 +83,9 @@ pub struct PreparedV2TextHost<T, R> {
     // The ordinary-member lane owns its OWN member-role domain, verifier, request and fees.
     // Drops before `owner`; Drop below cancels its domain first. Exclusive with founder Create.
     member: Option<Box<member::V2MemberLane>>,
+    // Unsigned original only. No invite key may run until its separately
+    // authenticated journal intent is covered by the future paired writer.
+    invite: Option<Box<invite::PendingInvite>>,
     resident: Option<PreparedV2TextResidentProjection>,
     capture: Option<PreparedV2TextPromotionCapture>,
     prepared: Option<PreparedV2TextPromotion>,
@@ -155,6 +159,7 @@ impl<T, R> PreparedV2TextHost<T, R> {
             origin,
             projection: None,
             member: None,
+            invite: None,
             resident: None,
             capture: None,
             prepared: None,

@@ -12214,9 +12214,10 @@ fn validate_ui_state_json(json: &str) -> Result<(), String> {
         .ok_or_else(|| "UI continuity state must be an object".to_string())?;
     if !matches!(
         object.get("version").and_then(serde_json::Value::as_u64),
-        // v3 protects exact retained Send copies that old v2 frontends silently omitted.
+        // v3 protects exact retained Send copies that old v2 frontends silently omitted;
+        // v4 protects native 32-byte requests from all preceding UI readers.
         // This gates only the sealed UI envelope; native authoring/Stop limits stay intact.
-        Some(1..=3)
+        Some(1..=4)
     ) || !object
         .get("drafts")
         .is_some_and(serde_json::Value::is_object)
@@ -12226,6 +12227,14 @@ fn validate_ui_state_json(json: &str) -> Result<(), String> {
     {
         return Err("unsupported UI continuity state shape".into());
     }
+    native_text::continuity::validate(
+        object,
+        object
+            .get("version")
+            .and_then(serde_json::Value::as_u64)
+            .expect("checked version"),
+    )
+    .map_err(str::to_owned)?;
     // Studio's owned PIX drafts need a larger envelope, not a larger allowance for unrelated
     // chat/read/trust state. Validate each independent budget before the atomic sealed write.
     if let Some(studio) = object.remove("studioDraft") {
@@ -27372,8 +27381,9 @@ mod tests {
         // these known envelopes are readable; the next unknown successor still refuses.
         assert!(validate_ui_state_json(r#"{"version":2,"drafts":{},"readMarks":{}}"#).is_ok());
         assert!(validate_ui_state_json(r#"{"version":3,"drafts":{},"readMarks":{}}"#).is_ok());
+        assert!(validate_ui_state_json(r#"{"version":4,"drafts":{},"readMarks":{}}"#).is_ok());
         assert!(validate_ui_state_json(r#"{"version":0,"drafts":{},"readMarks":{}}"#).is_err());
-        assert!(validate_ui_state_json(r#"{"version":4,"drafts":{},"readMarks":{}}"#).is_err());
+        assert!(validate_ui_state_json(r#"{"version":5,"drafts":{},"readMarks":{}}"#).is_err());
         assert!(validate_ui_state_json(r#"{"version":1,"drafts":[],"readMarks":{}}"#).is_err());
         assert!(validate_ui_state_json("not json").is_err());
         assert!(validate_ui_state_json(&"x".repeat(MAX_UI_STATE_BYTES + 1)).is_err());

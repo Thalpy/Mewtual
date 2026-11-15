@@ -2,6 +2,9 @@
 //! adopters or a Source/publication fixture. Every original remains mutation-closed.
 use super::*;
 use openmls_memory_storage::owner_restore::{TextAddTestEvent as Event, TextAddTestObservation};
+mod installation;
+mod result;
+mod routing;
 
 fn prepared(
     d: &MlsDevice,

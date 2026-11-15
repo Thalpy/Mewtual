@@ -3,13 +3,18 @@
 //! The warm fixture uses this SAME synchronous router and authentication flow;
 //! its trusted Rust policy selects implementation, never grants authority.
 use super::*;
-use catcoms_app::store::{NativeTextVaultAuthenticationCheck, NativeUiInvocationBudget};
+use catcoms_app::store::{
+    NativeTextHistoryResponseBudget, NativeTextVaultAuthenticationCheck, NativeUiInvocationBudget,
+};
 use tauri::ipc::{Invoke, InvokeBody};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 mod boot;
 mod boot_lifetime;
+pub(super) mod continuity;
 mod founding;
+mod history;
+mod listing;
 pub(super) mod retirement;
 mod sending;
 pub(super) mod sources;
@@ -26,6 +31,14 @@ pub(super) struct Registry {
     inflight: Arc<Semaphore>,
     bootstrap: Arc<StdMutex<Option<boot::Bootstrap>>>,
     ui_budget: NativeUiInvocationBudget,
+    history_budget: NativeTextHistoryResponseBudget,
+    listing: listing::Policy,
+    #[cfg(test)]
+    listing_reply_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
+    #[cfg(test)]
+    listing_drop_watch: StdMutex<Option<Arc<listing::DropWatch>>>,
+    #[cfg(test)]
+    history_drop_watch: StdMutex<Option<Arc<history::DropWatch>>>,
     pub(super) ui_state: ui_state::Controller,
     retirement: retirement::Coalescer,
     pub(super) preludes: Arc<retirement::Prelude>,
@@ -42,6 +55,8 @@ pub(super) struct Registry {
     source_work_waiting: tokio::sync::Notify,
     #[cfg(test)]
     found_publication_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
+    #[cfg(test)]
+    text_reply_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
     #[cfg(test)]
     send_final_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
     #[cfg(test)]
@@ -82,11 +97,24 @@ impl Default for Registry {
                 .prepare()
                 .expect("source lifecycle control payment"),
         );
+        let history_budget = NativeTextHistoryResponseBudget::new(
+            CriticalCatalogReadPool::new(NativeTextHistoryResponseBudget::required_capacity())
+                .expect("fixed history response policy"),
+        )
+        .expect("fixed history response capacity");
         Self {
             selected: false,
             inflight: Arc::new(Semaphore::new(1)),
             bootstrap: Arc::new(StdMutex::new(Some(boot::Bootstrap::Fresh))),
             ui_budget,
+            history_budget,
+            listing: listing::Policy::default(),
+            #[cfg(test)]
+            listing_reply_edge: StdMutex::new(None),
+            #[cfg(test)]
+            listing_drop_watch: StdMutex::new(None),
+            #[cfg(test)]
+            history_drop_watch: StdMutex::new(None),
             ui_state,
             retirement,
             preludes,
@@ -103,6 +131,8 @@ impl Default for Registry {
             source_work_waiting: tokio::sync::Notify::new(),
             #[cfg(test)]
             found_publication_edge: StdMutex::new(None),
+            #[cfg(test)]
+            text_reply_edge: StdMutex::new(None),
             #[cfg(test)]
             send_final_edge: StdMutex::new(None),
             #[cfg(test)]
@@ -227,6 +257,12 @@ fn router<R: tauri::Runtime>(
         if enabled && invoke.message.command() == "send_message" {
             return sending::route(invoke, &spawn);
         }
+        if enabled && invoke.message.command() == "get_message_page" {
+            return history::route(invoke, &spawn);
+        }
+        if enabled && invoke.message.command() == "resume_session" {
+            return listing::route(invoke, &spawn);
+        }
         if !enabled || invoke.message.command() != "unlock" {
             return fallback(invoke);
         }
@@ -289,7 +325,24 @@ fn router<R: tauri::Runtime>(
         spawn(Box::pin(async move {
             let state = app.state::<AppState>();
             let mut notice = None;
-            let result = execute(&state, &captured, directory, &mut notice).await;
+            let mut original_error = false;
+            let mut result = match execute(&state, &captured, directory, &mut notice).await {
+                Ok(authentication) => match state
+                    .native_text
+                    .listing
+                    .prepare(&state.native_text.ui_budget)
+                {
+                    Ok(payment) => {
+                        listing::snapshot(&state, captured.generation, authentication, payment)
+                            .await
+                    }
+                    Err(error) => Err(error),
+                },
+                Err(error) => {
+                    original_error = true;
+                    Err(error)
+                }
+            };
             #[cfg(test)]
             {
                 let edge = state.native_text.reply_edge.lock().unwrap().clone();
@@ -302,23 +355,30 @@ fn router<R: tauri::Runtime>(
             if state.ui_session_generation.load(Ordering::SeqCst) != captured.generation {
                 resolver.reject("Unlock was superseded. Try again.");
             } else {
-                let current = if let Some(n) = notice.as_ref() {
-                    state.native_text.preludes.is_idle_cached()
+                // Keep the whole owning output outside these final guards,
+                // including through a real callback panic.
+                let store = state.store.lock().await;
+                let table = state.servers.lock().await;
+                let success = result
+                    .as_ref()
+                    .is_ok_and(|output| output.current(&state, &store, &table));
+                match &mut result {
+                    Ok(output) if success => resolver.resolve(
+                        tauri::ipc::InvokeResponseBody::Json(output.body.take().unwrap()),
+                    ),
+                    Ok(_) => resolver.reject(listing::STALE),
+                    Err(error) => resolver.reject(&*error),
+                }
+                if notice.as_ref().is_some_and(|n| {
+                    n.delivered_by_unlock(original_error, success)
+                        && state.native_text.preludes.is_idle_cached()
+                        && !state.native_text.sources.is_closing_cached()
                         && state
                             .native_text
                             .ui_state
                             .snapshots
-                            .notice_is_current(&state, n)
-                            .await
-                } else {
-                    false
-                };
-                match result {
-                    Ok(rows) => resolver.resolve(rows),
-                    Err(error) => resolver.reject(error),
-                }
-                if current
-                    && state.ui_session_generation.load(Ordering::SeqCst) == captured.generation
+                            .notice_is_current_in_store(&state, n, &store)
+                }) && state.ui_session_generation.load(Ordering::SeqCst) == captured.generation
                 {
                     _retired_notice = state
                         .native_text
@@ -366,7 +426,7 @@ async fn execute(
     captured: &Captured,
     directory: PathBuf,
     notice: &mut Option<ui_state::snapshots::Notice>,
-) -> Result<Vec<ReloadedServer>, String> {
+) -> Result<Arc<NativeTextVaultAuthenticationCheck>, String> {
     if !state
         .native_text
         .sources
@@ -520,9 +580,9 @@ async fn execute(
         Some(notice),
     )
     .await?;
-    // This warm milestone admits only a fresh empty vault; no fake Legacy
-    // actors are created from index DATA. Native authoring/restore come next.
-    Ok(Vec::new())
+    // Preserve THIS actual authenticated association through listing/reply.
+    // Looking up a later canonical target could adopt a replacement mount.
+    Ok(authentication)
 }
 
 /// Actual returned bootstrap ownership precedes its file-work End, including

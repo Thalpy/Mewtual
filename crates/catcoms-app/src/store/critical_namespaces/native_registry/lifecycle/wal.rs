@@ -213,7 +213,11 @@ fn native_handler(store: &ServerStore) -> Result<&super::admission::Handler, App
         .as_ref()
         .and_then(|policy| policy.native_registry.as_ref())
     {
-        Some(super::super::preparation::NativeRegistryHandler::Lifecycle(handler)) => Ok(handler),
+        Some(
+            super::super::preparation::NativeRegistryHandler::Lifecycle(handler)
+            | super::super::preparation::NativeRegistryHandler::GovernedLifecycle(handler)
+            | super::super::preparation::NativeRegistryHandler::GovernanceOpening(handler),
+        ) => Ok(handler),
         _ => Err(refused()),
     }
 }

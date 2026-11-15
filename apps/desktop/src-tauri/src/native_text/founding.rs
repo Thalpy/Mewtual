@@ -48,6 +48,13 @@ struct Invocation {
     // response/envelope overlap. Root runtime/selection have separate payment.
     _metadata: Vec<NativeUiInvocationMetadata>,
 }
+/// Historical output plus the actual installed association. Never reconstruct
+/// this selection from the serialized server ID at response publication.
+struct Output {
+    body: Option<String>,
+    selection: server_table::NativeSelection,
+    instance: u64,
+}
 
 fn parse(payload: &InvokeBody) -> Result<Intent, &'static str> {
     let InvokeBody::Json(value) = payload else {
@@ -178,17 +185,45 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
         let state = app.state::<AppState>();
         // Paid invocation and all owning results precede final commit in Drop
         // order, including an actual resolver panic or a lost IPC observer.
-        let result = execute(&state, &captured).await;
+        let mut result = execute(&state, &captured).await;
+        #[cfg(test)]
+        {
+            let edge = state.native_text.text_reply_edge.lock().unwrap().clone();
+            if let Some(edge) = edge {
+                edge.wait_once().await;
+            }
+        }
         let _commit = state.ui_session_commit.lock().await;
+        let store = state.store.lock().await;
+        let table = state.servers.lock().await;
+        let original_mount = store
+            .as_ref()
+            .and_then(MountedVault::as_text_v2)
+            .is_some_and(|vault| captured.target.is_for_original_vault(vault));
+        let original_row = match &result {
+            Ok(output) => table
+                .native(&output.selection.id_data())
+                .is_some_and(|row| {
+                    row.matches(&output.selection, output.instance, &captured.target)
+                        && row.data().request == captured.intent.request
+                }),
+            Err(_) => true, // an error discloses no successful row association
+        };
         if state.ui_session_generation.load(Ordering::SeqCst) != captured.generation
             || ui_session_closed(&state)
             || state.native_text.sources.is_closing_cached()
+            || !original_mount
+            || !original_row
         {
             resolver.reject(SUPERSEDED);
         } else {
-            match result {
-                Ok(body) => resolver.resolve(InvokeResponseBody::Json(body)),
-                Err(error) => resolver.reject(error),
+            match &mut result {
+                // Keep the owning original selection in the OUTER result
+                // through callback panic; only pre-serialized DATA moves here.
+                Ok(output) => resolver.resolve(InvokeResponseBody::Json(
+                    output.body.take().expect("one founder reply"),
+                )),
+                Err(error) => resolver.reject(&*error),
             }
         }
     }));
@@ -284,7 +319,7 @@ async fn capture(state: &AppState, invocation: &Invocation) -> Result<Preparatio
     Ok(output.take().unwrap())
 }
 
-async fn execute(state: &AppState, invocation: &Invocation) -> Result<String, String> {
+async fn execute(state: &AppState, invocation: &Invocation) -> Result<Output, String> {
     // Each consuming call restores the SAME whole runtime before another UI
     // acquisition. Root caches exact primitive results across later refusals.
     for stage in 0..6 {
@@ -315,6 +350,7 @@ async fn execute(state: &AppState, invocation: &Invocation) -> Result<String, St
     let row_policy = { state.servers.lock().await.native_budget() };
     let credit = row_policy.prepare().map_err(|_| BUSY)?;
     let instance = state.next_server_instance.fetch_add(1, Ordering::Relaxed);
+    let mut installed_instance = instance;
     let mut row = Some(server_table::PreparedNativeRow::new(
         server_table::NativeRowSpec {
             selection: selection.clone(),
@@ -376,6 +412,7 @@ async fn execute(state: &AppState, invocation: &Invocation) -> Result<String, St
                 }
                 // Passive retry candidate is dropped only after every guard has
                 // left; unlike an installed row, it cannot close this Source.
+                installed_instance = previous.instance;
             } else {
                 table.install_native(&mut row)?;
             }
@@ -383,7 +420,11 @@ async fn execute(state: &AppState, invocation: &Invocation) -> Result<String, St
         })()
     };
     installed.map_err(str::to_owned)?;
-    Ok(response)
+    Ok(Output {
+        body: Some(response),
+        selection,
+        instance: installed_instance,
+    })
 }
 
 const _: () =
