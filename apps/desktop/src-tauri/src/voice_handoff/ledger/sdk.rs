@@ -117,6 +117,36 @@ impl Drop for Preparation {
     }
 }
 impl ResolvedRow {
+    /// Deterministically exercise original SDK cleanup under real row contention.
+    /// Inspect through the held state rather than re-locking sdk_test_released.
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn sdk_test_release_with_parent_locked(
+        &self,
+        session: &Arc<SessionIdentity>,
+        request: &Request,
+        generation: u64,
+        proof: [u8; 32],
+    ) {
+        let state = self.row.state.lock().unwrap_or_else(|e| e.into_inner());
+        let before = storage(self, &state, session, request)
+            .unwrap()
+            .sdk
+            .as_ref()
+            .unwrap()
+            .released();
+        let result = self.release_sdk(session, request, generation, proof);
+        let after = storage(self, &state, session, request)
+            .unwrap()
+            .sdk
+            .as_ref()
+            .unwrap()
+            .released();
+        drop(state); // Never assert/unwind while holding the real row mutex.
+        assert!(matches!(result, Err(VoiceError::Capacity)));
+        assert!(!before, "this is the original unreleased SDK obligation");
+        assert_eq!(after, before, "local refusal must not publish SDK Release");
+    }
+
     /// Exercise the real constructor while this original parent's actual state
     /// mutex is held. No installed obligation or preparation is fabricated.
     #[cfg(test)]

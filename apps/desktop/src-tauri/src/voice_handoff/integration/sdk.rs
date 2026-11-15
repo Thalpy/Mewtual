@@ -130,6 +130,39 @@ async fn exchange(
     .unwrap();
     opened_reply(public, header, body, &reply)
 }
+
+/// Observe an exact original Release through transient fail-fast ledger pressure.
+/// Capacity is proven local and pre-effect in release_sdk; an outer/ambiguous
+/// error or any other authenticated response remains terminal. This deliberately
+/// does not wrap fresh SDK Admit, allocate, attach or actor work.
+async fn release_after_capacity(
+    state: &AppState,
+    public: &bootstrap::SetupOutput,
+    route: &bootstrap::Route,
+    parent: &ledger::ResolvedRow,
+    body: &[u8],
+) -> Vec<u8> {
+    let request = requests::sdk::Request::decode(parent.id().logical(), body).unwrap();
+    assert!(matches!(request.kind, requests::sdk::Kind::Release { .. }));
+    let clock = crate::voice_runtime(state).clock();
+    let capacity = replies::refused(factory::Refused::Protocol(VoiceError::Capacity));
+    let observe = async {
+        for attempt in 0..32 {
+            let reply = exchange(state, public, route, parent, body).await;
+            if reply != capacity || attempt == 31 {
+                return reply;
+            }
+            clock.sleep(std::time::Duration::from_millis(10)).await;
+        }
+        unreachable!("the final bounded observation returns its exact response")
+    };
+    tokio::select! {
+        reply = observe => reply,
+        _ = clock.sleep(std::time::Duration::from_secs(5)) => {
+            panic!("original SDK Release exceeded its fixed observation bound")
+        }
+    }
+}
 pub(super) async fn start(
     state: &AppState,
     public: &bootstrap::SetupOutput,
@@ -254,17 +287,29 @@ pub(super) async fn release_after_key_release(
     release[153] = 1;
     release.extend_from_slice(&token.generation.to_be_bytes());
     release.extend_from_slice(&token.proof);
+    let request = requests::sdk::Request::decode(parent.id().logical(), &release).unwrap();
+    parent.sdk_test_release_with_parent_locked(
+        route.session().identity(),
+        &request,
+        token.generation,
+        token.proof,
+    );
     for offset in [154, 162, 193] {
         let mut wrong = release.clone();
         wrong[offset] ^= 1;
         assert_eq!(
-            exchange(state, public, route, parent, &wrong).await,
+            release_after_capacity(state, public, route, parent, &wrong).await,
             replies::refused(factory::Refused::Protocol(VoiceError::Unauthorized))
         );
     }
     for _ in 0..2 {
-        let reply = exchange(state, public, route, parent, &release).await;
-        assert_eq!(&reply[..2], &[6, 3]);
+        let reply = release_after_capacity(state, public, route, parent, &release).await;
+        assert!(
+            reply.len() == super::super::sdk::REPLY_BYTES && reply[..2] == [6, 3],
+            "original SDK Release returned length {} / prefix {:?}",
+            reply.len(),
+            &reply[..reply.len().min(3)]
+        );
         assert_eq!(&reply[178..210], &token.proof);
     }
     assert!(parent.sdp_test_whole_drained());
