@@ -1,5 +1,11 @@
 # Mewtual; Architecture
 
+Independent V2 join binding DATA codecs now separate accepted-anchor/request/
+package/Welcome commitments and exact governing Add issuer linkage. They have
+no transport/native consumer or source constructor. The actual owning join,
+live founder/joined sources and namespace6 remain unfinished and disabled.
+[Scope and evidence](communication-recovery/CHAT-V2-JOIN-BINDINGS.md).
+
 The disabled Native Text App now consumes a distinct authenticated warm-session
 envelope, retains exact critical4 requests before authoring, and displays its
 own locally saved originals. It excludes unsupported Legacy surfaces/readers.

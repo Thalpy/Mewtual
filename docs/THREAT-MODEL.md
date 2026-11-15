@@ -1,5 +1,11 @@
 # Threat model; client integrity & enforcement boundaries
 
+The new V2 join binding codecs are bounded cryptographic DATA only. A valid
+signature or matching tuple neither selects a root nor establishes an MLS
+Add/current source. Every representation is verified before link/duplicate use;
+Welcome's governing issuer is checked independently of inviter/forwarder.
+No consumer or protocol activation exists. [Scope and tests](communication-recovery/CHAT-V2-JOIN-BINDINGS.md).
+
 Native session listings retain the actual authentication/installed-object
 association and independent copy payment through final delivery. Busy/stale
 post-auth listing errors do not consume warning acknowledgement. The App keeps

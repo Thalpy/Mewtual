@@ -1,5 +1,19 @@
 # Mewtual; Handover
 
+Active continuation is `chat-v2-production-join`, based on PR #128 `ad0af06b`,
+in the SAME isolated `target/cv2-native-text-history` worktree. Independent
+Core invite/request/Welcome DATA codecs and links are implemented under
+validation; no native or transport consumer is registered. Replication727unit/
+52integration, frontend3480, native check and both audits passed. The exact
+named cost case remains deferred; strict replication lint passed and full
+Root/native CI remains pending.
+Root strict Clippy retains564 inherited failures. Read-only design/diff reviews
+are clear after a cross-root test fix.
+Production Add/live founder/joined sources, namespace6/combined opener,
+durable archive, transport and Chat V2 acceptance remain open.
+[Codec scope/evidence](communication-recovery/CHAT-V2-JOIN-BINDINGS.md) ·
+[Owning production vertical](communication-recovery/CHAT-V2-PRODUCTION-JOIN.md).
+
 Current continuation is `chat-v2-native-text-session`, in the same isolated
 `target/cv2-native-text-history` worktree, based on PR #127 `47b44308`.
 Warm native listing, real App local creation/send/history and exact critical4

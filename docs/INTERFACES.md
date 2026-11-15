@@ -1,5 +1,11 @@
 # Mewtual; Interfaces & Hooks Schema
 
+Core now has independent V2 invite/request/Welcome binding DATA codecs under
+validation. They separate wire-KP/reference/credential and public-plan/sealed-
+transfer domains, and bind Welcome to the actual signed Add issuer. They create
+no pin, prefix selection, SDK outcome, native or Source authority and have no
+registered consumer. [Contract and pending evidence](communication-recovery/CHAT-V2-JOIN-BINDINGS.md).
+
 Native unlock/resume has a closed `text-v2` envelope even for zero rows; Legacy
 keeps its existing array. Native save receipts now encode u64 ordinals as
 decimal strings. The App seals critical4 native intents before dispatch and
