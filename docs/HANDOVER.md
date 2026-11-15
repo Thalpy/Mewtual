@@ -1,5 +1,13 @@
 # Mewtual; Handover
 
+Continuation `chat-v2-native-found-ownership` fixes Native Found busy ownership
+across lock/reauthentication and permanently retires destroyed App components
+before other cleanup. Old timers/send completions cannot overwrite a remounted
+App's journal. All3,485 frontend tests, type checking, build, the14 focused
+cases, Native remount browser and all10 existing flows passed. Exact-head
+complete Root/native CI remains pending. Chat V2 remains OFF and incomplete.
+[Lifecycle boundary and evidence](communication-recovery/CHAT-V2-UI-RETIREMENT.md).
+
 Current continuation is `chat-v2-native-text-session`, in the same isolated
 `target/cv2-native-text-history` worktree, based on PR #127 `47b44308`.
 Warm native listing, real App local creation/send/history and exact critical4

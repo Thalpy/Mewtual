@@ -30,6 +30,10 @@ against the exact current Store receipt, target and generation at publication.
 
 ## Renderer behavior
 
+Destroyed App instances are permanently retired before other cleanup. Native
+Found completion also owns only its original UI generation. See the
+[remount/reauthentication correction](CHAT-V2-UI-RETIREMENT.md).
+
 The App retains backend mode separately from its server list, so an empty
 native response cannot downgrade to Legacy. The disabled native entry screen
 offers local group creation only. Unsupported Join, DM, server settings,

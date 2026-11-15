@@ -1717,6 +1717,7 @@
   // What Enter (and the primary button) means on the gate, which is not always "unlock": during
   // setup the same keystroke must advance the wizard, never write the vault early.
   function gateSubmit() {
+    if(uiSessionRetired)return;
     if (!locked || unlocking || windowCloseInFlight) return;
     if (!unlockSecret()) return;
     if (!inSetup) {
@@ -1734,6 +1735,7 @@
   }
   // Last step: this is the call that writes the vault. Everything before it is reversible.
   async function setupFinish() {
+    if(uiSessionRetired)return;
     if (!setupFirst || !locked || unlocking || windowCloseInFlight) return;
     const requestedSync = setupPath === "sync";
     const opened = await unlock(setupFirst);
@@ -3591,9 +3593,15 @@
   let uiStateFailureToast = 0;
   let uiStateLoadGeneration = 0;
   let uiStateHydrationAttempt = 0;
+  // Monotone component lifetime, independent of the still-live native vault.
+  // A remounted App gets a new flag; an old callback can never re-open this one.
+  let uiSessionRetired = false;
   const pendingSendRetry = new PendingSendRetry(async (session) => {
     if (!locked && uiStateReady && session === uiStateLoadGeneration) await retryPendingSends(true);
   });
+  // Register before ANY other onMount/onDestroy cleanup: a later media or
+  // preview teardown may throw, and Svelte does not finally-run later hooks.
+  onDestroy(retireUiSessionOnUnmount);
   $effect(() => {
     pendingSendRetry.update(
       !locked && uiStateReady && !windowCloseInFlight ? uiStateLoadGeneration : null,
@@ -3603,6 +3611,7 @@
   });
   onMount(() => () => pendingSendRetry.cancel());
   function queueUiStateSave(json: string | (() => string), afterSave: () => void = () => {}): Promise<void> {
+    if(uiSessionRetired)return Promise.reject(new Error("The app view was replaced before continuity could be saved."));
     // Close drains entries already admitted here, including their afterSave memory commits.
     // New work must not extend that drain or race the fresh final snapshot captured afterward.
     if (windowCloseInFlight) return Promise.reject(new Error("The window is closing; no new continuity save can start."));
@@ -3610,13 +3619,13 @@
     // chain additionally prevents two ordinary same-session saves from overtaking one another.
     const generation = uiStateLoadGeneration;
     const save = uiStateSaveChain.then(async () => {
-      if (locked || generation !== uiStateLoadGeneration) {
+      if (uiSessionRetired || locked || generation !== uiStateLoadGeneration) {
         throw new Error("the UI session changed before continuity could be saved");
       }
       // Ordinary saves build from current state at execution, so a queued typing save cannot
       // resurrect a request retired by an earlier resolution in this same chain.
       await invoke<void>("save_ui_state", { json: typeof json === "function" ? json() : json });
-      if (locked || generation !== uiStateLoadGeneration) {
+      if (uiSessionRetired || locked || generation !== uiStateLoadGeneration) {
         throw new Error("the UI session changed before continuity finished saving");
       }
       afterSave();
@@ -3647,7 +3656,7 @@
    * restore a more permissive policy. A hard process/OS failure can still interrupt any disk write.
    */
   async function saveUiStateImmediately(): Promise<boolean> {
-    if (!uiStateReady || locked || windowCloseInFlight) return false;
+    if (uiSessionRetired || !uiStateReady || locked || windowCloseInFlight) return false;
     const session = uiStateLoadGeneration;
     clearTimeout(uiStateSaveTimer);
     try {
@@ -3669,16 +3678,16 @@
     }
   }
   function scheduleUiStateSave() {
-    if (!uiStateReady || locked || windowCloseInFlight) return;
+    if (uiSessionRetired || !uiStateReady || locked || windowCloseInFlight) return;
     clearTimeout(uiStateSaveTimer);
     uiStateSaveTimer = setTimeout(() => {
       void saveUiStateImmediately();
     }, 250);
   }
   async function loadUiContinuity(generation: number) {
-    if (generation !== uiStateLoadGeneration || locked) return;
+    if (uiSessionRetired || generation !== uiStateLoadGeneration || locked) return;
     const attempt = ++uiStateHydrationAttempt;
-    const current = () => generation === uiStateLoadGeneration && attempt === uiStateHydrationAttempt && !locked;
+    const current = () => !uiSessionRetired && generation === uiStateLoadGeneration && attempt === uiStateHydrationAttempt && !locked;
     // studio-exit: forced edge. Only restoreReloaded calls this reader during initial mount or
     // completed unlock, when Studio is absent; lock has already captured its owned draft queue.
     uiStateReady = false;
@@ -6583,6 +6592,7 @@
   // Unlock the vault with the entered passphrase and reload persisted servers (9f). A wrong
   // passphrase fails (the vault won't decrypt) and we stay locked, showing the error.
   async function refreshVaultGate() {
+    if(uiSessionRetired)return;
     const generation = uiStateLoadGeneration, attempt = unlockAttempt;
     const current = () => generation === uiStateLoadGeneration && attempt === unlockAttempt
       && locked && !unlocking && !windowCloseInFlight;
@@ -6595,7 +6605,7 @@
   function restoreReloaded(value: unknown) {
     // Restoration is an entry edge, never an in-session refresh. In particular it
     // must not reset readiness underneath a live Studio and its retained work.
-    if (!locked || windowCloseInFlight) return false;
+    if (uiSessionRetired || !locked || windowCloseInFlight) return false;
     const restored = decodeRestoredChatSession<Reloaded>(value);
     if (restored === null) return false;
     const reloaded: Reloaded[] = restored.backend === "text-v2"
@@ -6654,6 +6664,7 @@
   }
 
   async function unlock(secret = unlockSecret()): Promise<{ attempt: number; generation: number } | null> {
+    if(uiSessionRetired)return null;
     // Close and unlock are competing generation changes. The close handler sets this before its
     // first await, so an unlock can never reopen native IPC underneath an older close operation.
     if (!locked || unlocking || windowCloseInFlight || !secret) return null;
@@ -6868,11 +6879,7 @@
     drafts = {};
     pendingSends = {};
     recoveredSendDrafts = {};
-    nativeTextIntents = {};
-    chatBackend = null;
-    nativeOriginals = [];nativeCursor=null;nativeHistoryLoading=false;nativeHistoryRevision++;
-    nativeHistoryLoaded=false;nativeHistoryError=null;
-    nativeRetryGeneration=null;
+    resetNativeTextForLock();
     pendingSendResolution = null;
     pendingSendErrors = {};
     retryingPendingSends = false;
@@ -6897,8 +6904,19 @@
     locked = true; // studio-exit: forced edge (lock, as above)
   }
 
+  function resetNativeTextForLock() {
+    // A lost old Found reply must not keep the next unlocked UI busy. Its
+    // generation-owned finally is separately forbidden from releasing a new
+    // Found after this synchronous redaction has retired the original owner.
+    if(chatBackend==="text-v2")busy=false;
+    nativeTextIntents = {};
+    chatBackend = null;
+    nativeOriginals = [];nativeCursor=null;nativeHistoryLoading=false;nativeHistoryRevision++;
+    nativeHistoryLoaded=false;nativeHistoryError=null;
+    nativeRetryGeneration=null;
+  }
   function nativeTextDriver(session:number, sealed:()=>void=()=>{}) {
-    const current=()=>chatBackend==="text-v2" && !locked && uiStateReady && !windowCloseInFlight && session===uiStateLoadGeneration;
+    const current=()=>!uiSessionRetired && chatBackend==="text-v2" && !locked && uiStateReady && !windowCloseInFlight && session===uiStateLoadGeneration;
     return createNativeTextDriver({
       read:()=>nativeTextIntents,
       replace:next=>{if(!current())throw new Error("The chat session changed.");nativeTextIntents=next;uiContinuityVersion=4;},
@@ -7000,6 +7018,7 @@
   }
 
   async function found() {
+    if(uiSessionRetired)return;
     if(chatBackend === "text-v2" && (!uiStateReady || locked || windowCloseInFlight || nativeHistoryLoading || nativeRetryGeneration===uiStateLoadGeneration || busy)) return;
     busy = true;
     error = "";
@@ -7043,8 +7062,8 @@
     } catch (e) {
       if (sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) error = errorText(e);
     } finally {
-      busy = false;
-      if(nativeSession!==null && nativeSession===uiStateLoadGeneration && !locked)await refreshNativeHistory();
+      if(nativeSession===null)busy=false;
+      else if(nativeSession===uiStateLoadGeneration && !locked){busy=false;await refreshNativeHistory();}
     }
   }
 
@@ -22709,7 +22728,7 @@
     let explicitlyLocked = false;
     try { explicitlyLocked = sessionStorage.getItem("catcoms.explicit-lock") === "1"; } catch { /* best effort */ }
     const resumeGeneration = uiStateLoadGeneration, resumeAttempt = unlockAttempt;
-    const resumeCurrent = () => resumeGeneration === uiStateLoadGeneration && resumeAttempt === unlockAttempt
+    const resumeCurrent = () => !uiSessionRetired && resumeGeneration === uiStateLoadGeneration && resumeAttempt === unlockAttempt
       && locked && !unlocking && !windowCloseInFlight;
     const chooseGate = () => { if (resumeCurrent()) return refreshVaultGate(); };
     if (explicitlyLocked) void chooseGate();
@@ -23524,6 +23543,7 @@
       if (changed) voiceRooms = next;
     }, 4000);
     return () => {
+      retireUiSessionOnUnmount();
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("contextmenu", onFallbackContext);
       window.removeEventListener("keyup", onKeyUp);
@@ -23550,6 +23570,21 @@
       uiLogging = null;
     };
   });
+  function retireUiSessionOnUnmount() {
+    if(uiSessionRetired)return;
+    // Retire BEFORE teardown: callbacks starting later must also refuse, not
+    // capture the bumped local generation as if it were a new authorized view.
+    // Already-submitted native work retains its own ordering/custody. Do not
+    // lock/close the vault or submit an empty continuity snapshot on remount.
+    uiSessionRetired=true;
+    uiStateLoadGeneration++;
+    uiStateHydrationAttempt++;
+    unlockAttempt++;
+    viewGeneration++;
+    uiStateReady=false;
+    clearTimeout(uiStateSaveTimer);
+    pendingSendRetry.cancel();
+  }
 </script>
 
 {#snippet styledName(name: string, color: string, font: string, effect: string)}
