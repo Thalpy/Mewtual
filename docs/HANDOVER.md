@@ -5,7 +5,11 @@ branch. The complete affected source cohort passed all 78 cases (zero failures
 or ignored), including four original-runtime selector regressions, 12 genuine
 member prepare/admit cases and five original-runtime history cases. Broader
 gates are pending; the strengthened exact receipt regression passed separately
-(one case, 8.94 seconds). Both dependency audits and static self-checks passed.
+(one case, 8.94 seconds). Both dependency audits, formatting and static self-checks
+passed. Native check (1m39s) and strict native Clippy (3m30s) passed; Root strict
+Clippy retains 564 existing errors. Runtime commit 502b565e is pushed in draft
+PR #124, with full CI run 43658076181 queued. The validation follow-up changes
+documentation only; Chat V2 remains off and incomplete.
 A real Entry payment-tail regression failed before its fix
 and passed afterward. Root member saving now reaches the retained NativeRequired
 driver, with actual guard/notification ordering tests. The checked native
@@ -26,8 +30,8 @@ restore and combined acceptance remain open.
 Runtime checkpoint `d4496bdd`: native-text 51/51, Root identity 1/1 and frontend
 3446/3446 passed, as did native lint/check/build/startup, UI flows, formatting,
 static gates and both audits. Root strict Clippy retains 564 existing failures;
-full CI run 43643841874 passed Root Linux and native Linux; Root Windows is
-pending (one user-deferred slow case). Native Windows failed one SDK-release
+full CI run 43643841874 passed Root on both platforms and native Linux (one
+user-deferred slow case). Native Windows failed one SDK-release
 integration assertion at voice_handoff/integration/sdk.rs:267, followed by 23
 fixture-poison failures. The first failure is under diagnosis; no green full
 native Windows acceptance is claimed for this checkpoint.

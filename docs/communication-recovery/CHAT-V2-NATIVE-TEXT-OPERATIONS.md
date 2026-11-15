@@ -99,10 +99,13 @@ ordinal receipt assertion passed its focused rerun (one case, 8.94 seconds).
 These APIs contain only this member's
 saved originals, not a complete group ledger or installed native UI.
 
-Both dependency audits and the ambient/raw-filesystem/exact-count self-checks
-passed. Broader Root/native suites, native checking and current lint remain
-pending for this checkpoint. The earlier controller CI passed Root and
-native Linux; Windows native failed the SDK cleanup fixture described separately
+Both dependency audits, formatting and the ambient/raw-filesystem/exact-count
+self-checks passed. Native checking passed (1m39s), as did strict native Clippy
+(3m30s). Root strict Clippy retains the same 564 existing errors, without new
+warnings or suppressions. Complete current CI run 43658076181 is queued at
+runtime commit 502b565e (only the user-deferred slow case excluded). No pending
+job is acceptance evidence. The earlier controller CI passed Root on both
+platforms and native Linux; Windows native failed the SDK cleanup fixture described separately
 in [SDK cleanup evidence](CHAT-V2-SDK-CLEANUP-ACCEPTANCE.md). Its corrected exact
 case passed locally; no corrected full Windows native result is claimed yet.
 
