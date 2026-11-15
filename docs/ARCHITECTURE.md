@@ -1,5 +1,11 @@
 # Mewtual; Architecture
 
+The main-based security prerequisite updates both shipping network graphs and
+preserves the existing bounded topic/wire contracts. It introduces no Chat V2
+activation or storage namespace. TLS provider selection is transport-local;
+the old-peer compatibility gate uses only APIs shared with the predecessor.
+[Scope and pending validation](communication-recovery/MAIN-SECURITY-PREREQUISITE.md).
+
 ## Inactive exact moderation approval (29 October; validation pending)
 
 The separate typed chat ledger now distinguishes ordinary historical authority from one exact

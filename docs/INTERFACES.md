@@ -1,5 +1,11 @@
 # Mewtual; Interfaces & Hooks Schema
 
+`SeededProtocolRng` bridges the upstream AutoNAT rand-core0.10 seed/fork API.
+The ordinary application RNG seam remains unchanged; child forks advance the
+parent and do not clone state. Security runners use their own bounded exact-test
+guard, independent of unfinished native/Chat V2 modules.
+[Contract and pending checks](communication-recovery/MAIN-SECURITY-PREREQUISITE.md).
+
 ## Native unlock generation contract (30 October)
 
 `lock_session` returns `{ continuity_error, generation }`, where `generation` is the canonical

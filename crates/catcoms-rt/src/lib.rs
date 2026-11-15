@@ -15,11 +15,13 @@
 
 pub mod clock;
 pub mod mem;
+pub mod protocol_rng;
 pub mod rng;
 pub mod transport;
 
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use mem::{Hub, MemNetwork};
+pub use protocol_rng::SeededProtocolRng;
 pub use rng::{CryptoRng, CryptoRngCore, OsCryptoRng, RngCore};
 pub use transport::{
     BoxedDialPermit, ConnectionDirection, ConnectionFamily, ConnectionLease, ConnectionPath,

@@ -1,5 +1,10 @@
 # Mewtual: message flow and micelle convergence
 
+Security prerequisite: an incoming subscription retries retained publication
+only for its exact canonical topic. Other retained originals preserve their
+ownership/order and normal periodic retry; wire and delivery claims below are
+unchanged. [Scope](communication-recovery/MAIN-SECURITY-PREREQUISITE.md).
+
 Status: a **trace of what the code does today**. It began as a trace written before any change;
 sections 1 to 5 have since been brought back in line with the fixes recorded in sections 8 to 11,
 so the trace and the fix log describe the same code. It records the send path, the live receive

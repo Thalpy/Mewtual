@@ -1,5 +1,14 @@
 # Threat model; client integrity & enforcement boundaries
 
+The security prerequisite repairs the actual shipping DNS/gossip/QUIC and
+xattr dependency graphs rather than leaving an unused repaired dependency
+alongside vulnerable runtime versions. Subscription and packet limits remain
+finite. Canonical topic-scoped retry prevents unrelated subscription events
+from repeatedly signing every retained original. QUIC uses its explicit
+AWS-LC provider while WebSocket retains public-PKI/ring verification; Net
+installs no global provider. This does not prove a total TLS memory/work bound.
+[Exact scope and pending evidence](communication-recovery/MAIN-SECURITY-PREREQUISITE.md).
+
 ## Queued unlock versus a newer lock (30 October)
 
 Tauri schedules async command futures, so a dispatched older unlock may first run after a newer

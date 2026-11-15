@@ -1,5 +1,17 @@
 # Mewtual; Handover
 
+## Main-based security prerequisite (15 November; validation pending)
+
+PR84 stays draft. Its strict Root/native checks pass, but its audit reports19
+advisories and lifecycle shard1 ran out of outer time. The prerequisite extracts
+the existing dependency repairs from PRs93/94/103/113 onto main88f36129,
+without their intervening Chat V2 implementation. It also increases only the
+lifecycle mutation job allowance to90minutes, preserving every check.
+[Extraction, compatibility and current limits](communication-recovery/MAIN-SECURITY-PREREQUISITE.md).
+Extracted-source Net171, frontend3388, runner4, strict Root lint, both dependency
+audits and vendor/static gates pass. Native/full-suite/compatibility checks are
+pending; no merge or complete acceptance is claimed.
+
 ## PR82 follow-up review corrections (30 October; local gates passed)
 
 The five findings against `6fc7ae6d` are corrected in the text-chat branch. Complete Send/Edit/Delete

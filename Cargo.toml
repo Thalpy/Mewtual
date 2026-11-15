@@ -21,6 +21,7 @@ members = [
 exclude = [
     "crates/catcoms-wire/fuzz",
     "apps/desktop/src-tauri",
+    "vendor/libp2p-gossipsub",
 ]
 
 [workspace.package]
@@ -46,3 +47,7 @@ rust_2018_idioms = { level = "warn", priority = -1 }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+
+# Keep both shipping workspaces on the same reviewed bounded-hello correction.
+[patch.crates-io]
+libp2p-gossipsub = { path = "vendor/libp2p-gossipsub" }
