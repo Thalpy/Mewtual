@@ -64,6 +64,8 @@ use catcoms_rt::{CryptoRngCore, MeshTransport, RequestCancellation};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};
 
+mod history;
+
 /// Native custody for ONE member-save admission.
 ///
 /// `custody` is the native consumer's concrete checked custody: the actual owned UI commit
@@ -86,6 +88,17 @@ impl MemberSaveNativeAdmission {
         Self {
             session,
             _custody: Box::new(custody),
+        }
+    }
+
+    /// Move already allocated, genuinely checked native custody without an
+    /// allocator call at final admission. Native prepares its empty guard slot
+    /// before locking, fills it after actual checks, then supplies that SAME
+    /// box. Erasure remains ownership only; this authenticates no Rust caller.
+    pub fn from_boxed_custody(custody: Box<dyn Send>, session: RequestCancellation) -> Self {
+        Self {
+            session,
+            _custody: custody,
         }
     }
 }

@@ -15,8 +15,17 @@ use std::marker::PhantomData;
 use std::sync::Mutex;
 use zeroize::Zeroizing;
 mod capture;
+mod invite;
+mod member;
 mod network;
+pub use member::{
+    NativeTextMemberAdmissionFailure, NativeTextMemberBudget, NativeTextMemberFinalPreparation,
+    NativeTextMemberHistoryItem, NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus,
+    NativeTextMemberJob, NativeTextMemberPreparation, NativeTextMemberSaveJob,
+};
+mod selection;
 pub use capture::{NativeTextCreationBudget, NativeTextCreationPreparation};
+pub use selection::NativeTextRuntimeSelection;
 mod retirement;
 pub use retirement::{
     NativeTextSourceRetirement, NativeTextSourceRetirementPreparation,
@@ -127,9 +136,20 @@ pub struct NativeTextSources<T: MeshTransport, R: CryptoRngCore> {
 struct Entry<T: MeshTransport, R: CryptoRngCore> {
     invocation: [u8; 32],
     request: [u8; 32],
-    // Outside the operation mutex. Revocation must never wait for SDK/file IO.
-    owner: NativeChatSourceOwner,
     runtime: Arc<RuntimeCell<T, R>>,
+    // LAST: the source counter owns the original runtime/cell payment. Keep
+    // that payer until actual cell/Notify/allocation destruction completes,
+    // even after retirement removed the body and all worker drains left.
+    owner: NativeChatSourceOwner,
+}
+
+impl<T: MeshTransport, R: CryptoRngCore> Drop for Entry<T, R> {
+    fn drop(&mut self) {
+        // Close new key entry BEFORE field destruction without releasing its
+        // payer or notifying Wakers. Actual owner Drop/notification is LAST.
+        // Entries must still be disposed outside native/control writers.
+        self.owner.close();
+    }
 }
 
 /// Fee-only custody. Never put a runtime/issuer, drain or registry in a source
@@ -153,6 +173,12 @@ struct Runtime<T: MeshTransport, R: CryptoRngCore> {
     group_rng: Option<R>,
     clock: Option<Box<dyn catcoms_rt::Clock + Send>>,
     network: Option<network::Reservation>,
+    // One paid canonical metadata allocation. Exact retries issue handles to
+    // this same selection rather than allocating again on the entry's debit.
+    selection: Option<NativeTextRuntimeSelection<T, R>>,
+    // Negative-only original key counter, captured before moving its issuer
+    // into Entry. Native row closure must not borrow this runtime or issuer.
+    source_close: catcoms_rt::NativeChatSourceClose,
     work: SourceWork,
     _metadata: Arc<RuntimeMetadata>,
 }
@@ -351,6 +377,26 @@ struct RuntimeSlot<T: MeshTransport, R: CryptoRngCore> {
 struct RuntimeCell<T: MeshTransport, R: CryptoRngCore> {
     state: Mutex<RuntimeSlot<T, R>>,
     returned: tokio::sync::Notify,
+    #[cfg(test)]
+    tail_probe: Mutex<Option<RuntimeCellTailProbe>>,
+}
+
+/// Non-paying witness AFTER actual state/Notify destruction. It observes the
+/// exact entry debit, so another retained source/selector cannot mask a refund.
+#[cfg(test)]
+struct RuntimeCellTailProbe {
+    refunded: Arc<std::sync::atomic::AtomicBool>,
+    observed: Arc<std::sync::atomic::AtomicBool>,
+    covered: Arc<std::sync::atomic::AtomicBool>,
+}
+#[cfg(test)]
+impl Drop for RuntimeCellTailProbe {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        self.covered
+            .store(!self.refunded.load(Ordering::SeqCst), Ordering::SeqCst);
+        self.observed.store(true, Ordering::SeqCst);
+    }
 }
 
 /// A finite worker moves its body OUT of the control mutex. SDK/file effects
@@ -393,6 +439,9 @@ fn runtime_invoice<T: MeshTransport, R: CryptoRngCore>() -> Option<usize> {
         std::mem::size_of::<NativeFounderKeys>(),
         std::mem::size_of::<NativeTextSourceCommand>(),
         2 * std::mem::size_of::<NativeTextCreationPreparation<T, R>>(),
+        selection::invoice::<T, R>(),
+        member::invoice::<T, R>(),
+        8 * 1024, // finite original invite routing-plan scratch and return overlap
         2 * std::mem::size_of::<Entry<T, R>>(),
         // Original frame + Pending copy + retained activation dependency,
         // with bounded ciphertext/plaintext validation and reread overlap.
@@ -502,6 +551,13 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSourcePreparation<T, R> {
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> NativeTextSources<T, R> {
+    /// Cached original-allocation comparison for native replacement refusal.
+    /// This remains true after closure. It supplies no UI authority, readiness,
+    /// key drainage or permission to substitute a different facade/collection.
+    pub fn is_from_original_vault_cached(&self, vault: &NativeTextVault) -> bool {
+        Arc::ptr_eq(&self.scope, &vault.sources.observe())
+    }
+
     /// Preparation may read the original native index and allocate; call only
     /// outside EVERY native/Root guard. Lookup precedes device/key generation.
     /// The native checked factory must already have captured the original UI
@@ -547,4 +603,4 @@ impl<T: MeshTransport, R: CryptoRngCore> Drop for NativeTextSources<T, R> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

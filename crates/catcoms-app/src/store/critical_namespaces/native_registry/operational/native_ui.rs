@@ -28,6 +28,12 @@ pub struct NativeUiInvocationBudget {
     pool: CriticalCatalogReadPool,
 }
 impl NativeUiInvocationBudget {
+    /// Actual affine metadata debit, as policy DATA only. Native buffer
+    /// envelopes use this quote so a future price change cannot silently make
+    /// their combined credit insufficient. This grants no UI/Source authority.
+    pub const fn metadata_bytes() -> usize {
+        INVOCATION_BYTES
+    }
     /// Process policy DATA; this minimum funds one mounted host and the bounded
     /// independent candidate overlap. It grants no capture or native access.
     pub const fn required_capacity() -> usize {

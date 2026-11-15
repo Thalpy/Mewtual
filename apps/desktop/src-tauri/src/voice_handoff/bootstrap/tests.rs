@@ -597,7 +597,7 @@ async fn monotonic_identity_distinguishes_repeated_rng_and_exhaustion_never_wrap
         .servers
         .lock()
         .await
-        .get(&7)
+        .legacy(&7)
         .unwrap()
         .device_id
         .as_bytes();

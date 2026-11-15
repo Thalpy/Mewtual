@@ -1,13 +1,13 @@
 //! Finite original physical3 custody, separate from affine admission. No raw
 //! Current/Store, owned index, SDK entry or native command credential escapes.
 use super::*;
+mod work;
 use crate::store::critical_namespaces::native_registry::lifecycle::{
     cell, founder, refresh, rename,
 };
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Mutex,
-};
+use std::sync::Mutex;
+pub(in crate::store::critical_namespaces::native_registry) use work::WorkDrain;
+use work::{Slot, SlotAck};
 
 pub(super) struct Physical {
     // Actual poisoned cell and its pending files/buffers retire before Current.
@@ -20,9 +20,6 @@ pub(super) struct Physical {
     ui_slot: Arc<Slot>,
     // LAST: actual original payment after every file/slot control allocation.
     handler: lifecycle_admission::Handler,
-}
-struct Slot {
-    taken: AtomicBool,
 }
 
 /// Exactly one prepaid fixed capsule. It is not Clone and contains no affine
@@ -61,36 +58,47 @@ impl NetworkSeal {
         )?)))
     }
 }
-struct SlotAck {
-    original: Arc<Slot>,
-    _payment: lifecycle_admission::PaymentTail,
-}
-impl Drop for SlotAck {
-    fn drop(&mut self) {
-        self.original.taken.store(false, Ordering::SeqCst);
-    }
-}
 
 pub(super) const METADATA: usize = 8
     * (std::mem::size_of::<Physical>() + std::mem::size_of::<MetadataWork>()
     + std::mem::size_of::<SlotAck>() + std::mem::size_of::<Slot>()
     // Physical and both slot Arc controls, plus Option control metadata.
     + 6 * std::mem::size_of::<usize>())
+    + work::METADATA
     + 512;
 
 impl Physical {
+    pub(super) fn require_governance_completion(
+        &self,
+        receiver: &crate::store::critical_namespaces::governance_layout::native::Startup,
+    ) -> Result<(), AppError> {
+        receiver.require_complete(self.current()?.checked_store()?)
+    }
+    #[cfg(test)]
+    pub(super) fn constructor_store_for_test(&self) -> Result<&ServerStore, AppError> {
+        Ok(self.current()?.constructor_store_for_test())
+    }
+    pub(super) fn advance_governance(
+        &mut self,
+        receiver: &mut crate::store::critical_namespaces::governance_layout::native::Startup,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        self.cell.get_mut().map_err(|_| refused())?.require_idle()?;
+        self.handler.require()?;
+        self.handler.require_idle_cached()?;
+        self.current
+            .as_mut()
+            .ok_or_else(refused)?
+            .advance_native_governance(receiver, rng)
+    }
     /// Allocate BEFORE original Current extraction, with the original upgrade
     /// still wholly armed. No physical allocation is exposed until install().
     pub(super) fn allocate(handler: lifecycle_admission::Handler) -> Arc<Self> {
         Arc::new(Self {
             cell: Mutex::default(),
             current: None,
-            slot: Arc::new(Slot {
-                taken: AtomicBool::new(false),
-            }),
-            ui_slot: Arc::new(Slot {
-                taken: AtomicBool::new(false),
-            }),
+            slot: Arc::new(Slot::new()),
+            ui_slot: Arc::new(Slot::new()),
             handler,
         })
     }
@@ -105,6 +113,12 @@ impl Physical {
     }
     pub(super) fn finish_cold(&self) -> Result<(), AppError> {
         self.handler.finish_cold(self.current()?.checked_store()?)
+    }
+    pub(super) fn finish_governed_cold(
+        &self,
+        tail: &crate::store::critical_namespaces::governance_layout::NativeColdTail,
+    ) -> Result<(), AppError> {
+        tail.finish(self.current()?.checked_store()?)
     }
     #[cfg(test)]
     pub(super) fn handler_for_test(&self) -> lifecycle_admission::Handler {
@@ -125,15 +139,16 @@ impl Physical {
     /// this capsule before capture; no account/observer/cell lock is needed.
     /// An active claim may be lent for exact retry, never mistaken for Idle.
     pub(super) fn capture(self: &Arc<Self>) -> Option<MetadataWork> {
-        if !self.open_for_custody()
-            || self
-                .slot
-                .taken
-                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                .is_err()
-        {
+        if !self.open_for_custody() {
             return None;
         }
+        #[cfg(test)]
+        tests::before_work_slot(false);
+        if !self.slot.enter() {
+            return None;
+        }
+        #[cfg(test)]
+        tests::work_slot_claimed();
         // Arm the ack immediately after the slot CAS. All construction here is
         // plain moves/Arc clones; there is no fallible gap with an orphan slot.
         let ack = SlotAck {
@@ -144,23 +159,26 @@ impl Physical {
             physical: self.clone(),
             _ack: ack,
         };
-        if !value.physical.open_for_custody() {
-            return None;
-        }
+        #[cfg(test)]
+        tests::after_work_slot(false);
+        // After winning ACTIVE, return WHOLE custody even if closure raced.
+        // The caller rejects stale negatives outside its native guard. A late
+        // None here would drop SlotAck and synchronously wake close under it.
         Some(value)
     }
     /// The UI sidecar is independent of index WAL/claim state. Reusing the
     /// index slot would let an uncertain metadata transaction starve drafts.
     pub(super) fn capture_ui(self: &Arc<Self>) -> Option<UiWork> {
-        if !self.open_for_custody()
-            || self
-                .ui_slot
-                .taken
-                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                .is_err()
-        {
+        if !self.open_for_custody() {
             return None;
         }
+        #[cfg(test)]
+        tests::before_work_slot(true);
+        if !self.ui_slot.enter() {
+            return None;
+        }
+        #[cfg(test)]
+        tests::work_slot_claimed();
         let ack = SlotAck {
             original: self.ui_slot.clone(),
             _payment: self.handler.payment_tail(),
@@ -169,9 +187,10 @@ impl Physical {
             physical: self.clone(),
             _ack: ack,
         };
-        if !work.is_live_cached() {
-            return None;
-        }
+        #[cfg(test)]
+        tests::after_work_slot(true);
+        // Same owning late-refusal rule as MetadataWork above: read/save
+        // recheck this original outside guards before performing any IO.
         Some(work)
     }
 
@@ -198,6 +217,14 @@ impl Physical {
     }
     pub(super) fn close_admission(&self) {
         self.handler.close();
+        self.slot.close();
+        self.ui_slot.close();
+    }
+    /// Original metadata/UI controls only. The affine owning caller has
+    /// already closed its index; no Physical or cold evidence escapes.
+    pub(super) fn observe_closed_work(&self) -> WorkDrain {
+        self.close_admission();
+        WorkDrain::new(self)
     }
     /// Exact bounded immutable receipt lookup under the SAME cell/claim. A
     /// matched unsupported backend refuses; it must never become absence.
@@ -512,6 +539,126 @@ impl SourceWork {
         driver.retry_with_access(
             self.physical.current()?,
             rng,
+            crate::store::critical_namespaces::archive_bootstrap::founder::FounderAccess::Native(
+                keys,
+            ),
+        )
+    }
+
+    /// Original retained member preparation only. The finite caller already
+    /// moved the whole runtime outside writers and owns actual per-command
+    /// native key cuts. There is no library-origin retry or raw Current getter.
+    pub(in crate::store::critical_namespaces::native_registry) fn prepare_native_member<T, R>(
+        &self,
+        driver: &mut crate::store::PreparedFreshV2TextFounder<T, R>,
+        request: crate::store::V2MemberSignRequest<'_>,
+        negative: &catcoms_rt::RequestCancellation,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+        keys: &mut crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounderKeys,
+    ) -> Result<crate::store::V2MemberSaveOutcome, crate::store::V2MemberSaveRefusal>
+    where
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    {
+        let current = self
+            .physical
+            .current()
+            .map_err(|_| crate::store::V2MemberSaveRefusal::Unavailable)?;
+        driver.prepare_member_save_with_access(
+            current,
+            request,
+            negative,
+            rng,
+            crate::store::critical_namespaces::archive_bootstrap::founder::FounderAccess::Native(
+                keys,
+            ),
+        )
+    }
+    /// Actual physical Current stays private to the owning native source.
+    pub(in crate::store::critical_namespaces::native_registry) fn prepare_native_invite_intent<
+        T,
+        R,
+    >(
+        &self,
+        driver: &mut crate::store::PreparedFreshV2TextFounder<T, R>,
+        request: catcoms_sync::owner_v2::V2FounderInviteRequestData,
+        routing_plan: &[u8],
+        keys: &mut crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounderKeys,
+    ) -> Result<([u8; 32], u64), AppError>
+    where
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    {
+        driver.prepare_native_invite_intent_data(
+            self.physical.current()?,
+            request,
+            routing_plan,
+            keys,
+        )
+    }
+    /// Bounded history setup/recovery through the exact retained NativeRequired
+    /// Host. No raw Current/Store getter or library-origin fallback escapes.
+    pub(in crate::store::critical_namespaces::native_registry) fn prepare_native_member_history<
+        T,
+        R,
+    >(
+        &self,
+        driver: &mut crate::store::PreparedFreshV2TextFounder<T, R>,
+        read: crate::store::persistence::v2_member_outbox::MemberHistoryRead,
+        negative: &catcoms_rt::RequestCancellation,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+        keys: &mut crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounderKeys,
+    ) -> Result<
+        crate::store::persistence::v2_member_outbox::MemberHistoryPage,
+        crate::store::V2MemberSaveRefusal,
+    >
+    where
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    {
+        let current = self
+            .physical
+            .current()
+            .map_err(|_| crate::store::V2MemberSaveRefusal::Unavailable)?;
+        driver.prepare_member_history_with_access(
+            current,
+            read,
+            negative,
+            rng,
+            crate::store::critical_namespaces::archive_bootstrap::founder::FounderAccess::Native(
+                keys,
+            ),
+        )
+    }
+
+    /// Finite native-aware final edge on this SAME original Current. Failure
+    /// returns native custody whole; the outer runtime envelope restores only
+    /// after that custody has actually released its native guard.
+    pub(in crate::store::critical_namespaces::native_registry) fn admit_native_member<T, R>(
+        &self,
+        driver: &mut crate::store::PreparedFreshV2TextFounder<T, R>,
+        token: [u8; 32],
+        native: crate::store::MemberSaveNativeAdmission,
+        keys: &mut crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounderKeys,
+    ) -> Result<
+        crate::store::MemberSaveJob,
+        (
+            crate::store::MemberSaveNativeAdmission,
+            crate::store::V2MemberSaveRefusal,
+        ),
+    >
+    where
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    {
+        let current = match self.physical.current() {
+            Ok(current) => current,
+            Err(_) => return Err((native, crate::store::V2MemberSaveRefusal::Unavailable)),
+        };
+        driver.admit_member_save_with_access(
+            current,
+            token,
+            native,
             crate::store::critical_namespaces::archive_bootstrap::founder::FounderAccess::Native(
                 keys,
             ),
