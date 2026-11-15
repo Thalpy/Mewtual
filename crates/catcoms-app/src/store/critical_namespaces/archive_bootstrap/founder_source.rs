@@ -15,7 +15,9 @@ use catcoms_sync::owner_v2::{
 const PHASE_METADATA_FEE: usize = 64 * 1024;
 #[path = "founder_source_handoff.rs"]
 mod handoff;
-pub(in crate::store) use handoff::{CompletedWarmFounderOrigin, WarmFounderCurrentReservation};
+pub(in crate::store) use handoff::{
+    CompletedWarmFounderOrigin, WarmFounderCurrentReservation, WarmSavedSourceSdkReopenEvidence,
+};
 #[path = "founder_source_prepared.rs"]
 mod prepared;
 #[path = "founder_source_terminal.rs"]

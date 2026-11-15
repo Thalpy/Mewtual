@@ -233,6 +233,7 @@ fn check_owner_invoice() -> Result<(), AppError> {
         + std::mem::size_of::<BirthProgress>()
         + std::mem::size_of::<AdmissionOwner>()
         + std::mem::size_of::<revocation::Owner>()
+        + revocation::LIFE_ALLOCATION_BYTES
         + 2 * std::mem::size_of::<AdmissionAuthority>()
         + 2 * GROUP_BOUNDS_ALLOCATION_BYTES
         + 4 * MAX_GROUP

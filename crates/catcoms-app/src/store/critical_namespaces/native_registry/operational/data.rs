@@ -9,9 +9,10 @@ use catcoms_wire::{Decoder, Encoder};
 use zeroize::Zeroizing;
 
 const TAG: &[u8] = b"catcoms/private-native-backend-index/v2\0";
-pub(super) const MAX_PLAIN: usize = old::MAX_PLAIN;
-pub(super) const MAX_FRAME: usize = MAX_PLAIN + 40;
-pub(super) const MAX_NETWORK_FRAME: usize = 64 * 1024;
+pub(in crate::store::critical_namespaces::native_registry) const MAX_PLAIN: usize = old::MAX_PLAIN;
+pub(in crate::store::critical_namespaces::native_registry) const MAX_FRAME: usize = MAX_PLAIN + 40;
+pub(in crate::store::critical_namespaces::native_registry) const MAX_NETWORK_FRAME: usize =
+    64 * 1024;
 const HEADER_BYTES: usize = 4 + TAG.len() + 2 + 3 * 36 + 8 + 1 + 8 + 4;
 const BIRTH_BYTES: usize = 1 + 4 * 36;
 
@@ -20,15 +21,15 @@ const BIRTH_BYTES: usize = 1 + 4 * 36;
 /// full public key and algorithm, not ciphertext, routes or mutable port fields.
 /// All states, including retired/abandoned, keep this receipt for token lookup.
 #[derive(Clone, PartialEq, Eq)]
-pub(super) struct Birth {
-    pub(super) invocation: [u8; 32],
-    pub(super) request: [u8; 32],
-    pub(super) signer: [u8; 32],
-    pub(super) network: [u8; 32],
+pub(in crate::store::critical_namespaces::native_registry) struct Birth {
+    pub(in crate::store::critical_namespaces::native_registry) invocation: [u8; 32],
+    pub(in crate::store::critical_namespaces::native_registry) request: [u8; 32],
+    pub(in crate::store::critical_namespaces::native_registry) signer: [u8; 32],
+    pub(in crate::store::critical_namespaces::native_registry) network: [u8; 32],
 }
 
 #[derive(PartialEq, Eq)]
-pub(super) enum Backend {
+pub(in crate::store::critical_namespaces::native_registry) enum Backend {
     // Existing legacy rows are copied exactly from genuine G1. This version's
     // new-birth operation is deliberately FounderV2-only; it does not invent
     // idempotency receipts for an old legacy invocation it never observed.
@@ -55,7 +56,7 @@ pub(super) enum Backend {
     },
 }
 impl Backend {
-    pub(super) fn birth(&self) -> Option<&Birth> {
+    pub(in crate::store::critical_namespaces::native_registry) fn birth(&self) -> Option<&Birth> {
         match self {
             Self::Legacy { .. } => None,
             Self::Pending { birth, .. }
@@ -66,22 +67,22 @@ impl Backend {
     }
 }
 #[derive(PartialEq, Eq)]
-pub(super) struct Row {
-    pub(super) id: u64,
-    pub(super) identity: [u8; 32],
-    pub(super) name: String,
-    pub(super) is_dm: bool,
-    pub(super) backend: Backend,
+pub(in crate::store::critical_namespaces::native_registry) struct Row {
+    pub(in crate::store::critical_namespaces::native_registry) id: u64,
+    pub(in crate::store::critical_namespaces::native_registry) identity: [u8; 32],
+    pub(in crate::store::critical_namespaces::native_registry) name: String,
+    pub(in crate::store::critical_namespaces::native_registry) is_dm: bool,
+    pub(in crate::store::critical_namespaces::native_registry) backend: Backend,
 }
 #[derive(PartialEq, Eq)]
-pub(super) struct Index {
-    pub(super) capability: Capability,
-    pub(super) generation: u64,
-    pub(super) parent: Option<[u8; 32]>,
+pub(in crate::store::critical_namespaces::native_registry) struct Index {
+    pub(in crate::store::critical_namespaces::native_registry) capability: Capability,
+    pub(in crate::store::critical_namespaces::native_registry) generation: u64,
+    pub(in crate::store::critical_namespaces::native_registry) parent: Option<[u8; 32]>,
     // Never decrease, even if a later concrete legacy projection removes rows.
     // Native terminal receipts themselves are never recycled or removed.
-    pub(super) last_issued_id: u64,
-    pub(super) rows: Vec<Row>,
+    pub(in crate::store::critical_namespaces::native_registry) last_issued_id: u64,
+    pub(in crate::store::critical_namespaces::native_registry) rows: Vec<Row>,
 }
 
 fn string<'a>(input: &mut Decoder<'a>, limit: usize) -> Result<&'a str, AppError> {
@@ -153,7 +154,9 @@ fn put_binding(output: &mut Encoder, value: &old::FounderBindingData) -> Result<
 impl Index {
     /// Only genuine old Legacy-only G1 is eligible. Decode/authentication and
     /// original held-file checks remain the physical migration owner's work.
-    pub(super) fn migrate_v1_data(old: old::IndexData) -> Result<Self, AppError> {
+    pub(in crate::store::critical_namespaces::native_registry) fn migrate_v1_data(
+        old: old::IndexData,
+    ) -> Result<Self, AppError> {
         if old.generation != 1 || old.parent.is_some() || old.rows.len() > old::MAX_ROWS {
             return Err(refused());
         }
@@ -185,7 +188,10 @@ impl Index {
 
     /// Before allocation/copying, callers reserve complete selected/candidate,
     /// plaintext/ciphertext, fixed uniqueness scratch and row/string overlap.
-    pub(super) fn decode_data(raw: &[u8], expected: Capability) -> Result<Self, AppError> {
+    pub(in crate::store::critical_namespaces::native_registry) fn decode_data(
+        raw: &[u8],
+        expected: Capability,
+    ) -> Result<Self, AppError> {
         if raw.len() > MAX_PLAIN {
             return Err(refused());
         }
@@ -279,7 +285,11 @@ impl Index {
         Ok(value)
     }
 
-    fn encoded_length(&self) -> Result<usize, AppError> {
+    // Pure DATA validation reused by the private owning version3 conversion.
+    // The physical cell still exposes only Copy projections to public callers.
+    pub(in crate::store::critical_namespaces::native_registry) fn encoded_length(
+        &self,
+    ) -> Result<usize, AppError> {
         if self.generation == 0
             || (self.generation == 1) != self.parent.is_none()
             || self.rows.len() > old::MAX_ROWS
@@ -357,7 +367,9 @@ impl Index {
         Ok(length)
     }
 
-    pub(super) fn encode_data(&self) -> Result<Zeroizing<Vec<u8>>, AppError> {
+    pub(in crate::store::critical_namespaces::native_registry) fn encode_data(
+        &self,
+    ) -> Result<Zeroizing<Vec<u8>>, AppError> {
         let length = self.encoded_length()?;
         let mut output = Encoder::with_capacity(length);
         output.put_bytes(TAG).map_err(|_| refused())?;
@@ -436,7 +448,7 @@ impl Index {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Change {
+pub(in crate::store::critical_namespaces::native_registry) enum Change {
     Birth,
     Activate,
     Retire,
@@ -447,7 +459,7 @@ impl Index {
     /// Structural admission only. The writer must additionally own the actual
     /// source/journal/native evidence for the returned operation. An authenticated
     /// arbitrary next-generation snapshot is never a semantic successor.
-    pub(super) fn successor_data(
+    pub(in crate::store::critical_namespaces::native_registry) fn successor_data(
         &self,
         next: &Self,
         parent_frame: [u8; 32],
@@ -504,7 +516,7 @@ impl Index {
 
     /// Token lookup survives unrelated updates and every terminal state. Caller
     /// invokes it BEFORE RNG, seal, network construction or device/SDK work.
-    pub(super) fn lookup_data(
+    pub(in crate::store::critical_namespaces::native_registry) fn lookup_data(
         &self,
         invocation: [u8; 32],
         request: [u8; 32],

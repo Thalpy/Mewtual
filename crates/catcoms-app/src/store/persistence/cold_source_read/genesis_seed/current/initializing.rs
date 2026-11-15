@@ -438,5 +438,5 @@ impl<T, R> UnexposedRepairedV2GenesisCurrent<T, R> {
 #[cfg(test)]
 mod tests;
 
-#[cfg(all(test, not(windows)))]
+#[cfg(all(test, not(any(windows, target_os = "linux"))))]
 mod unsupported_tests;

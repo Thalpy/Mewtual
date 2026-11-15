@@ -388,6 +388,35 @@ pub(super) struct V2MemberLane {
 }
 
 impl V2MemberLane {
+    /// Reuse this lane's one verifier and actual selected G1 parent. No second
+    /// prefix/domain is constructed for the invite producer. This phase does
+    /// not sign or perform IO writes; key admission requires its later journal.
+    pub(super) fn require_invite_parent(
+        &mut self,
+        store: &ServerStore,
+        owner: &V2TextOwnerRef<'_>,
+    ) -> Result<(), AppError> {
+        self.validate_accounts(store)?;
+        self.retry_verifier(store, owner)?;
+        let verifier = self.verifier.as_ref().ok_or_else(refused)?;
+        let admission = verifier.admission(self.admission).map_err(|_| refused())?;
+        let original = owner.source().data();
+        if !admission.is_open_data()
+            || admission.admission_data().spec().subject != original.context.spec_data().signer
+            || verifier.replay_data().mls_epoch_data() != 0
+            || verifier.replay_data().header().id() != original.header.id()
+        {
+            return Err(refused());
+        }
+        let selected = self.capture.selected_data().ok_or_else(refused)?;
+        let resources = self.capture.resources().clone();
+        store.with_v2_text_current(owner, |current| {
+            let guard = store.lock_v2_text_current_group(current, &resources)?;
+            self.domain.require_current_source(current)?;
+            selected.validate_under_current_guard(&guard)?;
+            guard.require_governed_native_invite_parent()
+        })
+    }
     fn prepare(
         store: &ServerStore,
         owner: &V2TextOwnerRef<'_>,
@@ -463,7 +492,7 @@ impl V2MemberLane {
     }
 
     /// Save-source lifecycle, for regressions only.
-    #[cfg(all(test, windows))]
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(super) fn save_source_for_test(&self) -> &V2MemberSaveSource {
         &self.save_source
     }
@@ -1168,6 +1197,14 @@ fn cancel_domain_during_admitted_sign(domain: &V2TextProjectionDomain) {
 #[cfg(all(test, windows))]
 pub(in crate::store) fn member_sign_dispatches_for_test() -> usize {
     SIGN_DISPATCHES.with(std::cell::Cell::get)
+}
+/// Read-only access to the existing actual dispatch counter for cross-boundary
+/// native-runtime regressions. No signer, source or native permission escapes.
+#[cfg(all(test, windows))]
+impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
+    pub(in crate::store) fn native_member_sign_dispatches_for_test() -> usize {
+        member_sign_dispatches_for_test()
+    }
 }
 /// Arm a member-domain close at the post-raw cut of the NEXT admitted key operation. Read
 /// whether that close had drained at the cut (it must not: Core's reader is still held)

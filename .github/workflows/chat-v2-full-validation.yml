@@ -38,10 +38,11 @@ jobs:
     name: Root tests, slow case deferred (${{ matrix.os }})
     if: github.event_name != 'workflow_dispatch' || (inputs.scope != 'native' && inputs.scope != 'native-focused')
     runs-on: ${{ matrix.os }}
-    # The earlier Windows run was cancelled at the outer120-minute job bound
-    # while tests still reported progress. Allow the complete suite to finish;
-    # no individual test/protocol deadline or the one deferred-case rule changes.
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 240 || 120 }}
+    # Both OSes have reached the old aggregate120-minute CI bound while
+    # individual tests still reported progress (Linux run43547127334 included).
+    # Keep every test/protocol deadline and the one explicit deferral unchanged;
+    # this is an outer job allowance for the growing complete workspace.
+    timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:

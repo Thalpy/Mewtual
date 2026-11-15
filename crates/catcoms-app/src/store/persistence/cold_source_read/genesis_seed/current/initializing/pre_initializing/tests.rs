@@ -393,7 +393,7 @@ fn newly_born_repaired_current_drains_then_new_mount_uses_existing_current_reade
     assert_eq!(std::fs::read(&f.seed).unwrap(), f.original);
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 #[test]
 fn unsupported_no_row_recovery_refuses_before_wrapper_fee_rng_or_journal_change() {
     let f = fixture_at_cut(0xcb88, ColdFixtureCut::CompleteSeedBeforeScope);

@@ -14,7 +14,9 @@ pub use source::{
     FreshV2TextFounderBinding, FreshV2TextFounderPolicy, PreparedFreshV2TextFounder,
     ReturnedArchiveFounderPlanning,
 };
-pub(in crate::store) use source::{CompletedWarmFounderOrigin, WarmFounderCurrentReservation};
+pub(in crate::store) use source::{
+    CompletedWarmFounderOrigin, WarmFounderCurrentReservation, WarmSavedSourceSdkReopenEvidence,
+};
 
 /// A source borrow is constructible only here, from the direct `Server::found` result retained
 /// by the actual one-shot creator. Keeping it borrowed through Root I/O prevents this creator's

@@ -64,6 +64,8 @@ use catcoms_rt::{CryptoRngCore, MeshTransport, RequestCancellation};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};
 
+mod history;
+
 /// Native custody for ONE member-save admission.
 ///
 /// `custody` is the native consumer's concrete checked custody: the actual owned UI commit
@@ -86,6 +88,17 @@ impl MemberSaveNativeAdmission {
         Self {
             session,
             _custody: Box::new(custody),
+        }
+    }
+
+    /// Move already allocated, genuinely checked native custody without an
+    /// allocator call at final admission. Native prepares its empty guard slot
+    /// before locking, fills it after actual checks, then supplies that SAME
+    /// box. Erasure remains ownership only; this authenticates no Rust caller.
+    pub fn from_boxed_custody(custody: Box<dyn Send>, session: RequestCancellation) -> Self {
+        Self {
+            session,
+            _custody: custody,
         }
     }
 }
@@ -457,7 +470,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
             original,
             lost: false,
         });
-        #[cfg(all(test, windows))]
+        #[cfg(all(test, any(windows, target_os = "linux")))]
         before_member_preseal_for_test();
         let fee = match mount.pay(MEMBER_OUTBOX_APPEND_FEE) {
             Ok(fee) => fee,
@@ -565,7 +578,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
             drop(source);
             return Err((native, V2MemberSaveRefusal::Unavailable));
         }
-        #[cfg(all(test, windows))]
+        #[cfg(all(test, any(windows, target_os = "linux")))]
         before_native_member_save_edge_for_test();
         // The first mode/source check preceded cell and source acquisition.
         // Repeat its pinned, allocation-free native negatives at this actual
@@ -1104,7 +1117,7 @@ impl V2MemberSaveSource {
     }
 
     /// Ends dropped so far (monotone). Regression DATA only; never a permission.
-    #[cfg(all(test, windows))]
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(super) fn completed_for_test(&self) -> u64 {
         self.body.completed.load(Ordering::Acquire)
     }
@@ -1153,19 +1166,19 @@ impl Drop for V2MemberSaveSourceEnd {
 // Regression observations only (`current/tests/text_group_guard/host/member_save.rs`). They
 // read DATA through the same derivation phase 1 uses and grant nothing. This is a macro
 // invocation, so keep these as ordinary comments rather than unattached rustdoc.
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "linux")))]
 thread_local! {
     static BEFORE_MEMBER_PRESEAL: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static BEFORE_NATIVE_MEMBER_SAVE_EDGE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "linux")))]
 fn before_native_member_save_edge_for_test() {
     let hook = BEFORE_NATIVE_MEMBER_SAVE_EDGE.with(|slot| slot.borrow_mut().take());
     if let Some(hook) = hook {
         hook();
     }
 }
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "linux")))]
 fn before_member_preseal_for_test() {
     let hook = BEFORE_MEMBER_PRESEAL.with(|slot| slot.borrow_mut().take());
     if let Some(hook) = hook {
@@ -1173,7 +1186,7 @@ fn before_member_preseal_for_test() {
     }
 }
 
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "linux")))]
 impl<T, R> PreparedV2TextHost<T, R> {
     pub(in crate::store) fn with_native_member_save_edge_for_test<Output>(
         hook: Box<dyn FnOnce()>,
@@ -1277,6 +1290,25 @@ impl<T, R> PreparedV2TextHost<T, R> {
         let cell = self.member_cell_for_test(layout)?;
         let idle = cell.lock().ok()?.owner.is_some();
         Some(idle)
+    }
+    /// Hold the REAL lane's source End independently of key counters, to test
+    /// whole-driver teardown. This bypasses request admission in tests only.
+    pub(in crate::store) fn hold_member_save_source_for_test(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+    ) -> Result<Box<dyn Send>, AppError>
+    where
+        T: MeshTransport,
+        R: CryptoRngCore,
+    {
+        self.ensure_member_lane(layout)?;
+        Ok(Box::new(
+            self.member
+                .as_ref()
+                .ok_or_else(refused)?
+                .save_source_for_test()
+                .issue()?,
+        ))
     }
     /// Save-source ends dropped so far by this host's lane.
     pub(in crate::store) fn member_save_ends_completed_for_test(&self) -> Option<u64> {

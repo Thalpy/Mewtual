@@ -160,8 +160,31 @@ async fn exercise_impl(
             Err(error) => panic!("unexpected media mailbox error {error:?}"),
         }
     }
-    let output = queue(&context, route, row(), original(), physical())
-        .unwrap()
+    // Filling the Actor mailbox does not idle native try-lock gates. A
+    // synchronous Capacity here is provably before Actor handoff: queue_impl
+    // always returns a Waiter after try_queue_voice_initial_media. Retry only
+    // that local refusal with the same parent/Begin and retained child. Never
+    // retry an ambiguous Actor outcome or relax the forced mailbox assertion.
+    let clock = crate::voice_runtime(state).clock();
+    let started = clock.monotonic_ms();
+    let mut queued = None;
+    for _ in 0..32 {
+        if clock.monotonic_ms().saturating_sub(started) >= 1000 {
+            break;
+        }
+        match queue(&context, route, row(), original(), physical()) {
+            Ok(waiter) => {
+                queued = Some(waiter);
+                break;
+            }
+            Err(Refused::Protocol(VoiceError::Capacity)) => {}
+            Err(error) => panic!("unexpected pre-mailbox media refusal {error:?}"),
+        }
+        // Every refused construction/physical hold has dropped before sleep.
+        clock.sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let output = queued
+        .expect("native media preflight remained busy before forced mailbox refusal")
         .complete()
         .await
         .unwrap();

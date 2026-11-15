@@ -32,6 +32,7 @@ mod create;
 // never the founder A/I/S/B certification lane. Mutually exclusive with founder Create.
 mod member;
 // Member save: the two-phase production path into the Store's member outbox.
+mod invite;
 mod member_save;
 mod projection;
 // Request DATA types travel to the regression tests only until the primary's native
@@ -82,6 +83,9 @@ pub struct PreparedV2TextHost<T, R> {
     // The ordinary-member lane owns its OWN member-role domain, verifier, request and fees.
     // Drops before `owner`; Drop below cancels its domain first. Exclusive with founder Create.
     member: Option<Box<member::V2MemberLane>>,
+    // Unsigned original only. No invite key may run until its separately
+    // authenticated journal intent is covered by the future paired writer.
+    invite: Option<Box<invite::PendingInvite>>,
     resident: Option<PreparedV2TextResidentProjection>,
     capture: Option<PreparedV2TextPromotionCapture>,
     prepared: Option<PreparedV2TextPromotion>,
@@ -100,7 +104,7 @@ pub struct PreparedV2TextHost<T, R> {
     retired: Option<RetiredV2TextPromotionLane>,
     selected: Option<Arc<SavedV2TextPromotion>>,
     policy: V2TextQuotaPolicy,
-    #[cfg(all(test, windows))]
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     next_work_fault: Option<crate::store::persistence::v2_text::V2TextPromotionTestCut>,
     // Whole original wrapper/payment remains intact. Drop below cancels before ANY debt
     // fields drain; destruction is not an acknowledgment that a running worker has ended.
@@ -155,6 +159,7 @@ impl<T, R> PreparedV2TextHost<T, R> {
             origin,
             projection: None,
             member: None,
+            invite: None,
             resident: None,
             capture: None,
             prepared: None,
@@ -173,7 +178,7 @@ impl<T, R> PreparedV2TextHost<T, R> {
             retired: None,
             selected: None,
             policy: policy.quota,
-            #[cfg(all(test, windows))]
+            #[cfg(all(test, any(windows, target_os = "linux")))]
             next_work_fault: None,
             owner: read.owner,
         }
@@ -262,7 +267,7 @@ impl<T, R> PreparedV2TextHost<T, R> {
         }
         let prepared = self.prepared.as_mut().ok_or_else(refused)?;
         prepared.prepare_candidates(store, owner.source(), rng)?;
-        #[cfg(all(test, windows))]
+        #[cfg(all(test, any(windows, target_os = "linux")))]
         if let Some(cut) = self.next_work_fault.take() {
             prepared.set_work_fault_for_test(cut);
         }
@@ -492,7 +497,7 @@ impl<T, R> PreparedV2TextHost<T, R> {
 
     /// Inject only a real finite-IO cut in the next original worker. Production has no
     /// caller-selected phase, admission bypass or error-to-absence substitution.
-    #[cfg(all(test, windows))]
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store) fn fail_next_promotion_work_for_test(
         &mut self,
         cut: crate::store::persistence::v2_text::V2TextPromotionTestCut,

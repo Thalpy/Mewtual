@@ -204,13 +204,11 @@ async fn studio_inspection_paused_real_draft_allows_actor_checkpoint_progress() 
         object: [8; 16],
     };
     verifier.sync.with_registry_context(|g, d, _, _| {
-        crate::store::fill_studio_epoch_fixture(
-            f.store.try_lock().unwrap().as_mut().unwrap(),
-            7,
-            g,
-            d,
-            other,
-        );
+        let mut held = f.store.try_lock().unwrap();
+        let Some(crate::store::MountedVault::Legacy(store)) = held.as_mut() else {
+            panic!("inspection fixture must retain its original Legacy store");
+        };
+        crate::store::fill_studio_epoch_fixture(store, 7, g, d, other);
     });
     let before = f.records();
     let job = f.capture().await;
@@ -235,11 +233,10 @@ async fn studio_inspection_paused_real_draft_allows_actor_checkpoint_progress() 
             .studio_begin(StudioRequest::Read { target: other })
             .await
             .unwrap()
-            .execute(StudioVaultLease::new(
-                f.store.clone().try_lock_owned().unwrap(),
-                7,
-                (),
-            ))
+            .execute(
+                StudioVaultLease::new_mounted(f.store.clone().try_lock_owned().unwrap(), 7, ())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         for _ in 0..60 {
@@ -248,16 +245,15 @@ async fn studio_inspection_paused_real_draft_allows_actor_checkpoint_progress() 
                 .studio_receive_begin()
                 .await
                 .unwrap()
-                .execute(StudioVaultLease::new(
-                    f.store.clone().try_lock_owned().unwrap(),
-                    7,
-                    (),
-                ))
+                .execute(
+                    StudioVaultLease::new_mounted(f.store.clone().try_lock_owned().unwrap(), 7, ())
+                        .unwrap(),
+                )
                 .await
                 .unwrap();
             let installed = verifier.sync.with_registry_context(|g, d, _, _| {
                 let held = f.store.try_lock().unwrap();
-                let store = held.as_ref().unwrap();
+                let store = held.as_ref().unwrap().as_legacy().unwrap();
                 store
                     .load_studio_epoch(7, g, other, d)
                     .unwrap()

@@ -174,8 +174,9 @@ impl NativeFixture {
             generation.clone(),
             authorized.clone(),
             requested.clone(),
+            Arc::new(()),
         );
-        let ui = binding.open_session(7).unwrap();
+        let ui = binding.open_session(7, Arc::new(())).unwrap();
         let source =
             catcoms_rt::NativeChatSourceOwner::for_trusted_source(&ui.observe(), Arc::new(()))
                 .unwrap();
@@ -207,7 +208,7 @@ impl NativeFixture {
         let generation = self.generation.load(SeqCst);
         self.authorized.store(generation, SeqCst);
         self.requested.store(false, SeqCst);
-        self.ui = Some(self.binding.open_session(generation).unwrap());
+        self.ui = Some(self.binding.open_session(generation, Arc::new(())).unwrap());
     }
 }
 

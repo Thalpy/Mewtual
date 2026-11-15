@@ -4,6 +4,23 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { planLegacyReadMarkMigration, sanitizeUiContinuity } from "./ui-continuity.ts";
 
+test("critical4 roundtrip and read-mark migration keep every native request",()=>{
+  const token="01".repeat(32);
+  const intent={kind:"create",token,server:7,channel:"9",expectedContext:"02".repeat(32),text:"original\n🐈"};
+  const raw={version:4,drafts:{room:"draft"},readMarks:{},nativeTextIntents:{[token]:intent}};
+  const state=sanitizeUiContinuity(raw);
+  assert.equal(state.version,4);assert.deepEqual(state.nativeTextIntents,raw.nativeTextIntents);
+  assert.deepEqual(sanitizeUiContinuity(JSON.parse(JSON.stringify(state))),state);
+  const migration=planLegacyReadMarkMigration(state,'{"7:9":123}');
+  assert.equal(migration.state.version,4);assert.deepEqual(migration.state.nativeTextIntents,raw.nativeTextIntents);
+  assert.equal(sanitizeUiContinuity({...raw,nativeTextIntents:{}}).version,4,"emptying queue never downgrades format");
+  for(const changed of [{...intent,kind:"future"},{...intent,extra:true},{...intent,token:"00".repeat(32)}]){
+    const malformed={...raw,nativeTextIntents:{[token]:changed}},before=JSON.stringify(malformed);
+    assert.throws(()=>sanitizeUiContinuity(malformed));assert.equal(JSON.stringify(malformed),before);
+  }
+  assert.throws(()=>sanitizeUiContinuity({...raw,version:3}));
+});
+
 test("continuity sanitization keeps only bounded drafts and safe read positions", () => {
   const state = sanitizeUiContinuity({
     drafts: { good: "draft", huge: "x".repeat(32_769), ["k".repeat(257)]: "hidden" },

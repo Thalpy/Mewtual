@@ -46,6 +46,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
 
+pub(super) mod history;
+
 /// Logical invoices, each the caller's prepaid debit BEFORE the operation allocates. They are
 /// derived from this module's hard caps (WAL <= 1 MiB, page <= 64 KiB, action <= 128 KiB,
 /// at most 17 node reads per lookup), counted with generous overlap; they are not measured

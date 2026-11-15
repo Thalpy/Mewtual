@@ -4,15 +4,57 @@
 //! receipts here must not silently enlarge its grammar or authorize its reader.
 //! A decoded receipt is historical DATA, never permission to instantiate an SDK,
 //! construct a network transport, sign, or install a native backend.
-mod capability;
+// Internal DATA visibility for the owning version3 conversion only. This does
+// not expose a physical Index/Store loan or change the closed version2 grammar.
+pub(super) mod capability;
 mod catalog;
-mod data;
+mod cell;
+pub(super) mod data;
+mod facade;
+mod governed;
+pub use governed::NativeTextGovernedStorage;
+mod history_response;
+pub use history_response::{NativeTextHistoryResponseBudget, NativeTextHistoryResponseCredit};
 mod interlock;
 mod mount;
+mod native_ui;
 mod opening;
 mod payment;
+mod source_admission;
+mod sources;
+pub use sources::{
+    NativeTextCreationBudget, NativeTextCreationInputs, NativeTextCreationJob,
+    NativeTextCreationPreparation, NativeTextCreationProgress, NativeTextCreationRefusal,
+    NativeTextCreationRequest, NativeTextCreationSettings, NativeTextMemberAdmissionFailure,
+    NativeTextMemberBudget, NativeTextMemberFinalPreparation, NativeTextMemberHistoryItem,
+    NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus, NativeTextMemberJob,
+    NativeTextMemberPreparation, NativeTextMemberSaveJob, NativeTextRuntimeSelection,
+    NativeTextSourceBudget, NativeTextSourceCommand, NativeTextSourcePolicy,
+    NativeTextSourcePreparation, NativeTextSourceRetirement, NativeTextSourceRetirementPreparation,
+    NativeTextSourceRetirementRefusal, NativeTextSourceRetirementStatus, NativeTextSources,
+};
+mod ui_state;
+mod work_retirement;
+pub use work_retirement::{NativeTextWorkRetirement, NativeTextWorkRetirementPreparation};
 mod upgrade;
+pub(in crate::store::critical_namespaces) mod upgrade_source;
+pub use facade::{
+    NativeTextGovernanceUpgrade, NativeTextVault, NativeTextVaultAuthentication,
+    NativeTextVaultAuthenticationCheck, NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal,
+};
 pub use mount::{NativeCreationStateData, NativeCreationStatusData, NativeIndexStore};
+pub use native_ui::{NativeUiInvocationBudget, NativeUiInvocationMetadata};
+pub use native_ui::{
+    RetirementBatch as NativeTextUiRetirementBatch, RetirementDrain as NativeTextUiRetirementDrain,
+    UiCandidate as NativeTextUiCandidate, UiCapture as NativeTextUiObservation,
+    UiGarbage as NativeTextUiGarbage, UiPreparation as NativeTextUiPreparation,
+    UiRetirement as NativeTextUiRetirement, UiRetirementState as NativeTextUiRetirementState,
+};
+pub use ui_state::{
+    UiStateBudget as NativeUiStateBudget, UiStateCredit as NativeUiStateCredit,
+    UiStatePreparation as NativeUiStatePreparation, UiStateRead as NativeUiStateRead,
+    UiStateSaved as NativeUiStateSaved,
+};
 pub use upgrade::{NativeIndexPolicy, NativeIndexUpgrade};
 
 use super::super::{read_pool::CatalogReadReservation, refused};
@@ -39,6 +81,7 @@ const _: () = assert!(
 const _: () = assert!(
     8 * (std::mem::size_of::<mount::NativeIndexStore>()
         + std::mem::size_of::<mount::NativeIndexPhysical>()
+        + std::mem::size_of::<facade::NativeTextVault>()
         + std::mem::size_of::<upgrade::NativeIndexUpgrade>()
         + std::mem::size_of::<crate::store::persistence::native_registry::operational::UpgradeIo>(
         )
@@ -54,6 +97,7 @@ const _: () = assert!(
         + std::mem::size_of::<interlock::IndexInterlock>()
         + std::mem::size_of::<Handler>()
         + std::mem::size_of::<payment::IndexPayment>())
+        + cell::CELL_METADATA_BYTES
         + 32 * (super::preparation::MAX_BASE_PATH + 256)
         + 64 * 1024
         <= CONTROL_METADATA_FEE
@@ -74,6 +118,9 @@ pub(in crate::store) struct Handler {
     fee: Arc<payment::IndexPayment>,
 }
 impl Handler {
+    pub(super) fn same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.gate, &other.gate) && Arc::ptr_eq(&self.fee, &other.fee)
+    }
     pub(in crate::store) fn require(&self) -> Result<(), AppError> {
         self.fee
             .debit
@@ -108,7 +155,7 @@ impl crate::store::ServerStore {
     /// mutex; startup callers are still private. Never take the index cell, read
     /// files, acquire payment or call an admission/SDK getter under that mutex.
     pub(in crate::store) fn require_native_index_idle_cached(&self) -> Result<(), AppError> {
-        if let Some(super::preparation::NativeRegistryHandler::Operational(handler)) = self
+        if let Some(handler) = self
             .current_layout_policy
             .as_ref()
             .and_then(|policy| policy.native_registry.as_ref())
@@ -116,7 +163,17 @@ impl crate::store::ServerStore {
             if self.chat_mount.observer().is_cancelled() {
                 return Err(refused());
             }
-            handler.require_index_idle_cached()?;
+            match handler {
+                super::preparation::NativeRegistryHandler::Operational(handler) => {
+                    handler.require_index_idle_cached()?
+                }
+                super::preparation::NativeRegistryHandler::Lifecycle(handler)
+                | super::preparation::NativeRegistryHandler::GovernedLifecycle(handler)
+                | super::preparation::NativeRegistryHandler::GovernanceOpening(handler) => {
+                    handler.require_idle_cached()?
+                }
+                super::preparation::NativeRegistryHandler::Migration(_) => {}
+            }
         }
         Ok(())
     }
