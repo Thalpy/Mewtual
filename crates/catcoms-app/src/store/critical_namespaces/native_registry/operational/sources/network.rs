@@ -58,7 +58,7 @@ impl Reservation {
     pub(super) fn invite_routing_plan_data(
         &self,
         binding: &crate::store::FreshV2TextFounderBinding,
-    ) -> Result<[u8; 32], AppError> {
+    ) -> Result<Vec<u8>, AppError> {
         let public = self.public.as_ref().ok_or_else(refused)?;
         let active = self.active.ok_or_else(refused)?;
         let pending = self.pending.as_ref().ok_or_else(refused)?;
@@ -100,9 +100,11 @@ impl Reservation {
         plan.put_u16(1); // TCP reservation; this is not a verified dial address
         plan.put_u16(self.port);
         plan.put_u32(0); // no certified public contact addresses
-        catcoms_replication::chat::join_bindings::JoinPayloadKindData::RoutingPlan
-            .commitment_data(&plan.finish())
-            .map_err(|_| refused())
+        let plan = plan.finish();
+        if plan.len() > 1024 || plan.capacity() > 1024 {
+            return Err(refused());
+        }
+        Ok(plan)
     }
     /// Negative-only observation of this original preparation. No transport,
     /// constructor or passive physical custody is exposed to cleanup.

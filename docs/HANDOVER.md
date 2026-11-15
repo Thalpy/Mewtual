@@ -1,5 +1,22 @@
 # Mewtual; Handover
 
+The `chat-v2-invite-journal` continuation now retains the exact bounded public
+routing-plan frame with the original invite, not just its digest. Hash/bounds
+and exact-retry checks run before copy/draw; the genuine transport test pins
+all fields, zero certified contacts and EOF. Root5, native compile/strict lint,
+all3,485 frontend tests and formatting pass; Root strict lint remains556.
+The current software signer's exact raw64 equality across genuine bounded
+device restore is also pinned; complete MLS163 unit/22 integration/5 docs and
+strict MLS lint pass (two pre-existing ignored cases). Read-only reviews are
+clear. This does NOT implement cold recovery, a journal writer or SavedInvite.
+
+Both design reviews approve an isolated journal gate under the same exclusive
+NativeRequired RuntimeLoan. It needs no canonical text-lane registration or
+post-Stop slot-removal machinery while no worker/owner escapes the loan and
+all files belong to the new private directory. Actual physical/Current4/key
+and covering-save checks remain mandatory. No persistence runtime is added
+by that design decision; Chat V2 stays OFF.
+
 The `chat-v2-saved-invite-producer` continuation implements unsigned invite
 preparation on the actual same-row NativeRequired Runtime/Host, requiring the
 real governed4 family and reusing its member verifier. The retained Sync

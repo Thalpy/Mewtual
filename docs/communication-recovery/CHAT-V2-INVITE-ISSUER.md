@@ -19,8 +19,11 @@ independent randomness: it must match the active/pending row, while the
 transport commitment must separately match the immutable Birth. Both share
 the same original Current vault/root. Configured advertise, relay and
 rendezvous strings do not prove external reachability and are excluded. The
-versioned plan explicitly contains zero certified contact addresses. Hashing
-this reservation does not make it a dialable route.
+versioned plan explicitly contains zero certified contact addresses. The Host
+retains the exact bounded plan bytes alongside its commitment, verifies their
+domain-separated hash before copying, and compares both on retry. A later
+journal must use those bytes instead of reconstructing them from transport
+state. Hashing this reservation does not make it a dialable route.
 
 SourceWork forwards through the same fresh driver, Host and warm whole node.
 The Host requires NativeRequired origin and the constructor-selected steady
@@ -65,6 +68,16 @@ The paired journal must be a separate closed family inside the held
 `text.pages` directory, with independent persistent count/byte quotas and its
 own memory invoice. It must preserve ordinary Head1 inventories/accounting
 and pass a real predecessor save/retirement preservation test.
+
+For the current private producer it can use an isolated affine IO/access gate
+inside the SAME synchronous RuntimeLoan. Native collection, Entry and Host
+creation are unique, and whole-Source retirement waits for that loan. All
+journal reads, writes, recovery and admitted work must stay inside it; no
+worker, mutation capability or library/cold adopter may escape. The journal
+does not mutate shared Head/O/H/WAL/I/S objects and requires no global text-lane
+registration. Actual Current4/physical, key, covering-save and publication
+proofs remain separate. Future independent cold/detached writers need genuine
+per-context serialization before enabling that broader ownership profile.
 
 It must look up the exact token before beginning new work, cover its intent
 and durable KeyAttempt before key entry, retain exact raw/output across write
