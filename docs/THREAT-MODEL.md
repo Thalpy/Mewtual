@@ -1,5 +1,16 @@
 # Threat model; client integrity & enforcement boundaries
 
+The disabled governed Add library now freezes both authenticated signed join
+inputs and bounded exact package bytes before native SDK entry. The actual
+retained Clock supplies first-admission time; cached retries cannot substitute
+renderer time, different credential expectations or new routing randomness.
+The original L0/file key and supported pinned policy are sealed only by the
+same merged candidate. This is cryptographic/source consistency, not Root
+invitation authorization, consumed-nonce evidence, saved membership, Welcome
+release or joined Source provenance. A future joiner must strictly verify the
+tagged V2 plaintext and every binding with no Legacy fallback.
+[Contract and remaining boundaries](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
 Governed-native Current admission now revalidates its actual mounted4 owner,
 retained marker and final same-file bytes under the already-held Root. A
 missing marker, equal-byte replacement or post-authentication in-place mutation

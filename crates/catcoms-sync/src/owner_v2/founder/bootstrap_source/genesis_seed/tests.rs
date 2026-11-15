@@ -86,11 +86,15 @@ struct Fixture {
     opened: OpenedBootstrapSourceData,
 }
 fn fixture(id: u64) -> Fixture {
+    fixture_with_clock(id, Box::new(ManualClock::new(1000)))
+}
+
+fn fixture_with_clock(id: u64, clock: Box<dyn Clock + Send>) -> Fixture {
     let mut node = ChannelSync::found(
         Hub::new().join(PeerId::from_u64(id)),
         MlsDevice::generate().unwrap(),
         ChaCha20Rng::seed_from_u64(id),
-        Box::new(ManualClock::new(1000)),
+        clock,
     )
     .unwrap();
     node.rendezvous_nodes = vec![

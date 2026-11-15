@@ -19,6 +19,10 @@ use catcoms_rt::{
     NativeChatKeyEnds, NativeChatKeyPurpose, NativeChatPreparedKeyCut, NativeChatSourceObservation,
 };
 
+mod request;
+use request::FrozenAddRequest;
+pub use request::{V2FounderAddRequestData, MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES};
+
 /// Immutable observation of THIS wrapper's actual installation, not a saved
 /// head, selected Core prefix, portable proof, or positive Source capability.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,6 +48,8 @@ enum Phase {
 /// must first reconcile its real disk workers and durable journal: idle Rust
 /// ownership alone does not prove that an admitted write has finished.
 struct PendingAdd {
+    request: FrozenAddRequest,
+    admitted_at_ms: Option<u64>,
     cell: Option<PreparedTextCurrentAdd>,
     admission: Option<TextCurrentAddAdmission>,
     body: Option<AdmissionBody>,
@@ -77,6 +83,9 @@ pub const FOUNDER_GOVERNANCE_DATA_BYTES: usize = UNSIGNED_ADMISSION_DATA_INVOICE
     + 8 * MAX_HEADER_BYTES
     + 4 * MAX_ADMISSION_BYTES
     + 16 * MAX_GROUP_ID_BYTES
+    + 4 * MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES
+    + 8 * catcoms_replication::chat::join_bindings::MAX_JOIN_BINDING_BYTES
+    + 2 * catcoms_mls::group::text_current_add::MAX_TEXT_ADD_ROUTING_PLAIN_BYTES
     + 4 * std::mem::size_of::<PendingAdd>()
     + 4 * std::mem::size_of::<V2InstalledFounderAddData>()
     + 4 * std::mem::size_of::<PreparedV2FounderGovernanceNode<(), ()>>()
@@ -162,6 +171,7 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
     /// This allocates its named Box; call outside writers under a separate fee.
     pub fn prepare_add_data(
         &mut self,
+        request: V2FounderAddRequestData<'_>,
         original: NativeChatSourceObservation,
         admission: TextCurrentAddAdmission,
         sdk_cut: NativeChatPreparedKeyCut,
@@ -176,6 +186,7 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
         )>,
     > {
         if self.pending.is_some()
+            || !admission.supports_routing_data()
             || sdk_cut
                 .preflight(&original, NativeChatKeyPurpose::AddSdk)
                 .is_err()
@@ -188,7 +199,13 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
             // metadata allowance. Every original input is returned unchanged.
             return Err(Box::new((original, admission, sdk_cut, header_cut)));
         }
+        let Ok(request) = FrozenAddRequest::prepare(&self.node.seed.body, self.installed, request)
+        else {
+            return Err(Box::new((original, admission, sdk_cut, header_cut)));
+        };
         self.pending = Some(Box::new(PendingAdd {
+            request,
+            admitted_at_ms: None,
             cell: None,
             admission: Some(admission),
             body: None,
@@ -211,8 +228,11 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
     /// before late source/native checks. Never call while holding writers.
     pub fn execute_add_data_native(
         &mut self,
-        request: TextCurrentAddRequestData<'_>,
-    ) -> Result<(), SyncError> {
+        request: V2FounderAddRequestData<'_>,
+    ) -> Result<(), SyncError>
+    where
+        R: CryptoRngCore,
+    {
         if self
             .pending
             .as_ref()
@@ -221,17 +241,25 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
             self.require_sdk_current_data()?;
         }
         let p = self.pending.as_mut().ok_or_else(unavailable)?;
+        p.request.require_same(request)?;
         if p.phase == Phase::Prepared {
+            // Sample the ORIGINAL retained node clock, immediately before the
+            // first native SDK entry. Prepared time and caller time cannot
+            // extend the signed invitation or the actual package lifetime.
+            let now_ms = self.node._parts.body._clock.now_ms();
+            p.request.require_unexpired(now_ms)?;
             p.sdk_cut
                 .enter(&p.original, NativeChatKeyPurpose::AddSdk, &mut p.ends)
                 .map_err(|_| unavailable())?;
+            p.admitted_at_ms = Some(now_ms);
             p.phase = Phase::SdkEntered;
             #[cfg(test)]
             test_cut(TestCut::SdkEntered);
-            PreparedTextCurrentAdd::prepare_into(
+            PreparedTextCurrentAdd::prepare_with_routing_into(
                 &self.node.seed.body.device,
                 &self.node.seed.body.group,
-                request,
+                p.request.sdk_request(now_ms),
+                &p.request.routing_plain,
                 &mut p.admission,
                 &mut p.cell,
             )
@@ -243,10 +271,12 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
             if p.cell.is_none() {
                 return Err(unavailable());
             }
-            PreparedTextCurrentAdd::prepare_into(
+            PreparedTextCurrentAdd::prepare_with_routing_into(
                 &self.node.seed.body.device,
                 &self.node.seed.body.group,
-                request,
+                p.request
+                    .sdk_request(p.admitted_at_ms.ok_or_else(unavailable)?),
+                &p.request.routing_plain,
                 &mut p.admission,
                 &mut p.cell,
             )
@@ -256,7 +286,7 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
             p.cell
                 .as_mut()
                 .ok_or_else(unavailable)?
-                .execute_private()
+                .execute_private_with_routing(&mut self.node._parts.body._rng)
                 .map_err(|_| unavailable())?;
             p.phase = Phase::Complete;
             #[cfg(test)]
@@ -303,6 +333,12 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
                     .map_or(self.node.seed.body.genesis.header.id(), |s| s.header)
             || change.group() != spec.group
             || change.author() != &spec.signer
+            || change.subject() != &p.request.spec.joiner
+            || change.key_package_reference() != Some(p.request.spec.key_package_reference)
+            || change.credential_digest() != Some(p.request.spec.credential)
+            || change.before_epoch() != p.request.before_epoch
+            || change.after_epoch() != p.request.after_epoch
+            || replay.header().id() != p.request.parent
         {
             return Err(unavailable());
         }

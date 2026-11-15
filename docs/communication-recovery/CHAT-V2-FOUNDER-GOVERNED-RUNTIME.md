@@ -40,6 +40,59 @@ named metadata allowance before allocation, in addition to the whole source,
 actual SDK reservation, Core verifier/replay and native metadata payments.
 These library DATA interfaces do not themselves authenticate that Root paid.
 
+### Frozen join request and routing continuation (15 November)
+
+`prepare_add_data` now accepts `V2FounderAddRequestData`: borrowed signed
+Invite, signed JoinRequest and exact wire KeyPackage. It verifies BOTH
+signatures before identity comparison, the complete original genesis anchor,
+request/invite/wire links, this founder's inviter key and the exact retained
+public `GroupPolicy::encode()` body in the V2 Policy commitment domain. The
+wire package is capped at32KiB before hashing or copying. This does not
+authorize invitation use, consume its nonce or validate its public route plan;
+those are still duties of the real Root transaction.
+
+The owning plan freezes canonical signed envelopes, package/spec/nonce and a
+secret preallocated zeroizing V2 routing plaintext before native entry. The
+named Sync metadata inventory includes retained package/encodings and
+construction overlap independently of the lower SDK Cell's copies. The
+cached admission-mode check refuses a no-routing reservation before entry.
+The initial profile explicitly requires label0, one slot numbered0, the
+original file-wrap key and a supported pinned policy. Add preserves L0; only
+its transfer wrapping key changes. Future Remove/policy mutation requires
+genuine new routing custody and cannot reuse this profile silently.
+
+First SDK admission samples the SAME original node Clock immediately before
+the actual native cut and checks the signed invite expiry. It caches that
+time with the entered phase. The lower SDK request uses ONLY frozen owned
+bytes and signed subject/reference/credential. Authenticated exact retries
+reuse that time and Cell, including after expiry. New representations must
+still verify before comparison; they cannot alter the frozen plan. Actual
+package lifetime and credential checks precede secret snapshot/restore.
+
+Routing seals after the genuine Add merge, under that SAME candidate's epoch
+transfer key, using the original retained RNG. Its strict field sequence is:
+length-prefixed `mewtual/chat/join-routing-plain/v2\0`, u16 version2, group,
+genesis-anchor commitment, signed request ID, wire-package commitment, joiner,
+MLS package reference, credential; u64 before/after epochs; parent Header,
+signed Policy/public-plan commitments, exact public policy body; u64 label0,
+u32 count1, u64 slot0, fixed32 secret and fixed32 file key (both length-prefixed).
+All integers are big endian; fields use u32 byte lengths. The plaintext cap is
+16KiB. The separate sealed frame uses length-prefixed nonce24 and ciphertext,
+adding48 bytes including the AEAD tag. A future joiner must bound, decrypt and
+strictly verify every field against its actual trusted inputs, with exact EOF
+and no Legacy fallback. This implementation does not yet create that joiner.
+
+The SAME actual completed membership change must match the frozen subject,
+reference, credential, epochs and parent before unsigned Admission creation.
+Neither the sealed transfer nor the Header alone certifies a covering save.
+All21 focused tests pass, including expiry, forged representations, changed
+wire bytes, anchor/policy/routing refusals and two genuine joiner decryptions.
+The broader131-case Sync cohort, complete MLS crate (163 unit,22 integration,
+5 doctests; two pre-existing ignored cases), strict MLS/Sync lint, native
+compile, full3,485-case frontend and both dependency audits pass. Read-only
+adversarial review found no blocker/high/medium. Root strict lint retains556
+inherited diagnostics; full Root/native paired CI remains pending.
+
 ## Required production integration
 
 The concrete native `GovernedLifecycle` Current group guard now also verifies
@@ -100,6 +153,9 @@ retirement Job. After generation closure, it must borrow only idle runtimes,
 reconcile actual admitted work and dispose eligible cancelled Add custody
 outside every writer BEFORE waiting for key drainage. Do not use whole-Source
 `capture_retirement` for UI locking; it permanently closes Source scope.
+The capture must also cover Prepared and in-flight preparation: the frozen
+secret routing plaintext exists before AddSdk entry, when key Ends can still
+be zero. Zero counters alone cannot decide that no cleanup owner is needed.
 
 Retain cleanup custody and retry progress on the SAME Job/Runtime across lost
 waiters, unpolled tasks and panics. Never replace the original mount/drain with

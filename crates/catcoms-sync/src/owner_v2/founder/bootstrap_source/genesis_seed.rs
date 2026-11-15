@@ -25,8 +25,8 @@ mod governance;
 mod ordinary_member;
 #[cfg(not(target_arch = "wasm32"))]
 pub use governance::{
-    PreparedV2FounderGovernanceNode, V2FounderGovernanceNegative, V2InstalledFounderAddData,
-    FOUNDER_GOVERNANCE_DATA_BYTES,
+    PreparedV2FounderGovernanceNode, V2FounderAddRequestData, V2FounderGovernanceNegative,
+    V2InstalledFounderAddData, FOUNDER_GOVERNANCE_DATA_BYTES, MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES,
 };
 pub use ordinary_append::{
     DetachedV2AppendData, PreparedV2AppendData, V2AppendDataView, V2AppendPlanObservation,

@@ -1,5 +1,19 @@
 # Mewtual; Handover
 
+The `chat-v2-founder-add-transaction` continuation wires authenticated signed
+Invite/JoinRequest and exact bounded package bytes into the same retained
+governed node. It freezes original L0/file key/policy and tagged V2 routing
+before native entry, samples the original Clock at first admission, and seals
+with the actual merged candidate's key and original RNG. Exact retries keep
+the original time/bytes/Cell. All24 lower MLS tests and21 Sync Add tests pass;
+the131-case cohort, complete MLS crate, strict MLS/Sync lint, native compile,
+full frontend and both dependency audits pass. Read-only review has no
+blocker/high/medium. Root strict lint retains556 inherited diagnostics;
+complete paired Root/native CI remains pending. Root
+covering save, Source4, native Welcome signing, production installation,
+joined Source, transport/projection and real acceptance remain unfinished.
+Chat V2 is OFF. [Current contract](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
 The `chat-v2-governed-current-admission` continuation adds the original mounted4
 physical proof to the actual constructor-selected governed-native Current group
 guard, borrowing its held Root to preserve lock order. All3 new genuine native
@@ -46,8 +60,8 @@ Strict native lint passed; Root strict lint retains556 inherited diagnostics
 (prior564), with no suppression. Final routing rechecks4+1+1, both formatting
 checks, native compile/build/startup and both dependency audits passed.
 Draft PR #132 contains the two separate runtime commits. Complete Root/native
-Linux/Windows CI run43703760738 has passed both native suites and the frontend;
-both Root jobs are still running at runtime head790e703a. Later
+Linux/Windows CI run43703760738 has passed both Root and native suites and the
+frontend at runtime head790e703a. Later
 receipt-only documentation does not change tested code. The one named catch-up
 cost case remains deferred. Real predecessor-binary evidence remains open.
 This creates no Source4, production Add/Header, joined source, archive or

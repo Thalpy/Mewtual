@@ -4,6 +4,38 @@ This is a library ownership boundary, not a production Chat V2 join. Chat V2
 remains disabled. No Root, native command or transport consumer invokes this
 handoff yet.
 
+The ongoing transaction continuation adds a separate routing-enabled private
+Cell mode, under validation. It freezes a bounded plaintext before work and
+seals it with the SAME merged candidate's Welcome-epoch transfer key before
+provider closure, snapshot and Complete. The old constructor/executor cannot
+complete that mode. Its independently paid routing class is192KiB plus a
+conservative work allowance; it does not borrow spare SDK/output credit.
+Actual sealed output is cached before hooks, then framed once. A lost return
+after caching reuses ciphertext without exporter/RNG; entered-without-output
+ambiguity stays terminal. Completed views expose only sealed bytes.
+
+All24 private Add tests passed, including7 routing/credential regressions for genuine
+joiner decryption, wrong group/epoch, two successive Adds, exact retry, credit
+boundaries and interrupted nonce/seal. A signed credential expectation is
+compared before secret snapshot/restore, including on completed retries.
+The complete MLS crate, strict MLS/Sync all-target/all-feature lint,131-case
+Sync cohort, native compile, full frontend and both dependency audits pass.
+Root strict lint retains the same556 inherited App diagnostics. Complete
+Root/native Linux+Windows execution is queued separately before acceptance;
+only the one named catch-up cost case remains deferred.
+The Sync producer now selects this mode with its original L0 tuple/file key,
+supported pinned policy, tagged V2 plaintext and SAME retained RNG. It freezes
+the authenticated invite/request/package before native SDK entry. This is
+source/request consistency, not Root invitation authorization. See the
+[whole-node contract](CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+Native Welcome signing, durable Root
+request/outcome coverage and production installation remain unfinished.
+
+The combined governed/native storage constructor now exists; its Current
+guard also verifies actual mounted4. Neither storage boundary supplies the
+missing Source4 or Add transaction. The remaining text below records the
+earlier ownership checkpoint and its historical validation receipt.
+
 `PreparedTextCurrentAdd::prepare_install_into` borrows the actual retained
 candidate slot and both exact original receiver halves exclusively. It checks
 the completed outcome, original accounting pair, group/key/epoch/authenticator,

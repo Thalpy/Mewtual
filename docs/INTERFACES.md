@@ -1,5 +1,14 @@
 # Mewtual; Interfaces & Hooks Schema
 
+The library governed Add request now freezes authenticated Invite/JoinRequest
+and bounded exact package bytes before native SDK entry. First execution uses
+the original retained Clock; exact retries reuse that admitted time and the
+same candidate. Routing plaintext binds original L0/policy and the signed
+request, and seals under the real merged candidate's epoch key with the same
+retained RNG. This supplies no Root invitation/nonce authorization, covering
+save, joined Source or production installation.
+[Exact framing and ownership](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
 The constructor-selected governed-native Current group guard rechecks actual
 mounted4 via `validate_mounted_governance_layout_under_archive_root`, borrowing
 its SAME held Root before final pin/directory/Source negatives. This preserves
