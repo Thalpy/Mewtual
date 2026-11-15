@@ -643,6 +643,7 @@ dependencies = [
  "catcoms-crypto",
  "catcoms-discovery",
  "catcoms-mls",
+ "catcoms-net",
  "catcoms-replication",
  "catcoms-rt",
  "catcoms-storage",
@@ -712,6 +713,7 @@ version = "0.0.0"
 dependencies = [
  "blake3",
  "catcoms-crypto",
+ "catcoms-rt",
  "catcoms-wire",
  "openmls",
  "openmls_basic_credential",

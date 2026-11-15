@@ -24,9 +24,10 @@ pub use clock::{Clock, ManualClock, SystemClock};
 pub use mem::{Hub, MemNetwork};
 pub use native_chat_key::{
     NativeChatKeyDrain, NativeChatKeyEnds, NativeChatKeyPurpose, NativeChatKeyRefusal,
-    NativeChatPreparedKeyCut, NativeChatSdkRestoreEnds, NativeChatSourceObservation,
-    NativeChatSourceOwner, NativeChatUiBinding, NativeChatUiCommand, NativeChatUiCurrentCheck,
-    NativeChatUiSessionOwner, NativeChatUiSessionPreparation, NativeChatWarmSdkReopenCut,
+    NativeChatPreparedKeyCut, NativeChatSdkRestoreEnds, NativeChatSourceClose,
+    NativeChatSourceObservation, NativeChatSourceOwner, NativeChatUiBinding, NativeChatUiCommand,
+    NativeChatUiCurrentCheck, NativeChatUiMountObservation, NativeChatUiSessionOwner,
+    NativeChatUiSessionPreparation, NativeChatWarmSdkReopenCut,
     NATIVE_CHAT_UI_FIXED_METADATA_BYTES,
 };
 pub use protocol_rng::SeededProtocolRng;

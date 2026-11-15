@@ -1,7 +1,7 @@
 //! One normal3 transaction retained inside the affine selected owner. The
 //! mutex is still held across actual IO: exclusive Rust borrowing alone would
 //! not poison the state when a file effect unwinds. Poison requires cold open.
-use super::{admission, metadata, preparation, refresh, rename, wal, *};
+use super::{admission, founder, metadata, preparation, refresh, rename, wal, *};
 use crate::store::{
     critical_namespaces::native_registry::preparation::NativeRegistryHandler,
     persistence::native_registry::lifecycle::upgrade::{index::IndexCommitIo, UpgradeInventory},
@@ -46,7 +46,7 @@ struct Transaction {
     _selected: Box<data::Index>,
     _candidate: Box<data::Index>,
     request: metadata::Request,
-    result: rename::Metadata,
+    result: metadata::Outcome,
     claim: Option<admission::Claim>,
     // Original physical exclusion outlives every file/buffer, even if the
     // affine Store closes before an already-completed caller drops its debt.
@@ -102,6 +102,7 @@ pub(in crate::store::critical_namespaces::native_registry) fn rename_metadata(
         metadata::Input::Rename(request),
         rng,
     )
+    .map(metadata_result)
 }
 
 /// The same cell, claim and outgoing debt as Rename; this cannot overlap it.
@@ -119,6 +120,99 @@ pub(in crate::store::critical_namespaces::native_registry) fn refresh_legacy_inv
         metadata::Input::Refresh(request),
         rng,
     )
+    .map(metadata_result)
+}
+
+// The request tag fixes the result kind before admission. A mismatch here is
+// an internal invariant failure, never permission to discard another request.
+fn metadata_result(
+    (result, debt): (metadata::Outcome, Option<CompletedDebt>),
+) -> (rename::Metadata, Option<CompletedDebt>) {
+    let metadata::Outcome::Metadata(result) = result else {
+        unreachable!("metadata request result")
+    };
+    (result, debt)
+}
+
+pub(in crate::store::critical_namespaces::native_registry) fn birth_founder(
+    cell: &Mutex<Cell>,
+    current: &V2CurrentLayoutStore,
+    handler: &admission::Handler,
+    request: &founder::Pending,
+    rng: &mut impl CryptoRngCore,
+) -> Result<
+    (
+        crate::store::NativeCreationStatusData,
+        Option<CompletedDebt>,
+    ),
+    AppError,
+> {
+    change_metadata(
+        cell,
+        current,
+        handler,
+        metadata::Input::FounderBirth(request),
+        rng,
+    )
+    .map(creation_result)
+}
+pub(in crate::store::critical_namespaces::native_registry) fn activate_founder(
+    cell: &Mutex<Cell>,
+    current: &V2CurrentLayoutStore,
+    handler: &admission::Handler,
+    request: &founder::Activate,
+    rng: &mut impl CryptoRngCore,
+) -> Result<
+    (
+        crate::store::NativeCreationStatusData,
+        Option<CompletedDebt>,
+    ),
+    AppError,
+> {
+    change_metadata(
+        cell,
+        current,
+        handler,
+        metadata::Input::FounderActivate(request),
+        rng,
+    )
+    .map(creation_result)
+}
+pub(in crate::store::critical_namespaces::native_registry) fn activate_native_founder(
+    cell: &Mutex<Cell>,
+    current: &V2CurrentLayoutStore,
+    handler: &admission::Handler,
+    request: &founder::Activate,
+    network: &std::sync::Arc<
+        crate::store::persistence::native_registry::network::NetworkDependency,
+    >,
+    rng: &mut impl CryptoRngCore,
+) -> Result<
+    (
+        crate::store::NativeCreationStatusData,
+        Option<CompletedDebt>,
+    ),
+    AppError,
+> {
+    change_metadata(
+        cell,
+        current,
+        handler,
+        metadata::Input::NativeFounderActivate(request, network),
+        rng,
+    )
+    .map(creation_result)
+}
+fn creation_result(
+    (result, debt): (metadata::Outcome, Option<CompletedDebt>),
+) -> (
+    crate::store::NativeCreationStatusData,
+    Option<CompletedDebt>,
+) {
+    let metadata::Outcome::Creation(result) = result else {
+        unreachable!("creation request result")
+    };
+    (result, debt)
 }
 
 fn change_metadata(
@@ -127,13 +221,14 @@ fn change_metadata(
     handler: &admission::Handler,
     request: metadata::Input<'_>,
     rng: &mut impl CryptoRngCore,
-) -> Result<(rename::Metadata, Option<CompletedDebt>), AppError> {
+) -> Result<(metadata::Outcome, Option<CompletedDebt>), AppError> {
     // Bound before touching files, scanning equality or cloning retained input.
     request.require_bounded()?;
     let mut cell = cell.try_lock().map_err(|_| refused())?;
     handler.require()?;
     let store = current.checked_store()?;
     if let Some(pending) = &cell.pending {
+        pending.io.require_network_identity(request.network())?;
         if !request.matches(&pending.request) {
             return Err(refused());
         }
@@ -148,15 +243,18 @@ fn change_metadata(
             return Err(refused());
         }
         let (selected, _) = preparation::decode_selected_data(store, &inventory)?;
+        if let metadata::Input::NativeFounderActivate(input, network) = request {
+            super::network::require_activation(store, &selected, input, network)?;
+        }
         let parent = *blake3::hash(inventory.index()).as_bytes();
         let plan = request.prepare(selected, parent)?;
-        let rename::Plan::Change {
+        let metadata::Plan::Change {
             selected,
             candidate,
             result,
         } = plan
         else {
-            let rename::Plan::NoChange(result) = plan else {
+            let metadata::Plan::NoChange(result) = plan else {
                 unreachable!()
             };
             // No sealing/RNG/effect. Reprove the same observation under the
@@ -170,6 +268,9 @@ fn change_metadata(
             }
             handler.require_idle_cached()?;
             inventory.require(store)?;
+            if let Some(network) = request.network() {
+                network.require(store)?;
+            }
             return Ok((result, None));
         };
         let key = Zeroizing::new(store.keys.db_key()?);
@@ -178,7 +279,10 @@ fn change_metadata(
         let frame = Zeroizing::new(crate::store::frame(&seal(&derived, &plain, rng)?));
         let proof =
             wal::verify_warm_metadata(store, &inventory, &candidate, &frame, request.kind())?;
-        let io = IndexCommitIo::prepare(store, inventory, proof, &frame)?;
+        let mut io = IndexCommitIo::prepare(store, inventory, proof, &frame)?;
+        if let Some(network) = request.network() {
+            io.attach_native_network(store, network.clone())?;
+        }
         // All allocations/preparation precede the writer and final claim.
         let mut transaction = Transaction {
             io,
@@ -199,7 +303,7 @@ fn change_metadata(
         if catalog.pending.is_some()
             || !matches!(store.current_layout_policy.as_ref()
             .and_then(|policy| policy.native_registry.as_ref()),
-            Some(NativeRegistryHandler::Lifecycle(actual)) if actual.same(handler))
+            Some(NativeRegistryHandler::Lifecycle(actual) | NativeRegistryHandler::GovernedLifecycle(actual) | NativeRegistryHandler::GovernanceOpening(actual)) if actual.same(handler))
         {
             return Err(refused());
         }
@@ -209,6 +313,9 @@ fn change_metadata(
         super::super::operational::upgrade_source::owning::observe_edge(
             super::super::operational::upgrade_source::owning::Edge::BeforeMetadataAdmission,
         );
+        // The admission hook may replace the network output. Re-prove the
+        // same held dependency AFTER it, immediately before the claim.
+        transaction.io.require_unstarted_parent(store)?;
         transaction.claim = Some(handler.claim()?);
         // Infallible move after admission, before unlocking or any file effect.
         cell.pending = Some(transaction);

@@ -17,15 +17,42 @@ pub(super) fn take_observer_constructions() -> u64 {
 
 pub(super) struct Owner {
     identity: Arc<()>,
-    revoked: AtomicBool,
+    // All revoke paths share this one atomic. A cached negative may retain
+    // Life, but must never retain this revoking Owner/Sender/Notify itself.
+    life: Arc<Life>,
     wake: Arc<Notify>,
     signal: watch::Sender<bool>,
+}
+/// Original atomic only. No publisher, wake callback, physical custody or
+/// authority lives here; holding it cannot defer Owner's revocation on Drop.
+struct Life {
+    revoked: AtomicBool,
+}
+
+/// Additional heap allocation beyond size_of::<Owner>(). Every funded owner
+/// constructor must name this term; sizeof Owner includes only the Arc pointer.
+// Two Arc reference-count words plus a conservative word for allocation
+// alignment/tail padding. sizeof(Life)+two words alone is not a full layout.
+pub(super) const LIFE_ALLOCATION_BYTES: usize =
+    std::mem::size_of::<Life>() + 3 * std::mem::size_of::<usize>();
+
+/// Cached negative for a bounded native final edge. Non-Clone and no Drop
+/// callback: is_live only reads its original atomic, never upgrades Weak/Owner.
+pub(super) struct CachedLife {
+    original: Arc<Life>,
+}
+impl CachedLife {
+    pub(super) fn is_live(&self) -> bool {
+        !self.original.revoked.load(Ordering::Acquire)
+    }
 }
 impl Owner {
     pub(super) fn new() -> Arc<Self> {
         Arc::new(Self {
             identity: Arc::new(()),
-            revoked: AtomicBool::new(false),
+            life: Arc::new(Life {
+                revoked: AtomicBool::new(false),
+            }),
             wake: Arc::new(Notify::new()),
             signal: watch::channel(false).0,
         })
@@ -34,11 +61,18 @@ impl Owner {
         self.identity.clone()
     }
     pub(super) fn live(&self) -> bool {
-        !self.revoked.load(Ordering::Acquire)
+        !self.life.revoked.load(Ordering::Acquire)
     }
     pub(super) fn revoke(&self) {
-        self.revoked.store(true, Ordering::Release);
+        self.life.revoked.store(true, Ordering::Release);
         self.wake.notify_waiters();
+    }
+    /// Borrowed-original capture only. The native caller pays independent
+    /// metadata before retaining the returned observation past its guard.
+    pub(super) fn cached(self: &Arc<Self>) -> CachedLife {
+        CachedLife {
+            original: self.life.clone(),
+        }
     }
     pub(super) fn handle(self: &Arc<Self>) -> Handle {
         self.handle_with_custody(None)
@@ -163,6 +197,48 @@ mod tests {
         async fn revoked(&self) {
             std::future::pending::<()>().await;
         }
+    }
+
+    #[test]
+    fn cached_life_retains_no_revoking_owner_sender_or_wake() {
+        let owner = Owner::new();
+        let original = Arc::downgrade(&owner);
+        let wake = Arc::downgrade(&owner.wake);
+        let pin = owner.cached();
+        // Keep the receiver check independent of the dead Weak<Owner>:
+        // an accidentally retained Sender must not be masked by authority.
+        let observer = owner.observer().with_authority(Arc::new(AlwaysAllow));
+        assert!(pin.is_live());
+        drop(owner);
+        assert!(
+            original.upgrade().is_none(),
+            "cached metadata retained the actual publisher"
+        );
+        assert!(!pin.is_live());
+        assert!(observer.is_cancelled());
+        drop(observer);
+        assert!(
+            wake.upgrade().is_none(),
+            "cached metadata retained notification custody"
+        );
+    }
+
+    #[test]
+    fn cached_life_observes_the_same_handle_revocation_and_never_retargets_replacement() {
+        let original = Owner::new();
+        let pin = original.cached();
+        let handle = original.handle();
+        assert!(pin.is_live());
+        handle.revoke();
+        assert!(!pin.is_live());
+        let replacement = Owner::new();
+        assert!(replacement.cached().is_live());
+        assert!(
+            !pin.is_live(),
+            "new life must not retarget an original cached negative"
+        );
+        drop(original);
+        assert!(!pin.is_live());
     }
 
     #[test]
