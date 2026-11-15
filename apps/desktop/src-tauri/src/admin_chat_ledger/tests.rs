@@ -63,10 +63,10 @@ fn install(
     let (actor, mut events, task) = spawn(node);
     let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
     let mut servers = state.servers.try_lock().unwrap();
-    if let Some(old) = servers.remove(&id) {
+    if let Some(old) = servers.remove_legacy_fixture(&id) {
         old.files.retire();
     }
-    servers.insert(
+    servers.install_legacy_fixture(
         id,
         crate::tests::snapshot_test_entry(instance, actor, group, device),
     );
@@ -390,7 +390,7 @@ async fn cached_native_read_observer_does_not_keep_a_dropped_registry_actor_aliv
     drop(captured);
     {
         let mut servers = running.state.servers.lock().await;
-        let entry = servers.remove(&7).unwrap();
+        let entry = servers.remove_legacy_fixture(&7).unwrap();
         entry.files.retire(); // real row retirement precedes releasing its registry guard
         drop(entry); // last genuine owner drops; no explicit Actor shutdown is supplied
     }
@@ -458,7 +458,15 @@ async fn retiring_queued_reads_frees_all_global_permits_before_an_old_actor_read
         .await
         .unwrap();
     running.tasks.extend(install(&running.state, 8, 2, healthy));
-    let actor = running.state.servers.lock().await[&7].actor.clone();
+    let actor = running
+        .state
+        .servers
+        .lock()
+        .await
+        .legacy(&7)
+        .expect("Legacy fixture row")
+        .actor
+        .clone();
     let expected_context = actor.durable_send_context().await.unwrap();
     // The REAL actor is parked in its production Ready/lease barrier. No mock receiver or
     // scheduling delay stands in for the command queue that all eight reads wait behind.
@@ -636,8 +644,8 @@ fn synchronous_manual_command_inventory_and_acl_are_explicit() {
             ))));
     }
     let source = include_str!("../lib.rs");
-    assert!(source
-        .contains(".invoke_handler(admin_chat_ledger::with_commands(tauri::generate_handler!["));
+    let compact: String = source.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(compact.contains(".invoke_handler(native_text::with_commands(admin_chat_ledger::with_commands(tauri::generate_handler!["));
     // The separate public moderation endpoint remains its original advisory projection.
     assert!(!source[source.find("async fn get_moderation(").unwrap()
         ..source.find("async fn get_moderation(").unwrap() + 1500]

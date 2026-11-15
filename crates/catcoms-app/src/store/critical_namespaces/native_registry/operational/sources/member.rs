@@ -1,0 +1,285 @@
+//! Existing-runtime member operations. The original Sources stays canonical;
+//! finite work drops all book/Entry issuer pins before its runtime writer/IO.
+use super::*;
+use crate::store::{V2MemberSaveOutcome, V2MemberSaveRefusal, V2MemberSignRequest};
+use catcoms_rt::RequestCancellation;
+mod history;
+pub use history::{
+    NativeTextMemberHistoryItem, NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus,
+};
+use std::sync::Weak;
+mod admission;
+pub use admission::{
+    NativeTextMemberAdmissionFailure, NativeTextMemberFinalPreparation, NativeTextMemberSaveJob,
+};
+type MemberKeys<T, R> = (Arc<RuntimeCell<T, R>>, NativeFounderKeys);
+
+/// Independent per-invocation payment. Configuration is not a source selector
+/// or native credential; the exact policy account is checked again at capture.
+pub struct NativeTextMemberBudget<T, R> {
+    metadata: Arc<RuntimeMetadata>,
+    _types: PhantomData<fn() -> (T, R)>,
+}
+impl NativeTextSourcePolicy {
+    /// Reserve before native Store/controller/UI guards or request copies.
+    pub fn prepare_member<T: MeshTransport, R: CryptoRngCore>(
+        &self,
+    ) -> Result<NativeTextMemberBudget<T, R>, AppError> {
+        if runtime_invoice::<T, R>().is_none_or(|n| n > ENTRY_BYTES) {
+            return Err(refused());
+        }
+        Ok(NativeTextMemberBudget {
+            metadata: Arc::new(RuntimeMetadata {
+                pool: self.pool.clone(),
+                _debit: self.pool.try_reserve(ENTRY_BYTES)?,
+            }),
+            _types: PhantomData,
+        })
+    }
+}
+
+/// Guard-safe owning capture, including refusal. Keep the whole capture outside
+/// native guards through finish/Drop. No caller-supplied founder settings/RNG
+/// can select, recreate or replace the retained original member runtime.
+pub struct NativeTextMemberPreparation<T: MeshTransport, R: CryptoRngCore> {
+    scope: Arc<Scope>,
+    book: Weak<SourceBook<T, R>>,
+    row: NativeTextRuntimeSelection<T, R>,
+    command: Option<NativeTextSourceCommand>,
+    work: Option<SourceWork>,
+    budget: NativeTextMemberBudget<T, R>,
+    refusal: Option<V2MemberSaveRefusal>,
+    _end: Option<retirement::PreparationEnd>,
+    // LAST even on a refused capture: its actual weak book can outlive Sources.
+    _control: Arc<retirement::Control>,
+}
+
+/// Whole finite prepare work. Its concrete native member key cut is issued by
+/// the original Entry, not a row label. This owns no Entry/SourceOwner/issuer.
+pub struct NativeTextMemberJob<T: MeshTransport, R: CryptoRngCore> {
+    pub(super) inner: NativeTextCreationJob<T, R>,
+}
+
+impl<T: MeshTransport, R: CryptoRngCore> NativeTextSources<T, R> {
+    /// Atomic/Arc/Weak-only under the established short native owner borrow.
+    /// Actual index IO, issuer lookup, key preparation and runtime borrowing
+    /// happen only in finish, after every native/controller guard has left.
+    pub fn capture_member(
+        &self,
+        row: &NativeTextRuntimeSelection<T, R>,
+        command: NativeTextSourceCommand,
+        budget: NativeTextMemberBudget<T, R>,
+    ) -> NativeTextMemberPreparation<T, R> {
+        let end = self.retirement.enter_preparation();
+        let refusal = if !Arc::ptr_eq(&self.scope, &row.original.scope)
+            || !self.policy.pool.same_pool_cached(&budget.metadata.pool)
+            || self.require_command(&command).is_err()
+        {
+            Some(V2MemberSaveRefusal::Unavailable)
+        } else if end.is_none() {
+            Some(V2MemberSaveRefusal::Busy)
+        } else {
+            None
+        };
+        let work = if refusal.is_none() {
+            self.work.for_paid_runtime(&budget.metadata)
+        } else {
+            None
+        };
+        NativeTextMemberPreparation {
+            scope: self.scope.clone(),
+            book: Arc::downgrade(&self.entries),
+            row: row.clone(),
+            command: Some(command),
+            work,
+            budget,
+            refusal,
+            _end: end,
+            _control: self.retirement.clone(),
+        }
+    }
+}
+
+impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
+    fn require_current(&self) -> Result<(), V2MemberSaveRefusal> {
+        if let Some(reason) = self.refusal {
+            return Err(reason);
+        }
+        let command = self
+            .command
+            .as_ref()
+            .ok_or(V2MemberSaveRefusal::Unavailable)?;
+        if self._end.is_none()
+            || !self.scope.is_open()
+            || !Arc::ptr_eq(&self.scope, &command.scope)
+            || !Arc::ptr_eq(&self.scope, &self.row.original.scope)
+            || !command.ui.is_current_cached()
+            || self.work.as_ref().is_none_or(|w| !w.is_live_cached())
+        {
+            return Err(V2MemberSaveRefusal::Unavailable);
+        }
+        Ok(())
+    }
+
+    /// Finish outside ALL native/Root guards. Fresh covered-row lookup precedes
+    /// taking an Entry pin; every such pin leaves before the runtime writer.
+    fn prepare_keys(&self) -> Result<MemberKeys<T, R>, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Error;
+        self.require_current()?;
+        self.budget
+            .metadata
+            ._debit
+            .validate(&self.budget.metadata.pool, ENTRY_BYTES)
+            .map_err(|_| Error::Unavailable)?;
+        let actual = self
+            .work
+            .as_ref()
+            .unwrap()
+            .lookup_creation(self.row.original.invocation, self.row.original.request)
+            .map_err(|_| Error::Failed)?;
+        if actual != Some(self.row.original.status) {
+            return Err(Error::Stale);
+        }
+        self.require_current()?;
+        let selected = {
+            let book = self.book.upgrade().ok_or(Error::Unavailable)?;
+            let entries = book.try_lock().map_err(|_| Error::Busy)?;
+            entries
+                .iter()
+                .find(|entry| {
+                    Weak::ptr_eq(&Arc::downgrade(&entry.runtime), &self.row.original.runtime)
+                        && entry.invocation == self.row.original.invocation
+                        && entry.request == self.row.original.request
+                })
+                .cloned()
+                .ok_or(Error::Unavailable)?
+        }; // original book/guard leave before issuer preparation
+        let keys =
+            NativeFounderKeys::prepare(&selected.owner, &self.command.as_ref().unwrap().ui.command);
+        let cell = selected.runtime.clone();
+        drop(selected); // no issuer enters either runtime writer or SDK/IO
+        let keys = keys.map_err(|_| Error::Unavailable)?;
+        self.require_current()?;
+        Ok((cell, keys))
+    }
+
+    /// Borrow the genuine whole runtime only after original lookup and issuer
+    /// preparation have completed outside all native and Root guards.
+    pub fn finish(mut self) -> Result<NativeTextMemberJob<T, R>, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Error;
+        let (cell, keys) = self.prepare_keys()?;
+        let body = {
+            let mut state = cell.state.try_lock().map_err(|_| Error::Busy)?;
+            if state.retiring || !self.scope.is_open() {
+                return Err(Error::Unavailable);
+            }
+            if state.running || state.poisoned {
+                return Err(Error::Busy);
+            }
+            let body = state.body.take().ok_or(Error::Unavailable)?;
+            state.running = true;
+            body
+        };
+        // Arm owning restoration immediately after the infallible body move.
+        // Any later refusal drops this whole loan only outside native guards.
+        let job = NativeTextMemberJob {
+            inner: NativeTextCreationJob {
+                loan: RuntimeLoan {
+                    body: Some(body),
+                    cell,
+                    recorded: false,
+                },
+                keys,
+                command: self.command.take().unwrap(),
+            },
+        };
+        if job
+            .inner
+            .loan
+            .body
+            .as_ref()
+            .unwrap()
+            .driver
+            .as_ref()
+            .is_none_or(|driver| !driver.is_ready_data())
+        {
+            return Err(Error::Unavailable);
+        }
+        Ok(job)
+    }
+}
+
+impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberJob<T, R> {
+    /// Blocking phase one only. The caller owns/pays borrowed request DATA and
+    /// supplies its complete original account+row cancellation. A returned job
+    /// never crosses a UI-commit await: body restoration and key Ends leave on
+    /// this consuming call before native can acquire final commit custody.
+    pub fn prepare_member_save(
+        mut self,
+        request: V2MemberSignRequest<'_>,
+        negative: &RequestCancellation,
+    ) -> Result<V2MemberSaveOutcome, V2MemberSaveRefusal> {
+        if negative.is_cancelled() {
+            return Err(V2MemberSaveRefusal::Cancelled);
+        }
+        self.inner
+            .require_current()
+            .map_err(|_| V2MemberSaveRefusal::Unavailable)?;
+        let inner = &mut self.inner;
+        let body = inner
+            .loan
+            .body
+            .as_mut()
+            .ok_or(V2MemberSaveRefusal::Unavailable)?;
+        let result = body.work.prepare_native_member(
+            body.driver
+                .as_mut()
+                .ok_or(V2MemberSaveRefusal::Unavailable)?,
+            request,
+            negative,
+            body.rng.as_mut().ok_or(V2MemberSaveRefusal::Unavailable)?,
+            &mut inner.keys,
+        );
+        #[cfg(all(test, any(windows, target_os = "linux")))]
+        tests::after_prepare();
+        // The actual driver retains all known outcomes before this late check.
+        // This flag records return, never an attempt/signature refund.
+        inner.loan.recorded = true;
+        if negative.is_cancelled() {
+            return Err(V2MemberSaveRefusal::Cancelled);
+        }
+        inner
+            .require_current()
+            .map_err(|_| V2MemberSaveRefusal::Cancelled)?;
+        result
+    }
+}
+
+#[cfg(all(test, any(windows, target_os = "linux")))]
+mod tests;
+
+pub(super) fn invoice<T: MeshTransport, R: CryptoRngCore>() -> usize {
+    2 * std::mem::size_of::<NativeTextMemberBudget<T, R>>()
+        + 2 * std::mem::size_of::<NativeTextMemberPreparation<T, R>>()
+        + 2 * std::mem::size_of::<NativeTextMemberJob<T, R>>()
+        + admission::invoice::<T, R>()
+        + 2 * std::mem::size_of::<NativeTextMemberHistoryPage>()
+        + 2 * std::mem::size_of::<NativeTextMemberHistoryItem<'static>>()
+        + 4096 // bounded owned capture/refusal/control envelope overlap
+}
+
+impl<T, R> std::fmt::Debug for NativeTextMemberBudget<T, R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NativeTextMemberBudget { .. }")
+    }
+}
+impl<T: MeshTransport, R: CryptoRngCore> std::fmt::Debug for NativeTextMemberPreparation<T, R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NativeTextMemberPreparation { .. }")
+    }
+}
+impl<T: MeshTransport, R: CryptoRngCore> std::fmt::Debug for NativeTextMemberJob<T, R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NativeTextMemberJob { .. }")
+    }
+}

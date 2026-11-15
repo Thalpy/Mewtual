@@ -11,21 +11,49 @@ mod catalog;
 mod cell;
 pub(super) mod data;
 mod facade;
+mod governed;
+pub use governed::NativeTextGovernedStorage;
+mod history_response;
+pub use history_response::{NativeTextHistoryResponseBudget, NativeTextHistoryResponseCredit};
 mod interlock;
 mod mount;
 mod native_ui;
 mod opening;
 mod payment;
+mod source_admission;
+mod sources;
+pub use sources::{
+    NativeTextCreationBudget, NativeTextCreationInputs, NativeTextCreationJob,
+    NativeTextCreationPreparation, NativeTextCreationProgress, NativeTextCreationRefusal,
+    NativeTextCreationRequest, NativeTextCreationSettings, NativeTextMemberAdmissionFailure,
+    NativeTextMemberBudget, NativeTextMemberFinalPreparation, NativeTextMemberHistoryItem,
+    NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus, NativeTextMemberJob,
+    NativeTextMemberPreparation, NativeTextMemberSaveJob, NativeTextRuntimeSelection,
+    NativeTextSourceBudget, NativeTextSourceCommand, NativeTextSourcePolicy,
+    NativeTextSourcePreparation, NativeTextSourceRetirement, NativeTextSourceRetirementPreparation,
+    NativeTextSourceRetirementRefusal, NativeTextSourceRetirementStatus, NativeTextSources,
+};
+mod ui_state;
+mod work_retirement;
+pub use work_retirement::{NativeTextWorkRetirement, NativeTextWorkRetirementPreparation};
 mod upgrade;
-pub(super) mod upgrade_source;
-pub use facade::NativeTextVault;
+pub(in crate::store::critical_namespaces) mod upgrade_source;
+pub use facade::{
+    NativeTextGovernanceUpgrade, NativeTextVault, NativeTextVaultAuthentication,
+    NativeTextVaultAuthenticationCheck, NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal,
+};
 pub use mount::{NativeCreationStateData, NativeCreationStatusData, NativeIndexStore};
 pub use native_ui::{NativeUiInvocationBudget, NativeUiInvocationMetadata};
 pub use native_ui::{
-    RetirementBatch as NativeTextUiRetirementBatch, UiCandidate as NativeTextUiCandidate,
-    UiCapture as NativeTextUiObservation, UiGarbage as NativeTextUiGarbage,
-    UiPreparation as NativeTextUiPreparation, UiRetirement as NativeTextUiRetirement,
-    UiRetirementState as NativeTextUiRetirementState,
+    RetirementBatch as NativeTextUiRetirementBatch, RetirementDrain as NativeTextUiRetirementDrain,
+    UiCandidate as NativeTextUiCandidate, UiCapture as NativeTextUiObservation,
+    UiGarbage as NativeTextUiGarbage, UiPreparation as NativeTextUiPreparation,
+    UiRetirement as NativeTextUiRetirement, UiRetirementState as NativeTextUiRetirementState,
+};
+pub use ui_state::{
+    UiStateBudget as NativeUiStateBudget, UiStateCredit as NativeUiStateCredit,
+    UiStatePreparation as NativeUiStatePreparation, UiStateRead as NativeUiStateRead,
+    UiStateSaved as NativeUiStateSaved,
 };
 pub use upgrade::{NativeIndexPolicy, NativeIndexUpgrade};
 
@@ -90,6 +118,9 @@ pub(in crate::store) struct Handler {
     fee: Arc<payment::IndexPayment>,
 }
 impl Handler {
+    pub(super) fn same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.gate, &other.gate) && Arc::ptr_eq(&self.fee, &other.fee)
+    }
     pub(in crate::store) fn require(&self) -> Result<(), AppError> {
         self.fee
             .debit
@@ -124,7 +155,7 @@ impl crate::store::ServerStore {
     /// mutex; startup callers are still private. Never take the index cell, read
     /// files, acquire payment or call an admission/SDK getter under that mutex.
     pub(in crate::store) fn require_native_index_idle_cached(&self) -> Result<(), AppError> {
-        if let Some(super::preparation::NativeRegistryHandler::Operational(handler)) = self
+        if let Some(handler) = self
             .current_layout_policy
             .as_ref()
             .and_then(|policy| policy.native_registry.as_ref())
@@ -132,7 +163,17 @@ impl crate::store::ServerStore {
             if self.chat_mount.observer().is_cancelled() {
                 return Err(refused());
             }
-            handler.require_index_idle_cached()?;
+            match handler {
+                super::preparation::NativeRegistryHandler::Operational(handler) => {
+                    handler.require_index_idle_cached()?
+                }
+                super::preparation::NativeRegistryHandler::Lifecycle(handler)
+                | super::preparation::NativeRegistryHandler::GovernedLifecycle(handler)
+                | super::preparation::NativeRegistryHandler::GovernanceOpening(handler) => {
+                    handler.require_idle_cached()?
+                }
+                super::preparation::NativeRegistryHandler::Migration(_) => {}
+            }
         }
         Ok(())
     }

@@ -4,8 +4,7 @@
 //! gate. Upgraded ownership is transient; it does not replace lease/Root revocation checks.
 use super::ledger::Ledger;
 use crate::voice_authority::Coordinator;
-use crate::{AppState, MountedVault, ServerEntry, UiSessionGate};
-use std::collections::HashMap;
+use crate::{AppState, MountedVault, ServerTable, UiSessionGate};
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use tokio::sync::Mutex;
@@ -27,7 +26,7 @@ fn allocation_bytes<T>() -> usize {
     std::mem::size_of::<ArcAllocation<T>>()
 }
 
-type Servers = Mutex<HashMap<u64, ServerEntry>>;
+type Servers = Mutex<ServerTable>;
 type Store = Mutex<Option<MountedVault>>;
 
 /// Stored in the original paid IO state, before its infrastructure credit in drop order.
