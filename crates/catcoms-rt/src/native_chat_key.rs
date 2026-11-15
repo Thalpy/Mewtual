@@ -22,7 +22,7 @@ pub use source_close::NativeChatSourceClose;
 
 const CLOSED: usize = 1 << (usize::BITS - 1);
 const MAX_ENTRIES: usize = 32;
-const PURPOSES: usize = 7;
+const PURPOSES: usize = 8;
 
 /// Closed purposes selected by concrete producers, never a WebView permission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +38,9 @@ pub enum NativeChatKeyPurpose {
     /// The exact retained governing Header preimage. Bootstrap and ordinary
     /// member cuts cannot authorize this later membership signature.
     GoverningHeader,
+    /// The exact retained join response signature. It is distinct from the
+    /// governing Header and never grants response publication or delivery.
+    JoinWelcome,
 }
 impl NativeChatKeyPurpose {
     fn slot(self) -> usize {
@@ -51,6 +54,7 @@ impl NativeChatKeyPurpose {
             // These Rust-only purpose tags are not a wire or disk codec.
             Self::AddSdk => 5,
             Self::GoverningHeader => 6,
+            Self::JoinWelcome => 7,
         }
     }
 }

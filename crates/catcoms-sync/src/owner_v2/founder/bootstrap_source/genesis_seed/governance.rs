@@ -21,7 +21,20 @@ use catcoms_rt::{
 
 mod request;
 use request::FrozenAddRequest;
+mod welcome;
 pub use request::{V2FounderAddRequestData, MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES};
+use welcome::PreparedWelcome;
+
+/// Unchanged original preparation inputs on refusal. The independently paid
+/// owning Box is built outside writers; it confers no renewed admission and
+/// cannot replace an operation that already entered this whole-node owner.
+pub type V2FounderAddPreparationRefusal = Box<(
+    NativeChatSourceObservation,
+    TextCurrentAddAdmission,
+    NativeChatPreparedKeyCut,
+    NativeChatPreparedKeyCut,
+    NativeChatPreparedKeyCut,
+)>;
 
 /// Immutable observation of THIS wrapper's actual installation, not a saved
 /// head, selected Core prefix, portable proof, or positive Source capability.
@@ -56,10 +69,12 @@ struct PendingAdd {
     unsigned: Option<UnsignedAdmissionStepData>,
     header: Option<SignedOwnerHeader>,
     raw: Option<[u8; 64]>,
+    welcome: Option<PreparedWelcome>,
     phase: Phase,
     original: NativeChatSourceObservation,
     sdk_cut: NativeChatPreparedKeyCut,
     header_cut: NativeChatPreparedKeyCut,
+    welcome_cut: NativeChatPreparedKeyCut,
     // LAST. Native retirement must continue to see the real operation until
     // its private graph, provider snapshots and failed preparation have gone.
     ends: NativeChatKeyEnds,
@@ -84,7 +99,7 @@ pub const FOUNDER_GOVERNANCE_DATA_BYTES: usize = UNSIGNED_ADMISSION_DATA_INVOICE
     + 4 * MAX_ADMISSION_BYTES
     + 16 * MAX_GROUP_ID_BYTES
     + 4 * MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES
-    + 8 * catcoms_replication::chat::join_bindings::MAX_JOIN_BINDING_BYTES
+    + 16 * catcoms_replication::chat::join_bindings::MAX_JOIN_BINDING_BYTES
     + 2 * catcoms_mls::group::text_current_add::MAX_TEXT_ADD_ROUTING_PLAIN_BYTES
     + 4 * std::mem::size_of::<PendingAdd>()
     + 4 * std::mem::size_of::<V2InstalledFounderAddData>()
@@ -92,6 +107,7 @@ pub const FOUNDER_GOVERNANCE_DATA_BYTES: usize = UNSIGNED_ADMISSION_DATA_INVOICE
     + 4 * std::mem::size_of::<(
         NativeChatSourceObservation,
         TextCurrentAddAdmission,
+        NativeChatPreparedKeyCut,
         NativeChatPreparedKeyCut,
         NativeChatPreparedKeyCut,
     )>()
@@ -162,9 +178,9 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
         }
     }
 
-    /// Bind BOTH originally prepared native cuts to ONE original native source,
+    /// Bind all THREE originally prepared native cuts to ONE original native source,
     /// retaining that observation with the independent payment and End batch.
-    /// Install the exact two originally prepared native cuts and independent
+    /// Install the exact originally prepared native cuts and independent
     /// MLS payment BEFORE admission. Root calls only after covering its exact
     /// request/parent reservation and reconciling ordinary-message custody.
     /// A live pending operation is never replaced by a new request or cuts.
@@ -176,15 +192,8 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
         admission: TextCurrentAddAdmission,
         sdk_cut: NativeChatPreparedKeyCut,
         header_cut: NativeChatPreparedKeyCut,
-    ) -> Result<
-        (),
-        Box<(
-            NativeChatSourceObservation,
-            TextCurrentAddAdmission,
-            NativeChatPreparedKeyCut,
-            NativeChatPreparedKeyCut,
-        )>,
-    > {
+        welcome_cut: NativeChatPreparedKeyCut,
+    ) -> Result<(), V2FounderAddPreparationRefusal> {
         if self.pending.is_some()
             || !admission.supports_routing_data()
             || sdk_cut
@@ -193,15 +202,30 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
             || header_cut
                 .preflight(&original, NativeChatKeyPurpose::GoverningHeader)
                 .is_err()
+            || welcome_cut
+                .preflight(&original, NativeChatKeyPurpose::JoinWelcome)
+                .is_err()
             || self.require_sdk_current_data().is_err()
         {
             // Owning refusal is boxed outside writers under the same caller's
             // metadata allowance. Every original input is returned unchanged.
-            return Err(Box::new((original, admission, sdk_cut, header_cut)));
+            return Err(Box::new((
+                original,
+                admission,
+                sdk_cut,
+                header_cut,
+                welcome_cut,
+            )));
         }
         let Ok(request) = FrozenAddRequest::prepare(&self.node.seed.body, self.installed, request)
         else {
-            return Err(Box::new((original, admission, sdk_cut, header_cut)));
+            return Err(Box::new((
+                original,
+                admission,
+                sdk_cut,
+                header_cut,
+                welcome_cut,
+            )));
         };
         self.pending = Some(Box::new(PendingAdd {
             request,
@@ -212,10 +236,12 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
             unsigned: None,
             header: None,
             raw: None,
+            welcome: None,
             phase: Phase::Prepared,
             original,
             sdk_cut,
             header_cut,
+            welcome_cut,
             ends: NativeChatKeyEnds::new(),
         }));
         Ok(())
@@ -594,6 +620,8 @@ enum TestCut {
     SdkComplete,
     HeaderEntered,
     RawCached,
+    WelcomeEntered,
+    WelcomeRawCached,
 }
 #[cfg(test)]
 type TestHook = (TestCut, Box<dyn FnOnce()>);

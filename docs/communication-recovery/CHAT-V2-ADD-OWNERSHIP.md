@@ -28,8 +28,9 @@ supported pinned policy, tagged V2 plaintext and SAME retained RNG. It freezes
 the authenticated invite/request/package before native SDK entry. This is
 source/request consistency, not Root invitation authorization. See the
 [whole-node contract](CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
-Native Welcome signing, durable Root
-request/outcome coverage and production installation remain unfinished.
+The library Welcome signature now has its own original native cut and cached
+preimage/raw result. Durable Root request/outcome/WelcomeIntent coverage,
+production installation and response release remain unfinished.
 
 The combined governed/native storage constructor now exists; its Current
 guard also verifies actual mounted4. Neither storage boundary supplies the

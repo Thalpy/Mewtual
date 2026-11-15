@@ -100,11 +100,12 @@ fn invalid_signature_sharing_an_id_cannot_prepare_or_retry_the_original_plan() {
             admission(&count),
             native.cut(NativeChatKeyPurpose::AddSdk),
             native.cut(NativeChatKeyPurpose::GoverningHeader),
+            native.cut(NativeChatKeyPurpose::JoinWelcome),
         )
         .unwrap_err();
     assert!(node.pending.is_none());
-    let (original, fee, sdk, header) = *refused;
-    node.prepare_add_data(request.data(), original, fee, sdk, header)
+    let (original, fee, sdk, header, welcome) = *refused;
+    node.prepare_add_data(request.data(), original, fee, sdk, header, welcome)
         .unwrap();
     assert!(node.execute_add_data_native(bad).is_err());
     assert!(node.pending.as_ref().unwrap().phase == Phase::Prepared);
@@ -143,6 +144,7 @@ fn complete_original_anchor_and_pinned_policy_are_checked_before_native_entry() 
                 admission(&count),
                 native.cut(NativeChatKeyPurpose::AddSdk),
                 native.cut(NativeChatKeyPurpose::GoverningHeader),
+                native.cut(NativeChatKeyPurpose::JoinWelcome),
             )
             .unwrap_err();
         assert!(node.pending.is_none());
@@ -178,6 +180,7 @@ fn unsupported_original_routing_or_absent_policy_refuses_before_cut_and_valid_re
                 admission(&count),
                 native.cut(NativeChatKeyPurpose::AddSdk),
                 native.cut(NativeChatKeyPurpose::GoverningHeader),
+                native.cut(NativeChatKeyPurpose::JoinWelcome),
             )
             .unwrap_err();
         assert!(node.pending.is_none());
@@ -188,8 +191,8 @@ fn unsupported_original_routing_or_absent_policy_refuses_before_cut_and_valid_re
         if case == 3 {
             m.policy = old_policy;
         }
-        let (original, fee, sdk, header) = *refused;
-        node.prepare_add_data(request.data(), original, fee, sdk, header)
+        let (original, fee, sdk, header, welcome) = *refused;
+        node.prepare_add_data(request.data(), original, fee, sdk, header, welcome)
             .unwrap();
         node.execute_add_data_native(request.data()).unwrap();
         require_joiner_routing(&node, &request);
@@ -247,15 +250,16 @@ fn no_routing_reservation_is_returned_before_any_native_or_request_plan_entry() 
             old,
             native.cut(NativeChatKeyPurpose::AddSdk),
             native.cut(NativeChatKeyPurpose::GoverningHeader),
+            native.cut(NativeChatKeyPurpose::JoinWelcome),
         )
         .unwrap_err();
     assert!(node.pending.is_none());
-    let (original, old, sdk, header) = *refused;
+    let (original, old, sdk, header, welcome) = *refused;
     drop(old);
     assert_eq!(count.load(SeqCst), 0);
     let paid = admission(&count);
     assert!(paid.supports_routing_data());
-    node.prepare_add_data(request.data(), original, paid, sdk, header)
+    node.prepare_add_data(request.data(), original, paid, sdk, header, welcome)
         .unwrap();
     node.execute_add_data_native(request.data()).unwrap();
 }

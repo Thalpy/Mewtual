@@ -20,10 +20,17 @@ This remains a namespace negative, not Source4 or a governing save receipt.
 [Boundary and evidence](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
 
 The library-only governed founder owner preserves immutable genesis provenance
-separately from actual installed SDK evidence. One pending Add owns both native
+separately from actual installed SDK evidence. One pending Add owns three native
 cuts bound to the same original source and keeps real Ends after all private
 payloads. Constructor ambiguity cannot reset its debit; governing raw64 is
 cached before late checks. No Root/native path constructs this owner yet.
+
+The response uses a separate `JoinWelcome` purpose (appended slot7), never the
+governing Header's spent cut. Its unsigned canonical preimage is frozen from
+the same request/Cell/materialized Add; raw64 is cached before verification or
+late cancellation. An uncertain entered key call cannot sign again. Root must
+durably cover WelcomeIntent before entry and the actual installed response
+before release; these library DATA interfaces implement neither authority.
 Its future consumer requires durable outcome binding and cancelled-operation
 cleanup before UI/key drainage; End counting alone would deadlock lock/close.
 [Scope and remaining enforcement](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).

@@ -13,7 +13,7 @@ genesis-only predicates still refuse after a real Add; their epoch-zero checks
 and original `admission_state` have not been weakened.
 
 At most one private `PendingAdd` owns its MLS candidate, independent admission,
-both prepared native cuts and actual admitted End batch. Both cuts must match
+three prepared native cuts and actual admitted End batch. All cuts must match
 the ONE original native source consumed at preparation. New inputs or native
 cuts cannot replace that pending operation, including after lock/unlock.
 The SDK cut is entered before secret snapshot/restore, not merely before Add.
@@ -93,6 +93,35 @@ compile, full3,485-case frontend and both dependency audits pass. Read-only
 adversarial review found no blocker/high/medium. Root strict lint retains556
 inherited diagnostics; full Root/native paired CI remains pending.
 
+### Separate native Welcome signature
+
+`JoinWelcome` appends local native purpose slot7; slots0 through6 retain their
+meanings. All three prepared cuts (SDK, governing Header, Welcome) are checked
+against the ONE original source before the pending Add is installed. A fresh
+cut after lock/unlock cannot replace any of them.
+
+After the actual Header is materialized, `prepare_welcome_data` constructs the
+spec exclusively from this frozen request, actual completed Cell payloads and
+Header/Admission. Core's pure `WelcomeBindingSpecData::signing_bytes_data`
+validates and encodes the SAME canonical preimage used by its signed wrapper.
+Root must cover `unsigned_welcome_data` in a durable WelcomeIntent before key
+entry; this library does not mint that covering proof.
+
+`sign_welcome_native` uses a separate entered marker and the original Welcome
+cut, performs the bounded retained-key primitive, and caches raw64 immediately.
+An interrupted entry without raw is terminal; a lost return after caching
+never signs again. Signature/error scratch remains separately invoiced; this
+is not a zero-allocation claim. Materialization verifies outside writers using
+only cached raw and leaves it retained on error. Cached getters/retries remain
+historical DATA after cancellation, never permission to release a response.
+
+The original SDK candidate, routing, intent, signature and materialized response
+precede real native Ends in disposal order. Final actual covering save/install,
+Source/current/native checks and response release remain Root integration work.
+Focused tests cover canonical Core bytes, actual signed links and payloads,
+separate wrong-source/wrong-purpose refusals, interrupted entry, materializer
+failure, lost raw reply and lock/unlock. Downstream layout checks are pending.
+
 ## Required production integration
 
 The concrete native `GovernedLifecycle` Current group guard now also verifies
@@ -125,7 +154,8 @@ then the SAME SDK outcome, unsigned preimage, raw Header, governing history and
 response before selecting head2. A decoder or namespace4 descriptor cannot
 mint `SavedGovernedAdd`. The immutable dependency graph is:
 
-`Outcome` → `RawHeader` → records/response → `Archive2` → `Head2`.
+`Outcome` → `RawHeader` → governing record → `WelcomeIntent` → `RawWelcome`
+→ exact response → `Archive2` → `Head2`.
 
 The private snapshot encoding is noncanonical. Freeze the original Cell bytes
 once; equal epochs/authenticators do not authorize substituting another Cell

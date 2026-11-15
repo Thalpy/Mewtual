@@ -127,7 +127,7 @@ fn native_chat_key_distinct_purposes_are_bound_to_the_original_source() {
 #[test]
 fn native_chat_key_governing_purposes_refuse_bootstrap_member_and_each_other() {
     use NativeChatKeyPurpose::*;
-    for purpose in [AddSdk, GoverningHeader] {
+    for purpose in [AddSdk, GoverningHeader, JoinWelcome] {
         let fixture = Fixture::new();
         let ui = fixture.session();
         let source = fixture.source(&ui);
@@ -141,6 +141,7 @@ fn native_chat_key_governing_purposes_refuse_bootstrap_member_and_each_other() {
             MemberAction,
             AddSdk,
             GoverningHeader,
+            JoinWelcome,
         ] {
             if wrong == purpose {
                 continue;
@@ -177,12 +178,13 @@ fn native_chat_key_governing_ends_do_not_alias_existing_slots_and_hold_source_dr
         MemberAction,
         AddSdk,
         GoverningHeader,
+        JoinWelcome,
     ] {
         let mut cut = source.prepare_cut(&ui.observe(), purpose).unwrap();
         cut.enter(&source.observe(), purpose, &mut ends).unwrap();
     }
-    assert_eq!(ui.original.counter.state.load(Ordering::SeqCst), 7);
-    assert_eq!(source.original.counter.state.load(Ordering::SeqCst), 7);
+    assert_eq!(ui.original.counter.state.load(Ordering::SeqCst), 8);
+    assert_eq!(source.original.counter.state.load(Ordering::SeqCst), 8);
     let drain = source.observe_retirement();
     source.close_handle().close();
     let mut wait = Box::pin(drain.wait());

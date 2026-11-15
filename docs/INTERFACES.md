@@ -16,10 +16,16 @@ the original marker identity/content and lock order without creating Source4
 or Add authority. [Contract and evidence](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
 
 The library-only `PreparedV2FounderGovernanceNode` keeps one whole original warm
-node and private Add candidate. Both native cuts bind one retained source;
+node and private Add candidate. All three native cuts bind one retained source;
 actual End custody follows the candidate through cleanup. There is no public
 production install, Root covering receipt or native dispatcher. Existing
 genesis checks remain strict. [Contract and integration requirements](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
+Its Welcome signature uses separate purpose slot7. The spec/preimage derive
+only from that pending request, actual Cell and materialized Add. Core's pure
+unsigned encoder grants no signing permission. Raw64 is cached at the bounded
+native primitive; materialization/retries use it without another key call.
+Root covering intent/final response release remain unimplemented.
 
 `NativeTextVaultUpgrade::prepare_governance` consumes only its private,
 unexposed Selected3 owner. The resulting `NativeTextGovernanceUpgrade` retains

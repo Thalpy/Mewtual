@@ -10,9 +10,18 @@ the131-case cohort, complete MLS crate, strict MLS/Sync lint, native compile,
 full frontend and both dependency audits pass. Read-only review has no
 blocker/high/medium. Root strict lint retains556 inherited diagnostics;
 complete paired Root/native CI remains pending. Root
-covering save, Source4, native Welcome signing, production installation,
+covering save, Source4, WelcomeIntent/release, production installation,
 joined Source, transport/projection and real acceptance remain unfinished.
 Chat V2 is OFF. [Current contract](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
+The next library increment adds a separate original `JoinWelcome` purpose and
+freezes its canonical preimage from the actual same-operation inputs. It caches
+raw64 at the retained key primitive and materializes outside writers without
+re-signing, including after lock/lost reply. All34 native-key,13 join-binding
+and26 Add tests pass; strict/downstream checks are in progress. Two LOW review
+findings (scratch wording and an independent wrong-purpose control) are fixed;
+the short re-review has no findings. No Root covering or release authority is
+supplied by that signature.
 
 The `chat-v2-governed-current-admission` continuation adds the original mounted4
 physical proof to the actual constructor-selected governed-native Current group

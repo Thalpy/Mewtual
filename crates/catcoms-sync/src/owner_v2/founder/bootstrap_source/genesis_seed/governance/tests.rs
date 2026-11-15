@@ -25,6 +25,7 @@ const RAW: usize = 2 * 1024 * 1024;
 const WORK: usize = 2 * 1024 * 1024 * 1024 - 1;
 
 mod signed_request;
+mod welcome;
 
 fn prepared_node(
     id: u64,
@@ -263,6 +264,7 @@ fn begin(
         admission(count),
         native.cut(NativeChatKeyPurpose::AddSdk),
         native.cut(NativeChatKeyPurpose::GoverningHeader),
+        native.cut(NativeChatKeyPurpose::JoinWelcome),
     )
     .unwrap();
 }
@@ -581,6 +583,7 @@ fn native_source_is_one_original_across_both_retained_cuts() {
                 admission(&count),
                 sdk.cut(NativeChatKeyPurpose::AddSdk),
                 header.cut(NativeChatKeyPurpose::GoverningHeader),
+                a.cut(NativeChatKeyPurpose::JoinWelcome),
             )
             .unwrap_err();
         assert!(node.pending.is_none());
@@ -603,6 +606,7 @@ fn native_source_is_one_original_across_both_retained_cuts() {
             admission(&count),
             b.cut(NativeChatKeyPurpose::AddSdk),
             b.cut(NativeChatKeyPurpose::GoverningHeader),
+            b.cut(NativeChatKeyPurpose::JoinWelcome),
         )
         .unwrap_err();
     drop(refused);
@@ -636,6 +640,7 @@ fn lock_unlock_cannot_replace_the_original_add_cuts_or_revive_header_signing() {
             admission(&count),
             native.cut(NativeChatKeyPurpose::AddSdk),
             native.cut(NativeChatKeyPurpose::GoverningHeader),
+            native.cut(NativeChatKeyPurpose::JoinWelcome),
         )
         .unwrap_err();
     drop(refused);

@@ -1,0 +1,180 @@
+//! Separate response-key custody. Merely signing a Welcome never permits its
+//! release: Root must cover its intent before entry and the whole response /
+//! installed transition before final publication under actual native guards.
+use super::*;
+use catcoms_replication::chat::join_bindings::{
+    JoinPayloadKindData, SignedWelcomeBindingData, WelcomeBindingSpecData,
+};
+
+pub(super) struct PreparedWelcome {
+    spec: WelcomeBindingSpecData,
+    bytes: Vec<u8>,
+    entered: bool,
+    raw: Option<[u8; 64]>,
+    signed: Option<SignedWelcomeBindingData>,
+}
+
+impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
+    /// Freeze the exact validated response preimage OUTSIDE final writers from
+    /// only this operation's immutable request, actual SDK outputs and signed
+    /// materialized Header/Admission. No caller-supplied WelcomeSpec is accepted.
+    /// Root MUST durably cover the returned intent before sign_welcome_native.
+    pub fn prepare_welcome_data(&mut self) -> Result<(), SyncError> {
+        let p = self.pending.as_mut().ok_or_else(unavailable)?;
+        if p.welcome.is_some() {
+            return Ok(()); // cached historical DATA, including after closure
+        }
+        if p.phase != Phase::Materialized {
+            return Err(unavailable());
+        }
+        let header = p.header.as_ref().ok_or_else(unavailable)?;
+        let body = p.body.as_ref().ok_or_else(unavailable)?;
+        let result = p
+            .cell
+            .as_ref()
+            .ok_or_else(unavailable)?
+            .completed_result_data()
+            .map_err(|_| unavailable())?;
+        let spec = WelcomeBindingSpecData {
+            invite: p.request.spec.invite,
+            anchor: p.request.spec.anchor,
+            request_binding: p.request.request_id,
+            key_package_wire: p.request.spec.key_package_wire,
+            key_package_reference: p.request.spec.key_package_reference,
+            admitter: header.spec().issuer,
+            add_header: *header.id().as_bytes(),
+            admission: *body.admission_id().as_bytes(),
+            welcome: JoinPayloadKindData::Welcome
+                .commitment_data(result.welcome_data())
+                .map_err(|_| unavailable())?,
+            policy: p.request.policy,
+            public_routing_plan: p.request.public_routing_plan,
+            sealed_routing_transfer: JoinPayloadKindData::RoutingTransfer
+                .commitment_data(
+                    result
+                        .sealed_routing_transfer_data()
+                        .map_err(|_| unavailable())?,
+                )
+                .map_err(|_| unavailable())?,
+        };
+        let bytes = spec.signing_bytes_data().map_err(|_| unavailable())?;
+        p.welcome = Some(PreparedWelcome {
+            spec,
+            bytes,
+            entered: false,
+            raw: None,
+            signed: None,
+        });
+        Ok(())
+    }
+
+    /// Exact bounded unsigned DATA for Root's covering WelcomeIntent. This
+    /// contains no private routing plaintext, source/key or positive save proof.
+    pub fn unsigned_welcome_data(&self) -> Result<(&WelcomeBindingSpecData, &[u8]), SyncError> {
+        let w = self
+            .pending
+            .as_ref()
+            .and_then(|p| p.welcome.as_ref())
+            .ok_or_else(unavailable)?;
+        Ok((&w.spec, &w.bytes))
+    }
+
+    /// Native key tail with no codec, replay or SDK-graph work. The bounded
+    /// signer still needs its independently invoiced signature/error scratch.
+    /// Root supplies genuine covering intent/current/source admission. Cache raw64 before any
+    /// postverification or late negative, so a lost reply cannot repeat signing.
+    pub fn sign_welcome_native(&mut self) -> Result<(), SyncError> {
+        if self
+            .pending
+            .as_ref()
+            .and_then(|p| p.welcome.as_ref())
+            .is_some_and(|w| w.raw.is_some())
+        {
+            return Ok(()); // historical raw, never publication permission
+        }
+        self.stable_negative().require_live_data()?;
+        let p = self.pending.as_mut().ok_or_else(unavailable)?;
+        let w = p.welcome.as_mut().ok_or_else(unavailable)?;
+        let signer = self.node.seed.body.context.spec_data().signer;
+        if w.entered
+            || w.spec.admitter != signer
+            || !self
+                .node
+                .seed
+                .body
+                .device
+                .retained_ed25519_key_matches(&signer)
+        {
+            return Err(unavailable());
+        }
+        p.welcome_cut
+            .enter(&p.original, NativeChatKeyPurpose::JoinWelcome, &mut p.ends)
+            .map_err(|_| unavailable())?;
+        w.entered = true;
+        #[cfg(test)]
+        test_cut(TestCut::WelcomeEntered);
+        let raw = self
+            .node
+            .seed
+            .body
+            .device
+            .sign_retained_ed25519_bounded(
+                &signer,
+                &w.bytes,
+                catcoms_replication::chat::join_bindings::MAX_JOIN_BINDING_BYTES,
+            )
+            .map_err(|_| unavailable())?;
+        w.raw = Some(raw);
+        #[cfg(test)]
+        test_cut(TestCut::WelcomeRawCached);
+        Ok(())
+    }
+
+    /// Outside writers, reconstruct and verify using ONLY retained raw64.
+    /// Even an error/unwind leaves that raw and the spent key entry owned.
+    pub fn materialize_welcome_data(&mut self) -> Result<(), SyncError> {
+        let w = self
+            .pending
+            .as_mut()
+            .and_then(|p| p.welcome.as_mut())
+            .ok_or_else(unavailable)?;
+        if w.signed.is_some() {
+            return Ok(());
+        }
+        let raw = w.raw.ok_or_else(unavailable)?;
+        let signed = SignedWelcomeBindingData::sign_using(w.spec.clone(), |bytes| {
+            if bytes == w.bytes {
+                Ok(raw)
+            } else {
+                Err(catcoms_replication::chat::ChatError::Dependency)
+            }
+        })
+        .map_err(|_| unavailable())?;
+        w.signed = Some(signed);
+        Ok(())
+    }
+
+    /// Cached historical response binding only. Root independently controls
+    /// release of this and the exact Welcome/routing payloads after final save.
+    pub fn signed_welcome_data(&self) -> Result<&SignedWelcomeBindingData, SyncError> {
+        self.pending
+            .as_ref()
+            .and_then(|p| p.welcome.as_ref())
+            .and_then(|w| w.signed.as_ref())
+            .ok_or_else(unavailable)
+    }
+
+    /// Simulate a post-key materializer fault without exposing a production
+    /// mutable-spec API. Applying it twice restores the SAME original DATA.
+    #[cfg(test)]
+    pub(super) fn change_welcome_materialization_spec_for_test(&mut self) {
+        self.pending
+            .as_mut()
+            .unwrap()
+            .welcome
+            .as_mut()
+            .unwrap()
+            .spec
+            .sealed_routing_transfer[0] ^= 1;
+    }
+}
