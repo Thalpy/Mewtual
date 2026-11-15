@@ -1,5 +1,9 @@
 # Threat model; client integrity & enforcement boundaries
 
+Native retry continuity is caller DATA under sticky critical4, with whole-queue
+refusal instead of lossy sanitization. It cannot reconstruct a cold signer or
+replace native object/generation checks. [Scope and pending evidence](communication-recovery/CHAT-V2-NATIVE-CONTINUITY.md).
+
 Native history plaintext is paid independently from its Root page before work,
 serialized under a fixed cap and withheld after original mount/row/generation
 replacement. The same final installed-object checks protect founder/send replies.

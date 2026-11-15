@@ -1,5 +1,10 @@
 # Mewtual; Interfaces & Hooks Schema
 
+Critical UI continuity4 retains native32-byte retry requests separately from
+Legacy pending sends. Unknown native entries refuse the whole envelope;
+the format never grants signing authority. Paired validation is in progress.
+[Contract](communication-recovery/CHAT-V2-NATIVE-CONTINUITY.md).
+
 Native `get_message_page` now has a distinct own-saved-originals response. Its
 u64 cursors are decimal strings; channel filtering never changes the underlying
 context-wide continuation. Actual installed-object checks gate final replies.

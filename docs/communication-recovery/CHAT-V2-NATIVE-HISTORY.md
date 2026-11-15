@@ -66,9 +66,10 @@ The last review's two LOW coverage gaps are corrected: the held-output test now
 finishes actual whole-close and acquires the real vault session before releasing
 the stale reply; a test-only notice after actual page/body destruction checks
 all native guards and the original live response credit during callback unwind.
-These final test extensions and native strict lint/check remain in the queue.
-The first strict-lint attempt caught one needless borrow in that test, now fixed
-without suppression. Full current suites remain pending; inherited Root strict
+These final four history regressions passed (16.54s), as did strict native lint
+(1m37s) and explicit native check (2m13s). The first lint attempt caught one
+needless borrow in that test, fixed without suppression. Full current suites
+remain pending; inherited Root strict
 Clippy debt is not resolved by this increment.
 
 Frontend continuity/routing, warm listings, joined/Add sources, durable archive,

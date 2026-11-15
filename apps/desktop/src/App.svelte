@@ -211,6 +211,7 @@
     type ModerationEvent, type ModerationState, type TimelineMessage,
   } from "./moderation";
   import { MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity } from "./ui-continuity";
+  import type { NativeTextIntents } from "./native-text-intents";
   import {
     captureLockContinuity, closeContinuityAcknowledgement, NativeVaultLockCoordinator, type NativeVaultCloseOutcome, type NativeVaultLockOutcome,
   } from "./window-close";
@@ -3561,7 +3562,8 @@
   // completes asynchronously after unlock.
   let uiStateReady = $state(false);
   let pendingSends = $state<PendingSends>({});
-  let uiContinuityVersion: 1 | 2 | 3 = 1;
+  let uiContinuityVersion: 1 | 2 | 3 | 4 = 1;
+  let nativeTextIntents = $state<NativeTextIntents>({});
   let recoveredSendDrafts = $state<PendingSends>({});
   // Holds submissions/result mutations while a user's explicit resolution crosses the vault barrier.
   let pendingSendResolution = $state<string | null>(null);
@@ -3617,7 +3619,9 @@
     }
   }
   function continuityJson(): string {
+    if (Object.keys(nativeTextIntents).length && uiContinuityVersion !== 4) throw new Error("Native chat requests require continuity version 4.");
     return JSON.stringify({ version: uiContinuityVersion, drafts, readMarks, statusCursors, fileTrustPolicies, latePast, embedAutoLoad, pendingSends, recoveredSendDrafts,
+      ...(uiContinuityVersion === 4 ? { nativeTextIntents } : {}),
       studioDraft: studioSnapshot?.() ?? restoredStudioDraft });
   }
   /**
@@ -3671,14 +3675,14 @@
       let next = sanitizeUiContinuity(original);
       if (!current()) return;
       if (uiContinuityVersion > next.version) next = { ...next, version: uiContinuityVersion };
-      if (next.version === 3) {
+      if (next.version >= 3) {
         // Preserve the complete original root, not a sanitized replacement. Old v2 native
         // readers must reject before their frontend silently drops these Send copies.
         // Re-save even already-v3 roots: a preceding rename may have succeeded while its
         // parent-sync acknowledgement failed. Only this actual barrier opens the UI.
         await queueUiStateSave(() => {
           if (!current()) throw new Error("The continuity load was replaced before its upgrade could be saved.");
-          return JSON.stringify({ ...original, version: 3 });
+          return JSON.stringify({ ...original, version: next.version });
         });
         if (!current()) return;
       }
@@ -3705,6 +3709,7 @@
       pendingSends = next.pendingSends;
       uiContinuityVersion = next.version;
       recoveredSendDrafts = next.recoveredSendDrafts;
+      nativeTextIntents = next.nativeTextIntents ?? {};
       drafts = next.drafts;
       readMarks = next.readMarks;
       statusCursors = next.statusCursors;
@@ -6831,6 +6836,7 @@
     drafts = {};
     pendingSends = {};
     recoveredSendDrafts = {};
+    nativeTextIntents = {};
     pendingSendResolution = null;
     pendingSendErrors = {};
     retryingPendingSends = false;
@@ -21126,7 +21132,7 @@
           text, replyTo: reply_to, expectedContext, acceptance: "not_accepted" };
         pendingSends = addPendingSend(pendingSends, intent);
       }
-      if (pendingContinuityVersion(intent) === 3) uiContinuityVersion = 3;
+      if (pendingContinuityVersion(intent) === 3 && uiContinuityVersion < 3) uiContinuityVersion = 3;
       // Keep the composer intact until its retry identity and payload have crossed the vault
       // barrier. A lock at either await captures the draft or this resumable intent.
       clearTimeout(uiStateSaveTimer);

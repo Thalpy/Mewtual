@@ -1,5 +1,16 @@
 # Mewtual; Handover
 
+Active continuation is `chat-v2-native-text-continuity`, in the SAME isolated
+`target/cv2-native-text-history` worktree, based on pushed draft PR #126
+`bea882ac`. Critical4 frontend persistence/strict retry DATA and paired native
+validation are implemented under final validation. Frontend3,454 passed,
+static0/0/build38.34s/real flows passed; native-text75 and outer envelope1
+passed, as did strict native Clippy2m49s. Audits, full current suites and final
+native build/check/startup remain pending. No producer is wired.
+The preceding history final4 regressions passed (16.54s), and strict native
+Clippy passed (1m37s); explicit native check passed (2m13s). Chat V2 stays off.
+[Current scope](communication-recovery/CHAT-V2-NATIVE-CONTINUITY.md).
+
 Active continuation: `chat-v2-native-text-history`, based on PR #125 runtime
 `9c16563b`. Native own-history dispatch and final installed-object reply checks
 are under validation. All 71 native-text cases passed (163.22s), including

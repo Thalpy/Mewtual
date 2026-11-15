@@ -35,7 +35,7 @@ export function pendingManagerApp(initial: unknown) {
   return new Function(...Object.keys(dependencies), `
     let locked = false, uiStateReady = false, uiStateLoadGeneration = 1, uiStateHydrationAttempt = 0, uiStateSaveTimer;
     let uiStateSaveChain = Promise.resolve(), uiStateSaveFailed = false, uiStateFailureToast = 0;
-    let pendingSends = {}, recoveredSendDrafts = {}, pendingSendErrors = {}, pendingSendResolution = null, uiContinuityVersion = 1;
+    let pendingSends = {}, recoveredSendDrafts = {}, nativeTextIntents = {}, pendingSendErrors = {}, pendingSendResolution = null, uiContinuityVersion = 1;
     let retryingPendingSends = false, pendingManagerOpen = false, sending = false;
     let windowCloseInFlight = false, unlocking = false, unlockAttempt = 0, closeAfterContinuityError = false, closeContinuityRevision = null;
     // This fixture is an already-known vault; lifecycle tests exercise actual gate reads.
@@ -116,7 +116,7 @@ export function pendingManagerApp(initial: unknown) {
       if (!nativeAlreadyLocked) void nativeVaultLock.begin(uiStateReady ? continuityJson() : null);
       locked = true; uiStateReady = false; uiStateLoadGeneration++; pendingSendResolution = null;
       cancelEdit(); // the actual lock path calls this through clearServerView
-      pendingSends = {}; recoveredSendDrafts = {}; drafts = {}; draft = "";
+      pendingSends = {}; recoveredSendDrafts = {}; nativeTextIntents = {}; drafts = {}; draft = "";
     }
     ${productionCloseCallback()}
     return {
@@ -146,7 +146,7 @@ export function pendingManagerApp(initial: unknown) {
       replaceUiGeneration() { uiStateLoadGeneration++; },
       async unlock() { await nativeVaultLock.settle(); nativeVaultLock.reset(); nativeLocked = false; nativeGeneration++; locked = false; uiStateLoadGeneration++; return loadUiContinuity(uiStateLoadGeneration); },
       done() { clearTimeout(uiStateSaveTimer); },
-      state() { return { pendingSends: structuredClone(pendingSends), recoveredSendDrafts: structuredClone(recoveredSendDrafts), drafts: structuredClone(drafts), draft, editingId, editDraft, sealed: JSON.parse(sealed), writes, submissions, stops, warnings, pendingSendResolution, locked, error, closeCalls, windowCloseInFlight, destroyCalls, restartCalls, contextCalls, uiStateReady, videoScopeEpoch, videoReview: videoReviews.current }; }
+      state() { return { nativeTextIntents: structuredClone(nativeTextIntents), uiContinuityVersion, pendingSends: structuredClone(pendingSends), recoveredSendDrafts: structuredClone(recoveredSendDrafts), drafts: structuredClone(drafts), draft, editingId, editDraft, sealed: JSON.parse(sealed), writes, submissions, stops, warnings, pendingSendResolution, locked, error, closeCalls, windowCloseInFlight, destroyCalls, restartCalls, contextCalls, uiStateReady, videoScopeEpoch, videoReview: videoReviews.current }; }
     };
   `)(...Object.values(dependencies));
 }

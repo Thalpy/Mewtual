@@ -467,6 +467,49 @@ async fn native_text_history_real_resolver_unwind_and_lost_observers_release_ori
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_ui_state_critical4_real_sealed_roundtrip_and_lock_preserve_exact_retry_data() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("vault");
+    let (app, main, queue) = app(path.clone(), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let token = "01".repeat(32);
+    // Deliberately not an actual row's context: this journal stores caller DATA
+    // and cannot grant signing authority. The native send factory remains the
+    // independent original-object/generation enforcement boundary.
+    let json=serde_json::json!({"version":4,"drafts":{},"readMarks":{},"nativeTextIntents":{token.clone():{"kind":"create","token":token,"server":7,"channel":"9","expectedContext":"02".repeat(32),"text":"exact original\n🐈"}}}).to_string();
+    let saved = ui_request(&main, "save_ui_state", Some(&json));
+    run(&queue).await;
+    assert!(matches!(
+        saved.await.unwrap(),
+        tauri::ipc::InvokeResponse::Ok(_)
+    ));
+    assert_eq!(read_ui(&main, &queue).await, json);
+    let state = app.state::<AppState>();
+    let outcome = lock_session_outcome_inner(&state, Some(json.clone())).await;
+    assert!(outcome.continuity_error.is_none());
+    unlock_current(&app, &main, &queue).await;
+    assert_eq!(read_ui(&main, &queue).await, json);
+    let ciphertext = std::fs::read(path.join("ui-state.bin")).unwrap();
+    for malformed in [
+        serde_json::json!({"version":5,"drafts":{},"readMarks":{}}),
+        serde_json::json!({"version":4,"drafts":{},"readMarks":{},"nativeTextIntents":{token.clone():{"kind":"future","token":token}}}),
+        serde_json::json!({"version":3,"drafts":{},"readMarks":{},"nativeTextIntents":{}}),
+    ] {
+        let malformed = malformed.to_string();
+        let refused_write = ui_request(&main, "save_ui_state", Some(&malformed));
+        if !queue.lock().unwrap().is_empty() {
+            run(&queue).await;
+        }
+        refused(refused_write.await.unwrap());
+        assert_eq!(
+            std::fs::read(path.join("ui-state.bin")).unwrap(),
+            ciphertext
+        );
+        assert_eq!(read_ui(&main, &queue).await, json);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_text_history_reply_rechecks_same_id_incarnation_and_does_not_hold_source_across_lock(
 ) {
     let root = tempfile::tempdir().unwrap();

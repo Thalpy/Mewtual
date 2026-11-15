@@ -11,6 +11,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 mod boot;
 mod boot_lifetime;
+pub(super) mod continuity;
 mod founding;
 mod history;
 pub(super) mod retirement;
