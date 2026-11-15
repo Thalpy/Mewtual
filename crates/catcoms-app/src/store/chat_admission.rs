@@ -583,6 +583,25 @@ fn decode(bytes: &[u8], domain: &[u8; 32]) -> Result<BTreeMap<ChatAdmissionKey, 
 }
 
 impl ServerStore {
+    /// Fresh native governance may only abort a torn declaration while no
+    /// admission has ever existed. Check the exact tiny empty grammar BEFORE
+    /// any per-row decoding/allocation; absence on a managed vault refuses.
+    pub(in crate::store) fn require_empty_native_governance_admissions(
+        &self,
+    ) -> Result<(), AppError> {
+        let cap = DOMAIN.len() + 4 + 4 + 32 + 4 + 40;
+        let held = self.read_native_empty_admission_frame(cap)?;
+        let plain = Zeroizing::new(unseal(&self.keys.db_key()?, &unframe(held.raw())?)?);
+        let mut d = Decoder::new(&plain);
+        if d.get_str().map_err(|_| refused())? != DOMAIN
+            || d.get_bytes().map_err(|_| refused())? != self.chat_vault_domain()?
+            || d.get_u32().map_err(|_| refused())? != 0
+        {
+            return Err(refused());
+        }
+        d.finish().map_err(|_| refused())?;
+        self.require_native_empty_admission_frame(&held)
+    }
     /// The actual authenticated mounted format, not a live authoring permit. Restore consumers
     /// must require managed mode for no-tail bytes too, BEFORE any owner run/network handoff.
     /// A raw snapshot does not supply this physical-vault classification.

@@ -311,6 +311,27 @@ impl Endpoint {
             .clone()
     }
 
+    /// Read only this original endpoint's existing bounded observers after a
+    /// paired pump failed. No replacement row selection, Actor await, locking
+    /// pool getter, retry or protocol mutation is introduced by diagnostics.
+    pub(crate) fn automatic_diagnostic(&self) -> String {
+        let selected = self.selected();
+        let (selector, ledger) = self
+            .state
+            .voice_handoff
+            .fixture_sdp_diagnostic(&selected, self.callbacks.expected_parent);
+        let native = selector.map(|selector| {
+            self.state
+                .voice_channels
+                .fixture_native_diagnostic(&selected, selector)
+        });
+        let session = self
+            .state
+            .voice_channels
+            .fixture_sdp_session_diagnostic(&selected);
+        format!("{ledger}; {native:?}; independent {session}")
+    }
+
     async fn step(&mut self, value: Value) -> Value {
         // Borrow the actual process streams without cloning or creating another reader.
         drive_streams(

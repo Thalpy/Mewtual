@@ -131,6 +131,43 @@ async fn exchange(
     opened_reply(public, header, body, &reply)
 }
 
+/// Observe only an intentionally invalid immutable binding, before any SDK
+/// preparation. Recovery takes fail-fast index/row locks before validating
+/// these fields, so maintenance may correctly return Capacity first. Retain
+/// the exact bad body/parent and require eventual Unauthorized; acceptance,
+/// any SDK state change, or any other result is an immediate failure. This
+/// helper never wraps an original Admit/Release, allocation or attach.
+async fn require_invalid_binding_after_capacity(
+    state: &AppState,
+    public: &bootstrap::SetupOutput,
+    route: &bootstrap::Route,
+    parent: &ledger::ResolvedRow,
+    body: &[u8],
+) {
+    let before = parent.sdk_test_preparation_state();
+    assert_eq!(before, Some((false, false)));
+    let capacity = replies::refused(factory::Refused::Protocol(VoiceError::Capacity));
+    let unauthorized = replies::refused(factory::Refused::Protocol(VoiceError::Unauthorized));
+    let clock = crate::voice_runtime(state).clock();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        for attempt in 0..32 {
+            let reply = exchange(state, public, route, parent, body).await;
+            assert_eq!(parent.sdk_test_preparation_state(), before);
+            if reply == capacity && attempt != 31 {
+                clock.sleep(std::time::Duration::from_millis(10)).await;
+            } else {
+                assert_eq!(
+                    reply, unauthorized,
+                    "changed native SDK binding must refuse"
+                );
+                return;
+            }
+        }
+    })
+    .await
+    .expect("invalid native SDK binding observation stayed busy");
+}
+
 /// Observe an exact original Release through transient fail-fast ledger pressure.
 /// Capacity is proven local and pre-effect in release_sdk; an outer/ambiguous
 /// error or any other authenticated response remains terminal. This deliberately
@@ -177,7 +214,6 @@ pub(super) async fn start(
     body.push(0);
     let request = requests::sdk::Request::decode(parent.id().logical(), &body).unwrap();
     let capacity = replies::refused(factory::Refused::Protocol(VoiceError::Capacity));
-    let unauthorized = replies::refused(factory::Refused::Protocol(VoiceError::Unauthorized));
     let commit = state.ui_session_commit.clone().lock_owned().await;
     assert_eq!(
         exchange(state, public, route, parent, &body).await,
@@ -187,11 +223,15 @@ pub(super) async fn start(
     for offset in [1, 9, 17, 49, 81, 113, 121, 152] {
         let mut wrong = body.clone();
         wrong[offset] ^= 1;
-        assert_eq!(
-            exchange(state, public, route, parent, &wrong).await,
-            unauthorized,
-            "changed native SDK binding {offset}"
-        );
+        if offset == 113 {
+            let invalid = requests::sdk::Request::decode(parent.id().logical(), &wrong).unwrap();
+            parent.sdk_test_bad_recovery_with_parent_locked(
+                route.session().identity(),
+                &request,
+                &invalid,
+            );
+        }
+        require_invalid_binding_after_capacity(state, public, route, parent, &wrong).await;
     }
     // Use the actual affine physical position. Even trusted code cannot allocate another
     // candidate under it while the first original preparation is retained.
