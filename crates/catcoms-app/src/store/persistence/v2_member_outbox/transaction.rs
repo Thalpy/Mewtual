@@ -87,6 +87,46 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// The write boundaries other modules' regressions may target (a subset of [`Cut`]). Hooks are
+/// thread-local: they fire only for work run on the arming thread.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(in crate::store) enum MemberOutboxTestCut {
+    /// After the complete WAL stage is written, BEFORE it becomes MAIN (pre-commit).
+    WalStage,
+    /// After the WAL is MAIN and the first immutable output exists (commit point passed).
+    FirstOutput,
+    /// After the head stage is complete, before the selector CAS.
+    HeadStage,
+}
+#[cfg(test)]
+impl MemberOutboxTestCut {
+    fn cut(self) -> Cut {
+        match self {
+            Self::WalStage => Cut::WalStageWritten,
+            Self::FirstOutput => Cut::OutputWritten(0),
+            Self::HeadStage => Cut::HeadStageWritten,
+        }
+    }
+}
+/// Stop the next commit at `cut` as if the process died (an `Io` error is returned).
+#[cfg(test)]
+pub(in crate::store) fn member_outbox_crash_at_for_test(cut: MemberOutboxTestCut) {
+    HOOKS.with(|hooks| hooks.borrow_mut().push((cut.cut(), HookAction::Crash)));
+}
+/// Run `call` when the next commit reaches `cut` (to pause, cancel or unwind), then continue.
+#[cfg(test)]
+pub(in crate::store) fn member_outbox_call_at_for_test(
+    cut: MemberOutboxTestCut,
+    call: Box<dyn FnOnce()>,
+) {
+    HOOKS.with(|hooks| hooks.borrow_mut().push((cut.cut(), HookAction::Call(call))));
+}
+#[cfg(test)]
+pub(in crate::store) fn member_outbox_disarm_for_test() {
+    HOOKS.with(|hooks| hooks.borrow_mut().clear());
+}
+
 /// Pass one boundary. Production: a no-op. Tests: fire the first matching hook once.
 pub(super) fn reach(cut: Cut) -> Result<(), AppError> {
     #[cfg(test)]
@@ -592,10 +632,16 @@ pub(in crate::store) struct MemberAppendAdmissionFacts {
 /// Final save-edge admission for ONE prepared append, plus the physical lease its worker
 /// holds through every write, barrier and cleanup.
 ///
-/// Production construction is deliberately ABSENT: the primary's real member-source guard
-/// (original source generation + native/UI-session generation, checked against
-/// [`PreparedMemberAppend::admission_facts`]) is the only intended issuer and is not yet
-/// implemented. No boolean, callback or label can construct this. The cfg(test) constructor
+/// The one production issuer is the operational host's member-save final edge
+/// (`operational::host::member_save`). Before calling [`Self::at_member_save_final_edge`] it
+/// has, with no IO in between: issued the member lane's OWN save-source end for exactly these
+/// facts (live source negative, the lane's own context, the token Lent with this ActionId, the
+/// Plan's historical Admission), re-checked that the Store's member-outbox mount is still the
+/// live one, and then observed the native session's complete cancellation authority live
+/// (the linearization point). That source end and the native custody travel in the SAME job
+/// as the admitted worker and are released only after its last File and cleanup. The
+/// constructor is visible to `persistence` only because that host is a sibling subtree; the
+/// facts alone are labels and confer nothing without that edge. The cfg(test) constructor
 /// grants durability for storage tests only and exercises no authorization path.
 pub(in crate::store) struct MemberOutboxSaveAdmission {
     facts: MemberAppendAdmissionFacts,
@@ -608,6 +654,15 @@ impl std::fmt::Debug for MemberOutboxSaveAdmission {
     }
 }
 impl MemberOutboxSaveAdmission {
+    /// See the type documentation: only the host's member-save final edge calls this, after
+    /// its source, mount and native checks. `lease` is the Store's own physical-work loan.
+    pub(in crate::store::persistence) fn at_member_save_final_edge(
+        facts: MemberAppendAdmissionFacts,
+        lease: VaultPhysicalWorkLease,
+    ) -> Self {
+        Self { facts, lease }
+    }
+
     #[cfg(test)]
     pub(in crate::store) fn durability_only_for_test(
         facts: MemberAppendAdmissionFacts,
@@ -671,6 +726,14 @@ impl PreparedMemberAppend {
     /// Abandon before admission: nothing was written; the original custody comes back.
     pub(in crate::store) fn abandon(self) -> MemberSignedOriginal {
         self.original
+    }
+    /// Non-consuming DATA check of exactly what [`Self::admit`] requires of the owner: this
+    /// context, a clean state and the prepared parent still selected. The final edge runs it
+    /// BEFORE the native linearization point so nothing fallible follows that point.
+    pub(in crate::store) fn admissible_by(&self, owner: &MemberOutbox) -> bool {
+        let facts = self.admission_facts();
+        owner.context.id == facts.context
+            && matches!(&owner.state, OwnerState::Clean(head) if head.id == facts.parent)
     }
     /// Bind the final admission and the owner. Refuses (returning everything) unless the
     /// admission names exactly these facts and the owner still selects the prepared parent.
@@ -756,11 +819,75 @@ pub(in crate::store) struct MemberAppendRun {
 }
 
 impl AdmittedMemberAppend {
+    /// Storage-level worker: commit, then hand the original back on an uncertain outcome.
+    /// Shares [`AdmittedMemberCommit::run`] with the production job, so both paths run the
+    /// exact same write protocol.
     pub(in crate::store) fn run(self) -> MemberAppendRun {
+        let (original, commit) = self.into_commit();
+        let MemberCommitRun { owner, outcome } = commit.run();
+        let outcome = match outcome {
+            Ok(receipt) => MemberAppendOutcome::Saved(receipt),
+            Err(error) => MemberAppendOutcome::Uncertain { original, error },
+        };
+        MemberAppendRun { owner, outcome }
+    }
+
+    /// Separate the exact signed original from the presealed commit. The production save job
+    /// keeps the original in the Store's recovered-DATA custody while the worker does IO, so
+    /// an unwind or an unrun drop can never lose it; the commit needs only presealed bytes.
+    pub(in crate::store) fn into_commit(self) -> (MemberSignedOriginal, AdmittedMemberCommit) {
         let Self {
             transition,
             receipt,
             original,
+            payment,
+            owner,
+            lease,
+        } = self;
+        (
+            original,
+            AdmittedMemberCommit {
+                transition,
+                receipt,
+                payment,
+                owner,
+                lease,
+            },
+        )
+    }
+}
+
+/// The admitted worker without its signed original (see [`AdmittedMemberAppend::into_commit`]).
+/// It owns the exclusive owner, the presealed bytes, their payment and the physical lease.
+/// Running it cannot be cancelled; dropping it unrun performs no IO.
+pub(in crate::store) struct AdmittedMemberCommit {
+    transition: PreparedTransition,
+    receipt: MemberReceiptData,
+    payment: CatalogReadReservation,
+    owner: MemberOutbox,
+    // LAST: physical exclusion outlives every buffer, File and the owner's own cleanup.
+    lease: VaultPhysicalWorkLease,
+}
+impl std::fmt::Debug for AdmittedMemberCommit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdmittedMemberCommit")
+            .finish_non_exhaustive()
+    }
+}
+
+/// The outcome of one admitted commit. `Ok` is SavedLocal: durably selected, cached at the CAS
+/// before cleanup could fail (a cleanup failure only leaves the owner needing recovery). `Err`
+/// is uncertain: recovery may still finish it; recover, then look the token up.
+pub(in crate::store) struct MemberCommitRun {
+    pub(in crate::store) owner: MemberOutbox,
+    pub(in crate::store) outcome: Result<MemberReceiptData, Box<AppError>>,
+}
+
+impl AdmittedMemberCommit {
+    pub(in crate::store) fn run(self) -> MemberCommitRun {
+        let Self {
+            transition,
+            receipt,
             payment,
             mut owner,
             lease,
@@ -768,10 +895,7 @@ impl AdmittedMemberAppend {
         let outcome = match std::mem::replace(&mut owner.state, OwnerState::NeedsRecovery) {
             OwnerState::Clean(current) => {
                 match commit(&owner.ns, &current, &transition, Resume::Fresh) {
-                    Err(error) => MemberAppendOutcome::Uncertain {
-                        original,
-                        error: Box::new(error),
-                    },
+                    Err(error) => Err(Box::new(error)),
                     Ok(()) => {
                         owner.state = OwnerState::Clean(transition.candidate.clone());
                         let cleaned = retire(
@@ -784,21 +908,62 @@ impl AdmittedMemberAppend {
                         if cleaned.is_err() {
                             owner.state = OwnerState::NeedsRecovery;
                         }
-                        MemberAppendOutcome::Saved(receipt)
+                        Ok(receipt)
                     }
                 }
             }
             // Admission proved the owner clean; keep the refusal total anyway.
-            OwnerState::NeedsRecovery => MemberAppendOutcome::Uncertain {
-                original,
-                error: Box::new(refused()),
-            },
+            OwnerState::NeedsRecovery => Err(Box::new(refused())),
         };
         // All Files have closed. Buffers and payment go first; the lease goes last.
         drop(transition);
         drop(payment);
         drop(lease);
-        MemberAppendRun { owner, outcome }
+        MemberCommitRun { owner, outcome }
+    }
+
+    /// De-admit an UNRUN commit: no IO happened, so the lease is released and the exact
+    /// presealed append is rebuilt around the SAME original for a later, fresh final edge.
+    /// Refuses (returning both) unless `original` is byte-for-byte the one this commit was
+    /// admitted for: its ActionId, its Admission and its original-byte digest (which covers
+    /// the signature an ActionId alone does not).
+    pub(in crate::store) fn de_admit(
+        self,
+        original: MemberSignedOriginal,
+    ) -> Result<(MemberOutbox, PreparedMemberAppend), Box<(MemberOutbox, MemberSignedOriginal)>>
+    {
+        let Self {
+            transition,
+            receipt,
+            payment,
+            owner,
+            lease,
+        } = self;
+        let same = original.action().id() == receipt.action
+            && original.admission() == receipt.admission
+            && PreparedActionPages::prepare(
+                owner.context.vault,
+                owner.context.profile,
+                original.action(),
+            )
+            .is_ok_and(|pages| pages.original_digest() == receipt.original);
+        let result = if same {
+            Ok((
+                owner,
+                PreparedMemberAppend {
+                    transition,
+                    receipt,
+                    original,
+                    payment,
+                },
+            ))
+        } else {
+            drop(transition);
+            drop(payment);
+            Err(Box::new((owner, original)))
+        };
+        drop(lease);
+        result
     }
 }
 

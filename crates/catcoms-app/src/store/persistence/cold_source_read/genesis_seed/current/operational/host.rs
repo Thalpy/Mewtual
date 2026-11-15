@@ -6,6 +6,7 @@
 use super::negative::{PreparedV2TextSourceObserver, V2TextSourceNegativeObserver};
 use super::owner::V2TextOwnedCurrent;
 use super::PreparedV2TextRead;
+use crate::store::critical_namespaces::archive_bootstrap::founder::{FounderAccess, FounderOrigin};
 use crate::store::critical_namespaces::current_layout::{
     AdmittedV2TextPromotionCommit, AdmittedV2TextPromotionStage, PreparedV2TextPhysicalLease,
     V2CurrentLayoutStore,
@@ -30,6 +31,9 @@ mod create;
 // ORDINARY-member lane (founder-as-member vertical): general verifier + signing plan,
 // never the founder A/I/S/B certification lane. Mutually exclusive with founder Create.
 mod member;
+// Member save: the two-phase production path into the Store's member outbox.
+mod invite;
+mod member_save;
 mod projection;
 // Request DATA types travel to the regression tests only until the primary's native
 // dispatcher exists; that dispatcher must re-export them without this gate.
@@ -42,8 +46,14 @@ use create::{PendingCompletedCreate, PendingCreate};
 #[cfg(all(test, windows))]
 pub(in crate::store) use member::{
     arm_member_close_during_sign_for_test, arm_owner_cancel_during_sign_for_test,
-    member_close_drained_during_sign_for_test, member_sign_dispatches_for_test, V2MemberDependency,
-    V2MemberSignRequest,
+    member_close_drained_during_sign_for_test, member_sign_dispatches_for_test,
+};
+// The member-save API the native consumer calls: borrowed request DATA in, advisory outcome
+// DATA and an owned admitted job out. None of these types is authority by itself.
+pub use member::{V2MemberDependency, V2MemberSignRequest};
+pub use member_save::{
+    MemberSaveJob, MemberSaveJobReport, MemberSaveNativeAdmission, V2MemberSaveOutcome,
+    V2MemberSaveRefusal,
 };
 
 /// Trusted local immutable-history limits, separate from memory reservations and fixed
@@ -66,10 +76,16 @@ impl V2TextHostPolicy {
 /// Actual original owner and all same-candidate first-promotion debt. No raw SDK/node or
 /// adopting constructor is exposed. This still cannot post or issue a projection token.
 pub struct PreparedV2TextHost<T, R> {
+    // Immutable provenance from the SAME retained native creator, not a mode
+    // inferred from a transient empty phase or a decoded source/status record.
+    origin: FounderOrigin,
     projection: Option<Arc<projection::V2TextProjectionDomain>>,
     // The ordinary-member lane owns its OWN member-role domain, verifier, request and fees.
     // Drops before `owner`; Drop below cancels its domain first. Exclusive with founder Create.
     member: Option<Box<member::V2MemberLane>>,
+    // Unsigned original only. No invite key may run until its separately
+    // authenticated journal intent is covered by the future paired writer.
+    invite: Option<Box<invite::PendingInvite>>,
     resident: Option<PreparedV2TextResidentProjection>,
     capture: Option<PreparedV2TextPromotionCapture>,
     prepared: Option<PreparedV2TextPromotion>,
@@ -88,7 +104,7 @@ pub struct PreparedV2TextHost<T, R> {
     retired: Option<RetiredV2TextPromotionLane>,
     selected: Option<Arc<SavedV2TextPromotion>>,
     policy: V2TextQuotaPolicy,
-    #[cfg(all(test, windows))]
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     next_work_fault: Option<crate::store::persistence::v2_text::V2TextPromotionTestCut>,
     // Whole original wrapper/payment remains intact. Drop below cancels before ANY debt
     // fields drain; destruction is not an acknowledgment that a running worker has ended.
@@ -96,12 +112,54 @@ pub struct PreparedV2TextHost<T, R> {
 }
 
 impl<T, R> PreparedV2TextHost<T, R> {
+    /// Historical DATA for the closed warm driver, never an owner constructor.
+    /// The driver prepays this bounded group copy and performs a final genuine
+    /// selected-head check AFTER caching the result.
+    pub(in crate::store) fn fresh_founder_binding_data(
+        &self,
+        layout: &V2CurrentLayoutStore,
+    ) -> Result<crate::store::FreshV2TextFounderBinding, AppError> {
+        let store = layout.checked_store()?;
+        let namespace = store
+            .current_layout
+            .lock()
+            .map_err(|_| refused())?
+            .as_ref()
+            .ok_or_else(refused)?
+            .layout;
+        let owner = self.owner.borrow_current()?;
+        owner.source().validate_original(store)?;
+        let data = owner.source().data();
+        let spec = data.context.spec_data();
+        if spec.vault != namespace.vault || spec.group.is_empty() || spec.group.len() > 256 {
+            return Err(refused());
+        }
+        Ok(crate::store::FreshV2TextFounderBinding {
+            vault: namespace.vault,
+            layout: namespace.root,
+            group: spec.group.to_vec(),
+            signer: spec.signer,
+            source: *data.source.as_bytes(),
+            profile: *data.profile.id().as_bytes(),
+            pin: *owner.original_pin_id_data()?.as_bytes(),
+        })
+    }
+
     /// Moving a read-only owner creates no allocation or permission. The trusted policy
     /// is fixed for this host; all actual captures and work acquire their own fees first.
     pub fn from_read(read: PreparedV2TextRead<T, R>, policy: V2TextHostPolicy) -> Self {
+        Self::from_read_with_origin(read, policy, FounderOrigin::Library)
+    }
+    pub(in crate::store) fn from_read_with_origin(
+        read: PreparedV2TextRead<T, R>,
+        policy: V2TextHostPolicy,
+        origin: FounderOrigin,
+    ) -> Self {
         Self {
+            origin,
             projection: None,
             member: None,
+            invite: None,
             resident: None,
             capture: None,
             prepared: None,
@@ -120,7 +178,7 @@ impl<T, R> PreparedV2TextHost<T, R> {
             retired: None,
             selected: None,
             policy: policy.quota,
-            #[cfg(all(test, windows))]
+            #[cfg(all(test, any(windows, target_os = "linux")))]
             next_work_fault: None,
             owner: read.owner,
         }
@@ -133,6 +191,15 @@ impl<T, R> PreparedV2TextHost<T, R> {
         layout: &V2CurrentLayoutStore,
         rng: &mut impl catcoms_rt::CryptoRngCore,
     ) -> Result<(), AppError> {
+        self.retry_original_seed_settlement_with_access(layout, rng, FounderAccess::Library)
+    }
+    pub(in crate::store) fn retry_original_seed_settlement_with_access(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+        access: FounderAccess<'_>,
+    ) -> Result<(), AppError> {
+        access.require(&self.origin)?;
         if self.resident.is_some()
             || self.next_request_preparation.is_some()
             || self.capture.is_some()
@@ -152,10 +219,22 @@ impl<T, R> PreparedV2TextHost<T, R> {
         layout: &V2CurrentLayoutStore,
         rng: &mut impl catcoms_rt::CryptoRngCore,
     ) -> Result<(), AppError> {
+        self.origin.require_library()?;
+        self.retry_empty_promotion_with_access(layout, rng, FounderAccess::Library)
+    }
+    pub(in crate::store) fn retry_empty_promotion_with_access(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+        access: FounderAccess<'_>,
+    ) -> Result<(), AppError> {
         self.drain_admitted_promotion_work()?;
         // An outcome removed from the registry was cached before the late postcheck.
         // Its payload and refunds must drain OUTSIDE all host writers, even on retry.
         self.drain_cached_retirement();
+        // Finish already-admitted DATA first, then refuse any new/cached
+        // positive progress from a retired or foreign native command.
+        access.require(&self.origin)?;
 
         // Once the same verifier has moved into its completed resident, dropping
         // the old O1 receipt must never make genesis preparation available again.
@@ -188,7 +267,7 @@ impl<T, R> PreparedV2TextHost<T, R> {
         }
         let prepared = self.prepared.as_mut().ok_or_else(refused)?;
         prepared.prepare_candidates(store, owner.source(), rng)?;
-        #[cfg(all(test, windows))]
+        #[cfg(all(test, any(windows, target_os = "linux")))]
         if let Some(cut) = self.next_work_fault.take() {
             prepared.set_work_fault_for_test(cut);
         }
@@ -418,7 +497,7 @@ impl<T, R> PreparedV2TextHost<T, R> {
 
     /// Inject only a real finite-IO cut in the next original worker. Production has no
     /// caller-selected phase, admission bypass or error-to-absence substitution.
-    #[cfg(all(test, windows))]
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store) fn fail_next_promotion_work_for_test(
         &mut self,
         cut: crate::store::persistence::v2_text::V2TextPromotionTestCut,

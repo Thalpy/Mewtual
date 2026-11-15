@@ -1,5 +1,1774 @@
 # Mewtual; Handover
 
+The `chat-v2-invite-journal` continuation now retains the exact bounded public
+routing-plan frame with the original invite, not just its digest. Hash/bounds
+and exact-retry checks run before copy/draw; the genuine transport test pins
+all fields, zero certified contacts and EOF. Root5, native compile/strict lint,
+all3,485 frontend tests and formatting pass; Root strict lint remains556.
+The current software signer's exact raw64 equality across genuine bounded
+device restore is also pinned; complete MLS163 unit/22 integration/5 docs and
+strict MLS lint pass (two pre-existing ignored cases). Read-only reviews are
+clear. This does NOT implement cold recovery, a journal writer or SavedInvite.
+
+Both design reviews approve an isolated journal gate under the same exclusive
+NativeRequired RuntimeLoan. It needs no canonical text-lane registration or
+post-Stop slot-removal machinery while no worker/owner escapes the loan and
+all files belong to the new private directory. Actual physical/Current4/key
+and covering-save checks remain mandatory. No persistence runtime is added
+by that design decision; Chat V2 stays OFF.
+
+The `chat-v2-saved-invite-producer` continuation implements unsigned invite
+preparation on the actual same-row NativeRequired Runtime/Host, requiring the
+real governed4 family and reusing its member verifier. The retained Sync
+Clock/nonce/spec/raw-signature owner has11 passing focused tests; Core14/RT36
+also pass. Actual Root5, the156-case Sync cohort, strict RT/Core/Sync lint,
+all3,485 frontend tests,10 browser flows and ambient/raw-fs gates pass. Native
+compile/lint,17 existing Root member regressions, formatting and both dependency
+audits also pass. Root strict lint retains the same556 inherited errors. Read-only review fixed a
+row-identity/transport-key domain mix-up; direct context/domain controls were
+added. The current output is only preimage-hash/expiry DATA: no covering journal,
+SavedInvite, native invite command or publication exists yet. Chat V2 is OFF.
+[Actual path and remaining work](communication-recovery/CHAT-V2-INVITE-ISSUER.md).
+
+The two implementation commits51e0b9b2 and6f822243 are pushed on draft PR #137.
+Complete Root/native Linux+Windows validation is queued at the exact runtime
+head6f822243 in [run43733133820](https://github.com/Thalpy/Mewtual/actions/runs/43733133820),
+deferring only the agreed10k catch-up cost case. No full-suite sign-off yet.
+
+PR #136 is pushed at9c93a80b, with complete paired validation in progress at
+[run43729697575](https://github.com/Thalpy/Mewtual/actions/runs/43729697575).
+Both native jobs for PR #135/run43723764290 pass; Root jobs are still running.
+
+`chat-v2-governed-add-stage-lifetime` follows PR #135. It separates
+closed snapshot DATA from finite native cuts/Ends, retains the actual End for
+partial SDK continuation, and supports fresh authorization only for an exact
+eligible unentered stage. A private Attempting marker prevents a native-entry
+panic becoming a returned-refusal witness; only actual Busy/Unavailable may
+recover before the primitive, and attempts remain spent. RT36, Add35, the145-case
+Sync owner cohort, two doctests and all3,485 frontend tests pass. Strict RT/Sync
+and native lint, native compilation, formatting, ambient/raw-fs gates and both
+dependency audits pass. Root strict lint retains556 inherited errors; complete
+paired Root/native CI is pending. Static review has no findings. Root Runtime
+cleanup before native waiting, terminal
+partial disposal, actual SavedInvite/Outcome/Intent issuers, Source4 and all
+production Add/transport/joined/projection/acceptance work remain unfinished.
+
+PR #135 is pushed at47814a58 with its three separate commits. Complete paired
+Root/native Linux+Windows CI is running at
+[run43723764290](https://github.com/Thalpy/Mewtual/actions/runs/43723764290), with
+only the named10k catch-up cost case deferred. Chat V2 remains OFF.
+
+The `chat-v2-founder-add-transaction` continuation wires authenticated signed
+Invite/JoinRequest and exact bounded package bytes into the same retained
+governed node. It freezes original L0/file key/policy and tagged V2 routing
+before native entry, samples the original Clock at first admission, and seals
+with the actual merged candidate's key and original RNG. Exact retries keep
+the original time/bytes/Cell. All24 lower MLS tests and21 Sync Add tests pass;
+the131-case cohort, complete MLS crate, strict MLS/Sync lint, native compile,
+full frontend and both dependency audits pass. Read-only review has no
+blocker/high/medium. Root strict lint retains556 inherited diagnostics;
+complete paired Root/native CI remains pending. Root
+covering save, Source4, WelcomeIntent/release, production installation,
+joined Source, transport/projection and real acceptance remain unfinished.
+Chat V2 is OFF. [Current contract](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
+The next library increment adds a separate original `JoinWelcome` purpose and
+freezes its canonical preimage from the actual same-operation inputs. It caches
+raw64 at the retained key primitive and materializes outside writers without
+re-signing, including after lock/lost reply. All34 native-key,13 join-binding
+and26 Add tests pass; strict/downstream checks are in progress. Two LOW review
+findings (scratch wording and an independent wrong-purpose control) are fixed;
+the short re-review has no findings. No Root covering or release authority is
+supplied by that signature. The136-case Sync cohort, native compilation and
+strict native all-target/all-feature lint also pass. The same556 Root lint
+diagnostics remain; paired complete execution is still pending.
+
+A separate native test correction handles the PR #134 SDK-binding assertion:
+real maintenance contention can return pre-effect Capacity before validating
+the deliberately wrong sequence. The fixture now retains that same invalid
+body, proves SDK preparation/installation stay absent and requires eventual
+Unauthorized. Its held-original-row regression exercises real recovery;
+production Admit/Release and deadlines are unchanged. The affected case and
+all9 SDK-custody cases pass. PR #133's separate missing-Finish stall remains
+undiagnosed: its test passes locally, and a failed paired pump now records BOTH
+original endpoints before teardown. That successful run is not a diagnosis.
+Read-only reviews of correction and diagnostics have no findings.
+
+The `chat-v2-governed-current-admission` continuation adds the original mounted4
+physical proof to the actual constructor-selected governed-native Current group
+guard, borrowing its held Root to preserve lock order. All3 new genuine native
+founder/member tests passed, including late missing/replaced/in-place marker
+faults and same-owner recovery. The member20, missing-metadata1 and standard
+three-family control1 cohorts passed, as did format/static/native compile gates.
+Root strict lint retains the same556 inherited diagnostics; complete suites are
+pending. Read-only review has no findings. No Add journal, Source4, production
+SDK installation or activation is supplied by this extra namespace negative.
+[Contract and remaining work](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
+The `chat-v2-founder-governed-runtime` continuation adds a library-only SAME-node
+private Add owner, exact Admission/Header data and a governed ordinary-member
+branch. All13 focused real-MLS tests and the affected123-case cohort passed,
+including two Adds/signing between them with the same Core verifier. Lifecycle34,
+MLS Add17, strict lint for the three edited crates, formatting and ambient passed.
+The mixed-source finding is fixed; read-only re-review has no remaining findings.
+Complete suites remain pending. Actual installation remains test-only. Root covering save, physical
+Current, durable formats and cancellation cleanup are unfinished; connecting a
+Runtime-held Add without cleanup would block UI retirement. Chat V2 remains OFF.
+[Boundary and required integration](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
+The separate native acceptance-fixture correction addresses hosted failures
+in PRs #130/#131: a temporary Capacity refusal was used as an Open-history
+baseline, and positive pre-body intake assumed no lock contention. The test
+helpers now retry only those proven pre-body/read-only refusals within the
+same original deadline and authenticated position. History must match the
+known row/parent/Open/no-action shape before byte comparison. Real held-lock
+controls remain; actual full group pressure is refilled after every wait and
+reproved through body admission. Armed expiry and all negative assertions
+remain single-attempt. All9 PC-intent cases and strict native lint passed;
+full exact-head CI remains pending. This changes no production authorization,
+transport behavior, resource allowance, native deadline or activation switch.
+
+The `chat-v2-governed-native-storage` continuation now implements the private
+same-owner native3-to-governance4 startup and an explicit cold metadata-only
+opener. Native seed2 binds the original index/marker tuple; first-torn cleanup
+is abort-only on the independently pristine baseline. Warm and cold owners
+retain original evidence through their last reads before exposure. Read-only
+review fixes cover opening order, in-place evidence changes, late equal-file
+replacement and payment/drop ordering. All51 focused governance cases, frontend
+3,485, type/build/browser-flow/static gates and all83 native text cases passed.
+Strict native lint passed; Root strict lint retains556 inherited diagnostics
+(prior564), with no suppression. Final routing rechecks4+1+1, both formatting
+checks, native compile/build/startup and both dependency audits passed.
+Draft PR #132 contains the two separate runtime commits. Complete Root/native
+Linux/Windows CI run43703760738 has passed both Root and native suites and the
+frontend at runtime head790e703a. Later
+receipt-only documentation does not change tested code. The one named catch-up
+cost case remains deferred. Real predecessor-binary evidence remains open.
+This creates no Source4, production Add/Header, joined source, archive or
+transport. Chat V2 remains OFF and incomplete.
+[Implementation and acceptance](communication-recovery/CHAT-V2-GOVERNED-NATIVE-STORAGE.md).
+
+Continuation `chat-v2-founder-governed-add` combines the pushed join bindings
+and renderer-retirement correction. The completed MLS Add now has a two-phase
+exact-original receiver handoff and deferred opaque old-graph disposal. The17
+focused cases, complete MLS crate, five final doctests, strict crate lint,
+native check, frontend3,485, static gates and both audits passed; final review
+is clear. Complete Root/native CI remains pending. No Root consumer, production Add or Welcome
+publication is implemented. Chat V2 remains OFF and incomplete.
+[Current boundary and gaps](communication-recovery/CHAT-V2-ADD-OWNERSHIP.md).
+
+Active continuation is `chat-v2-production-join`, based on PR #128 `ad0af06b`,
+in the SAME isolated `target/cv2-native-text-history` worktree. Independent
+Core invite/request/Welcome DATA codecs and links are implemented under
+validation; no native or transport consumer is registered. Replication727unit/
+52integration, frontend3480, native check and both audits passed. The exact
+named cost case remains deferred; strict replication lint passed and full
+Root/native CI remains pending.
+Root strict Clippy retains564 inherited failures. Read-only design/diff reviews
+are clear after a cross-root test fix.
+Production Add/live founder/joined sources, namespace6/combined opener,
+durable archive, transport and Chat V2 acceptance remain open.
+[Codec scope/evidence](communication-recovery/CHAT-V2-JOIN-BINDINGS.md) ·
+[Owning production vertical](communication-recovery/CHAT-V2-PRODUCTION-JOIN.md).
+
+Continuation `chat-v2-native-found-ownership` fixes Native Found busy ownership
+across lock/reauthentication and permanently retires destroyed App components
+before other cleanup. Old timers/send completions cannot overwrite a remounted
+App's journal. All3,485 frontend tests, type checking, build, the14 focused
+cases, Native remount browser and all10 existing flows passed. Exact-head
+complete Root/native CI remains pending. Chat V2 remains OFF and incomplete.
+[Lifecycle boundary and evidence](communication-recovery/CHAT-V2-UI-RETIREMENT.md).
+
+Current continuation is `chat-v2-native-text-session`, in the same isolated
+`target/cv2-native-text-history` worktree, based on PR #127 `47b44308`.
+Warm native listing, real App local creation/send/history and exact critical4
+retry scheduling are implemented. Native83 and final frontend3480 passed.
+Native lint/check/build/
+startup, frontend check/build, Native and existing browser flows, audits and
+static gates passed. Exact-head complete Root/native CI remains pending.
+Root strict Clippy retains564 inherited failures. Chat V2 stays OFF and
+incomplete. This paragraph supersedes older “frontend not wired” checkpoints.
+[Current contract, evidence and remaining scope](communication-recovery/CHAT-V2-NATIVE-SESSION.md).
+
+Active continuation is `chat-v2-native-text-continuity`, in the SAME isolated
+`target/cv2-native-text-history` worktree, based on pushed draft PR #126
+`bea882ac`. Critical4 frontend persistence/strict retry DATA and paired native
+validation are implemented under final validation. Frontend3,454 passed,
+static0/0/build38.34s/real flows passed; native-text75 and outer envelope1
+passed, as did strict native Clippy2m49s. Audits, full current suites and final
+native build/check/startup remain pending. No producer is wired.
+The preceding history final4 regressions passed (16.54s), and strict native
+Clippy passed (1m37s); explicit native check passed (2m13s). Chat V2 stays off.
+[Current scope](communication-recovery/CHAT-V2-NATIVE-CONTINUITY.md).
+
+Active continuation: `chat-v2-native-text-history`, based on PR #125 runtime
+`9c16563b`. Native own-history dispatch and final installed-object reply checks
+are under validation. All 71 native-text cases passed (163.22s), including
+stronger replacement and real roundtrip cases; Root response-credit3 passed.
+Final review's test-only whole-close/Drop-observation extensions and native
+strict lint/check remain in the focused queue. The compiled registry332/4
+fixture inventory pins normal328 in its guard; static gates passed.
+PR #125 full CI run 43673752928 is still running, with frontend tests/type/build
+passed in its Linux job. No current full-suite success is claimed yet.
+Chat V2 stays off and incomplete. [Scope](communication-recovery/CHAT-V2-NATIVE-HISTORY.md).
+
+CI follow-up: PR #124 full run 43658076181 completed with Linux Root and both
+native jobs passing; Windows Root failed one Sync retirement classification
+race (Capacity versus Unauthorized). The separate correction classifies only
+Capacity after the same irreversible successor close, after actual cleanup.
+The new deterministic metadata-boundary regression and all 26 transfer tests
+passed; the original concurrency assertion stays strict. A current full run is
+still required. Native build/startup and real frontend flows for 4183bcf9 passed.
+Chat V2 remains disabled and incomplete.
+
+Active continuation: `chat-v2-native-text-dispatch` in its isolated worktree,
+based on PR #124. The actual tagged table, native founding and plain local send
+are wired behind the OFF switch. Four initial founder cases passed in 29.85 seconds,
+including actual saves in both funded native contexts, retry/conflict, old
+unpolled invocation, lost reply and whole-close/publication ordering. Table4,
+close-refusal2, retained-output drainage1 and stopped-incarnation1 also passed.
+All 62 focused native-text cases passed in 229.12 seconds, including the later
+closure-payment repair and native send/close/IO races. The final probe-only
+atomic-observation change still awaits execution. Legacy-box cleanup compiled
+under strict native Clippy (all targets/features, 3m40s) and native check (1m17s).
+Frontend 3,446 passed (124.90 seconds), Svelte 0/0, build 47.53 seconds, both audits and
+static gates passed. Complete current Root/native suites and startup remain
+pending. No frontend integration, own-history route,
+usable Leave/Retired, joined source, transport, projection or cold operational
+restore is complete. Chat V2 stays off and incomplete.
+Native close now bypasses Legacy's UI/table-owning freeze barrier, publishes
+irreversible bootstrap closure before fallible probes, and retains fenced rows
+until actual Source/SDK/physical drainage. Final save preparation uses TRY-only
+persist/UI/Store/table admission, with genuinely checked owned native custody
+through IO and payment behind runtime restoration. Read-only reviews found one
+MEDIUM closure-capture lifetime gap; the concrete whole-input work wrapper and
+fee-tailed mapping repair are statically clear. New probes remain pending.
+[Current scope](communication-recovery/CHAT-V2-NATIVE-DISPATCH.md).
+
+`chat-v2-native-text-operations` continues in the controller worktree on a new
+branch. The complete affected source cohort passed all 78 cases (zero failures
+or ignored), including four original-runtime selector regressions, 12 genuine
+member prepare/admit cases and five original-runtime history cases. Broader
+gates are pending; the strengthened exact receipt regression passed separately
+(one case, 8.94 seconds). Both dependency audits, formatting and static self-checks
+passed. Native check (1m39s) and strict native Clippy (3m30s) passed; Root strict
+Clippy retains 564 existing errors. Runtime commit 502b565e is pushed in draft
+PR #124, with full CI run 43658076181: native Linux/Windows passed; Root on both
+platforms is still running. The validation follow-up changes
+documentation only; Chat V2 remains off and incomplete.
+A real Entry payment-tail regression failed before its fix
+and passed afterward. Root member saving now reaches the retained NativeRequired
+driver, with actual guard/notification ordering tests. The checked native
+factory, typed row/dispatch and stored-message integration remain next. The
+internal bounded all-original reader passed all 38 outbox cases, including six
+new regressions. The actual original-host reader also passed in the source
+cohort; it does not sign or expose unsaved originals. Chat V2 is
+still off and incomplete.
+[Current scope](communication-recovery/CHAT-V2-NATIVE-TEXT-OPERATIONS.md).
+
+Native caller requirement found during dispatch design: final preparation owns
+counted physical Source work. It must not await the UI commit guard that Legacy
+whole-close holds while draining Sources; use fail-fast owned acquisition and
+drop the whole preparation outside guards before waiting/retrying. The native
+factory remains absent; no deadlocking caller is enabled by this checkpoint.
+
+Native canonical Sources, paired warm installation and whole-close composition
+are under validation. Original bootstrap work, retained plans, Source/SDK/TCP,
+metadata/UI work and actual facade disposal are separate obligations. Chat V2
+stays off; native commands, joined/Add sources, archive/transport/projection/cold
+restore and combined acceptance remain open.
+[Current contract and pending checks](communication-recovery/CHAT-V2-NATIVE-SOURCE-CONTROLLER.md).
+
+Runtime checkpoint `d4496bdd`: native-text 51/51, Root identity 1/1 and frontend
+3446/3446 passed, as did native lint/check/build/startup, UI flows, formatting,
+static gates and both audits. Root strict Clippy retains 564 existing failures;
+full CI run 43643841874 passed Root on both platforms and native Linux (one
+user-deferred slow case). Native Windows failed one SDK-release
+integration assertion at voice_handoff/integration/sdk.rs:267, followed by 23
+fixture-poison failures. The first failure is under diagnosis; no green full
+native Windows acceptance is claimed for this checkpoint.
+This does not complete or enable Chat V2. The follow-up is docs/test-comment only.
+
+Original metadata/authentication and UI-state work now have a distinct closed
+drain under validation. Nine focused cases passed, including a post-CAS capture
+wakeup race fixed after review. This is separate from Source/SDK/TCP and actual
+facade disposal; native close integration and Chat V2 remain unfinished.
+[Contract and pending checks](communication-recovery/CHAT-V2-NATIVE-WORK-DRAIN.md).
+
+Native text creation and retirement now have owning two-phase work captures
+under validation. Admitted preparations participate in original closure even
+when no row exists. Ten new regressions and all 56 affected source tests passed;
+the native controller/commands
+and wider Chat V2 remain unfinished and disabled.
+[Contract and pending checks](communication-recovery/CHAT-V2-NATIVE-SOURCE-CAPTURE.md).
+
+Whole native text Source retirement is under validation. Cleanup now separates
+original key work, whole SDK/body destruction and original TCP drainage, retaining
+the same canonical evidence across lost workers. All 46 affected source tests
+passed; adversarial review is clear. The native consumer and wider
+Chat V2 remain unfinished and disabled.
+[Contract and pending checks](communication-recovery/CHAT-V2-NATIVE-SOURCE-RETIREMENT.md).
+
+Native text transport now retains actual TCP key-task custody through teardown.
+The affected networking package passed 208 tests and strict Clippy; the Root
+source/admission cohort passed 37 cases. Native commands, canonical
+retirement, joined sources and Chat V2 acceptance remain unfinished and disabled.
+[Scope and evidence](communication-recovery/CHAT-V2-NATIVE-TCP-LIFETIME.md).
+
+Native text authoring is adding the original device/network/whole founder and
+Native4 activation dependencies. The current source cohort passed 33 local
+regressions; broader gates and the actual native command consumer remain open.
+Chat V2 stays disabled and incomplete. [Scope and pending acceptance](communication-recovery/CHAT-V2-NATIVE-AUTHORING.md).
+
+Native lock snapshots now have bounded synchronous DATA custody, original-mount
+retry, exact close acknowledgements and response-bound warning receipts under
+adversarial validation. Chat V2 stays off; operational text authoring and
+acceptance remain unfinished. This continuation supersedes the older snapshot
+status paragraphs below. [Contract and pending evidence](communication-recovery/CHAT-V2-NATIVE-UI-SNAPSHOTS.md).
+
+## Prior disabled checkpoints (before lock-snapshot integration)
+
+Original authenticated-mount binding for native ordinary UI-state IO is under
+validation. Same-root reauth retains canonical metadata; live foreign targets
+refuse. Native lock snapshots/pending retry are still unimplemented and V2 is off.
+[Contract and pending evidence](communication-recovery/CHAT-V2-NATIVE-UI-TARGET.md).
+
+Ordinary native UI-state IO is implemented and under validation; Chat V2 is off.
+The same original physical slot/lane remains owned through response or caller
+loss. Native lock snapshots, original-target pending retries and authentication
+continuity still need implementation before this path is usable.
+[Contract and pending evidence](communication-recovery/CHAT-V2-NATIVE-UI-STATE.md).
+
+## Native authentication slot continuation (14 November, under validation)
+
+The real native verifier now returns a paid original cached-negative Check after
+releasing its MetadataWork slot. Root auth4/revocation5/native19 and frontend3441/
+check/build passed, as did native strict/check/build/startup/flows, both audits
+and static gates. Root strict fails582 unfinished-App errors; full Root/native CI
+remains pending. No typed UI persistence, operational send or completion is claimed.
+[Contract](communication-recovery/CHAT-V2-NATIVE-AUTH-CHECK.md).
+
+## Native text UI lifecycle continuation (14 November, validation pending)
+
+Original-batch coalescing, failed-task original-counter recovery, prelude ordering
+and unconditional close fencing are implemented on the disabled native path.
+Root focused12, native focused19 and frontend3441/check/build passed. Read-only
+adversarial review is clear; actual TCP regression, full Rust/static gates and
+build/startup remain pending. Chat V2 is OFF and not complete.
+[Detailed contract, tests and remaining work](communication-recovery/CHAT-V2-NATIVE-UI-LIFECYCLE.md).
+
+## Native text warm factory (14 November; validation in progress, off)
+
+The actual main-window Tauri unlock path now has a trusted off-by-default native
+consumer for the opaque selected3 vault. Fresh storage keeps one original
+session/key/mount through critical activation and namespace upgrades. Native
+checks real ACL, original generation, actual secret and same Host/physical
+liveness; it caches completed metadata locked when a later lock wins. A foreign
+wrapper, empty secret or stale invocation cannot authorize that retained owner.
+
+This is mount/authentication only. UI continuity, SourceRegistry, retained
+native device/transport/whole creator, member command dispatch, cold restore,
+joined Add/source/archive, transport, projection/admin and combined acceptance
+remain unfinished. Do not enable Chat V2 or claim user-ready text messaging.
+[Exact scope, pending checks and limitations](communication-recovery/CHAT-V2-NATIVE-WARM-FACTORY.md).
+
+## Wire compatibility and pressure evidence (14 November; Linux/Windows CI passed)
+
+The new old/current Windows failure exposes predecessor retry amplification:
+1,129 topics adopted, target absent and 53,783 signing attempts. Current-only
+source correction does not repair that old binary. The fixture now separates
+phased old/new wire compatibility from a stronger current/current pressure test.
+The latter proves 128 original NoPeers holds, an actual second RR before any
+subscription release, progress through 2,000 subscriptions, receipt from the
+original 128 set and a non-vacuous 256..=1,280 signing-work bound.
+Both scenarios pass locally and on both OSes in CI43561112497 at66b9a2f3;
+the local current client records 256 attempts. The same
+pressure contract rejects the actual pinned predecessor at the signing bound.
+The hold-tuple ordering race found in review is fixed with Release/Acquire.
+A separate post-original-receipt RR acknowledgement now prevents premature
+completion while the client's retry batch is still running. Both endpoints
+require it before the signing-range check; both real scenarios pass afterward.
+No time limit or receipt assertion was relaxed. Legacy startup resilience,
+complete-original delivery, broader fairness and full Chat V2 remain unproved.
+[Exact contracts and evidence](communication-recovery/NETWORK-SECURITY-MIGRATION.md).
+
+## Network subscription retry continuation (14 November; validation ongoing)
+
+Fresh `939ea602` Windows old-peer CI43553131480 failed after genuine QUIC/RR; both
+endpoints timed out on gossip. The earlier passing pair does not resolve this
+run. Separately confirmed actor amplification is corrected: Subscribed now
+retries only exact-topic held originals; unrelated/invalid/uppercase aliases
+cannot cause wholesale re-signing. Periodic retries, limits and deadlines remain.
+All 177 Net tests and strict affected lint pass. Actual old/current process
+interop passes locally with new bounded scalar diagnostics and unchanged
+assertions. No target-subscription wait was added to the probe. No claim that
+this proves the CI cause, broader startup fairness or full Chat V2 is made.
+See [scope and evidence](communication-recovery/NETWORK-SECURITY-MIGRATION.md).
+
+Earlier combined `4935e25` full native/checks pass on both platforms; Linux
+frontend 3,441/check/build pass. Windows Root passed; Linux Root hit its outer120-minute job bound while
+individual tests progressed. It is not a full Root pass. Member-storage
+43553131305 passes both platforms at939ea602. Final checks for the new runtime
+correction and native/joined/transport/UI Chat V2 integration remain open.
+
+
+## Combined network/native checkpoint (14 November; full CI running)
+
+PR113 integrates the separately reviewed native fixture correction from PR109.
+The two exact PC-close/media scenarios pass on the new stack(6.45s and8.42s).
+Actual native rebuilding passes(4m13s), followed by the real application startup
+gate. No startup panic or provider-selection failure occurs. Network compatibility
+CI43547079658 passes on Linux and Windows, including exact6/9/159/174/3 cohorts,
+archive verification and the genuine old-peer process gate. Complete shipping
+validation43547127334 is running; the single agreed slow cost case is deferred.
+
+The member-storage lane stopped with22 passing tests where its old guard expected
+19. History identifies the three added genuine JOIN regressions; all original19
+remain, with no ignored test. The unchanged broad Windows member_save selector
+likewise now has the original19 cases plus one native whole-Host case. The strict
+guards now expect22 and20 respectively. Actual local cohorts pass(183.15s and
+144.56s); the guard self-test and read-only review pass. This changes inventory,
+not tests or their contracts. Other strict-lint-blocked lanes remain red. Chat V2
+is still off; actual native, joined, transport and UI integration remain unfinished.
+
+## Network security migration (14 November; validation pending)
+
+All five libp2p manifest edges and both locks move to0.57.1, actual production
+gossipsub0.50.1 and Hickory0.26.3. The old DNS exceptions are removed. Both
+shipping audits pass(advisories, bans, licences, sources); no new waiver. Finite
+2000/2000 counts and explicit65536-byte payload/SUB-control caps preserve topic
+capacity; the latter increases the new16KiB default. A checksum-verified full
+vendor corrects oversized initial hello and declared-frame/coalesced-frame
+handling while retaining upstream PRUNE/count protections. The original priority
+queue is unbounded; no total memory bound is claimed.
+
+Pass: Net174(0.93s), RT67(0.01s), vendor159(8.80s), direct vendor6/protocol9,
+both dependency audits, formatting, ambient/raw-fs and cleanup self-test. The
+complete frontend3441 tests pass(118.37s), check has0 errors/warnings and build
+passes(51.69s). Actual Windows native production checking passes(7m05s).
+Read-only design/diff review and re-review found no remaining blocker/high/medium.
+
+QUIC unavoidably moves to upstream explicit AWS-LC/hybrid TLS. WebSocket remains
+explicit ring, with no new global initializer. Fresh-process provider order,
+real WS TLS trust/name/DNS and wrong-peer QUIC regressions pass. A real pinned
+0.56/0.49.5 binary exchanges both RR directions and near 60 KiB signed gossip after
+both queue2000 subscriptions; the last topic is observed, not every remote slot.
+The controller proves a live path before old Mesh Drop, then actual withdrawal
+and exact Unreachable while the old process stays alive. Binaries, unchanged old
+HEAD/lock and identical helper source are checked; both owned children always
+retire, even if the first cleanup fails.
+
+Earlier overlapping-bulk probes failed, including one current/current control;
+the production cause remains unknown. The passing functional gate negotiates RR
+before bulk and establishes no sustained-load fairness. Root strict lint fails
+with610 existing App errors; no suppression or public dead-code workaround was
+added. Full shipping suites, Linux native build and startup remain open. Native commands,
+joined sources and final Chat V2 acceptance are unfinished. Chat V2 is off.
+[Design and primary sources](communication-recovery/NETWORK-SECURITY-MIGRATION.md).
+
+## Private Legacy invite refresh (14 November; validation pending)
+
+The owning normal3 metadata path now stores a Legacy invite using the same
+physical cell, revision, retained claim/IO and outgoing debt as Rename. A closed
+tagged request retains every field and is bounded before IO; its maximum64KiB
+payload is explicit in the existing2MiB control invoice, without a fee increase.
+Warm proof derives the authenticated successor kind. Both IO constructors and
+cold inspection accept exactly Rename or Refresh; cleanup rules remain closed.
+
+The initial nine focused regressions pass (50.59s). Both LOW review follow-ups
+are fixed and re-reviewed clear; all 98 combined lifecycle cases pass (442.83s).
+The compiled registry contains 207 ordinary cases plus 2 explicit compatibility
+cases. All 3,441 frontend tests, Svelte checking and the production build pass. The real4f45d586 predecessor gate now
+has11 fixtures, including clean refresh success and unchanged Refresh-Stage
+refusal. The actual pinned predecessor passes all 11 x 3 opener probes (15.02s), and the
+head recovers all 11 round trips (13.83s). Native production checking compiles
+this actual worktree and passes (1m52s). Strict Clippy fails with 610 errors,
+including unfinished native consumers; the audit reports 13 vulnerabilities.
+No suppressions or new exceptions were added. Full suites and integration remain
+required. Chat V2 remains disabled; actual native/joined/transport/UI
+consumers and the other lifecycle operations are still unfinished.
+[Scope](communication-recovery/CHAT-V2-NATIVE-INDEX3-INVITE.md).
+
+## Private finite physical3 work (13 November; validation in progress)
+
+The actual selected3 owner now closes admission separately from one fixed-slot
+finite physical capsule. It retains the original mutex cell/Current/handler;
+capsule destruction drains actual physical custody before releasing its slot.
+Completed debt independently keeps its claim and finite session until its own
+files/buffers retire. No public Store/Current or SDK/native grant is added.
+
+Design review also found that `cached_store()` constructed an observer/Authority
+at final cached edges. The genuine Current regression fails before the fix
+(count1 versus0, 1.97s) and passes after the direct original-atomic check (1.83s).
+Seven new physical cases plus the existing physical-session control pass
+(eight total, 22.66s); expanded assembly-unwind coverage passes both edges
+(10.82s). The independent known-negative capture case passes (8.56s), as does
+the coherent87-case run (364.97s). Native production checking compiles this
+actual worktree and passes (2m17s). The compiled registry count is196 ordinary
+cases plus2 explicit compatibility cases; focused CI adds the cached Current
+regression. Static checks and actual design/diff/re-reviews are clear. Strict
+Clippy still fails604 errors, including the unfinished consumer;13 dependency
+findings remain open, with no exemptions added. Full suites, actual native
+consumers and scoped Legacy/Source/SDK work remain open. Chat V2 is off.
+See [the custody contract](communication-recovery/CHAT-V2-NATIVE-INDEX3-PHYSICAL-WORK.md).
+
+## Private normal3 metadata WAL (13 November; validation in progress)
+
+The first owning normal3 producer retains one exact local-name CAS, sealed
+candidate, original claim and IO in a real mutex cell. Uncertain retry does not
+draw RNG; actual post-effect unwind poisons the cell until cold reopen. Completed
+debt keeps the claim active through file/buffer/session retirement. The final
+nested acknowledgement releases it outside guards. No Handler/cold cycle or new
+invoice is introduced.
+
+Strict3 cold recovery retains the same original inventory through Rename or
+qualified cleanup and common opening. Authenticated unsupported/future records
+are preserved. The new writer needs a dedicated own-Stage exclusion: reusing
+the older declaration helper made all5 first end-to-end tests fail. That
+regression is fixed, and those5 now pass (61.67s); the3 classifier cases also
+pass (11.42s). Review additionally found a late marker/catalog object proof gap;
+the check, replacement regressions and cleanup cuts now pass in8 cases (82.36s).
+The actual pinned cfd837a7 predecessor now passes9×3 probes (14.18s), and the
+head verifies all9 round trips (10.18s). The coherent79-case lifecycle run passes
+(357.93s), including the later barrier-observation strengthening. Three internal
+items were then narrowed back to Lifecycle visibility, fixing4 new private-type
+lint errors; all8 affected cases pass again (76.47s). Strict Clippy still fails
+600 errors and the actual audit still reports13 vulnerabilities, with
+bans/licenses/sources passing. No suppression or new exemption was added. The actual
+compiled registry cohort contains188 ordinary cases plus2 explicit ignored
+compatibility cases; its CI count guard is updated. All3,441 frontend tests,
+Svelte checking and the production build pass. Static adversarial re-review,
+formatting, ambient, raw-fs and script self-checks pass. Full Root/native and
+strict lint/dependency gates remain open.
+
+See [the storage contract](communication-recovery/CHAT-V2-NATIVE-INDEX3-WAL.md).
+Native command/backend consumers, cold SDK source and joined provenance remain
+unfinished. Chat V2 is off. This is not full-suite or final acceptance evidence.
+
+## Private owning index3 upgrade (13 November; validation in progress)
+
+The next storage increment owns the genuine index2 allocation, both distinct
+catalog claims, exact upgrade I/O and the concrete handler3 installation. An
+uncertain attempt retains its original work; an installed handler is recognized
+on retry rather than reparsed as2. The final handoff drains one whole retirement
+bundle before exposing the opaque DATA owner, with both real payments retained.
+Close-first unwind and an original physical-work lease cover file retirement.
+
+The strict3 cold opener retains original native files and independent marker
+proofs across the common Current/JOIN opener. Its closed inventory-bound catalog
+proof distinguishes duplicate from required successor. First-torn cleanup that
+leaves2 refuses this opener. Missing selected output is never recreated. Normal3
+WAL, real predecessor-process gates, native commands/backend composition and Chat
+V2 activation are still unfinished.
+
+All65 coherent focused lifecycle3 tests pass before the final error-owner boxing
+(411.52s), including six admission,
+seven owning, four strict-cold and the genuine shared-JOIN catalog-role case.
+Review found and corrected final-unlink completion, admission and destination
+unwind, cold proof continuity, and required-successor handling. Final actual-diff
+re-review is clear. Exact compiled registry selection is174; the genuine3 JOIN
+role is a separate1-case cohort. Formatting/ambient/raw-fs/exact-count checks
+pass. After boxing the same refused owners outside writers, all seven owning
+cases pass again (44.14s); no suppression was added. Strict Clippy reports597
+errors before those two large-error fixes, including inactive APIs, and the
+actual dependency audit reports13 vulnerabilities. Full validation and strict
+sign-off remain open. The separate native fixture PR106 focused Linux/Windows run
+43489175508 passes. Broader prior native CI exposed another maintenance-fixture
+Capacity assumption, still open; no specific lock or production deadlock was
+established. Exact-head full suites, strict Clippy and dependency sign-off remain
+required. Chat V2 stays disabled.
+## Original PC close contention (14 November; validation pending)
+
+Full native CI43531747636 passes on Windows. Linux has1041 passing and4 failing
+cases: the first refusal is the exact SDP-result fixture's direct original
+`close_pc` unwrap; the other3 are the recovery fixture's failed-shutdown exclusion.
+The SDK constructor correction remains in place. No production fault is inferred
+from this newly identified nonblocking close refusal.
+
+Every Capacity return in `close_pc` precedes `request_close`: index/row contention
+or genuine undrained media prevents closure. The fixture now retains the same
+parent, Session and decoded PC request through at most32 attempts with the
+existing Clock's10ms delay. Persistent media/refusal still fails; success and
+non-Capacity outcomes never become another attempt. No result, mint, allocation,
+SDK Release or authority generation is repeated.
+
+A forced actual-parent-mutex observation proves closed/action-closed flags stay
+false before the positive control. It drops the guard before assertions. The
+existing genuine-admitted-media refusal and later drainage checks remain intact.
+The exact formerly failing scenario passes locally(5.78s), as does the real
+queued-actor/media/SDK-close control(6.18s). Native production checking passes
+(1m33s), as do native formatting and diff checks. Read-only design/diff review
+and short re-review are clear; the compile finding was fixed without adding
+Debug to private proof types. Exact-source full native validation remains open.
+Chat V2 is off.
+
+## SDK preparation contention (13 November; full rerun pending)
+
+Full native CI43522590967 passes on Windows. Linux has1027 passing and18 failing
+cases: the first failure is `integration/sdk.rs`'s direct `begin_sdk` constructor
+unwrap on `Protocol(Capacity)`; the other17 are the fixture's explicit failed-
+shutdown exclusion. This is a local preparation refusal before SDK allocation,
+attachment or publication, not an SDK Release result.
+
+The fixture retains the same decoded request, original parent, Context/Route and
+PhysicalHold through at most32 constructor attempts, sleeping at most10ms through
+the injected Clock between attempts. Only exact protocol Capacity retries. Every
+attempt repeats production current-custody checks; successful/absent preparation
+and every other error return immediately. No preflight, physical-position capture,
+allocation, attach, final admission or Release is wrapped in this retry.
+
+A genuine parent-state mutex oracle now precedes recovery in all three fixture
+constructors. It calls the actual constructor under that lock and proves the
+preparing/installed flags remain false and the same Session counts unchanged.
+The guard drops before assertions or unexpected preparation destruction. Global
+pool counts are intentionally not compared while unrelated maintenance is active.
+
+The formerly failing exact scenario passes locally(6.49s), as do both real
+closing-fence scenarios(13.96s), native production checking(1m31s) and formatting.
+Read-only design and actual-diff review are clear. Linux full native rerun remains
+required; the earlier Linux failed-media timeout's root cause remains unresolved.
+No Chat V2 activation or final native acceptance is claimed.
+
+## Native acceptance follow-up (13 November; execution pending)
+
+Focused CI43505629044 reached new later failures after the initial SDP/discovery
+corrections. Windows refused the second exact collected-history lookup with
+Capacity. That nonblocking lookup can contend even after its first success.
+The fixture now retries only the same Target on Capacity under its original
+deadline, retaining all proof/absence/tombstone assertions. A deterministic
+probe holds the actual entry mutex and proves that same refusal before retry.
+No SDK Release or production authorization retry was added.
+
+Linux's failed-media preservation case timed out while the original parent had
+no adopted key. Its earlier diagnostic discarded the actual selector at that
+absence. The test-only snapshot now retains original parent/Claim/key flags
+and the bounded original confirmation-child roles/status, including contention.
+It uses nonblocking locks and formats after unlocking; no receipt, key, payload
+or owned result is exposed. Genuine child-reservation regressions cover foreign
+filtering and a held original child mutex without starting work.
+
+Read-only actual-diff review and re-review are clear. Exact-source focused
+CI43518027838 passes on Linux and Windows:7 real scenarios, the original deadline
+regression,6 command-ACL cases and native checking. Linux also runs the full
+frontend/check/build gates. The2 diagnostic regressions pass locally; the focused
+runner now executes their exact2-case cohort before the7 scenarios. Local runs
+also pass the exact history-retirement case (38.07s), failed-media preservation
+case (66.70s) and native production check (1m07s).
+
+Linux's earlier intermittent timeout was not reproduced in these runs; adding
+diagnostics does not establish its cause or a production fix. Full exact-source
+native validation remains open. Chat V2 is off.
+
+## Native fixture contention follow-up (13 November; execution pending)
+
+Combined parent run43492056361 reports1027 passed/16 failed on Windows native.
+The first failure is candidate preparation in `integration/sdp_rows.rs`: its
+nonblocking parent/index checks legitimately return Capacity before a Candidate
+or publication. The later failures are the recovery fixture's fail-stop cascade.
+An earlier Linux failure at `maintenance/tests.rs` likewise assumed an admitted
+discovery worker must succeed. Neither log identifies the winning lock or proves
+a production deadlock or authorization bypass.
+
+The test-only correction retries the same three SDP candidate preparations under
+their original Ready deadline, only on Capacity. A real parent-row lock oracle
+checks no new row/outcome/action and the same original Seal funding. Begin,
+RetryMismatch, SDK Release and actual actor/drop-order assertions remain intact.
+
+Discovery retries keep original-request DATA from the actual native Worker and
+completion: query cursor until selection, then a sticky exact actual selector
+before any effect. The whole completion drops before re-entry, with one shared
+10-second observer bound and32 attempts. The production Cursor is neither reset
+nor advanced by retries. An additional real map-held refusal and the existing
+alternate-peer/indexed-sibling assertions remain. A real refused completion plus
+ManualClock tests the sleep-to-deadline edge and actual native-position release.
+The cfg(test) metadata is included in the existing actual layout measurements;
+no fee, stack or timeout waiver was added.
+
+Read-only actual-diff review and re-review are clear. Formatting, diff and exact
+runner self-checks pass. Local execution passes the deadline case (1.73s), all
+nine native-worker cases (0.29s), the actual SDP/SDK-order scenario (7.93s) and
+the actual discovery/alternate-peer scenario (51.51s). Native production checking
+passes (2m01s). Focused Linux/Windows run43505629044 remains in progress. Its
+runner requires seven real scenarios, the deadline regression and six ACL cases;
+it does not replace full suites or provide physical audio/network evidence.
+
+## Private index3 physical roles (13 November; owning handoff still open)
+
+The private fixed3 I/O now holds the actual original marker pair, files,
+directories and mount negative. Full independently paid inventory precedes
+capture. Warm preparation also retains its earlier expectation, and last-target
+proofs reject replacement even when bytes match. Old1/2 limits and openers stay
+unchanged. No production opener/handler3 or dual-claim handoff selects3 yet.
+
+The first-torn verifier authenticates every old2 role at any supported generation
+and binds its cleanup proof to the same inventory. Short claims/actual MAC
+failure may retire only attributable work; authenticated-invalid/future intent,
+oversized input and unknown JOIN stages are preserved. Empty fence removal is
+covered before seed unlink on every retry. A complete authenticated ordinary
+JOIN relation is preserved byte-for-byte while only the claim is removed.
+
+Focused execution passed46 of47 cases (210.05s); its sole failure was a fixture
+mistaking the persistent JOIN fault switch for a consumed one. After correcting
+that assumption, the real interrupted-JOIN case passes (54.79s), including the
+native2 version fix, and the actual repeat-fence-barrier case passes again
+(11.06s). Coverage includes all14 owned write cuts, reconstructed mixed roles,
+last-target replacements, same-files reopen, foreign authenticated markers,
+first-torn boundaries, unlink cuts, later index generation and proof transplant.
+This is not actual cold-opener, predecessor-binary, native command or SDK proof.
+
+Read-only design/diff/re-review is clear after the barrier-test and documentation
+corrections. Native compile passes (1m56s), as do formatting, ambient, raw-fs and
+exact-count self-checks (the compiled registry cohort contains157 cases). The
+browser flow gate passes with tracing outside the initial sandbox failure; the
+first attempt closed CDP before any app assertion. Strict Clippy fails625 errors
+and the actual dependency audit reports13 vulnerabilities; bans/licenses/sources
+pass. No exemptions were added. Full exact-head Root/native/frontend CI remains
+required. No owning3 release, scoped
+Legacy backend, native producer, joined-source transport or UI activation is
+claimed. Chat V2 remains disabled.
+
+## Native key-adoption probe contention (13 November; execution pending)
+
+Full run43470275852 passed Linux native/frontend checking, but Windows native
+reported1031 passed/12 failed. The initial failure was an invalid-claim probe
+requiring immediate Unauthorized while the real nonblocking ledger can first
+return authenticated Capacity. Eleven later failures came from the fixture's
+intentional fail-stop guard after that panic. No authorization bypass was found;
+the log does not identify which local lock was contended on that attempt.
+
+The test-only correction retries only authenticated Capacity under the existing
+32-attempt/10ms policy, preserving request body, route, row and original deadline.
+The held-UI contention probe remains single-attempt. All exact Unauthorized,
+receipt, release-history and Root-observer fencing assertions remain. A new
+oracle holds the actual row-state mutex and proves wrong-claim recovery returns
+Capacity without creating custody; the framed request after release must still
+obtain Unauthorized and leave no key. The correct original adoption follows.
+
+No production locking, wire or authorization behavior changes. Read-only actual
+review/re-review is clear. Native formatting/diff checks pass; runtime execution
+is pending. The exact failing scenario is added to the five-case focused native
+CI lane; the complete native suite is still required. Existing direct foreign-
+session probes outside these framed retries remain unchanged. Chat V2 is off.
+
+## Native namespace version during JOIN (13 November; validation in progress)
+
+A real index2/JOIN regression exposed that the shared catalog writer emitted
+descriptor2 under entry version1. Its configured parser refused the candidate
+before IO, blocking the first saved JOIN. The parser now retains the actual
+validated version, and the common writer checks and conserves the complete
+version/payload pair. Closed descriptor acceptance remains unchanged.
+
+The new genuine installation-to-upgrade-to-JOIN-to-cold-open test failed before
+the correction (1 case, 7.37s). It covers save, pause/resume, execution migration,
+arming, exact5/7 descriptor retention, explicit version2 and unchanged-tree cold
+reopen with NeverRng. Two narrow encoder-pair tests cover known versions and
+inconsistent/unknown pair refusal; the existing real version1 control is retained.
+Post-fix execution passes both encoder cases and the genuine index2 lifecycle
+(10.14s); the unchanged genuine version1 control also passes. Formatting, ambient,
+raw-fs, exact-count self-check and diff checks pass. Read-only actual-diff re-review
+has no remaining findings. Exact-head full CI is pending. Strict Clippy debt and
+dependency findings remain open; Chat V2 stays disabled.
+
+## Native index upgrade output barrier (13 November; validation in progress)
+
+Adversarial inspection found that a real marker-rename failure cached the rename
+before its directory barrier. Warm retry and cold mixed-tuple recovery could then
+select catalog2 without covering that output again. The writer now flushes the
+exact selected index/marker handles and held root, verifies the complete intent
+and tuple, and only then writes a nonempty catalog Stage on every preselection
+attempt. Existing post-selection barriers remain unchanged.
+
+Both actual marker-rename regressions failed before the correction and pass
+afterward (2 cases, 6.80s). The cold case goes through the real opener with
+NeverRng. All19 upgrade cases also pass (187.22s), including every warm/cold cut
+and missing-selected-output refusal. Formatting, ambient dependency, exact-count
+self-check and the raw-fs gate pass. Read-only final actual-diff review is clear
+with no remaining findings. Exact-head full CI is pending; neither this fix nor
+the prior green baseline enables Chat V2. Strict Clippy and the thirteen remaining
+dependency advisories are still open. The new index3 writer needs the same rule
+and remains a separate unfinished component.
+
+## Compatible QUIC patches (13 November; validation in progress)
+
+`chat-v2-quic-security-patches` is based on1ad844c8/PR102. Both application locks
+select quinn-proto0.11.19 and quinn-udp0.5.16; Root also selects libp2p-quic0.13.1,
+already present natively. Each workspace retains its original Quinn version and
+all unrelated dependency blocks/edges. Both scoped graphs pass locked resolution.
+Production feature evidence includes actual Net/native-App selections, Tokio,
+rustls-ring and Root's new bloom dependencies. No manifest island/ignore is added.
+
+The new real UDP-only Mesh regression passes, covering authenticated QUIC paths,
+bidirectional connected requests, remote-path withdrawal and exact-peer refusal
+after loss. Its initial tuple-pattern compile error was corrected. All190 Net
+unit/integration cases, strict Net Clippy and the separate native production check
+pass. Both dependency audits now report13 remaining Hickory/PRUNE advisories;
+their bans/licenses/sources checks pass. Actual diff/re-review has no remaining B/H/M/LOW
+after tightening lock scope and feature evidence. The full suites remain required.
+[Version scope, official fixes and limits](communication-recovery/QUIC-SECURITY-PATCHES.md).
+
+The prior1ad code passes36 lifecycle cases, all3441 frontend cases and native
+production checking. Its surrounding145-case run predates the seed-decoder delta.
+Strict Clippy fails607 errors, including unused inactive APIs and inherited debt;
+the dependency audit at1ad reports17 advisories. Neither gate is waived. The
+narrow QUIC patch targets four Root/three native findings; the thirteen
+Hickory/PRUNE findings require the separately reviewed0.57 migration. Chat V2
+is still off and production storage/native/joined/transport/UI work remains open.
+
+## Index3 owning preparation (13 November; writing/recovery still open)
+
+The private upgrade source consumes the genuine opaque index2 owner. Atomic
+Arc uniqueness rejects both active workers and weak tails; an unpoisoned idle
+cell and open original gate are required. Refusal returns the identical whole
+owner and payment, without resetting completed history or retirement markers.
+
+Non-writing preparation reserves a separate complete old/new-schema invoice
+before reads, AEAD or candidates. It holds the original catalog/index/marker,
+authenticates the actual2 tuple, derives migration origin from its held frame,
+and retains complete encrypted3 output/intent. The catalog builder changes only
+ID7 and preserves all other payloads, including active/paused/spent JOIN history.
+After sealing, it repeats original file identity, Current, catalog-summary,
+Pending absence and original-gate checks. A byte-identical replacement is refused.
+Whole prepared-owner drop closes the old gate before actual files/buffers, then
+retires the old mount/invoice and finally the new reservation. Older configured
+readers preserve/refuse every new3 scratch role, even empty files/directories.
+
+Local execution passes all145 surrounding registry cases, including the two
+final ownership/retirement/equal-replacement regressions. A subsequent private
+intent decoder validates borrowed roles before copying, checks the exact full
+conversion against an external mounted Current expectation, and distinguishes
+pre-authentication indeterminate input, actual AEAD failure and authenticated
+invalid/future content. Its regression matrix adds typed short/cap boundaries,
+every raw/authenticated truncation and AEAD-valid semantic substitutions. All36
+focused lifecycle cases pass after correcting the reviewed error-type conversion;
+the145-case result predates this decoder delta.
+Read-only design/diff/re-review is clear after fixing sibling visibility and
+adding real buffer-retirement/equal-replacement controls. No claim, file write,
+version3 handler/opener, cold recovery, SDK or native admission is supplied yet.
+Real JOIN-producing physical handoff and pinned predecessor-binary acceptance
+remain required. Chat V2 stays disabled; complete exact-head suites, strict
+Clippy and dependency sign-off remain pending.
+
+## Index3 lifecycle DATA (13 November; physical upgrade not implemented)
+
+`chat-v2-native-index3-lifecycle`, based on PR101/bdf1a462, adds a private version3
+descriptor/model/codec and exact owned version2 DATA conversion. No opener or
+physical writer supports3 yet. Existing1/2 parsers and public Copy projections
+retain their contracts; only internal DATA visibility is expanded for conversion.
+
+The model preserves original receipts/highwater, imported Legacy provenance and
+immutable group/DM classification. Rename and Legacy invite refresh are separate
+revision-checked operations. Terminal records preserve bindings and receipts and
+cannot resurrect. Generation1 permits only genuine predecessor shapes, with
+the predecessor's own G1 restrictions retained. Joined fields are initial facts;
+actual namespace6/own-Add/live replay proofs are still required. Founder journal
+abandonment reasons cannot be reinterpreted for Joined or LegacyJoin attempts.
+
+Admission reserves future parent, activation and terminal bytes, independently
+of actual current size. A valid full4MiB version2 table converts with enough
+space to complete its old rows. New birth/optional metadata cannot spend those
+promised completion bytes. See [the design and scope](communication-recovery/CHAT-V2-NATIVE-INDEX3-DESIGN.md).
+
+Local execution passes all133 surrounding native-registry cases. After final
+test-only assertion improvements, all24 new lifecycle cases pass again. They
+exercise the actual version2 canonical codec at its exact size limit, short-name
+rename/all64 Legacy retirements, minimum-frame Founder activation/retirement,
+exact moved ciphertext, every conversion field and terminal reason, full3 table
+reservation refusal and strict malformed/cross-context inputs. Read-only design,
+diff and re-review have no B/H/M/LOW remaining after migration-shape and completion-
+capacity fixes. These are DATA tests, not physical3/native/SDK acceptance.
+
+Next: actual old-gate claim admission, dedicated writing roles, version3 handler,
+crash recovery and real predecessor refusal gates. Non-writing ownership,
+fixed input roles/invoice and catalog/JOIN-byte preservation are implemented above.
+The checked native producer, mixed Legacy operation, cold restore, joined source,
+transport and UI/admin acceptance remain open. Chat V2 remains disabled.
+
+## Warm native saved-source SDK admission (13 November; factory still open)
+
+The real warm handoff now binds its retained creator's native origin. A distinct
+warm-SDK cut and fixed End holder guard the saved-source reload at the actual
+Sync loader, separately from fresh SDK creation. The completed handoff, original
+paid read and archive-root negatives are checked again after counter admission.
+The driver caches the returned SDK graph/source/fees before late source or UI
+checks; reauthentication continues that same graph without another decode.
+
+Local execution passes25 RT lifecycle cases, the eight-ordering Sync primitive
+case, all11 whole warm factory cases and eight existing Root read/SDK cases.
+Strict RT/Sync Clippy passes. Read-only design/diff/re-review has no remaining
+B/H/M/LOW after fixing the final original-negative interval and adding final
+Source-closure coverage. Full exact-head Root/native execution remains required.
+The future native invocation invoice must separately cover NativeFounderKeys;
+the enlarged driver and bridge fields are included by their existing size checks.
+No cold Current restore, background protocol signer, native issuer or activation
+is supplied by this warm-only path.
+
+## Mounted native vault boundary (13 November; inactive integration)
+
+The production branch carries one Root-owned `MountedVault` sum through the
+original native Store mutex. Existing Legacy paths explicitly select Legacy;
+they cannot borrow the Store hidden by `NativeTextVault`. Durable send, shutdown
+and Studio leases preserve the same mutex and ordering token. Their unscoped
+constructors intentionally refuse TextV2; mixed Legacy rows in a native vault
+still need the scoped original-row bridge described in
+[the index3 design](communication-recovery/CHAT-V2-NATIVE-INDEX3-DESIGN.md).
+
+`NativeTextVault` owns the affine UI lifecycle and physical index. Its final UI
+check uses only the captured original metadata and SC atomics, without locking a
+registry, upgrading a Weak or touching a pool under final native guards. Actual
+native generation, authorized-generation and lock-request accesses participate
+in that ordering. An already mounted TextV2 vault explicitly refuses the Legacy
+unlock route; it must never fall through to a cold Legacy opener or replace its
+original owner. Native V2 opening is still unimplemented.
+
+Focused Root native-registry tests pass109 cases; RT passes21 cases and strict
+Clippy. The separate native library check and test-library compilation pass.
+The subsequent full local native run passed1012 and failed30: the first media
+fixture capacity refusal poisoned28 later recovery fixtures, and the Studio
+Node export child exited because this worktree lacked frontend dependencies.
+Dependencies are now installed. The new native unlock regression and all three
+shared Root Studio fixture cases pass. All3441 frontend tests, frontend static
+checking, production build and real-browser flow checks pass; these are not a
+full-suite sign-off. The first sandboxed flow run lost its CDP connection; the
+unrestricted headless Edge rerun passed every flow.
+Windows CI at9d3a3dd2 independently failed a fresh-Current assertion after media
+retirement. Static review traced both media failures to one-shot fixture
+assumptions around valid local refusal/joined attempts, rather than establishing
+a production regression. All18 matching native/browser cases now pass, including
+both failing paths; the actual Studio export case also passes. CI on29dc358c
+then exposed five Root unit-test type errors in the shared inspection fixture's
+remaining callers. Commit6a280f76 fixes those while preserving the same guard;
+all four inspection cases pass. Other one-shot affine media setup sites remain
+explicit coverage follow-ups. The parent9d3a3dd2 run finished with both Root jobs
+and Linux native passing; its Windows native failure is the corrected oracle.
+
+The mounted sum is not backend activation: per-group backend ownership, native
+founder/network publication, cold restore, joined provenance, transport and UI
+acceptance remain open. Chat V2 remains disabled. Unregistered index3 and sequence
+starter files are neither executed code nor acceptance evidence.
+
+## Native source close fence (13 November; consumer still unfinished)
+
+SourceOwner now supports SC-only close before native row/operation locks, with
+preissued negative key-work drains. Retire/Drop notify outside guards, including
+a prefenced idle source; admitted Ends still drain independently. All20 RT cases
+and strict RT Clippy pass; read-only diff review has no B/H/M/LOW. This grants no
+durable Leave, physical/worker/SDK drainage or key-erasure proof. Native owner and
+command integration remain open.
+
+## Retained native index cell (13 November; producer unfinished)
+
+The physical mount now retains one Pending-only transaction, exact IO/frame and
+JOIN claim through caller loss and normal IO refusal. Preparation before claim
+has no file/SDK/network effect; claim-to-cell publication is infallible. Unwind
+poison remains held for exact cold recovery. Covered outgoing buffers keep a
+negative retirement fence until their real destruction; fresh count/lookup data
+is derived under the same cell, with no owned-index escape.
+
+All101 surrounding storage cases pass. After the final test-only bounded
+handshake, all13 new cell regressions pass again. Re-review has no remaining
+B/H/M/LOW in this boundary. Review corrected retry consistency, outgoing-buffer
+accounting and an inherited owned-read escape; no
+native authorization is inferred. The actual Pending/network/founder producer,
+backend/commands and activation remain unfinished. [Scope](communication-recovery/CHAT-V2-NATIVE-INDEX-CELL.md).
+
+## Canonical UI-generation kernel (13 November; native consumer unfinished)
+
+The native production WIP has independent affine candidate payments, original
+capture/finish outside guards,32 canonical generations, monotone retirement/GC
+and no-budget-required lock batches. Actual reservations survive unentered pins.
+Read-only review found/fixed a repeated-retirement last-payer race and locked error
+allocation. Eight real-Root regressions pass, including concurrent final-End/GC;
+the fixed-stack result follow-up also passes. All18 RT lifecycle cases and
+current strict RT Clippy pass.
+This is a private library kernel, not checked Tauri capture or native activation.
+Its actual facade/founder/worker and bounded waiter consumers are still absent.
+Strict App Clippy remains failing (latest pre-follow-up574, including unconsumed
+integration code); no debt is waived. The joined native-row storage contract is
+also absent. [Detailed scope](communication-recovery/CHAT-V2-NATIVE-UI-GENERATIONS.md).
+
+## Native generation metadata (13 November; integration in progress)
+
+The next native production branch ties Host and generation metadata payments to
+their actual retained RT objects. An idle, closed session can still have unentered
+pins; reclaiming a registry record cannot refund those pins' payment. Preissued
+negative drains wait for CLOSED+zero and wake on first idle close. Whole Host
+close is SC-only; actual retirement/Drop and notifications run outside guards.
+All17 RT cases and strict RT Clippy pass, plus10 bootstrap,9 member,5 actual SDK
+and10 whole warm Host cases. Read-only review has no B/H/M; its public lifecycle
+doc LOW is fixed. Actual canonical native registry/waiter integration and the
+owning native Pending/network/founder producer remain unfinished. No activation.
+
+## Linux founder inventory (13 November; focused execution passed)
+
+A fixed-buffer Linux RawDir reader now supplies the previously unsupported
+settlement/repair/promotion inventory. It uses original held directories,
+independent offsets, exact byte names, nofollow type checks and bounded work;
+unknown objects stay untouched. Four existing inventory cases, two role matrices,
+eight seed cleanup and three covering-write cases, two focused promotion recovery
+cases and the ten whole warm driver cases now have actual Linux positive paths.
+Windows mount/warm compatibility passes. Hosted run43407038976 passes42 focused
+Linux cases and11 Windows cases, plus3438 frontend tests/check/build. The exact-head
+full run43416522284 at053ac72a passes all four Root/native jobs on Linux and
+Windows. Review has no
+production blocker/high/medium; the Stat invoice LOW is fixed. This supplies no
+native command or backend permission. Chat V2 remains disabled.
+[Exact reader, tests and limits](communication-recovery/CHAT-V2-LINUX-FOUNDER-INVENTORY.md).
+
+## Concrete native key cuts (13 November; production factory incomplete)
+
+Exact-source run43403553170 atPR99/ecb7472f now passes all four hosted Root/
+native jobs across Linux and Windows, plus full frontend/check/build. The agreed
+slow cost case and strict/dependency acceptance remain open. PR100/053ac72a also
+passes all four Root/native jobs across Linux and Windows.
+
+The integration branch privately carries an immutable NativeRequired origin through
+SDK creation, encrypted SourceSaved, Current, empty promotion and the whole member
+save Host. Concrete per-purpose cuts fence actual SDK/Profile/Header/member keys.
+Public library wrappers refuse that origin even on cached hits. Late final-save
+source/generation changes preserve the same prepared original; fresh authorization
+saves it without RNG. Focused local execution passes14 RT,10 Sync bootstrap,9 Sync
+member,5 Root SDK and2 new whole warm Windows cases. Strict rt/sync/net Clippy,
+ambient and raw-fs pass. Read-only reviews have no remaining blocker/high/medium.
+
+Synthetic UI atomics/test custody do not prove native command authorization. The
+checked factory, index cell/Pending/network reservation, mounted-vault/backend sum,
+cold owner, joined source/transport and UI/admin acceptance remain unfinished.
+Linux whole warm execution needs a bounded inventory. Exact-source full suites
+remain required. [Contract](communication-recovery/CHAT-V2-NATIVE-KEY-CUTS.md).
+
+## Native founder integration (13 November; in progress)
+
+PR98 atb7803f83 is pushed with83 passing local surrounding storage tests and the
+actual18-fixture native1-aware predecessor gate. Exact-head run43384631617 passes
+Root/native on Linux and Windows and all3438 frontend tests/check/build. The agreed
+slow test is deferred; inherited strict/dependency findings remain open. It is
+storage evidence; the warm cell/producer is still absent.
+
+The next isolated branch, `chat-v2-native-founder-integration`, has a reviewed
+affine-owner/private-physical split and bounded actual transport-identity DATA.
+All3 Net regressions pass, including a literal compatibility vector and real
+Mesh identity. All32 index2 cases pass, including the two new actual storage-drain
+cases. Read-only review has no blocker/high/medium; both Net LOWs are fixed. No public loan,
+DATA publisher, native command or SDK/key authorization was added. Central JOIN
+helpers still refuse CLOSED; all-JOIN-after-close drainage is not claimed.
+
+## Native index2 storage (13 November; in progress)
+
+The isolated `chat-v2-native-index-admission` branch now has explicit7/v2 and
+index2, immutable birth receipts, a genuine opaque v1 G1 upgrade, cold role
+classification/repair, and cached negative JOIN checks. All30 local cases pass,
+including crash cuts, restart, four late target replacements and exact file/frame/
+mount/payment retirement. Read-only review found and corrected the latter two
+boundaries. The real predecessor2 gate passes locally:18 fixtures, four public
+openers in unmodified382a30a0, and18 current-reader round trips. Its successful
+controls include v1/Current5 vaults and a deliberately unfenced complete intent.
+Exact-source run43384631617 passes complete Root/native Linux/Windows and frontend
+validation with the agreed slow test deferred. Strict/dependency findings remain
+open. No generic row publication or native backend is exposed.
+
+The warm cell/genuine native founder producer remains unfinished; its claim must
+retain original files, candidate and payment across uncertainty. Native command/
+key admission, mounted-vault/backend sum, operational restart/Leave, joined pins/
+Add/archive/transport and UI/admin/combined acceptance remain activation gates.
+[Exact storage scope and pending work](communication-recovery/CHAT-V2-NATIVE-INDEX2-STORAGE.md).
+
+PR95's focused predecessor repair is green on both platforms (run43366761860).
+PR97's full Root/native execution passes on Linux and Windows (run43371944196).
+PR96's Root and native jobs pass on both Linux and
+Windows (run43369377314), with the agreed slow case deferred. These are parent/sibling-source
+results, not full validation of this new index2 work. Chat V2 stays disabled.
+
+## Retained bootstrap signing (13 November; in progress)
+
+The next isolated branch `chat-v2-retained-bootstrap-signing` follows PR95. The
+actual Root source now installs a paid Signing phase before primitive entry and
+retains separate Profile/Header raw results through refusal/unwind and consuming
+freeze. The stateless Sync library API is preserved. Six focused Sync and three
+Root regressions pass, including the same-owner cache-pressure refusal/retry.
+Read-only diff review has no blocker/high/medium; direct primitive counts are
+tested in Sync, with Root composition coverage separately identified.
+The surrounding11 Root source and15 stateless Sync cases and eight Windows warm
+factory cases also pass. Strict Sync Clippy, fmt, ambient and raw-fs pass. The App
+warning inventory still has719 warnings with zero on new/added Rust lines; that
+does not waive the inherited531-error strict workspace gate. Exact-source complete
+Root/native/frontend execution remains required before completed handoff.
+
+This adds no native session/key authority. NativeRequired still needs original
+synchronous router capture, concrete SDK/Profile/Header/member key cuts, Ends and
+lock drainage. [Scope and remaining work](communication-recovery/CHAT-V2-RETAINED-BOOTSTRAP-SIGNING.md).
+
+The index2/native-founder consumer has a reviewed implementation design in
+[native index admission](communication-recovery/CHAT-V2-NATIVE-INDEX-ADMISSION-DESIGN.md),
+including explicit namespace7/version2 migration, immutable birth receipts,
+Pending's exact network frame, actual transport identity and no SDK restart grant.
+It is not implemented by the retained-signing prerequisite.
+
+## Native registry physical installation (13 November; validation in progress)
+
+The new isolated `chat-v2-native-registry-install` branch, based on58b39fb9,
+implements the actual initial namespace7 declaration and cold recovery. The
+original preparation API remains non-writing. Separate prepaid writing and opaque
+mount APIs retain the actual private Current3/member5 owner; there is no raw
+Store/Current escape, public handler switch, native command credential or V2 row.
+
+Read-only adversarial review found and corrected authenticated-empty-seed disposal,
+classification/reopen identity substitution, late selected-catalog loss, final
+index exactness and shared-reader invoice reuse. Regressions use actual file/key
+state, deterministic cuts and bounded reader overlap. The real JOIN lifecycle
+test exercises native7 through save/pause/resume/migration/arm/reopen. Its first
+failure was a fixture's lost ephemeral owner budget after opening a new mount;
+the test now configures that trusted budget on the actual new owner.
+
+The predecessor gate pins the real ID3/ID5-aware a607123a commit and four capable
+public openers, not a simulated old-handler boolean. Sixteen fixture states have
+positive control/claim/unfenced cases. A negative first-torn native role handles
+settled or complete-seeded predecessor governance progress without touching its
+Stage or other objects; native4+7 operational ownership is still unsupported.
+All53 focused native-registry cases now pass on Windows, including the actual
+JOIN lifecycle and governance claim-window regressions. All3438 frontend tests,
+Svelte checks (zero errors/warnings), build, ambient and raw-fs gates pass.
+Workspace strict Clippy still hits exactly531 inherited App errors. The complete
+App warning inventory reports zero diagnostics on added Rust lines, and the native
+cargo check passes. The real local a607 predecessor passes16fixtures x4openers and
+the head governance round trip. Windows hosted execution passed all storage cohorts
+but hit Git checkout's MAX_PATH in the new predecessor harness; PR95fix382a30a0
+uses command-local longpaths/shorter temporary names and reports original stderr.
+The hosted rerun is pending. Linux focused execution passes.
+
+Full Windows native validation found a separate pre-SDP automatic-confirmation
+timeout in native_browser_maximum_offer_answer_round_uses_real_http_and_blocked_tcp_bridge;
+37 later cases intentionally refuse because its shared fixture did not shut down.
+That first failure is being diagnosed, not credited as a storage regression or
+ignored as flaky. Linux full native passes. Complete current-source gates and
+Chat V2 acceptance remain open.
+
+Next: serialize native index updates with exact-parent CAS and retained uncertain
+candidate; implement the opaque mounted-vault/native backend sum and durable
+PendingCreate before SDK entry; bind/install the genuine founder product; complete
+original native command/key and save admission. Cold operational owner, durable
+Leave, joined source/pin/archive/transport and UI/admin/combined acceptance remain
+hard activation gates. Chat V2 stays disabled.
+[Implementation and residuals](communication-recovery/CHAT-V2-NATIVE-REGISTRY-INSTALLATION.md).
+
+## GRAFT-specific gossip repair (13 November; full validation pending)
+
+Parent native-registry source8cd87b32 now has5294 passing Linux Root cases,
+29 preexisting ignores and the one explicitly deferred catch-up cost case;
+both complete native jobs pass1042 library +6 ACL cases and Linux frontend3438
+passes. Windows Root is still running under its larger outer job budget. This
+is exact parent-source evidence, not the later dependency/GRAFT source sign-off.
+
+The compatible dependency subset is pushed in draft PR93 atdf1a1813. Its
+[Linux focused gate](https://github.com/Thalpy/Mewtual/actions/runs/43346932337)
+now passes the three exact real ACL/group cases, actual native >4KiB xattr/list
+integration, strict storage Clippy, all3438 frontend tests, types/build and native
+check. Windows native check and strict storage also pass locally, along with20
+external +87 export cases and the previously recorded frontend/browser checks.
+These focused results do not clear the remaining nine Hickory/three low npm
+findings, inherited workspace strict debt or full current-source acceptance.
+
+Review of the live network dependency found an additional GRAFT memory-growth
+defect despite inconsistent advisory metadata. The genuine TCP regression fails
+on0.49.4 with257 retained topics instead of1; compatible0.49.5 fixes it. Net uses
+the direct production minimum and both locks agree. Four real-wire tests also
+exercise the new2000/2000 incoming count defaults, duplicates, overflow and slot
+release, plus actual two-product-peer payload delivery at100/101/2000 topics.
+All four and strict Net Clippy pass on Windows; the complete Net suite also
+passes186 tests (165 unit +21 integration), zero failed/ignored, on final source.
+Final read-only review has no remaining finding in the GRAFT-only diff; its
+duplicate-boundary test observes both real admission events rather than inferring
+admission from unchanged cardinality alone.
+[Exact evidence and residual HIGH](communication-recovery/GOSSIP-GRAFT-REPAIR.md).
+
+This is a GRAFT-only repair. PRUNE still permits unknown-topic backoff growth and
+remains HIGH; it is not solved by0.49.5. The reviewed broader0.57 migration requires
+old identity/address/envelope fixtures, RNG/request-response adapters, a bounded
+supported topic policy and interoperability tests before changing API families.
+Native installation, physical registry writer/recovery, original command/key
+admission, cold operational ownership and joined/governing transport remain open.
+Chat V2 remains disabled; no completed plan/merge/physical claim is made.
+
+## Compatible dependency repairs (13 November; Linux acceptance pending)
+
+The native-registry increment is pushed in draft PR92 at8cd87b32. Its final
+Windows28 focused +18 surrounding storage cases pass; all3438 frontend tests,
+types and build also pass. Current-source Linux/Windows focused and complete
+root/native/frontend CI runs independently; Chat V2 stays disabled. The earlier
+strict workspace check reports531 existing App errors, none in the new native-
+registry files. It is not a completed workspace strict sign-off.
+
+A separate compatible dependency repair raises the DOMPurify/Vite/rustix floors,
+updates named npm transitives within their parent ranges and pairs rustix1.1.6
+with native xattr1.7.0. The ACL detector uses the explicit size-query API without
+changing its conservative outcomes. Real Linux ACL and >4KiB native xattr/list
+regressions are authored, not credited as executed on Windows. Read-only design
+and actual-diff review reports no remaining source findings; scoped lock drift
+was removed and native locked metadata passes.
+
+Windows20 storage cases,98 renderer/wiki/infobox cases, full3438 frontend tests,
+Svelte 0/0, build and actual browser flows pass after the dependency updates.
+Native compilation, Linux syscall/large-xattr execution and complete current-
+source Rust validation remain pending. Npm audit improves10 ->3LOW; both Cargo
+audits improve10 ->9 Hickory findings. No new ignore/waiver or clean-audit claim.
+[Exact versions, compatibility boundary and outstanding gates](communication-recovery/COMMUNICATION-DEPENDENCY-REPAIRS.md).
+
+## Native registry preparation (13 November; local focused tests pass)
+
+The fresh-founder driver in draft PR91 is now green at6308c992 on
+[Linux and Windows](https://github.com/Thalpy/Mewtual/actions/runs/43334467995):
+one genuine mount prerequisite plus four/eight driver cases respectively. The
+Windows cases execute the actual whole warm factory, member durable save/retry,
+independent original/Current revocations and corrupted cached-identity refusal.
+Root test-native custody does not establish native authentication.
+
+The next increment prepares the independent native registry on a newly opened
+private Current3/member5 mount, holding original authenticated inputs and caching
+strict initial index/catalog/marker/seed outputs under a full independent invoice.
+It writes no namespace7 output, exports no Store/key/runtime, and grants no
+physical commit or native authority. Existing openers refuse reserved native
+artifacts before older cleaners. [Contract and remaining physical work](communication-recovery/CHAT-V2-NATIVE-REGISTRY-PREPARATION.md).
+
+Local Windows `cargo test --offline -p catcoms-app --all-features --lib
+native_registry -- --test-threads=2` passes28 cases on the final reviewed source,
+zero failed/ignored. The default-feature run also passes28. This includes actual active
+and paused JOIN refusal, replaced files/directories, in-place byte changes,
+authenticated inconsistent seed/index contents, strict absence, final original
+revocation and retained/refunded payment. Root formatting, ambient/raw-filesystem
+gates, whitespace and the exact-count harness self-check pass. Final read-only
+review reports no remaining blocker/high/medium/low. The surrounding18 storage
+regressions are running; complete current-source suites, strict Clippy and audit
+remain open. Only one local Cargo build/test owner runs at a time.
+
+Native physical declaration/recovery/CAS, mounted-vault/backend installation,
+command/key/save admission, durable Leave and cold operational ownership remain
+unfinished. Joined App source, durable governing archive/transport and combined
+acceptance remain required. Chat V2 is disabled; none of these drafts is accepted
+or merged based only on the focused evidence.
+
+## External reviews 84–88 corrected (12 November; focused CI green, drafts remain)
+
+All six reported code defects are fixed and pushed through the scoped PR stack.
+Read-only actual-diff re-reviews found no remaining blocker/high/medium in those
+corrections. The [correction ledger](communication-recovery/CHAT-V2-EXTERNAL-REVIEW-FIXES.md)
+records each defect, regression, failed precursor and publication correction.
+
+The [Linux/Windows run at ac25f840](https://github.com/Thalpy/Mewtual/actions/runs/43323677107)
+passes joined/source-fence, bounded saved-original recovery, cold-fork ordering,
+member storage and actual predecessor-binary acceptance. Windows passes all 19
+member-save cases and the final negative-retirement slot. Linux also passes all
+3,437 frontend tests, types and build. Formatting and strict Sync/Replication
+Clippy pass on both platforms. No local Cargo was run.
+
+PR #89 replaces #85 after a mistaken base-branch push briefly made GitHub mark
+#85 merged. That base was restored; the marker establishes no acceptance and
+no intended main merge occurred. Open draft order: #84, #89, #86, #87, #88.
+Current complete-suite, workspace-wide strict and audit gates remain required.
+Earlier e1b7e34a full native acceptance now passes 1,042 library plus six ACL
+tests on both platforms; it is distinct older-source evidence. Native fixture
+corrections continue in draft #90 with bounded diagnostics and forced local
+contention. They change no shipping protocol or timeout.
+
+Chat V2 remains disabled and incomplete. Next implementation is the closed
+original fresh-founder bootstrap/native path; joined App source, durable
+governing archive/transport, cold operational ownership, native signer/save
+admission and activation/combined acceptance remain open. A fresh typed-mount
+prerequisite regression is pushed on `chat-v2-native-bootstrap-driver` and runs
+separately. It does not establish the runtime handoff or native integration.
+
+## Primary review of C's Core/Sync seams (12 November; focused CI green, full validation open)
+
+Integration branch `chat-v2-joined-source-integration` starts from C's pushed
+`0bcc808e`; C's branch and PR #86 are unchanged. The primary's actual-diff review
+found an authority gap in failed current-epoch commit settlement, an exact
+selected-state retry defect, and disagreement between the atomic closed flag and
+positive gates after a section entered during an existing unwind. These are
+fixed on the integration branch. Draft PR #87 contains C's original commits and
+the separate primary fixes. Nothing has been merged into C's branch or PR #86.
+
+The commit observer classifies against its ORIGINAL group/header/epoch. A failed
+current commit closes as Diverged in the SAME settlement section that clears
+merging, before the caller's Err arm. Invalid/noncommit headers remain the
+negative control. Actual changed-state evidence is retained when its commit is
+known; uncertain panic effects close without inventing an applied transition.
+An observer-wide unwind guard covers hooks outside that section. Every positive
+gate also checks the monotone atomic negative under its state guard. Repeating
+the exact already-selected epoch/authenticator/Admission is idempotent after
+transition consumption; altered tuples gain no such shortcut.
+
+Seven new regressions use original-node/exact-commit scoped faults for genuine
+Remove/self refusal (real in-order and pre-caller boundaries), failed contest
+winner, uncertain merge panic, hook panic after actual settlement, and atomic
+closure without mutex poison, plus an error after a successful real SDK apply
+that must retain exact Add/Remove transition evidence. A transport-destructor
+probe on a genuinely joined node now checks that fence retirement precedes
+resource teardown; the fence is the first lifetime guard, with the file publisher
+still preceding every resource it protects. The existing Add test
+additionally covers exact retry and altered authenticator/Admission. Focused CI
+pins 57 executed, nonignored cases on each OS: three Core accessors, three join-fact, seventeen fence,
+eleven owner-operation (including two new V1 exclusion), seventeen tenure and six
+founder-member cases. These are 25 new cases and 32 neighboring legacy controls.
+Its Python guard self-check passes without Cargo. Standalone formatting,
+whitespace and the static ambient gate also pass; no local Cargo was run.
+
+The [corrected focused run](https://github.com/Thalpy/Mewtual/actions/runs/43305407742)
+at `0b2f94eca47ad4f34d9dd2ba133d77f860b8103f` passes all 57 cases with zero failed
+or ignored on BOTH Linux and Windows. Both affected-crate strict-Clippy steps
+(`catcoms-sync` and `catcoms-replication`, all targets/features, `-D warnings`)
+also pass. These are scoped results, not workspace-wide strict acceptance.
+Both complete job logs independently confirm the checkout, cohort counts and
+strict command; both OS jobs, including cleanup, completed successfully. The
+read-only evidence review confirms those exact results.
+
+Failed and cancelled evidence remains explicit: strict CI at `5b325a3c` reported
+two unused imports in C's tests (removed). CI at `b549f42b` then found the primary's
+transport-destructor fixture used `Unreachable` without its required peer;
+`0b2f94ec` corrects that test-only constructor. Superseded focused runs and the
+first queued broad run were cancelled rather than credited as passes. Root App
+Clippy still reports inherited 531 library/471 Linux test-library errors (188
+test-library on Windows); no waiver or broad warning suppression was added.
+
+The [restarted broad run](https://github.com/Thalpy/Mewtual/actions/runs/43308200073)
+executes root and separate native workspaces plus frontend checks/build on the
+same tested source `0b2f94ec`. Its results remain open. The single user-deferred
+10,000-operation cost case remains excluded until final acceptance. Dependency
+audit and full strict/native sign-off remain open too, including the parent
+branch's two diagnosed native fixture failures. This documentation update changes
+no runtime, tests, Cargo inputs or CI policy from that tested source.
+
+C may continue the separately reviewed App-source milestone from `0b2f94ec` on a
+new branch, preserving the primary's fence fixes and the ownership/boundaries in
+the coordination document. The primary retains broader validation, native work
+and the durable fork archive. No App joined source or archive is supplied by this
+seam integration; Chat V2 remains disabled and PR #87 stays draft/unmerged.
+
+## Agent C Core/Sync seams (12 November; authored, NOT executed)
+
+Branch `chat-v2-joined-member-source`, from `8674813c`. Five code commits (`68acfe6a`,
+`12a7cee9`, `c34e43b7`, `a9af1526`, `e29de641`) implement only the narrow seams the
+coordinator approved. There is no App joined source, governance replay,
+pin, lane/save change or historical custody yet, and Chat V2 stays disabled.
+
+- **Core read accessors:** `mls_epoch_data`, `is_open_data` and `require_open_data`, plus
+  the joined consumer named in the `from_trusted_host` contract.
+- **Sync join facts:** captured in `finish_join`, exact `new_joined` handoff, a once-only
+  take, and exclusion of the v1 owner checkpoint install.
+- **Sync live source fence:**
+  - It brackets every merge and records finalized transitions (commit digest,
+    authenticator, `DeviceId` delta).
+  - A contest flag is updated at every `pending` write.
+  - Final-admission custody is held while the save-source end is issued; the `closed`
+    atomic sits beside the mutex.
+  - It closes for good on removal, drop, v1 install, cancel or fork. Bytes-less,
+    non-contiguous or overflowing history is a terminal `HistoryGap`.
+
+Every invite-joined legacy member now carries a fence: two device-id roster listings and a
+short lock per merge. Founder and other non-joined nodes are unchanged.
+
+Execution: local Cargo is paused, so nothing compiled or ran. Standalone rustfmt
+(catcoms-sync and catcoms-replication) and `scripts/check-no-ambient.sh` pass. The full
+suites, strict Clippy and native checks still need CI through the primary.
+
+The adversarial diff review of `8674813c..c34e43b7` found 1 BLOCKER, 1 HIGH, 4 MEDIUM and 5
+LOW. All of these are fixed in the follow-up commit:
+- **BLOCKER:** a test compile error (`snapshot` needs `&mut`).
+- **HIGH:** a wrong test assertion (`initial_owner_evidence` is `Some` in the v1 fixture).
+- **M1:** the admission custody now closes the fence on unwind.
+- **M2:** the delta is computed from one sorted device-id roster pass, not per-key
+  lookups.
+- **M3:** a node's own legacy Add records its result's commit (`with_observed_mls_add`),
+  not `HistoryGap`.
+- **M4:** a non-contiguous bracket is a `HistoryGap`, and the fence now settles before
+  the observer hooks can unwind.
+- **LOWs:**
+  - a reserved Remove(self) ring slot;
+  - an install refuses to cover Neutral/Multiple/inactive deltas;
+  - doc corrections.
+
+Remaining:
+- At C's `0bcc808e` checkpoint, `Diverged` marking at header-valid apply failures
+  was missing. The separate primary integration above fixes it with scoped faults.
+- No test yet produces a real neutral or multi-member delta, a header-valid winner that
+  fails to apply, staged we-won/we-lost branches on a joined committer, a ring overflow, or
+  a threaded race between `admit_final` and a merge.
+- The v1-exclusion tests are necessarily synthetic: a genuinely joined node cannot reach
+  that install.
+- Two regressions are not deterministically testable and have none: the M1 test cannot pin
+  the admission's field order, and there is no hook-unwind test.
+
+Short re-review of the fixes: B1, H1 and M1-M4 are confirmed fixed. It found one new BLOCKER
+(strict-warnings dead code) and five LOWs. The BLOCKER is fixed in the next commit: switching
+the two admission sites to `with_observed_mls_add` left the bytes-less
+`with_observed_mls_transition` with no production caller, so it is now `#[cfg(test)]`. That
+does not make every bytes-less gap unreachable: a production Add can merge and
+then fail before returning its commit bytes, which still closes as `HistoryGap`.
+Only the direct bytes-less helper is test-only. The LOWs were
+recorded, not fixed:
+- `CloseOnUnwind` also closes when a section is merely opened during an unwind, which fails
+  closed;
+- the contiguity check fires only at the next bracket;
+- `install_selected`'s own-inactive arm is unreachable;
+- the two test gaps above.
+
+No BLOCKER or HIGH remains on review.
+
+## Agent C draft-4 decisions (12 November; durable fork backing required)
+
+The primary chooses durable backing, option (c), for the completed joined source.
+4096 may limit a paid hot cache, not lifetime governing steps or membership
+changes. Forgetting an old Append fork is not repaired by a guaranteed later gap;
+that guarantee is false. Core's opaque archived-parent owners are bound to the
+original verifier, so disk retention needs a reviewed selected-record/cold-replay
+handoff rather than raw parent reconstruction. The primary owns this archive.
+
+The [draft-4 addendum](communication-recovery/CHAT-V2-JOINED-SOURCE-COORDINATION.md)
+approves C's private joined selection-constructor use, the pre-take V1 checkpoint
+exclusion, `SavedHistorical`/bounded historical custody, and the closed negative
+enum under explicit binding/accounting conditions. Prepared classification needs
+the actual unstarted/current-parent proof or exact recovery/lookup. Conflict is
+not absence. A historical discard command is primary-owned future work and is
+not supplied or approved by this decision. No numeric pool estimate is accepted
+without its actual retained/transient invoice.
+
+C can implement the narrow Core/Sync commits and strict bounded warm tests now;
+complete replay/source acceptance still requires actual durable backing. A
+read-only cross-boundary design review supports these decisions. No Rust, wire,
+format or runtime change is made here; no Cargo/suites run for these documents.
+
+## Agent C coordination (12 November; design decisions, no implementation)
+
+C's source survey confirms missing production V2 invite/pin provenance, founder
+Add/governance custody, multi-member archive support, governance delivery and a
+joined App owner. The primary owns those production prerequisites and native
+integration; C owns the joined source/replay, factual Sync seams, three narrow
+Core read accessors and agreed lane/save adaptations. The
+[coordinator response](communication-recovery/CHAT-V2-JOINED-SOURCE-COORDINATION.md)
+answers D1-D6 and owner placement. C's external design review is still required.
+
+A read-only cross-boundary review found two HIGH design defects in draft 1:
+phase-1 epoch observations cannot authorize phase-2 saves, and removal cannot
+justify discarding the only retained A1 original. Both are rejected in the
+response. The response also requires complete prejoin history, actual finalized
+postjoin transitions, paid archived-parent fork escrows, stable pin ciphertext
+across rejoin and a defined neutral-epoch protocol. It approves real MLS/Core
+test producers and a warm first milestone only as partial evidence. No new wire,
+namespace, producer, authoring capability or Chat V2 activation is implemented by
+these documents. Documentation-only checks; no suites rerun for this response.
+
+## Primary namespace5 review (12 November; focused acceptance passed, broader failures open)
+
+Two fresh read-only actual-diff reviews of `ea7e4ae1..d475ddb1` found no confirmed
+BLOCKER/HIGH/MEDIUM. Three LOWs are corrected: comments now distinguish disposable
+predecessor zero-byte stages and untouched authenticated JOIN successors, and the
+Current3 lifecycle test explicitly checks ID5 after migration/initial grant and
+again after first arm. Activation alone does not migrate the JOIN payload. These
+corrections change no recovery production behavior or cohort count; re-review is clear.
+
+The primary independently inspected the passing `952d8a1b` logs: 66 Linux and 84
+Windows cohort executions, plus one fixture-generator, one predecessor-gate and
+one head-round-trip test on each OS. The 23 fixtures x 10 openers are assertions
+inside the gate, not 230 separate Rust tests; all four round trips pass. The
+[final focused run at `3c904440`](https://github.com/Thalpy/Mewtual/actions/runs/43117903583)
+also passes on BOTH platforms at those exact counts, including the stronger
+separate migration/first-arm check and all predecessor stages. Namespace5's four
+assigned recovery/compatibility items are accepted within that scope.
+
+The annotated remote tag `compat/chat-v2-namespace5-predecessor-ce402364` now
+retains exactly `ce4023649b1a2f37f7d8032c950fbefff03daef3` (peeled target verified).
+The gate remains full-SHA pinned and no longer depends on PR history surviving.
+The stale namespace5 gap list in the A/B/F save handoff is updated.
+
+The new `Chat V2 integration test execution` workflow supplies four isolated hosted
+jobs: root tests and complete native workspaces on Linux and Windows, native
+checking, and frontend tests/checking/build. The root command explicitly excludes
+only `cold_provider_transfers_only_one_missing_change_after_ten_thousand_operations`,
+honouring the user's instruction to defer that unusually slow cost case until
+final Chat V2 acceptance. Manual `run_deferred_catchup=true` runs it last on Linux;
+the test is unchanged and root sign-off stays incomplete until it passes. Manual
+scope selection can execute root, native or both. It uses ordinary Cargo execution independently
+of strict Clippy, with one build job, two test threads and the default stack; it
+does not suppress warnings or change `ci.yml` or audit policy. Its workflow-only
+path filter is this integration PR's explicit execution lane, not a permanent
+all-source validation policy after merge. The first run
+at `3c904440` mistakenly included the deferred case and was cancelled by the
+primary; its unfinished Rust jobs are not passes. Its frontend portion did pass
+3,434 tests, checking and build. This cancellation did not affect the separate
+focused namespace5 workflow.
+
+The corrected [manual integration run](https://github.com/Thalpy/Mewtual/actions/runs/43122799845)
+at `0eb29686` has passed the Linux root job: 5,211 passed, zero failed, 29 existing
+ignores and exactly one filtered test (the deferred cost case). The Windows root
+test step also succeeded: 5,469 passed, zero failed, 28 existing ignores and that
+one filter. Its overall job was cancelled during post-job Rust-cache saving;
+that cancellation does not erase the successful test-step result or make the
+overall job green. Its runtime/test source is identical to the
+focused-tested `3c904440`; only CI execution policy and documentation differ.
+Both complete native jobs failed: Linux 1,007 passed/41 failed and Windows 1,030
+passed/18 failed, including six passing command-ACL cases per OS. There are two
+original failures: Linux's failed-media sibling test did not observe a fresh
+authenticated Current, and Windows's original-SDP-result test unwrapped a local
+`Protocol(Capacity)` at `integration/pc.rs:137`. The remaining 40/17 failures are
+the fixture's deliberate semaphore-close cascades after failed teardown. These
+are unresolved failures, not green acceptance or established production defects.
+Separate native checks passed on both OSes; Linux frontend passed 3,434 tests,
+checking and build, and Windows assets built. Read-only failure diagnosis is in
+progress; no limits, timeouts or assertions have been weakened.
+
+The expanded native prerequisites specify a reviewed fresh-founder first vertical
+and concrete key-admission lifecycle, but supply no native implementation or
+restart acceptance. [Agent C's brief](communication-recovery/CHAT-V2-AGENT-C-BRIEF.md)
+now assigns genuine joined-member sources and founder-offline ordinary saves on a
+separate branch; the primary retains native integration and broader validation.
+
+Local Cargo remains paused. Standalone rustfmt, the Python exact-count guard
+self-check, and the static ambient/raw-filesystem checks pass. The current root
+audit still reports the same five Hickory/rustix
+advisories (bans/licences/sources pass); strict Clippy still blocks ordinary CI's
+test steps. PR #86 remains draft/unmerged and Chat V2 remains disabled.
+
+## Namespace5 recovery and compatibility (11 November; B, focused CI passed at 952d8a1b)
+
+Four namespace5 items, all on `chat-v2-member-outbox-production` (draft PR #86). Design,
+decisions and residuals:
+[Namespace5 recovery](communication-recovery/CHAT-V2-NAMESPACE5-RECOVERY.md).
+
+1. **JOIN lifecycle on ID5 without governance4.** A real Current3 test covers save, pause,
+   resume, migration and first arm. After every step, ID5 is byte-identical and governance4
+   is absent.
+2. **Interrupted ordinary JOIN stage at open.** The JOIN writer's cuts are exercised on an
+   ID5 vault: a complete stage settles cold, and a prefix or zero-length stage is preserved
+   and refused. A vault-key-sealed stage that drops or changes ID5 is refused too.
+3. **First-torn declaration seed recovery.**
+   - **Claim first.** A zero-byte claim of the seed name now precedes the legacy fence, so
+     every fence is attributable.
+   - **Disposal.** The cold first-torn role abandons a declaration whose first seed never
+     authenticated, and the warm retry declares afresh. It runs only when there is no
+     marker, no parent and no ID5. It unlinks the fence, then the seed, each followed by a
+     barrier and a NotFound proof, and needs no RNG.
+   - **Stages it leaves alone.** An authenticated ordinary JOIN successor left by a
+     predecessor in the claim window is left to its settlement.
+   - **Governance seeds.** An unauthenticated member seed beside a complete predecessor
+     governance seed is disposed without touching governance's stage.
+   - **Still preserved and refused:** authenticated-invalid seeds, seeds beside a torn
+     governance seed, and every other partial state.
+   - The read-only adversarial design review found no blocker. Its HIGH (Windows
+     delete-pending resurrection of a claimless fence) and all five MEDIUMs are fixed in the
+     design and code.
+4. **Real predecessor gate.**
+   - The focused lane writes 23 head fixtures and runs an unchanged `ce402364` worktree's
+     ten public openers against them. The harness file is the only addition.
+   - The harness, not the head, owns each fixture's verdicts.
+   - Controls must open, which rules out vacuous refusals.
+   - A fence-removed cut must open, which proves the fence is what refuses.
+   - The head reopens the four trees the predecessor's full runs produced and must recover
+     each.
+
+Counts: the current-mount cohort grows 9 → 16 and the governance-mount cohort 5 → 7. The
+predecessor gate pins 23 fixtures, 10 openers and 4 round trips.
+
+**Focused CI.** At `952d8a1b`, the focused lane passes on Linux and Windows:
+- **Every cohort,** at its exact count:
+  - 4 sorted-declaration cases;
+  - 6 codec cases;
+  - 2 JOIN-producer cases;
+  - 16 current-mount cases;
+  - 7 governance-mount cases;
+  - 31 outbox-engine cases;
+  - on Windows, also the 18 save cases.
+- **The real predecessor gate:**
+  - 23 fixtures were written.
+  - The predecessor checked them against all 10 openers: 2 controls, 18 refuse, 2 may-open
+    and 1 unfenced fixture.
+  - The head then verified all 4 round trips.
+
+The first run, at `7aab7775`, compiled on both platforms and failed two wrong test
+expectations, now corrected:
+- the first JOIN row adds the JOIN entry;
+- the fired probe was sticky.
+
+**Lint and review fixes.** The strict Clippy job reported two new test-only
+`type_complexity` lints; they are fixed. The library's lint count is unchanged at 531. The
+read-only actual-diff review found no production blocker. Its LOW follow-ups are in the
+next commit, whose CI is pending:
+- the disposal edge re-classifies the seed itself;
+- governance cuts 233 and 234 are added;
+- the zero-length JOIN stage residual is pinned;
+- the round trip also checks entry order, ID4 bytes and both mounts;
+- the hand-built envelope gets a positive control;
+- the docs are reworded.
+
+**Gates.** The store raw-fs gate (new allowlist entries for the claim and the two
+classified unlinks), the ambient gate and rustfmt pass. The full suites, strict Clippy
+sign-off and the advisory job remain the primary's.
+
+**Open to the primary.** The predecessor `ce402364` is not on `main`; a pushed tag would
+make the gate independent of PR #86's history. The namespace5 gap list in
+`CHAT-V2-MEMBER-SAVE-HANDOFF.md` is not edited.
+
+Not covered:
+- governance4's own first-torn states;
+- native integration, joined-member sources and transport (out of this increment).
+
+## Primary member-save follow-up (11 November; focused tests passed, full sign-off open)
+
+The primary's fresh actual-diff review of `ae5a0837` found four MEDIUM issues: an
+invocation cancelled during lookup could still start signing; retryable preseal
+refusal kept its known original only in the replaceable host; temporary lookup
+scratch could outlive its refunded payer; and source-end Drop could wait on its
+issuance mutex. Corrections retain originals in the Store before append payment,
+recheck the native negative before new authoring, explicitly fund serialized
+scratch from the existing slot allowance, and retire issued ends atomically.
+No pool cap is increased. F's actual close/key and native authorization boundaries
+remain required; the negative observation is not a credential substitute.
+
+Three new Windows regressions cover cancellation during real namespace-head
+sealing before authoring, post-sign append-credit refusal followed by lane
+replacement with the exact retained original/no new key, and retiring an unrun
+job's source end while its actual issuance mutex is held. The source inventory
+contains 15 earlier Windows save cases, now 18; B's two new mount cases are separate.
+CI at `5960b177` passes all 57 Linux storage/catalog executions and all 75 Windows
+executions (the same 57 plus 18 save cases). No cases are ignored. The first run
+at `57676fd2` exposed a deterministic Busy-versus-Stale mismatch for a never-prepared
+host. The correction checks the lane/context before the lazy mount, without
+changing any positive admission check. Its now-passing strengthened case retains
+the Stale assertion for both absent and installed mounts, plus unchanged files/sign
+count and whole returned native custody.
+[Focused run and artifacts](https://github.com/Thalpy/Mewtual/actions/runs/43093078523).
+Local Cargo remains paused by user request. Earlier "none run" entries below
+describe their original checkpoints, not this subsequent execution evidence.
+
+The independent `Chat V2 member storage regressions` workflow runs ordinary
+focused Cargo test commands on Linux/Windows, with exact nonzero cohort counts
+(57 storage/catalog executions on either OS plus 18 Windows-only save cases).
+It streams artifacts and bounds each owned subprocess tree, including the
+deadlock regression. It neither changes warning handling nor replaces strict
+Clippy, supply-chain audit, native/frontend or full-suite gates. Standalone
+rustfmt and the Python count-guard self-check passed without invoking Cargo.
+
+The same head's ordinary CI passes all 3,434 frontend tests, Svelte checking
+(zero errors/warnings) and production build. Root tests are still not reached by
+the strict-Clippy jobs; native compilation stops on existing App warning debt.
+The root supply-chain audit still fails on the five advisories named below, and
+its native audit step is skipped. This checkpoint is not full-suite sign-off.
+An unattached test-macro rustdoc comment introduced by the primary was also
+converted to ordinary comments. PR #86 remains draft and unmerged.
+
+M4 is decided: retain bounded exact signed-original DATA across a UI lock. Do not
+discard the only unsaved copy to implement lock. No save/publication authority
+survives that lock; a later invocation needs fresh native generation/row and
+actual source admission. No lock-time plaintext-erasure claim is made.
+
+Neither C nor F is running externally; the primary owns the next native slice.
+The actual native/source audit confirms that a new IPC handler is insufficient:
+typed vault/bootstrap custody, genuine durable backend/source binding, a distinct
+cold-operational owner factory and actual native key admission are still absent.
+Cold genesis explicitly rejects a promoted operational head, including an empty
+promotion. A warm-save/cold-reopen result therefore needs implementation, not
+only another test. The reviewed next-slice design is
+[Native member saves: production prerequisites](communication-recovery/CHAT-V2-NATIVE-MEMBER-SAVE-NEXT.md).
+No native or root-factory code was changed during that audit.
+
+The read-only dependency survey identified a published remediation route; no
+dependency changes are mixed into this save checkpoint. First update rustix to
+at least 1.1.6 in both lockfiles, move native xattr to published 1.7.0 in the same
+change (older xattr's empty-buffer size queries are incompatible with the fixed
+semantics), and use `fgetxattr_query` for the direct Linux ACL probe. Separately,
+all five direct libp2p 0.56 declarations need a coordinated 0.57 upgrade to admit
+fixed Hickory 0.26.2 or newer; this requires source adaptation and fixed-identity,
+mixed-version transport tests. Do not force an incompatible lock-only Hickory
+upgrade or add advisory ignores. See the upstream
+[xattr compatibility fix](https://github.com/Stebalien/xattr/commit/794a4fbec59289150af15de9aef6c3db7d62214e)
+and [libp2p 0.57.1 dependency set](https://github.com/libp2p/rust-libp2p/blob/v0.57.1/Cargo.toml).
+
+## Member save, root path (11 November; B, pushed, nothing executed yet)
+
+Branch `chat-v2-member-outbox-production` (draft PR #86) now connects the member outbox to
+its production owners under the primary's A/B/F contract: a Store-scoped mount
+(`v2_member_outbox/production.rs`: registry, `MemberOutboxParentDirectory::from_mount`,
+bounded paid per-context custody cells), the engine's final-edge admission constructor and
+commit split, the authorized lane hooks in `operational/host/member.rs` (historical pin
+identity, serialized save-source lifecycle composed into close, exact saved-hit
+reconciliation, recovered-DATA adoption) and the public two-phase driver
+`operational/host/member_save.rs` (`prepare_member_save`, `admit_member_save`,
+`MemberSaveJob`). It also fixes the one strict-lint finding namespace5 had introduced
+(`result_large_err` on the Current3 owning refusal).
+
+Seventeen new regressions: fifteen Windows-only save cases on the real warm whole-owner
+fixture with namespace5 mounted (SavedLocal and exact retries without signing, refusal
+without presealed work, a cancelled session at the edge, close before and after admission,
+unrun de-admission, an uncertain commit, an unwind mid-commit, an unwind before the commit
+point that re-preseals the same original after an Absent lookup, cancellation and receiver
+loss during paused IO, lane replacement adoption, an exact hit in every lane state with an
+unrelated token untouched, a lookup read failure before signing, same-token changed DATA as
+a conflict in every custody state, another token's retained original named, and the pin
+identity matching the on-disk pin ciphertext in all three families) and two cross-platform
+mount cases. None has run: local Cargo is paused and CI stops at the base branch's strict
+Clippy debt before tests. CI's Clippy pass type-checks the library and test library on Linux
+and Windows: `0371efbe` had no compile error and no new lint in the changed files; the
+review-fix commit `00c8b32d` introduced one Windows test compile error (an array-repeat
+pattern) and two new lints (`enum_variant_names` on the test-cut enum, `drop_non_drop` in a
+test), all fixed in `7ff99020`, which type-checks on both platforms with no compile error and
+no lint in the changed files (Linux 531 library / 471 test-library lint errors, Windows 531 /
+188; the base at `ca35f74a` had 556 / 497 and 556 / 189).
+
+The read-only adversarial review of `0371efbe` found no BLOCKER. Its HIGH (a same-token retry
+with changed DATA reported Ready or Saved) and its MEDIUM/LOW code findings are fixed; one
+MEDIUM is a recorded primary decision (retained plaintext across UI lock). A short re-review
+of the fixes found no BLOCKER/HIGH/MEDIUM; its LOW notes are fixed or listed as follow-ups.
+
+Not done: F's native producer and barrier tests (root fixtures use a test custody box and
+establish no native authorization); true host replacement with a second whole owner (the
+cases replace the lane under one owner); routing checkpoints through the cell; nonfounder
+and joined-member sources (C); governance4-vault saves. Process restart is crash-equivalent.
+[Save path](communication-recovery/CHAT-V2-MEMBER-OUTBOX.md).
+
+## Primary namespace5 review and save handoff (11 November; CI red, updated tests pending)
+
+The namespace checkpoint is published in draft PR #86 against the inactive Chat V2
+integration branch. Static actual-diff review through `ab5852a1` found no confirmed
+BLOCKER/HIGH/MEDIUM. The remaining LOW coverage gap now has two source regressions:
+complete-seed recovery with a populated parent refuses before recreating a stage,
+and a settled seed-free populated parent remounts unchanged. Both compare recursive
+names and file contents. There are now 24 new namespace cases (22 from B plus two
+from the primary); none has executed successfully for this checkpoint yet.
+
+Standalone rustfmt passes on the added tests. Local Cargo remains paused by user
+request. CI for `ab5852a1` is red: the Linux strict-Clippy job reports 556 App library
+errors and 497 App test-library errors, including unused integration and API-size
+findings. This stops its test steps; source inspection is not compile/test clearance.
+The supply-chain job also fails on the locked `hickory-proto 0.25.2` advisories
+RUSTSEC-2026-0487/0489/0490/0491 and `rustix 1.1.4` RUSTSEC-2026-0486. Bans, licences
+and sources pass that root audit. No ignore or dependency change is made here.
+
+The primary has resolved the A/B/F design requests in
+[the member-save handoff](communication-recovery/CHAT-V2-MEMBER-SAVE-HANDOFF.md).
+B may implement the narrow A-side hooks without waiting for another A session.
+Use the existing exact retained-pin identity before lookup/lane creation, serialize
+source-end admission against close, reconcile saved hits instead of abandoning them,
+and retain known originals across host replacement. The two-phase native contract
+requires real checked UI/row custody and forbids reversed UI/host lock order.
+These are implementation decisions, not implemented save/native producers.
+
+## Member outbox namespace5 (11 November; source checkpoint, NOT compiled)
+
+Branch `chat-v2-member-outbox-production` (from `ce402364`) declares the member outbox's
+parent as critical namespace5/version1, independent of governance4, in two commits:
+`c87f8f84` (catalog DATA: shared sorted-insert declarations, the ID5 codec, ID5 in the
+JOIN grammar, successor and every JOIN re-encoder; governance4 moved onto sorted insert)
+and `94f5290d` (physical declaration, mount, gate ordering and older-reader fences).
+No successful Cargo compile/test result is recorded; the store raw-fs and ambient-dependency gates pass.
+Twenty-two original focused tests await CI. An independent read-only
+actual-diff review found one compile blocker (a cross-module visibility error) and one
+`-D warnings` dead-code failure; both are fixed in the follow-up commit with the review's
+hardening (empty-parent adoption only, independent member pool, fault cut 255, summary
+ordering) and its requested regressions (both wrappers' cut matrices, pre-namespace5
+emulation at every cut, ID2 to 3 to 5 in one retry, frozen governance bytes). Still not
+covered: an interrupted ordinary JOIN stage present at open on an ID5 vault. The member save path itself
+(Store-scoped slot table, production save admission, native job handoff) is not written:
+its A-side hooks and native handoff now have the primary's contract above, while F's
+actual native producer remains absent. Unsupported today: member saves on governance4
+vaults (that wrapper yields no Store) and first-torn member-seed recovery.
+[Format](communication-recovery/CHAT-V2-MEMBER-OUTBOX.md).
+
 ## Ordinary-member signer, founder vertical (11 November; focused checks passed)
 
 Branch `chat-v2-ordinary-member-signing` (from `b24fd196`) adds the production signing
@@ -16,10 +1785,9 @@ The unchanged frontend passes all 3,434 tests, static checking with zero errors/
 warnings and its production build. Ambient-dependency and store raw-filesystem
 gates pass. Independent actual-diff review found no BLOCKER/HIGH/MEDIUM; its LOW
 comment overclaim about full-Draft binding was corrected and re-reviewed.
-The full root/native suites, separate native check and strict lint/audit gates are
-running serially; their new results are not yet acceptance evidence. The named
-10,000-operation test remains deferred until the end. The previous 9 November
-results below describe the earlier checkpoint, not this new source.
+The local broad runner was subsequently stopped at the user's request to pause and
+use CI. Its unfinished root run is not a pass. The previous 9 November results below
+describe the earlier checkpoint, not this new source.
 
 - MLS: narrow retained-device signer with an exact full-key check and payload bound.
 - Core: `V2OrdinarySigningGuard::signer_data` (DATA getter).
@@ -59,8 +1827,10 @@ guards. All 21 succession cases pass in 127.53 seconds on the default stack.
 The full native suite passes 1,048 tests and the separate native compile check
 passes. The unchanged frontend passes all 3,434 unit tests, static checking,
 production build, default browser flows and the admin-history browser scenario.
-Current formatting, ambient-dependency and raw-filesystem gates pass; the recorded
-dependency audit remains applicable to the unchanged locked dependencies.
+Formatting, ambient-dependency and raw-filesystem gates passed at that checkpoint.
+The dependency audit passed on 9 November against the advisory data then available;
+the 11 November CI advisory failures above supersede that result despite the
+unchanged locked dependencies.
 
 Strict root Clippy still fails with 534 App library errors: unfinished unused
 integration plus remaining style/API findings. CI/sign-off is not green and no
@@ -4962,7 +6732,7 @@ affine writer; production native action handlers and Row installation do not yet
 Slot tests distinguish never-entered command loss from entered uncertainty, preserve actual
 IO collection independently of a negative result, prevent a finished old token corrupting
 a retried writer, and fence a close racing writer reservation. Positive history survives
-actual input/join teardown. All624 focused Root voice-v2 tests pass (16.39s), including actual
+actual input/join teardown. All 624 focused Root voice-v2 tests pass (16.39s), including actual
 LOW/Open/HIGH publication, profile races and cached-mode rejection. The new actual recorded
 Actor/collection-waker blocked-TCP case passed before the final timeout/accounting revision
 (9.56s; exact current rerun pending): unpolled drop, stopped Actor,
@@ -6742,7 +8512,7 @@ substitution, independent byte copies and malformed metadata. Svelte reports zer
 Before the Result increment,252 focused native handoff tests and both actual TCP confirmation
 tests pass. Input/admission/cleanup run as authenticated frames. Scoping the synchronous
 decoder before later serialization keeps the complete measured Control peak12,252B/12,288B.
-All2,597 frontend tests, Svelte0/0 and production build pass. Native Result changes below have
+All2,597 frontend tests, Svelte 0/0 and production build pass. Native Result changes below have
 not yet compiled; their enlarged graph must pass the same unchanged bounds. A fresh complete
 Root suite is running separately on identical Root inputs; no second heavy Cargo is started.
 
@@ -6817,7 +8587,7 @@ active Keep/private-download recovery after B restart, outside this handoff diff
 an isolated serial rerun2/2 in25.39s; this does not erase the full-run failures or establish their
 cause. File recovery implementation remains the other agent's area. Native sign-off stays open
 pending reconciliation under combined load; no timeout or assertion was relaxed. Native check
-and strict all-target/all-feature Clippy pass. Full frontend2,577, current Svelte0/0 and production
+and strict all-target/all-feature Clippy pass. Full frontend2,577, current Svelte 0/0 and production
 build pass; both formatting and ambient gates pass. Current Root sources/manifests remain
 unchanged from the previously validated3,310-test checkpoint; a fresh complete Root run remains
 pending. No startup/flow rerun is required for this inactive, non-setup/non-chat increment.
@@ -8759,7 +10529,7 @@ Tauri continues to own native rebuilds. The regression exercises the actual conf
 watcher predicate; OS file-notification delivery and the historical F-drive activity are not
 established by that test. The test fixture opens no HMR WebSocket listener.
 
-Integration validation passes2,067 frontend cases,427 native library +5 ACL cases, Svelte0/0,
+Integration validation passes2,067 frontend cases,427 native library +5 ACL cases, Svelte 0/0,
 production frontend build, native check/build/startup, ten standard browser flows and the separate
 private-download, retained-copy and Gate7 Studio/playback/close flows. The root Rust sources are
 identical at the original UI merge to the 3,033-pass checkpoint. The subsequent native transaction
@@ -15395,3 +17165,16 @@ opener above. These DATA codecs issue no source, quota, Saved, Current or live c
 Root's actual group-wide/cross-signer fences, pin/head/seed/scope writes and owning Current
 consumer remain required. Compilation/tests/builds remain paused; direct format, whitespace
 and ambient/raw-FS static checks do not establish readiness. [Format and limits](communication-recovery/CHAT-OWNER-V2-GENESIS-ACTIVATION-FORMAT.md).
+## Selected governing-history Core increment (12 November; focused checks passed)
+
+Branch `chat-v2-selected-history-proofs` adds bounded negative-only old-parent
+proofs against the actual selected prefix, with precomputed candidate outputs
+and retained signed contradiction evidence. CI run43313196959 passed all13 new
+cases plus3 existing controls, root formatting and strict Core Clippy on Linux
+and Windows at sourcee1b7e34a (runtime3f94470c). Broader run43313807311 remains
+running; the user's slow catch-up cost case is still deferred. No local Cargo
+was run. This does not complete durable history backing or
+Chat V2. The App joined source, governing transport, registered archive,
+cold authority reconstruction and native admission remain separate work.
+Details and exact acceptance gaps:
+[CHAT-V2-SELECTED-HISTORY-PROOFS.md](communication-recovery/CHAT-V2-SELECTED-HISTORY-PROOFS.md).

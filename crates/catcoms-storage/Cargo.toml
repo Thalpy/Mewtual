@@ -45,7 +45,10 @@ libc = "0.2"
 # descriptor, `fstatfs` for the filesystem type and the effective uid for the shared-folder rule,
 # all through safe APIs (Bytecode Alliance; Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR
 # MIT). Already in both lock files at this version through `tempfile`.
-rustix = { version = "1.1.4", features = ["fs", "process"] }
+# 1.1.6 fixes RUSTSEC-2026-0486 and supplies the explicit xattr size-query API.
+# The native tar/xattr transitive must move with it (xattr>=1.7.0); older xattr
+# used empty-buffer reads as queries, whose semantics changed in the fix.
+rustix = { version = "1.1.6", features = ["fs", "process"] }
 
 [dev-dependencies]
 rand_chacha = "0.3"

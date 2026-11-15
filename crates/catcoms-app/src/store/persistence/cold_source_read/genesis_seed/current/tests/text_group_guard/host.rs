@@ -3,6 +3,8 @@
 mod create;
 // Founder-as-ordinary-member lane: general verifier, plan and retained-device signing.
 mod member;
+// Member save: the two-phase path into the real member outbox on the fixture's own vault.
+mod member_save;
 mod recovery;
 use super::*;
 use crate::store::owner_evidence::canonical::text_lane::{

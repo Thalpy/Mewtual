@@ -173,7 +173,7 @@ impl Drop for PromotionFactsDropNotice {
 }
 
 /// Shared Ready/Saved facts plus one complete final readonly proof, paid independently of
-/// the active16MiB worker. The Windows directory-iterator traversal belongs only to active
+/// the active16MiB worker. The fixed directory traversal belongs only to active
 /// Ready/Prepared (which retain that actual work fee), not the escaping Saved metadata.
 const PROMOTION_READ_METADATA_BYTES: usize = 4 * std::mem::size_of::<PromotionReadyFacts>()
     + 2 * std::mem::size_of::<ReadyReadFiles>()
@@ -192,11 +192,11 @@ fn io(error: impl std::fmt::Display) -> AppError {
 pub(super) fn require_original_genesis_inventory(
     guard: &V2TextCurrentGroupGuard<'_, '_>,
 ) -> Result<(), AppError> {
-    // The first inventory profile shares the actual audited Windows iterator bound. A new
-    // platform needs its own paid native iterator bound before any promotion effect.
-    require_exact_inventory(guard.directory_data().0, &["pin.bin"], false)?;
+    // Both supported readers have an explicit fixed fee. Linux borrows a fixed
+    // getdents buffer and independently opens the original held directory.
+    require_exact_inventory(guard.directory_data(), &["pin.bin"], false)?;
     require_exact_inventory(
-        guard.target_directory_data().0,
+        guard.target_directory_data(),
         &[
             "origin",
             "source.seed",
@@ -210,17 +210,29 @@ pub(super) fn require_original_genesis_inventory(
 }
 
 pub(super) fn require_exact_inventory(
-    path: &Path,
+    directory: (&Path, &File, SessionId),
     names: &[&str],
     permits_pages_directory: bool,
 ) -> Result<(), AppError> {
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
-        let _ = (path, names, permits_pages_directory);
+        let _ = (directory, names, permits_pages_directory);
         Err(refused())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if !directory.0.is_absolute() || directory.0.as_os_str().len() > MAX_TEXT_PATH {
+            return Err(refused());
+        }
+        crate::store::persistence::exact_inventory_linux::require_exact_names(
+            directory,
+            names,
+            permits_pages_directory,
+        )
     }
     #[cfg(windows)]
     {
+        let path = directory.0;
         if path.as_os_str().len() > MAX_TEXT_PATH || names.len() > 10 {
             return Err(refused());
         }
@@ -477,7 +489,7 @@ fn require_promotion_workspace(
     promotion: &PreparedV2TextPromotion,
     guard: &V2TextCurrentGroupGuard<'_, '_>,
 ) -> Result<(), AppError> {
-    require_exact_inventory(guard.directory_data().0, &["pin.bin"], false)?;
+    require_exact_inventory(guard.directory_data(), &["pin.bin"], false)?;
     let target = &promotion.captured.target;
     let mut names = [""; 10];
     names[..6].copy_from_slice(&[
@@ -526,7 +538,7 @@ fn require_promotion_workspace(
         }
     }
     // WAL and unknown scratch cannot hide behind a successful original-head comparison.
-    require_exact_inventory(target, &names[..count], true)
+    require_exact_inventory(guard.target_directory_data(), &names[..count], true)
 }
 
 impl PreparedV2TextPromotion {
@@ -760,7 +772,7 @@ impl ReadyV2TextPromotionSelection {
             return Err(refused());
         }
         let files = inspect_ready_content(&self.facts)?;
-        require_exact_inventory(guard.directory_data().0, &["pin.bin"], false)?;
+        require_exact_inventory(guard.directory_data(), &["pin.bin"], false)?;
         let target_names = [
             "origin",
             "source.seed",
@@ -773,7 +785,7 @@ impl ReadyV2TextPromotionSelection {
             "head.stage",
         ];
         require_exact_inventory(
-            &self.facts.target,
+            guard.target_directory_data(),
             &target_names[..if files.parent.is_some() { 9 } else { 8 }],
             true,
         )?;

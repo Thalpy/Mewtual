@@ -8,6 +8,7 @@
 use crate::store::chat_admission::v2_current::{
     ColdV2CurrentPreparation, ColdV2InitializingPreparation, V2CurrentPreparation,
 };
+use crate::store::critical_namespaces::archive_current_codec::V2GroupPinId;
 use crate::store::critical_namespaces::current_layout::PreparedV2GenesisGroupNamespace;
 use crate::store::critical_namespaces::current_layout::V2CurrentLayoutStore;
 use crate::store::critical_namespaces::refused;
@@ -122,6 +123,22 @@ impl<T, R> V2TextOwnedCurrent<T, R> {
 }
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurrent<T, R> {
+    /// Only the real warm whole owner can prepare an invite. Cold/Repaired
+    /// metadata never supplies a new signer or starts another original draw.
+    pub(super) fn prepare_invite_data(
+        &mut self,
+        store: &ServerStore,
+        request: catcoms_sync::owner_v2::V2FounderInviteRequestData,
+        native: &catcoms_rt::NativeChatSourceObservation,
+        slot: &mut Option<catcoms_sync::owner_v2::PreparedV2FounderInviteData>,
+    ) -> Result<(), AppError> {
+        match &mut self.core {
+            OwnedCurrent::Warm(current) => {
+                current.prepare_text_invite_data(store, request, native, slot)
+            }
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
     /// Root already admitted the exact selected request and separately paid producer
     /// buffers. Family helpers end their SourceRef borrow before the mutable RNG call.
     pub(super) fn prepare_create_data(
@@ -230,6 +247,29 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurr
             OwnedCurrent::Repaired(c) => c.sign_text_ordinary_admitted(inputs, guard),
         }
     }
+    pub(super) fn sign_ordinary_admitted_native<'a>(
+        &self,
+        inputs: &catcoms_sync::owner_v2::V2MemberDraftInputs,
+        guard: catcoms_replication::chat::V2OrdinarySigningGuard<'a>,
+        original: &catcoms_rt::NativeChatSourceObservation,
+        cut: &mut catcoms_rt::NativeChatPreparedKeyCut,
+        ends: &mut catcoms_rt::NativeChatKeyEnds,
+    ) -> Result<
+        catcoms_replication::chat::V2OrdinarySigningGuard<'a>,
+        catcoms_sync::owner_v2::V2MemberSignRefusal,
+    > {
+        match &self.core {
+            OwnedCurrent::Warm(c) => {
+                c.sign_text_ordinary_admitted_native(inputs, guard, original, cut, ends)
+            }
+            OwnedCurrent::Cold(c) => {
+                c.sign_text_ordinary_admitted_native(inputs, guard, original, cut, ends)
+            }
+            OwnedCurrent::Repaired(c) => {
+                c.sign_text_ordinary_admitted_native(inputs, guard, original, cut, ends)
+            }
+        }
+    }
     pub(super) fn borrow_unsigned_append<'a>(
         &'a self,
         store: &ServerStore,
@@ -315,6 +355,25 @@ impl<'owner> V2TextOwnerRef<'owner> {
         writer: &V2WriterObservation,
     ) -> Result<(), AppError> {
         self.original.require_original_negative(store, writer)
+    }
+    /// Historical DATA: the canonical `V2GroupPinId` of the EXACT authenticated original pin
+    /// ciphertext retained by this owner's single real family (warm, cold or repaired). The
+    /// existing typed capture labels the pin with this same identity. It stays computable for
+    /// the whole owner life, after O advances beyond generation 1, so member-outbox receipts
+    /// remain readable. Nothing is reopened, resealed or re-derived from the public Profile, and
+    /// it grants no current OPEN, signing or save right.
+    pub(in crate::store) fn original_pin_id_data(&self) -> Result<V2GroupPinId, AppError> {
+        let pin = match (
+            self.original.warm_head(),
+            self.original.cold_head(),
+            self.original.repaired_head(),
+        ) {
+            (Some(head), None, None) => head.text_pin_data()?.2,
+            (None, Some(head), None) => head.text_pin_data()?.2,
+            (None, None, Some(head)) => head.text_pin_data()?.2,
+            _ => return Err(refused()),
+        };
+        Ok(V2GroupPinId::of(pin))
     }
     /// Recheck that exactly one real original family is present. Scope must not interpret
     /// optional family loans as a caller-selected role or fall through to another family.

@@ -58,6 +58,14 @@ impl HeldDirectory {
         )?;
         Ok(Self { path, id })
     }
+    /// Hold an ALREADY captured directory by its original native identity (the namespace5
+    /// mount's parent). Unlike [`Self::open`] this never adopts whatever the name refers to
+    /// now: it refuses unless the name still refers to exactly that directory object.
+    pub(super) fn adopt(path: PathBuf, id: SessionId) -> Result<Self, AppError> {
+        let held = Self { path, id };
+        held.require()?;
+        Ok(held)
+    }
     pub(super) fn path(&self) -> &Path {
         &self.path
     }

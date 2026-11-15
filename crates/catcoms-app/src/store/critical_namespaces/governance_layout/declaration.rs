@@ -8,9 +8,18 @@ fn summary(
     raw: &[u8],
 ) -> Result<pending_join_codec::Summary, AppError> {
     let plain = Zeroizing::new(unseal(key, &unframe(raw)?)?);
-    Ok(store
-        .parse_configured_join_catalog(&plain)?
-        .summary(*blake3::hash(raw).as_bytes()))
+    let parsed = if store.governance_layout_policy.as_ref().is_some_and(|p| {
+        p.family == governance_namespace_codec::GovernanceCatalogFamily::NativeLifecycle
+    }) {
+        pending_join_codec::parse_native_governance_family(
+            &plain,
+            &store.chat_vault_domain()?,
+            true,
+        )?
+    } else {
+        store.parse_configured_join_catalog(&plain)?
+    };
+    Ok(parsed.summary(*blake3::hash(raw).as_bytes()))
 }
 
 impl ServerStore {
@@ -19,7 +28,25 @@ impl ServerStore {
         fee: &CatalogReadReservation,
         rng: &mut impl CryptoRngCore,
     ) -> Result<Declaration, AppError> {
+        self.prepare_governance_layout_declaration_with_native(fee, rng, &mut None)
+    }
+    pub(in crate::store) fn prepare_governance_layout_declaration_with_native(
+        &self,
+        fee: &CatalogReadReservation,
+        rng: &mut impl CryptoRngCore,
+        native_slot: &mut Option<
+            super::super::native_registry::lifecycle::VerifiedGovernanceNative,
+        >,
+    ) -> Result<Declaration, AppError> {
         let policy = self.governance_layout_policy.as_ref().ok_or_else(refused)?;
+        match (policy.family, native_slot.as_ref()) {
+            (governance_namespace_codec::GovernanceCatalogFamily::Standard, None) => {}
+            (
+                governance_namespace_codec::GovernanceCatalogFamily::NativeLifecycle,
+                Some(native),
+            ) => native.require_initial_catalog(self)?,
+            _ => return Err(refused()),
+        }
         fee.validate(&policy.current.archive.pending.pool, codec::DECLARATION_FEE)?;
         policy.require_persistent_capacity()?;
         let inventory = self.read_governance_inventory(fee)?;
@@ -41,10 +68,21 @@ impl ServerStore {
         if before.governance.is_some() {
             return Err(refused());
         }
-        let capability = GovernanceCapabilityData::from_original_catalog_data(
-            &old_plain,
-            &self.chat_vault_domain()?,
-        )?;
+        let capability = match policy.family {
+            governance_namespace_codec::GovernanceCatalogFamily::Standard => {
+                GovernanceCapabilityData::from_original_catalog_data(
+                    &old_plain,
+                    &self.chat_vault_domain()?,
+                )?
+            }
+            governance_namespace_codec::GovernanceCatalogFamily::NativeLifecycle => {
+                GovernanceCapabilityData::from_family_original_catalog_data(
+                    &old_plain,
+                    &self.chat_vault_domain()?,
+                    policy.family,
+                )?
+            }
+        };
         let layout = capability.current_layout_data();
         self.check_current_marker_before_old_gates(layout, fee)?;
         {
@@ -54,12 +92,27 @@ impl ServerStore {
                 return Err(refused());
             }
         }
-        let next_plain =
-            governance_namespace_codec::prepare_declaration_data(&old_plain, &layout.vault)?;
+        let next_plain = match policy.family {
+            governance_namespace_codec::GovernanceCatalogFamily::Standard => {
+                governance_namespace_codec::prepare_declaration_data(&old_plain, &layout.vault)?
+            }
+            governance_namespace_codec::GovernanceCatalogFamily::NativeLifecycle => {
+                governance_namespace_codec::prepare_family_declaration_data(
+                    &old_plain,
+                    &layout.vault,
+                    policy.family,
+                )?
+            }
+        };
         let mut next = self
             .parse_configured_join_catalog(&next_plain)?
             .summary([0; 32]);
-        if next.governance != Some(capability) {
+        // An existing member-outbox ID5 is carried over byte for byte (the codec inserts
+        // 4 before it); this second, Summary-level check never lets 4 alter or drop it.
+        if next.governance != Some(capability)
+            || next.member_outbox != before.member_outbox
+            || next.member_outbox_payload_digest != before.member_outbox_payload_digest
+        {
             return Err(refused());
         }
         self.require_no_prior_governance_declaration_debts()?;
@@ -69,7 +122,18 @@ impl ServerStore {
         let candidate = Zeroizing::new(frame(&seal(&key, &next_plain, rng)?));
         next.framed = *blake3::hash(&candidate).as_bytes();
         let marker = codec::seal_marker(&key, capability, rng)?;
-        let seed = codec::seal_seed(&key, &layout.vault, &original, &candidate, &marker, rng)?;
+        let seed = match native_slot.as_ref() {
+            Some(native) => codec::seal_native_seed(
+                &key,
+                &layout.vault,
+                &original,
+                &candidate,
+                &marker,
+                native.data(),
+                rng,
+            )?,
+            None => codec::seal_seed(&key, &layout.vault, &original, &candidate, &marker, rng)?,
+        };
         let initial_current_frame = before.framed;
         Ok(Declaration {
             capability,
@@ -89,6 +153,7 @@ impl ServerStore {
             stage_file: None,
             captured_duplicate_stage: None,
             marker_file: None,
+            native: native_slot.take(),
             #[cfg(test)]
             _tail_drop: DeclarationTailDrop,
         })
@@ -103,6 +168,16 @@ impl ServerStore {
         if actual != VaultFormat::CriticalNamespaces {
             return Err(refused());
         }
+        // An in-progress namespace5 declaration owns the catalog stage slot, which the
+        // governance inspector would refuse. With the concrete member handler configured,
+        // finish it, abandon a first seed that never authenticated, or preserve and refuse it
+        // first; the Current3 gate below re-inspects and installs its marker. Both seeds at
+        // once are conflicting debts, except that an unauthenticated member seed beside a
+        // governance seed (a predecessor's governance write during the claim window) is
+        // abandoned without touching the stage, which is governance's own.
+        if self.member_outbox_policy().is_some() && self.member_outbox_seed_present()? {
+            drop(self.inspect_and_repair_member_outbox_declaration()?);
+        }
         // The large4 transient/repair fee is gone before the old3/2 gates reserve
         // their own large phases. An exact captured marker keeps only its OWN fee.
         let captured = self.inspect_and_repair_governance_declaration()?;
@@ -111,6 +186,14 @@ impl ServerStore {
             after_marker_capture_for_test();
         }
         self.require_no_prior_governance_declaration_debts()?;
+        if matches!(self.current_layout_policy.as_ref().and_then(|p|p.native_registry.as_ref()),
+            Some(super::super::native_registry::preparation::NativeRegistryHandler::GovernanceOpening(_)))
+        {
+            // Seed4 repair/abort finished above. Hold native3's actual final
+            // catalog and leaves through the COMMON Current/JOIN opener; its
+            // one observation is consumed only by open_native afterward.
+            self.inspect_and_repair_native_registry_declaration()?;
+        }
         self.open_current_layout_catalog_gate(actual, passphrase, rng)?;
         if let Some(captured) = captured {
             self.install_governance_layout_marker(captured)?;
@@ -135,15 +218,40 @@ impl ServerStore {
         let current = summary(self, &key, current_raw)?;
         let layout = current.current_layout.ok_or_else(refused)?;
         let archive = current.archive.as_ref().ok_or_else(refused)?;
+        if policy.family == governance_namespace_codec::GovernanceCatalogFamily::NativeLifecycle {
+            if let Some((_, raw)) = inventory.seed.as_ref() {
+                let torn = match codec::open_native_seed(&key, raw) {
+                    Ok(_) => false,
+                    Err(codec::NativeSeedReadError::Unauthenticated(_)) => true,
+                    Err(codec::NativeSeedReadError::Indeterminate(_)) if raw.len() < 40 => true,
+                    Err(e) => return Err(e.into_error()),
+                };
+                if torn {
+                    let native_inventory=crate::store::persistence::native_registry::lifecycle::governed::NativeGovernanceInventory::capture(self,policy.native_pool.as_ref().ok_or_else(refused)?)?;
+                    let proof = super::super::native_registry::lifecycle::verify_governance_native(
+                        self,
+                        native_inventory,
+                        current_raw,
+                        None,
+                    )?;
+                    self.cleanup_native_governance_torn(inventory, proof)?;
+                    // Cleanup grants no4: common original3 opening and the same
+                    // owning preparation must complete before a fresh declaration.
+                    return Ok(None);
+                }
+            }
+        }
         if let Some((seed_file, seed_raw)) = inventory.seed {
-            let plain = codec::open_seed(&key, &seed_raw)?;
-            let saved = codec::parse_seed(&key, &layout.vault, &plain)?;
+            let plain = policy.open_seed(&key, &seed_raw)?;
+            let saved = policy.parse_seed(&key, &layout.vault, &plain)?;
             let before = summary(self, &key, saved.original)?;
             let next = summary(self, &key, saved.candidate)?;
             if before.governance.is_some()
                 || next.governance != Some(saved.capability)
                 || before.current_layout != Some(layout)
                 || next.current_layout != Some(layout)
+                || before.member_outbox != next.member_outbox
+                || before.member_outbox_payload_digest != next.member_outbox_payload_digest
             {
                 return Err(refused());
             }
@@ -151,6 +259,20 @@ impl ServerStore {
             if !promoted && current_raw.as_slice() != saved.original {
                 return Err(refused());
             }
+            let native = match saved.native {
+                Some(data) => {
+                    let actual=crate::store::persistence::native_registry::lifecycle::governed::NativeGovernanceInventory::capture(self,policy.native_pool.as_ref().ok_or_else(refused)?)?;
+                    Some(
+                        super::super::native_registry::lifecycle::verify_governance_native(
+                            self,
+                            actual,
+                            saved.original,
+                            Some(data),
+                        )?,
+                    )
+                }
+                None => None,
+            };
             let stage_file = if let Some((file, stage)) = inventory.stage {
                 if stage.len() > saved.candidate.len()
                     || saved.candidate[..stage.len()] != stage[..]
@@ -224,6 +346,7 @@ impl ServerStore {
                 stage_file,
                 captured_duplicate_stage,
                 marker_file,
+                native,
                 #[cfg(test)]
                 _tail_drop: DeclarationTailDrop,
             };

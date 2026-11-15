@@ -165,6 +165,17 @@ impl V2OrdinarySigningPlan {
     pub fn admission_id_data(&self) -> crate::chat::owner_facts::OwnerFactId {
         self.facts.admission
     }
+    /// Negative observation of this Plan's ORIGINAL lifetimes: its group view, its channel
+    /// view and the issuing Admission's OPEN life (the same predicate `admit_signing` checks).
+    /// `Err(Scope)` once any of them closed: a selected Remove, a source stop, a group/channel
+    /// close or fork fence. Atomic loads only; it takes no reader, never enters the key, never
+    /// changes the Plan's phase and is legal after Stop (it simply refuses).
+    ///
+    /// Not authority and not a fence. Final member-save admission must still be ordered by the
+    /// caller's live source fence; this read is an additional refusal there.
+    pub fn require_open_data(&self) -> Result<(), ChatError> {
+        self.facts.live()
+    }
     pub fn observe_original(&self) -> OriginalV2OrdinarySigningPlanObservation {
         OriginalV2OrdinarySigningPlanObservation {
             identity: Arc::downgrade(&self.identity),

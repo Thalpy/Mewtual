@@ -21,7 +21,7 @@
     "@tauri-apps/api": "^2.12.4",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1",
-    "dompurify": "^3.4.11",
+    "dompurify": "^3.4.17",
     "jsqr": "^1.4.0",
     "marked": "^18.0.5",
     "mediabunny": "1.61.3",
@@ -36,6 +36,6 @@
     "svelte": "^5",
     "svelte-check": "^4",
     "typescript": "^5",
-    "vite": "^6"
+    "vite": "^6.4.4"
   }
 }

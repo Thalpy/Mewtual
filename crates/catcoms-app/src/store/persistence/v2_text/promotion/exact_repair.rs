@@ -316,8 +316,8 @@ impl CapturedV2TextPromotionSeedRepair {
             names[count] = "head.stage";
             count += 1;
         }
-        work::require_exact_inventory(guard.directory_data().0, &["pin.bin"], false)?;
-        work::require_exact_inventory(&self.plan.target, &names[..count], true)?;
+        work::require_exact_inventory(guard.directory_data(), &["pin.bin"], false)?;
+        work::require_exact_inventory(guard.target_directory_data(), &names[..count], true)?;
         guard.validate_original_namespace()?;
         self.require_names()?;
         guard.validate_source_only()

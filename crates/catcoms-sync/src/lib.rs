@@ -1905,6 +1905,9 @@ pub struct RoutingState {
     connection_handoff: PreOwnerConnectionHandoff,
     /// Minted only by the live exact-KP completion path; never part of routing wire/storage.
     fresh_chat_admission: Option<chat_scope::VerifiedFreshChatAdmission>,
+    /// V2 joined-member join FACTS, captured by `finish_join` from the same verified invite
+    /// Welcome. Transient like `fresh_chat_admission`: never encoded, sealed, persisted or sent.
+    v2_join_facts: Option<owner_v2::V2JoinFacts>,
 }
 
 impl std::fmt::Debug for RoutingState {
@@ -1960,6 +1963,7 @@ fn open_routing_transfer(
         policy,
         connection_handoff: PreOwnerConnectionHandoff::default(),
         fresh_chat_admission: None,
+        v2_join_facts: None,
     })
 }
 
@@ -4324,7 +4328,10 @@ pub enum PostJoinDiscoveryEvent {
 }
 
 pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
-    // FIRST: its sole publisher must retire before transport, group or stores during Drop.
+    // Lifetime retirement comes BEFORE owned resources. A retained public fence handle must
+    // refuse new admissions before any transport, SDK or service destructor can run.
+    v2_fence: owner_v2::JoinedFenceNode,
+    // The sole file publisher also retires before transport, group or stores during Drop.
     file_effects: file_service::scope::FileEffectOwners,
     file_service: file_service::service::FileService,
     // Only this owner consumes next_event. Detached requests share outbound access without
@@ -4351,6 +4358,9 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     group: ServerGroup,
     /// Actual constructor/join provenance, not inferred from restored MLS epoch/roster labels.
     fresh_chat_admission: Option<chat_scope::VerifiedFreshChatAdmission>,
+    /// V2 joined-member join facts of THIS original incarnation (invite joins only), and
+    /// whether the joined source or the v1 owner install claimed the node. Never serialized.
+    v2_join_facts: owner_v2::JoinFactsSlot,
     /// Saved with this exact MLS group; never inferred from a received receipt or Welcome.
     owner_tenure: owner_tenure::OwnerTenure,
     group_policy: Option<GroupPolicy>,
@@ -4907,6 +4917,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             group_policy_last_topic: None,
             group,
             fresh_chat_admission: None,
+            v2_join_facts: owner_v2::JoinFactsSlot::Absent,
+            v2_fence: owner_v2::JoinedFenceNode::default(),
             device,
             rng,
             clock: clock.clone(),
@@ -5452,6 +5464,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             policy,
             connection_handoff: PreOwnerConnectionHandoff::default(),
             fresh_chat_admission: None,
+            v2_join_facts: None,
         });
         this.group_policy_publish_ready = this.group_policy.is_some();
         this.file_wrap_key = Zeroizing::new(file_wrap_key);
@@ -5930,8 +5943,21 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .fresh_chat_admission
             .take()
             .filter(|proof| proof.matches_initial_state(&group, &device));
+        // Same exact-handoff rule for the V2 join facts: kept only for the very group/device/
+        // post-Welcome state they were captured on, never for a re-paired raw group.
+        let v2_join_facts = routing
+            .v2_join_facts
+            .take()
+            .filter(|facts| facts.matches_initial_state(&group, &device));
         let mut this = Self::new(transport, group, device, rng, clock);
         this.fresh_chat_admission = fresh_chat_admission;
+        // A genuinely joined incarnation gets its source fence NOW, settled at the post-Welcome
+        // state, so every later finalized transition is recorded even before the joined source
+        // takes the facts. Nodes without join facts never carry one.
+        if v2_join_facts.is_some() {
+            this.v2_fence = owner_v2::JoinedFenceNode::for_join(&this.group);
+        }
+        this.v2_join_facts = owner_v2::JoinFactsSlot::from_handoff(v2_join_facts);
         // `joined`, not `unknown`. A device that joins into a recycled low leaf becomes the
         // designated committer, and with `unknown` it could never issue a receipt while every witness
         // knew the answer. The inference is about current continuous membership: a tenure is an
@@ -12210,6 +12236,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             deadline_ms: self.clock.now_ms() + self.config.stage_decision_window_ms,
             mine: Some(mine),
         });
+        self.v2_fence_sync_contest();
         let mut framed = vec![CTRL_COMMIT];
         framed.extend_from_slice(&record.encode());
         self.outbox.push((self.control_topic.clone(), framed));
@@ -12296,6 +12323,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 });
             }
         }
+        // A contest is open (or was refreshed) for this epoch: a joined source pauses.
+        self.v2_fence_sync_contest();
     }
 
     /// If a fork-resolution contest's window has closed, adopt the lowest-`commit_id`
@@ -12315,12 +12344,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if epoch != self.group.epoch() {
             // A stale contest from an epoch we have since left: just drop it.
             self.pending = None;
+            self.v2_fence_sync_contest();
             return false;
         }
         if self.clock.now_ms() < deadline {
             return false; // window still open
         }
         let p = self.pending.take().expect("checked some");
+        // Every branch below merges or applies through the observer. Clear `contested` and
+        // raise `merging` in one fence section so no admission fits between them.
+        self.v2_fence_take_contest_into_merge();
         let winner_id = p.best.commit_id();
         let we_won = p.mine.as_ref().map(|m| m.commit_id) == Some(winner_id);
         let i_removed = p.mine.as_ref().map(|m| m.removed).unwrap_or(false);
@@ -12329,9 +12362,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // departed members on all three branches below.
         let before = self.group.member_device_ids();
         let advanced = match &p.mine {
-            Some(_) if we_won => match self
-                .with_observed_mls_transition(|node| node.group.merge_staged_self(&node.device))
-            {
+            // We won, so the winner record is our own staged commit: these are its exact bytes.
+            Some(_) if we_won => match self.with_observed_mls_commit(&p.best.mls_commit, |node| {
+                node.group.merge_staged_self(&node.device)
+            }) {
                 // We won: merge our own staged commit.
                 Ok(()) => {
                     if i_removed {
@@ -12355,7 +12389,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 }
                 // `apply_commit`, never `process_incoming`: the winner is about to be recorded, so
                 // it must really be this epoch's commit (see `apply_commit_in_order`).
-                match self.with_observed_mls_transition(|node| {
+                match self.with_observed_mls_commit(&p.best.mls_commit, |node| {
                     node.group
                         .apply_commit(&node.device, &p.best.mls_commit, p.best.commit_epoch)
                 }) {
@@ -12370,7 +12404,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     }
                 }
             }
-            None => match self.with_observed_mls_transition(|node| {
+            None => match self.with_observed_mls_commit(&p.best.mls_commit, |node| {
                 node.group
                     .apply_commit(&node.device, &p.best.mls_commit, p.best.commit_epoch)
             }) {
@@ -12465,7 +12499,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // The roster as it stands *before* the commit, so an applied removal can name who left
         // (MLS reports only that a removal happened). Bounded by the group size.
         let before = self.group.member_device_ids();
-        match self.with_observed_mls_transition(|node| {
+        match self.with_observed_mls_commit(&record.mls_commit, |node| {
             node.group
                 .apply_commit(&node.device, &record.mls_commit, record.commit_epoch)
         }) {
@@ -12587,6 +12621,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let had_staged = self.pending.as_ref().is_some_and(|p| p.mine.is_some());
         let contest_epoch = self.pending.as_ref().map(|p| p.epoch).unwrap_or(0);
         self.pending = None;
+        self.v2_fence_sync_contest();
         if had_staged {
             // Our staged openmls commit was built on the now-superseded epoch.
             let _ = self.group.abort_staged(&self.device);
@@ -12682,9 +12717,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         };
         let record = self.sign_staged_record(&staged);
         self.snapshot_epoch_keys();
-        if let Err(e) =
-            self.with_observed_mls_transition(|node| node.group.merge_staged_self(&node.device))
-        {
+        if let Err(e) = self.with_observed_mls_commit(&record.mls_commit, |node| {
+            node.group.merge_staged_self(&node.device)
+        }) {
             tracing::error!(error = %e, "merge of remove commit failed");
             let _ = self.group.abort_staged(&self.device);
             return;
@@ -14917,6 +14952,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 removed: false,
             }),
         });
+        self.v2_fence_sync_contest();
         let mut framed = vec![CTRL_COMMIT];
         framed.extend_from_slice(&record.encode());
         self.outbox.push((self.control_topic.clone(), framed));
@@ -14955,7 +14991,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let base_authenticator = self.group.epoch_authenticator_id();
         self.snapshot_epoch_keys();
         let outcome = self
-            .with_observed_mls_transition(|node| {
+            .with_observed_mls_add(|node| {
                 node.group.add_member_via_invite(
                     &node.device,
                     key_package,
@@ -15542,7 +15578,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let base_authenticator = self.group.epoch_authenticator_id();
         self.snapshot_epoch_keys();
         let outcome = self
-            .with_observed_mls_transition(|node| node.group.add_member(&node.device, key_package))
+            .with_observed_mls_add(|node| node.group.add_member(&node.device, key_package))
             .ok()?;
         self.evict_past_keys();
         // Burn the certificate. `check_device_add` already refused a consumed nonce, so this can
@@ -16553,6 +16589,13 @@ fn finish_join(
             welcome,
         )?,
     );
+    // V2 joined-member join FACTS from this same verified Welcome, captured before any later
+    // transition (the credential digest needs the active own leaf). Facts only, never V2 pin
+    // provenance. A capture failure leaves the legacy join untouched and only means this node
+    // can never host a joined V2 source. A companion-device join (`finish_device_join`)
+    // deliberately captures none.
+    routing.v2_join_facts =
+        owner_v2::V2JoinFacts::capture(&group, device, *expected_key_package).ok();
     Ok((group, routing))
 }
 
@@ -18374,6 +18417,7 @@ mod tests {
             policy: None,
             connection_handoff: PreOwnerConnectionHandoff::default(),
             fresh_chat_admission: None,
+            v2_join_facts: None,
         });
         assert_eq!(
             joiner.open_file(&stored, &fref).unwrap(),

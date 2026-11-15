@@ -166,6 +166,7 @@ impl ServerStore {
             permit.validate_original()?;
             let mut mounted = self.pending_join_catalog.lock().map_err(|_| refused())?;
             let mounted = mounted.as_mut().ok_or_else(refused)?;
+            self.require_native_index_idle_cached()?; // Before predecessor replacement OR Pending installation.
             let pending = candidate.as_ref().ok_or_else(refused)?;
             permit.validate_capture(&pending.original.capture)?;
             original.pin.validate_original(self, original.pin.group())?;

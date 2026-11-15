@@ -23,7 +23,10 @@ then derives4. It checks whole input framing/domain/EOF, entry count, checked
 successor generation and candidate size before growing an encoder. New catalog
 parent is exactly `catalog_envelope::catalog_digest` of the WHOLE old plaintext.
 Every prior entry ID, version and payload is copied and compared byte-for-byte.
-Exactly one4/version1 is appended; no JOIN normalization, downgrade, scope reset,
+Exactly one4/version1 is inserted at its sorted position (11 November: appended when
+every existing ID is below 4, byte-identical to the earlier builder; inserted before an
+already declared member-outbox ID5 otherwise, see CHAT-V2-MEMBER-OUTBOX.md); no JOIN
+normalization, downgrade, scope reset,
 root change or cap increase is permitted. Decode supplies no runtime support or
 execution grant. Inputs/candidate/parser/sealing overlap need independent caller
 funding; this DATA slice supplies no reservation or actual Root payer.

@@ -13,13 +13,16 @@ pub(in crate::store) use host::{
 };
 pub(super) mod negative;
 pub(super) mod owner;
-pub use host::{PreparedV2TextHost, V2TextHostPolicy};
-// Ordinary-member request DATA for the host regressions (see host.rs on the gate).
+pub use host::{
+    MemberSaveJob, MemberSaveJobReport, MemberSaveNativeAdmission, PreparedV2TextHost,
+    V2MemberDependency, V2MemberSaveOutcome, V2MemberSaveRefusal, V2MemberSignRequest,
+    V2TextHostPolicy,
+};
+// Ordinary-member regression observations (see host.rs on the gate).
 #[cfg(all(test, windows))]
 pub(in crate::store) use host::{
     arm_member_close_during_sign_for_test, arm_owner_cancel_during_sign_for_test,
-    member_close_drained_during_sign_for_test, member_sign_dispatches_for_test, V2MemberDependency,
-    V2MemberSignRequest,
+    member_close_drained_during_sign_for_test, member_sign_dispatches_for_test,
 };
 
 use crate::store::critical_namespaces::current_layout::V2CurrentLayoutStore;

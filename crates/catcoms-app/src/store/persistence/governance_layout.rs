@@ -176,6 +176,95 @@ pub(in crate::store) struct GovernanceInventory {
     pub(in crate::store) directory: GovernanceDirectoryCapture,
 }
 impl ServerStore {
+    /// Abort-only recovery for a native-family first claim that never
+    /// authenticated. Never rewrites Current or manufactures namespace4.
+    /// Cold retries reprove the pristine baseline and repeat the fence's
+    /// absence/covering barrier, including when a previous unlink succeeded.
+    pub(in crate::store) fn cleanup_native_governance_torn(
+        &self,
+        mut inventory: GovernanceInventory,
+        native: critical_namespaces::native_registry::VerifiedGovernanceNative,
+    ) -> Result<(), AppError> {
+        let policy = self.governance_layout_policy.as_ref().ok_or_else(denied)?;
+        if policy.family!=critical_namespaces::governance_namespace_codec::GovernanceCatalogFamily::NativeLifecycle||inventory.marker.is_some(){return Err(denied());}
+        let seed_path = fixed(self, false, governance::GOVERNANCE_SEED)?;
+        let stage_path = fixed(self, false, critical_namespaces::Slot::Stage.name())?;
+        let marker_path = fixed(self, true, governance::GOVERNANCE_MARKER)?;
+        let current_path = fixed(self, false, critical_namespaces::Slot::Current.name())?;
+        let (seed, raw) = inventory.seed.as_ref().ok_or_else(denied)?;
+        match governance::codec::open_native_seed(&self.keys.db_key()?, raw) {
+            Err(governance::codec::NativeSeedReadError::Unauthenticated(_)) => {}
+            Err(governance::codec::NativeSeedReadError::Indeterminate(_)) if raw.len() < 40 => {}
+            _ => return Err(denied()),
+        }
+        let seed_id = session_id(seed).map_err(io)?;
+        let (current, current_raw) = inventory.current.as_ref().ok_or_else(denied)?;
+        let current_id = session_id(current).map_err(io)?;
+        let domain = self.chat_vault_domain()?;
+        let key = Zeroizing::new(self.keys.db_key()?);
+        let plain = Zeroizing::new(catcoms_crypto::unseal(
+            &key,
+            &crate::store::unframe(current_raw)?,
+        )?);
+        GovernanceCapabilityData::from_family_original_catalog_data(&plain,&domain,
+            critical_namespaces::governance_namespace_codec::GovernanceCatalogFamily::NativeLifecycle)?;
+        native.require_initial_catalog(self)?;
+        #[cfg(test)]
+        governance::after_native_torn_classification_for_test(self);
+        self.require_governance_directory_matches_root_if_mounted(&inventory.directory)?;
+        absent(&marker_path)?;
+        held(&current_path, current, current_id)?;
+        held(&seed_path, seed, seed_id)?;
+        if let Some((stage, bytes)) = inventory.stage.as_ref() {
+            if !bytes.is_empty() {
+                return Err(denied());
+            }
+            let id = session_id(stage).map_err(io)?;
+            held(&stage_path, stage, id)?;
+            native.require_initial_catalog(self)?;
+            exact_held(&seed_path, seed, seed_id, raw)?;
+            exact_held(&stage_path, stage, id, bytes)?;
+            fs::remove_file(&stage_path).map_err(io)?;
+        } else {
+            absent(&stage_path)?;
+        }
+        drop(inventory.stage.take());
+        self.governance_fault(241)?;
+        // Repeat this even on an already-absent fence. A prior unlink did not
+        // acknowledge its parent-directory barrier and may not survive power loss.
+        absent(&stage_path)?;
+        sync_directory(&self.dir).map_err(io)?;
+        absent(&stage_path)?;
+        native.require_initial_catalog(self)?;
+        absent(&marker_path)?;
+        held(&current_path, current, current_id)?;
+        exact_held(&seed_path, seed, seed_id, raw)?;
+        self.governance_fault(242)?;
+        fs::remove_file(&seed_path).map_err(io)?;
+        drop(inventory.seed.take());
+        self.governance_fault(243)?;
+        absent(&seed_path)?;
+        sync_directory(&self.dir).map_err(io)?;
+        absent(&seed_path)?;
+        native.require_initial_catalog(self)?;
+        absent(&stage_path)?;
+        absent(&marker_path)?;
+        self.governance_fault(244)
+    }
+    /// Cold pre-cleaner paths do not yet own the old root's mounted metadata.
+    /// The continuously captured real directory is still checked against its
+    /// original name/identity; the common opener later validates the full root.
+    fn require_governance_directory_matches_root_if_mounted(
+        &self,
+        directory: &GovernanceDirectoryCapture,
+    ) -> Result<(), AppError> {
+        validate_directory(self, directory)?;
+        let root = self.archive_bootstrap_root.lock().map_err(|_| denied())?;
+        if let Some(root) = root.as_ref() {
+            directory_under_root(self, root, directory)?;
+        }
+        Ok(())
+    }
     pub(in crate::store) fn require_no_prior_governance_declaration_debts(
         &self,
     ) -> Result<(), AppError> {
@@ -188,6 +277,16 @@ impl ServerStore {
             self,
             false,
             critical_namespaces::current_group::DECLARATION_SEED,
+        )?)?;
+        // An unfinished namespace5 declaration is likewise a prior debt: its owner (the
+        // member handler, which runs first when configured) must settle it before 4 starts.
+        if critical_namespaces::member_outbox_layout::pre_namespace5_emulated() {
+            return Ok(());
+        }
+        absent(&fixed(
+            self,
+            false,
+            critical_namespaces::member_outbox_layout::MEMBER_OUTBOX_SEED,
         )?)
     }
     pub(in crate::store) fn read_governance_inventory(
@@ -395,8 +494,29 @@ fn exact_retained(
     expected: &[u8],
 ) -> Result<(), AppError> {
     let id = original.identity.ok_or_else(denied)?;
-    held(path, &original.file, id)?;
-    let mut file = &original.file;
+    exact_held(path, &original.file, id, expected)
+}
+
+fn selected_original(
+    declaration: &Declaration,
+) -> Result<&critical_namespaces::pending_join::CreatedStage, AppError> {
+    if declaration.initial_current_frame == *blake3::hash(&declaration.candidate).as_bytes() {
+        Ok(&declaration.initial_current)
+    } else {
+        declaration.stage_file.as_ref().ok_or_else(denied)
+    }
+}
+
+/// Compare bytes on the retained file, including zero-length first claims.
+/// File identity alone cannot exclude in-place rewrites after classification.
+fn exact_held(
+    path: &Path,
+    original: &File,
+    id: SessionId,
+    expected: &[u8],
+) -> Result<(), AppError> {
+    held(path, original, id)?;
+    let mut file = original;
     file.seek(SeekFrom::Start(0)).map_err(io)?;
     let mut buffer = [0u8; 8192];
     let mut offset = 0;
@@ -411,7 +531,7 @@ fn exact_retained(
     if file.read(&mut buffer[..1]).map_err(io)? != 0 {
         return Err(denied());
     }
-    held(path, &original.file, id)
+    held(path, original, id)
 }
 fn verify_seed(
     store: &ServerStore,
@@ -431,12 +551,14 @@ fn verify_seed(
     }
     held(path, &original.file, id)?;
     let key = Zeroizing::new(store.keys.db_key()?);
-    let plain = governance::codec::open_seed(&key, &raw)?;
-    let saved = governance::codec::parse_seed(&key, &store.chat_vault_domain()?, &plain)?;
+    let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
+    let plain = policy.open_seed(&key, &raw)?;
+    let saved = policy.parse_seed(&key, &store.chat_vault_domain()?, &plain)?;
     if saved.capability != declaration.capability
         || saved.original != declaration.original.as_slice()
         || saved.candidate != declaration.candidate.as_slice()
         || saved.marker != declaration.marker.as_slice()
+        || saved.native != declaration.native.as_ref().map(|n| n.data())
     {
         return Err(denied());
     }
@@ -461,18 +583,20 @@ impl ServerStore {
         // Every retry verifies complete retained sources outside Root; no Summary
         // reconstructed from a candidate can substitute for original plaintext.
         let key = Zeroizing::new(self.keys.db_key()?);
-        let plain = governance::codec::open_seed(&key, &declaration.seed)?;
-        let saved = governance::codec::parse_seed(&key, &self.chat_vault_domain()?, &plain)?;
+        let plain = policy.open_seed(&key, &declaration.seed)?;
+        let saved = policy.parse_seed(&key, &self.chat_vault_domain()?, &plain)?;
         if saved.capability != declaration.capability
             || saved.original != declaration.original.as_slice()
             || saved.candidate != declaration.candidate.as_slice()
             || saved.marker != declaration.marker.as_slice()
+            || saved.native != declaration.native.as_ref().map(|n| n.data())
             || *blake3::hash(&declaration.original).as_bytes() != declaration.before.framed
             || *blake3::hash(&declaration.candidate).as_bytes() != declaration.next.framed
         {
             return Err(denied());
         }
         drop(plain);
+        require_native(self, declaration)?;
         let root_guard = self.archive_bootstrap_root.lock().map_err(|_| denied())?;
         let root = root_guard.as_ref().ok_or_else(denied)?;
         require_root(self, root, declaration.capability)?;
@@ -502,6 +626,14 @@ impl ServerStore {
                 return Err(denied());
             }
             let original_id = session_id(&current).map_err(io)?;
+            if declaration.native.is_some() {
+                // The attributable claim precedes the shared legacy fence. A
+                // torn first seed therefore cannot leave ownerless empty Stage.
+                ensure_native_claim(&seed_path, &mut declaration.seed_file)?;
+                sync_directory(&self.dir).map_err(io)?;
+                self.governance_fault(240)?;
+            }
+            require_native(self, declaration)?;
             // The durable old-slot refusal MUST precede every governance-only
             // output. Patching current readers cannot fence an older binary.
             ensure_legacy_stage_fence(
@@ -511,6 +643,7 @@ impl ServerStore {
             )?;
             sync_directory(&self.dir).map_err(io)?;
             self.governance_fault(229)?;
+            require_native(self, declaration)?;
             ensure(
                 &seed_path,
                 &declaration.seed,
@@ -523,6 +656,7 @@ impl ServerStore {
             )?;
             sync_directory(&self.dir).map_err(io)?;
             self.governance_fault(232)?;
+            require_native(self, declaration)?;
             ensure(
                 &marker_path,
                 &declaration.marker,
@@ -535,6 +669,7 @@ impl ServerStore {
             )?;
             sync_marker_parent(root)?;
             self.governance_fault(234)?;
+            require_native(self, declaration)?;
             ensure(
                 &stage_path,
                 &declaration.candidate,
@@ -556,6 +691,7 @@ impl ServerStore {
                 return Err(denied());
             }
             held(&current_path, &current, original_id)?;
+            require_native(self, declaration)?;
             actual.sync_all().map_err(io)?;
             verify_marker(
                 self,
@@ -580,6 +716,9 @@ impl ServerStore {
                 &declaration.candidate,
             )?;
             held(&current_path, &current, original_id)?;
+            // Reprove native leaves after all independent catalog/marker
+            // waits and the final test barrier, immediately before selection.
+            require_native(self, declaration)?;
             if root.negative.is_cancelled() || self.chat_mount.observer().is_cancelled() {
                 return Err(denied());
             }
@@ -639,14 +778,56 @@ impl ServerStore {
             &declaration.marker,
             declaration.marker_file.as_ref().ok_or_else(denied)?,
         )?;
+        // The new read above permits syncing; it cannot replace original
+        // custody. Compare to the actual renamed Stage or recovered Current.
+        exact_retained(
+            &current_path,
+            selected_original(declaration)?,
+            &declaration.candidate,
+        )?;
         if let Some((seed, id)) = seed {
+            require_native(self, declaration)?;
             held(&seed_path, &seed, id)?;
             fs::remove_file(&seed_path).map_err(io)?;
             self.governance_fault(238)
                 .map_err(|e| AppError::CommittedButNotDurable(e.to_string()))?;
         }
         sync_directory(&self.dir).map_err(|e| AppError::CommittedButNotDurable(e.to_string()))?;
+        // Also required on retries whose prior seed unlink already succeeded.
+        // Absence of that name does not authorize replacing native leaves.
+        require_native(self, declaration)?;
         self.governance_fault(239)
+    }
+
+    /// Final retained native-family proof after mounted4 installation and its
+    /// independent waits. No fresh catalog/native capture may replace this
+    /// constructor's original evidence before it is destroyed.
+    pub(in crate::store) fn require_native_governance_selection(
+        &self,
+        declaration: &governance::Declaration,
+    ) -> Result<(), AppError> {
+        if declaration.native.is_none() {
+            return Err(denied());
+        }
+        let current = fixed(self, false, critical_namespaces::Slot::Current.name())?;
+        let selected = selected_original(declaration)?;
+        exact_retained(&current, selected, &declaration.candidate)?;
+        self.require_governance_directory_matches_root(&declaration.directory)?;
+        verify_marker(
+            self,
+            declaration.capability,
+            &fixed(self, true, governance::GOVERNANCE_MARKER)?,
+            &declaration.marker,
+            declaration.marker_file.as_ref().ok_or_else(denied)?,
+        )?;
+        absent(&fixed(self, false, governance::GOVERNANCE_SEED)?)?;
+        absent(&fixed(
+            self,
+            false,
+            critical_namespaces::Slot::Stage.name(),
+        )?)?;
+        require_native(self, declaration)?;
+        exact_retained(&current, selected, &declaration.candidate)
     }
 
     pub(in crate::store) fn capture_governance_layout_marker(
@@ -729,7 +910,7 @@ impl ServerStore {
             directory,
             mount: self.registry_mount(),
             negative: self.chat_mount.observer(),
-            _fee: fee,
+            control: governance::GovernanceMountControl::new(fee),
         });
         drop(raw);
         let root_guard = self.archive_bootstrap_root.lock().map_err(|_| denied())?;
@@ -766,9 +947,63 @@ impl ServerStore {
     pub(in crate::store) fn validate_mounted_governance_layout(&self) -> Result<(), AppError> {
         let root_guard = self.archive_bootstrap_root.lock().map_err(|_| denied())?;
         let root = root_guard.as_ref().ok_or_else(denied)?;
+        self.validate_mounted_governance_layout_under_archive_root(root)
+    }
+
+    /// Borrow the SAME already-held Root in a concrete Current group guard.
+    /// Reacquiring `archive_bootstrap_root` here would deadlock that guard.
+    /// Lock order remains Root -> governance metadata -> Current metadata.
+    /// The retained mounted payment covers the serialized marker/read/AEAD
+    /// scratch; a parsed namespace descriptor is never an installed owner.
+    pub(in crate::store) fn validate_mounted_governance_layout_under_archive_root(
+        &self,
+        root: &critical_namespaces::archive_bootstrap::MountedRoot,
+    ) -> Result<(), AppError> {
         let mounted = self.governance_layout.lock().map_err(|_| denied())?;
         validate_mounted(self, root, mounted.as_ref().ok_or_else(denied)?)
     }
+    pub(in crate::store) fn capture_governance_cached_negative(
+        &self,
+    ) -> Result<governance::GovernanceCachedNegative, AppError> {
+        let root = self.archive_bootstrap_root.lock().map_err(|_| denied())?;
+        let mounted = self.governance_layout.lock().map_err(|_| denied())?;
+        let mounted = mounted.as_ref().ok_or_else(denied)?;
+        validate_mounted(self, root.as_ref().ok_or_else(denied)?, mounted)?;
+        Ok(governance::GovernanceCachedNegative::from_mounted(mounted))
+    }
+}
+
+fn require_native(store: &ServerStore, declaration: &Declaration) -> Result<(), AppError> {
+    if let Some(native) = declaration.native.as_ref() {
+        native.require(store)?;
+    }
+    Ok(())
+}
+fn ensure_native_claim(
+    path: &Path,
+    slot: &mut Option<critical_namespaces::pending_join::CreatedStage>,
+) -> Result<(), AppError> {
+    if slot.is_none() {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(io)?;
+        *slot = Some(critical_namespaces::pending_join::CreatedStage {
+            file,
+            identity: None,
+        });
+    }
+    let original = slot.as_mut().ok_or_else(denied)?;
+    let id = session_id(&original.file).map_err(io)?;
+    if original.identity.is_some_and(|old| old != id) {
+        return Err(denied());
+    }
+    original.identity = Some(id);
+    held(path, &original.file, id)?;
+    original.file.sync_all().map_err(io)?;
+    held(path, &original.file, id)
 }
 
 fn validate_mounted(
@@ -777,7 +1012,7 @@ fn validate_mounted(
     mounted: &MountedGovernanceLayout,
 ) -> Result<(), AppError> {
     let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
-    mounted._fee.validate(
+    mounted.control.fee.validate(
         &policy.current.archive.pending.pool,
         governance::MOUNTED_FEE,
     )?;
