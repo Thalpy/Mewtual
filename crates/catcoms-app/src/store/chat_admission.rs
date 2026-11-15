@@ -24,6 +24,12 @@ pub use recovery::{OwnerUnexposedInitialization, OwnerUnexposedRetirement};
 pub(crate) mod restore;
 pub(crate) mod retired;
 mod revocation;
+/// Count the actual observer constructor, rather than infer allocation absence
+/// from a negative result. Used only to pin final cached-edge regressions.
+#[cfg(test)]
+pub(in crate::store) fn take_revocation_observer_constructions() -> u64 {
+    revocation::take_observer_constructions()
+}
 mod storage;
 pub(in crate::store) mod v2_current;
 pub(crate) use storage::ChatAdmissionStoragePermit;
@@ -347,7 +353,37 @@ pub(super) struct MountOwner {
     #[cfg(test)]
     before_writer: Mutex<Option<BeforeWriterHook>>,
 }
+
+/// Paid negative metadata for private physical IO. This keeps only an original
+/// identity and cancellation observer, never the mount's revoking sender, a
+/// Store loan or any membership/key/publication authority.
+pub(in crate::store) struct PhysicalMountNegative {
+    identity: Arc<()>,
+    negative: RequestCancellation,
+}
+/// Original physical lifetime atomic only. Unlike PhysicalMountNegative this
+/// performs no weak upgrade, sender observation or last-Owner destruction at
+/// a native final edge. Its retaining caller must independently pay metadata.
+pub(in crate::store) struct CachedPhysicalMountNegative {
+    life: revocation::CachedLife,
+}
+impl CachedPhysicalMountNegative {
+    pub(in crate::store) fn is_live_cached(&self) -> bool {
+        self.life.is_live()
+    }
+}
 impl MountOwner {
+    pub(in crate::store) fn capture_cached_physical_negative(&self) -> CachedPhysicalMountNegative {
+        CachedPhysicalMountNegative {
+            life: self.life.cached(),
+        }
+    }
+    /// Borrow only this original owner's revocation atomic. Unlike observer(),
+    /// this neither allocates Authority nor subscribes/borrows a watch channel.
+    /// It is a negative check, never a permit or a retained lifetime witness.
+    pub(in crate::store) fn is_live_cached(&self) -> bool {
+        self.life.live()
+    }
     /// Negative test observation only; never returns Runtime, a permit or a new owner.
     #[cfg(test)]
     pub(in crate::store) fn writer_available_for_test(&self) -> bool {
@@ -547,6 +583,25 @@ fn decode(bytes: &[u8], domain: &[u8; 32]) -> Result<BTreeMap<ChatAdmissionKey, 
 }
 
 impl ServerStore {
+    /// Fresh native governance may only abort a torn declaration while no
+    /// admission has ever existed. Check the exact tiny empty grammar BEFORE
+    /// any per-row decoding/allocation; absence on a managed vault refuses.
+    pub(in crate::store) fn require_empty_native_governance_admissions(
+        &self,
+    ) -> Result<(), AppError> {
+        let cap = DOMAIN.len() + 4 + 4 + 32 + 4 + 40;
+        let held = self.read_native_empty_admission_frame(cap)?;
+        let plain = Zeroizing::new(unseal(&self.keys.db_key()?, &unframe(held.raw())?)?);
+        let mut d = Decoder::new(&plain);
+        if d.get_str().map_err(|_| refused())? != DOMAIN
+            || d.get_bytes().map_err(|_| refused())? != self.chat_vault_domain()?
+            || d.get_u32().map_err(|_| refused())? != 0
+        {
+            return Err(refused());
+        }
+        d.finish().map_err(|_| refused())?;
+        self.require_native_empty_admission_frame(&held)
+    }
     /// The actual authenticated mounted format, not a live authoring permit. Restore consumers
     /// must require managed mode for no-tail bytes too, BEFORE any owner run/network handoff.
     /// A raw snapshot does not supply this physical-vault classification.
@@ -594,6 +649,24 @@ impl ServerStore {
     /// The returned weak negative handle cannot keep the Store/session alive or affect a new mount.
     pub fn chat_mount_revoker(&self) -> ChatMountRevoker {
         ChatMountRevoker(self.chat_mount.life.handle())
+    }
+
+    pub(in crate::store) fn capture_physical_mount_negative(&self) -> PhysicalMountNegative {
+        PhysicalMountNegative {
+            identity: self.chat_mount.identity.clone(),
+            negative: self.chat_mount.observer(),
+        }
+    }
+    pub(in crate::store) fn require_original_physical_mount(
+        &self,
+        original: &PhysicalMountNegative,
+    ) -> Result<(), AppError> {
+        if !Arc::ptr_eq(&original.identity, &self.chat_mount.identity)
+            || original.negative.is_cancelled()
+        {
+            return Err(refused());
+        }
+        Ok(())
     }
 
     /// Nonsecret comparison domain, not a runtime binding or source of admission authority.

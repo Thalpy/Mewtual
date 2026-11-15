@@ -72,7 +72,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use catcoms_rt::{Clock, OsCryptoRng, SystemClock};
+use catcoms_rt::{Clock, SystemClock};
 use futures::StreamExt;
 use libp2p::core::transport::MemoryTransport;
 use libp2p::core::upgrade::Version;
@@ -330,7 +330,7 @@ pub struct RendezvousBehaviour {
     pub ping: ping::Behaviour,
     /// Optional AutoNAT v2 dial-back service. The first-declared guard restricts callbacks to the
     /// requester's observed public IP and applies node/peer/source-prefix windows before dialing.
-    pub autonat_server: Toggle<GuardedAutoNatServer<OsCryptoRng>>,
+    pub autonat_server: Toggle<GuardedAutoNatServer<catcoms_rt::SeededProtocolRng>>,
 }
 
 pub(crate) fn rendezvous_behaviour(key: &libp2p::identity::Keypair) -> RendezvousBehaviour {

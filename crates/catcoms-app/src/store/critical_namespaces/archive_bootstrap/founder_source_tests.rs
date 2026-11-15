@@ -138,17 +138,91 @@ fn pending_private_initializing_stage_retries_same_nonce_and_foreign_stage_stays
 }
 
 #[test]
-fn consuming_freeze_refusal_latches_terminal_without_second_signing_or_sdk() {
+fn retained_bootstrap_freeze_refusal_keeps_raw_custody_without_reentering_a_retired_source() {
     let (_path, store, mut rng) = fixture(0xfd20);
     let mut owner = source(&store, &mut rng, 43);
     FOUNDERS_PREPARED.with(|count| count.set(0));
     let revoker = owner.original.creator.original.revoker();
     owner.before_freeze = Some(Box::new(move || revoker.revoke()));
     assert!(owner.prepare_private_source(&store, &mut NeverRng).is_err());
-    assert!(matches!(owner.phase, SourcePhase::HeldConsumingRefusal));
+    // Intentional contract change: consuming freeze loses only temporary DATA. Keep the
+    // original signature cache, while the retired source STILL refuses all fresh work.
+    assert!(matches!(owner.phase, SourcePhase::Signing { .. }));
     assert_eq!(FOUNDERS_PREPARED.with(|count| count.get()), 1);
     assert!(owner.prepare_private_source(&store, &mut NeverRng).is_err());
     assert_eq!(FOUNDERS_PREPARED.with(|count| count.get()), 1);
+}
+
+#[test]
+fn retained_bootstrap_freeze_unwind_keeps_the_original_signer_and_can_finish() {
+    let (_path, store, mut rng) = fixture(0xfd21);
+    let mut owner = source(&store, &mut rng, 46);
+    let original_group = owner.original.creator.group_data().unwrap().to_vec();
+    owner.before_freeze = Some(Box::new(|| panic!("injected before consuming freeze")));
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = owner.prepare_private_source(&store, &mut NeverRng);
+    }))
+    .is_err());
+    assert!(matches!(owner.phase, SourcePhase::Signing { .. }));
+    assert_eq!(owner.original.creator.group_data().unwrap(), original_group);
+    owner.prepare_private_source(&store, &mut rng).unwrap();
+    let (context, id, bytes) = output(&owner, &store);
+    owner.prepare_private_source(&store, &mut NeverRng).unwrap();
+    let (again_context, again_id, again) = output(&owner, &store);
+    assert_eq!(again_context, context);
+    assert_eq!(again_id, id);
+    assert_eq!(again, bytes);
+}
+
+#[test]
+fn retained_bootstrap_cache_payment_refusal_can_finish_on_the_same_staged_owner() {
+    let (_path, store, mut rng) = fixture(0xfd22);
+    let mut owner = source(&store, &mut rng, 47);
+    let pool = store
+        .archive_bootstrap_policy
+        .as_ref()
+        .unwrap()
+        .pending
+        .pool
+        .clone();
+    let free = pool.capacity() - pool.charged_for_test();
+    let held = pool
+        .try_reserve(free - (RETAINED_FOUNDER_SIGNING_INVOICE - 1))
+        .unwrap();
+    FOUNDERS_PREPARED.with(|count| count.set(0));
+    assert!(owner.prepare_private_source(&store, &mut NeverRng).is_err());
+    assert!(matches!(owner.phase, SourcePhase::PendingPrivateStage));
+    assert_eq!(FOUNDERS_PREPARED.with(|count| count.get()), 0);
+    // Scope staging preceded the cache reservation. Its exact original reservation is
+    // retained, so pressure cannot strand that same owner or force another SDK admission.
+    // Staging and attaching the genuine reservation are TWO existing transitions.
+    // Retrying the cache payment must not repeat either transition.
+    let revision = owner
+        .original
+        .creator
+        .server
+        .as_ref()
+        .unwrap()
+        .sync
+        .chat_scope_revision();
+    assert_eq!(revision, 2);
+    let group = owner.original.creator.group_data().unwrap().to_vec();
+    drop(held);
+    owner.prepare_private_source(&store, &mut rng).unwrap();
+    assert_eq!(FOUNDERS_PREPARED.with(|count| count.get()), 1);
+    assert_eq!(owner.original.creator.group_data().unwrap(), group);
+    assert_eq!(
+        owner
+            .original
+            .creator
+            .server
+            .as_ref()
+            .unwrap()
+            .sync
+            .chat_scope_revision(),
+        revision
+    );
+    assert!(matches!(owner.phase, SourcePhase::Bootstrap(_)));
 }
 
 #[test]
@@ -251,10 +325,14 @@ fn actual_transfer_once_keeps_original_fee_output_and_requires_exact_transferred
             })
             .unwrap();
     }
-    owner.detach_for_root(&store, &mut NeverRng).unwrap();
+    owner
+        .detach_for_root(&store, &mut NeverRng, FounderAccess::Library)
+        .unwrap();
     assert!(owner.source_fee.is_some());
     assert_eq!(owner.detached.as_ref().unwrap().as_bytes(), frame);
-    owner.detach_for_root(&store, &mut NeverRng).unwrap();
+    owner
+        .detach_for_root(&store, &mut NeverRng, FounderAccess::Library)
+        .unwrap();
     let SourcePhase::Transferred {
         source,
         context: original,
@@ -342,7 +420,9 @@ fn last_full_source_comparison_cannot_outlive_original_root_or_creator_return_ch
             let mut owner = source(&store, &mut rng, 48);
             owner.prepare_private_source(&store, &mut rng).unwrap();
             if transferred {
-                owner.detach_for_root(&store, &mut NeverRng).unwrap();
+                owner
+                    .detach_for_root(&store, &mut NeverRng, FounderAccess::Library)
+                    .unwrap();
             }
             let marker = path.path().join(ARCHIVE_BOOTSTRAP_ROOT).join(ROOT_MARKER);
             let original = fs::read(&marker).unwrap();

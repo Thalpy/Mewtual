@@ -65,6 +65,9 @@ impl PreparedTextCurrentAdd {
         {
             return Err(bad());
         }
+        if let Some(route) = &self.routing {
+            route.frame_data()?;
+        }
         let commit = self.commit.as_deref().ok_or_else(bad)?;
         let welcome = self.welcome.as_deref().ok_or_else(bad)?;
         let group_info = self.group_info.as_deref().ok_or_else(bad)?;
@@ -97,6 +100,12 @@ impl PreparedTextCurrentAdd {
     }
 }
 impl<'a> CompletedTextCurrentAddData<'a> {
+    /// Exact candidate-owned sealed routing bytes. The caller must separately
+    /// verify/bind the input tuple, policy, request and covering response.
+    /// Old no-routing Cells refuse rather than pretending an empty transfer.
+    pub fn sealed_routing_transfer_data(&self) -> Result<&'a [u8], MlsError> {
+        self.cell.routing.as_ref().ok_or_else(bad)?.frame_data()
+    }
     pub fn commit_data(&self) -> &'a [u8] {
         self.commit
     }
@@ -174,6 +183,7 @@ impl<'a> CompletedTextCurrentAddData<'a> {
             && self.cell.subject == request.subject
             && self.cell.nonce == request.nonce
             && self.cell.reference == request.reference
+            && self.cell.expected_credential == request.expected_credential
             && self.cell.now_ms == request.now_ms
         {
             Ok(())

@@ -11,6 +11,8 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use tokio::sync::watch;
 
+mod v2_join_exclusion;
+
 type Node = ChannelSync<MemNetwork, ChaCha20Rng>;
 struct Binding {
     group: Vec<u8>,
