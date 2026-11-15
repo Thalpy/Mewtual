@@ -57,7 +57,7 @@ pub struct NativeTextMemberPreparation<T: MeshTransport, R: CryptoRngCore> {
 /// Whole finite prepare work. Its concrete native member key cut is issued by
 /// the original Entry, not a row label. This owns no Entry/SourceOwner/issuer.
 pub struct NativeTextMemberJob<T: MeshTransport, R: CryptoRngCore> {
-    inner: NativeTextCreationJob<T, R>,
+    pub(super) inner: NativeTextCreationJob<T, R>,
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> NativeTextSources<T, R> {
