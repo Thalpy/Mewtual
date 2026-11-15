@@ -6,6 +6,9 @@ use super::*;
 use crate::store::critical_namespaces::native_registry::lifecycle::preparation;
 use catcoms_rt::CryptoRngCore;
 
+#[cfg(test)]
+mod governance_tests;
+
 enum Phase {
     Index2(mount::NativeIndexStore),
     Source(upgrade_source::UpgradeSource),
@@ -26,6 +29,63 @@ pub struct NativeTextVaultUpgrade {
     policy: preparation::Policy,
     // LAST: pays this controller/phase boxes independently until they retire.
     _metadata: CatalogReadReservation,
+}
+
+/// Same whole unexposed native3 owner through its governance declaration. No
+/// arbitrary empty facade can be adopted and no ordinary-vault fallback exists
+/// after this constructor has consumed the original Selected3 continuation.
+pub struct NativeTextGovernanceUpgrade {
+    original: Option<NativeTextVaultUpgrade>,
+    receiver: Box<crate::store::critical_namespaces::governance_layout::native::Startup>,
+    // Independent outer payment LAST. Dropping the original must close its
+    // admissions first, but may not refund the receiver box while it still
+    // holds declaration evidence and finite physical-session work.
+    _metadata: CatalogReadReservation,
+}
+impl std::fmt::Debug for NativeTextGovernanceUpgrade {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeTextGovernanceUpgrade")
+            .finish_non_exhaustive()
+    }
+}
+impl NativeTextGovernanceUpgrade {
+    /// Advance this original declaration outside native writers. Any refusal
+    /// keeps its cached outputs, files, payments and close owners in this value;
+    /// retry it rather than reopening or preparing a replacement declaration.
+    pub fn retry(&mut self, rng: &mut impl CryptoRngCore) -> Result<(), AppError> {
+        match self
+            .original
+            .as_mut()
+            .and_then(|original| original.phase.as_mut())
+        {
+            Some(Phase::Selected3(index)) => index.advance_governance(&mut self.receiver, rng),
+            _ => Err(refused()),
+        }
+    }
+    /// Reprove the original completed selection after all final metadata reads
+    /// and move the whole owner. Refusal returns this same continuation. The
+    /// returned facade does not itself grant a signer, SDK or native caller.
+    pub fn into_vault(mut self) -> Result<NativeTextVault, Self> {
+        if !self.receiver.is_complete() {
+            return Err(self);
+        }
+        let ready = match self.original.as_ref().and_then(|o| o.phase.as_ref()) {
+            Some(Phase::Selected3(index)) => {
+                index.native_row_count_data().is_ok()
+                    && index.require_governance_completion(&self.receiver).is_ok()
+            }
+            _ => false,
+        };
+        if !ready {
+            return Err(self);
+        }
+        let Some(original) = self.original.take() else {
+            return Err(self);
+        };
+        // All fallible index/marker work and final ORIGINAL witness checks
+        // precede this move. Do not call ordinary into_vault and repeat IO.
+        Ok(original.take_ready_vault())
+    }
 }
 
 /// Pre-effect refusal keeps the caller's genuine opaque index2 owner. A caller
@@ -62,7 +122,11 @@ impl NativeTextVaultUpgrade {
             // upgrade's paid decoded/frame/IO and physical-wrapper terms.
             const METADATA: usize = 4096
                 + 16 * (std::mem::size_of::<NativeTextVaultUpgrade>()
-                    + std::mem::size_of::<Phase>());
+                    + std::mem::size_of::<Phase>()
+                    + std::mem::size_of::<NativeTextGovernanceUpgrade>()
+                    + std::mem::size_of::<
+                        crate::store::critical_namespaces::governance_layout::native::Startup,
+                    >());
             let metadata = CriticalCatalogReadPool::new(METADATA)?.try_reserve(METADATA)?;
             let ui = UiAdmissionOwner::new(generation, authorized, requested, budget)?;
             let sources = super::super::source_admission::SourceAdmission::new(ui.observe_mount())?;
@@ -137,21 +201,50 @@ impl NativeTextVaultUpgrade {
 
     /// This moves the whole mounted owner. No borrowed Store/Current, raw
     /// index, Source, signing key or preconstructed backend can escape.
-    pub fn into_vault(mut self) -> Result<NativeTextVault, Self> {
+    pub fn into_vault(self) -> Result<NativeTextVault, Self> {
         let ready = matches!(self.phase.as_ref(), Some(Phase::Selected3(index)) if index.native_row_count_data().is_ok());
         if !ready {
             return Err(self);
         }
+        Ok(self.take_ready_vault())
+    }
+
+    /// Private infallible move after the caller's exact readiness proof. No
+    /// lookup, IO, allocation, callback or replacement owner is introduced.
+    fn take_ready_vault(mut self) -> NativeTextVault {
         let Some(Phase::Selected3(index)) = self.phase.take() else {
             unreachable!()
         };
-        Ok(NativeTextVault {
+        NativeTextVault {
             ui: self.ui.take().expect("whole native UI owner"),
             sources: self
                 .sources
                 .take()
                 .expect("original native source admission"),
             index: IndexOwner::Version3(index),
+        }
+    }
+    /// Enter governance only before the ordinary facade/source API is ever
+    /// exposed. A row count is an additional negative, not provenance: the
+    /// private Selected3 phase and original UI/source owners supply that.
+    pub fn prepare_governance(self) -> Result<NativeTextGovernanceUpgrade, Self> {
+        if !matches!(self.phase.as_ref(),Some(Phase::Selected3(index))if index.native_row_count_data().is_ok_and(|n|n==0))
+        {
+            return Err(self);
+        }
+        const OUTER: usize = 4096
+            + 16 * (std::mem::size_of::<NativeTextGovernanceUpgrade>()
+                + std::mem::size_of::<
+                    crate::store::critical_namespaces::governance_layout::native::Startup,
+                >());
+        let payment = CriticalCatalogReadPool::new(OUTER).and_then(|pool| pool.try_reserve(OUTER));
+        let Ok(metadata) = payment else {
+            return Err(self);
+        };
+        Ok(NativeTextGovernanceUpgrade {
+            original: Some(self),
+            receiver: Box::default(),
+            _metadata: metadata,
         })
     }
 }

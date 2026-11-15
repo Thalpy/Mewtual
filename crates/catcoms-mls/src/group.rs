@@ -34,8 +34,9 @@ mod owner_observation;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod private_text_add;
 mod text_current;
-// Native, independently paid PRIVATE scratch only. It cannot export/install a
-// graph or publish outputs; Root governance/Source/save admission stays separate.
+// Native, independently paid private Add, completed DATA and exact-receiver
+// whole-pair ownership handoff. Root governance/Source/save admission and
+// publication stay separate; no raw SDK extraction or mutable getter exists.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod text_current_add;
 pub use owner_observation::{LocalMembershipChange, LocalMembershipChangeKind};

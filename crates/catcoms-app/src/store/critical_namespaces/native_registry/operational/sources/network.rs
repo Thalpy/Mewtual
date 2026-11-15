@@ -51,6 +51,66 @@ pub(super) struct Reservation {
     io: Option<crate::store::persistence::native_registry::network::NetworkIo>,
 }
 impl Reservation {
+    /// Canonical public reservation DATA, not a reachable contact. Wildcard
+    /// listening and configured advertise/relay/rendezvous strings prove no
+    /// external address or relay reservation, so this initial profile encodes
+    /// ZERO certified contacts. Addressed join transport remains unfinished.
+    pub(super) fn invite_routing_plan_data(
+        &self,
+        binding: &crate::store::FreshV2TextFounderBinding,
+    ) -> Result<Vec<u8>, AppError> {
+        let public = self.public.as_ref().ok_or_else(refused)?;
+        let active = self.active.ok_or_else(refused)?;
+        let pending = self.pending.as_ref().ok_or_else(refused)?;
+        if self.context
+            != (
+                *binding.vault_layout_data().0,
+                *binding.vault_layout_data().1,
+            )
+            || binding.signer_data() != &self.signer
+            || active.state != crate::store::NativeCreationStateData::Founder
+            || active.identity != self.identity
+            // Native row identity is random and is NOT the transport-key
+            // commitment. The immutable Birth binds that independent domain.
+            || pending.identity != self.identity
+            || pending.birth.kind != founder::BirthKind::NativeFounder
+            || pending.birth.signer != self.signer
+            || pending.birth.network != public.commitment_data()
+            || self.actual_peer.as_deref() != Some(public.peer_id_data())
+            || self.transport_build != TransportBuild::Returned
+            || self.port == 0
+            || binding.group_data().is_empty()
+            || binding.group_data().len() > 256
+            || public.peer_id_data().len() > 128
+        {
+            return Err(refused());
+        }
+        let mut plan = Encoder::with_capacity(1024);
+        plan.put_bytes(b"mewtual/chat/native-invite-routing-plan/v2\0")
+            .map_err(|_| refused())?;
+        plan.put_u16(2);
+        for bytes in [
+            binding.group_data(),
+            public.public_key_data().as_slice(),
+            public.peer_id_data().as_bytes(),
+            public.commitment_data().as_slice(),
+        ] {
+            plan.put_bytes(bytes).map_err(|_| refused())?;
+        }
+        plan.put_u16(1); // TCP reservation; this is not a verified dial address
+        plan.put_u16(self.port);
+        plan.put_u32(0); // no certified public contact addresses
+        let plan = plan.finish();
+        if plan.len() > 1024 || plan.capacity() > 1024 {
+            return Err(refused());
+        }
+        Ok(plan)
+    }
+    /// Negative-only observation of this original preparation. No transport,
+    /// constructor or passive physical custody is exposed to cleanup.
+    pub(super) fn observe_tcp(&self) -> Option<catcoms_net::NativeTcpDrain> {
+        self.tcp.as_ref().map(|tcp| tcp.observe_drain())
+    }
     fn new(context: ([u8; 32], [u8; 32]), signer: [u8; 32]) -> Self {
         Self {
             context,
@@ -113,6 +173,63 @@ impl Reservation {
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> NativeTextCreationJob<T, R> {
+    /// Issue a paid association from the genuine retained stored runtime, not
+    /// a renderer row ID or a recovered index entry. This is blocking work:
+    /// perform it outside all native/Root control and UI commit guards.
+    pub fn select_stored_runtime(
+        mut self,
+    ) -> Result<NativeTextRuntimeSelection<T, R>, NativeTextCreationRefusal> {
+        use NativeTextCreationRefusal as Error;
+        self.require_current()?;
+        let body = self.loan.body.as_ref().ok_or(Error::Unavailable)?;
+        let request = body.request.as_ref().ok_or(Error::Unavailable)?;
+        let network = body.network.as_ref().ok_or(Error::Unavailable)?;
+        let active = network.active.ok_or(Error::Unavailable)?;
+        if active.state != crate::store::NativeCreationStateData::Founder
+            || active.identity != network.identity
+            || body
+                .driver
+                .as_ref()
+                .is_none_or(|driver| !driver.is_ready_data())
+            || body
+                .work
+                .lookup_creation(request.invocation, request.digest)
+                .map_err(|_| Error::Storage)?
+                != Some(active)
+        {
+            return Err(Error::Unavailable);
+        }
+        self.require_current()?;
+        if self.loan.body.as_ref().unwrap().selection.is_none() {
+            let selection = NativeTextRuntimeSelection::from_stored(&self, active);
+            self.loan.body.as_mut().unwrap().selection = Some(selection);
+        }
+        let selection = self
+            .loan
+            .body
+            .as_ref()
+            .unwrap()
+            .selection
+            .as_ref()
+            .unwrap()
+            .clone();
+        let body = self.loan.body.as_ref().unwrap();
+        let request = body.request.as_ref().unwrap();
+        if selection.original.status != active
+            || selection.original.invocation != request.invocation
+            || selection.original.request != request.digest
+            || !Arc::ptr_eq(&selection.original.scope, &self.command.scope)
+            || !std::sync::Weak::ptr_eq(
+                &selection.original.runtime,
+                &Arc::downgrade(&self.loan.cell),
+            )
+        {
+            return Err(Error::Unavailable);
+        }
+        self.loan.recorded = true;
+        Ok(selection)
+    }
+
     /// Separate Device-purpose entry from the earlier MLS-device job. There
     /// is exactly one retained seed attempt and one initial seal attempt; an
     /// unwind/unknown outcome never draws or seals a replacement on retry.
@@ -249,7 +366,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextCreationJob<T, R> {
         Ok(NativeTextCreationProgress::PendingCovered)
     }
 
-    fn require_current(&self) -> Result<(), NativeTextCreationRefusal> {
+    pub(super) fn require_current(&self) -> Result<(), NativeTextCreationRefusal> {
         if !self.command.scope.is_open()
             || !self.command.ui.is_current_cached()
             || self
@@ -584,4 +701,4 @@ impl<R: CryptoRngCore> NativeTextCreationJob<catcoms_net::MeshService, R> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

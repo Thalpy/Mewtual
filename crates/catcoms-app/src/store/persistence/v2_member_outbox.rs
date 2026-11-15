@@ -57,6 +57,10 @@ pub(in crate::store) use data::{
     MemberReceiptData, MemberRequestData, MemberRequestDigest, MemberRequestToken,
     MemberSignedOriginal,
 };
+pub(in crate::store) use engine::history::{
+    MemberHistoryItem, MemberHistoryPage, MemberHistoryRead, MEMBER_HISTORY_MAX_ITEMS,
+    MEMBER_OUTBOX_HISTORY_FEE,
+};
 #[allow(unused_imports)]
 pub(in crate::store) use engine::{
     MemberDebtBatch, MemberDebtClass, MemberDebtItem, MemberEntryStatus, MemberLookup,

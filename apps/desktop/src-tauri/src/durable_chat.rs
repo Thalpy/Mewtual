@@ -50,7 +50,7 @@ fn authorize(
     drop(resumable);
     let registry = state.servers.clone().try_lock_owned().map_err(|_| busy())?;
     if registry
-        .get(&server)
+        .legacy(&server)
         .is_none_or(|entry| entry.instance != instance)
     {
         return Err("The conversation changed before this message could be saved.".into());
@@ -188,7 +188,7 @@ pub(super) async fn durable_send_context(
     let _session = require_ui_session_generation(&state, generation).await?;
     let registry = state.servers.lock().await;
     if registry
-        .get(&server)
+        .legacy(&server)
         .is_none_or(|entry| entry.instance != instance)
     {
         return Err("The conversation changed while preparing the message.".into());
@@ -313,7 +313,7 @@ pub(super) async fn durable_mutation_context(
     let _session = require_ui_session_generation(&state, generation).await?;
     let registry = state.servers.lock().await;
     if registry
-        .get(&server)
+        .legacy(&server)
         .is_none_or(|entry| entry.instance != instance)
     {
         return Err("The conversation changed while preparing the mutation.".into());
@@ -472,7 +472,7 @@ async fn stop_request_at(
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .map(|entry| (entry.actor.clone(), entry.instance));
     if let Some((actor, instance)) = current.filter(|_| !existing_fence) {
         drop(orphan);
@@ -627,7 +627,7 @@ mod tests {
         let device_id = server.device_id();
         let (actor, mut events, task) = spawn(server);
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
-        state.servers.lock().await.insert(
+        state.servers.lock().await.install_legacy_fixture(
             12,
             ServerEntry {
                 files: keep_session::EntryOwner::new(),
@@ -718,7 +718,7 @@ mod tests {
         task.abort();
         let _ = task.await;
         drain.await.unwrap();
-        state.servers.lock().await.clear();
+        state.servers.lock().await.clear_legacy_fixture();
         drop(state.store.lock().await.take());
         let store = ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap();
         let snapshot = store.load_server(12).unwrap();
@@ -804,7 +804,7 @@ mod tests {
         *state.session_resumable.lock().await = true;
         let (entry, task, drain) = leaving::tests::running(1001);
         let actor = entry.actor.clone();
-        state.servers.lock().await.insert(12, entry);
+        state.servers.lock().await.install_legacy_fixture(12, entry);
         actor.open_channel(5).await;
         let context = actor.durable_send_context().await.unwrap();
         let request = DurableChatRequest::Send(DurableSendRequest {
@@ -949,7 +949,11 @@ mod tests {
         drop(restored.chat_fence_commit);
         let (replacement, task, drain) = leaving::tests::running(1005);
         let replacement_actor = replacement.actor.clone();
-        reopened.servers.lock().await.insert(12, replacement);
+        reopened
+            .servers
+            .lock()
+            .await
+            .install_legacy_fixture(12, replacement);
         replacement_actor.open_channel(5).await;
         let late = send(
             &reopened,
@@ -1033,7 +1037,7 @@ mod tests {
         *state.session_resumable.lock().await = true;
         let (entry, task, drain) = leaving::tests::running(1011);
         let actor = entry.actor.clone();
-        state.servers.lock().await.insert(12, entry);
+        state.servers.lock().await.install_legacy_fixture(12, entry);
         actor.open_channel(5).await;
         let context = actor.durable_send_context().await.unwrap();
         let op = Operation::start(
@@ -1109,7 +1113,7 @@ mod tests {
         *state.session_resumable.lock().await = true;
         let (entry, task, drain) = leaving::tests::running(1013);
         let actor = entry.actor.clone();
-        state.servers.lock().await.insert(12, entry);
+        state.servers.lock().await.install_legacy_fixture(12, entry);
         actor.open_channel(5).await;
         let generation = unlocked_ui_session_generation(&state).await.unwrap();
         let request = DurableSendRequest {

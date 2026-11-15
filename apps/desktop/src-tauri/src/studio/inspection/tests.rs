@@ -126,7 +126,16 @@ async fn native_studio_inspection_expiring_after_conversion_is_rejected() {
             result.expect_err("expired inspection escaped final native delivery fence"),
             "Studio response belongs to a locked or changed UI session"
         );
-        assert_eq!(state.servers.lock().await[&fixture::SERVER].instance, 1);
+        assert_eq!(
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&fixture::SERVER)
+                .expect("Legacy fixture row")
+                .instance,
+            1
+        );
         f.shutdown().await;
     }
 }
@@ -169,7 +178,7 @@ async fn native_studio_inspection_original_session_request_and_instance_span_bot
                             .servers
                             .try_lock()
                             .unwrap()
-                            .get_mut(&fixture::SERVER)
+                            .legacy_mut(&fixture::SERVER)
                             .unwrap()
                             .instance += 1;
                     }

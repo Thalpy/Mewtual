@@ -27,7 +27,7 @@ async fn actor(state: &AppState, selected: &SelectedHandoffOwner) -> catcoms_app
         .servers
         .lock()
         .await
-        .get(&selected.binding().server)
+        .legacy(&selected.binding().server)
         .unwrap()
         .actor
         .clone()

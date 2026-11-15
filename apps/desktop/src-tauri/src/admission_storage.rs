@@ -49,14 +49,14 @@ pub(super) async fn prune_stale_pending(state: &AppState) {
     retain_current(state, &registry);
 }
 
-fn retain_current(state: &AppState, registry: &HashMap<u64, ServerEntry>) {
+fn retain_current(state: &AppState, registry: &ServerTable) {
     state
         .pending_server_nets
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .retain(|id, pending| {
             registry
-                .get(id)
+                .legacy(id)
                 .is_some_and(|entry| entry.instance == pending.instance)
         });
 }
@@ -115,7 +115,7 @@ pub(super) async fn persist_server_net(
     let registry = state.servers.lock().await;
     retain_current(state, &registry);
     let Some(entry) = registry
-        .get(&server)
+        .legacy(&server)
         .filter(|entry| entry.instance == instance)
     else {
         return PersistOutcome::Superseded;
@@ -223,7 +223,7 @@ pub(super) async fn retry_server_net(
     let registry = state.servers.lock().await;
     retain_current(state, &registry);
     let Some(entry) = registry
-        .get(&server)
+        .legacy(&server)
         .filter(|entry| entry.instance == instance)
     else {
         return Some(PersistOutcome::Superseded);
@@ -299,7 +299,7 @@ async fn write_registry(state: &AppState) -> PersistOutcome {
         .unwrap_or_else(|e| e.into_inner())
         .requested;
     let records: Vec<_> = registry
-        .iter()
+        .legacy_iter()
         .map(|(id, entry)| ServerRecord {
             id: *id,
             display_name: entry.name.clone(),
@@ -326,7 +326,7 @@ pub(super) async fn before_shutdown(state: &AppState) -> Result<(), String> {
         .servers
         .lock()
         .await
-        .iter()
+        .legacy_iter()
         .map(|(id, entry)| (*id, entry.instance))
         .collect();
     for (server, instance) in entries {
@@ -411,7 +411,7 @@ mod tests {
         let device_id = server.device_id();
         let (actor, mut events, task) = spawn(server);
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
-        state.servers.lock().await.insert(
+        state.servers.lock().await.install_legacy_fixture(
             1,
             ServerEntry {
                 files: keep_session::EntryOwner::new(),
@@ -706,7 +706,7 @@ mod tests {
             persist_registry(&state).await,
             pending(PersistFailure::WriteFailed)
         );
-        state.servers.lock().await.get_mut(&1).unwrap().name = "latest name".into();
+        state.servers.lock().await.legacy_mut(&1).unwrap().name = "latest name".into();
         assert_eq!(
             persist_registry(&state).await,
             pending(PersistFailure::WriteFailed)

@@ -130,7 +130,10 @@ fn independently_paid_competitors_use_one_canonical_generation_and_keep_the_lose
     let baseline = f.pool.charged_for_test();
     let mut first = f.candidate();
     let mut second = f.candidate();
-    assert_eq!(f.pool.charged_for_test(), baseline + 2 * INVOCATION_BYTES);
+    assert_eq!(
+        f.pool.charged_for_test(),
+        baseline + 2 * NativeUiInvocationBudget::metadata_bytes()
+    );
     let a = f.owner.admit(&mut first).unwrap();
     let b = f.owner.admit(&mut second).unwrap();
     assert!(first.owner.is_none());

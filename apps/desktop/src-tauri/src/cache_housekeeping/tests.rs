@@ -46,7 +46,7 @@ impl LimitWriteCase {
         let group = server.group_id();
         let device = server.device_id();
         let (actor, events, task) = spawn(server);
-        state.servers.lock().await.insert(
+        state.servers.lock().await.install_legacy_fixture(
             1,
             crate::tests::snapshot_test_entry(55_001, actor.clone(), group.clone(), device),
         );
@@ -101,7 +101,7 @@ impl LimitWriteCase {
 
     async fn finish(mut self) {
         self.start_drain();
-        self.state.servers.lock().await.clear();
+        self.state.servers.lock().await.clear_legacy_fixture();
         self.actor.shutdown().await;
         self.task.await.unwrap();
         self.drain.take().unwrap().await.unwrap();
@@ -211,7 +211,11 @@ async fn queued_cache_limit_cannot_select_a_replacement_server() {
         .set_cache_limit(CacheLimit::Unlimited)
         .await
         .unwrap();
-    case.state.servers.lock().await.insert(1, replacement);
+    case.state
+        .servers
+        .lock()
+        .await
+        .install_legacy_fixture(1, replacement);
     drop(serial);
     assert!(write.await.is_err());
     assert_eq!(
@@ -221,7 +225,7 @@ async fn queued_cache_limit_cannot_select_a_replacement_server() {
     );
     assert!(replacement_actor.cache_status().await.unwrap().unlimited);
     assert_ne!(replacement_group, case.group);
-    case.state.servers.lock().await.clear();
+    case.state.servers.lock().await.clear_legacy_fixture();
     replacement_actor.shutdown().await;
     task.await.unwrap();
     drain.await.unwrap();
@@ -534,7 +538,7 @@ async fn a_leave_claims_the_group_before_the_server_stops() {
     let (entry, task, drain) = crate::leaving::tests::running(951);
     let group = entry.group_id.clone();
     let actor = entry.actor.clone();
-    state.servers.lock().await.insert(1, entry);
+    state.servers.lock().await.install_legacy_fixture(1, entry);
     let claim = claim_for_leave(&state, 1)
         .await
         .expect("a registered server with no alias is claimed");
@@ -548,7 +552,7 @@ async fn a_leave_claims_the_group_before_the_server_stops() {
     let second = claim_for_leave(&state, 1);
     tokio::pin!(second);
     assert!(still_pending(second.as_mut()).await);
-    state.servers.lock().await.remove(&1); // the first leave removed the row
+    state.servers.lock().await.remove_legacy_fixture(&1); // the first leave removed the row
     drop(claim);
     assert!(
         second.await.is_none(),
@@ -564,8 +568,8 @@ async fn a_leave_claims_the_group_before_the_server_stops() {
     three.group_id = two.group_id.clone();
     let shared = two.group_id.clone();
     let actors = [two.actor.clone(), three.actor.clone()];
-    state.servers.lock().await.insert(2, two);
-    state.servers.lock().await.insert(3, three);
+    state.servers.lock().await.install_legacy_fixture(2, two);
+    state.servers.lock().await.install_legacy_fixture(3, three);
     let first = claim_for_leave(&state, 2)
         .await
         .expect("an alias row is claimed too");
@@ -576,7 +580,7 @@ async fn a_leave_claims_the_group_before_the_server_stops() {
         "the other alias's leave waits"
     );
     // `leave_server` for row 2: removed, an alias remains, so its claim goes unused.
-    state.servers.lock().await.remove(&2);
+    state.servers.lock().await.remove_legacy_fixture(&2);
     drop(first);
     let last = last
         .await

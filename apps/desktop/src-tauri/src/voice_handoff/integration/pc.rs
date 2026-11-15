@@ -333,7 +333,10 @@ pub(super) async fn exercise(
             return None;
         }
         // Keep the test-only nested stopped-Actor setup out of every ancestor TCP future.
-        super::sdp_intake::exercise(state, public, route, parent, &body);
+        Box::pin(super::sdp_intake::exercise(
+            state, public, route, parent, &body,
+        ))
+        .await;
         unstarted_sdp = Some(
             Box::pin(super::sdp_rows::exercise(
                 state,

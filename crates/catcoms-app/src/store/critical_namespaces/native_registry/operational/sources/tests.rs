@@ -64,7 +64,9 @@ pub(super) fn policy() -> NativeTextSourcePolicy {
     )
     .unwrap()
 }
-pub(super) fn selected(path: &std::path::Path) -> (NativeTextVault, NativeUiInvocationBudget) {
+pub(in crate::store::critical_namespaces::native_registry::operational) fn selected(
+    path: &std::path::Path,
+) -> (NativeTextVault, NativeUiInvocationBudget) {
     selected_configured(path, true)
 }
 fn selected_configured(
@@ -97,6 +99,78 @@ fn selected_configured(
     (upgrade.into_vault().unwrap(), budget)
 }
 
+/// Genuine empty1 -> index2 -> private3 -> governed4 startup, before any Source
+/// exists. Retain the same whole native/UI/index owner through every barrier;
+/// this is not a policy flag attached to an already exposed ordinary facade.
+pub(in crate::store::critical_namespaces::native_registry::operational) fn selected_governed(
+    path: &std::path::Path,
+) -> (NativeTextVault, NativeUiInvocationBudget) {
+    use crate::store::critical_namespaces::native_registry::preparation::tests::{
+        current_policy, SECRET,
+    };
+    use crate::store::{
+        NativeIndexPolicy, NativeIndexUpgrade, NativeRegistryInstallation, NativeRegistryPolicy,
+    };
+    let mut rng = ChaCha20Rng::seed_from_u64(0xcd04);
+    let mut current = current_policy();
+    current.archive = current
+        .archive
+        .with_checkpoint_join_execution(2, 10_000)
+        .unwrap();
+    let registry_policy = NativeRegistryPolicy::new(
+        CriticalCatalogReadPool::new(NativeRegistryPolicy::required_capacity()).unwrap(),
+        NativeRegistryPolicy::required_persistent_capacity(),
+    )
+    .unwrap();
+    let mut registry =
+        NativeRegistryInstallation::prepare_fresh(path, SECRET, &mut rng, current, registry_policy)
+            .unwrap();
+    registry.retry().unwrap();
+    let index_policy = NativeIndexPolicy::new(
+        CriticalCatalogReadPool::new(NativeIndexPolicy::required_capacity()).unwrap(),
+        NativeIndexPolicy::required_persistent_capacity(),
+    )
+    .unwrap();
+    let mut index = NativeIndexUpgrade::prepare(
+        registry.into_native_registry().unwrap(),
+        index_policy,
+        &mut rng,
+    )
+    .unwrap();
+    index.retry().unwrap();
+    let budget = NativeUiInvocationBudget::new(
+        CriticalCatalogReadPool::new(NativeUiInvocationBudget::required_capacity()).unwrap(),
+    )
+    .unwrap();
+    let mut upgrade = crate::store::NativeTextVaultUpgrade::prepare(
+        index.into_index_store().unwrap(),
+        Arc::new(AtomicU64::new(7)),
+        Arc::new(AtomicU64::new(7)),
+        Arc::new(AtomicBool::new(false)),
+        budget.clone(),
+    )
+    .unwrap();
+    upgrade.retry(&mut rng).unwrap();
+    let mut governance = upgrade.prepare_governance().unwrap();
+    governance.retry(&mut rng).unwrap();
+    (governance.into_vault().unwrap(), budget)
+}
+
+#[test]
+fn native_sources_original_vault_comparison_survives_close_and_refuses_foreign_facade() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let (vault, _) = selected(first.path());
+    let (foreign, _) = selected(second.path());
+    let owner = sources(&vault);
+    assert!(owner.is_from_original_vault_cached(&vault));
+    assert!(!owner.is_from_original_vault_cached(&foreign));
+    vault.close_admission();
+    owner.close_admission();
+    assert!(owner.is_from_original_vault_cached(&vault));
+    assert!(!owner.is_from_original_vault_cached(&foreign));
+}
+
 #[test]
 fn native_sources_data_only_mount_cannot_retain_an_authoring_entry_or_generate_a_device() {
     let dir = tempfile::tempdir().unwrap();
@@ -121,7 +195,9 @@ pub(super) fn command(
     let mut capture = Some(vault.admit_ui(&mut candidate).unwrap());
     vault.bind_native_source_command(&mut capture).unwrap()
 }
-pub(super) fn sources(vault: &NativeTextVault) -> NativeTextSources<MemNetwork, ChaCha20Rng> {
+pub(in crate::store::critical_namespaces::native_registry::operational) fn sources(
+    vault: &NativeTextVault,
+) -> NativeTextSources<MemNetwork, ChaCha20Rng> {
     match vault
         .capture_native_sources(policy().prepare().unwrap())
         .finish()
@@ -243,13 +319,18 @@ fn native_sources_invoice_counts_actual_generic_runtime_not_only_arc_pointer() {
 #[test]
 fn native_sources_runtime_loan_restores_exact_body_and_retains_original_files_after_owner_drop() {
     let dir = tempfile::tempdir().unwrap();
-    let (vault, _) = selected(dir.path());
+    let (vault, budget) = selected(dir.path());
     let owner = sources(&vault);
     let payment = Arc::new(RuntimeMetadata {
         pool: owner.policy.pool.clone(),
         _debit: owner.policy.pool.try_reserve(ENTRY_BYTES).unwrap(),
     });
     let original = owner.work.for_paid_runtime(&payment).unwrap();
+    let source_owner = NativeChatSourceOwner::for_trusted_source(
+        &command(&vault, &budget).ui.command,
+        payment.clone(),
+    )
+    .unwrap();
     let body: Runtime<MemNetwork, ChaCha20Rng> = Runtime {
         founder_policy: owner.policy.founder,
         request: Some(request(1, "Original retained request")),
@@ -261,6 +342,8 @@ fn native_sources_runtime_loan_restores_exact_body_and_retains_original_files_af
         group_rng: Some(ChaCha20Rng::seed_from_u64(0xcd19)),
         clock: None,
         network: None,
+        selection: None,
+        source_close: source_owner.close_handle(),
         work: original,
         _metadata: payment,
     };
@@ -270,8 +353,11 @@ fn native_sources_runtime_loan_restores_exact_body_and_retains_original_files_af
             running: true,
             interrupted: false,
             poisoned: false,
+            retiring: false,
+            retirement: retirement::BodyState::new(),
         }),
         returned: tokio::sync::Notify::new(),
+        tail_probe: Mutex::new(None),
     });
     let loan = RuntimeLoan {
         body: Some(body),
