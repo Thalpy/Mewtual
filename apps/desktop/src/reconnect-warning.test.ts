@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import ts from "typescript";
+import {decodeRestoredChatSession} from "./native-text-session.ts";
 
 const source = readFileSync(new URL("./App.svelte", import.meta.url), "utf8");
 const start = source.indexOf("  function restoreReloaded(");
@@ -12,8 +13,10 @@ const restore = ts.transpileModule(source.slice(start, end), {
 }).outputText;
 
 function reopen(reloaded: object[]) {
-  return new Function("reloaded", `
+  return new Function("reloaded", "decodeRestoredChatSession", `
     let servers = [], locked = true, windowCloseInFlight = false, uiStateLoadGeneration = 0;
+    let chatBackend=null,startTab="join",uiSessionRetired=false;
+    const studioExit={begin:()=>({current:()=>true})};
     const warnings = [];
     let callControllerClaims = 0;
     const callMappingSession = { claimController() { callControllerClaims++; return Promise.resolve(null); } };
@@ -24,7 +27,7 @@ function reopen(reloaded: object[]) {
     ${restore}
     restoreReloaded(reloaded);
     return { warnings, locked, servers, callControllerClaims };
-  `)(reloaded) as { warnings: unknown[][]; locked: boolean; servers: { id: number }[]; callControllerClaims: number };
+  `)(reloaded,decodeRestoredChatSession) as { warnings: unknown[][]; locked: boolean; servers: { id: number }[]; callControllerClaims: number };
 }
 
 test("actual restored-server flow discloses missing outgoing routes without blocking the group", () => {

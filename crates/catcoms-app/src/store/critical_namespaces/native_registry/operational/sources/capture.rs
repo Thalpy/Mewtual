@@ -170,6 +170,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextCreationPreparation<T, R> {
                 metadata.clone(),
             )
             .map_err(|_| Error::Unavailable)?;
+            let source_close = owner.close_handle();
             let request = self.request.take().unwrap();
             let inputs = self.inputs.take().unwrap();
             let entry = Arc::new(Entry {
@@ -190,6 +191,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextCreationPreparation<T, R> {
                             clock: Some(inputs.clock),
                             network: None,
                             selection: None,
+                            source_close,
                             work: self.work.take().unwrap(),
                             _metadata: metadata,
                         }),

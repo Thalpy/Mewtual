@@ -29,6 +29,15 @@ impl GovernanceCapabilityData {
             inner: original_data(original, domain)?.1,
         })
     }
+    pub(in crate::store) fn from_family_original_catalog_data(
+        original: &[u8],
+        domain: &[u8; 32],
+        family: GovernanceCatalogFamily,
+    ) -> Result<Self, AppError> {
+        Ok(Self {
+            inner: original_family_data(original, domain, family)?.1,
+        })
+    }
     pub(in crate::store) fn decode_data(
         payload: &[u8],
         layout: current::CurrentLayoutData,

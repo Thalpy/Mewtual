@@ -15,6 +15,7 @@ use std::marker::PhantomData;
 use std::sync::Mutex;
 use zeroize::Zeroizing;
 mod capture;
+mod invite;
 mod member;
 mod network;
 pub use member::{
@@ -175,6 +176,9 @@ struct Runtime<T: MeshTransport, R: CryptoRngCore> {
     // One paid canonical metadata allocation. Exact retries issue handles to
     // this same selection rather than allocating again on the entry's debit.
     selection: Option<NativeTextRuntimeSelection<T, R>>,
+    // Negative-only original key counter, captured before moving its issuer
+    // into Entry. Native row closure must not borrow this runtime or issuer.
+    source_close: catcoms_rt::NativeChatSourceClose,
     work: SourceWork,
     _metadata: Arc<RuntimeMetadata>,
 }
@@ -437,6 +441,7 @@ fn runtime_invoice<T: MeshTransport, R: CryptoRngCore>() -> Option<usize> {
         2 * std::mem::size_of::<NativeTextCreationPreparation<T, R>>(),
         selection::invoice::<T, R>(),
         member::invoice::<T, R>(),
+        8 * 1024, // finite original invite routing-plan scratch and return overlap
         2 * std::mem::size_of::<Entry<T, R>>(),
         // Original frame + Pending copy + retained activation dependency,
         // with bounded ciphertext/plaintext validation and reread overlap.

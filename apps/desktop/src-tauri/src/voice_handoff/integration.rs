@@ -394,7 +394,7 @@ async fn derivation_cycle(
             .servers
             .lock()
             .await
-            .get(&selected.binding().server)
+            .legacy(&selected.binding().server)
             .unwrap()
             .device_id
             .as_bytes()

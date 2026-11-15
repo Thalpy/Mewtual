@@ -213,7 +213,7 @@ pub(super) fn decode_selected_data(
     let original = NativeCapabilityData::for_current_data(layout, &layout.encode_data()?)?;
     let key = Zeroizing::new(store.keys.db_key()?);
     let plain = Zeroizing::new(unseal(&key, &unframe(inventory.catalog())?)?);
-    let parsed = grammar::parse_lifecycle_native_registry_layout(&plain, &original.vault, true)?;
+    let parsed = parse_selected_catalog(store, &plain, &original.vault)?;
     let cap = Capability { original };
     Capability::decode_exact(parsed.native_registry_payload.ok_or_else(refused)?, cap)?;
     Capability::decode_exact(
@@ -227,8 +227,7 @@ pub(super) fn decode_selected_data(
     let mut successor = false;
     if let Some(stage) = inventory.catalog_stage() {
         let next_plain = Zeroizing::new(unseal(&key, &unframe(stage)?)?);
-        let next =
-            grammar::parse_lifecycle_native_registry_layout(&next_plain, &original.vault, true)?;
+        let next = parse_selected_catalog(store, &next_plain, &original.vault)?;
         Capability::decode_exact(next.native_registry_payload.ok_or_else(refused)?, cap)?;
         if next_plain.as_slice() != plain.as_slice() {
             grammar::successor(
@@ -252,6 +251,104 @@ pub(super) fn decode_selected_data(
             successor,
         },
     ))
+}
+
+fn parse_selected_catalog<'a>(
+    store: &crate::store::ServerStore,
+    plain: &'a [u8],
+    domain: &[u8; 32],
+) -> Result<grammar::Parsed<'a>, AppError> {
+    let handler = store
+        .current_layout_policy
+        .as_ref()
+        .and_then(|p| p.native_registry.as_ref())
+        .ok_or_else(refused)?;
+    if handler.lifecycle().is_none() {
+        return Err(refused());
+    }
+    handler.parse_layout(plain, domain, true)
+}
+
+/// An authenticated pristine native3 tuple with retained original file leaves.
+/// This is only the negative parent for a catalog declaration, never Source,
+/// native command, saved-governance or group operation authority.
+pub(in crate::store) struct VerifiedGovernanceNative {
+    inventory:
+        crate::store::persistence::native_registry::lifecycle::governed::NativeGovernanceInventory,
+    data: crate::store::critical_namespaces::governance_layout::codec::NativeTupleData,
+    original_catalog: [u8; 32],
+}
+impl VerifiedGovernanceNative {
+    pub(in crate::store) fn data(
+        &self,
+    ) -> crate::store::critical_namespaces::governance_layout::codec::NativeTupleData {
+        self.data
+    }
+    pub(in crate::store) fn require(
+        &self,
+        store: &crate::store::ServerStore,
+    ) -> Result<(), AppError> {
+        self.inventory.require_tuple(store, self.data)
+    }
+    pub(in crate::store) fn require_initial_catalog(
+        &self,
+        store: &crate::store::ServerStore,
+    ) -> Result<(), AppError> {
+        self.inventory
+            .require_captured_catalog(store, &self.original_catalog)
+    }
+}
+pub(in crate::store) fn verify_governance_native(
+    store: &crate::store::ServerStore,
+    inventory:crate::store::persistence::native_registry::lifecycle::governed::NativeGovernanceInventory,
+    original_catalog: &[u8],
+    expected: Option<crate::store::critical_namespaces::governance_layout::codec::NativeTupleData>,
+) -> Result<VerifiedGovernanceNative, AppError> {
+    inventory.require_leaves(store)?;
+    let layout = inventory.layout(store)?;
+    let original = NativeCapabilityData::for_current_data(layout, &layout.encode_data()?)?;
+    let key = Zeroizing::new(store.keys.db_key()?);
+    let plain = Zeroizing::new(unseal(&key, &unframe(original_catalog)?)?);
+    let parsed = grammar::parse_lifecycle_native_registry_layout(&plain, &original.vault, true)?;
+    if parsed.member_outbox.is_none() || parsed.count != 0 {
+        return Err(refused());
+    }
+    crate::store::critical_namespaces::member_outbox_layout::codec::require_marker(
+        &key,
+        parsed.member_outbox.ok_or_else(refused)?,
+        inventory.member_marker(),
+    )?;
+    let descriptor = parsed.native_registry_payload.ok_or_else(refused)?;
+    let cap = Capability { original };
+    Capability::decode_exact(descriptor, cap)?;
+    Capability::decode_exact(
+        &open(&key, MARKER_KEY, inventory.marker(), v1::MAX_MARKER_FRAME)?,
+        cap,
+    )?;
+    let index = Index::decode_data(
+        &open(&key, INDEX_KEY, inventory.index(), super::codec::MAX_FRAME)?,
+        cap,
+    )?;
+    // Both earlier migrations preserve empty highwater. No ordinary metadata,
+    // birth, terminal receipt or lost-row compaction can produce this baseline.
+    if index.generation != 1
+        || index.parent.is_some()
+        || index.origin.generation != 1
+        || index.last_issued_id != 0
+        || !index.rows.is_empty()
+    {
+        return Err(refused());
+    }
+    let data=crate::store::critical_namespaces::governance_layout::codec::NativeTupleData::from_frames_data(inventory.index(),inventory.marker(),descriptor)?;
+    if expected.is_some_and(|expected| expected != data) {
+        return Err(refused());
+    }
+    inventory.require_tuple(store, data)?;
+    Ok(VerifiedGovernanceNative {
+        inventory,
+        data,
+        original_catalog: *blake3::hash(original_catalog).as_bytes(),
+    })
 }
 
 /// Closed semantic decision bound to THIS held inventory. An authenticated

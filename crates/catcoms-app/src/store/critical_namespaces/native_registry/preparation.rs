@@ -46,20 +46,24 @@ pub(in crate::store) enum NativeRegistryHandler {
     Migration(NativeMigrationHandler),
     Operational(super::operational::Handler),
     Lifecycle(super::lifecycle::admission::Handler),
+    GovernedLifecycle(super::lifecycle::admission::Handler),
+    GovernanceOpening(super::lifecycle::admission::Handler),
 }
 impl NativeRegistryHandler {
     pub(in crate::store) fn require(&self) -> Result<(), AppError> {
         match self {
             Self::Migration(handler) => handler.require(),
             Self::Operational(handler) => handler.require(),
-            Self::Lifecycle(handler) => handler.require(),
+            Self::Lifecycle(handler)
+            | Self::GovernedLifecycle(handler)
+            | Self::GovernanceOpening(handler) => handler.require(),
         }
     }
     pub(in crate::store) fn namespace_version(&self) -> u32 {
         match self {
             Self::Migration(_) => 1,
             Self::Operational(_) => 2,
-            Self::Lifecycle(_) => 3,
+            Self::Lifecycle(_) | Self::GovernedLifecycle(_) | Self::GovernanceOpening(_) => 3,
         }
     }
     pub(in crate::store::critical_namespaces) fn parse_layout<'a>(
@@ -82,7 +86,27 @@ impl NativeRegistryHandler {
                     plain, domain, executing,
                 )
             }
+            Self::GovernedLifecycle(_) => {
+                super::super::pending_join_codec::parse_governed_native_registry_layout(
+                    plain, domain, executing,
+                )
+            }
+            Self::GovernanceOpening(_) => {
+                super::super::pending_join_codec::parse_native_governance_family(
+                    plain, domain, executing,
+                )
+            }
         }
+    }
+    /// Exact concrete native3 handler loan, never a version-number conversion.
+    pub(in crate::store) fn lifecycle(&self) -> Option<&super::lifecycle::admission::Handler> {
+        match self {
+            Self::Lifecycle(h) | Self::GovernedLifecycle(h) | Self::GovernanceOpening(h) => Some(h),
+            _ => None,
+        }
+    }
+    pub(in crate::store) fn is_governed(&self) -> bool {
+        matches!(self, Self::GovernedLifecycle(_))
     }
 }
 #[derive(Clone)]

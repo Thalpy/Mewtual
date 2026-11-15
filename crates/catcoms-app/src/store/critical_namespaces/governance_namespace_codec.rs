@@ -18,6 +18,14 @@ const VERSION: u16 = 1;
 const DESCRIPTOR_BYTES: usize = 4 + TAG.len() + 2 + 3 * 36;
 const ENTRY_OVERHEAD: usize = 12;
 
+/// Constructor-selected DATA family. It grants no mounted handler or Source;
+/// the original standard family never accepts a native descriptor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::store) enum GovernanceCatalogFamily {
+    Standard,
+    NativeLifecycle,
+}
+
 /// Immutable capability labels only. Request inventory belongs in a separate, future
 /// journal and cannot mutate this descriptor or normalize any preceding namespace.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -85,12 +93,34 @@ fn original_data<'a>(
     raw: &'a [u8],
     domain: &[u8; 32],
 ) -> Result<(outer::Envelope<'a>, GovernanceLayoutData), AppError> {
+    original_family_data(raw, domain, GovernanceCatalogFamily::Standard)
+}
+
+fn original_family_data<'a>(
+    raw: &'a [u8],
+    domain: &[u8; 32],
+    family: GovernanceCatalogFamily,
+) -> Result<(outer::Envelope<'a>, GovernanceLayoutData), AppError> {
     // This is DATA grammar validation, not selection of a runtime JOIN executor.
     // The complete parser accepts only its actual known JOINv1/v2, ID2, ID3 and an
     // already declared member-outbox ID5 (which the new4 is inserted before, byte for
     // byte). An existing4 refuses. No namespace3 parser/descriptor is widened here;
     // the configured opener's own grammar still decides runtime support of ID5.
-    let parsed = prior::parse_governance_declaration_original(raw, domain)?;
+    let parsed = match family {
+        GovernanceCatalogFamily::Standard => {
+            prior::parse_governance_declaration_original(raw, domain)?
+        }
+        GovernanceCatalogFamily::NativeLifecycle => {
+            let parsed = prior::parse_lifecycle_native_registry_layout(raw, domain, true)?;
+            if parsed.member_outbox.is_none()
+                || parsed.native_registry_payload.is_none()
+                || parsed.count != 0
+            {
+                return Err(refused());
+            }
+            parsed
+        }
+    };
     let layout = parsed.current_layout.ok_or_else(refused)?;
     let archive = parsed.archive.as_ref().ok_or_else(refused)?;
     if layout.vault != *domain || archive.vault != layout.vault || archive.root != layout.root {
@@ -140,7 +170,15 @@ pub(super) fn prepare_declaration_data(
     original: &[u8],
     domain: &[u8; 32],
 ) -> Result<Zeroizing<Vec<u8>>, AppError> {
-    let (old, layout) = original_data(original, domain)?;
+    prepare_family_declaration_data(original, domain, GovernanceCatalogFamily::Standard)
+}
+
+pub(in crate::store) fn prepare_family_declaration_data(
+    original: &[u8],
+    domain: &[u8; 32],
+    family: GovernanceCatalogFamily,
+) -> Result<Zeroizing<Vec<u8>>, AppError> {
+    let (old, layout) = original_family_data(original, domain, family)?;
     old.generation.checked_add(1).ok_or_else(refused)?;
     old.count
         .checked_add(1)
@@ -156,7 +194,7 @@ pub(super) fn prepare_declaration_data(
         NAMESPACE_VERSION,
         &descriptor,
     )?;
-    validate_declaration_pair_data(original, &candidate, domain)?;
+    validate_family_declaration_pair_data(original, &candidate, domain, family)?;
     Ok(candidate)
 }
 
@@ -169,7 +207,21 @@ pub(super) fn validate_declaration_pair_data(
     candidate: &[u8],
     domain: &[u8; 32],
 ) -> Result<(), AppError> {
-    let (_, expected) = original_data(original, domain)?;
+    validate_family_declaration_pair_data(
+        original,
+        candidate,
+        domain,
+        GovernanceCatalogFamily::Standard,
+    )
+}
+
+pub(in crate::store) fn validate_family_declaration_pair_data(
+    original: &[u8],
+    candidate: &[u8],
+    domain: &[u8; 32],
+    family: GovernanceCatalogFamily,
+) -> Result<(), AppError> {
+    let (_, expected) = original_family_data(original, domain, family)?;
     let added = catalog_declaration::validate_insert_pair_data(
         original,
         candidate,
@@ -178,6 +230,9 @@ pub(super) fn validate_declaration_pair_data(
         NAMESPACE_VERSION,
     )?;
     GovernanceLayoutData::decode_data(added, expected)?;
+    if family == GovernanceCatalogFamily::NativeLifecycle {
+        prior::parse_governed_native_registry_layout(candidate, domain, true)?;
+    }
     Ok(())
 }
 
