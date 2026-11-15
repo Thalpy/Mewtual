@@ -46,7 +46,7 @@ impl Fixture {
         let device = server.device_id();
         let (actor, mut events, worker) = spawn(server);
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
-        state.servers.lock().await.insert(
+        state.servers.lock().await.install_legacy_fixture(
             7,
             tests::snapshot_test_entry(1, actor.clone(), group, device),
         );
@@ -186,7 +186,7 @@ async fn accepted_activation_entry_replacement_before_final_admission_is_refused
         async {
             f.actor.member_count().await;
             // Even a replacement retaining the same group/actor cannot adopt an old entry id.
-            f.state.servers.lock().await.get_mut(&7).unwrap().instance = 2;
+            f.state.servers.lock().await.legacy_mut(&7).unwrap().instance = 2;
             drop(boundary);
         }
     );

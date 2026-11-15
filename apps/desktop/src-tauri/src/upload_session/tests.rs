@@ -48,7 +48,7 @@ impl Fixture {
         let group = hex::encode(&group_id);
         let device = server.device_id();
         let (actor, events, task) = spawn(server);
-        state.servers.lock().await.insert(
+        state.servers.lock().await.install_legacy_fixture(
             1,
             crate::tests::snapshot_test_entry(70, actor.clone(), group_id, device),
         );
@@ -707,7 +707,7 @@ async fn replaced_server_cannot_adopt_an_upload_or_redirect_its_cleanup() {
     let device = replacement.device_id();
     let (actor, mut events, task) = spawn(replacement);
     let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
-    f.state.servers.lock().await.insert(
+    f.state.servers.lock().await.install_legacy_fixture(
         1,
         crate::tests::snapshot_test_entry(71, actor.clone(), group, device),
     );

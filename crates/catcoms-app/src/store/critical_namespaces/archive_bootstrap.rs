@@ -154,7 +154,27 @@ impl ServerStore {
             .pending_join_policy
             .as_ref()
             .and_then(|policy| policy.execution.as_ref());
+        if let Some(handler) = self
+            .current_layout_policy
+            .as_ref()
+            .and_then(|p| p.native_registry.as_ref())
+            .filter(|h| h.is_governed())
+        {
+            if self.governance_layout_policy.as_ref().is_none_or(|p|p.family != super::governance_namespace_codec::GovernanceCatalogFamily::NativeLifecycle) {
+                return Err(refused());
+            }
+            return handler.parse_layout(plain, &domain, execution.is_some());
+        }
         if let Some(policy) = self.governance_layout_policy.as_ref() {
+            if policy.family
+                == super::governance_namespace_codec::GovernanceCatalogFamily::NativeLifecycle
+            {
+                return super::pending_join_codec::parse_native_governance_family(
+                    plain,
+                    &domain,
+                    execution.is_some(),
+                );
+            }
             return super::pending_join_codec::parse_governance_layout(plain, &domain, policy);
         }
         if let Some(policy) = self.current_layout_policy.as_ref() {
@@ -552,6 +572,17 @@ pub(in crate::store) fn verify_marker_frame(
     raw: &[u8],
 ) -> Result<(), AppError> {
     open_marker_data(key, descriptor, raw)
+}
+
+/// Authenticated descriptor DATA only, for the native pre-cleaner inspector.
+/// Callers retain/recheck the actual fixed marker and directory identities and
+/// independent payment; this never installs an archive or Current root.
+pub(in crate::store) fn read_marker_descriptor_data(
+    key: &[u8; 32],
+    vault: &[u8; 32],
+    raw: &[u8],
+) -> Result<Descriptor, AppError> {
+    seed::open_marker_descriptor_data(key, vault, raw)
 }
 
 /// Fixed name only. Frame the group length and full signer; no numeric alias, truncated

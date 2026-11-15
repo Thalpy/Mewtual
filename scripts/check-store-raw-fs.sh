@@ -60,6 +60,13 @@ declare -A allowed=(
   # destination is re-proved after large reads before rename; selection/unlink
   # phases are cached before covering barriers. These are not epoch-file permits.
   ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|abandon_first_torn|fs::remove_file(&seed_path).map_err(io)?;']=1
+  # Immutable initial native network output: held original file/parents only.
+  ['crates/catcoms-app/src/store/persistence/native_registry/network.rs|cover|self.servers.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/network.rs|cover|self.vault.file.sync_all().map_err(io)?;']=1
+  # Retained native activation dependency: original file and both parents.
+  ['crates/catcoms-app/src/store/persistence/native_registry/network/dependency.rs|require|self.output.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/network/dependency.rs|require|self.servers.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/network/dependency.rs|require|self.vault.file.sync_all().map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|abandon_first_torn|fs::remove_file(&stage_path).map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|abandon_first_torn|self.base.vault.file.sync_all().map_err(io)?;']=2
   ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|advance_upgrade|fs::remove_file(&seed).map_err(io)?;']=1
@@ -79,11 +86,49 @@ declare -A allowed=(
   ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|run|fs::remove_file(&stage_path).map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|run|self.original.index.file.sync_all().map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/native_registry/operational.rs|run|self.original.root.file.sync_all().map_err(io)?;']=2
+  # Dedicated fixed7/v3 roles, with original marker expectation and exact held
+  # input/output identity. No generic path, epoch mutation or v2 parser widening.
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade.rs|cover_selected_outputs_before_catalog|output.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade.rs|cover_selected_outputs_before_catalog|self.original.root.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade.rs|advance_upgrade|self.original.vault.file.sync_all().map_err(io)?;']=6
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade.rs|advance_upgrade|self.original.root.file.sync_all().map_err(io)?;']=5
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade.rs|advance_upgrade|fs::rename(&index_temp, &index).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade.rs|advance_upgrade|fs::rename(&marker_temp, &marker).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade.rs|advance_upgrade|fs::rename(&stage, &current).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade.rs|advance_upgrade|selected.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade.rs|advance_upgrade|fs::remove_file(&seed).map_err(io)?;']=1
+  # First-torn3 requires an affine proof for THIS inventory, mutually valid old2
+  # outputs and independently authenticated Current. Empty fence is covered
+  # before seed unlink; an authenticated ordinary JOIN Stage is left untouched.
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade/first_torn.rs|run|fs::remove_file(&stage).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade/first_torn.rs|run|fs::remove_file(&seed).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade/first_torn.rs|run|self.original.base.vault.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade/first_torn.rs|cover_catalog_fence_before_seed|self.original.base.vault.file.sync_all().map_err(io)?;']=1
+  # Normal3 fixed index WAL only: a semantic proof binds this held inventory,
+  # exact selected parent and Stage hash. Original marker/Current/dirs are
+  # re-proved before selection or unlink; completed is set after coverage.
+  # These roles cannot write epochs, accept arbitrary paths or use v2 limits.
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade/index.rs|commit|self.original.base.root.file.sync_all().map_err(io)?;']=2
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade/index.rs|commit|fs::rename(&stage, &selected).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade/index.rs|commit|output.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade/index.rs|run|self.original.base.index.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade/index.rs|run|self.original.base.root.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade/index.rs|cover_removed_stage|self.original.base.root.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade/index.rs|run|fs::remove_file(&stage).map_err(io)?;']=1
   # Namespace4 declaration first creates/syncs the SAME empty legacy stage so
   # actual older readers refuse before any governance-only recovery debt exists.
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure_legacy_stage_fence|let file = OpenOptions::new()']=1
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure_legacy_stage_fence|.create_new(true)']=1
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure_legacy_stage_fence|original.file.sync_all().map_err(io)?;']=1
+  # Native-family constructor only: claim attribution precedes the shared
+  # fence. Abort-only cleanup reauthenticates the pristine native3 baseline,
+  # compares bytes AND held identity again, and covers/reproves Stage absence
+  # before retiring the claim. No native/G/Source authority is produced.
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure_native_claim|let file = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure_native_claim|.create_new(true)']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|ensure_native_claim|original.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|cleanup_native_governance_torn|fs::remove_file(&stage_path).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout.rs|cleanup_native_governance_torn|fs::remove_file(&seed_path).map_err(io)?;']=1
   # Private offline Current4 metadata declaration only. Complete authenticated TWO-frame
   # seed and exact original native objects precede promotion; no arbitrary path, Source,
   # SDK/key entry or epoch-family effect. Preserve partial/foreign evidence on refusal.
@@ -206,7 +251,7 @@ declare -A allowed=(
   ['crates/catcoms-app/src/store/persistence/v2_text/transaction/work/io.rs|write_complete_only|.create_new(true)']=1
   ['crates/catcoms-app/src/store/persistence/v2_text/transaction/work/io.rs|write_complete_only|file.sync_all().map_err(io)?;']=1
   # Both public open APIs use this one private constructor before any token/cursor exists.
-  ['crates/catcoms-app/src/store.rs|open_with_catalog_policies|fs::create_dir_all(dir.join("servers")).map_err(|e| AppError::Io(e.to_string()))?;']=1
+  ['crates/catcoms-app/src/store.rs|open_catalog_in_session|fs::create_dir_all(dir.join("servers")).map_err(|e| AppError::Io(e.to_string()))?;']=1
   # remove_server unlinks only the non-family {id}.bin, .net and .cache files (I-4 audit:
   # correctly not rotating).
   ['crates/catcoms-app/src/store.rs|remove_server|fs::remove_file(p).map_err(|e| AppError::Io(e.to_string()))?;']=1
