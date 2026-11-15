@@ -210,6 +210,22 @@ fn require_pin_bytes(path: &Path, pin: PinData<'_>) -> Result<(), AppError> {
 }
 
 impl<'guard, 'writer> V2TextCurrentGroupGuard<'guard, 'writer> {
+    /// Positive family discriminator for the private native invite producer.
+    /// A generic Current3 guard (or a GovernanceOpening) is insufficient. The
+    /// original4 files are revalidated under this SAME already-held Root;
+    /// invoking an outer governance facade here would recursively lock it.
+    pub(in crate::store) fn require_governed_native_invite_parent(&self) -> Result<(), AppError> {
+        if !self
+            .store()
+            .current_layout_policy
+            .as_ref()
+            .and_then(|p| p.native_registry.as_ref())
+            .is_some_and(|handler| handler.is_governed())
+        {
+            return Err(refused());
+        }
+        self.validate_original_namespace()
+    }
     #[cfg(all(test, windows))]
     pub(in crate::store) fn after_original_source_for_test(&self, hook: Box<dyn FnOnce()>) {
         set_after_original_source_hook_for_test(hook);

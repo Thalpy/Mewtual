@@ -22,7 +22,7 @@ pub use source_close::NativeChatSourceClose;
 
 const CLOSED: usize = 1 << (usize::BITS - 1);
 const MAX_ENTRIES: usize = 32;
-const PURPOSES: usize = 8;
+const PURPOSES: usize = 9;
 
 /// Closed purposes selected by concrete producers, never a WebView permission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,6 +41,9 @@ pub enum NativeChatKeyPurpose {
     /// The exact retained join response signature. It is distinct from the
     /// governing Header and never grants response publication or delivery.
     JoinWelcome,
+    /// A retained invitation preimage. This does not authorize Add, consume
+    /// an invite nonce, or prove that the invitation has been saved.
+    JoinInvite,
 }
 impl NativeChatKeyPurpose {
     fn slot(self) -> usize {
@@ -55,6 +58,7 @@ impl NativeChatKeyPurpose {
             Self::AddSdk => 5,
             Self::GoverningHeader => 6,
             Self::JoinWelcome => 7,
+            Self::JoinInvite => 8,
         }
     }
 }

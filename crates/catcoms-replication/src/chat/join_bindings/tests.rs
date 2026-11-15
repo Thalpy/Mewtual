@@ -562,3 +562,36 @@ fn frozen_welcome_preimage_is_the_exact_canonical_signed_preimage() {
         );
     }
 }
+
+#[test]
+fn frozen_invite_preimage_is_exact_and_invalid_fields_never_reach_the_key() {
+    let f = Fixture::new();
+    let bytes = f.invite.spec.signing_bytes_data().unwrap();
+    let signed = SignedInviteBindingData::sign_using(f.invite.spec.clone(), |actual| {
+        assert_eq!(actual, bytes);
+        Ok(key(2).sign(actual))
+    })
+    .unwrap();
+    assert_eq!(signed.encode(), f.invite.encode());
+    for index in 0..11 {
+        let mut spec = f.invite.spec.clone();
+        match index {
+            0 => spec.anchor.group.clear(),
+            1 => spec.anchor.founder = [0; 32],
+            2 => spec.anchor.profile = [0; 32],
+            3 => spec.anchor.admission = [0; 32],
+            4 => spec.anchor.tenure = [0; 32],
+            5 => spec.anchor.header = [0; 32],
+            6 => spec.anchor.state = [0; 32],
+            7 => spec.inviter = [0; 32],
+            8 => spec.nonce = [0; 16],
+            9 => spec.policy = [0; 32],
+            _ => spec.public_routing_plan = [0; 32],
+        }
+        assert!(spec.signing_bytes_data().is_err());
+        assert!(
+            SignedInviteBindingData::sign_using(spec, |_| panic!("invalid unsigned invite"))
+                .is_err()
+        );
+    }
+}

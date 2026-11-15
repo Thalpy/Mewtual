@@ -6734,3 +6734,17 @@ archive: malicious omission can still deny progress, and Root must implement
 bounded authenticated export, selected-write coupling and contradiction replay
 before evicting hot evidence or claiming restart-safe fork detection. See
 [the detailed boundary](communication-recovery/CHAT-V2-SELECTED-HISTORY-PROOFS.md).
+
+## Native V2 invitation boundary (15 November)
+
+Unsigned invite preparation now derives anchor/policy/draws from the same warm
+node and route DATA from its actual retained transport reservation. A random
+row identity is distinct from the transport-key commitment authenticated by
+Birth. Current4 and the original founder Admission/selected G1 are rechecked
+before and after draw. Zero certified contacts are encoded; a wildcard listener
+or configured relay string is never treated as reachable-route evidence.
+The separate native JoinInvite tail caches raw64 before late checks and cannot
+renew unknown Clock/RNG/key entry. This supplies no SavedInvite/current Add or
+publication authority. Durable KeyAttempt/cold no-resign, persistent quotas and
+covering journal/IO admission remain unfinished. Chat V2 stays OFF.
+[Detailed limits](communication-recovery/CHAT-V2-INVITE-ISSUER.md).

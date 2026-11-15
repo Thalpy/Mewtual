@@ -9,6 +9,7 @@ use rand_chacha::ChaCha20Rng;
 mod admission;
 mod governance;
 mod history;
+mod invite;
 
 type Owner = NativeTextSources<MeshService, ChaCha20Rng>;
 type Row = NativeTextRuntimeSelection<MeshService, ChaCha20Rng>;
