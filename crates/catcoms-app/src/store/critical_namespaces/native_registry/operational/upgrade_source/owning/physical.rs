@@ -515,6 +515,104 @@ impl SourceWork {
             ),
         )
     }
+
+    /// Original retained member preparation only. The finite caller already
+    /// moved the whole runtime outside writers and owns actual per-command
+    /// native key cuts. There is no library-origin retry or raw Current getter.
+    pub(in crate::store::critical_namespaces::native_registry) fn prepare_native_member<T, R>(
+        &self,
+        driver: &mut crate::store::PreparedFreshV2TextFounder<T, R>,
+        request: crate::store::V2MemberSignRequest<'_>,
+        negative: &catcoms_rt::RequestCancellation,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+        keys: &mut crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounderKeys,
+    ) -> Result<crate::store::V2MemberSaveOutcome, crate::store::V2MemberSaveRefusal>
+    where
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    {
+        let current = self
+            .physical
+            .current()
+            .map_err(|_| crate::store::V2MemberSaveRefusal::Unavailable)?;
+        driver.prepare_member_save_with_access(
+            current,
+            request,
+            negative,
+            rng,
+            crate::store::critical_namespaces::archive_bootstrap::founder::FounderAccess::Native(
+                keys,
+            ),
+        )
+    }
+    /// Bounded history setup/recovery through the exact retained NativeRequired
+    /// Host. No raw Current/Store getter or library-origin fallback escapes.
+    pub(in crate::store::critical_namespaces::native_registry) fn prepare_native_member_history<
+        T,
+        R,
+    >(
+        &self,
+        driver: &mut crate::store::PreparedFreshV2TextFounder<T, R>,
+        read: crate::store::persistence::v2_member_outbox::MemberHistoryRead,
+        negative: &catcoms_rt::RequestCancellation,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+        keys: &mut crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounderKeys,
+    ) -> Result<
+        crate::store::persistence::v2_member_outbox::MemberHistoryPage,
+        crate::store::V2MemberSaveRefusal,
+    >
+    where
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    {
+        let current = self
+            .physical
+            .current()
+            .map_err(|_| crate::store::V2MemberSaveRefusal::Unavailable)?;
+        driver.prepare_member_history_with_access(
+            current,
+            read,
+            negative,
+            rng,
+            crate::store::critical_namespaces::archive_bootstrap::founder::FounderAccess::Native(
+                keys,
+            ),
+        )
+    }
+
+    /// Finite native-aware final edge on this SAME original Current. Failure
+    /// returns native custody whole; the outer runtime envelope restores only
+    /// after that custody has actually released its native guard.
+    pub(in crate::store::critical_namespaces::native_registry) fn admit_native_member<T, R>(
+        &self,
+        driver: &mut crate::store::PreparedFreshV2TextFounder<T, R>,
+        token: [u8; 32],
+        native: crate::store::MemberSaveNativeAdmission,
+        keys: &mut crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounderKeys,
+    ) -> Result<
+        crate::store::MemberSaveJob,
+        (
+            crate::store::MemberSaveNativeAdmission,
+            crate::store::V2MemberSaveRefusal,
+        ),
+    >
+    where
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    {
+        let current = match self.physical.current() {
+            Ok(current) => current,
+            Err(_) => return Err((native, crate::store::V2MemberSaveRefusal::Unavailable)),
+        };
+        driver.admit_member_save_with_access(
+            current,
+            token,
+            native,
+            crate::store::critical_namespaces::archive_bootstrap::founder::FounderAccess::Native(
+                keys,
+            ),
+        )
+    }
 }
 /// One dedicated original UI-sidecar slot. Neither Clone nor a close owner.
 /// Actual last Physical/Current destruction precedes its acknowledgement.

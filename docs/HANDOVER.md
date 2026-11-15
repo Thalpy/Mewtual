@@ -1,5 +1,21 @@
 # Mewtual; Handover
 
+`chat-v2-native-text-operations` continues in the controller worktree on a new
+branch. The complete affected source cohort passed all 78 cases (zero failures
+or ignored), including four original-runtime selector regressions, 12 genuine
+member prepare/admit cases and five original-runtime history cases. Broader
+gates are pending; the strengthened exact receipt regression passed separately
+(one case, 8.94 seconds). Both dependency audits and static self-checks passed.
+A real Entry payment-tail regression failed before its fix
+and passed afterward. Root member saving now reaches the retained NativeRequired
+driver, with actual guard/notification ordering tests. The checked native
+factory, typed row/dispatch and stored-message integration remain next. The
+internal bounded all-original reader passed all 38 outbox cases, including six
+new regressions. The actual original-host reader also passed in the source
+cohort; it does not sign or expose unsaved originals. Chat V2 is
+still off and incomplete.
+[Current scope](communication-recovery/CHAT-V2-NATIVE-TEXT-OPERATIONS.md).
+
 Native canonical Sources, paired warm installation and whole-close composition
 are under validation. Original bootstrap work, retained plans, Source/SDK/TCP,
 metadata/UI work and actual facade disposal are separate obligations. Chat V2
@@ -10,7 +26,11 @@ restore and combined acceptance remain open.
 Runtime checkpoint `d4496bdd`: native-text 51/51, Root identity 1/1 and frontend
 3446/3446 passed, as did native lint/check/build/startup, UI flows, formatting,
 static gates and both audits. Root strict Clippy retains 564 existing failures;
-full Root/native CI run 43643841874 is pending (one user-deferred slow case).
+full CI run 43643841874 passed Root Linux and native Linux; Root Windows is
+pending (one user-deferred slow case). Native Windows failed one SDK-release
+integration assertion at voice_handoff/integration/sdk.rs:267, followed by 23
+fixture-poison failures. The first failure is under diagnosis; no green full
+native Windows acceptance is claimed for this checkpoint.
 This does not complete or enable Chat V2. The follow-up is docs/test-comment only.
 
 Original metadata/authentication and UI-state work now have a distinct closed

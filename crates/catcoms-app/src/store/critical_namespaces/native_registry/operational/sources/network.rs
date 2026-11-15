@@ -118,6 +118,63 @@ impl Reservation {
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> NativeTextCreationJob<T, R> {
+    /// Issue a paid association from the genuine retained stored runtime, not
+    /// a renderer row ID or a recovered index entry. This is blocking work:
+    /// perform it outside all native/Root control and UI commit guards.
+    pub fn select_stored_runtime(
+        mut self,
+    ) -> Result<NativeTextRuntimeSelection<T, R>, NativeTextCreationRefusal> {
+        use NativeTextCreationRefusal as Error;
+        self.require_current()?;
+        let body = self.loan.body.as_ref().ok_or(Error::Unavailable)?;
+        let request = body.request.as_ref().ok_or(Error::Unavailable)?;
+        let network = body.network.as_ref().ok_or(Error::Unavailable)?;
+        let active = network.active.ok_or(Error::Unavailable)?;
+        if active.state != crate::store::NativeCreationStateData::Founder
+            || active.identity != network.identity
+            || body
+                .driver
+                .as_ref()
+                .is_none_or(|driver| !driver.is_ready_data())
+            || body
+                .work
+                .lookup_creation(request.invocation, request.digest)
+                .map_err(|_| Error::Storage)?
+                != Some(active)
+        {
+            return Err(Error::Unavailable);
+        }
+        self.require_current()?;
+        if self.loan.body.as_ref().unwrap().selection.is_none() {
+            let selection = NativeTextRuntimeSelection::from_stored(&self, active);
+            self.loan.body.as_mut().unwrap().selection = Some(selection);
+        }
+        let selection = self
+            .loan
+            .body
+            .as_ref()
+            .unwrap()
+            .selection
+            .as_ref()
+            .unwrap()
+            .clone();
+        let body = self.loan.body.as_ref().unwrap();
+        let request = body.request.as_ref().unwrap();
+        if selection.original.status != active
+            || selection.original.invocation != request.invocation
+            || selection.original.request != request.digest
+            || !Arc::ptr_eq(&selection.original.scope, &self.command.scope)
+            || !std::sync::Weak::ptr_eq(
+                &selection.original.runtime,
+                &Arc::downgrade(&self.loan.cell),
+            )
+        {
+            return Err(Error::Unavailable);
+        }
+        self.loan.recorded = true;
+        Ok(selection)
+    }
+
     /// Separate Device-purpose entry from the earlier MLS-device job. There
     /// is exactly one retained seed attempt and one initial seal attempt; an
     /// unwind/unknown outcome never draws or seals a replacement on retry.
@@ -254,7 +311,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextCreationJob<T, R> {
         Ok(NativeTextCreationProgress::PendingCovered)
     }
 
-    fn require_current(&self) -> Result<(), NativeTextCreationRefusal> {
+    pub(super) fn require_current(&self) -> Result<(), NativeTextCreationRefusal> {
         if !self.command.scope.is_open()
             || !self.command.ui.is_current_cached()
             || self
@@ -589,4 +646,4 @@ impl<R: CryptoRngCore> NativeTextCreationJob<catcoms_net::MeshService, R> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

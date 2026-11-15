@@ -189,6 +189,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextCreationPreparation<T, R> {
                             group_rng: Some(inputs.group_rng),
                             clock: Some(inputs.clock),
                             network: None,
+                            selection: None,
                             work: self.work.take().unwrap(),
                             _metadata: metadata,
                         }),
@@ -199,6 +200,8 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextCreationPreparation<T, R> {
                         retirement: retirement::BodyState::new(),
                     }),
                     returned: tokio::sync::Notify::new(),
+                    #[cfg(test)]
+                    tail_probe: Mutex::new(None),
                 }),
             });
             candidate = Some(entry);

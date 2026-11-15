@@ -1169,6 +1169,14 @@ fn cancel_domain_during_admitted_sign(domain: &V2TextProjectionDomain) {
 pub(in crate::store) fn member_sign_dispatches_for_test() -> usize {
     SIGN_DISPATCHES.with(std::cell::Cell::get)
 }
+/// Read-only access to the existing actual dispatch counter for cross-boundary
+/// native-runtime regressions. No signer, source or native permission escapes.
+#[cfg(all(test, windows))]
+impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
+    pub(in crate::store) fn native_member_sign_dispatches_for_test() -> usize {
+        member_sign_dispatches_for_test()
+    }
+}
 /// Arm a member-domain close at the post-raw cut of the NEXT admitted key operation. Read
 /// whether that close had drained at the cut (it must not: Core's reader is still held)
 /// with `member_close_drained_during_sign_for_test`.

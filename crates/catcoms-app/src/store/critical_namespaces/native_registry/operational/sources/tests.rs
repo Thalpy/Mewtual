@@ -280,6 +280,7 @@ fn native_sources_runtime_loan_restores_exact_body_and_retains_original_files_af
         group_rng: Some(ChaCha20Rng::seed_from_u64(0xcd19)),
         clock: None,
         network: None,
+        selection: None,
         work: original,
         _metadata: payment,
     };
@@ -293,6 +294,7 @@ fn native_sources_runtime_loan_restores_exact_body_and_retains_original_files_af
             retirement: retirement::BodyState::new(),
         }),
         returned: tokio::sync::Notify::new(),
+        tail_probe: Mutex::new(None),
     });
     let loan = RuntimeLoan {
         body: Some(body),

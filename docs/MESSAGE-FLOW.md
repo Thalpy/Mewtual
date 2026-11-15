@@ -23,6 +23,15 @@ separate work.
 
 ## Chat history adversarial continuation (20 October)
 
+15 November disabled native V2 continuation: original-runtime member preparation
+signs once into namespace5; final admission holds actual native custody through
+the local save and restores the runtime afterward. Its own-history reader also
+includes settled originals, using fixed bounded ordinal pages. This Root path
+does not publish a message or receive another member's history. The checked
+native command/UI consumer and V2 transport remain unfinished; the active
+desktop send path below still uses the legacy durable transaction.
+[Implementation and evidence](communication-recovery/CHAT-V2-NATIVE-TEXT-OPERATIONS.md).
+
 MLS key epochs do not reset the chat operation graph. The additive ledger, causal edit/delete
 rules, newly found message-addressing and failed-page cursor defects, compatibility-conscious
 writer check, and remaining audit/equivocation limits are traced in

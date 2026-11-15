@@ -383,7 +383,7 @@ fn mesh_inputs(seed: u64) -> NativeTextCreationInputs<rand_chacha::ChaCha20Rng> 
 }
 
 #[cfg(any(windows, target_os = "linux"))]
-fn prepared_mesh_founder(
+pub(in super::super) fn prepared_mesh_founder(
     vault: &NativeTextVault,
     budget: &crate::store::NativeUiInvocationBudget,
     seed: u64,

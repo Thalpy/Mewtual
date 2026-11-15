@@ -21,9 +21,12 @@ mod sources;
 pub use sources::{
     NativeTextCreationBudget, NativeTextCreationInputs, NativeTextCreationJob,
     NativeTextCreationPreparation, NativeTextCreationProgress, NativeTextCreationRefusal,
-    NativeTextCreationRequest, NativeTextCreationSettings, NativeTextSourceBudget,
-    NativeTextSourceCommand, NativeTextSourcePolicy, NativeTextSourcePreparation,
-    NativeTextSourceRetirement, NativeTextSourceRetirementPreparation,
+    NativeTextCreationRequest, NativeTextCreationSettings, NativeTextMemberAdmissionFailure,
+    NativeTextMemberBudget, NativeTextMemberFinalPreparation, NativeTextMemberHistoryItem,
+    NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus, NativeTextMemberJob,
+    NativeTextMemberPreparation, NativeTextMemberSaveJob, NativeTextRuntimeSelection,
+    NativeTextSourceBudget, NativeTextSourceCommand, NativeTextSourcePolicy,
+    NativeTextSourcePreparation, NativeTextSourceRetirement, NativeTextSourceRetirementPreparation,
     NativeTextSourceRetirementRefusal, NativeTextSourceRetirementStatus, NativeTextSources,
 };
 mod ui_state;

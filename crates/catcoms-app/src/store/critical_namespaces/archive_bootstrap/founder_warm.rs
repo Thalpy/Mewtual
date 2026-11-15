@@ -376,6 +376,29 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
             .prepare_member_save_with_access(layout, request, negative, rng, access)
     }
 
+    /// Read setup/recovery on the genuine retained Host, never a recreated
+    /// library-origin owner. This produces saved-original DATA only.
+    pub(in crate::store) fn prepare_member_history_with_access(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        read: crate::store::persistence::v2_member_outbox::MemberHistoryRead,
+        negative: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+        access: FounderAccess<'_>,
+    ) -> Result<crate::store::persistence::v2_member_outbox::MemberHistoryPage, V2MemberSaveRefusal>
+    {
+        access
+            .require(&self.origin)
+            .map_err(|_| V2MemberSaveRefusal::Unavailable)?;
+        if !self.is_ready_data() {
+            return Err(V2MemberSaveRefusal::Unavailable);
+        }
+        self.host
+            .as_mut()
+            .ok_or(V2MemberSaveRefusal::Unavailable)?
+            .prepare_member_history_with_access(layout, read, negative, rng, access)
+    }
+
     /// No IO/wait is added at the existing finite final edge. The actual
     /// native factory must still authenticate and retain its supplied custody.
     pub fn admit_member_save(

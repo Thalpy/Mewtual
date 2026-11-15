@@ -1,5 +1,12 @@
 # Mewtual; Architecture
 
+The disabled native text runtime now exposes a paid weak original-row selector
+and two-phase ordinary-member saving through the retained NativeRequired driver.
+Native custody precedes runtime restoration on save, refusal, drop and unwind.
+The native command factory, usable server row and complete stored-message reader
+remain open; these Root interfaces do not enable Chat V2.
+[Implementation and evidence](communication-recovery/CHAT-V2-NATIVE-TEXT-OPERATIONS.md).
+
 The disabled native text path now has a removable canonical Source owner,
 paired warm installation and original bootstrap/source/work shutdown under
 validation. Native commands, joined sources, transport/projection/cold restore

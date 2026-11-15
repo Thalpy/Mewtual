@@ -1,5 +1,19 @@
 # Threat model; client integrity & enforcement boundaries
 
+Native text member preparation selects the original runtime through fresh index
+evidence and the original Entry's member cut. Numeric IDs, recovered row DATA
+and erased custody boxes confer no signing or native UI authority. The owning
+save/refusal frames release actual native custody before runtime restoration or
+notification, retaining original payments throughout. The Root mutex tests do
+not authenticate native AppState credentials; the checked native factory and
+complete send/read integration remain unfinished and Chat V2 stays off.
+Bounded history returns only this member's stored originals, including settled
+items; empty publication debt never establishes empty history. Page ordinals
+are DATA, statuses are local observations, and returned plaintext grants no
+current source/UI authority. Host setup/recovery preserves unsaved custody and
+does not sign, admit or publish on behalf of a read.
+[Boundary and tests](communication-recovery/CHAT-V2-NATIVE-TEXT-OPERATIONS.md).
+
 Native source-controller validation now separates actual bootstrap work and
 returned plans from complete unlock tasks. Irreversible close follows continuity
 admission, rejects replacement owners at each stage, and acknowledges disposal

@@ -48,7 +48,7 @@ COHORTS = (
     # regressions. Keep all22 in this broad cohort; do not trim it to the old19.
     ("current-mount", "critical_namespaces::current_layout::tests::member_outbox", 22),
     ("governance-mount", "critical_namespaces::governance_layout::tests::member_outbox", 8),
-    ("outbox-engine", "v2_member_outbox", 32),
+    ("outbox-engine", "v2_member_outbox", 38),
 )
 
 # The last commit before namespace5. Its source is never modified by this gate. The annotated

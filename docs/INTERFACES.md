@@ -1,5 +1,15 @@
 # Mewtual; Interfaces & Hooks Schema
 
+Native text operations provide a paid weak original-runtime association from
+the actual retained stored founder, plus original member prepare/final-admit
+wrappers. An admitted save owns native custody before its runtime restoration
+tail; erased custody boxes authenticate nothing. Row IDs and recovered DATA
+supply no owner. Bounded stored-original pages include the settled prefix and
+retain an exclusive end ordinal across continuations. Host preparation may
+initialize/recover its exact context; the engine read itself never writes.
+The actual native factory and real TextV2 row installation remain in progress.
+[Contract](communication-recovery/CHAT-V2-NATIVE-TEXT-OPERATIONS.md).
+
 Native warm bootstrap now privately pairs its original facade and removable
 Sources. Cached same-allocation comparison supports replacement refusal only.
 Close composes actual bootstrap, Source/SDK/TCP and metadata/UI retirement;
