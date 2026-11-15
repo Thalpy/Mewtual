@@ -21,8 +21,12 @@ review fixes cover opening order, in-place evidence changes, late equal-file
 replacement and payment/drop ordering. All51 focused governance cases, frontend
 3,485, type/build/browser-flow/static gates and all83 native text cases passed.
 Strict native lint passed; Root strict lint retains556 inherited diagnostics
-(prior564), with no suppression. Final routing/native build/startup and full
-validation are still running; earlier results are not this revision's gates.
+(prior564), with no suppression. Final routing rechecks4+1+1, both formatting
+checks, native compile/build/startup and both dependency audits passed.
+Draft PR #132 contains the two separate runtime commits. Complete Root/native
+Linux/Windows CI run43703760738 is running at runtime head790e703a; later
+receipt-only documentation does not change tested code. The one named catch-up
+cost case remains deferred. Real predecessor-binary evidence remains open.
 This creates no Source4, production Add/Header, joined source, archive or
 transport. Chat V2 remains OFF and incomplete.
 [Implementation and acceptance](communication-recovery/CHAT-V2-GOVERNED-NATIVE-STORAGE.md).

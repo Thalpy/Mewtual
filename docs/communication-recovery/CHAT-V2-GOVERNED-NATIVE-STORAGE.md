@@ -16,8 +16,13 @@ gates passed. All83 native text cases passed (217.12s), including actual
 create/save/history and close/lock paths through the combined startup.
 Strict native all-target/all-feature Clippy passed (3m06s). Root strict Clippy
 still fails on556 inherited App diagnostics (prior checkpoint564); no warning
-suppression was added. Final routing rechecks, native build/startup, complete
-Root/native sign-off and real predecessor-binary evidence are pending.
+suppression was added. Final routing rechecks4+1+1, both formatting checks,
+native compile (1m31s), native build (3m14s), real startup and both dependency
+audits passed. Complete Root/native sign-off and real predecessor-binary
+evidence remain pending. [Draft PR #132](https://github.com/Thalpy/Mewtual/pull/132)
+contains storage commita7f949e0 and separate fixture correction790e703a.
+[Full CI run43703760738](https://github.com/Thalpy/Mewtual/actions/runs/43703760738)
+runs that runtime head; receipt-only documentation changes no tested code.
 
 ## Owning sequence
 
