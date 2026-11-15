@@ -144,7 +144,7 @@ async fn native_close_saves_history_and_pending_admission_without_waiting_for_of
         );
 
         // Local custody failure still refuses close and leaves the actor usable for retry.
-        state.session_lock_requested.store(true, Ordering::Release);
+        state.session_lock_requested.store(true, Ordering::SeqCst);
         let store = state.store.lock().await.take().unwrap();
         assert!(shutdown::freeze_servers(&state).await.is_err());
         assert!(running.actor.snapshot().await.is_ok());
@@ -167,7 +167,7 @@ async fn native_close_saves_history_and_pending_admission_without_waiting_for_of
             .stop();
         running.task.await.unwrap();
         running.drain.await.unwrap();
-        state.servers.lock().await.clear();
+        state.servers.lock().await.clear_legacy_fixture();
         drop(running.mesh);
         drop(local_tcp);
         drop(state.store.lock().await.take());
@@ -184,7 +184,7 @@ async fn native_close_saves_history_and_pending_admission_without_waiting_for_of
             .lock()
             .await
             .as_ref()
-            .unwrap()
+            .unwrap().as_legacy().unwrap()
             .load_server(1)
             .unwrap();
         let mut restored = Server::restore(

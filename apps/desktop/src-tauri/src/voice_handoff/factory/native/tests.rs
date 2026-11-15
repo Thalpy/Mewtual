@@ -15,6 +15,7 @@ fn worker(context: &Context, route: &Route, selector: PairSelector) -> Worker {
         )
         .unwrap();
     Worker {
+        original: FixtureOriginalRequest::Exact(selector),
         context: Some(context.clone()),
         selector: Selection::Exact(selector),
         custody: NativeCustody {
@@ -244,7 +245,7 @@ async fn native_factory_ui_wait_does_not_revive_after_a_lock_unlock_cycle() {
     let generation = f
         .state
         .ui_session_generation
-        .load(std::sync::atomic::Ordering::Acquire);
+        .load(std::sync::atomic::Ordering::SeqCst);
     crate::finalize_unlock_session(&f.state, generation, false)
         .await
         .unwrap();

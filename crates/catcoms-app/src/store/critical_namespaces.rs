@@ -37,12 +37,20 @@ pub(in crate::store) mod governance_namespace_codec;
 // configured handler in `member_outbox_layout` is the only physical interpreter.
 pub(in crate::store) mod member_outbox_layout;
 pub(in crate::store) mod member_outbox_namespace_codec;
+// Independent native registry: non-writing preparation plus its private physical handler.
+#[cfg(test)]
+mod native2_predecessor_tests;
+#[cfg(test)]
+mod native7_predecessor_tests;
+pub(in crate::store) mod native_registry;
 pub use archive_bootstrap::{
     ArchiveBootstrapCatalogPolicy, ArchiveFounderBegin, ArchiveFounderCreation,
     ArchiveFounderExisting, ArchiveFounderInputs, ArchiveFounderPlanning,
     ArchiveFounderPlanningProgress, ArchiveFounderPolicy, ArchiveFounderProgress,
-    ArchiveFounderSourcePreparation, ArchiveFounderSourceProgress, PreparedArchiveBootstrapStore,
-    ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs, ReturnedArchiveFounderPlanning,
+    ArchiveFounderSourcePreparation, ArchiveFounderSourceProgress, FreshV2TextFounderBegin,
+    FreshV2TextFounderBinding, FreshV2TextFounderPolicy, PreparedArchiveBootstrapStore,
+    PreparedFreshV2TextFounder, ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs,
+    ReturnedArchiveFounderPlanning,
 };
 pub use current_layout::{
     CanonicalFilenameInventoryPolicy, PreparedV2CurrentLayoutStore, V2CurrentLayoutPolicy,
@@ -52,6 +60,29 @@ pub use governance_layout::{
     PreparedV2GovernanceLayoutStore, V2GovernanceLayoutPolicy, V2GovernanceLayoutStore,
 };
 pub use member_outbox_layout::V2MemberOutboxPolicy;
+pub use native_registry::{
+    NativeCreationStateData, NativeCreationStatusData, NativeIndexPolicy, NativeIndexStore,
+    NativeIndexUpgrade, NativeRegistryInstallation, NativeRegistryPolicy,
+    NativeRegistryPreparationPolicy, NativeRegistryStore, NativeTextCreationBudget,
+    NativeTextCreationInputs, NativeTextCreationJob, NativeTextCreationPreparation,
+    NativeTextCreationProgress, NativeTextCreationRefusal, NativeTextCreationRequest,
+    NativeTextCreationSettings, NativeTextGovernanceUpgrade, NativeTextGovernedStorage,
+    NativeTextHistoryResponseBudget, NativeTextHistoryResponseCredit,
+    NativeTextMemberAdmissionFailure, NativeTextMemberBudget, NativeTextMemberFinalPreparation,
+    NativeTextMemberHistoryItem, NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus,
+    NativeTextMemberJob, NativeTextMemberPreparation, NativeTextMemberSaveJob,
+    NativeTextRuntimeSelection, NativeTextSourceBudget, NativeTextSourceCommand,
+    NativeTextSourcePolicy, NativeTextSourcePreparation, NativeTextSourceRetirement,
+    NativeTextSourceRetirementPreparation, NativeTextSourceRetirementRefusal,
+    NativeTextSourceRetirementStatus, NativeTextSources, NativeTextUiCandidate,
+    NativeTextUiGarbage, NativeTextUiObservation, NativeTextUiPreparation, NativeTextUiRetirement,
+    NativeTextUiRetirementBatch, NativeTextUiRetirementDrain, NativeTextUiRetirementState,
+    NativeTextVault, NativeTextVaultAuthentication, NativeTextVaultAuthenticationCheck,
+    NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal, NativeTextWorkRetirement,
+    NativeTextWorkRetirementPreparation, NativeUiInvocationBudget, NativeUiInvocationMetadata,
+    NativeUiStateBudget, NativeUiStateCredit, NativeUiStatePreparation, NativeUiStateRead,
+    NativeUiStateSaved, PreparedNativeRegistryMigration,
+};
 pub(super) mod read_pool;
 pub use read_pool::CriticalCatalogReadPool;
 use read_pool::{CatalogReadReservation, EMPTY_READ_FEE};
@@ -134,13 +165,22 @@ impl ValidatedEmptyCatalog {
 
 /// Inspect fixed metadata BEFORE lower vault opening could allocate a new identity. In
 /// particular a dangling vault link is present/unsupported, not permission to create a DEK.
-pub(super) fn refuse_orphan_before_vault_creation(dir: &Path) -> Result<(), AppError> {
+pub(super) fn refuse_orphan_before_vault_creation(
+    dir: &Path,
+    native_handler: bool,
+) -> Result<(), AppError> {
+    // Only the private native opener has already paid for its handler. It may defer
+    // classification on an EXISTING real vault; absence never permits adopting artifacts.
+    if !native_handler {
+        super::persistence::native_registry::refuse_unsupported_storage(dir)?;
+    }
     match fs::symlink_metadata(dir.join("vault.bin")) {
         Ok(metadata) if metadata.file_type().is_file() => return Ok(()),
         Ok(_) => return Err(refused()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return Err(refused()),
     }
+    super::persistence::native_registry::refuse_unsupported_storage(dir)?;
     for slot in [Slot::Current, Slot::Stage] {
         match fs::symlink_metadata(dir.join(slot.name())) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -211,6 +251,42 @@ impl ServerStore {
         passphrase: &[u8],
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
+        // Only the private prepaid native opener can classify/repair namespace7. All
+        // ordinary openers keep the early fixed-artifact refusal before older cleaners.
+        if self
+            .current_layout_policy
+            .as_ref()
+            .is_some_and(|policy| policy.native_registry.is_some())
+        {
+            if actual_format != VaultFormat::CriticalNamespaces {
+                return Err(refused());
+            }
+            let handler = self
+                .current_layout_policy
+                .as_ref()
+                .and_then(|policy| policy.native_registry.as_ref())
+                .ok_or_else(refused)?;
+            if matches!(
+                handler,
+                native_registry::preparation::NativeRegistryHandler::GovernanceOpening(_)
+            ) {
+                // This closed constructor owns the combined grammar. Seed4
+                // must settle before native3 captures the selected catalog:
+                // otherwise an empty declaration fence looks like JOIN work,
+                // or the ordinary native inspector refuses its foreign seed.
+                handler.require()?;
+                if self.governance_layout_policy.as_ref().is_none_or(|policy| {
+                    policy.family
+                        != governance_namespace_codec::GovernanceCatalogFamily::NativeLifecycle
+                }) {
+                    return Err(refused());
+                }
+            } else {
+                self.inspect_and_repair_native_registry_declaration()?;
+            }
+        } else {
+            super::persistence::native_registry::refuse_unsupported_storage(&self.dir)?;
+        }
         // Every opener WITHOUT the concrete namespace5 handler refuses its fixed artifacts
         // before any gate below can settle, clean or reinterpret them. The configured handler
         // instead inspects them first inside the Current3 (and governance) gate.

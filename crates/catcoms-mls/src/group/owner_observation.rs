@@ -55,6 +55,12 @@ impl LocalMembershipChange {
     pub fn after_epoch(&self) -> u64 {
         self.after_epoch
     }
+    /// Cached historical fingerprint only. The private completed-Add view uses
+    /// this without entering SDK/provider state; it is not fresh source proof.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::group) fn private_text_add_after_authenticator_data(&self) -> &[u8; 32] {
+        &self.state
+    }
     /// Exact already-produced MLS bytes. The caller must retain them with its candidate
     /// publication obligation; obtaining this token is not a durable-export permit.
     pub fn commit(&self) -> &[u8] {
