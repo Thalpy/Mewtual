@@ -322,6 +322,26 @@ impl ResolvedRow {
 }
 #[cfg(test)]
 impl ResolvedRow {
+    /// Hold the actual parent's mutex while attempting the real close. A busy
+    /// observation must leave both closure flags unchanged: no receipt or
+    /// callback cleanup has been published at this refusal boundary.
+    pub(in crate::voice_handoff) fn pc_test_close_with_parent_locked(
+        &self,
+        session: &Arc<SessionIdentity>,
+        request: &Request,
+    ) -> Result<Receipt, VoiceError> {
+        let state = self.row.state.lock().unwrap_or_else(|e| e.into_inner());
+        let original = storage(self, &state, session, request).unwrap();
+        let before = (original.closed, original.actions_closed);
+        let result = self.close_pc(session, request);
+        let original = storage(self, &state, session, request).unwrap();
+        let after = (original.closed, original.actions_closed);
+        drop(state);
+        assert_eq!(before, (false, [false; 2]));
+        assert_eq!(after, before);
+        result
+    }
+
     /// Observe only the actual stored Root result after HTTP dispatch. This test seam
     /// creates no Claim/worker/effect and cannot make a browser Promise its own oracle.
     pub(in crate::voice_handoff) fn pc_test_intent(&self) -> Option<Arc<InitialSdpIntent>> {

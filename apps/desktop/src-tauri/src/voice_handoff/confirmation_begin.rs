@@ -268,7 +268,7 @@ async fn observe_incoming(
             .map_err(|_| VoiceError::Capacity)?;
         let b = route.selected().binding();
         servers
-            .get(&b.server)
+            .legacy(&b.server)
             .filter(|entry| entry.instance == b.instance && entry.group_id == b.group)
             .map(|entry| entry.actor.clone())
             .ok_or(Refused::Closed)?
