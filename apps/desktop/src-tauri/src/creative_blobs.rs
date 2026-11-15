@@ -63,7 +63,7 @@ pub(super) async fn finish_response<T>(
     let _commit = require_ui_session_generation(state, generation).await?;
     let servers = state.servers.lock().await;
     if servers
-        .get(&server)
+        .legacy(&server)
         .is_none_or(|entry| entry.instance != instance)
     {
         return Err("the server changed while the blob request was in progress".into());
@@ -195,7 +195,7 @@ mod tests {
         let group_id = server.group_id();
         let device_id = server.device_id();
         let (actor, events, task) = spawn(server);
-        state.servers.lock().await.insert(
+        state.servers.lock().await.install_legacy_fixture(
             12,
             ServerEntry {
                 files: keep_session::EntryOwner::new(),
@@ -223,7 +223,7 @@ mod tests {
                 .unwrap(),
             42
         );
-        state.servers.lock().await.get_mut(&12).unwrap().instance = 41;
+        state.servers.lock().await.legacy_mut(&12).unwrap().instance = 41;
         assert!(finish_response(&state, 12, 40, generation, || panic!(
             "stale bytes converted"
         ))

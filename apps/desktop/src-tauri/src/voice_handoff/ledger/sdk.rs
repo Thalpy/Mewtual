@@ -117,6 +117,60 @@ impl Drop for Preparation {
     }
 }
 impl ResolvedRow {
+    /// Deterministically exercise original SDK cleanup under real row contention.
+    /// Inspect through the held state rather than re-locking sdk_test_released.
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn sdk_test_release_with_parent_locked(
+        &self,
+        session: &Arc<SessionIdentity>,
+        request: &Request,
+        generation: u64,
+        proof: [u8; 32],
+    ) {
+        let state = self.row.state.lock().unwrap_or_else(|e| e.into_inner());
+        let before = storage(self, &state, session, request)
+            .unwrap()
+            .sdk
+            .as_ref()
+            .unwrap()
+            .released();
+        let result = self.release_sdk(session, request, generation, proof);
+        let after = storage(self, &state, session, request)
+            .unwrap()
+            .sdk
+            .as_ref()
+            .unwrap()
+            .released();
+        drop(state); // Never assert/unwind while holding the real row mutex.
+        assert!(matches!(result, Err(VoiceError::Capacity)));
+        assert!(!before, "this is the original unreleased SDK obligation");
+        assert_eq!(after, before, "local refusal must not publish SDK Release");
+    }
+
+    /// Exercise the real constructor while this original parent's actual state
+    /// mutex is held. No installed obligation or preparation is fabricated.
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn sdk_test_begin_with_parent_locked(
+        &self,
+        admission: &super::super::transition::Admission<'_>,
+        physical: &PhysicalHold,
+        session: &Arc<Session>,
+        request: &Request,
+    ) -> Result<Option<Preparation>, VoiceError> {
+        let state = self.row.state.lock().unwrap_or_else(|e| e.into_inner());
+        let original = storage(self, &state, admission.session(), request).unwrap();
+        let before = (original.sdk_preparing, original.sdk.is_some());
+        let result = self.begin_sdk(admission, physical, session, request);
+        let storage = storage(self, &state, admission.session(), request).unwrap();
+        let after = (storage.sdk_preparing, storage.sdk.is_some());
+        // A regressed constructor might return a Preparation whose Drop locks
+        // this state. Release the guard before any assertion or result drop.
+        drop(state);
+        assert_eq!(before, (false, false));
+        assert_eq!(after, before);
+        result
+    }
+
     /// Test-only observation of the actual installed obligation; this neither constructs
     /// custody nor mutates release state. Used after real HTTP/browser admission.
     #[cfg(test)]
@@ -135,6 +189,46 @@ impl ResolvedRow {
                 .as_ref()?
                 .released(),
         )
+    }
+    /// Test-only original-state observation. No request can construct a new
+    /// SDK obligation through this getter; fixtures call it outside writers.
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn sdk_test_preparation_state(&self) -> Option<(bool, bool)> {
+        let state = self.row.state.lock().unwrap_or_else(|e| e.into_inner());
+        let storage = state
+            .plan()?
+            .transition
+            .as_ref()?
+            .key
+            .as_ref()?
+            .sdp
+            .as_ref()?;
+        Some((storage.sdk_preparing, storage.sdk.is_some()))
+    }
+
+    /// Prove the actual recovery path refuses BEFORE inspecting a deliberately
+    /// invalid request when its original row is held by maintenance. Then the
+    /// caller observes that SAME bad request after releasing this guard.
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn sdk_test_bad_recovery_with_parent_locked(
+        &self,
+        session: &Arc<SessionIdentity>,
+        original: &Request,
+        invalid: &Request,
+    ) {
+        let state = self.row.state.lock().unwrap_or_else(|e| e.into_inner());
+        let original_storage = storage(self, &state, session, original).unwrap();
+        let before = (
+            original_storage.sdk_preparing,
+            original_storage.sdk.is_some(),
+        );
+        let result = self.recover_sdk(session, invalid);
+        let storage = storage(self, &state, session, original).unwrap();
+        let after = (storage.sdk_preparing, storage.sdk.is_some());
+        drop(state);
+        assert!(matches!(result, Err(VoiceError::Capacity)));
+        assert_eq!(before, (false, false));
+        assert_eq!(after, before);
     }
     /// Recover one immutable original obligation before current-authority checks. An End,
     /// expired old Claim, or collected physical position cannot manufacture its Release.

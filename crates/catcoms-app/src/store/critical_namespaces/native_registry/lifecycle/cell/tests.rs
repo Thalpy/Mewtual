@@ -48,7 +48,9 @@ fn selected(owner: &owning::Store) -> data::Index {
         .unwrap()
         .0
 }
-fn request(owner: &owning::Store) -> rename::Request {
+pub(in crate::store::critical_namespaces::native_registry) fn request(
+    owner: &owning::Store,
+) -> rename::Request {
     let index = selected(owner);
     let row = &index.rows[0];
     rename::Request {
@@ -442,3 +444,7 @@ fn lifecycle3_cell_cleanup_repeats_barrier_and_never_reports_visible_unlink_as_c
 }
 
 mod compatibility;
+
+mod refresh;
+
+mod founder;

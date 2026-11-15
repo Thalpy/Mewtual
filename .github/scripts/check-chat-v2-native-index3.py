@@ -1,6 +1,7 @@
-"""Actual pre-normal-WAL index3 reader; no modified production or support flag.
+"""Actual pre-refresh index3 reader; no modified production or support flag.
 
-The exact cfd837a7 predecessor already understands selected3. Append a test-only
+The exact 4f45d586 predecessor already understands selected3 and Rename recovery, but refuses a
+Refresh Stage. Append a test-only
 module to its existing cfg(test) file and prove that is the only changed file.
 All original bytes stay intact. Both positive controls and expected refusals
 are decided by the harness, not a head-provided acceptance manifest.
@@ -16,7 +17,7 @@ import tempfile
 REPO = Path(__file__).resolve().parents[2]
 BASE = runpy.run_path(str(REPO / ".github/scripts/check-chat-v2-member-save.py"))
 GIT = runpy.run_path(str(REPO / ".github/scripts/check-chat-v2-native-registry.py"))["git"]
-PREDECESSOR = "cfd837a785d8d74cc96bed86e79f53028f7d217c"
+PREDECESSOR = "4f45d586f6e23f6acc0914fa83d93792544c5bba"
 TARGET = "crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/cell/tests.rs"
 PREFIX = "store::critical_namespaces::native_registry::lifecycle::cell::tests::compatibility::"
 OLD_CASE = "store::critical_namespaces::native_registry::operational::cell::tests::normal3_predecessor::index3_predecessor_gate"
@@ -27,13 +28,13 @@ VERIFIED = re.compile(r"native3 predecessor round trip: (\d+) verified")
 
 def self_test() -> None:
     for pattern, good, expected in (
-        (WRITTEN, "native3 predecessor fixtures: 9 written", ("9",)),
-        (CHECKED, "native3 predecessor gate: 9 fixtures x 3 openers checked", ("9", "3")),
-        (VERIFIED, "native3 predecessor round trip: 9 verified", ("9",)),
+        (WRITTEN, "native3 predecessor fixtures: 11 written", ("11",)),
+        (CHECKED, "native3 predecessor gate: 11 fixtures x 3 openers checked", ("11", "3")),
+        (VERIFIED, "native3 predecessor round trip: 11 verified", ("11",)),
     ):
         groups = lambda text: [match.groups() for match in pattern.finditer(text)]
         BASE["require_marker"](groups(good), expected)
-        for bad in ([], groups(good + "\n" + good), groups(good.replace("9", "8"))):
+        for bad in ([], groups(good + "\n" + good), groups(good.replace("11", "8"))):
             try:
                 BASE["require_marker"](bad, expected)
             except RuntimeError:
@@ -107,7 +108,7 @@ def run() -> None:
         try:
             clean_app("native3-clean-head-before", REPO, env, directory, results)
             BASE["ignored_head_case"]("native3-fixtures", PREFIX + "generate_native3_fixtures",
-                directory, env, WRITTEN, ("9",), results)
+                directory, env, WRITTEN, ("11",), results)
             worktree = owned / "p"
             if not worktree.resolve().is_relative_to(owned):
                 raise RuntimeError("predecessor escaped the owned temporary directory")
@@ -138,7 +139,7 @@ def run() -> None:
                     "exit": code, "timed_out": timed_out})
                 if timed_out: raise RuntimeError("native3 predecessor exceeded its owned-process deadline")
                 BASE["validate"]("".join(summaries), code, 1)
-                BASE["require_marker"](markers[0], ("9", "3"))
+                BASE["require_marker"](markers[0], ("11", "3"))
                 require_test_only_change()
             finally:
                 # Exact checked path in this fresh owned directory, after all
@@ -148,7 +149,7 @@ def run() -> None:
                     lambda: clean_app("native3-clean-head-after", REPO, env, directory, results),
                     results, sys.exception())
             BASE["ignored_head_case"]("native3-round-trip", PREFIX + "verify_native3_predecessor_fixtures",
-                directory, env, VERIFIED, ("9",), results)
+                directory, env, VERIFIED, ("11",), results)
         finally:
             (directory / "results.json").write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
 

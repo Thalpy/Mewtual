@@ -7,11 +7,13 @@ use crate::store::{
     NativeRegistryPolicy, NativeRegistryStore,
 };
 
-const CASES: [&str; 9] = [
+const CASES: [&str; 11] = [
     "control1",
     "control2",
     "selected3",
     "renamed3",
+    "refreshed3",
+    "refresh-stage3",
     "partial3",
     "rename-stage3",
     "duplicate3",
@@ -74,6 +76,26 @@ fn generate_native3_fixtures() {
                     let (_, debt) = owner.rename_metadata_data(&input, &mut rng).unwrap();
                     drop(debt);
                 }
+                "refreshed3" | "refresh-stage3" => {
+                    let base = request(&owner);
+                    let input = super::super::super::refresh::Request {
+                        id: base.id,
+                        identity: base.identity,
+                        expected_revision: base.expected_revision,
+                        invite: "refreshed compatibility invite".into(),
+                    };
+                    if case == "refresh-stage3" {
+                        cuts::arm_fault(cuts::Fault::IndexStage);
+                    }
+                    let result = owner.refresh_legacy_invite_data(&input, &mut rng);
+                    if case == "refresh-stage3" {
+                        assert!(result.is_err());
+                        assert!(cuts::take_fault_seen());
+                    } else {
+                        let (_, debt) = result.unwrap();
+                        drop(debt);
+                    }
+                }
                 "partial3" | "rename-stage3" => {
                     let input = request(&owner);
                     cuts::arm_fault(if case == "partial3" {
@@ -125,7 +147,7 @@ fn generate_native3_fixtures() {
             drop(owner);
         }
     }
-    println!("native3 predecessor fixtures: 9 written");
+    println!("native3 predecessor fixtures: 11 written");
 }
 
 #[test]
@@ -176,7 +198,17 @@ fn verify_native3_predecessor_fixtures() {
                 assert_eq!(owner.row_count_data().unwrap(), 1);
                 let index = selected(&owner);
                 let renamed = matches!(case, "renamed3" | "rename-stage3");
-                assert_eq!(index.rows[0].metadata_revision, u64::from(renamed));
+                let refreshed = matches!(case, "refreshed3" | "refresh-stage3");
+                assert_eq!(
+                    index.rows[0].metadata_revision,
+                    u64::from(renamed || refreshed)
+                );
+                if refreshed {
+                    let data::Backend::Legacy { invite, .. } = &index.rows[0].backend else {
+                        panic!("Legacy")
+                    };
+                    assert_eq!(invite, "refreshed compatibility invite");
+                }
                 assert_eq!(
                     index.rows[0].name,
                     if renamed {
@@ -194,6 +226,6 @@ fn verify_native3_predecessor_fixtures() {
         }
         checked += 1;
     }
-    assert_eq!(checked, 9);
-    println!("native3 predecessor round trip: 9 verified");
+    assert_eq!(checked, 11);
+    println!("native3 predecessor round trip: 11 verified");
 }

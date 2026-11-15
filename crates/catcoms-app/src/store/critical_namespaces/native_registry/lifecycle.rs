@@ -9,9 +9,49 @@ mod catalog;
 pub(super) mod cell;
 mod codec;
 mod data;
+pub(super) mod founder;
 mod inspection;
+mod metadata;
 mod migration;
+mod network;
 pub(super) mod preparation;
+pub(in crate::store) use preparation::{verify_governance_native, VerifiedGovernanceNative};
+
+/// Finish only the actual constructor-private native opening observation.
+/// Caller keeps any new declaration witness overlapping these same files
+/// before this method consumes/destroys the original cold observation.
+pub(in crate::store::critical_namespaces) fn finish_governance_opening(
+    store: &crate::store::ServerStore,
+) -> Result<(), AppError> {
+    match store
+        .current_layout_policy
+        .as_ref()
+        .and_then(|p| p.native_registry.as_ref())
+    {
+        Some(super::preparation::NativeRegistryHandler::GovernanceOpening(handler)) => {
+            handler.finish_cold(store)
+        }
+        _ => Err(refused()),
+    }
+}
+
+/// Consume the already-held cold observation only after the combined owner is
+/// installed. A newly declared4 uses its separate retained declaration instead.
+pub(in crate::store::critical_namespaces) fn finish_governed_cold_observation(
+    store: &crate::store::ServerStore,
+) -> Result<(), AppError> {
+    match store
+        .current_layout_policy
+        .as_ref()
+        .and_then(|p| p.native_registry.as_ref())
+    {
+        Some(super::preparation::NativeRegistryHandler::GovernedLifecycle(handler)) => {
+            handler.finish_cold(store)
+        }
+        _ => Err(refused()),
+    }
+}
+pub(super) mod refresh;
 pub(super) mod rename;
 pub(super) mod wal;
 

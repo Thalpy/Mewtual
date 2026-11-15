@@ -7,7 +7,7 @@ use catcoms_sync::voice_v2::resources::{ResourceKind, GROUP_BYTES};
 use catcoms_sync::voice_v2::VoiceError;
 use service::tests::{authenticated_header, signed_frame};
 
-pub(super) fn exercise(
+pub(super) async fn exercise(
     state: &AppState,
     public: &bootstrap::SetupOutput,
     route: &bootstrap::Route,
@@ -70,14 +70,26 @@ pub(super) fn exercise(
     // The permit belongs to this exact physical allocation, not merely the same signed
     // header bytes. It keeps the original position busy if its header owner disappears.
     let auth = authenticated_header(route, &wire);
-    let permit = state
-        .voice_handoff
-        .sdp_begin_intake(
-            route.selected(),
-            route.session().identity(),
-            &auth,
-            clock.clone(),
-        )
+    // Deterministic contention, before any body/row/Action exists. A direct
+    // Capacity refusal must leave this SAME physical authenticated position
+    // and original native row reusable once the real parent lock is released.
+    let counts = route.session().fixture_counts();
+    let rows = state.voice_handoff.sdp_test_rows(parent.id());
+    parent.sdp_test_hold_state(|| {
+        assert!(matches!(
+            state.voice_handoff.sdp_begin_intake(
+                route.selected(),
+                route.session().identity(),
+                &auth,
+                clock.clone(),
+            ),
+            Err(VoiceError::Capacity)
+        ));
+    });
+    assert_eq!(route.session().fixture_counts(), counts);
+    assert_eq!(state.voice_handoff.sdp_test_rows(parent.id()), rows);
+    let permit = super::sdp_http::begin_intake_after_capacity(state, route, parent, &auth)
+        .await
         .unwrap();
     drop(auth);
     assert_eq!(route.session().fixture_counts(), (true, before.1, before.2));
@@ -89,14 +101,8 @@ pub(super) fn exercise(
     assert_eq!(route.session().fixture_counts(), before);
 
     let auth = authenticated_header(route, &wire);
-    let permit = state
-        .voice_handoff
-        .sdp_begin_intake(
-            route.selected(),
-            route.session().identity(),
-            &auth,
-            clock.clone(),
-        )
+    let permit = super::sdp_http::begin_intake_after_capacity(state, route, parent, &auth)
+        .await
         .unwrap();
     let funding = phase.native_history(NativeRowPurpose::Seal).unwrap();
     assert_eq!(funding.in_flight(), 0);
@@ -123,24 +129,56 @@ pub(super) fn exercise(
     drop(slots);
     // The same immutable request may retry after a proven local capacity refusal. Full
     // ordinary group bytes cannot block the already prepaid fee, Buffer or RPC allowance.
-    let held = resources
-        .charge(
-            group,
-            GROUP_BYTES - resources.group_counts(group).unwrap().0,
-            ResourceKind::Retained,
-        )
-        .unwrap();
     let auth = authenticated_header(route, &wire);
-    let permit = state
-        .voice_handoff
-        .sdp_begin_intake(
+    let intent = parent.pc_test_intent().unwrap();
+    let mono = clock.monotonic_ms();
+    let remaining = intent.remaining_at(clock.now_ms(), mono).unwrap();
+    let deadline = mono.checked_add(remaining).unwrap();
+    let mut admitted = None;
+    for attempt in 0..32 {
+        assert!(
+            clock.monotonic_ms() < deadline,
+            "original pressure-test authority deadline"
+        );
+        // Refill pressure AFTER every wait. Holding yesterday's charge across
+        // an await does not prove the group is still full if background work
+        // retired. No await separates successful intake from body admission.
+        let held = resources
+            .charge(
+                group,
+                GROUP_BYTES - resources.group_counts(group).unwrap().0,
+                ResourceKind::Retained,
+            )
+            .unwrap();
+        assert_eq!(resources.group_counts(group).unwrap().0, GROUP_BYTES);
+        match state.voice_handoff.sdp_begin_intake(
             route.selected(),
             route.session().identity(),
             &auth,
             clock.clone(),
-        )
-        .unwrap();
+        ) {
+            Ok(permit) => {
+                admitted = Some((permit, held));
+                break;
+            }
+            Err(VoiceError::Capacity) => {
+                drop(held);
+                if attempt == 31 {
+                    break;
+                }
+                let remaining = deadline.saturating_sub(clock.monotonic_ms());
+                assert!(remaining > 0, "original pressure-test deadline");
+                clock
+                    .sleep(std::time::Duration::from_millis(remaining.min(10)))
+                    .await;
+            }
+            Err(error) => panic!("unexpected pre-body pressure refusal: {error:?}"),
+        }
+    }
+    let (permit, held) = admitted.expect("prepaid intake under actual full ordinary capacity");
+    assert_eq!(resources.group_counts(group).unwrap().0, GROUP_BYTES);
     let mut incoming = auth.admit_sdp(permit).unwrap();
+    assert_eq!(resources.group_counts(group).unwrap().0, GROUP_BYTES);
     assert_eq!(funding.in_flight(), 1);
     let tail = incoming.remaining_mut().len();
     incoming
@@ -175,9 +213,8 @@ pub(super) fn exercise(
     let mut bad = signed_frame(public, header, &plain);
     *bad.last_mut().unwrap() ^= 1;
     let auth = authenticated_header(route, &bad);
-    let permit = state
-        .voice_handoff
-        .sdp_begin_intake(route.selected(), route.session().identity(), &auth, clock)
+    let permit = super::sdp_http::begin_intake_after_capacity(state, route, parent, &auth)
+        .await
         .unwrap();
     let mut incoming = auth.admit_sdp(permit).unwrap();
     let tail = incoming.remaining_mut().len();
