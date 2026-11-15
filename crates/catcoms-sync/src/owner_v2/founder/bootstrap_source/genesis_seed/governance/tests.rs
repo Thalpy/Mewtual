@@ -1,15 +1,19 @@
 //! Actual MLS candidate and Core math under explicit TEST host selection.
 //! Synthetic native atomics are lifecycle fixtures, not command credentials.
 //! Installation stays test-private until the real Root covering consumer exists.
-use super::super::tests::ordinary_data::prepared_node;
+use super::super::tests::ordinary_data::prepared_node_with_clock;
 use super::*;
 use crate::owner_v2::member::governance_fixture::governance;
 use catcoms_mls::group::text_current_add::RetiredTextCurrentAdd;
 use catcoms_mls::persist::text_current_add::{TextCurrentAddLimits, TextCurrentAddReservation};
+use catcoms_replication::chat::join_bindings::{
+    GenesisAnchorBindingData, InviteBindingSpecData, JoinPayloadKindData,
+    JoinRequestBindingSpecData, SignedInviteBindingData, SignedJoinRequestBindingData,
+};
 use catcoms_replication::chat::owner_state::transition::ReplayBody;
 use catcoms_replication::chat::V2HostSelectionExpectation;
 use catcoms_rt::{
-    MemNetwork, NativeChatSourceOwner, NativeChatUiBinding, NativeChatUiSessionOwner,
+    ManualClock, MemNetwork, NativeChatSourceOwner, NativeChatUiBinding, NativeChatUiSessionOwner,
 };
 use openmls_memory_storage::owner_restore::TextAddOperationLimits;
 use rand_chacha::ChaCha20Rng;
@@ -19,6 +23,21 @@ type Node = PreparedV2FounderGovernanceNode<MemNetwork, ChaCha20Rng>;
 const NOW: u64 = 1_800_000_000_000;
 const RAW: usize = 2 * 1024 * 1024;
 const WORK: usize = 2 * 1024 * 1024 * 1024 - 1;
+
+mod native_stage;
+mod signed_request;
+mod welcome;
+
+fn prepared_node(
+    id: u64,
+) -> (
+    UnboundV2GenesisNode<MemNetwork, ChaCha20Rng>,
+    super::super::tests::Reservation,
+    OpenedBootstrapSourceData,
+    Arc<AtomicUsize>,
+) {
+    prepared_node_with_clock(id, Box::new(ManualClock::new(NOW)))
+}
 
 struct Native {
     _binding: NativeChatUiBinding,
@@ -84,6 +103,8 @@ impl TextCurrentAddReservation for Fee {
             sdk_typed_bytes: 32 * RAW,
             sdk_work: WORK,
             output_bytes: 4 * RAW,
+            routing_typed_bytes: catcoms_mls::group::text_current_add::TEXT_ADD_ROUTING_TYPED_BYTES,
+            routing_work: catcoms_mls::group::text_current_add::TEXT_ADD_ROUTING_WORK,
         }
     }
 }
@@ -99,49 +120,152 @@ fn admission(count: &Arc<AtomicUsize>) -> TextCurrentAddAdmission {
 struct Request {
     _peer: MlsDevice,
     frame: Vec<u8>,
-    subject: [u8; 32],
-    reference: [u8; 32],
-    nonce: [u8; 16],
+    invite: SignedInviteBindingData,
+    request: SignedJoinRequestBindingData,
 }
 impl Request {
     fn new(node: &Node, nonce: u8) -> Self {
+        Self::with_package_times(node, nonce, NOW / 1000 - 60, NOW / 1000 + 60 * 24 * 60 * 60)
+    }
+    fn with_package_times(node: &Node, nonce: u8, not_before: u64, not_after: u64) -> Self {
         let peer = MlsDevice::generate().unwrap();
         let nonce = [nonce; 16];
         let kp = peer
             .key_package_for_invite_fixture(
                 node.genesis_data().context.spec_data().group,
                 nonce,
-                NOW / 1000 - 60,
-                NOW / 1000 + 60 * 24 * 60 * 60,
+                not_before,
+                not_after,
             )
             .unwrap();
         let reference = peer.key_package_reference(&kp).unwrap();
         let subject = peer.public_key_bytes().try_into().unwrap();
+        let credential = *peer.key_package_identity(&kp).unwrap().credential_digest();
         let frame = catcoms_mls::serialize_key_package(&kp).unwrap();
+        let d = node.genesis_data();
+        let invite = SignedInviteBindingData::sign_using(
+            InviteBindingSpecData {
+                anchor: GenesisAnchorBindingData {
+                    group: d.profile.spec().group.clone(),
+                    founder: d.profile.spec().founder,
+                    profile: *d.profile.id().as_bytes(),
+                    admission: *d.admission.admission_id().as_bytes(),
+                    tenure: *d.profile.tenure().as_bytes(),
+                    header: *d.header.id().as_bytes(),
+                    state: *d.header.spec().state.as_bytes(),
+                },
+                inviter: d.context.spec_data().signer,
+                nonce,
+                expires_at_ms: NOW + 60_000,
+                policy: JoinPayloadKindData::Policy
+                    .commitment_data(
+                        &node
+                            .node
+                            .seed
+                            .body
+                            .metadata
+                            .policy
+                            .as_ref()
+                            .unwrap()
+                            .encode(),
+                    )
+                    .unwrap(),
+                // Explicit public DATA fixture; Root route authorization is
+                // deliberately absent from these library-only tests.
+                public_routing_plan: JoinPayloadKindData::RoutingPlan
+                    .commitment_data(b"test public plan")
+                    .unwrap(),
+            },
+            |bytes| {
+                node.node
+                    .seed
+                    .body
+                    .device
+                    .sign_retained_ed25519_bounded(
+                        &d.context.spec_data().signer,
+                        bytes,
+                        catcoms_replication::chat::join_bindings::MAX_JOIN_BINDING_BYTES,
+                    )
+                    .map_err(|_| catcoms_replication::chat::ChatError::Dependency)
+            },
+        )
+        .unwrap();
+        let request = SignedJoinRequestBindingData::sign_using(
+            JoinRequestBindingSpecData {
+                invite: invite.id_data(),
+                anchor: invite.spec_data().anchor.commitment_data().unwrap(),
+                joiner: subject,
+                request_token: [nonce[0]; 32],
+                key_package_wire: JoinPayloadKindData::KeyPackageWire
+                    .commitment_data(&frame)
+                    .unwrap(),
+                key_package_reference: reference,
+                credential,
+            },
+            |bytes| {
+                peer.sign(bytes)
+                    .map_err(|_| catcoms_replication::chat::ChatError::Dependency)
+            },
+        )
+        .unwrap();
         Self {
             _peer: peer,
             frame,
-            subject,
-            reference,
-            nonce,
+            invite,
+            request,
         }
     }
-    fn data(&self) -> TextCurrentAddRequestData<'_> {
-        TextCurrentAddRequestData::from_untrusted_data(
-            &self.frame,
-            self.subject,
-            self.nonce,
-            self.reference,
-            NOW,
-        )
+    fn data(&self) -> V2FounderAddRequestData<'_> {
+        V2FounderAddRequestData {
+            invite: &self.invite,
+            request: &self.request,
+            key_package: &self.frame,
+        }
+    }
+    fn sign_request(&self, spec: JoinRequestBindingSpecData) -> SignedJoinRequestBindingData {
+        SignedJoinRequestBindingData::sign_using(spec, |bytes| {
+            self._peer
+                .sign(bytes)
+                .map_err(|_| catcoms_replication::chat::ChatError::Dependency)
+        })
+        .unwrap()
+    }
+    fn change_invite(&mut self, node: &Node, change: impl FnOnce(&mut InviteBindingSpecData)) {
+        let mut spec = self.invite.spec_data().clone();
+        change(&mut spec);
+        let signer = node.genesis_data().context.spec_data().signer;
+        self.invite = SignedInviteBindingData::sign_using(spec, |bytes| {
+            node.node
+                .seed
+                .body
+                .device
+                .sign_retained_ed25519_bounded(
+                    &signer,
+                    bytes,
+                    catcoms_replication::chat::join_bindings::MAX_JOIN_BINDING_BYTES,
+                )
+                .map_err(|_| catcoms_replication::chat::ChatError::Dependency)
+        })
+        .unwrap();
+        let mut spec = self.request.spec_data().clone();
+        spec.invite = self.invite.id_data();
+        spec.anchor = self.invite.spec_data().anchor.commitment_data().unwrap();
+        self.request = self.sign_request(spec);
     }
 }
-fn begin(node: &mut Node, native: &Native, count: &Arc<AtomicUsize>) {
+fn begin(
+    node: &mut Node,
+    native: &Native,
+    count: &Arc<AtomicUsize>,
+    request: V2FounderAddRequestData<'_>,
+) {
     node.prepare_add_data(
+        request,
         native.source.observe(),
         admission(count),
         native.cut(NativeChatKeyPurpose::AddSdk),
         native.cut(NativeChatKeyPurpose::GoverningHeader),
+        native.cut(NativeChatKeyPurpose::JoinWelcome),
     )
     .unwrap();
 }
@@ -223,14 +347,14 @@ fn failed_sdk_constructor_is_sticky_without_replacing_original_fee_or_native_cut
     let native = Native::new();
     let request = Request::new(&node, 34);
     let count = Arc::new(AtomicUsize::new(0));
-    begin(&mut node, &native, &count);
-    let wrong = TextCurrentAddRequestData::from_untrusted_data(
-        &request.frame,
-        request.subject,
-        request.nonce,
-        [0; 32],
-        NOW,
-    );
+    let mut wrong_spec = request.request.spec_data().clone();
+    wrong_spec.key_package_reference = [88; 32];
+    let wrong_request = request.sign_request(wrong_spec);
+    let wrong = V2FounderAddRequestData {
+        request: &wrong_request,
+        ..request.data()
+    };
+    begin(&mut node, &native, &count, wrong);
     assert!(node.execute_add_data_native(wrong).is_err());
     let p = node.pending.as_ref().unwrap();
     assert!(p.phase == Phase::SdkEntered && p.cell.is_none() && p.admission.is_some());
@@ -249,7 +373,7 @@ fn cancellation_after_sdk_entry_finishes_same_finite_candidate_and_keeps_its_res
         let native = Native::new();
         let request = Request::new(&node, 35);
         let count = Arc::new(AtomicUsize::new(0));
-        begin(&mut node, &native, &count);
+        begin(&mut node, &native, &count, request.data());
         let generation = native.generation.clone();
         hook(cut, move || {
             generation.store(8, SeqCst);
@@ -272,7 +396,7 @@ fn raw_header_survives_late_lock_and_exact_retry_never_reenters_key() {
     let native = Native::new();
     let request = Request::new(&node, 36);
     let count = Arc::new(AtomicUsize::new(0));
-    begin(&mut node, &native, &count);
+    begin(&mut node, &native, &count, request.data());
     node.execute_add_data_native(request.data()).unwrap();
     node.prepare_admission_data(g.verifier.replay_data())
         .unwrap();
@@ -294,7 +418,14 @@ fn raw_header_survives_late_lock_and_exact_retry_never_reenters_key() {
     node.materialize_admission_data().unwrap();
     assert!(node.signed_admission_data().unwrap().verify());
     assert!(node.require_sdk_current_data().is_ok()); // Native lock is a distinct negative.
-    assert!(node.pending.as_ref().unwrap().header_cut.is_cancelled());
+    assert!(node
+        .pending
+        .as_ref()
+        .unwrap()
+        .header_cut
+        .as_ref()
+        .unwrap()
+        .is_cancelled());
     drop(node);
     assert_eq!(count.load(SeqCst), 0);
 }
@@ -308,7 +439,7 @@ fn panic_after_header_entry_does_not_repeat_key_or_lose_completed_sdk_result() {
     let native = Native::new();
     let request = Request::new(&node, 37);
     let count = Arc::new(AtomicUsize::new(0));
-    begin(&mut node, &native, &count);
+    begin(&mut node, &native, &count, request.data());
     node.execute_add_data_native(request.data()).unwrap();
     node.prepare_admission_data(g.verifier.replay_data())
         .unwrap();
@@ -339,10 +470,14 @@ fn same_node_verifier_and_original_admission_survive_two_real_adds() {
     let mut g = governance(d.profile, d.admission, d.header, d.state);
     let native = Native::new();
     let count = Arc::new(AtomicUsize::new(0));
+    let mut previous_transfer = None;
     for step in 1..=2 {
         let request = Request::new(&node, 40 + step);
-        begin(&mut node, &native, &count);
+        begin(&mut node, &native, &count, request.data());
         node.execute_add_data_native(request.data()).unwrap();
+        let transfer = signed_request::require_joiner_routing(&node, &request);
+        assert!(previous_transfer.as_ref() != Some(&transfer));
+        previous_transfer = Some(transfer);
         node.prepare_admission_data(g.verifier.replay_data())
             .unwrap();
         node.sign_admission_native().unwrap();
@@ -407,7 +542,7 @@ fn source_close_waits_for_actual_private_candidate_cleanup() {
     let native = Native::new();
     let request = Request::new(&node, 49);
     let count = Arc::new(AtomicUsize::new(0));
-    begin(&mut node, &native, &count);
+    begin(&mut node, &native, &count, request.data());
     node.execute_add_data_native(request.data()).unwrap();
     let close = native.source.observe_retirement();
     native.source.close();
@@ -446,14 +581,17 @@ fn native_source_is_one_original_across_both_retained_cuts() {
     let a = Native::new();
     let b = Native::new();
     let count = Arc::new(AtomicUsize::new(0));
+    let request = Request::new(&node, 51);
     for reversed in [false, true] {
         let (sdk, header) = if reversed { (&b, &a) } else { (&a, &b) };
         let refused = node
             .prepare_add_data(
+                request.data(),
                 a.source.observe(),
                 admission(&count),
                 sdk.cut(NativeChatKeyPurpose::AddSdk),
                 header.cut(NativeChatKeyPurpose::GoverningHeader),
+                a.cut(NativeChatKeyPurpose::JoinWelcome),
             )
             .unwrap_err();
         assert!(node.pending.is_none());
@@ -462,8 +600,7 @@ fn native_source_is_one_original_across_both_retained_cuts() {
         drop(refused);
         assert_eq!(count.load(SeqCst), 0);
     }
-    begin(&mut node, &a, &count); // Genuine same-original control.
-    let request = Request::new(&node, 51);
+    begin(&mut node, &a, &count, request.data()); // Genuine same-original control.
     node.execute_add_data_native(request.data()).unwrap();
     let d = node.genesis_data();
     let g = governance(d.profile, d.admission, d.header, d.state);
@@ -472,10 +609,12 @@ fn native_source_is_one_original_across_both_retained_cuts() {
     a.source.close();
     let refused = node
         .prepare_add_data(
+            request.data(),
             b.source.observe(),
             admission(&count),
             b.cut(NativeChatKeyPurpose::AddSdk),
             b.cut(NativeChatKeyPurpose::GoverningHeader),
+            b.cut(NativeChatKeyPurpose::JoinWelcome),
         )
         .unwrap_err();
     drop(refused);
@@ -495,8 +634,8 @@ fn lock_unlock_cannot_replace_the_original_add_cuts_or_revive_header_signing() {
     let g = governance(d.profile, d.admission, d.header, d.state);
     let mut native = Native::new();
     let count = Arc::new(AtomicUsize::new(0));
-    begin(&mut node, &native, &count);
     let request = Request::new(&node, 52);
+    begin(&mut node, &native, &count, request.data());
     node.execute_add_data_native(request.data()).unwrap();
     node.prepare_admission_data(g.verifier.replay_data())
         .unwrap();
@@ -504,10 +643,12 @@ fn lock_unlock_cannot_replace_the_original_add_cuts_or_revive_header_signing() {
     native.reauthenticate();
     let refused = node
         .prepare_add_data(
+            request.data(),
             native.source.observe(),
             admission(&count),
             native.cut(NativeChatKeyPurpose::AddSdk),
             native.cut(NativeChatKeyPurpose::GoverningHeader),
+            native.cut(NativeChatKeyPurpose::JoinWelcome),
         )
         .unwrap_err();
     drop(refused);
@@ -545,7 +686,7 @@ fn cancelled_before_sdk_preparation_preserves_unspent_candidate_and_original_nod
     let native = Native::new();
     let request = Request::new(&node, 31);
     let count = Arc::new(AtomicUsize::new(0));
-    begin(&mut node, &native, &count);
+    begin(&mut node, &native, &count, request.data());
     native.generation.store(8, SeqCst);
     assert!(node.execute_add_data_native(request.data()).is_err());
     let p = node.pending.as_ref().unwrap();
@@ -563,7 +704,7 @@ fn real_completed_add_retry_keeps_exact_snapshot_and_refuses_changed_request() {
     let native = Native::new();
     let request = Request::new(&node, 32);
     let count = Arc::new(AtomicUsize::new(0));
-    begin(&mut node, &native, &count);
+    begin(&mut node, &native, &count, request.data());
     node.execute_add_data_native(request.data()).unwrap();
     let snapshot = Zeroizing::new(
         node.completed_add_data()
@@ -575,13 +716,13 @@ fn real_completed_add_retry_keeps_exact_snapshot_and_refuses_changed_request() {
     node.execute_add_data_native(request.data()).unwrap();
     assert!(node.completed_add_data().unwrap().secret_snapshot_data() == snapshot.as_slice());
     assert!(node.completed_add_data().unwrap().commit_data() == commit);
-    let wrong = TextCurrentAddRequestData::from_untrusted_data(
-        &request.frame,
-        request.subject,
-        request.nonce,
-        [0; 32],
-        NOW,
-    );
+    let mut wrong_spec = request.request.spec_data().clone();
+    wrong_spec.key_package_reference = [88; 32];
+    let wrong_request = request.sign_request(wrong_spec);
+    let wrong = V2FounderAddRequestData {
+        request: &wrong_request,
+        ..request.data()
+    };
     assert!(node.execute_add_data_native(wrong).is_err());
     assert_eq!(node.completed_add_data().unwrap().after_epoch_data(), 1);
     assert_eq!(node.node.seed.body.group.epoch(), 0);
@@ -599,7 +740,7 @@ fn late_cancel_preserves_exact_result_but_cannot_enter_governing_key() {
     let native = Native::new();
     let request = Request::new(&node, 33);
     let count = Arc::new(AtomicUsize::new(0));
-    begin(&mut node, &native, &count);
+    begin(&mut node, &native, &count, request.data());
     node.execute_add_data_native(request.data()).unwrap();
     node.prepare_admission_data(g.verifier.replay_data())
         .unwrap();

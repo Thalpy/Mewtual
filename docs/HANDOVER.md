@@ -1,5 +1,110 @@
 # Mewtual; Handover
 
+The `chat-v2-invite-journal` continuation now retains the exact bounded public
+routing-plan frame with the original invite, not just its digest. Hash/bounds
+and exact-retry checks run before copy/draw; the genuine transport test pins
+all fields, zero certified contacts and EOF. Root5, native compile/strict lint,
+all3,485 frontend tests and formatting pass; Root strict lint remains556.
+The current software signer's exact raw64 equality across genuine bounded
+device restore is also pinned; complete MLS163 unit/22 integration/5 docs and
+strict MLS lint pass (two pre-existing ignored cases). Read-only reviews are
+clear. This does NOT implement cold recovery, a journal writer or SavedInvite.
+
+Both design reviews approve an isolated journal gate under the same exclusive
+NativeRequired RuntimeLoan. It needs no canonical text-lane registration or
+post-Stop slot-removal machinery while no worker/owner escapes the loan and
+all files belong to the new private directory. Actual physical/Current4/key
+and covering-save checks remain mandatory. No persistence runtime is added
+by that design decision; Chat V2 stays OFF.
+
+The `chat-v2-saved-invite-producer` continuation implements unsigned invite
+preparation on the actual same-row NativeRequired Runtime/Host, requiring the
+real governed4 family and reusing its member verifier. The retained Sync
+Clock/nonce/spec/raw-signature owner has11 passing focused tests; Core14/RT36
+also pass. Actual Root5, the156-case Sync cohort, strict RT/Core/Sync lint,
+all3,485 frontend tests,10 browser flows and ambient/raw-fs gates pass. Native
+compile/lint,17 existing Root member regressions, formatting and both dependency
+audits also pass. Root strict lint retains the same556 inherited errors. Read-only review fixed a
+row-identity/transport-key domain mix-up; direct context/domain controls were
+added. The current output is only preimage-hash/expiry DATA: no covering journal,
+SavedInvite, native invite command or publication exists yet. Chat V2 is OFF.
+[Actual path and remaining work](communication-recovery/CHAT-V2-INVITE-ISSUER.md).
+
+The two implementation commits51e0b9b2 and6f822243 are pushed on draft PR #137.
+Complete Root/native Linux+Windows validation is queued at the exact runtime
+head6f822243 in [run43733133820](https://github.com/Thalpy/Mewtual/actions/runs/43733133820),
+deferring only the agreed10k catch-up cost case. No full-suite sign-off yet.
+
+PR #136 is pushed at9c93a80b, with complete paired validation in progress at
+[run43729697575](https://github.com/Thalpy/Mewtual/actions/runs/43729697575).
+Both native jobs for PR #135/run43723764290 pass; Root jobs are still running.
+
+`chat-v2-governed-add-stage-lifetime` follows PR #135. It separates
+closed snapshot DATA from finite native cuts/Ends, retains the actual End for
+partial SDK continuation, and supports fresh authorization only for an exact
+eligible unentered stage. A private Attempting marker prevents a native-entry
+panic becoming a returned-refusal witness; only actual Busy/Unavailable may
+recover before the primitive, and attempts remain spent. RT36, Add35, the145-case
+Sync owner cohort, two doctests and all3,485 frontend tests pass. Strict RT/Sync
+and native lint, native compilation, formatting, ambient/raw-fs gates and both
+dependency audits pass. Root strict lint retains556 inherited errors; complete
+paired Root/native CI is pending. Static review has no findings. Root Runtime
+cleanup before native waiting, terminal
+partial disposal, actual SavedInvite/Outcome/Intent issuers, Source4 and all
+production Add/transport/joined/projection/acceptance work remain unfinished.
+
+PR #135 is pushed at47814a58 with its three separate commits. Complete paired
+Root/native Linux+Windows CI is running at
+[run43723764290](https://github.com/Thalpy/Mewtual/actions/runs/43723764290), with
+only the named10k catch-up cost case deferred. Chat V2 remains OFF.
+
+The `chat-v2-founder-add-transaction` continuation wires authenticated signed
+Invite/JoinRequest and exact bounded package bytes into the same retained
+governed node. It freezes original L0/file key/policy and tagged V2 routing
+before native entry, samples the original Clock at first admission, and seals
+with the actual merged candidate's key and original RNG. Exact retries keep
+the original time/bytes/Cell. All24 lower MLS tests and21 Sync Add tests pass;
+the131-case cohort, complete MLS crate, strict MLS/Sync lint, native compile,
+full frontend and both dependency audits pass. Read-only review has no
+blocker/high/medium. Root strict lint retains556 inherited diagnostics;
+complete paired Root/native CI remains pending. Root
+covering save, Source4, WelcomeIntent/release, production installation,
+joined Source, transport/projection and real acceptance remain unfinished.
+Chat V2 is OFF. [Current contract](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
+The next library increment adds a separate original `JoinWelcome` purpose and
+freezes its canonical preimage from the actual same-operation inputs. It caches
+raw64 at the retained key primitive and materializes outside writers without
+re-signing, including after lock/lost reply. All34 native-key,13 join-binding
+and26 Add tests pass; strict/downstream checks are in progress. Two LOW review
+findings (scratch wording and an independent wrong-purpose control) are fixed;
+the short re-review has no findings. No Root covering or release authority is
+supplied by that signature. The136-case Sync cohort, native compilation and
+strict native all-target/all-feature lint also pass. The same556 Root lint
+diagnostics remain; paired complete execution is still pending.
+
+A separate native test correction handles the PR #134 SDK-binding assertion:
+real maintenance contention can return pre-effect Capacity before validating
+the deliberately wrong sequence. The fixture now retains that same invalid
+body, proves SDK preparation/installation stay absent and requires eventual
+Unauthorized. Its held-original-row regression exercises real recovery;
+production Admit/Release and deadlines are unchanged. The affected case and
+all9 SDK-custody cases pass. PR #133's separate missing-Finish stall remains
+undiagnosed: its test passes locally, and a failed paired pump now records BOTH
+original endpoints before teardown. That successful run is not a diagnosis.
+Read-only reviews of correction and diagnostics have no findings.
+
+The `chat-v2-governed-current-admission` continuation adds the original mounted4
+physical proof to the actual constructor-selected governed-native Current group
+guard, borrowing its held Root to preserve lock order. All3 new genuine native
+founder/member tests passed, including late missing/replaced/in-place marker
+faults and same-owner recovery. The member20, missing-metadata1 and standard
+three-family control1 cohorts passed, as did format/static/native compile gates.
+Root strict lint retains the same556 inherited diagnostics; complete suites are
+pending. Read-only review has no findings. No Add journal, Source4, production
+SDK installation or activation is supplied by this extra namespace negative.
+[Contract and remaining work](communication-recovery/CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md).
+
 The `chat-v2-founder-governed-runtime` continuation adds a library-only SAME-node
 private Add owner, exact Admission/Header data and a governed ordinary-member
 branch. All13 focused real-MLS tests and the affected123-case cohort passed,
@@ -35,8 +140,8 @@ Strict native lint passed; Root strict lint retains556 inherited diagnostics
 (prior564), with no suppression. Final routing rechecks4+1+1, both formatting
 checks, native compile/build/startup and both dependency audits passed.
 Draft PR #132 contains the two separate runtime commits. Complete Root/native
-Linux/Windows CI run43703760738 has passed both native suites and the frontend;
-both Root jobs are still running at runtime head790e703a. Later
+Linux/Windows CI run43703760738 has passed both Root and native suites and the
+frontend at runtime head790e703a. Later
 receipt-only documentation does not change tested code. The one named catch-up
 cost case remains deferred. Real predecessor-binary evidence remains open.
 This creates no Source4, production Add/Header, joined source, archive or

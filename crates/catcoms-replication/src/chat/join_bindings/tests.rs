@@ -528,3 +528,70 @@ fn legacy_invite_decoder_and_other_binding_decoders_refuse_new_frames() {
     assert!(SignedWelcomeBindingData::decode(&f.request.encode()).is_err());
     assert!(SignedInviteBindingData::decode(&f.welcome.encode()).is_err());
 }
+
+#[test]
+fn frozen_welcome_preimage_is_the_exact_canonical_signed_preimage() {
+    let f = Fixture::new();
+    let bytes = f.welcome.spec.signing_bytes_data().unwrap();
+    let signed = SignedWelcomeBindingData::sign_using(f.welcome.spec.clone(), |actual| {
+        assert_eq!(actual, bytes);
+        Ok(key(1).sign(actual))
+    })
+    .unwrap();
+    assert_eq!(signed.encode(), f.welcome.encode());
+    for index in 0..12 {
+        let mut spec = f.welcome.spec.clone();
+        match index {
+            0 => spec.invite = [0; 32],
+            1 => spec.anchor = [0; 32],
+            2 => spec.request_binding = [0; 32],
+            3 => spec.key_package_wire = [0; 32],
+            4 => spec.key_package_reference = [0; 32],
+            5 => spec.admitter = [0; 32],
+            6 => spec.add_header = [0; 32],
+            7 => spec.admission = [0; 32],
+            8 => spec.welcome = [0; 32],
+            9 => spec.policy = [0; 32],
+            10 => spec.public_routing_plan = [0; 32],
+            _ => spec.sealed_routing_transfer = [0; 32],
+        }
+        assert!(spec.signing_bytes_data().is_err());
+        assert!(
+            SignedWelcomeBindingData::sign_using(spec, |_| panic!("invalid unsigned DATA"))
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn frozen_invite_preimage_is_exact_and_invalid_fields_never_reach_the_key() {
+    let f = Fixture::new();
+    let bytes = f.invite.spec.signing_bytes_data().unwrap();
+    let signed = SignedInviteBindingData::sign_using(f.invite.spec.clone(), |actual| {
+        assert_eq!(actual, bytes);
+        Ok(key(2).sign(actual))
+    })
+    .unwrap();
+    assert_eq!(signed.encode(), f.invite.encode());
+    for index in 0..11 {
+        let mut spec = f.invite.spec.clone();
+        match index {
+            0 => spec.anchor.group.clear(),
+            1 => spec.anchor.founder = [0; 32],
+            2 => spec.anchor.profile = [0; 32],
+            3 => spec.anchor.admission = [0; 32],
+            4 => spec.anchor.tenure = [0; 32],
+            5 => spec.anchor.header = [0; 32],
+            6 => spec.anchor.state = [0; 32],
+            7 => spec.inviter = [0; 32],
+            8 => spec.nonce = [0; 16],
+            9 => spec.policy = [0; 32],
+            _ => spec.public_routing_plan = [0; 32],
+        }
+        assert!(spec.signing_bytes_data().is_err());
+        assert!(
+            SignedInviteBindingData::sign_using(spec, |_| panic!("invalid unsigned invite"))
+                .is_err()
+        );
+    }
+}
