@@ -51,6 +51,59 @@ pub(super) struct Reservation {
     io: Option<crate::store::persistence::native_registry::network::NetworkIo>,
 }
 impl Reservation {
+    /// Canonical public reservation DATA, not a reachable contact. Wildcard
+    /// listening and configured advertise/relay/rendezvous strings prove no
+    /// external address or relay reservation, so this initial profile encodes
+    /// ZERO certified contacts. Addressed join transport remains unfinished.
+    pub(super) fn invite_routing_plan_data(
+        &self,
+        binding: &crate::store::FreshV2TextFounderBinding,
+    ) -> Result<[u8; 32], AppError> {
+        let public = self.public.as_ref().ok_or_else(refused)?;
+        let active = self.active.ok_or_else(refused)?;
+        let pending = self.pending.as_ref().ok_or_else(refused)?;
+        if self.context
+            != (
+                *binding.vault_layout_data().0,
+                *binding.vault_layout_data().1,
+            )
+            || binding.signer_data() != &self.signer
+            || active.state != crate::store::NativeCreationStateData::Founder
+            || active.identity != self.identity
+            // Native row identity is random and is NOT the transport-key
+            // commitment. The immutable Birth binds that independent domain.
+            || pending.identity != self.identity
+            || pending.birth.kind != founder::BirthKind::NativeFounder
+            || pending.birth.signer != self.signer
+            || pending.birth.network != public.commitment_data()
+            || self.actual_peer.as_deref() != Some(public.peer_id_data())
+            || self.transport_build != TransportBuild::Returned
+            || self.port == 0
+            || binding.group_data().is_empty()
+            || binding.group_data().len() > 256
+            || public.peer_id_data().len() > 128
+        {
+            return Err(refused());
+        }
+        let mut plan = Encoder::with_capacity(1024);
+        plan.put_bytes(b"mewtual/chat/native-invite-routing-plan/v2\0")
+            .map_err(|_| refused())?;
+        plan.put_u16(2);
+        for bytes in [
+            binding.group_data(),
+            public.public_key_data().as_slice(),
+            public.peer_id_data().as_bytes(),
+            public.commitment_data().as_slice(),
+        ] {
+            plan.put_bytes(bytes).map_err(|_| refused())?;
+        }
+        plan.put_u16(1); // TCP reservation; this is not a verified dial address
+        plan.put_u16(self.port);
+        plan.put_u32(0); // no certified public contact addresses
+        catcoms_replication::chat::join_bindings::JoinPayloadKindData::RoutingPlan
+            .commitment_data(&plan.finish())
+            .map_err(|_| refused())
+    }
     /// Negative-only observation of this original preparation. No transport,
     /// constructor or passive physical custody is exposed to cleanup.
     pub(super) fn observe_tcp(&self) -> Option<catcoms_net::NativeTcpDrain> {

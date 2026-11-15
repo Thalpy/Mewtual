@@ -1,5 +1,12 @@
 # Mewtual: message flow and micelle convergence
 
+Disabled native V2 invite continuation (15 November): the original runtime can
+prepare one unsigned invite through its same member verifier and actual
+Current4 checks. Its output is hash/expiry DATA and contains no usable contact,
+signed invite or covering receipt. No join/message transport changes follow;
+the active network flow below remains Legacy.
+[Producer status](communication-recovery/CHAT-V2-INVITE-ISSUER.md).
+
 Status: a **trace of what the code does today**. It began as a trace written before any change;
 sections 1 to 5 have since been brought back in line with the fixes recorded in sections 8 to 11,
 so the trace and the fix log describe the same code. It records the send path, the live receive

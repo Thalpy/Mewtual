@@ -9075,3 +9075,14 @@ authority or reconstructs an opaque hot parent. `StaleTip` grants no retry IO.
 See [the exact contract](communication-recovery/CHAT-V2-SELECTED-HISTORY-PROOFS.md).
 Root durable record/node coupling, cold replay, historical custody and
 contradiction restoration remain unimplemented prerequisites for eviction.
+
+## Native V2 invite preparation (15 November)
+
+`NativeTextMemberJob::prepare_invite_intent(token,lifetime,negative)` retains
+the unsigned original on the SAME warm NativeRequired Host, using the original
+transport reservation, existing member verifier and actual Current4 proof.
+Its `(preimage hash, expiry)` return is DATA, not an invite or Saved receipt.
+Sync's separate `JoinInvite` key tail requires Root covering/current admission
+and is not called by this production preparation. The actual journal and
+publication remain unfinished. [Contract](communication-recovery/CHAT-V2-INVITE-ISSUER.md).
+

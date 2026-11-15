@@ -1,5 +1,21 @@
 # Mewtual; Handover
 
+The `chat-v2-saved-invite-producer` continuation implements unsigned invite
+preparation on the actual same-row NativeRequired Runtime/Host, requiring the
+real governed4 family and reusing its member verifier. The retained Sync
+Clock/nonce/spec/raw-signature owner has11 passing focused tests; Core14/RT36
+also pass. Actual Root5, the156-case Sync cohort, strict RT/Core/Sync lint,
+all3,485 frontend tests,10 browser flows and ambient/raw-fs gates pass. Native
+compile/lint, broader Root member checks and final audits are running. Read-only review fixed a
+row-identity/transport-key domain mix-up; direct context/domain controls were
+added. The current output is only preimage-hash/expiry DATA: no covering journal,
+SavedInvite, native invite command or publication exists yet. Chat V2 is OFF.
+[Actual path and remaining work](communication-recovery/CHAT-V2-INVITE-ISSUER.md).
+
+PR #136 is pushed at9c93a80b, with complete paired validation in progress at
+[run43729697575](https://github.com/Thalpy/Mewtual/actions/runs/43729697575).
+Both native jobs for PR #135/run43723764290 pass; Root jobs are still running.
+
 `chat-v2-governed-add-stage-lifetime` follows PR #135. It separates
 closed snapshot DATA from finite native cuts/Ends, retains the actual End for
 partial SDK continuation, and supports fresh authorization only for an exact

@@ -150,6 +150,23 @@ impl<T: MeshTransport, R: CryptoRngCore> Drop for PreparedFreshV2TextFounder<T, 
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
+    /// Preserve the actual NativeRequired whole Host while preparing only an
+    /// unsigned original. No library fallback, key or Saved receipt is issued.
+    pub(in crate::store) fn prepare_native_invite_intent_data(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        request: catcoms_sync::owner_v2::V2FounderInviteRequestData,
+        keys: &mut super::founder::NativeFounderKeys,
+    ) -> Result<([u8; 32], u64), AppError> {
+        keys.preflight(&self.origin)?;
+        if !self.is_ready_data() {
+            return Err(refused());
+        }
+        self.host
+            .as_mut()
+            .ok_or_else(refused)?
+            .prepare_native_invite_intent_data(layout, request, keys)
+    }
     /// Additional driver/Box/refusal storage only. Existing creator, source,
     /// source-read, restored SDK and Current fees remain independently live.
     fn invoice() -> Result<usize, AppError> {
