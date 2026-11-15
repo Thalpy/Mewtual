@@ -6,6 +6,9 @@ on:
       - '.github/workflows/communication-security.yml'
       - '.github/scripts/check-communication-security.py'
       - 'crates/catcoms-storage/**'
+      - 'crates/catcoms-net/**'
+      - 'Cargo.lock'
+      - 'apps/desktop/src-tauri/Cargo.lock'
       - 'apps/desktop/src-tauri/tests/xattr_compat.rs'
       - 'apps/desktop/package*.json'
   workflow_dispatch:
@@ -24,6 +27,32 @@ env:
   RUST_TEST_THREADS: 2
 
 jobs:
+  gossip:
+    name: Real gossip resource regressions (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check nonempty result guards
+        run: python .github/scripts/check-communication-security.py self-test
+      - name: Execute exact real-wire regressions
+        run: python .github/scripts/check-communication-security.py gossip
+      - name: Strict network Clippy
+        run: cargo clippy --locked -p catcoms-net --all-targets --all-features -- -D warnings
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: communication-gossip-${{ matrix.os }}
+          path: logs/communication-security/
   linux:
     name: Linux ACL, native xattr and renderer compatibility
     runs-on: ubuntu-latest

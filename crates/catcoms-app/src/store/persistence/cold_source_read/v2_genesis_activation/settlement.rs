@@ -147,7 +147,7 @@ enum CleanupPhase {
 }
 
 /// Test-only DATA observation, never a phase setter or admission constructor.
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "linux")))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::store) enum GenesisSeedSettlementProgressData {
     OriginalPresent,
@@ -248,7 +248,7 @@ impl PreparedGenesisSeedSettlement {
         store: &ServerStore,
         owner: &GenesisCurrentOwnerRef<'_>,
     ) -> Result<Self, AppError> {
-        // This first native inventory profile is audited only on Windows. Refuse BEFORE
+        // Require the audited Windows or fixed-buffer Linux profile. Refuse BEFORE
         // fee/path/Arc capture, not after returning a prepared object on another platform.
         require_supported_settlement_profile()?;
         validate_settlement_invoice()?;
@@ -317,7 +317,7 @@ impl PreparedGenesisSeedSettlement {
         self.body.require_same_owner(store, owner)
     }
 
-    #[cfg(all(test, windows))]
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store) fn progress_data_for_test(&self) -> GenesisSeedSettlementProgressData {
         match self.phase {
             CleanupPhase::OriginalPresent => GenesisSeedSettlementProgressData::OriginalPresent,
@@ -631,11 +631,11 @@ enum SeedPresence {
     Absent,
 }
 fn require_supported_settlement_profile() -> Result<(), AppError> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     {
         Ok(())
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         Err(critical_namespaces::refused())
     }
@@ -646,7 +646,7 @@ std::thread_local! {
     static AFTER_LAST_SEED_COMPARISON: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 }
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "linux")))]
 pub(in crate::store) fn after_last_seed_comparison_for_test(hook: Box<dyn FnOnce()>) {
     AFTER_LAST_SEED_COMPARISON.with(|slot| {
         assert!(slot.borrow_mut().replace(hook).is_none());

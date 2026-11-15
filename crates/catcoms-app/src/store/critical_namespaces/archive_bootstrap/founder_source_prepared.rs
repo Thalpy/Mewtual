@@ -9,9 +9,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ArchiveFounderSourcePreparation<T, R> {
         store: &ServerStore,
         rng: &mut dyn CryptoRngCore,
     ) -> Result<ArchiveFounderSourceProgress, AppError> {
+        self.save_source_prepared_with_access(store, rng, FounderAccess::Library)
+    }
+    pub(in crate::store) fn save_source_prepared_with_access(
+        &mut self,
+        store: &ServerStore,
+        rng: &mut dyn CryptoRngCore,
+        access: FounderAccess<'_>,
+    ) -> Result<ArchiveFounderSourceProgress, AppError> {
+        access.require(&self.original.creator.origin)?;
         // Complete original cipher+fee custody is a hard predecessor. The registered
         // validator selects its exact current journal state after an interrupted SP save.
-        self.register_private_source(store, rng)?;
+        self.register_private_source_with_access(store, rng, access)?;
         let key = Zeroizing::new(store.keys.db_key()?);
         let SourcePhase::Transferred {
             source: bootstrap,

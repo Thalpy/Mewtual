@@ -38,6 +38,19 @@ impl Entry {
     }
 }
 impl Target<'_> {
+    /// Test the actual nonblocking history query while its original entry is
+    /// locked. The same guard ends before any later recovery observation.
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn retire_history_with_state_locked_for_test(
+        &self,
+    ) -> Result<Receipt, VoiceError> {
+        let _state = self
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.retire_history()
+    }
     #[cfg(test)]
     pub(in crate::voice_handoff) fn native_history_collected_for_test(&self) -> bool {
         matches!(

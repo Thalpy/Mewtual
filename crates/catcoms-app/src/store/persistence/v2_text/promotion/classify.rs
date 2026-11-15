@@ -202,8 +202,8 @@ impl PreparedV2TextPromotion {
             names[count] = "head.stage";
             count += 1;
         }
-        work::require_exact_inventory(guard.directory_data().0, &["pin.bin"], false)?;
-        work::require_exact_inventory(target, &names[..count], true)?;
+        work::require_exact_inventory(guard.directory_data(), &["pin.bin"], false)?;
+        work::require_exact_inventory(guard.target_directory_data(), &names[..count], true)?;
         guard.validate_original_namespace()?;
         require_named(&head_path, &head)?;
         require_optional_name(&seed_path, &main)?;

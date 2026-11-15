@@ -86,7 +86,14 @@ async fn native_recovery_preview_and_copy_use_real_actor_save_and_return_provisi
     let item = Item::Title {
         value: art.title.as_ref().unwrap().selected.source.op_id,
     };
-    let group = state.servers.lock().await[&7].group_id.clone();
+    let group = state
+        .servers
+        .lock()
+        .await
+        .legacy(&7)
+        .expect("Legacy fixture row")
+        .group_id
+        .clone();
     let logical = target().document(&group).unwrap();
     let saved = StudioRecovery::snapshot(
         &view.projection,
@@ -102,6 +109,10 @@ async fn native_recovery_preview_and_copy_use_real_actor_save_and_return_provisi
         .lock()
         .await
         .as_mut()
+        .and_then(|vault| match vault {
+            MountedVault::Legacy(store) => Some(store.as_mut()),
+            MountedVault::TextV2(_) => None,
+        })
         .unwrap()
         .update_epoch_recovery(
             7,

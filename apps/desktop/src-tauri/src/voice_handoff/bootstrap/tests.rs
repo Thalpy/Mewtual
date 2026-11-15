@@ -597,7 +597,7 @@ async fn monotonic_identity_distinguishes_repeated_rng_and_exhaustion_never_wrap
         .servers
         .lock()
         .await
-        .get(&7)
+        .legacy(&7)
         .unwrap()
         .device_id
         .as_bytes();
@@ -734,7 +734,7 @@ async fn exact_setup_settlement_after_reply_loss_and_lock_releases_only_setup_an
             let generation = f
                 .state
                 .ui_session_generation
-                .load(std::sync::atomic::Ordering::Acquire);
+                .load(std::sync::atomic::Ordering::SeqCst);
             crate::finalize_unlock_session(&f.state, generation, false)
                 .await
                 .unwrap();

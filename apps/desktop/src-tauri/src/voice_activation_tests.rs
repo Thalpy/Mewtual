@@ -32,7 +32,7 @@ impl Fixture {
     async fn from_state(state: AppState) -> Self {
         let root = tempfile::tempdir().unwrap();
         *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap());
+            Some((ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap()).into());
         *state.session_resumable.lock().await = true;
         let server = Server::found(
             Hub::new().join(PeerId::from_u64(1)),
@@ -46,11 +46,11 @@ impl Fixture {
         let device = server.device_id();
         let (actor, mut events, worker) = spawn(server);
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
-        state.servers.lock().await.insert(
+        state.servers.lock().await.install_legacy_fixture(
             7,
             tests::snapshot_test_entry(1, actor.clone(), group, device),
         );
-        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
         finalize_unlock_session(&state, generation, false)
             .await
             .unwrap();
@@ -186,7 +186,7 @@ async fn accepted_activation_entry_replacement_before_final_admission_is_refused
         async {
             f.actor.member_count().await;
             // Even a replacement retaining the same group/actor cannot adopt an old entry id.
-            f.state.servers.lock().await.get_mut(&7).unwrap().instance = 2;
+            f.state.servers.lock().await.legacy_mut(&7).unwrap().instance = 2;
             drop(boundary);
         }
     );
@@ -287,7 +287,7 @@ async fn accepted_activation_lock_then_unlock_never_revives_old_join() {
         }
     );
     assert!(result.is_err());
-    let generation = f.state.ui_session_generation.load(Ordering::Acquire);
+    let generation = f.state.ui_session_generation.load(Ordering::SeqCst);
     finalize_unlock_session(&f.state, generation, false)
         .await
         .unwrap();
@@ -308,7 +308,7 @@ async fn accepted_activation_generation_fence_precedes_delayed_revocation_hook()
     activate_voice_owner_inner(&f.state, candidate.clone())
         .await
         .unwrap();
-    let generation = f.state.ui_session_generation.load(Ordering::Acquire);
+    let generation = f.state.ui_session_generation.load(Ordering::SeqCst);
     {
         let authority = f.state.voice_authority.lock().unwrap();
         let accepted = authority.accepted_activation(&candidate).unwrap();
