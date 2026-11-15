@@ -6,11 +6,17 @@ real governed4 family and reusing its member verifier. The retained Sync
 Clock/nonce/spec/raw-signature owner has11 passing focused tests; Core14/RT36
 also pass. Actual Root5, the156-case Sync cohort, strict RT/Core/Sync lint,
 all3,485 frontend tests,10 browser flows and ambient/raw-fs gates pass. Native
-compile/lint, broader Root member checks and final audits are running. Read-only review fixed a
+compile/lint,17 existing Root member regressions, formatting and both dependency
+audits also pass. Root strict lint retains the same556 inherited errors. Read-only review fixed a
 row-identity/transport-key domain mix-up; direct context/domain controls were
 added. The current output is only preimage-hash/expiry DATA: no covering journal,
 SavedInvite, native invite command or publication exists yet. Chat V2 is OFF.
 [Actual path and remaining work](communication-recovery/CHAT-V2-INVITE-ISSUER.md).
+
+The two implementation commits51e0b9b2 and6f822243 are pushed on draft PR #137.
+Complete Root/native Linux+Windows validation is queued at the exact runtime
+head6f822243 in [run43733133820](https://github.com/Thalpy/Mewtual/actions/runs/43733133820),
+deferring only the agreed10k catch-up cost case. No full-suite sign-off yet.
 
 PR #136 is pushed at9c93a80b, with complete paired validation in progress at
 [run43729697575](https://github.com/Thalpy/Mewtual/actions/runs/43729697575).

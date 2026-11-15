@@ -9085,4 +9085,3 @@ Its `(preimage hash, expiry)` return is DATA, not an invite or Saved receipt.
 Sync's separate `JoinInvite` key tail requires Root covering/current admission
 and is not called by this production preparation. The actual journal and
 publication remain unfinished. [Contract](communication-recovery/CHAT-V2-INVITE-ISSUER.md).
-

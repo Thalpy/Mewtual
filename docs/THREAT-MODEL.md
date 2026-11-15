@@ -6748,4 +6748,3 @@ renew unknown Clock/RNG/key entry. This supplies no SavedInvite/current Add or
 publication authority. Durable KeyAttempt/cold no-resign, persistent quotas and
 covering journal/IO admission remain unfinished. Chat V2 stays OFF.
 [Detailed limits](communication-recovery/CHAT-V2-INVITE-ISSUER.md).
-

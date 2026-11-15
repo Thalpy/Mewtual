@@ -92,6 +92,11 @@ native atoms establish lifecycle properties, not Tauri caller authorization.
 All five actual Root preparation/transport-context regressions pass, including
 the final early-family check. The156-case Sync owner cohort, strict RT/Core/Sync
 lint, full3,485-case frontend, all10 browser flows and ambient/raw-fs gates
-also pass. Both read-only reviews have no remaining findings. Native and
-broader final gates are running; complete paired suites remain pending and
-will be recorded in HANDOVER. No acceptance claim follows from pending checks.
+also pass. Both read-only reviews have no remaining findings. The17 existing
+Root member regressions, native compile (2m10s), strict native lint (3m35s),
+formatting and both dependency audits pass. Root strict lint retains556
+inherited diagnostics. Complete paired Root/native validation at6f822243 is
+queued in [run43733133820](https://github.com/Thalpy/Mewtual/actions/runs/43733133820),
+deferring only the agreed10k cost case. No acceptance claim follows from
+pending checks. Startup was not rerun: setup, spawning and runtime placement
+are unchanged; browser flows passed after the sandbox initially blocked CDP.
