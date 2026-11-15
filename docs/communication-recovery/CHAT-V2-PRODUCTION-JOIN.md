@@ -97,6 +97,12 @@ activate the V2 transport until the actual owning join vertical exists.
 
 ## Namespace6 and original pin custody
 
+The prerequisite combined governance/native constructor now has a separate
+[implementation design](CHAT-V2-GOVERNED-NATIVE-STORAGE.md). It is not built;
+existing native3 still refuses governance4. Its startup-only Selected3 handoff
+must complete before group/Source creation, and its exact native tuple and
+first-torn recovery proofs must be paired before runtime use.
+
 Namespace6 needs its own critical handler and versioned authenticated format.
 Founder `GroupPinData` and pending Legacy `CapturedOwnerProfilePin` are different
 provenance and cannot be relabelled. Store the accepted genesis anchor and its

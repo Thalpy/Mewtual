@@ -1,5 +1,11 @@
 # Mewtual; Handover
 
+The next `chat-v2-governed-native-storage` continuation is DESIGN ONLY, based
+on the pushed PR #131 checkpoint `7eb556d5`. Read-only design review is clear
+after making exact native tuple binding and Stage-before-claim recovery
+ordering explicit. No combined constructor, recovery or Source is implemented.
+[Reviewed implementation design](communication-recovery/CHAT-V2-GOVERNED-NATIVE-STORAGE.md).
+
 Continuation `chat-v2-founder-governed-add` combines the pushed join bindings
 and renderer-retirement correction. The completed MLS Add now has a two-phase
 exact-original receiver handoff and deferred opaque old-graph disposal. The17
