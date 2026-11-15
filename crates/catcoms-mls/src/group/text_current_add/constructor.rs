@@ -68,6 +68,8 @@ fn limits() -> TextCurrentAddLimits {
         sdk_typed_bytes: 32 * RAW,
         sdk_work: WORK,
         output_bytes: 4 * RAW,
+        routing_typed_bytes: 0,
+        routing_work: 0,
     }
 }
 fn admission(

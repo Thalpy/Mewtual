@@ -15,7 +15,9 @@
 //! member's source is the separate `ChannelSync` seam in `owner_v2/member.rs`.
 use super::ordinary_create;
 use super::*;
-use crate::owner_v2::member::sign_admitted_with_device;
+use crate::owner_v2::member::{
+    sign_admitted_with_device, sign_admitted_with_device_native, NativeMemberSigning,
+};
 use crate::owner_v2::{V2MemberDraftInputs, V2MemberSignRefusal};
 use catcoms_replication::chat::V2OrdinarySigningGuard;
 
@@ -57,6 +59,44 @@ impl<T, R> UnboundV2GenesisNode<T, R> {
         // Test-only cancellation cut AFTER the raw was cached in the Plan, never before.
         #[cfg(test)]
         after_member_sign();
+        result
+    }
+
+    /// The same exact founder seed/Core plan with a concrete native member
+    /// cut. No SDK lookup or allocation is introduced under the Core reader;
+    /// Root owns the original-source binding and caller-held End lifetime.
+    /// Cached raw bypasses native source/purpose/UI validation even after
+    /// retirement. `Ok` is DATA, not current authority; Root must enforce its
+    /// pinned NativeRequired preflight and final publication/save fence.
+    pub fn sign_ordinary_admitted_native<'a>(
+        &self,
+        inputs: &V2MemberDraftInputs,
+        guard: V2OrdinarySigningGuard<'a>,
+        original: &catcoms_rt::NativeChatSourceObservation,
+        cut: &mut catcoms_rt::NativeChatPreparedKeyCut,
+        ends: &mut catcoms_rt::NativeChatKeyEnds,
+    ) -> Result<V2OrdinarySigningGuard<'a>, V2MemberSignRefusal> {
+        let s = &self.seed.body;
+        inputs.require_founder_origin(&self.seed)?;
+        if !s.metadata.scope.genesis_attachment_live()
+            || s.context.spec_data().signer != *guard.signer_data()
+        {
+            return Err(V2MemberSignRefusal::Source);
+        }
+        let result = sign_admitted_with_device_native(
+            &s.device,
+            inputs,
+            guard,
+            NativeMemberSigning {
+                original,
+                cut,
+                ends,
+            },
+        );
+        #[cfg(test)]
+        if result.is_ok() {
+            after_member_sign();
+        }
         result
     }
 }

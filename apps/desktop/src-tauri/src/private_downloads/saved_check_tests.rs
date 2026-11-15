@@ -26,19 +26,20 @@ impl RevealCase {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         *state.store.lock().await = Some(
-            ServerStore::open(
+            (ServerStore::open(
                 root.path(),
                 b"reveal",
                 &mut rand_chacha::ChaCha20Rng::seed_from_u64(51_077),
             )
-            .unwrap(),
+            .unwrap())
+            .into(),
         );
         *state.session_resumable.lock().await = true;
         let (entry, task, drain, cid) =
             crate::leaving::tests::running_with_file(51_077, &state, b"published private file")
                 .await;
         let actor = entry.actor.clone();
-        state.servers.lock().await.insert(1, entry);
+        state.servers.lock().await.install_legacy_fixture(1, entry);
         let (signal, watch) = tokio::sync::watch::channel(false);
         let origin = RequestCancellation::new(watch, None);
         let ready = actor
@@ -134,7 +135,7 @@ impl RevealCase {
         }
     }
     async fn finish(self) {
-        self.state.servers.lock().await.clear();
+        self.state.servers.lock().await.clear_legacy_fixture();
         self.actor.shutdown().await;
         self.task.await.unwrap();
         self.drain.await.unwrap();

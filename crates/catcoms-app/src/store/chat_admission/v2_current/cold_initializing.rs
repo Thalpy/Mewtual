@@ -49,6 +49,7 @@ pub(in crate::store) const COLD_INITIALIZING_SCOPE_METADATA_BYTES: usize =
         + std::mem::size_of::<Progress>()
         + std::mem::size_of::<AdmissionOwner>()
         + std::mem::size_of::<revocation::Owner>()
+        + revocation::LIFE_ALLOCATION_BYTES
         + 2 * std::mem::size_of::<AdmissionAuthority>()
         + std::mem::size_of::<ColdV2GenesisScopeBasis>()
         + std::mem::size_of::<V2CurrentBinding>()

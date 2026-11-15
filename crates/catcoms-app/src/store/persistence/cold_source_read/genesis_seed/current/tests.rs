@@ -558,7 +558,9 @@ fn both_owning_drop_paths_close_actual_authority_before_runtime_payload_and_fee(
     }
 }
 
-#[cfg(windows)]
+#[cfg(target_os = "linux")]
+mod linux_inventory;
+#[cfg(any(windows, target_os = "linux"))]
 mod seed_settlement;
 mod settlement_scope;
 

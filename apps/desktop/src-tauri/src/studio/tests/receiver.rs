@@ -69,7 +69,7 @@ impl Peer {
         let root = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState::default());
         *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"studio-native", &mut rng()).unwrap());
+            Some((ServerStore::open(root.path(), b"studio-native", &mut rng()).unwrap()).into());
         *state.session_resumable.lock().await = true;
         attach_blob_store(&state, &mut server).await;
         let group = server.group_id();
@@ -235,7 +235,17 @@ async fn native_studio_automatic_two_member_receive_events_pacing_and_restart() 
         .await
         .as_ref()
         .unwrap()
-        .blob_store(&hex::encode(&b.state.servers.lock().await[&7].group_id))
+        .as_legacy()
+        .unwrap()
+        .blob_store(&hex::encode(
+            &b.state
+                .servers
+                .lock()
+                .await
+                .legacy(&7)
+                .expect("Legacy fixture row")
+                .group_id
+        ))
         .unwrap()
         .get_bounded(&Cid::from_hex(&cid).unwrap(), pix.len())
         .unwrap()
@@ -282,6 +292,8 @@ async fn native_studio_automatic_two_member_receive_events_pacing_and_restart() 
         .await
         .as_ref()
         .unwrap()
+        .as_legacy()
+        .unwrap()
         .load_server(7)
         .unwrap();
     let restored = Server::restore(
@@ -309,11 +321,11 @@ async fn native_studio_automatic_two_member_receive_events_pacing_and_restart() 
 #[tokio::test]
 async fn native_studio_receiver_and_delayed_events_refuse_old_incarnation_and_lock() {
     let (_root, state, actor, task, drain) = fixture().await;
-    state.servers.lock().await.get_mut(&7).unwrap().instance = 2;
+    state.servers.lock().await.legacy_mut(&7).unwrap().instance = 2;
     assert!(receive_once(&state, 7, 1, &actor).await.is_err());
     assert!(!forward_if_current(&state, 7, 1, || panic!("old actor event escaped")).await);
     assert!(forward_if_current(&state, 7, 2, || {}).await);
-    state.session_lock_requested.store(true, Ordering::Release);
+    state.session_lock_requested.store(true, Ordering::SeqCst);
     assert!(receive_once(&state, 7, 2, &actor).await.is_err());
     assert!(!forward_if_current(&state, 7, 2, || panic!("locked event escaped")).await);
     assert!(state
@@ -321,6 +333,8 @@ async fn native_studio_receiver_and_delayed_events_refuse_old_incarnation_and_lo
         .lock()
         .await
         .as_ref()
+        .unwrap()
+        .as_legacy()
         .unwrap()
         .load_server(7)
         .is_err());

@@ -10,7 +10,7 @@ fn capture(state: &AppState, server: u64) -> Result<Captured, &'static str> {
     super::capture(
         state,
         server,
-        state.ui_session_generation.load(Ordering::Acquire),
+        state.ui_session_generation.load(Ordering::SeqCst),
     )
 }
 struct Running {
@@ -30,7 +30,7 @@ async fn mounted() -> Running {
     let root = tempfile::tempdir().unwrap();
     let state = Arc::new(AppState::default());
     *state.store.lock().await =
-        Some(ServerStore::open(root.path(), b"native ledger", &mut OsCryptoRng).unwrap());
+        Some((ServerStore::open(root.path(), b"native ledger", &mut OsCryptoRng).unwrap()).into());
     *state.session_resumable.lock().await = true;
     finalize_unlock_session(&state, 0, false).await.unwrap();
     Running {
@@ -63,10 +63,10 @@ fn install(
     let (actor, mut events, task) = spawn(node);
     let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
     let mut servers = state.servers.try_lock().unwrap();
-    if let Some(old) = servers.remove(&id) {
+    if let Some(old) = servers.remove_legacy_fixture(&id) {
         old.files.retire();
     }
-    servers.insert(
+    servers.install_legacy_fixture(
         id,
         crate::tests::snapshot_test_entry(instance, actor, group, device),
     );
@@ -390,7 +390,7 @@ async fn cached_native_read_observer_does_not_keep_a_dropped_registry_actor_aliv
     drop(captured);
     {
         let mut servers = running.state.servers.lock().await;
-        let entry = servers.remove(&7).unwrap();
+        let entry = servers.remove_legacy_fixture(&7).unwrap();
         entry.files.retire(); // real row retirement precedes releasing its registry guard
         drop(entry); // last genuine owner drops; no explicit Actor shutdown is supplied
     }
@@ -433,7 +433,7 @@ async fn completely_unpolled_original_work_stays_revoked_after_actual_lock_and_u
         },
     );
     lock_session_inner(&running.state, None).await.unwrap();
-    let fresh = running.state.ui_session_generation.load(Ordering::Acquire);
+    let fresh = running.state.ui_session_generation.load(Ordering::SeqCst);
     finalize_unlock_session(&running.state, fresh, false)
         .await
         .unwrap();
@@ -458,7 +458,15 @@ async fn retiring_queued_reads_frees_all_global_permits_before_an_old_actor_read
         .await
         .unwrap();
     running.tasks.extend(install(&running.state, 8, 2, healthy));
-    let actor = running.state.servers.lock().await[&7].actor.clone();
+    let actor = running
+        .state
+        .servers
+        .lock()
+        .await
+        .legacy(&7)
+        .expect("Legacy fixture row")
+        .actor
+        .clone();
     let expected_context = actor.durable_send_context().await.unwrap();
     // The REAL actor is parked in its production Ready/lease barrier. No mock receiver or
     // scheduling delay stands in for the command queue that all eight reads wait behind.
@@ -553,7 +561,7 @@ async fn final_publication_orders_both_lock_wins_and_reply_wins_with_real_commit
     );
     locking.await.unwrap();
 
-    let fresh = running.state.ui_session_generation.load(Ordering::Acquire);
+    let fresh = running.state.ui_session_generation.load(Ordering::SeqCst);
     finalize_unlock_session(&running.state, fresh, false)
         .await
         .unwrap();
@@ -636,8 +644,8 @@ fn synchronous_manual_command_inventory_and_acl_are_explicit() {
             ))));
     }
     let source = include_str!("../lib.rs");
-    assert!(source
-        .contains(".invoke_handler(admin_chat_ledger::with_commands(tauri::generate_handler!["));
+    let compact: String = source.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(compact.contains(".invoke_handler(native_text::with_commands(admin_chat_ledger::with_commands(tauri::generate_handler!["));
     // The separate public moderation endpoint remains its original advisory projection.
     assert!(!source[source.find("async fn get_moderation(").unwrap()
         ..source.find("async fn get_moderation(").unwrap() + 1500]
@@ -667,7 +675,7 @@ async fn actual_mockruntime_router_captures_before_spawn_and_acl_denies_secondar
     let root = tempfile::tempdir().unwrap();
     let state = app.state::<AppState>();
     *state.store.lock().await =
-        Some(ServerStore::open(root.path(), b"native router", &mut OsCryptoRng).unwrap());
+        Some((ServerStore::open(root.path(), b"native router", &mut OsCryptoRng).unwrap()).into());
     *state.session_resumable.lock().await = true;
     finalize_unlock_session(&state, 0, false).await.unwrap();
     let mut node = owner(887).await;
@@ -699,7 +707,7 @@ async fn actual_mockruntime_router_captures_before_spawn_and_acl_denies_secondar
     ));
     assert_eq!(queued.lock().unwrap().len(), 1);
     lock_session_inner(&state, None).await.unwrap();
-    let fresh = state.ui_session_generation.load(Ordering::Acquire);
+    let fresh = state.ui_session_generation.load(Ordering::SeqCst);
     finalize_unlock_session(&state, fresh, false).await.unwrap();
     let task = queued.lock().unwrap().pop().unwrap();
     task.await;

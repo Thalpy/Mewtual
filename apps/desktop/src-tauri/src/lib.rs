@@ -11,6 +11,9 @@
 #[cfg(all(test, target_os = "windows", target_env = "msvc"))]
 mod native_test_manifest;
 
+#[cfg(test)]
+mod native_vault_tests;
+
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io::{Read, Write};
@@ -22,7 +25,7 @@ use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use catcoms_app::store::MAX_UI_STATE_BYTES;
+use catcoms_app::store::{MountedVault, MAX_UI_STATE_BYTES};
 use catcoms_app::{
     channel_id, spawn, AppEvent, Cid, CidHasher, DeviceId, FileListing, FileRef, InviteJoinPlan,
     Livery, PairingLedger, PairingSecrets, PerServerGrant, Profile, ReconnectPolicy,
@@ -73,8 +76,11 @@ mod leaving;
 mod media_decode;
 mod media_worker;
 mod member_reconnect;
+mod native_text;
 mod private_downloads;
 mod saved_files;
+mod server_table;
+use server_table::ServerTable;
 mod studio_exports;
 #[cfg(test)]
 mod voice_activation_tests;
@@ -84,6 +90,7 @@ mod voice_authority;
 #[allow(dead_code)]
 mod voice_handoff;
 mod voice_join_key;
+
 // This broker model has no registered command consumers yet. Retain its contract tests without
 // presenting the unwired implementation as a production pairing boundary.
 #[cfg(test)]
@@ -432,7 +439,9 @@ struct AppState {
     keep_session: StdMutex<Option<(u64, watch::Sender<bool>)>>,
     /// Privileged admin read scopes are native-issued and globally bounded across all actors.
     admin_chat_ledger: admin_chat_ledger::Registry,
-    servers: Arc<Mutex<HashMap<u64, ServerEntry>>>,
+    /// Off-by-default owning Chat V2 warm factory; never decoded from IPC.
+    native_text: native_text::Registry,
+    servers: Arc<Mutex<ServerTable>>,
     /// Monotonic process-local source for [`ServerEntry::instance`]. Wrapping would require more
     /// actor installations than the process can perform in its lifetime; zero has no special
     /// meaning and is permitted after that theoretical wrap.
@@ -506,7 +515,7 @@ struct AppState {
     /// the final registry check still decides which incarnation may write. Never substitute
     /// persist_locks here: capture itself seals a snapshot through that other lock.
     reconnect_persist_locks: StdMutex<HashMap<u64, Arc<Mutex<()>>>>,
-    store: Arc<Mutex<Option<ServerStore>>>,
+    store: Arc<Mutex<Option<MountedVault>>>,
     /// Whether a freshly-mounted frontend may restore the already-unlocked UI session. This stays
     /// true across F5/HMR, but an explicit Ctrl+L clears it so a reload cannot bypass the lock.
     session_resumable: Arc<Mutex<bool>>,
@@ -1128,12 +1137,12 @@ struct UiSessionGate<'a> {
     requested: &'a AtomicBool,
     generation: &'a AtomicU64,
     authorized: &'a AtomicU64,
-    store: &'a Mutex<Option<ServerStore>>,
+    store: &'a Mutex<Option<MountedVault>>,
 }
 impl UiSessionGate<'_> {
     fn is_closed(&self) -> bool {
-        self.requested.load(Ordering::Acquire)
-            || self.generation.load(Ordering::Acquire) != self.authorized.load(Ordering::Acquire)
+        self.requested.load(Ordering::SeqCst)
+            || self.generation.load(Ordering::SeqCst) != self.authorized.load(Ordering::SeqCst)
     }
     async fn require_unlocked(&self) -> Result<(), String> {
         if self.is_closed() {
@@ -1149,7 +1158,7 @@ impl UiSessionGate<'_> {
     }
     /// Pure final fence, safe while Coordinator is held. No await or native callback.
     fn check_generation(&self, expected: u64) -> Result<(), String> {
-        if self.is_closed() || self.generation.load(Ordering::Acquire) != expected {
+        if self.is_closed() || self.generation.load(Ordering::SeqCst) != expected {
             return Err("the UI session changed while the operation was in progress".into());
         }
         Ok(())
@@ -1178,7 +1187,7 @@ async fn require_unlocked_session(state: &AppState) -> Result<(), String> {
 async fn unlocked_ui_session_generation(state: &AppState) -> Result<u64, String> {
     let _commit = state.ui_session_commit.lock().await;
     require_unlocked_session(state).await?;
-    Ok(state.ui_session_generation.load(Ordering::Acquire))
+    Ok(state.ui_session_generation.load(Ordering::SeqCst))
 }
 
 /// Permit one externally-visible step only if it still belongs to the UI session that began it.
@@ -1190,7 +1199,7 @@ async fn require_ui_session_generation(
 ) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
     let commit = state.ui_session_commit.lock().await;
     require_unlocked_session(state).await?;
-    if state.ui_session_generation.load(Ordering::Acquire) != expected {
+    if state.ui_session_generation.load(Ordering::SeqCst) != expected {
         return Err("the UI session changed while the operation was in progress".into());
     }
     Ok(commit)
@@ -1254,7 +1263,7 @@ async fn actor_of_unchecked(state: &AppState, server: u64) -> Result<ServerActor
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .map(|e| e.actor.clone())
         .ok_or(ActorLookup::NotOpen)
 }
@@ -1280,7 +1289,7 @@ async fn actor_instance_of(
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .map(|entry| (entry.actor.clone(), entry.instance))
         .ok_or(ActorLookup::NotOpen)
 }
@@ -1292,7 +1301,7 @@ async fn server_actor_of(state: &AppState, server: u64) -> Result<ServerActor, S
     require_unlocked_session(state).await?;
     let servers = state.servers.lock().await;
     let entry = servers
-        .get(&server)
+        .legacy(&server)
         .ok_or_else(|| "unknown server".to_string())?;
     if entry.is_dm {
         return Err("moderation is only available in server spaces".into());
@@ -2108,7 +2117,7 @@ async fn refresh_interface_routes(app: &AppHandle, server: u64) -> bool {
     let state = state.inner();
     let prepared = {
         let mut servers = state.servers.lock().await;
-        let Some(entry) = servers.get_mut(&server) else {
+        let Some(entry) = servers.legacy_mut(&server) else {
             return false;
         };
         let (Some(identity), Some(mesh)) = (entry.interface_routes.clone(), entry.mesh.clone())
@@ -2296,7 +2305,7 @@ fn event_needs_snapshot(event: &AppEvent) -> bool {
 async fn mark_server_dirty(state: &AppState, server: u64, instance: u64) -> bool {
     let mut servers = state.servers.lock().await;
     let Some(entry) = servers
-        .get_mut(&server)
+        .legacy_mut(&server)
         .filter(|entry| entry.instance == instance)
     else {
         return false;
@@ -2347,7 +2356,7 @@ async fn install_persistence_signal(
     instance: u64,
 ) -> Option<watch::Receiver<u64>> {
     let servers = state.servers.lock().await;
-    if servers.get(&server).map(|entry| entry.instance) != Some(instance) {
+    if servers.legacy(&server).map(|entry| entry.instance) != Some(instance) {
         return None;
     }
     let (signal, wake) = watch::channel(0u64);
@@ -3549,9 +3558,33 @@ async fn register_server(
     };
     let instance = state.next_server_instance.fetch_add(1, Ordering::Relaxed);
     let timer_actor = actor.clone();
+    let cache_group = group_id.clone();
+    // Allocate the complete unpublished owner before borrowing the registry.
+    // Voice stays empty until its exact registration CAS below succeeds.
+    let mut candidate = Box::new(ServerEntry {
+        files: keep_session::EntryOwner::new(),
+        actor,
+        instance,
+        group_id,
+        device_id,
+        invite,
+        name,
+        bootstrap,
+        bootstrap_owners,
+        interface_routes,
+        rendezvous,
+        mesh,
+        is_dm,
+        switchboard,
+        record_seq,
+        voice: None,
+        persist: PersistCounters::default(),
+    });
+    let mut replaced = None;
     let mut servers = state.servers.lock().await;
-    let install = if state.ui_session_generation.load(Ordering::Acquire) != expected_generation
+    let install = if state.ui_session_generation.load(Ordering::SeqCst) != expected_generation
         || ui_session_closed(state)
+        || servers.contains_key(&id)
     {
         Err("server registration was superseded by a lock request".into())
     } else {
@@ -3569,6 +3602,9 @@ async fn register_server(
         task.abort();
         return Err(error);
     }
+    let publication = servers
+        .prepare_legacy_publication(id, None, &mut replaced)
+        .expect("checked fresh vacancy under the same registry guard");
     let voice = registration.and_then(|registration| match registration.register() {
         Ok(()) => Some(RegisteredVoiceActor(registration)),
         Err(error) => {
@@ -3577,36 +3613,16 @@ async fn register_server(
             None
         }
     });
-    let files = keep_session::EntryOwner::new();
-    actor.set_keep_session(
-        keep_session::current(state, expected_generation).map(|account| files.scope(account)),
+    candidate.voice = voice;
+    candidate.actor.set_keep_session(
+        keep_session::current(state, expected_generation)
+            .map(|account| candidate.files.scope(account)),
     );
-    let cache_group = group_id.clone();
     // Exact row guard is already held. No await or fallible operation may separate the voice
     // registration CAS from publishing the native row that owns it.
-    servers.insert(
-        id,
-        ServerEntry {
-            files,
-            actor,
-            instance,
-            group_id,
-            device_id,
-            invite,
-            name,
-            bootstrap,
-            bootstrap_owners,
-            interface_routes,
-            rendezvous,
-            mesh,
-            is_dm,
-            switchboard,
-            record_seq,
-            voice,
-            persist: PersistCounters::default(),
-        },
-    );
+    publication.publish(candidate);
     drop(servers);
+    drop(replaced);
     supervise("server_actor", id, task);
     admission_storage::prune_stale_pending(state).await;
     install_persistence_worker(app, id, instance).await;
@@ -3627,7 +3643,7 @@ async fn register_server(
 /// anything the next launch's block starts at.
 async fn next_record_seq(state: &AppState, server: u64) -> Option<u64> {
     let mut servers = state.servers.lock().await;
-    let e = servers.get_mut(&server)?;
+    let e = servers.legacy_mut(&server)?;
     e.record_seq = e.record_seq.saturating_add(1);
     Some(e.record_seq)
 }
@@ -3645,7 +3661,7 @@ async fn persist_server(state: &AppState, server: u64) -> PersistOutcome {
     let Some((ticket, instance, actor)) = ({
         let mut servers = state.servers.lock().await;
         servers
-            .get_mut(&server)
+            .legacy_mut(&server)
             .map(|entry| (entry.persist.request(), entry.instance, entry.actor.clone()))
     }) else {
         return PersistOutcome::Superseded;
@@ -3666,7 +3682,7 @@ async fn persist_server_instance(
     let ticket = {
         let mut servers = state.servers.lock().await;
         let Some(entry) = servers
-            .get_mut(&server)
+            .legacy_mut(&server)
             .filter(|entry| entry.instance == instance)
         else {
             return PersistOutcome::Superseded;
@@ -3688,7 +3704,7 @@ async fn retry_pending_persistence(
     let (instance, ticket, actor) = {
         let servers = state.servers.lock().await;
         let entry = servers
-            .get(&server)
+            .legacy(&server)
             .filter(|entry| entry.instance == instance)?;
         if !entry.persist.needs_write(entry.persist.requested) {
             return admission_storage::combine_retries(net, registry);
@@ -3718,7 +3734,7 @@ async fn persist_captured(
     // request belongs to; and did a write that started after this ticket already carry it?
     let covering = {
         let servers = state.servers.lock().await;
-        let Some(entry) = servers.get(&server) else {
+        let Some(entry) = servers.legacy(&server) else {
             return PersistOutcome::Superseded;
         };
         if entry.instance != instance {
@@ -3753,23 +3769,30 @@ async fn persist_captured(
                 }
             };
             if registry
-                .get(&server)
+                .legacy(&server)
                 .is_none_or(|entry| entry.instance != instance)
             {
                 return PersistOutcome::Superseded;
             }
-            let lease = catcoms_app::durable_chat::DurableSendLease::new(
+            let lease = match catcoms_app::durable_chat::DurableSendLease::new_mounted(
                 store,
                 server,
                 (writing, registry),
-            );
+            ) {
+                Ok(lease) => lease,
+                Err(_) => {
+                    return PersistOutcome::Pending {
+                        reason: PersistFailure::StoreUnavailable,
+                    }
+                }
+            };
             if let Err(error) = ready.commit(lease).await {
                 tracing::error!(target:"catcoms_app",server,error=%error,"VAULT.CHAT_REPAIR.FAILED");
                 return PersistOutcome::Pending {
                     reason: PersistFailure::WriteFailed,
                 };
             }
-            if let Some(entry) = state.servers.lock().await.get_mut(&server) {
+            if let Some(entry) = state.servers.lock().await.legacy_mut(&server) {
                 if entry.instance == instance {
                     entry.persist.completed_through(covering);
                 }
@@ -3794,7 +3817,7 @@ async fn persist_captured(
         }
     };
     let guard = state.store.lock().await;
-    let Some(store) = guard.as_ref() else {
+    let Some(store) = guard.as_ref().and_then(MountedVault::as_legacy) else {
         return PersistOutcome::Pending {
             reason: PersistFailure::StoreUnavailable,
         };
@@ -3805,7 +3828,7 @@ async fn persist_captured(
     // registry lock, and removal cannot complete between this check and the write while the
     // registry guard below is held.
     let servers = state.servers.lock().await;
-    if servers.get(&server).map(|entry| entry.instance) != Some(instance) {
+    if servers.legacy(&server).map(|entry| entry.instance) != Some(instance) {
         return PersistOutcome::Superseded;
     }
     let mut rng = OsCryptoRng;
@@ -3819,7 +3842,7 @@ async fn persist_captured(
     drop(guard);
     // Only a write that actually reached the disk may retire the requests it covered, and only
     // for the incarnation that made them.
-    if let Some(entry) = state.servers.lock().await.get_mut(&server) {
+    if let Some(entry) = state.servers.lock().await.legacy_mut(&server) {
         if entry.instance == instance {
             entry.persist.completed_through(covering);
         }
@@ -3855,7 +3878,7 @@ async fn persist_address_cache(app: &AppHandle, server: u64) {
     // happens while holding it.
     let key = {
         let guard = state.store.lock().await;
-        match guard.as_ref() {
+        match guard.as_ref().and_then(MountedVault::as_legacy) {
             Some(store) => match store.address_cache_key() {
                 Ok(k) => k,
                 Err(e) => {
@@ -3870,7 +3893,7 @@ async fn persist_address_cache(app: &AppHandle, server: u64) {
         return; // the actor stopped
     };
     let guard = state.store.lock().await;
-    if let Some(store) = guard.as_ref() {
+    if let Some(store) = guard.as_ref().and_then(MountedVault::as_legacy) {
         let mut rng = OsCryptoRng;
         if let Err(e) = store.save_address_cache(server, &bytes, &mut rng) {
             tracing::warn!(target: "catcoms_app", server, error = %e, "VAULT.ADDRESS_CACHE.SEAL_FAILED");
@@ -3910,7 +3933,7 @@ async fn persist_live_local_reconnect_routes_in_state(
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .filter(|entry| entry.instance == instance)
         .and_then(|entry| entry.mesh.clone());
     let Some(mesh) = mesh else {
@@ -3940,7 +3963,7 @@ async fn persist_live_local_reconnect_routes_in_state(
     let now_ms = SystemClock.now_ms();
     let net = {
         let guard = state.store.lock().await;
-        let Some(store) = guard.as_ref() else {
+        let Some(store) = guard.as_ref().and_then(MountedVault::as_legacy) else {
             return;
         };
         match store.load_server_net(server) {
@@ -4021,7 +4044,7 @@ async fn persist_live_local_reconnect_routes_in_state(
         .map(|route| (PeerId::new(route.peer_id), route.address.clone()))
         .collect();
     let guard = state.store.lock().await;
-    let Some(store) = guard.as_ref() else {
+    let Some(store) = guard.as_ref().and_then(MountedVault::as_legacy) else {
         return;
     };
     // Re-read under the final write lock. A recovery-code apply can update only the pending field
@@ -4036,7 +4059,7 @@ async fn persist_live_local_reconnect_routes_in_state(
     let final_now_ms = SystemClock.now_ms();
     let registry = state.servers.lock().await;
     if registry
-        .get(&server)
+        .legacy(&server)
         .is_none_or(|entry| entry.instance != instance)
     {
         return;
@@ -4120,7 +4143,7 @@ async fn attach_blob_store_inner<T: MeshTransport, R: catcoms_rt::CryptoRngCore>
         }
     };
     let prepared = tokio::task::spawn_blocking(move || {
-        let store = guard.as_ref()?;
+        let store = guard.as_ref().and_then(MountedVault::as_legacy)?;
         Some(cache_housekeeping::prepare_blob_store(
             store, server_id, &group,
         ))
@@ -4631,7 +4654,7 @@ async fn persist_server_net(state: &AppState, server: u64, net: &ServerNet) -> P
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .map(|entry| entry.instance)
     else {
         return PersistOutcome::Superseded;
@@ -4817,7 +4840,7 @@ async fn fold_bootstrap_entry(
     let state = app.state::<AppState>();
     let changed_and_actor = {
         let mut servers = state.inner().servers.lock().await;
-        let Some(server_entry) = servers.get_mut(&server) else {
+        let Some(server_entry) = servers.legacy_mut(&server) else {
             return false;
         };
         let changed = if add {
@@ -6305,7 +6328,7 @@ async fn found_server_inner(
         .servers
         .lock()
         .await
-        .get(&server_id)
+        .legacy(&server_id)
         .map(|entry| (entry.instance, entry.actor.clone(), entry.mesh.clone()));
     if let Some((instance, actor, Some(mesh))) = registered {
         match member_reconnect::persist(
@@ -7117,7 +7140,7 @@ async fn join_server_inner(
         .servers
         .lock()
         .await
-        .get(&server_id)
+        .legacy(&server_id)
         .map(|entry| (entry.instance, entry.actor.clone(), entry.mesh.clone()));
     if let Some((instance, actor, Some(mesh))) = registered {
         match member_reconnect::persist(
@@ -7268,7 +7291,7 @@ async fn apply_join_reply(
     let (mesh, actor, group_id, device_id) = {
         let servers = state.servers.lock().await;
         let entry = servers
-            .get(&server)
+            .legacy(&server)
             .ok_or_else(|| "server not found".to_string())?;
         (
             entry
@@ -7469,7 +7492,7 @@ async fn leave_server(
         // the namespace, so it is left alone entirely and the claim goes. Its own leave claims
         // next (it may be waiting on this claim right now) and cleans up.
         let alias = servers
-            .values()
+            .legacy_values()
             .any(|entry| entry.group_id == removed.group_id);
         (removed, claim.filter(|_| !alias))
     };
@@ -7503,7 +7526,7 @@ async fn leave_server(
     let mut marked = false;
     {
         let guard = state.store.lock().await;
-        if let Some(store) = guard.as_ref() {
+        if let Some(store) = guard.as_ref().and_then(MountedVault::as_legacy) {
             if claim.is_some() {
                 match cache_housekeeping::mark_leaving(store, &removed.group_id) {
                     Ok(present) => marked = present,
@@ -7597,7 +7620,7 @@ async fn get_available_invite(state: &AppState, server: u64) -> Result<Option<St
     require_unlocked_session(state).await?;
     let (actor, device_id) = {
         let servers = state.servers.lock().await;
-        match servers.get(&server) {
+        match servers.legacy(&server) {
             Some(e) if e.invite.is_some() => (e.actor.clone(), e.device_id),
             _ => return Ok(None),
         }
@@ -7702,7 +7725,7 @@ async fn refresh_or_mint_invite(
     let (bootstrap, rendezvous, handle, stored_invite) = {
         let servers = state.servers.lock().await;
         let e = servers
-            .get(&server)
+            .legacy(&server)
             .ok_or_else(|| "unknown server".to_string())?;
         (
             e.bootstrap.clone(),
@@ -7756,7 +7779,7 @@ async fn refresh_or_mint_invite(
     {
         let mut servers = state.servers.lock().await;
         let e = servers
-            .get_mut(&server)
+            .legacy_mut(&server)
             .ok_or_else(|| "server closed while minting its invite".to_string())?;
         if !invite_routes_still_current(&bootstrap, &rendezvous, &e.bootstrap, &e.rendezvous) {
             return Err(
@@ -7818,7 +7841,7 @@ async fn check_invite_routes(
     let (bootstrap, rendezvous) = {
         let servers = state.servers.lock().await;
         let e = servers
-            .get(&server)
+            .legacy(&server)
             .ok_or_else(|| "unknown server".to_string())?;
         (e.bootstrap.clone(), !e.rendezvous.is_empty())
     };
@@ -7886,7 +7909,7 @@ async fn rename_server(
     if name.is_empty() {
         return Err("name cannot be empty".into());
     }
-    match state.servers.lock().await.get_mut(&server) {
+    match state.servers.lock().await.legacy_mut(&server) {
         Some(e) => e.name = name,
         None => return Err("unknown server".into()),
     }
@@ -8399,7 +8422,7 @@ async fn push_file_chunk(
             .get_mut(&key)
             .ok_or_else(|| "no such upload".to_string())?;
         if ui_session_closed(&state)
-            || state.ui_session_generation.load(Ordering::Acquire) != up.generation
+            || state.ui_session_generation.load(Ordering::SeqCst) != up.generation
             || !up.actor.same_instance(&actor)
         {
             return Err("this upload is no longer active".into());
@@ -8465,7 +8488,7 @@ async fn seal_pending_chunk(
                 .filter(|up| {
                     up.can_accept(index)
                         && !ui_session_closed(state)
-                        && state.ui_session_generation.load(Ordering::Acquire) == up.generation
+                        && state.ui_session_generation.load(Ordering::SeqCst) == up.generation
                         && up.actor.same_instance(actor)
                 })
                 .map(|up| up.chunk_sealed(file_ref.clone()));
@@ -8526,7 +8549,7 @@ async fn finish_file_upload(
             .get_mut(&key)
             .ok_or_else(|| op.fail(codes::FILE_UPLOAD_FAILED, "no such upload"))?;
         if ui_session_closed(&state)
-            || state.ui_session_generation.load(Ordering::Acquire) != up.generation
+            || state.ui_session_generation.load(Ordering::SeqCst) != up.generation
             || !up.actor.same_instance(&actor)
         {
             return Err(op.fail(codes::FILE_UPLOAD_FAILED, "this upload is no longer active"));
@@ -8738,7 +8761,7 @@ async fn storage_health_cache_get(
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .is_some_and(|entry| entry.instance == server_instance);
     if !current {
         return Err("the server changed while storage inspection was in progress".into());
@@ -8760,7 +8783,7 @@ async fn storage_health_cache_publish(
     // clearing the cache, which makes its ordering with this publication atomic.
     let servers = state.servers.lock().await;
     if servers
-        .get(&server)
+        .legacy(&server)
         .is_none_or(|entry| entry.instance != server_instance)
     {
         return Err("the server changed while storage inspection was in progress".into());
@@ -8997,7 +9020,7 @@ async fn mint_member_recovery(
     let candidates = {
         let servers = state.servers.lock().await;
         servers
-            .get(&server)
+            .legacy(&server)
             .map(|entry| entry.bootstrap.clone())
             .ok_or_else(|| "server is not open".to_string())?
     };
@@ -9025,6 +9048,7 @@ async fn authorize_member_recovery_capture(
     let guard = state.store.lock().await;
     let store = guard
         .as_ref()
+        .and_then(MountedVault::as_legacy)
         .ok_or_else(|| "the vault is locked".to_string())?;
     let mut net = store
         .load_server_net(server)
@@ -9122,7 +9146,7 @@ async fn dm_stats(state: State<'_, AppState>) -> Result<Vec<DmStat>, String> {
     let dms: Vec<(u64, ServerActor)> = {
         let servers = state.servers.lock().await;
         servers
-            .iter()
+            .legacy_iter()
             .filter(|(_, e)| e.is_dm)
             .map(|(id, e)| (*id, e.actor.clone()))
             .collect()
@@ -9348,7 +9372,7 @@ async fn get_kept_files(state: State<'_, AppState>, server: u64) -> Result<UiKep
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .map(|entry| entry.instance)
         != Some(instance)
     {
@@ -9388,7 +9412,7 @@ async fn keep_file(
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .map(|entry| entry.instance)
         != Some(instance)
     {
@@ -9486,13 +9510,13 @@ async fn commit_kept_command<T>(
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .map(|entry| entry.instance)
         != Some(instance)
     {
         return Err("server changed".into());
     }
-    if ui_session_closed(state) || state.ui_session_generation.load(Ordering::Acquire) != generation
+    if ui_session_closed(state) || state.ui_session_generation.load(Ordering::SeqCst) != generation
     {
         return Err("the UI session changed while the operation was in progress".into());
     }
@@ -9501,13 +9525,13 @@ async fn commit_kept_command<T>(
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .map(|entry| entry.instance)
         != Some(instance)
     {
         return Err("server changed".into());
     }
-    if ui_session_closed(state) || state.ui_session_generation.load(Ordering::Acquire) != generation
+    if ui_session_closed(state) || state.ui_session_generation.load(Ordering::SeqCst) != generation
     {
         return Err("the UI session changed while the operation was in progress".into());
     }
@@ -10399,7 +10423,7 @@ async fn get_connectivity(state: State<'_, AppState>) -> Result<Connectivity, St
             .servers
             .lock()
             .await
-            .get(&diag.server)
+            .legacy(&diag.server)
             .map(|entry| entry.bootstrap.clone());
         reconcile_advertised(&mut diag.advertised, live);
     }
@@ -10459,7 +10483,7 @@ async fn get_switchboard_status(
     let (actor, offered, eligible) = {
         let servers = state.servers.lock().await;
         let entry = servers
-            .get(&server)
+            .legacy(&server)
             .ok_or_else(|| "unknown server".to_string())?;
         (
             entry.actor.clone(),
@@ -10503,7 +10527,7 @@ async fn set_switchboard_offered(
     let actor = {
         let servers = state.servers.lock().await;
         let entry = servers
-            .get(&server)
+            .legacy(&server)
             .ok_or_else(|| "unknown server".to_string())?;
         let eligible = entry
             .bootstrap
@@ -10518,13 +10542,13 @@ async fn set_switchboard_offered(
         // Revocation is fail-safe: close the protocol gate first. Even if disk sealing fails, the
         // current process and UI state remain off rather than silently continuing to serve.
         actor.set_switchboard_offered(false).await?;
-        if let Some(entry) = state.servers.lock().await.get_mut(&server) {
+        if let Some(entry) = state.servers.lock().await.legacy_mut(&server) {
             entry.switchboard = false;
         }
     }
     let persist_result: Result<(), String> = async {
         let store = state.store.lock().await;
-        if let Some(store) = store.as_ref() {
+        if let Some(store) = store.as_ref().and_then(MountedVault::as_legacy) {
             let mut net = store
                 .load_server_net(server)
                 .map_err(|error| error.to_string())?
@@ -10552,7 +10576,7 @@ async fn set_switchboard_offered(
         // actor has stopped, roll the persisted bit back so a reload cannot surprise-enable it.
         if let Err(error) = actor.set_switchboard_offered(true).await {
             let store = state.store.lock().await;
-            if let Some(store) = store.as_ref() {
+            if let Some(store) = store.as_ref().and_then(MountedVault::as_legacy) {
                 if let Ok(Some(mut net)) = store.load_server_net(server) {
                     net.switchboard = false;
                     let mut rng = OsCryptoRng;
@@ -10561,7 +10585,7 @@ async fn set_switchboard_offered(
             }
             return Err(error);
         }
-        if let Some(entry) = state.servers.lock().await.get_mut(&server) {
+        if let Some(entry) = state.servers.lock().await.legacy_mut(&server) {
             entry.switchboard = true;
         }
     }
@@ -10667,7 +10691,7 @@ async fn get_call_transport(
     let (actor, advertised, router_maps) = {
         let servers = state.servers.lock().await;
         let entry = servers
-            .get(&server)
+            .legacy(&server)
             .ok_or_else(|| "unknown server".to_string())?;
         let router_maps = entry
             .bootstrap_owners
@@ -10814,7 +10838,7 @@ async fn prepare_call_mapping_owner(
     let _commit = require_ui_session_generation(&state, generation).await?;
     let servers = state.servers.lock().await;
     let entry = servers
-        .get(&server)
+        .legacy(&server)
         .ok_or("call server is no longer open")?;
     let binding = call_mappings::Binding {
         generation,
@@ -10839,8 +10863,8 @@ async fn prepare_call_mapping_owner(
 async fn call_mapping_binding_current(state: &AppState, binding: &call_mappings::Binding) -> bool {
     let servers = state.servers.lock().await;
     !ui_session_closed(state)
-        && state.ui_session_generation.load(Ordering::Acquire) == binding.generation
-        && servers.get(&binding.server).is_some_and(|entry| {
+        && state.ui_session_generation.load(Ordering::SeqCst) == binding.generation
+        && servers.legacy(&binding.server).is_some_and(|entry| {
             entry.instance == binding.instance && entry.group_id == binding.group
         })
 }
@@ -11008,8 +11032,8 @@ enum VoiceActivationPlan {
 async fn voice_binding_current(state: &AppState, binding: &voice_authority::Binding) -> bool {
     let servers = state.servers.lock().await;
     !ui_session_closed(state)
-        && state.ui_session_generation.load(Ordering::Acquire) == binding.generation
-        && servers.get(&binding.server).is_some_and(|entry| {
+        && state.ui_session_generation.load(Ordering::SeqCst) == binding.generation
+        && servers.legacy(&binding.server).is_some_and(|entry| {
             entry.instance == binding.instance && entry.group_id == binding.group
         })
 }
@@ -11026,13 +11050,13 @@ async fn check_voice_binding(
 /// The same exact registry/actor query for ordinary IPC and an upgraded handoff context.
 /// Its result is only a snapshot; both callers still need final commit/selection fencing.
 async fn check_voice_binding_in(
-    servers: &Mutex<HashMap<u64, ServerEntry>>,
+    servers: &Mutex<ServerTable>,
     binding: &voice_authority::Binding,
 ) -> Result<(), String> {
     let actor = {
         let servers = servers.lock().await;
         let entry = servers
-            .get(&binding.server)
+            .legacy(&binding.server)
             .filter(|entry| entry.instance == binding.instance && entry.group_id == binding.group)
             .ok_or("voice server changed")?;
         entry.actor.clone()
@@ -11082,7 +11106,7 @@ async fn prepare_voice_owner_inner(
     let (actor, instance, group) = {
         let servers = state.servers.lock().await;
         let entry = servers
-            .get(&server)
+            .legacy(&server)
             .ok_or("voice server is no longer open")?;
         (entry.actor.clone(), entry.instance, entry.group_id.clone())
     };
@@ -11172,7 +11196,7 @@ async fn activate_voice_owner_inner(
             let actor = {
                 let servers = state.servers.lock().await;
                 servers
-                    .get(&binding.server)
+                    .legacy(&binding.server)
                     .filter(|entry| {
                         entry.instance == binding.instance && entry.group_id == binding.group
                     })
@@ -11274,7 +11298,7 @@ async fn end_voice_owner_inner(state: &AppState, owner: &str) {
         let actor = {
             let servers = state.servers.lock().await;
             servers
-                .get(&original.binding.server)
+                .legacy(&original.binding.server)
                 .filter(|entry| {
                     entry.instance == original.binding.instance
                         && entry.group_id == original.binding.group
@@ -12190,9 +12214,10 @@ fn validate_ui_state_json(json: &str) -> Result<(), String> {
         .ok_or_else(|| "UI continuity state must be an object".to_string())?;
     if !matches!(
         object.get("version").and_then(serde_json::Value::as_u64),
-        // v3 protects exact retained Send copies that old v2 frontends silently omitted.
+        // v3 protects exact retained Send copies that old v2 frontends silently omitted;
+        // v4 protects native 32-byte requests from all preceding UI readers.
         // This gates only the sealed UI envelope; native authoring/Stop limits stay intact.
-        Some(1..=3)
+        Some(1..=4)
     ) || !object
         .get("drafts")
         .is_some_and(serde_json::Value::is_object)
@@ -12202,6 +12227,14 @@ fn validate_ui_state_json(json: &str) -> Result<(), String> {
     {
         return Err("unsupported UI continuity state shape".into());
     }
+    native_text::continuity::validate(
+        object,
+        object
+            .get("version")
+            .and_then(serde_json::Value::as_u64)
+            .expect("checked version"),
+    )
+    .map_err(str::to_owned)?;
     // Studio's owned PIX drafts need a larger envelope, not a larger allowance for unrelated
     // chat/read/trust state. Validate each independent budget before the atomic sealed write.
     if let Some(studio) = object.remove("studioDraft") {
@@ -12242,11 +12275,14 @@ async fn get_ui_state(state: State<'_, AppState>) -> Result<String, String> {
     let guard = state.store.lock().await;
     let store = guard
         .as_ref()
+        .and_then(MountedVault::as_legacy)
         .ok_or_else(|| "unlock the vault before loading UI state".to_string())?;
-    let bytes = store.load_ui_state().map_err(|error| error.to_string())?;
-    if bytes.is_empty() {
+    let Some(bytes) = store
+        .load_ui_state_record()
+        .map_err(|error| error.to_string())?
+    else {
         return Ok(r#"{"version":1,"drafts":{},"readMarks":{}}"#.into());
-    }
+    };
     let json = String::from_utf8(bytes).map_err(|_| "UI continuity state is not UTF-8")?;
     validate_ui_state_json(&json)?;
     Ok(json)
@@ -12267,10 +12303,12 @@ async fn save_ui_state_for_generation(
     json: &str,
     generation: u64,
 ) -> Result<(), String> {
+    let _io = state.native_text.ui_state.lane.clone().lock_owned().await;
     let _session_commit = require_ui_session_generation(state, generation).await?;
     let guard = state.store.lock().await;
     let store = guard
         .as_ref()
+        .and_then(MountedVault::as_legacy)
         .ok_or_else(|| "unlock the vault before saving UI state".to_string())?;
     store
         .save_ui_state(json.as_bytes(), &mut OsCryptoRng)
@@ -13349,7 +13387,7 @@ async fn get_inbox(state: State<'_, AppState>) -> Result<Vec<UiInboxItem>, Strin
     let servers: Vec<(u64, String, bool, ServerActor)> = {
         let guard = state.servers.lock().await;
         guard
-            .iter()
+            .legacy_iter()
             .map(|(id, e)| (*id, e.name.clone(), e.is_dm, e.actor.clone()))
             .collect()
     };
@@ -13452,6 +13490,7 @@ where
         let mounted = state.store.lock().await;
         let store = mounted
             .as_ref()
+            .and_then(MountedVault::as_legacy)
             .ok_or_else(|| "vault is not mounted during chat fence restore".to_string())?;
         let registry = state.servers.lock().await;
         // An actual fence may require a covering server save. Never let this private older
@@ -13498,7 +13537,7 @@ where
     // best-effort cache data never prevents the authoritative group snapshot from opening.
     {
         let guard = state.store.lock().await;
-        if let Some(store) = guard.as_ref() {
+        if let Some(store) = guard.as_ref().and_then(MountedVault::as_legacy) {
             match (
                 store.address_cache_key(),
                 store.load_address_cache(record.id),
@@ -13560,7 +13599,7 @@ async fn running_servers(state: &AppState) -> Vec<ReloadedServer> {
         .servers
         .lock()
         .await
-        .iter()
+        .legacy_iter()
         .map(|(id, e)| {
             (
                 *id,
@@ -13603,7 +13642,7 @@ async fn reload_one(
         .servers
         .lock()
         .await
-        .get(&record.id)
+        .legacy(&record.id)
         .map(|entry| entry.instance);
     // 9g used to dial every address in the snapshot's peer records here, straight at the
     // transport: up to `MAX_PEX_ADDRESSES` per record for every record ever stored, unconditional,
@@ -13728,11 +13767,35 @@ async fn reload_one(
     // Register under the SAME id as on disk (don't allocate a new one).
     let instance = state.next_server_instance.fetch_add(1, Ordering::Relaxed);
     let timer_actor = actor.clone();
+    let mut candidate = Box::new(ServerEntry {
+        files: keep_session::EntryOwner::new(),
+        actor,
+        instance,
+        group_id,
+        device_id,
+        invite: presented_invite,
+        name: record.display_name.clone(),
+        bootstrap,
+        bootstrap_owners,
+        interface_routes: Some(InterfaceRouteIdentity {
+            port,
+            peer_id: id.clone(),
+        }),
+        rendezvous: rz_vec,
+        mesh: Some(mesh_handle),
+        is_dm: record.is_dm,
+        switchboard: net.switchboard,
+        record_seq: net.record_seq,
+        voice: None,
+        persist: PersistCounters::default(),
+    });
+    let mut replaced = None;
     let commit = state.ui_session_commit.lock().await;
     let mut servers = state.servers.lock().await;
-    let install = if state.ui_session_generation.load(Ordering::Acquire) != expected_generation
+    let install = if state.ui_session_generation.load(Ordering::SeqCst) != expected_generation
         || !voice_runtime(state).is_current_ticket(voice_ticket)
-        || servers.get(&record.id).map(|entry| entry.instance) != previous_instance
+        || servers.legacy(&record.id).map(|entry| entry.instance) != previous_instance
+        || (previous_instance.is_none() && servers.contains_key(&record.id))
     {
         Err("server reload was superseded by a lock request".into())
     } else {
@@ -13743,57 +13806,35 @@ async fn reload_one(
         drop(commit);
         drop(registration);
         drop(events);
-        actor.shutdown().await;
+        candidate.actor.shutdown().await;
         let _ = task.await;
         return Err(error);
     }
+    let publication = servers
+        .prepare_legacy_publication(record.id, previous_instance, &mut replaced)
+        .expect("checked exact legacy incarnation under the same registry guard");
     let voice = match install_reloaded_voice(registration) {
         Ok(voice) => voice,
         Err(error) => {
             drop(servers);
             drop(commit);
             drop(events);
-            actor.shutdown().await;
+            candidate.actor.shutdown().await;
             let _ = task.await;
             return Err(error);
         }
     };
-    let files = keep_session::EntryOwner::new();
-    if let Some(old) = servers.get(&record.id) {
-        old.files.retire();
-    }
+    candidate.voice = voice;
     // Restores remain inactive until the authenticated account unlock commits below. If this
     // reload is within a live unlock, current() still checks that exact account generation.
-    actor.set_keep_session(
-        keep_session::current(state, expected_generation).map(|account| files.scope(account)),
+    candidate.actor.set_keep_session(
+        keep_session::current(state, expected_generation)
+            .map(|account| candidate.files.scope(account)),
     );
-    servers.insert(
-        record.id,
-        ServerEntry {
-            files,
-            actor,
-            instance,
-            group_id,
-            device_id,
-            invite: presented_invite,
-            name: record.display_name.clone(),
-            bootstrap,
-            bootstrap_owners,
-            interface_routes: Some(InterfaceRouteIdentity {
-                port,
-                peer_id: id.clone(),
-            }),
-            rendezvous: rz_vec,
-            mesh: Some(mesh_handle),
-            is_dm: record.is_dm,
-            switchboard: net.switchboard,
-            record_seq: net.record_seq,
-            voice,
-            persist: PersistCounters::default(),
-        },
-    );
+    publication.publish(candidate);
     drop(servers);
     drop(commit);
+    drop(replaced);
     // Registration is now visible to orphan Stop. Only here can the global absence fence
     // be released; earlier release would let a new fence race autonomous restored publication.
     chat_fence_commit.installed();
@@ -14636,7 +14677,7 @@ async fn create_backup(
         .servers
         .lock()
         .await
-        .iter()
+        .legacy_iter()
         .map(|(id, entry)| (*id, entry.instance, op.bind_actor(entry.actor.clone())))
         .collect();
     // Share ordinary snapshot ordering. A backup must never capture an old snapshot and later
@@ -14661,12 +14702,13 @@ async fn create_backup(
         let guard = state.store.lock().await;
         let store = guard
             .as_ref()
+            .and_then(MountedVault::as_legacy)
             .ok_or_else(|| op.fail(codes::VAULT_BACKUP_FAILED, "The vault is not mounted."))?;
         let registry = state.servers.lock().await;
         if registry.len() != servers.len()
             || servers.iter().any(|(id, instance, _)| {
                 registry
-                    .get(id)
+                    .legacy(id)
                     .is_none_or(|entry| entry.instance != *instance)
             })
         {
@@ -14676,7 +14718,7 @@ async fn create_backup(
             ));
         }
         let records: Vec<_> = registry
-            .iter()
+            .legacy_iter()
             .map(|(id, entry)| ServerRecord {
                 id: *id,
                 display_name: entry.name.clone(),
@@ -14721,6 +14763,7 @@ async fn change_vault_secret(
     let guard = state.store.lock().await;
     let store = guard
         .as_ref()
+        .and_then(MountedVault::as_legacy)
         .ok_or_else(|| "unlock the vault before changing its secret".to_string())?;
     vault_secret_change_result(store.change_passphrase(
         current_secret.as_bytes(),
@@ -16079,11 +16122,20 @@ async fn authenticate_mounted_store(
     passphrase: &[u8],
 ) -> Result<bool, catcoms_app::AppError> {
     let store_guard = state.store.lock().await;
-    let Some(store) = store_guard.as_ref() else {
-        return Ok(false);
-    };
-    store.verify_passphrase(passphrase)?;
-    Ok(true)
+    match store_guard.as_ref() {
+        None => Ok(false),
+        Some(MountedVault::Legacy(store)) => {
+            store.verify_passphrase(passphrase)?;
+            Ok(true)
+        }
+        // This route currently implements legacy restoration only. An actual
+        // mounted native owner must remain intact until its checked cold and
+        // authenticated re-entry paths exist. It is never permission to try an
+        // old opener against the same mount or restore its old flat registry.
+        Some(MountedVault::TextV2(_)) => Err(catcoms_app::AppError::Invalid(
+            "Chat V2 vault opening is not enabled yet.".into(),
+        )),
+    }
 }
 
 /// Resolve continuity debt from the locked UI generation before reopening native IPC.
@@ -16110,7 +16162,7 @@ async fn settle_ui_lock_continuity_before_unlock(
             Err(error) => Err(error),
             Ok(()) => {
                 let store = state.store.lock().await;
-                match store.as_ref() {
+                match store.as_ref().and_then(MountedVault::as_legacy) {
                     Some(store) => store
                         .save_ui_state(snapshot.json.as_bytes(), &mut OsCryptoRng)
                         .map_err(|error| error.to_string()),
@@ -16178,7 +16230,7 @@ async fn reattach_voice_actors(
         .servers
         .lock()
         .await
-        .iter()
+        .legacy_iter()
         .filter(|(_, entry)| {
             entry
                 .voice
@@ -16193,13 +16245,13 @@ async fn reattach_voice_actors(
             .await;
         let _commit = state.ui_session_commit.lock().await;
         let mut servers = state.servers.lock().await;
-        if state.ui_session_generation.load(Ordering::Acquire) != expected_generation
+        if state.ui_session_generation.load(Ordering::SeqCst) != expected_generation
             || !voice_runtime(state).is_current_ticket(ticket)
         {
             return Err("unlock was superseded by a newer lock request; try again".into());
         }
         let Some(entry) = servers
-            .get_mut(&id)
+            .legacy_mut(&id)
             .filter(|entry| entry.instance == instance)
         else {
             // Leave/reload won while the actor reply was pending. Its abandoned candidate is
@@ -16253,12 +16305,76 @@ async fn finalize_unlock_session_with_voice(
     include_running_servers: bool,
     voice_ticket: &SessionTicket,
 ) -> Result<Option<Vec<ReloadedServer>>, String> {
+    finalize_unlock_session_with_voice_checked(
+        state,
+        expected_generation,
+        include_running_servers,
+        voice_ticket,
+        || true,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Native selected3 supplies its actual original host/physical negatives. The
+/// legacy wrapper retains its existing contract. Neither callback grants UI
+/// authority: the secret and original generation must independently be valid.
+async fn finalize_unlock_session_with_voice_checked(
+    state: &AppState,
+    expected_generation: u64,
+    include_running_servers: bool,
+    voice_ticket: &SessionTicket,
+    mount_is_live: impl Fn() -> bool + Send + Sync,
+    native_target: Option<Arc<catcoms_app::store::NativeTextVaultAuthenticationCheck>>,
+    native_notice: Option<&mut Option<native_text::ui_state::snapshots::Notice>>,
+) -> Result<Option<Vec<ReloadedServer>>, String> {
+    state.native_text.preludes.wait_idle().await;
+    if !mount_is_live() {
+        return Err("The mounted vault has closed.".into());
+    }
+    // A lock may have published its SC barrier without yet starting the
+    // native-owned Root drain. Probe/start it here too, before authorization.
+    // Root's retirement bound is inclusive: preserve this NEW generation.
+    native_text::retirement::older_than(state, expected_generation).await?;
     reattach_voice_actors(state, expected_generation, voice_ticket).await?;
+    // Allocate/choose canonical metadata before guards. Whole replaced payment
+    // is kept in this outer variable even if final publication is superseded.
+    let mut candidate_target = native_target
+        .as_ref()
+        .map(|target| state.native_text.ui_state.canonical_target(target));
+    let mut _retired_target = None;
+    let io = state.native_text.ui_state.lock_lane().await;
+    let _io = if let Some(target) = native_target.as_ref() {
+        let (io, result, notice) = native_text::ui_state::snapshots::flush(
+            state,
+            io,
+            native_text::ui_state::snapshots::Purpose::Authentication {
+                generation: expected_generation,
+                target,
+            },
+        )
+        .await;
+        if let Some(output) = native_notice {
+            *output = notice;
+        }
+        result?;
+        io
+    } else {
+        io
+    };
+    #[cfg(test)]
+    state.native_text.unlock_commit_wait.notify_one();
     let _commit = state.ui_session_commit.lock().await;
-    if state.ui_session_generation.load(Ordering::Acquire) != expected_generation {
+    if !state.native_text.preludes.is_idle_cached()
+        || !mount_is_live()
+        || state.ui_session_generation.load(Ordering::SeqCst) != expected_generation
+    {
         return Err("unlock was superseded by a newer lock request; try again".into());
     }
-    settle_ui_lock_continuity_before_unlock(state, expected_generation).await?;
+    if native_target.is_none() {
+        settle_ui_lock_continuity_before_unlock(state, expected_generation).await?;
+    }
     // A successful authenticated transition either retried the exact pending bytes or crossed the
     // explicit malformed-snapshot acknowledgement flow. The old close warning is now resolved and
     // must not leak into a later, newly authorized UI session.
@@ -16268,34 +16384,54 @@ async fn finalize_unlock_session_with_voice(
     } else {
         None
     };
-    if state.ui_session_generation.load(Ordering::Acquire) != expected_generation {
+    if !state.native_text.preludes.is_idle_cached()
+        || !mount_is_live()
+        || state.ui_session_generation.load(Ordering::SeqCst) != expected_generation
+    {
         return Err("unlock was superseded by a newer lock request; try again".into());
     }
 
     let mut resumable = state.session_resumable.lock().await;
+    if let Some(target) = native_target.as_ref() {
+        let store = state.store.lock().await; // UI -> resumable -> short Store
+        if !store
+            .as_ref()
+            .and_then(MountedVault::as_text_v2)
+            .is_some_and(|vault| target.is_for_original_vault(vault))
+        {
+            return Err("The mounted vault changed.".into());
+        }
+    }
     let reopening = !*resumable || ui_session_closed(state);
     *resumable = true;
     let activation = voice_runtime(state).activate_session(voice_ticket);
-    if activation.is_ok()
-        && state.ui_session_generation.load(Ordering::Acquire) == expected_generation
+    if state.native_text.preludes.is_idle_cached()
+        && mount_is_live()
+        && activation.is_ok()
+        && state.ui_session_generation.load(Ordering::SeqCst) == expected_generation
     {
+        if let Some(target) = candidate_target.take() {
+            _retired_target = state.native_text.ui_state.install_target(target);
+        }
         state
             .ui_authorized_generation
-            .store(expected_generation, Ordering::Release);
-        state.session_lock_requested.store(false, Ordering::Release);
+            .store(expected_generation, Ordering::SeqCst);
+        state.session_lock_requested.store(false, Ordering::SeqCst);
     }
-    if activation.is_err()
-        || state.ui_session_generation.load(Ordering::Acquire) != expected_generation
-        || state.session_lock_requested.load(Ordering::Acquire)
+    if !state.native_text.preludes.is_idle_cached()
+        || !mount_is_live()
+        || activation.is_err()
+        || state.ui_session_generation.load(Ordering::SeqCst) != expected_generation
+        || state.session_lock_requested.load(Ordering::SeqCst)
     {
         // A lock request may publish its generation without this mutex so new IPC fails promptly.
         // Restore the conservative state before releasing either transition boundary.
         *resumable = false;
-        state.session_lock_requested.store(true, Ordering::Release);
+        state.session_lock_requested.store(true, Ordering::SeqCst);
         return Err("unlock was superseded by a newer lock request; try again".into());
     }
     if let Some(session) = keep_session::current(state, expected_generation) {
-        for entry in state.servers.lock().await.values() {
+        for entry in state.servers.lock().await.legacy_values() {
             entry
                 .actor
                 .set_keep_session(Some(entry.files.scope(session.clone())));
@@ -16387,16 +16523,26 @@ where
     // ANY await/authentication/KDF and retain it through every existing finalization barrier.
     let unlock_generation = parse_unlock_generation(&expected_ui_generation)
         .map_err(|error| op.fail(codes::SESSION_LOCKED, error))?;
-    if state.ui_session_generation.load(Ordering::Acquire) != unlock_generation {
+    if state.ui_session_generation.load(Ordering::SeqCst) != unlock_generation {
+        return Err(op.fail(
+            codes::SESSION_LOCKED,
+            "unlock was superseded by a newer lock request; try again",
+        ));
+    }
+    // This lock covers both the already-mounted authentication path and first reload. Without it,
+    // two concurrent webview mounts can both observe `None` and start duplicate actors.
+    let _mount = state.vault_mount.lock().await;
+    // An older lock may have published G before replacing its voice session.
+    // Complete that prelude, recheck the ORIGINAL request, and only then take
+    // the original pre-auth ticket. Never refresh the ticket after verification.
+    state.native_text.preludes.wait_idle().await;
+    if state.ui_session_generation.load(Ordering::SeqCst) != unlock_generation {
         return Err(op.fail(
             codes::SESSION_LOCKED,
             "unlock was superseded by a newer lock request; try again",
         ));
     }
     let voice_ticket = voice_runtime(state).session_ticket();
-    // This lock covers both the already-mounted authentication path and first reload. Without it,
-    // two concurrent webview mounts can both observe `None` and start duplicate actors.
-    let _mount = state.vault_mount.lock().await;
     if authenticate_mounted_store(state, passphrase.as_bytes())
         .await
         .map_err(|e| op.fail(codes::VAULT_LOCKED_OUT, e.to_string()))?
@@ -16471,7 +16617,7 @@ async fn unlock_cold(
     // `state.store` to attach the on-disk sealing blob store; if it were still `None` here,
     // every reloaded server would silently keep an empty in-memory blob store and be unable to
     // read its own persisted blobs ("no peer has it" for files you uploaded before the restart).
-    *state.store.lock().await = Some(store);
+    *state.store.lock().await = Some((store).into());
     {
         let mut n = state.next_id.lock().await;
         if *n < max_id {
@@ -16566,7 +16712,7 @@ async fn resume_session_projection(
     // Lock invalidation deliberately happens before `lock_session_inner` waits for `_commit`, so
     // recheck after every actor await. If a lock began while channels were being projected, none
     // of the names/invites/channels may cross back into the stale webview.
-    if state.ui_session_generation.load(Ordering::Acquire) != generation
+    if state.ui_session_generation.load(Ordering::SeqCst) != generation
         || require_unlocked_session(state).await.is_err()
     {
         return None;
@@ -16609,15 +16755,19 @@ struct RegisteredLockSessionOutcome {
 #[derive(Debug, Serialize, PartialEq, Eq)]
 struct LockSessionOutcome {
     continuity_error: Option<String>,
+    // Not discardable continuity. Native close reports this separately and
+    // must never destroy merely because the user acknowledged snapshot loss.
+    key_work_error: Option<String>,
 }
 
 async fn lock_session_outcome_inner(
     state: &AppState,
     ui_state_json: Option<String>,
 ) -> RegisteredLockSessionOutcome {
-    let (generation, result) = lock_session_with_generation_inner(state, ui_state_json).await;
+    let (generation, snapshot, keys) =
+        lock_session_with_generation_inner(state, ui_state_json).await;
     RegisteredLockSessionOutcome {
-        continuity_error: result.err(),
+        continuity_error: snapshot.err().or_else(|| keys.err()),
         generation: generation.to_string(),
     }
 }
@@ -16627,6 +16777,10 @@ async fn lock_session_outcome_inner(
 #[derive(Debug, Serialize, PartialEq, Eq)]
 struct CloseVaultWindowOutcome {
     continuity_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    continuity_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    continuity_discardable: Option<bool>,
     history_error: Option<String>,
     deferred: bool,
     destroy_error: Option<String>,
@@ -16634,12 +16788,60 @@ struct CloseVaultWindowOutcome {
 
 /// Lock the UI session and decide whether the close may proceed. Kept separate from the actual
 /// Tauri window mutation so the security/durability policy is deterministic under unit tests.
+#[cfg(test)]
 async fn close_vault_window_plan_inner(
     state: &AppState,
     ui_state_json: Option<String>,
     discard_continuity_error: bool,
 ) -> (LockSessionOutcome, bool) {
+    close_vault_window_plan_token(
+        state,
+        ui_state_json,
+        discard_continuity_error,
+        None,
+        &mut None,
+    )
+    .await
+}
+async fn close_vault_window_plan_token(
+    state: &AppState,
+    ui_state_json: Option<String>,
+    discard_continuity_error: bool,
+    discard_revision: Option<String>,
+    receipt: &mut Option<(Option<String>, native_text::ui_state::snapshots::Notice)>,
+) -> (LockSessionOutcome, bool) {
     let _close = state.vault_window_close.lock().await;
+    // Native controller owns retry and exact outcome revision; do not latch a
+    // transient native failure in Legacy's irreversible close-warning slot.
+    if state.native_text.selected && state.vault_window_close_debt.lock().await.is_none() {
+        let capture = state
+            .native_text
+            .ui_state
+            .snapshots
+            .capture(state, ui_state_json.as_deref());
+        let token = if discard_continuity_error {
+            discard_revision
+        } else {
+            None
+        };
+        let (_, snapshot, keys) =
+            lock_session_with_capture(state, None, Some(capture), token.clone()).await;
+        let decision = state
+            .native_text
+            .ui_state
+            .snapshots
+            .close_decision(token.as_deref());
+        let outcome = LockSessionOutcome {
+            continuity_error: snapshot.err().or_else(|| decision.result.err()),
+            key_work_error: keys.err(),
+        };
+        if let Some(notice) = decision.notice {
+            *receipt = Some((decision.revision, notice));
+        }
+        let may_destroy = outcome.key_work_error.is_none()
+            && (outcome.continuity_error.is_none() || decision.acknowledged);
+        return (outcome, may_destroy);
+    }
     // Two close/lock requests can cross the bridge before the first response disables the WebView.
     // The general lock-completion slot may be replaced by a later Ctrl+L success, so close debt has
     // its own latch. Only a later close carrying the explicit loss acknowledgement may consume it.
@@ -16651,6 +16853,7 @@ async fn close_vault_window_plan_inner(
                 return (
                     LockSessionOutcome {
                         continuity_error: Some(error),
+                        key_work_error: None,
                     },
                     true,
                 );
@@ -16658,16 +16861,18 @@ async fn close_vault_window_plan_inner(
             return (
                 LockSessionOutcome {
                     continuity_error: Some(error),
+                    key_work_error: None,
                 },
                 false,
             );
         }
     }
     let had_local_snapshot = ui_state_json.is_some();
-    let (requested_generation, result) =
+    let (requested_generation, snapshot, keys) =
         lock_session_with_generation_inner(state, ui_state_json).await;
     let mut outcome = LockSessionOutcome {
-        continuity_error: result.err(),
+        continuity_error: snapshot.err(),
+        key_work_error: keys.err(),
     };
     // The commit mutex is shared by all lock callers, so an older ordinary Ctrl+L may consume and
     // validate the close's newer pending snapshot. In that interleaving this close itself sees no
@@ -16693,7 +16898,8 @@ async fn close_vault_window_plan_inner(
             *state.vault_window_close_debt.lock().await = Some(error.clone());
         }
     }
-    let may_destroy = outcome.continuity_error.is_none() || discard_continuity_error;
+    let may_destroy = outcome.key_work_error.is_none()
+        && (outcome.continuity_error.is_none() || discard_continuity_error);
     (outcome, may_destroy)
 }
 
@@ -16708,24 +16914,108 @@ async fn close_vault_window(
     state: State<'_, AppState>,
     ui_state_json: Option<String>,
     discard_continuity_error: bool,
+    discard_continuity_revision: Option<String>,
 ) -> Result<CloseVaultWindowOutcome, String> {
-    let (lock, may_destroy) =
-        close_vault_window_plan_inner(&state, ui_state_json, discard_continuity_error).await;
+    close_vault_window_with_capture(
+        &app,
+        &state,
+        ui_state_json,
+        discard_continuity_error,
+        discard_continuity_revision,
+        None,
+        &mut None,
+    )
+    .await
+}
+async fn close_vault_window_with_capture<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &AppState,
+    ui_state_json: Option<String>,
+    discard_continuity_error: bool,
+    discard_revision: Option<String>,
+    capture: Option<native_text::ui_state::snapshots::Capture>,
+    notice: &mut Option<native_text::ui_state::snapshots::Notice>,
+) -> Result<CloseVaultWindowOutcome, String> {
+    // A continuity-loss acknowledgement is never permission to bypass key
+    // drainage. This outer prelude blocks reauthentication through destroy;
+    // every close also publishes a fresh negative epoch before any await.
+    let (close_prelude, accepted) = register_vault_close_capture(state, capture).await?;
+    if state.native_text.selected {
+        close_prelude.wait_for_other_mutations().await;
+    }
+    let mut receipt = None;
+    let (mut lock, mut may_destroy) = close_vault_window_plan_token(
+        state,
+        ui_state_json,
+        discard_continuity_error,
+        discard_revision,
+        &mut receipt,
+    )
+    .await;
+    if !accepted {
+        lock.continuity_error =
+            Some("An older close request was ignored. Try closing again.".into());
+        may_destroy = false;
+        receipt = None;
+    }
+    let (close_revision, close_notice) =
+        receipt.map_or((None, None), |(revision, notice)| (revision, Some(notice)));
+    *notice = close_notice;
     if !may_destroy {
         return Ok(CloseVaultWindowOutcome {
             continuity_error: lock.continuity_error,
-            history_error: None,
+            continuity_revision: close_revision.clone(),
+            continuity_discardable: state
+                .native_text
+                .selected
+                .then_some(close_revision.is_some()),
+            history_error: lock.key_work_error,
             deferred: true,
             destroy_error: None,
         });
     }
 
     let _closing = state.vault_window_close.lock().await;
-    let history = match shutdown::freeze_servers(&state).await {
+    if let Err(error) = native_text::retirement::older_than(
+        state,
+        state.ui_session_generation.load(Ordering::SeqCst),
+    )
+    .await
+    {
+        return Ok(CloseVaultWindowOutcome {
+            continuity_error: lock.continuity_error,
+            continuity_revision: close_revision.clone(),
+            continuity_discardable: state
+                .native_text
+                .selected
+                .then_some(close_revision.is_some()),
+            history_error: Some(error),
+            deferred: true,
+            destroy_error: None,
+        });
+    }
+
+    // Native Sources count final preparations as physical work. Never hold the
+    // Legacy barrier's UI/table guards while waiting for that work to drain.
+    // The close prelude above has already made closure irreversible; native
+    // rows stay canonically installed (but fenced) if any stage needs a retry.
+    let history_result = if state.native_text.selected {
+        native_text::sources::close_server_rows(state, &SystemClock)
+            .await
+            .map(|()| None)
+    } else {
+        shutdown::freeze_servers(state).await.map(Some)
+    };
+    let history = match history_result {
         Ok(barrier) => barrier,
         Err(error) => {
             return Ok(CloseVaultWindowOutcome {
                 continuity_error: lock.continuity_error,
+                continuity_revision: close_revision.clone(),
+                continuity_discardable: state
+                    .native_text
+                    .selected
+                    .then_some(close_revision.is_some()),
                 history_error: Some(error),
                 deferred: true,
                 destroy_error: None,
@@ -16737,14 +17027,51 @@ async fn close_vault_window(
         None => Some("the main window no longer exists".to_string()),
     };
     if destroy_error.is_none() {
-        history.stop();
+        if let Some(history) = history {
+            history.stop();
+        }
     }
     Ok(CloseVaultWindowOutcome {
         continuity_error: lock.continuity_error,
+        continuity_revision: close_revision.clone(),
+        continuity_discardable: state
+            .native_text
+            .selected
+            .then_some(close_revision.is_some()),
         history_error: None,
         deferred: false,
         destroy_error,
     })
+}
+
+/// Register the unconditional close fence before consulting any previously
+/// acknowledged continuity debt. The returned native guard must outlive the
+/// final key drain and actual window destruction (or deferred-close response).
+#[cfg(test)]
+async fn register_vault_close(
+    state: &AppState,
+) -> Result<native_text::retirement::PreludeGuard, String> {
+    Ok(register_vault_close_capture(state, None).await?.0)
+}
+async fn register_vault_close_capture(
+    state: &AppState,
+    capture: Option<native_text::ui_state::snapshots::Capture>,
+) -> Result<(native_text::retirement::PreludeGuard, bool), String> {
+    let guard = state
+        .native_text
+        .preludes
+        .begin_close()
+        .map_err(str::to_string)?;
+    let generation = register_ui_lock_request(state);
+    let accepted = capture.is_none_or(|capture| {
+        state
+            .native_text
+            .ui_state
+            .snapshots
+            .register(state, capture, generation)
+    });
+    *state.session_resumable.lock().await = false;
+    Ok((guard, accepted))
 }
 
 /// Testable core of the explicit lock operation. Closing the command boundary is unconditional:
@@ -16752,9 +17079,8 @@ async fn close_vault_window(
 /// sensitive webview session open as a side effect of that error.
 #[cfg(test)]
 async fn lock_session_inner(state: &AppState, ui_state_json: Option<String>) -> Result<(), String> {
-    lock_session_with_generation_inner(state, ui_state_json)
-        .await
-        .1
+    let (_, snapshot, keys) = lock_session_with_generation_inner(state, ui_state_json).await;
+    snapshot.and(keys)
 }
 
 /// Register the lock before calling any hook that may acquire a mutex. The separately committed
@@ -16763,24 +17089,17 @@ async fn lock_session_inner(state: &AppState, ui_state_json: Option<String>) -> 
 fn register_ui_lock_request(state: &AppState) -> u64 {
     let generation = state
         .ui_session_generation
-        .fetch_add(1, Ordering::AcqRel)
+        .fetch_add(1, Ordering::SeqCst)
         .wrapping_add(1);
-    state.session_lock_requested.store(true, Ordering::Release);
+    state.session_lock_requested.store(true, Ordering::SeqCst);
     keep_session::revoke(state);
     state.admin_chat_ledger.retire();
     generation
 }
 
-/// Execute one lock request and return the exact generation it registered. Native window-close
-/// policy needs this provenance because a different caller may consume the request's snapshot
-/// while holding the shared commit mutex.
-async fn lock_session_with_generation_inner(
-    state: &AppState,
-    ui_state_json: Option<String>,
-) -> (u64, Result<(), String>) {
-    // Revoke old work before any await, then cross the separate event and command fences. Once
-    // this function returns, an old join can neither emit its private reply nor register/persist.
-    let lock_generation = register_ui_lock_request(state);
+/// Early revocation also runs when bounded native ingress refuses scheduling.
+/// It grants no completion/drainage receipt and holds no persistence guard.
+fn revoke_ui_lock_owners(state: &AppState) {
     state
         .voice_authority
         .lock()
@@ -16795,6 +17114,64 @@ async fn lock_session_with_generation_inner(
     // Cancellation destroys authority and must not wait behind the persistence transaction. This
     // also retires unclaimed registrations left by a reloaded/crashed webview.
     cancel_all_inline_downloads(state);
+}
+
+/// Execute one lock request and return the exact generation it registered. Native window-close
+/// policy needs this provenance because a different caller may consume the request's snapshot
+/// while holding the shared commit mutex.
+async fn lock_session_with_generation_inner(
+    state: &AppState,
+    ui_state_json: Option<String>,
+) -> (u64, Result<(), String>, Result<(), String>) {
+    let capture = if state.native_text.selected {
+        Some(
+            state
+                .native_text
+                .ui_state
+                .snapshots
+                .capture(state, ui_state_json.as_deref()),
+        )
+    } else {
+        None
+    };
+    let legacy = if state.native_text.selected {
+        None
+    } else {
+        ui_state_json
+    };
+    lock_session_with_capture(state, legacy, capture, None).await
+}
+async fn lock_session_with_capture(
+    state: &AppState,
+    ui_state_json: Option<String>,
+    capture: Option<native_text::ui_state::snapshots::Capture>,
+    discard_revision: Option<String>,
+) -> (u64, Result<(), String>, Result<(), String>) {
+    // Revoke old work before any await, then cross the separate event and command fences. Once
+    // this function returns, an old join can neither emit its private reply nor register/persist.
+    // Atomic prelude registration precedes SC epoch publication; no later
+    // authenticated unlock can overtake an older snapshot/resumable mutation.
+    let prelude = state.native_text.preludes.begin();
+    let lock_generation = register_ui_lock_request(state);
+    let prelude = match prelude {
+        Ok(prelude) => prelude,
+        Err(error) => return (lock_generation, Ok(()), Err(error.into())),
+    };
+    let native_input_accepted = capture.is_none_or(|capture| {
+        state
+            .native_text
+            .ui_state
+            .snapshots
+            .register(state, capture, lock_generation)
+    });
+    #[cfg(test)]
+    {
+        let edge = state.native_text.lock_prelude_edge.lock().unwrap().clone();
+        if let Some(edge) = edge {
+            edge.wait_once().await;
+        }
+    }
+    revoke_ui_lock_owners(state);
     // Register before either session mutex await. A later close from a remounted webview carries no
     // JS snapshot, but it can still save this exact native transaction if it reaches commit first.
     if let Some(json) = ui_state_json {
@@ -16811,6 +17188,8 @@ async fn lock_session_with_generation_inner(
         }
     }
     *state.session_resumable.lock().await = false;
+    drop(prelude); // mutation quiescence, NOT proof that the snapshot was saved
+
     // Native snapshot custody must precede BOTH publication fences. If this future disappears
     // while waiting for an emission, a later snapshot-less close still owns the exact bytes.
     // Detached owners were revoked before the first await above. Release this short guard
@@ -16818,56 +17197,106 @@ async fn lock_session_with_generation_inner(
     {
         let _events = state.ui_event_commit.lock().await;
     }
+    // Snapshot custody and the early resumable=false assignment precede this
+    // await. The owned drain outlives a lost waiter; no UI/Store writer is held
+    // while actual admitted Root key work finishes.
+    let key_result = native_text::retirement::older_than(state, lock_generation).await;
+    #[cfg(test)]
+    {
+        let edge = state.native_text.lock_commit_edge.lock().unwrap().clone();
+        if let Some(edge) = edge {
+            edge.wait_once().await;
+        }
+    }
+    let io = state.native_text.ui_state.lock_lane().await;
+    let (io, native_save, _) = if state.native_text.selected {
+        native_text::ui_state::snapshots::flush(
+            state,
+            io,
+            native_text::ui_state::snapshots::Purpose::Lock {
+                keys_drained: key_result.is_ok(),
+                discard_token: discard_revision.as_deref(),
+            },
+        )
+        .await
+    } else {
+        (io, Ok(()), None)
+    };
+    let _io = io;
     let _session_commit = state.ui_session_commit.lock().await;
+    // A correct same/newer-generation authentication may have acquired commit
+    // first after all lock preludes completed. Its finalizer already settled
+    // pending continuity. Do not clear that newly opened session's state.
+    let current = state.ui_session_generation.load(Ordering::SeqCst);
+    if current >= lock_generation
+        && state.ui_authorized_generation.load(Ordering::SeqCst) == current
+        && !state.session_lock_requested.load(Ordering::SeqCst)
+        && *state.session_resumable.lock().await
+    {
+        return (
+            lock_generation,
+            if native_input_accepted {
+                Ok(())
+            } else {
+                Err("An older lock request was ignored.".into())
+            },
+            key_result,
+        );
+    }
     // Close the registration/early-sweep race as a second line of defence. Registration itself
     // checks `session_lock_requested` while holding the cancellation table, but this post-commit
     // drain also retires any future registration path that was already inside the UI commit seam.
     cancel_all_inline_downloads(state);
-    for entry in state.servers.lock().await.values() {
+    for entry in state.servers.lock().await.legacy_values() {
         entry.actor.clear_studio_previews();
     }
     // Save the final draft/read snapshot and close IPC as one ordered native operation. Two
     // separate fire-and-forget commands could race, causing the save to arrive after the lock and
     // be correctly rejected by the new session gate.
-    let pending_snapshot = state.pending_ui_lock_snapshot.lock().await.take();
-    let completed_generation = pending_snapshot
-        .as_ref()
-        .map(|snapshot| snapshot.generation);
-    let (save_result, retry_snapshot) = match pending_snapshot {
-        Some(snapshot) => match validate_ui_state_json(&snapshot.json) {
-            Err(error) => (Err(error), None),
-            Ok(()) => {
-                let guard = state.store.lock().await;
-                let result = match guard.as_ref() {
-                    Some(store) => store
-                        .save_ui_state(snapshot.json.as_bytes(), &mut OsCryptoRng)
-                        .map_err(|error| error.to_string()),
-                    None => Err("unlock the vault before saving UI state".to_string()),
-                };
-                let retry = result.as_ref().err().map(|_| snapshot);
-                (result, retry)
-            }
-        },
-        None => (Ok(()), None),
-    };
-    if let Some(snapshot) = retry_snapshot {
-        // Disk failures can be transient. Retain exact bytes for the warning's second close or a
-        // remounted webview; malformed input is intentionally not retained and retried forever.
-        let mut pending = state.pending_ui_lock_snapshot.lock().await;
-        let replace = match pending.as_ref() {
-            Some(current) => current.generation <= snapshot.generation,
-            None => true,
+    let save_result = if state.native_text.selected {
+        native_save
+    } else {
+        let pending_snapshot = state.pending_ui_lock_snapshot.lock().await.take();
+        let completed_generation = pending_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.generation);
+        let (save_result, retry_snapshot) = match pending_snapshot {
+            Some(snapshot) => match validate_ui_state_json(&snapshot.json) {
+                Err(error) => (Err(error), None),
+                Ok(()) => {
+                    let guard = state.store.lock().await;
+                    let result = match guard.as_ref().and_then(MountedVault::as_legacy) {
+                        Some(store) => store
+                            .save_ui_state(snapshot.json.as_bytes(), &mut OsCryptoRng)
+                            .map_err(|error| error.to_string()),
+                        None => Err("unlock the vault before saving UI state".to_string()),
+                    };
+                    let retry = result.as_ref().err().map(|_| snapshot);
+                    (result, retry)
+                }
+            },
+            None => (Ok(()), None),
         };
-        if replace {
-            *pending = Some(snapshot);
+        if let Some(snapshot) = retry_snapshot {
+            // Disk failures can be transient. Retain exact bytes for the warning's second close or a
+            // remounted webview; malformed input is intentionally not retained and retried forever.
+            let mut pending = state.pending_ui_lock_snapshot.lock().await;
+            let replace = match pending.as_ref() {
+                Some(current) => current.generation <= snapshot.generation,
+                None => true,
+            };
+            if replace {
+                *pending = Some(snapshot);
+            }
         }
-    }
-    if let Some(generation) = completed_generation {
-        *state.last_ui_lock_completion.lock().await = Some(UiLockCompletion {
-            generation,
-            error: save_result.clone().err(),
-        });
-    }
+        if let Some(generation) = completed_generation {
+            *state.last_ui_lock_completion.lock().await = Some(UiLockCompletion {
+                generation,
+                error: save_result.clone().err(),
+            });
+        }
+        save_result
+    };
     // The media cache holds decrypted chunks of shared files. Locking must drop them along with
     // the rest of the session's plaintext, not leave a film resident until something evicts it.
     state.media_cache.lock().await.clear();
@@ -16884,7 +17313,15 @@ async fn lock_session_with_generation_inner(
     for upload in abandoned {
         discard_pending_upload(upload).await;
     }
-    (lock_generation, save_result)
+    (
+        lock_generation,
+        if native_input_accepted {
+            save_result
+        } else {
+            Err("An older lock request was ignored. Try again.".into())
+        },
+        key_result,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -16967,7 +17404,7 @@ async fn ceremony_origin(state: &AppState) -> Result<DeviceId, String> {
     let actor = {
         let servers = state.servers.lock().await;
         let (_, entry) = servers
-            .iter()
+            .legacy_iter()
             .min_by_key(|(id, _)| **id)
             .ok_or_else(|| "join or found a server before pairing a device".to_string())?;
         entry.actor.clone()
@@ -17016,7 +17453,7 @@ async fn pairing_read(state: State<'_, AppState>, blob: String) -> Result<Pairin
     let (servers, dm_count) = {
         let guard = state.servers.lock().await;
         let mut names: Vec<(u64, String, bool)> = guard
-            .iter()
+            .legacy_iter()
             .map(|(id, e)| (*id, e.name.clone(), e.is_dm))
             .collect();
         names.sort_by_key(|(id, _, _)| *id);
@@ -17059,7 +17496,7 @@ async fn pairing_decline(state: State<'_, AppState>) -> Result<(), String> {
 async fn persist_pairing_ledger(state: &AppState) {
     let snapshot = state.pairing_ledger.lock().await.snapshot();
     let guard = state.store.lock().await;
-    if let Some(store) = guard.as_ref() {
+    if let Some(store) = guard.as_ref().and_then(MountedVault::as_legacy) {
         let mut rng = OsCryptoRng;
         if let Err(e) = store.save_pairing_ledger(&snapshot, &mut rng) {
             tracing::error!(target: "catcoms_app", error = %e, "IDENTITY.PAIRING_LEDGER.SEAL_FAILED");
@@ -17109,7 +17546,7 @@ async fn pairing_mint(
     let mut servers: Vec<GrantSource> = {
         let guard = state.servers.lock().await;
         guard
-            .iter()
+            .legacy_iter()
             .map(|(id, e)| GrantSource {
                 id: *id,
                 name: e.name.clone(),
@@ -18937,7 +19374,7 @@ fn record_ui_log(level: &str, message: String, repeats: u32) -> bool {
 
 /// Build and run the Tauri application.
 pub fn run() {
-    let state = AppState::default();
+    let state = native_text::initial_state();
     let mut context = tauri::generate_context!();
     // Tauri creates configured windows BEFORE calling user setup. Bind the paid socket and
     // add only its exact numeric-loopback source before build/run, never in a late setup hook.
@@ -18969,7 +19406,7 @@ pub fn run() {
             let expected_generation = handle
                 .state::<AppState>()
                 .ui_session_generation
-                .load(Ordering::Acquire);
+                .load(Ordering::SeqCst);
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<AppState>();
                 // Capture authorization before any actor/disk await, then hold its native commit
@@ -19031,233 +19468,235 @@ pub fn run() {
             tracing::info!(target: "catcoms_app", "STARTUP.SETUP.COMPLETE");
             Ok(())
         })
-        .invoke_handler(admin_chat_ledger::with_commands(tauri::generate_handler![
-            vault_exists,
-            resume_session,
-            lock_session,
-            close_vault_window,
-            unlock,
-            found_server,
-            preview_invite,
-            group_policy::group_communication_mode,
-            join_server,
-            apply_join_reply,
-            leave_server,
-            open_channel,
-            get_channels,
-            get_invite,
-            mint_invite_fresh,
-            check_invite_routes,
-            rename_server,
-            get_members,
-            set_profile,
-            get_profiles,
-            set_livery,
-            set_server_icon,
-            set_server_cursor,
-            set_server_banner,
-            get_livery,
-            set_shared_server_name,
-            get_file_size_limit,
-            set_file_size_limit,
-            set_member_badge,
-            get_badges,
-            get_devices,
-            begin_file_upload,
-            push_file_chunk,
-            finish_file_upload,
-            cancel_file_upload,
-            get_files,
-            get_storage_health,
-            repair_storage,
-            cache_housekeeping::get_cache_status,
-            cache_housekeeping::set_cache_limit,
-            get_online_members,
-            get_member_routes,
-            manual_fallback_redial,
-            mint_member_recovery,
-            apply_member_recovery,
-            get_delivery,
-            dm_stats,
-            send_dm_invite,
-            get_dm_requests,
-            send_call_signal,
-            call_media_key,
-            dismiss_dm_request,
-            begin_inline_download,
-            cancel_inline_download,
-            download_file,
-            file_available,
-            get_kept_files,
-            keep_file,
-            request_kept_file,
-            set_kept_paused,
-            forget_kept_file,
-            retry_kept_file,
-            delete_file,
-            set_file_expiry,
-            get_file_usage,
-            get_wiki_pinned_cids,
-            creative_blobs::publish_pix,
-            studio_exports::publish_pixa,
-            studio_exports::export_studio_gif,
-            creative_blobs::request_blob_bounded,
-            studio::studio_list,
-            studio::studio_read,
-            studio::inspection::studio_overlay_read,
-            studio::lifecycle::studio_overlay_lifecycle,
-            studio::lifecycle::studio_overlay_archive_read,
-            studio::lifecycle::studio_overlay_archive_export,
-            studio::lifecycle::studio_overlay_export,
-            studio::lifecycle::studio_overlay_archive,
-            studio::lifecycle::studio_overlay_archive_release,
-            studio::copy::studio_overlay_copy_preview,
-            studio::copy::studio_overlay_copy_apply,
-            studio::lifecycle::studio_overlay_dispose,
-            studio::lifecycle::studio_unconfirmed_overlay_save_begin,
-            studio::lifecycle::studio_unconfirmed_overlay_save,
-            studio::lifecycle::studio_closing_overlay_save_begin,
-            studio::lifecycle::studio_closing_overlay_save,
-            studio::studio_create,
-            studio::studio_apply,
-            studio::studio_apply_index,
-            studio::recovery::studio_recovery_list,
-            studio::fault::studio_fault_read,
-            studio::fault::studio_fault_repair,
-            studio::recovery::studio_recovery_preview,
-            studio::recovery::studio_recovery_apply,
-            studio::recovery::studio_recovery_restore_pointer,
-            studio::recovery::studio_recovery_read,
-            studio::recovery::studio_recovery_export,
-            studio::recovery::studio_recovery_acknowledge,
-            post_status,
-            get_statuses,
-            edit_status,
-            delete_status,
-            toggle_status_reaction,
-            set_status_pin,
-            get_status_policy,
-            set_status_policy,
-            create_event,
-            delete_event,
-            get_events,
-            get_wiki_pages,
-            get_wiki_map,
-            get_wiki_page,
-            save_wiki_page,
-            get_wiki_meta,
-            set_wiki_format,
-            delete_wiki_page,
-            rename_wiki_page,
-            get_wiki_history,
-            get_wiki_pending,
-            get_wiki_review_days,
-            set_wiki_review_days,
-            approve_wiki_edit,
-            reject_wiki_edit,
-            restore_wiki_page,
-            get_roles,
-            get_moderation,
-            warn_message,
-            create_kick_case,
-            cast_kick_vote,
-            resolve_kick_case,
-            get_join_attempts,
-            get_connectivity,
-            get_call_transport,
-            map_call_port,
-            prepare_call_mapping_controller,
-            prepare_call_mapping_owner,
-            activate_call_mapping_owner,
-            end_call_mapping_owner,
-            prepare_voice_controller,
-            prepare_voice_owner,
-            activate_voice_owner,
-            end_voice_owner,
-            admit_voice_crypto,
-            settle_voice_crypto,
-            voice_join_key::admit_voice_join_key,
-            voice_join_key::publish_voice_join_key,
-            voice_join_key::settle_voice_join_key,
-            voice_handoff::commands::setup_voice_channel,
-            voice_handoff::commands::read_voice_channel_work,
-            voice_handoff::commands::settle_voice_channel_setup,
-            voice_handoff::commands::collect_voice_channel,
-            default_route_address,
-            unmap_call_port,
-            get_switchboard_status,
-            set_switchboard_offered,
-            get_ui_state,
-            save_ui_state,
-            create_backup,
-            change_vault_secret,
-            get_debug_logging,
-            set_debug_logging,
-            test_debug_logging,
-            get_console_log,
-            clear_console_log,
-            get_capture_config,
-            set_capture_mode,
-            set_section_capture,
-            reset_section_capture,
-            open_public_diagnostics_issue,
-            get_event_cursor,
-            get_task_health,
-            save_diagnostics_report,
-            validate_diagnostics_report,
-            log_ui,
-            log_ui_batch,
-            record_ui_events,
-            set_admin,
-            remove_member,
-            revoke_device,
-            send_message,
-            durable_chat::durable_send_context,
-            durable_chat::durable_mutation_context,
-            durable_chat::stop_durable_chat,
-            edit_message,
-            delete_message,
-            toggle_reaction,
-            set_pin,
-            set_channel_topic,
-            get_channel_topic,
-            jukebox_add,
-            jukebox_add_link,
-            jukebox_remove,
-            get_jukebox,
-            get_inbox,
-            get_messages,
-            get_message_tail,
-            get_messages_by_id,
-            get_message_page,
-            get_pinned_messages,
-            get_channel_heads,
-            pairing_begin,
-            pairing_read,
-            pairing_mint,
-            pairing_decline,
-            pairing_open,
-            pairing_join,
-            open_issue_url,
-            open_external_url,
-            save_and_open_space_guide,
-            save_space_layout,
-            save_jam_sheet,
-            save_group_file,
-            private_downloads::get_private_downloads,
-            private_downloads::set_private_download_paused,
-            private_downloads::retry_private_download,
-            private_downloads::cancel_private_download,
-            private_downloads::check_saved_download,
-            private_downloads::reveal_saved_download,
-            saved_files::get_saved_files,
-            saved_files::check_saved_files,
-            saved_files::reveal_saved_file,
-            saved_files::forget_saved_file,
-            saved_files::reset_saved_files,
-            saved_files::get_saved_files_limit,
-            saved_files::set_saved_files_limit
-        ]))
+        .invoke_handler(native_text::with_commands(
+            admin_chat_ledger::with_commands(tauri::generate_handler![
+                vault_exists,
+                resume_session,
+                lock_session,
+                close_vault_window,
+                unlock,
+                found_server,
+                preview_invite,
+                group_policy::group_communication_mode,
+                join_server,
+                apply_join_reply,
+                leave_server,
+                open_channel,
+                get_channels,
+                get_invite,
+                mint_invite_fresh,
+                check_invite_routes,
+                rename_server,
+                get_members,
+                set_profile,
+                get_profiles,
+                set_livery,
+                set_server_icon,
+                set_server_cursor,
+                set_server_banner,
+                get_livery,
+                set_shared_server_name,
+                get_file_size_limit,
+                set_file_size_limit,
+                set_member_badge,
+                get_badges,
+                get_devices,
+                begin_file_upload,
+                push_file_chunk,
+                finish_file_upload,
+                cancel_file_upload,
+                get_files,
+                get_storage_health,
+                repair_storage,
+                cache_housekeeping::get_cache_status,
+                cache_housekeeping::set_cache_limit,
+                get_online_members,
+                get_member_routes,
+                manual_fallback_redial,
+                mint_member_recovery,
+                apply_member_recovery,
+                get_delivery,
+                dm_stats,
+                send_dm_invite,
+                get_dm_requests,
+                send_call_signal,
+                call_media_key,
+                dismiss_dm_request,
+                begin_inline_download,
+                cancel_inline_download,
+                download_file,
+                file_available,
+                get_kept_files,
+                keep_file,
+                request_kept_file,
+                set_kept_paused,
+                forget_kept_file,
+                retry_kept_file,
+                delete_file,
+                set_file_expiry,
+                get_file_usage,
+                get_wiki_pinned_cids,
+                creative_blobs::publish_pix,
+                studio_exports::publish_pixa,
+                studio_exports::export_studio_gif,
+                creative_blobs::request_blob_bounded,
+                studio::studio_list,
+                studio::studio_read,
+                studio::inspection::studio_overlay_read,
+                studio::lifecycle::studio_overlay_lifecycle,
+                studio::lifecycle::studio_overlay_archive_read,
+                studio::lifecycle::studio_overlay_archive_export,
+                studio::lifecycle::studio_overlay_export,
+                studio::lifecycle::studio_overlay_archive,
+                studio::lifecycle::studio_overlay_archive_release,
+                studio::copy::studio_overlay_copy_preview,
+                studio::copy::studio_overlay_copy_apply,
+                studio::lifecycle::studio_overlay_dispose,
+                studio::lifecycle::studio_unconfirmed_overlay_save_begin,
+                studio::lifecycle::studio_unconfirmed_overlay_save,
+                studio::lifecycle::studio_closing_overlay_save_begin,
+                studio::lifecycle::studio_closing_overlay_save,
+                studio::studio_create,
+                studio::studio_apply,
+                studio::studio_apply_index,
+                studio::recovery::studio_recovery_list,
+                studio::fault::studio_fault_read,
+                studio::fault::studio_fault_repair,
+                studio::recovery::studio_recovery_preview,
+                studio::recovery::studio_recovery_apply,
+                studio::recovery::studio_recovery_restore_pointer,
+                studio::recovery::studio_recovery_read,
+                studio::recovery::studio_recovery_export,
+                studio::recovery::studio_recovery_acknowledge,
+                post_status,
+                get_statuses,
+                edit_status,
+                delete_status,
+                toggle_status_reaction,
+                set_status_pin,
+                get_status_policy,
+                set_status_policy,
+                create_event,
+                delete_event,
+                get_events,
+                get_wiki_pages,
+                get_wiki_map,
+                get_wiki_page,
+                save_wiki_page,
+                get_wiki_meta,
+                set_wiki_format,
+                delete_wiki_page,
+                rename_wiki_page,
+                get_wiki_history,
+                get_wiki_pending,
+                get_wiki_review_days,
+                set_wiki_review_days,
+                approve_wiki_edit,
+                reject_wiki_edit,
+                restore_wiki_page,
+                get_roles,
+                get_moderation,
+                warn_message,
+                create_kick_case,
+                cast_kick_vote,
+                resolve_kick_case,
+                get_join_attempts,
+                get_connectivity,
+                get_call_transport,
+                map_call_port,
+                prepare_call_mapping_controller,
+                prepare_call_mapping_owner,
+                activate_call_mapping_owner,
+                end_call_mapping_owner,
+                prepare_voice_controller,
+                prepare_voice_owner,
+                activate_voice_owner,
+                end_voice_owner,
+                admit_voice_crypto,
+                settle_voice_crypto,
+                voice_join_key::admit_voice_join_key,
+                voice_join_key::publish_voice_join_key,
+                voice_join_key::settle_voice_join_key,
+                voice_handoff::commands::setup_voice_channel,
+                voice_handoff::commands::read_voice_channel_work,
+                voice_handoff::commands::settle_voice_channel_setup,
+                voice_handoff::commands::collect_voice_channel,
+                default_route_address,
+                unmap_call_port,
+                get_switchboard_status,
+                set_switchboard_offered,
+                get_ui_state,
+                save_ui_state,
+                create_backup,
+                change_vault_secret,
+                get_debug_logging,
+                set_debug_logging,
+                test_debug_logging,
+                get_console_log,
+                clear_console_log,
+                get_capture_config,
+                set_capture_mode,
+                set_section_capture,
+                reset_section_capture,
+                open_public_diagnostics_issue,
+                get_event_cursor,
+                get_task_health,
+                save_diagnostics_report,
+                validate_diagnostics_report,
+                log_ui,
+                log_ui_batch,
+                record_ui_events,
+                set_admin,
+                remove_member,
+                revoke_device,
+                send_message,
+                durable_chat::durable_send_context,
+                durable_chat::durable_mutation_context,
+                durable_chat::stop_durable_chat,
+                edit_message,
+                delete_message,
+                toggle_reaction,
+                set_pin,
+                set_channel_topic,
+                get_channel_topic,
+                jukebox_add,
+                jukebox_add_link,
+                jukebox_remove,
+                get_jukebox,
+                get_inbox,
+                get_messages,
+                get_message_tail,
+                get_messages_by_id,
+                get_message_page,
+                get_pinned_messages,
+                get_channel_heads,
+                pairing_begin,
+                pairing_read,
+                pairing_mint,
+                pairing_decline,
+                pairing_open,
+                pairing_join,
+                open_issue_url,
+                open_external_url,
+                save_and_open_space_guide,
+                save_space_layout,
+                save_jam_sheet,
+                save_group_file,
+                private_downloads::get_private_downloads,
+                private_downloads::set_private_download_paused,
+                private_downloads::retry_private_download,
+                private_downloads::cancel_private_download,
+                private_downloads::check_saved_download,
+                private_downloads::reveal_saved_download,
+                saved_files::get_saved_files,
+                saved_files::check_saved_files,
+                saved_files::reveal_saved_file,
+                saved_files::forget_saved_file,
+                saved_files::reset_saved_files,
+                saved_files::get_saved_files_limit,
+                saved_files::set_saved_files_limit
+            ]),
+        ))
         .build(context)
         .expect("error while building the Mewtual desktop app");
     app.run(move |_, event| {
@@ -19376,7 +19815,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState::default());
         *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"kept test", &mut OsCryptoRng).unwrap());
+            Some((ServerStore::open(root.path(), b"kept test", &mut OsCryptoRng).unwrap()).into());
         *state.session_resumable.lock().await = true;
         let server = Server::found(
             Hub::new().join(PeerId::from_u64(72)),
@@ -19394,7 +19833,7 @@ mod tests {
             .servers
             .lock()
             .await
-            .insert(7, snapshot_test_entry(2, actor.clone(), group, device));
+            .install_legacy_fixture(7, snapshot_test_entry(2, actor.clone(), group, device));
         let generation = unlocked_ui_session_generation(&state).await.unwrap();
         let called = AtomicBool::new(false);
         let error = commit_kept_command(&state, 7, 1, generation, async {
@@ -19866,7 +20305,7 @@ mod tests {
             catcoms_app::ServerStore::open(dir.path(), b"passphrase", &mut catcoms_rt::OsCryptoRng)
                 .expect("a fresh vault opens");
         *state.session_resumable.lock().await = true;
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         assert_eq!(actor_of(&state, 1).await.unwrap_err(), ActorLookup::NotOpen);
     }
 
@@ -20683,7 +21122,7 @@ mod tests {
             tokio::spawn(
                 async move { lock_session_with_generation_inner(&locking_state, None).await },
             );
-        while !state.session_lock_requested.load(Ordering::Acquire) {
+        while !state.session_lock_requested.load(Ordering::SeqCst) {
             tokio::task::yield_now().await;
         }
 
@@ -20691,8 +21130,9 @@ mod tests {
             .unwrap_err()
             .contains("locked"));
         drop(admitted_begin);
-        let (_generation, result) = locking.await.unwrap();
-        result.unwrap();
+        let (_generation, snapshot, keys) = locking.await.unwrap();
+        snapshot.unwrap();
+        keys.unwrap();
         assert!(state
             .inline_downloads
             .lock()
@@ -21070,7 +21510,7 @@ mod tests {
         let downloads = tempfile::tempdir().unwrap();
         let state = AppState::default();
         let store = ServerStore::open(vault.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = true;
         let old_generation = unlocked_ui_session_generation(&state).await.unwrap();
         let (mut file, staging, final_path) =
@@ -21099,7 +21539,7 @@ mod tests {
         assert!(authenticate_mounted_store(&state, b"correct horse")
             .await
             .unwrap());
-        let new_generation = state.ui_session_generation.load(Ordering::Acquire);
+        let new_generation = state.ui_session_generation.load(Ordering::SeqCst);
         finalize_unlock_session(&state, new_generation, true)
             .await
             .unwrap();
@@ -21362,7 +21802,7 @@ mod tests {
         let state = Arc::new(AppState::default());
         let dir = tempfile::tempdir().unwrap();
         let store = ServerStore::open(dir.path(), b"passphrase", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = true;
         let generation = unlocked_ui_session_generation(&state).await.unwrap();
 
@@ -21388,7 +21828,7 @@ mod tests {
             "stale join work must not enter the registration/persistence boundary"
         );
         assert_ne!(
-            state.ui_session_generation.load(Ordering::Acquire),
+            state.ui_session_generation.load(Ordering::SeqCst),
             generation
         );
     }
@@ -21718,7 +22158,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = true;
         let generation = unlocked_ui_session_generation(&state).await.unwrap();
         state.media_cache.lock().await.push(cached(1, "cid", 0));
@@ -22876,7 +23316,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = true;
         state.storage_health.lock().await.insert(
             7,
@@ -22905,6 +23345,8 @@ mod tests {
             .lock()
             .await
             .as_ref()
+            .unwrap()
+            .as_legacy()
             .unwrap()
             .load_ui_state()
             .unwrap();
@@ -22978,8 +23420,9 @@ mod tests {
     async fn ordinary_lock_completion_cannot_erase_native_close_debt() {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
-        *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.store.lock().await = Some(
+            (ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap()).into(),
+        );
         *state.session_resumable.lock().await = true;
 
         let (failed_close, may_destroy) =
@@ -23020,7 +23463,7 @@ mod tests {
         let ordinary = tokio::spawn(async move {
             lock_session_inner(&ordinary_state, Some("ordinary-invalid".into())).await
         });
-        while state.ui_session_generation.load(Ordering::Acquire) < 1
+        while state.ui_session_generation.load(Ordering::SeqCst) < 1
             || state
                 .pending_ui_lock_snapshot
                 .lock()
@@ -23036,7 +23479,7 @@ mod tests {
         let closing = tokio::spawn(async move {
             close_vault_window_plan_inner(&close_state, Some("close-invalid".into()), false).await
         });
-        while state.ui_session_generation.load(Ordering::Acquire) < 2
+        while state.ui_session_generation.load(Ordering::SeqCst) < 2
             || state
                 .pending_ui_lock_snapshot
                 .lock()
@@ -23066,15 +23509,16 @@ mod tests {
     async fn successful_reunlock_resolves_old_native_close_debt() {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
-        *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.store.lock().await = Some(
+            (ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap()).into(),
+        );
         *state.session_resumable.lock().await = true;
         let (failed, may_destroy) =
             close_vault_window_plan_inner(&state, Some("not json".into()), false).await;
         assert!(failed.continuity_error.is_some());
         assert!(!may_destroy);
 
-        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
         assert!(finalize_unlock_session(&state, generation, false)
             .await
             .is_err());
@@ -23100,7 +23544,7 @@ mod tests {
         store
             .save_ui_state(BEFORE_CANCELLED_LOCK_UI_STATE.as_bytes(), &mut OsCryptoRng)
             .unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = true;
         let events = state.ui_event_commit.lock().await;
         let commands = state.ui_session_commit.lock().await;
@@ -23141,6 +23585,8 @@ mod tests {
                 .await
                 .as_ref()
                 .unwrap()
+                .as_legacy()
+                .unwrap()
                 .load_ui_state()
                 .unwrap(),
             latest.as_bytes(),
@@ -23161,6 +23607,8 @@ mod tests {
                 .lock()
                 .await
                 .as_ref()
+                .unwrap()
+                .as_legacy()
                 .unwrap()
                 .load_ui_state()
                 .unwrap(),
@@ -23206,7 +23654,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = true;
         let generation = unlocked_ui_session_generation(&state).await.unwrap();
         let late_report =
@@ -23257,7 +23705,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap());
+            Some((ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap()).into());
         *state.session_resumable.lock().await = true;
         let server = Server::found(
             Hub::new().join(PeerId::from_u64(71)),
@@ -23275,8 +23723,8 @@ mod tests {
             .servers
             .lock()
             .await
-            .insert(7, snapshot_test_entry(1, actor.clone(), group, device));
-        let generation = state.ui_session_generation.load(Ordering::Acquire);
+            .install_legacy_fixture(7, snapshot_test_entry(1, actor.clone(), group, device));
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
         finalize_unlock_session(&state, generation, false)
             .await
             .unwrap();
@@ -23344,21 +23792,21 @@ mod tests {
         let candidate = prepare_voice_owner_inner(&state, controller, 7, room)
             .await
             .unwrap();
-        state.servers.lock().await.get_mut(&7).unwrap().instance = 2;
+        state.servers.lock().await.legacy_mut(&7).unwrap().instance = 2;
         assert!(activate_voice_owner_inner(&state, candidate).await.is_err());
         assert!(
             admit_voice_crypto_inner(&state, second.owner.clone(), "generate".into(), 128)
                 .await
                 .is_err()
         );
-        state.servers.lock().await.get_mut(&7).unwrap().instance = 1;
+        state.servers.lock().await.legacy_mut(&7).unwrap().instance = 1;
         let (_download, download_cancelled) = claim_internal_inline_download(&state).unwrap();
         let mapping_owner = {
             let mut mappings = state.media_mappings.lock().unwrap();
             let controller = mappings
                 .prepare(
                     call_mappings::CandidateKind::Controller {
-                        generation: state.ui_session_generation.load(Ordering::Acquire),
+                        generation: state.ui_session_generation.load(Ordering::SeqCst),
                     },
                     0,
                 )
@@ -23369,7 +23817,7 @@ mod tests {
                     call_mappings::CandidateKind::Call {
                         controller,
                         binding: call_mappings::Binding {
-                            generation: state.ui_session_generation.load(Ordering::Acquire),
+                            generation: state.ui_session_generation.load(Ordering::SeqCst),
                             server: 7,
                             instance: 1,
                             group: vec![4; 16],
@@ -23447,11 +23895,11 @@ mod tests {
                 .servers
                 .lock()
                 .await
-                .insert(id, snapshot_test_entry(id, actor.clone(), group, device));
+                .install_legacy_fixture(id, snapshot_test_entry(id, actor.clone(), group, device));
             actors.push(actor);
             workers.push((task, drain));
         }
-        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
         finalize_unlock_session(&state, generation, false)
             .await
             .unwrap();
@@ -23470,7 +23918,7 @@ mod tests {
         assert_eq!(runtime.resources().counts(), counts);
         lock_session_inner(&state, None).await.unwrap();
         assert!(old.iter().all(|grant| !grant.lease().is_live()));
-        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
         finalize_unlock_session(&state, generation, false)
             .await
             .unwrap();
@@ -23480,13 +23928,13 @@ mod tests {
         }
         assert!(current.iter().all(|grant| grant.lease().is_live()));
         assert!(old.iter().all(|grant| !grant.lease().is_live()));
-        state.servers.lock().await.remove(&1);
+        state.servers.lock().await.remove_legacy_fixture(&1);
         assert!(
             !current[0].lease().is_live(),
             "native row removal revokes before actor shutdown"
         );
         assert!(current[1].lease().is_live());
-        state.servers.lock().await.clear();
+        state.servers.lock().await.clear_legacy_fixture();
         for actor in &actors {
             actor.shutdown().await;
         }
@@ -23517,10 +23965,10 @@ mod tests {
             .servers
             .lock()
             .await
-            .insert(7, snapshot_test_entry(1, actor.clone(), group, device));
+            .install_legacy_fixture(7, snapshot_test_entry(1, actor.clone(), group, device));
         let runtime = voice_runtime(&state);
         let old_ticket = runtime.session_ticket();
-        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
         let boundary = state.ui_session_commit.lock().await;
         let (result, ()) = tokio::join!(biased;
             reattach_voice_actors(&state, generation, &old_ticket),
@@ -23533,10 +23981,17 @@ mod tests {
             }
         );
         assert!(result.is_err());
-        assert!(state.servers.lock().await.get(&7).unwrap().voice.is_none());
+        assert!(state
+            .servers
+            .lock()
+            .await
+            .legacy(&7)
+            .unwrap()
+            .voice
+            .is_none());
         assert!(actor.voice_call_grant(channel_id("general")).await.is_err());
         assert!(runtime.activate_session(&old_ticket).is_err());
-        state.servers.lock().await.clear();
+        state.servers.lock().await.clear_legacy_fixture();
         actor.shutdown().await;
         task.await.unwrap();
         drain.await.unwrap();
@@ -23566,17 +24021,24 @@ mod tests {
                 .servers
                 .lock()
                 .await
-                .insert(id, snapshot_test_entry(id, actor.clone(), group, device));
+                .install_legacy_fixture(id, snapshot_test_entry(id, actor.clone(), group, device));
             actors.push(actor);
             workers.push((task, drain));
         }
         actors[0].shutdown().await;
-        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
         finalize_unlock_session(&state, generation, false)
             .await
             .unwrap();
         assert!(*state.session_resumable.lock().await);
-        assert!(state.servers.lock().await.get(&1).unwrap().voice.is_none());
+        assert!(state
+            .servers
+            .lock()
+            .await
+            .legacy(&1)
+            .unwrap()
+            .voice
+            .is_none());
         let grant = actors[1]
             .voice_call_grant(channel_id("general"))
             .await
@@ -23604,7 +24066,7 @@ mod tests {
                 charges.push(credit);
             }
         }
-        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
         finalize_unlock_session(&state, generation, false)
             .await
             .unwrap();
@@ -23624,7 +24086,7 @@ mod tests {
             .lease()
             .is_live());
         assert!(!grant.lease().is_live());
-        state.servers.lock().await.clear();
+        state.servers.lock().await.clear_legacy_fixture();
         actors[1].shutdown().await;
         for (task, drain) in workers {
             task.await.unwrap();
@@ -23635,7 +24097,7 @@ mod tests {
     #[tokio::test]
     async fn voice_old_unlock_cannot_erase_lock_registered_before_revocation_hooks() {
         let state = AppState::default();
-        let old_generation = state.ui_session_generation.load(Ordering::Acquire);
+        let old_generation = state.ui_session_generation.load(Ordering::SeqCst);
         let runtime = voice_runtime(&state);
         let old_ticket = runtime.session_ticket();
         // Split the real synchronous entry seam at the point where a coordinator/mapping mutex
@@ -23651,7 +24113,7 @@ mod tests {
         assert!(!*state.session_resumable.lock().await);
         assert!(require_unlocked_session(&state).await.is_err());
         // Clearing only the separate flag cannot open the still-uncommitted generation.
-        state.session_lock_requested.store(false, Ordering::Release);
+        state.session_lock_requested.store(false, Ordering::SeqCst);
         assert!(ui_session_closed(&state));
         assert!(require_unlocked_session(&state).await.is_err());
         state.voice_authority.lock().unwrap().revoke_all();
@@ -23721,8 +24183,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap());
-        state.session_lock_requested.store(true, Ordering::Release);
+            Some((ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap()).into());
+        state.session_lock_requested.store(true, Ordering::SeqCst);
         let channel = channel_id("general");
         let mut running = Vec::new();
         for id in 1..=2 {
@@ -23747,7 +24209,7 @@ mod tests {
                 .servers
                 .lock()
                 .await
-                .insert(id, snapshot_test_entry(id, actor.clone(), group, device));
+                .install_legacy_fixture(id, snapshot_test_entry(id, actor.clone(), group, device));
             running.push((actor, task, drain));
         }
         // First actor has frozen by the time the second actor cannot acquire its save lease.
@@ -23798,7 +24260,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState::default());
         *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap());
+            Some((ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap()).into());
         let server = Server::found(
             Hub::new().join(PeerId::from_u64(71)),
             MlsDevice::generate().unwrap(),
@@ -23821,7 +24283,7 @@ mod tests {
             .servers
             .lock()
             .await
-            .insert(1, snapshot_test_entry(71, actor.clone(), group, device));
+            .install_legacy_fixture(1, snapshot_test_entry(71, actor.clone(), group, device));
         let store = state.store.lock().await;
         let backup_state = state.clone();
         let backup_actor = actor.clone();
@@ -23843,7 +24305,7 @@ mod tests {
             .send_reply(channel, "after the backup captured history", "")
             .await
             .unwrap();
-        state.session_lock_requested.store(true, Ordering::Release);
+        state.session_lock_requested.store(true, Ordering::SeqCst);
         assert!(
             shutdown::freeze_servers(&state).await.is_err(),
             "close must observe the outstanding backup writer"
@@ -23858,6 +24320,8 @@ mod tests {
             .lock()
             .await
             .as_ref()
+            .unwrap()
+            .as_legacy()
             .unwrap()
             .load_server(1)
             .unwrap();
@@ -23875,7 +24339,13 @@ mod tests {
     async fn wait_for_clean_snapshot(state: &AppState, server: u64) {
         timeout(Duration::from_secs(5), async {
             loop {
-                let counters = state.servers.lock().await[&server].persist;
+                let counters = state
+                    .servers
+                    .lock()
+                    .await
+                    .legacy(&server)
+                    .expect("Legacy fixture row")
+                    .persist;
                 if counters.requested > 0 && counters.requested == counters.completed {
                     return;
                 }
@@ -23901,10 +24371,11 @@ mod tests {
         let channel = channel_id("general");
         let root = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState::default());
-        *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.store.lock().await = Some(
+            (ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap()).into(),
+        );
         // A mounted explicit UI lock permits sealed native persistence, but no frontend commands.
-        state.session_lock_requested.store(true, Ordering::Release);
+        state.session_lock_requested.store(true, Ordering::SeqCst);
         assert!(require_unlocked_session(&state).await.is_err());
 
         let hub = Hub::new();
@@ -23941,7 +24412,7 @@ mod tests {
         let group_id = receiver_server.group_id();
         let device_id = receiver_server.device_id();
         let (receiver, mut events, receiver_task) = spawn(receiver_server);
-        state.servers.lock().await.insert(
+        state.servers.lock().await.install_legacy_fixture(
             SERVER,
             snapshot_test_entry(INSTANCE, receiver.clone(), group_id, device_id),
         );
@@ -23960,7 +24431,14 @@ mod tests {
             }
         });
         wait_for_clean_snapshot(&state, SERVER).await;
-        let baseline = state.servers.lock().await[&SERVER].persist.completed;
+        let baseline = state
+            .servers
+            .lock()
+            .await
+            .legacy(&SERVER)
+            .expect("Legacy fixture row")
+            .persist
+            .completed;
         sender
             .send_reply(channel, "retained without a local send", "")
             .await
@@ -23972,6 +24450,8 @@ mod tests {
                     .lock()
                     .await
                     .as_ref()
+                    .unwrap()
+                    .as_legacy()
                     .unwrap()
                     .load_server(SERVER)
                     .unwrap();
@@ -23998,7 +24478,17 @@ mod tests {
         .await
         .expect("the received message did not reach the encrypted background snapshot");
         wait_for_clean_snapshot(&state, SERVER).await;
-        assert!(state.servers.lock().await[&SERVER].persist.completed > baseline);
+        assert!(
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&SERVER)
+                .expect("Legacy fixture row")
+                .persist
+                .completed
+                > baseline
+        );
         assert!(require_unlocked_session(&state).await.is_err());
 
         sender.shutdown().await;
@@ -24045,7 +24535,7 @@ mod tests {
         let group_id = server.group_id();
         let device_id = server.device_id();
         let (actor, events, task) = spawn(server);
-        state.servers.lock().await.insert(
+        state.servers.lock().await.install_legacy_fixture(
             1,
             snapshot_test_entry(10, actor.clone(), group_id.clone(), device_id),
         );
@@ -24059,7 +24549,17 @@ mod tests {
             !old.has_changed().unwrap(),
             "a burst retains a single latest notification"
         );
-        assert_eq!(state.servers.lock().await[&1].persist.requested, 1_000);
+        assert_eq!(
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&1)
+                .expect("Legacy fixture row")
+                .persist
+                .requested,
+            1_000
+        );
         note_event_for_persistence(
             &state,
             1,
@@ -24072,7 +24572,7 @@ mod tests {
             !old.has_changed().unwrap(),
             "presence and route churn must not snapshot history"
         );
-        state.servers.lock().await.insert(
+        state.servers.lock().await.install_legacy_fixture(
             1,
             snapshot_test_entry(11, actor.clone(), group_id, device_id),
         );
@@ -24082,7 +24582,13 @@ mod tests {
         note_event_for_persistence(&state, 1, 10, &AppEvent::Closed).await;
         assert!(!replacement.has_changed().unwrap());
         assert_eq!(
-            state.servers.lock().await[&1].persist,
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&1)
+                .expect("Legacy fixture row")
+                .persist,
             PersistCounters::default()
         );
         assert!(install_persistence_signal(&state, 1, 10).await.is_none());
@@ -24118,7 +24624,7 @@ mod tests {
         let device_id = server.device_id();
         let (actor, mut events, task) = spawn(server);
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
-        state.servers.lock().await.insert(
+        state.servers.lock().await.install_legacy_fixture(
             1,
             snapshot_test_entry(10, actor.clone(), group_id, device_id),
         );
@@ -24128,7 +24634,16 @@ mod tests {
             run_persistence_worker(&worker_state, 1, 10, wake).await;
         });
         timeout(Duration::from_secs(5), async {
-            while state.servers.lock().await[&1].persist.requested == 0 {
+            while state
+                .servers
+                .lock()
+                .await
+                .legacy(&1)
+                .expect("Legacy fixture row")
+                .persist
+                .requested
+                == 0
+            {
                 tokio::task::yield_now().await;
             }
         })
@@ -24139,19 +24654,32 @@ mod tests {
         let writing = persist_lock_for(&state, 1);
         let idle = writing.lock().await;
         assert_eq!(
-            state.servers.lock().await[&1].persist,
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&1)
+                .expect("Legacy fixture row")
+                .persist,
             PersistCounters {
                 requested: 1,
                 completed: 0
             }
         );
         drop(idle);
-        *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.store.lock().await = Some(
+            (ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap()).into(),
+        );
         note_event_for_persistence(&state, 1, 10, &AppEvent::SnapshotNeeded).await;
         wait_for_clean_snapshot(&state, 1).await;
         assert_eq!(
-            state.servers.lock().await[&1].persist,
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&1)
+                .expect("Legacy fixture row")
+                .persist,
             PersistCounters {
                 requested: 2,
                 completed: 2
@@ -24162,6 +24690,8 @@ mod tests {
             .lock()
             .await
             .as_ref()
+            .unwrap()
+            .as_legacy()
             .unwrap()
             .load_server(1)
             .unwrap();
@@ -24191,8 +24721,9 @@ mod tests {
         const INSTANCE: u64 = 40;
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
-        *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.store.lock().await = Some(
+            (ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap()).into(),
+        );
         *state.session_resumable.lock().await = true;
         let mut server = Server::found(
             Hub::new().join(PeerId::from_u64(91)),
@@ -24206,7 +24737,7 @@ mod tests {
         let group_id = server.group_id();
         let device_id = server.device_id();
         let (actor, events, task) = spawn(server);
-        state.servers.lock().await.insert(
+        state.servers.lock().await.install_legacy_fixture(
             SERVER,
             ServerEntry {
                 files: keep_session::EntryOwner::new(),
@@ -24256,7 +24787,13 @@ mod tests {
             Some(pending)
         );
         assert_eq!(
-            state.servers.lock().await[&SERVER].persist,
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&SERVER)
+                .expect("Legacy fixture row")
+                .persist,
             PersistCounters {
                 requested: 1,
                 completed: 0
@@ -24274,7 +24811,13 @@ mod tests {
             None
         );
         assert_eq!(
-            state.servers.lock().await[&SERVER].persist,
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&SERVER)
+                .expect("Legacy fixture row")
+                .persist,
             PersistCounters {
                 requested: 1,
                 completed: 1
@@ -24285,6 +24828,8 @@ mod tests {
             .lock()
             .await
             .as_ref()
+            .unwrap()
+            .as_legacy()
             .unwrap()
             .load_server(SERVER)
             .unwrap();
@@ -24316,7 +24861,13 @@ mod tests {
             }
         );
         assert_eq!(
-            state.servers.lock().await[&SERVER].persist,
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&SERVER)
+                .expect("Legacy fixture row")
+                .persist,
             PersistCounters {
                 requested: 2,
                 completed: 1
@@ -24338,7 +24889,13 @@ mod tests {
             }
         );
         assert_eq!(
-            state.servers.lock().await[&SERVER].persist,
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&SERVER)
+                .expect("Legacy fixture row")
+                .persist,
             PersistCounters {
                 requested: 3,
                 completed: 2
@@ -24362,8 +24919,9 @@ mod tests {
         const NEW: u64 = 41;
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
-        *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.store.lock().await = Some(
+            (ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap()).into(),
+        );
 
         // Two genuinely different groups, so what reached the disk is legible from its content.
         let build = |peer: u64, seed: u64| {
@@ -24418,30 +24976,36 @@ mod tests {
             .servers
             .lock()
             .await
-            .insert(SERVER, entry(OLD, old_actor.clone()));
+            .install_legacy_fixture(SERVER, entry(OLD, old_actor.clone()));
         // Several requests, so the stale ticket is a number the replacement's own counters will
         // not have reached. A departing writer holding ticket 1 is accidentally stopped by the
         // coalescing check; the hazard is the one whose ticket is still ahead.
         let stale_ticket = {
             let mut servers = state.servers.lock().await;
-            let entry = servers.get_mut(&SERVER).unwrap();
+            let entry = servers.legacy_mut(&SERVER).unwrap();
             entry.persist.request();
             entry.persist.request();
             entry.persist.request()
         };
         assert_eq!(stale_ticket, 3);
-        state.servers.lock().await.remove(&SERVER);
+        state.servers.lock().await.remove_legacy_fixture(&SERVER);
         state
             .servers
             .lock()
             .await
-            .insert(SERVER, entry(NEW, new_actor.clone()));
+            .install_legacy_fixture(SERVER, entry(NEW, new_actor.clone()));
 
         // The replacement persists a change of its own, and that is what belongs on disk.
         persist_server(&state, SERVER).await;
         let after_replacement = {
             let guard = state.store.lock().await;
-            guard.as_ref().unwrap().load_server(SERVER).unwrap()
+            guard
+                .as_ref()
+                .unwrap()
+                .as_legacy()
+                .unwrap()
+                .load_server(SERVER)
+                .unwrap()
         };
 
         // Now the departed writer resumes.
@@ -24458,7 +25022,13 @@ mod tests {
 
         let on_disk = {
             let guard = state.store.lock().await;
-            guard.as_ref().unwrap().load_server(SERVER).unwrap()
+            guard
+                .as_ref()
+                .unwrap()
+                .as_legacy()
+                .unwrap()
+                .load_server(SERVER)
+                .unwrap()
         };
         assert_eq!(
             on_disk.to_vec(),
@@ -24482,7 +25052,7 @@ mod tests {
                 .servers
                 .lock()
                 .await
-                .get(&SERVER)
+                .legacy(&SERVER)
                 .unwrap()
                 .persist
                 .completed,
@@ -24507,7 +25077,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = true;
         let generation = unlocked_ui_session_generation(&state).await.unwrap();
 
@@ -24544,15 +25114,23 @@ mod tests {
         const SERVER: u64 = 12;
         const OLD: u64 = 40;
         const NEW: u64 = 41;
-        state.servers.lock().await.insert(SERVER, entry(OLD));
+        state
+            .servers
+            .lock()
+            .await
+            .install_legacy_fixture(SERVER, entry(OLD));
         let stale_report =
             build_storage_report(StorageHealth::default(), Vec::new(), &HashSet::new(), 123);
 
         // Model a scan paused after producing its report: leave removes its registry incarnation,
         // then a reload installs a new actor row under the same persisted id before it resumes.
-        state.servers.lock().await.remove(&SERVER);
+        state.servers.lock().await.remove_legacy_fixture(&SERVER);
         state.storage_health.lock().await.remove(&SERVER);
-        state.servers.lock().await.insert(SERVER, entry(NEW));
+        state
+            .servers
+            .lock()
+            .await
+            .install_legacy_fixture(SERVER, entry(NEW));
         assert!(storage_health_cache_publish(
             &state,
             SERVER,
@@ -24582,7 +25160,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = false;
         let mut recovery = state.network_changes.subscribe();
 
@@ -24603,7 +25181,7 @@ mod tests {
         assert!(authenticate_mounted_store(&state, b"correct horse")
             .await
             .unwrap());
-        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
         let running = finalize_unlock_session(&state, generation, true)
             .await
             .unwrap()
@@ -24633,9 +25211,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = false;
-        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
         let latest = r#"{"version":1,"drafts":{"room":"survives remount"},"readMarks":{}}"#;
 
         // A reloaded webview has no JavaScript coordinator or Promise. Native state is therefore
@@ -24660,6 +25238,8 @@ mod tests {
                 .await
                 .as_ref()
                 .unwrap()
+                .as_legacy()
+                .unwrap()
                 .load_ui_state()
                 .unwrap(),
             latest.as_bytes(),
@@ -24674,8 +25254,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         *state.session_resumable.lock().await = false;
-        state.session_lock_requested.store(true, Ordering::Release);
-        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        state.session_lock_requested.store(true, Ordering::SeqCst);
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
         let recovery = state.network_changes.subscribe();
         let latest = r#"{"version":1,"drafts":{"room":"retry me"},"readMarks":{}}"#;
         *state.pending_ui_lock_snapshot.lock().await = Some(PendingUiLockSnapshot {
@@ -24700,12 +25280,12 @@ mod tests {
             "a failed retry must retain the immutable bytes rather than accept older continuity",
         );
         assert!(!*state.session_resumable.lock().await);
-        assert!(state.session_lock_requested.load(Ordering::Acquire));
+        assert!(state.session_lock_requested.load(Ordering::SeqCst));
 
         // Model a transient persistence problem clearing. The next unlock retries the same native
         // transaction and only then reopens the IPC boundary.
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         finalize_unlock_session(&state, generation, false)
             .await
             .expect("the retained exact snapshot should be retryable");
@@ -24716,6 +25296,8 @@ mod tests {
                 .lock()
                 .await
                 .as_ref()
+                .unwrap()
+                .as_legacy()
                 .unwrap()
                 .load_ui_state()
                 .unwrap(),
@@ -24744,11 +25326,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = false;
         let recovery = state.network_changes.subscribe();
 
-        let stale_generation = state.ui_session_generation.load(Ordering::Acquire);
+        let stale_generation = state.ui_session_generation.load(Ordering::SeqCst);
         assert!(
             authenticate_mounted_store(&state, b"correct horse")
                 .await
@@ -24757,9 +25339,9 @@ mod tests {
         );
         let newer_generation = state
             .ui_session_generation
-            .fetch_add(1, Ordering::AcqRel)
+            .fetch_add(1, Ordering::SeqCst)
             .wrapping_add(1);
-        state.session_lock_requested.store(true, Ordering::Release);
+        state.session_lock_requested.store(true, Ordering::SeqCst);
         let newer_snapshot = r#"{"version":1,"drafts":{"room":"newer lock"},"readMarks":{}}"#;
         *state.pending_ui_lock_snapshot.lock().await = Some(PendingUiLockSnapshot {
             generation: newer_generation,
@@ -24784,7 +25366,7 @@ mod tests {
             require_unlocked_session(&state).await.unwrap_err(),
             "the vault is locked"
         );
-        assert!(state.session_lock_requested.load(Ordering::Acquire));
+        assert!(state.session_lock_requested.load(Ordering::SeqCst));
         assert!(!*state.session_resumable.lock().await);
         assert_eq!(
             state
@@ -24813,7 +25395,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState::default());
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = true;
 
         // This generation is exactly what production captures before `running_servers` begins its
@@ -24837,7 +25419,7 @@ mod tests {
 
         let lock_state = Arc::clone(&state);
         let locking = tokio::spawn(async move { lock_session_inner(&lock_state, None).await });
-        while !state.session_lock_requested.load(Ordering::Acquire) {
+        while !state.session_lock_requested.load(Ordering::SeqCst) {
             tokio::task::yield_now().await;
         }
         release_projection.notify_one();
@@ -24854,7 +25436,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState::default());
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = true;
         let generation = unlocked_ui_session_generation(&state).await.unwrap();
 
@@ -24877,7 +25459,7 @@ mod tests {
         let lock_state = Arc::clone(&state);
         let locking =
             tokio::spawn(async move { lock_session_inner(&lock_state, Some(latest.into())).await });
-        while !state.session_lock_requested.load(Ordering::Acquire) {
+        while !state.session_lock_requested.load(Ordering::SeqCst) {
             tokio::task::yield_now().await;
         }
         drop(boundary);
@@ -24892,6 +25474,8 @@ mod tests {
             .lock()
             .await
             .as_ref()
+            .unwrap()
+            .as_legacy()
             .unwrap()
             .load_ui_state()
             .unwrap();
@@ -24991,7 +25575,7 @@ mod tests {
                 "reconnect consent is part of the sealed lifecycle"
             );
             let state = AppState::default();
-            *state.store.lock().await = Some(store);
+            *state.store.lock().await = Some((store).into());
             *state.next_id.lock().await = SERVER_ID;
             *state.session_resumable.lock().await = true;
             let restored = restore_server_actor(
@@ -25014,7 +25598,7 @@ mod tests {
             .await
             .unwrap();
             let actor = restored.actor.clone();
-            state.servers.lock().await.insert(
+            state.servers.lock().await.install_legacy_fixture(
                 SERVER_ID,
                 ServerEntry {
                     files: keep_session::EntryOwner::new(),
@@ -25104,7 +25688,7 @@ mod tests {
         store
             .save_server_net(SERVER_ID, &network, &mut rng)
             .unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
 
         let pending_peer = PeerId::from_u64(99);
         authorize_member_recovery_capture(&state, SERVER_ID, pending_peer, u64::MAX)
@@ -25114,6 +25698,8 @@ mod tests {
         let guard = state.store.lock().await;
         let sealed = guard
             .as_ref()
+            .unwrap()
+            .as_legacy()
             .unwrap()
             .load_server_net(SERVER_ID)
             .unwrap()
@@ -25198,7 +25784,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap());
+            Some((ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap()).into());
         *state.session_resumable.lock().await = true;
         let (owner, member, _, _) = admitted_reply_pair(Vec::new()).await;
         assert_eq!(member.my_role(), catcoms_app::Role::Member);
@@ -25213,22 +25799,31 @@ mod tests {
         let (actor, events, task) = spawn(member);
         let mut entry = snapshot_test_entry(1, actor.clone(), group, device);
         entry.invite = Some(stored.clone());
-        state.servers.lock().await.insert(1, entry);
+        state.servers.lock().await.install_legacy_fixture(1, entry);
 
         // Even a reusable token must disappear for a current ordinary member. Previously this
         // either exposed a retained code or tried to refresh it and raised a global error.
         assert_eq!(get_available_invite(&state, 1).await.unwrap(), None);
-        assert_eq!(state.servers.lock().await[&1].invite, Some(stored));
-        state.servers.lock().await.get_mut(&1).unwrap().invite = Some("stale code".into());
+        assert_eq!(
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&1)
+                .expect("Legacy fixture row")
+                .invite,
+            Some(stored)
+        );
+        state.servers.lock().await.legacy_mut(&1).unwrap().invite = Some("stale code".into());
         assert_eq!(get_available_invite(&state, 1).await.unwrap(), None);
         assert!(mint_and_store_invite(&state, 1)
             .await
             .unwrap_err()
             .contains("only the owner or an admin"));
-        state.servers.lock().await.get_mut(&1).unwrap().invite = None;
+        state.servers.lock().await.legacy_mut(&1).unwrap().invite = None;
         assert_eq!(get_available_invite(&state, 1).await.unwrap(), None);
         assert_eq!(get_available_invite(&state, 99).await.unwrap(), None);
-        state.session_lock_requested.store(true, Ordering::Release);
+        state.session_lock_requested.store(true, Ordering::SeqCst);
         assert_eq!(
             get_available_invite(&state, 1).await.unwrap_err(),
             "the vault is locked"
@@ -25246,7 +25841,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap());
+            Some((ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap()).into());
         *state.session_resumable.lock().await = true;
         let (owner, member, owner_peer, _) = admitted_reply_pair(Vec::new()).await;
         let owner_device = owner.device_id();
@@ -25262,7 +25857,11 @@ mod tests {
         let (member, member_events, member_task) = spawn(member);
         let mut owner_entry = snapshot_test_entry(1, owner.clone(), group.clone(), owner_device);
         owner_entry.invite = Some(owner_invite);
-        state.servers.lock().await.insert(1, owner_entry);
+        state
+            .servers
+            .lock()
+            .await
+            .install_legacy_fixture(1, owner_entry);
         assert!(get_available_invite(&state, 1).await.unwrap().is_some());
 
         owner.set_admin(member_device, true).await.unwrap();
@@ -25288,7 +25887,11 @@ mod tests {
         );
         let mut member_entry = snapshot_test_entry(2, member.clone(), group, member_device);
         member_entry.invite = Some(admin_invite.clone());
-        state.servers.lock().await.insert(2, member_entry);
+        state
+            .servers
+            .lock()
+            .await
+            .install_legacy_fixture(2, member_entry);
         assert!(get_available_invite(&state, 2).await.unwrap().is_some());
 
         for cached in [admin_invite, "stale code".into()] {
@@ -25304,7 +25907,7 @@ mod tests {
             })
             .await
             .unwrap();
-            state.servers.lock().await.get_mut(&2).unwrap().invite = Some(cached);
+            state.servers.lock().await.legacy_mut(&2).unwrap().invite = Some(cached);
 
             // Pause refresh at the mint mutex AFTER its permitted-role preflight. One poll
             // sends the role query; the actor query barrier ensures its reply is ready for the
@@ -25344,7 +25947,7 @@ mod tests {
 
         // Do not hide a genuine failure behind 'no invite': an unavailable actor has no current
         // role projection, while a permitted owner's malformed cache still self-heals by minting.
-        state.servers.lock().await.get_mut(&1).unwrap().invite = Some("stale code".into());
+        state.servers.lock().await.legacy_mut(&1).unwrap().invite = Some("stale code".into());
         assert!(get_available_invite(&state, 1).await.unwrap().is_some());
         owner.shutdown().await;
         owner_task.await.unwrap();
@@ -26626,8 +27229,9 @@ mod tests {
     async fn jam_sheet_export_cannot_publish_or_reveal_after_lock() {
         let root = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState::default());
-        *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.store.lock().await = Some(
+            (ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap()).into(),
+        );
         *state.session_resumable.lock().await = true;
         let generation = unlocked_ui_session_generation(&state).await.unwrap();
         let safe = format!(
@@ -26777,8 +27381,9 @@ mod tests {
         // these known envelopes are readable; the next unknown successor still refuses.
         assert!(validate_ui_state_json(r#"{"version":2,"drafts":{},"readMarks":{}}"#).is_ok());
         assert!(validate_ui_state_json(r#"{"version":3,"drafts":{},"readMarks":{}}"#).is_ok());
+        assert!(validate_ui_state_json(r#"{"version":4,"drafts":{},"readMarks":{}}"#).is_ok());
         assert!(validate_ui_state_json(r#"{"version":0,"drafts":{},"readMarks":{}}"#).is_err());
-        assert!(validate_ui_state_json(r#"{"version":4,"drafts":{},"readMarks":{}}"#).is_err());
+        assert!(validate_ui_state_json(r#"{"version":5,"drafts":{},"readMarks":{}}"#).is_err());
         assert!(validate_ui_state_json(r#"{"version":1,"drafts":[],"readMarks":{}}"#).is_err());
         assert!(validate_ui_state_json("not json").is_err());
         assert!(validate_ui_state_json(&"x".repeat(MAX_UI_STATE_BYTES + 1)).is_err());
