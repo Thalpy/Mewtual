@@ -100,7 +100,10 @@ jobs:
   # The harness sets RUST_MIN_STACK itself.
   lifecycle-mutations:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Shard1 detected all23 mutations but only12 restored controls completed
+    # before the old60-minute outer limit. Preserve all68 cases, the same three
+    # shards and every per-command bound; allow the restored phase to finish.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:

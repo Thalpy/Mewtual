@@ -1,5 +1,11 @@
 # Mewtual; Architecture
 
+The main-based security prerequisite updates both shipping network graphs and
+preserves the existing bounded topic/wire contracts. It introduces no Chat V2
+activation or storage namespace. TLS provider selection is transport-local;
+the old-peer compatibility gate uses only APIs shared with the predecessor.
+[Scope and pending validation](communication-recovery/MAIN-SECURITY-PREREQUISITE.md).
+
 Unsigned native V2 invitation preparation now follows the SAME retained
 Runtime/Host/member verifier and actual governed4 Current. Its output is only
 preimage-hash/expiry DATA. A separate Sync original caches Clock/nonce/spec/raw

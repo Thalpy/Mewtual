@@ -5,6 +5,8 @@ on:
     paths:
       - '.github/workflows/network-security.yml'
       - '.github/scripts/check-network-security.py'
+      - '.github/scripts/security_test_guard.py'
+      - '.github/scripts/test_security_test_guard.py'
       - 'vendor/libp2p-gossipsub/**'
       - 'crates/catcoms-net/**'
       - 'crates/catcoms-rt/**'
@@ -48,6 +50,7 @@ jobs:
           python-version: '3.12'
       - name: Check actual vendor archive and both shipping resolutions
         run: |
+          python .github/scripts/test_security_test_guard.py
           python .github/scripts/check-network-security.py --self-test
           python .github/scripts/check-network-security.py --integrity-only
       - name: Execute exact patched and production cohorts
@@ -56,13 +59,15 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           import runpy
-          guard = runpy.run_path('.github/scripts/check-chat-v2-member-save.py')
+          guard = runpy.run_path('.github/scripts/security_test_guard.py')
           output = Path('logs/network-security')
           output.mkdir(parents=True, exist_ok=True)
           cohorts = (
               ('vendor-regressions', ['--manifest-path', 'vendor/libp2p-gossipsub/Cargo.toml', '--lib', 'mewtual_'], 6),
               ('vendor-protocol', ['--manifest-path', 'vendor/libp2p-gossipsub/Cargo.toml', '--lib', 'protocol::'], 9),
               ('vendor-library', ['--manifest-path', 'vendor/libp2p-gossipsub/Cargo.toml', '--lib'], 159),
+              # Foundation security/publication cases plus the later reviewed
+              # native transport identity and lifetime regressions.
               ('net', ['-p', 'catcoms-net', '--lib'], 177),
               ('protocol-rng', ['-p', 'catcoms-rt', '--lib', 'protocol_rng::tests'], 3),
           )

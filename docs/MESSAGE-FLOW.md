@@ -1,5 +1,10 @@
 # Mewtual: message flow and micelle convergence
 
+Security prerequisite: an incoming subscription retries retained publication
+only for its exact canonical topic. Other retained originals preserve their
+ownership/order and normal periodic retry; wire and delivery claims below are
+unchanged. [Scope](communication-recovery/MAIN-SECURITY-PREREQUISITE.md).
+
 Disabled native V2 invite continuation (15 November): the original runtime can
 prepare one unsigned invite through its same member verifier and actual
 Current4 checks. Its output is hash/expiry DATA and contains no usable contact,

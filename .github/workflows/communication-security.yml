@@ -5,6 +5,8 @@ on:
     paths:
       - '.github/workflows/communication-security.yml'
       - '.github/scripts/check-communication-security.py'
+      - '.github/scripts/security_test_guard.py'
+      - '.github/scripts/test_security_test_guard.py'
       - 'crates/catcoms-storage/**'
       - 'crates/catcoms-net/**'
       - 'Cargo.lock'
@@ -43,7 +45,9 @@ jobs:
         with:
           python-version: '3.12'
       - name: Check nonempty result guards
-        run: python .github/scripts/check-communication-security.py self-test
+        run: |
+          python .github/scripts/test_security_test_guard.py
+          python .github/scripts/check-communication-security.py self-test
       - name: Execute exact real-wire regressions
         run: python .github/scripts/check-communication-security.py gossip
       - name: Strict network Clippy

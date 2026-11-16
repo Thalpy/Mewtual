@@ -20,20 +20,25 @@ VCS:       a4f584c86358dd07f83f36708573e1c8d1bd8161
 VCS path:  rust/automerge
 ```
 
-The published `.cargo_vcs_info.json`, `Cargo.toml`, `Cargo.toml.orig`, README, tests, nested
-licenses and upstream Cargo.lock are preserved. The published archive omits its repository-root
+The published `.cargo_vcs_info.json`, README, tests, nested licenses and upstream Cargo.lock
+are preserved. Both Cargo manifests retain upstream dependencies and add only the opt-in
+`history-recovery-test-counters` feature described below. The published archive omits its repository-root
 license. `LICENSE.upstream` is the unchanged MIT license from the exact VCS revision:
 [upstream license](https://github.com/automerge/automerge/blob/a4f584c86358dd07f83f36708573e1c8d1bd8161/LICENSE).
-No dependency versions or crate feature definitions were changed. Both Mewtual workspaces patch
+No upstream dependency versions or existing feature definitions were changed. Both Mewtual workspaces patch
 crates.io to this SAME directory; their lockfiles differ only by Automerge becoming a local source.
 The vendor directory is excluded from Mewtual workspace membership, so normal full-suite commands
 do not silently turn every upstream integration test into a new Mewtual workspace test target.
 
 ## Complete patch inventory
 
-Only these upstream source files differ from the archive:
+Only these upstream manifests and source files differ from the archive:
 
-- `src/lib.rs`: declare the private `history` module and re-export its opaque public token.
+- `Cargo.toml` and `Cargo.toml.orig`: add the empty, opt-in
+  `history-recovery-test-counters` feature. It is not a default feature.
+
+- `src/lib.rs`: declare the private `history` module, re-export its opaque public token,
+  and expose `history_recovery_work_on_this_thread` only with the counter feature.
 - `src/automerge.rs`: one nonserialized instance-identity field and initialization in all three
   direct construction paths (`new`, `new_with_encoding`, `from_parts`). Its private custom Clone
   makes a document clone/fork a fresh instance without changing copied document content.
@@ -46,9 +51,16 @@ Only these upstream source files differ from the archive:
   No codec or log-macro behavior is changed and no crate-wide warning suppression is added.
 - `src/autocommit.rs`: readonly ROOT-value metadata forwarding with explicit isolation refusal.
 - `src/op_set2/op_set.rs`: declare the private metadata-only ROOT lookup module.
+- `src/op_set2/change/collector.rs`: with the counter feature, count entry into real
+  applied-change reconstruction before executing the unchanged reconstruction body.
+- `src/op_set2/op_set/op_iter.rs`: with the counter feature, count real value visits.
 
 New files are this note, `LICENSE.upstream`, `src/history.rs`, `src/history/tests.rs`,
 `src/value_metadata.rs` and `src/op_set2/op_set/value_metadata.rs`.
+`src/history.rs` also contains the feature-gated, thread-local counters and observer.
+They retain only saturating visit counts, never operation contents, and are used by
+the recovery regressions to distinguish actual upstream reconstruction/value work.
+Without the opt-in feature the instrumentation and exported observer are absent.
 The history module adds four readonly inherent methods on BOTH Automerge and AutoCommit:
 `applied_change_hashes`, `queued_changes`, `has_applied_change`, `history_instance_id`.
 The metadata modules add `root_value_metadata` and bounded borrowed `root_bytes` on both types,

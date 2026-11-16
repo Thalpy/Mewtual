@@ -2,7 +2,7 @@
 //! stacks by check-network-security.py. This uses only public production APIs.
 //! Fixed seeds and loopback-only QUIC are test inputs, never shipping identities.
 use bytes::Bytes;
-use catcoms_net::{keypair_from_seed, seeded_transport_identity_data, MeshService};
+use catcoms_net::{keypair_from_seed, phase0_peer_id, MeshService};
 use catcoms_rt::{
     Clock, ConnectionTransport, MeshTransport, ProtocolId, SystemClock, Topic, TransportError,
     TransportEvent,
@@ -202,7 +202,12 @@ async fn main() {
     let role = if server { "server" } else { "client" };
     let own = if server { 0x73 } else { 0x74 };
     let remote = if server { 0x74 } else { 0x73 };
-    let expected = seeded_transport_identity_data(&[remote; 32]).unwrap();
+    // These public identity APIs exist in both the unchanged predecessor and
+    // main. The compatibility harness must not depend on later Chat V2 helpers.
+    let expected = keypair_from_seed([remote; 32])
+        .unwrap()
+        .public()
+        .to_peer_id();
     let listeners = if server {
         vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()]
     } else {
@@ -214,9 +219,11 @@ async fn main() {
     let mesh = Arc::new(mesh);
     assert_eq!(
         id.to_string(),
-        seeded_transport_identity_data(&[own; 32])
+        keypair_from_seed([own; 32])
             .unwrap()
-            .peer_id_data()
+            .public()
+            .to_peer_id()
+            .to_string()
     );
     // Wire compatibility queues all topics before dial; their real hex hello
     // exceeds64KiB. The pressure server deliberately withholds all topics until
@@ -236,7 +243,7 @@ async fn main() {
         // Accept only the exact fixed test peer on loopback UDP. Neither the
         // controller nor an untrusted stdout line can nominate an external dial.
         let prefix = "/ip4/127.0.0.1/udp/";
-        let suffix = format!("/quic-v1/p2p/{}", expected.peer_id_data());
+        let suffix = format!("/quic-v1/p2p/{expected}");
         let port = arguments[1]
             .strip_prefix(prefix)
             .and_then(|v| v.strip_suffix(&suffix))
@@ -247,7 +254,7 @@ async fn main() {
             .await
             .unwrap();
     }
-    let peer = expected.phase0_peer_data();
+    let peer = phase0_peer_id(&expected);
     let connected = bounded(
         "authenticated connection",
         mesh.wait_for_peer_connected(peer),

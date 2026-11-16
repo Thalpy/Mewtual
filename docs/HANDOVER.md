@@ -1,5 +1,33 @@
 # Mewtual; Handover
 
+## Foundation merge follow-up (16 November; focused checks pass)
+
+Both complete Root jobs stopped with the same default-stack overflow in
+`a_cold_held_page_with_a_full_pool_still_reserves_checkpoint_service`.
+Backport the already-reviewed test-fixture corrections1558928a/6cc42548 from
+the validated later stack. Their11 files keep authenticated fixture ownership
+and nested futures on the heap; assertions, pool limits, deadlines, shutdown
+and reopen checks and platform stack sizes remain unchanged. All six page
+tests pass locally on the default stack before any crypto-profile change.
+
+The exact reviewed development/test crypto profile blocks from7cbb40ea/966b7a03
+are also carried forward in both workspaces. They optimize six existing
+dependency packages; algorithms, parameters, features, debug assertions and
+release profiles stay unchanged. Broader fixture and fresh full CI are pending.
+The old aborted Root runs are not acceptance; main remains unmerged.
+
+## Main-based security prerequisite (15 November; validation pending)
+
+PR84 stays draft. Its strict Root/native checks pass, but its audit reports19
+advisories and lifecycle shard1 ran out of outer time. The prerequisite extracts
+the existing dependency repairs from PRs93/94/103/113 onto main88f36129,
+without their intervening Chat V2 implementation. It also increases only the
+lifecycle mutation job allowance to90minutes, preserving every check.
+[Extraction, compatibility and current limits](communication-recovery/MAIN-SECURITY-PREREQUISITE.md).
+Extracted-source Net171, frontend3388, runner4, strict Root lint, both dependency
+audits and vendor/static gates pass. Native/full-suite/compatibility checks are
+pending; no merge or complete acceptance is claimed.
+
 The `chat-v2-invite-journal` continuation now retains the exact bounded public
 routing-plan frame with the original invite, not just its digest. Hash/bounds
 and exact-retry checks run before copy/draw; the genuine transport test pins

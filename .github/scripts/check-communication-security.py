@@ -22,7 +22,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("storage", "native", "gossip", "self-test"))
     args = parser.parse_args()
-    guard = runpy.run_path(str(REPO / ".github/scripts/check-chat-v2-member-save.py"))
+    guard = runpy.run_path(str(REPO / ".github/scripts/security_test_guard.py"))
     guard["self_test"]()
     assert len(STORAGE) == len(set(STORAGE)) == 3
     if args.mode == "self-test":
@@ -35,8 +35,8 @@ def main() -> None:
     if args.mode == "gossip":
         commands = [("gossip-resource", ["cargo", "test", "--locked", "-p", "catcoms-net",
                      "--all-features", "--lib", "gossip_resource_tests"])]
-        # The patched gossip migration adds the real oversize-control refusal
-        # and fresh-stream progress case to the four original resource cases.
+        # Oversized control, unsolicited GRAFT, subscription overflow,
+        # duplicate/unsubscribe recovery and real multi-topic delivery.
         expected = 5
     elif args.mode == "storage":
         commands = [(selector, ["cargo", "test", "--locked", "-p", "catcoms-storage",

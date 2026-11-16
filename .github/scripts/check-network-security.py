@@ -26,7 +26,7 @@ import tomllib
 import urllib.request
 
 REPO = Path(__file__).resolve().parents[2]
-BASE = runpy.run_path(str(REPO / ".github/scripts/check-chat-v2-member-save.py"))
+BASE = runpy.run_path(str(REPO / ".github/scripts/security_test_guard.py"))
 OLD = "944115c2bce5e028f55f8a2c2685b4c23396ea51"
 EXAMPLE = "crates/catcoms-net/examples/network_compat_peer.rs"
 CRATE_SHA = "6c28d7256540bd1a5df45cf6d7a7d8c58e913ad63ccfaa2f97983ec077b2794a"

@@ -51,7 +51,12 @@ jobs:
           archive_replacement_after_target_notfound_is_rejected_before_old_issuance
           archive_target_notfound_requires_the_same_held_root_and_marker_objects
       - name: Test
-        run: cargo test --all --all-features
+        # The user deferred only this known slow cost case until final Chat V2
+        # acceptance. With no positive filter, every other workspace test still
+        # executes. This intermediate gate is not final unfiltered acceptance.
+        run: >-
+          cargo test --all --all-features --no-fail-fast --
+          --skip cold_provider_transfers_only_one_missing_change_after_ten_thousand_operations
       # WMI accepts independent broad windows/windows-core ranges. A valid lock resolution
       # can mix their incompatible COM interfaces while all Linux builds still pass. Check
       # that native dependency on Windows without compiling the entire WebView application.
