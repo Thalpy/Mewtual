@@ -1,0 +1,1249 @@
+//! Trusted admitted-call activation, reached by fixed-profile native commands.
+//! The canonical task, not an invoke waiter, owns native admission. The separate
+//! key command can publish presence; agreement, Ready and RTC remain gated.
+#![allow(dead_code)] // staged internal entry; enabling it requires separate protocol gates
+use crate::{voice_authority, AppState, ServerEntry, UiSessionGate, VoiceActivation};
+use catcoms_app::{
+    PreparedVoiceCall, VoiceActivationControl, VoiceCallActivationPublisher,
+    VoiceCallActivationResult, VoiceCallActivationWork, VoiceEndpointError,
+};
+use catcoms_rt::Clock;
+use catcoms_sync::voice_v2::call_activation::{
+    ActivationObserver, ActivationOwner, ActivationRpcPermit, RootResidenceReturned,
+    RootResidenceUnclaimed, RootSelectedCall,
+};
+use catcoms_sync::voice_v2::{CallGrant, VoiceError};
+use std::collections::HashMap;
+use std::future::{poll_fn, Future};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
+use std::task::Poll;
+use tokio::sync::{Mutex, OwnedMutexGuard};
+pub(crate) mod physical;
+use physical::{PhysicalHistory, PhysicalPurpose};
+
+pub(crate) const MAX_ACTIVATIONS: usize = 32;
+// The original graph measured 17,752 bytes; deferred old-owner custody raised it
+// to 18,464, already beyond 18 KiB. Reserve 19 KiB before construction, keeping the
+// complete compiled graph guard and unchanged group/process ceilings.
+const NATIVE_BYTES: usize = 19 * 1024;
+const CADENCE_MS: u64 = 250;
+// The only production source is the sanctioned SystemClock through Runtime's
+// EffectiveClock. ManualClock is the deterministic test source. Their boxed sleep
+// bodies are independently measured below; arbitrary Clock implementations are a
+// trusted Rust seam, not an untrusted extensibility/memory-budget promise.
+const CLOCK_SLEEP_BYTES: usize = 1024;
+const CLOCK_OWNER_BYTES: usize = 256;
+struct Funding {
+    _credit: catcoms_sync::voice_v2::resources::Credit,
+}
+#[derive(Clone)]
+pub(crate) struct Handle {
+    cell: Arc<Cell>,
+    // All raw Cell aliases stay private and pair with this SAME last plain payer.
+    funding: Arc<Funding>,
+}
+struct Cell {
+    id: String,
+    controller: String,
+    binding: voice_authority::Binding,
+    original: ActivationObserver,
+    clock: Arc<dyn Clock>,
+    state: StdMutex<State>,
+    changed: tokio::sync::Notify,
+    physical_projection_busy: AtomicBool,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Failure {
+    Revoked,
+    Capacity,
+    Stopped,
+    Interrupted,
+    Protocol(VoiceError),
+}
+impl Failure {
+    fn message(self) -> String {
+        match self {
+            Self::Revoked => "The call ended before it could start.".into(),
+            Self::Capacity => "Voice is busy. Try again.".into(),
+            Self::Stopped => "This server is closed.".into(),
+            Self::Interrupted => "The call could not finish starting.".into(),
+            Self::Protocol(error) => error.to_string(),
+        }
+    }
+}
+#[derive(Clone, Copy)]
+enum Terminal {
+    Accepted([u8; 32]),
+    Refused(Failure),
+}
+enum StorageProof {
+    Returned(RootResidenceReturned),
+    Unclaimed(RootResidenceUnclaimed),
+}
+impl StorageProof {
+    fn matches(&self, original: &ActivationObserver) -> bool {
+        match self {
+            Self::Returned(proof) => proof.matches(original),
+            Self::Unclaimed(proof) => proof.matches(original),
+        }
+    }
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Select,
+    Clear,
+}
+enum Outcome {
+    Completed(VoiceCallActivationResult),
+    Unstarted(VoiceEndpointError, Option<ActivationRpcPermit>),
+    Uncertain,
+}
+struct Invocation {
+    serial: u64,
+    kind: Kind,
+    work: Option<VoiceCallActivationWork>,
+    outcome: Option<Outcome>,
+}
+struct TaskTicket {
+    serial: u64,
+    // ONE original stamp allocation for every negative recovery. Creating a fresh
+    // Arc per retry would let paused old marker destructors accumulate heap tails.
+    returned: Arc<AtomicU64>,
+}
+impl TaskTicket {
+    fn has_returned(&self) -> bool {
+        self.returned.load(Ordering::Acquire) == self.serial
+    }
+}
+struct State {
+    physical: PhysicalPurpose,
+    owner: Option<ActivationOwner>,
+    grant: Option<Arc<CallGrant>>,
+    control: Option<VoiceActivationControl>,
+    select_payment: Option<ActivationRpcPermit>,
+    clear_payment: Option<ActivationRpcPermit>,
+    invocation: Option<Invocation>,
+    serial: u64,
+    terminal: Option<Terminal>,
+    acknowledged: bool,
+    storage: Option<StorageProof>,
+    cleanup_done: bool,
+    task: TaskTicket,
+    task_started: bool,
+}
+impl Handle {
+    pub(crate) fn new(
+        id: String,
+        controller: String,
+        binding: voice_authority::Binding,
+        prepared: PreparedVoiceCall,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self, VoiceError> {
+        if native_layout_bytes() > NATIVE_BYTES {
+            return Err(VoiceError::Capacity);
+        }
+        // These are trusted native identities, not wire data. Still pin every
+        // retained allocation before construction; a large caller capacity must
+        // not silently become an unaccounted owned String/Vec in the Cell.
+        if id.is_empty()
+            || id.capacity() > 64
+            || controller.is_empty()
+            || controller.capacity() > 64
+            || binding.group.capacity() > 128
+            || prepared.grant().scope() != binding.scope
+        {
+            return Err(VoiceError::Bounds);
+        }
+        let (prepared, control) = prepared.into_parts();
+        let original = prepared.observer();
+        let funding = Arc::new(Funding {
+            _credit: original.reserve_retained(NATIVE_BYTES)?,
+        });
+        // Reserve negative progress BEFORE selection. No fresh ordinary payment is
+        // needed after Root has accepted custody or the ordinary pool becomes full.
+        let select_payment = original.reserve_rpc()?;
+        let clear_payment = original.reserve_rpc()?;
+        let (grant, owner) = prepared.into_parts();
+        Ok(Self {
+            cell: Arc::new(Cell {
+                id,
+                controller,
+                binding,
+                original,
+                clock,
+                state: StdMutex::new(State {
+                    physical: PhysicalPurpose::NoIntentYet,
+                    owner: Some(owner),
+                    grant: Some(grant),
+                    control: Some(control),
+                    select_payment: Some(select_payment),
+                    clear_payment: Some(clear_payment),
+                    invocation: None,
+                    serial: 0,
+                    terminal: None,
+                    acknowledged: false,
+                    storage: None,
+                    cleanup_done: false,
+                    task: TaskTicket {
+                        serial: 1,
+                        returned: Arc::new(AtomicU64::new(0)),
+                    },
+                    task_started: false,
+                }),
+                changed: tokio::sync::Notify::new(),
+                physical_projection_busy: AtomicBool::new(false),
+            }),
+            funding,
+        })
+    }
+    pub(crate) fn same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.cell, &other.cell)
+    }
+    pub(crate) fn id(&self) -> &str {
+        &self.cell.id
+    }
+    pub(crate) fn binding(&self) -> &voice_authority::Binding {
+        &self.cell.binding
+    }
+    pub(crate) fn controller(&self) -> &str {
+        &self.cell.controller
+    }
+    pub(crate) fn original(&self) -> &ActivationObserver {
+        &self.cell.original
+    }
+    pub(crate) fn grant(&self) -> Option<Arc<CallGrant>> {
+        self.cell
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .grant
+            .clone()
+    }
+    pub(crate) fn active(&self) -> bool {
+        self.original().is_active()
+            && matches!(
+                self.cell
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .terminal,
+                Some(Terminal::Accepted(_))
+            )
+    }
+    pub(crate) fn close(&self) {
+        self.original().close();
+        self.cell.changed.notify_waiters();
+    }
+    pub(crate) fn admit(
+        &self,
+        selected: RootSelectedCall,
+        grant: &Arc<CallGrant>,
+        join: [u8; 32],
+    ) -> Result<(), VoiceError> {
+        if !selected.original().is_same(self.original()) {
+            return Err(VoiceError::Unauthorized);
+        }
+        selected.commit_native(grant)?;
+        let mut state = self.cell.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.terminal.is_some() {
+            return Err(VoiceError::RetryMismatch);
+        }
+        state.terminal = Some(Terminal::Accepted(join));
+        // The final Coordinator fence calls this synchronously. Its canonical
+        // task notifies AFTER dropping Coordinator and its UI guard; an arbitrary
+        // waiter waker must never become a callback under those admission locks.
+        Ok(())
+    }
+    fn refuse(&self, failure: Failure) {
+        self.latch_refusal(failure);
+        self.notify_closed();
+    }
+    // Only irreversible atomics/Cell metadata. The original native task may call
+    // this before exceptional UI-guard release without executing any waker.
+    fn latch_refusal(&self, failure: Failure) {
+        self.original().invalidate();
+        let mut state = self.cell.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.terminal.is_none() {
+            state.terminal = Some(Terminal::Refused(failure));
+        }
+    }
+    fn notify_closed(&self) {
+        self.original().notify_closed();
+        self.cell.changed.notify_waiters();
+    }
+    fn begin(&self, kind: Kind) -> Result<(u64, ActivationRpcPermit, Box<Publisher>), Failure> {
+        let mut state = self.cell.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.invocation.is_some() {
+            return Err(Failure::Interrupted);
+        }
+        let serial = state.serial.checked_add(1).ok_or(Failure::Interrupted)?;
+        let payment = match kind {
+            Kind::Select => state.select_payment.take(),
+            Kind::Clear => state.clear_payment.take(),
+        }
+        .ok_or(Failure::Interrupted)?;
+        state.serial = serial;
+        state.invocation = Some(Invocation {
+            serial,
+            kind,
+            work: None,
+            outcome: None,
+        });
+        drop(state);
+        Ok((
+            serial,
+            payment,
+            Box::new(Publisher {
+                handle: self.clone(),
+                serial,
+                settled: false,
+            }),
+        ))
+    }
+    async fn outcome_ready(&self) {
+        loop {
+            let notified = self.cell.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self
+                .cell
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .invocation
+                .as_ref()
+                .is_some_and(|inv| inv.outcome.is_some())
+            {
+                return;
+            }
+            notified.await;
+        }
+    }
+    fn work(&self) -> Option<VoiceCallActivationWork> {
+        self.cell
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .invocation
+            .as_ref()
+            .and_then(|inv| inv.work.clone())
+    }
+    fn take_outcome(&self) -> Option<Outcome> {
+        let invocation = {
+            let mut state = self.cell.state.lock().unwrap_or_else(|e| e.into_inner());
+            let inv = state.invocation.as_ref()?;
+            if inv.outcome.is_none() || inv.work.as_ref().is_some_and(|work| !work.is_retired()) {
+                return None;
+            }
+            state.invocation.take()
+        };
+        // Actual Work/argument retirement precedes moving/destroying the original
+        // outcome; all heavy destruction happens outside the Cell mutex.
+        invocation.and_then(|mut inv| inv.outcome.take())
+    }
+    pub(crate) async fn reply(&self) -> Reply {
+        loop {
+            let notified = self.cell.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self
+                .cell
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .terminal
+                .is_some()
+            {
+                return Reply {
+                    original: self.clone(),
+                };
+            }
+            notified.await;
+        }
+    }
+    pub(crate) fn collectible(&self) -> bool {
+        let state = self.cell.state.lock().unwrap_or_else(|e| e.into_inner());
+        self.original().is_closed()
+            && !self.cell.physical_projection_busy.load(Ordering::Acquire)
+            && match &state.physical {
+                PhysicalPurpose::Physical(history) => history.acknowledged(),
+                PhysicalPurpose::NoIntentYet | PhysicalPurpose::KeyOnly => true,
+            }
+            && state.acknowledged
+            && state.cleanup_done
+            && state.invocation.is_none()
+            && state.grant.is_none()
+            && state.control.is_none()
+            && state
+                .storage
+                .as_ref()
+                .is_some_and(|proof| proof.matches(self.original()))
+            && state.task.has_returned()
+    }
+
+    /// One prepaid physical metadata serialization, including NoIntent. Claim
+    /// before cloning a new reply/history owner; duplicate lookup is Busy and
+    /// cannot multiply capped serializers under the same original invoice.
+    pub(crate) fn physical_projection(&self) -> Result<PhysicalProjection, VoiceError> {
+        self.cell
+            .physical_projection_busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| VoiceError::Capacity)?;
+        Ok(PhysicalProjection {
+            original: self.clone(),
+        })
+    }
+
+    /// Purpose is immutable before any SDK admission. Equal public fields do
+    /// not allow a key-only caller to adopt a physical generation or vice versa.
+    pub(crate) fn require_key_only_purpose(&self) -> Result<(), VoiceError> {
+        let state = self.cell.state.lock().unwrap_or_else(|e| e.into_inner());
+        match state.physical {
+            PhysicalPurpose::NoIntentYet | PhysicalPurpose::KeyOnly => Ok(()),
+            PhysicalPurpose::Physical(_) => Err(VoiceError::Unauthorized),
+        }
+    }
+    pub(crate) fn select_key_only_purpose(&self) -> Result<(), VoiceError> {
+        let mut state = self.cell.state.lock().unwrap_or_else(|e| e.into_inner());
+        if self.original().is_closed() {
+            return Err(VoiceError::Unauthorized);
+        }
+        match state.physical {
+            PhysicalPurpose::NoIntentYet => {
+                state.physical = PhysicalPurpose::KeyOnly;
+                Ok(())
+            }
+            PhysicalPurpose::KeyOnly => Ok(()),
+            PhysicalPurpose::Physical(_) => Err(VoiceError::Unauthorized),
+        }
+    }
+    pub(crate) fn require_physical_purpose(&self) -> Result<(), VoiceError> {
+        let state = self.cell.state.lock().unwrap_or_else(|e| e.into_inner());
+        match state.physical {
+            PhysicalPurpose::NoIntentYet | PhysicalPurpose::Physical(_) => Ok(()),
+            PhysicalPurpose::KeyOnly => Err(VoiceError::Unauthorized),
+        }
+    }
+    pub(crate) fn install_physical_history(
+        &self,
+        history: &PhysicalHistory,
+    ) -> Result<(), VoiceError> {
+        let mut state = self.cell.state.lock().unwrap_or_else(|e| e.into_inner());
+        if self.original().is_closed() || !history.original().is_same(self.original()) {
+            return Err(VoiceError::Unauthorized);
+        }
+        match &state.physical {
+            PhysicalPurpose::NoIntentYet => {
+                state.physical = PhysicalPurpose::Physical(history.clone());
+                Ok(())
+            }
+            PhysicalPurpose::Physical(original) if original.is_same(history) => Ok(()),
+            _ => Err(VoiceError::Unauthorized),
+        }
+    }
+    /// Negative/history lookup only. It never checks a replacement live owner,
+    /// creates a history body, or upgrades the old grant.
+    pub(crate) fn physical_history(&self, executor: [u8; 32]) -> Option<PhysicalHistory> {
+        let state = self.cell.state.lock().unwrap_or_else(|e| e.into_inner());
+        match &state.physical {
+            PhysicalPurpose::Physical(history) if history.executor() == executor => {
+                Some(history.clone())
+            }
+            _ => None,
+        }
+    }
+    /// This is NOT a generation/executor/SDK certificate. It is available only
+    /// for the retained exact permanently closed original whose purpose never
+    /// entered the physical family. A forgotten/unknown parent gives NoProof.
+    pub(crate) fn no_physical_intent(&self) -> bool {
+        let state = self.cell.state.lock().unwrap_or_else(|e| e.into_inner());
+        self.original().is_closed() && matches!(state.physical, PhysicalPurpose::NoIntentYet)
+    }
+}
+
+/// An affine serialization slot. It remains with the actual reply through
+/// success, abandonment, serializer error and unwind. No caller-reset flag or
+/// generation floor can release another original Cell's projection.
+pub(crate) struct PhysicalProjection {
+    original: Handle,
+}
+impl PhysicalProjection {
+    pub(crate) fn original(&self) -> &Handle {
+        &self.original
+    }
+}
+impl Drop for PhysicalProjection {
+    fn drop(&mut self) {
+        self.original
+            .cell
+            .physical_projection_busy
+            .store(false, Ordering::Release);
+    }
+}
+/// Local trusted receiver receipt. Dropping a lost reply does NOT acknowledge it.
+/// This receipt itself is not serialized; native commands project only its fixed
+/// historical activation metadata. That projection never conveys RTC authority.
+pub(crate) struct Reply {
+    original: Handle,
+}
+impl Reply {
+    pub(crate) fn result(&self) -> Result<VoiceActivation, String> {
+        let terminal = self
+            .original
+            .cell
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .terminal
+            .expect("latched reply");
+        match terminal {
+            Terminal::Accepted(join) => Ok(VoiceActivation {
+                owner: self.original.id().into(),
+                group: Some(hex::encode(self.original.binding().scope.group)),
+                join: Some(hex::encode(join)),
+            }),
+            Terminal::Refused(error) => Err(error.message()),
+        }
+    }
+    /// Explicit observed-result acknowledgement, bound to this exact original Cell.
+    /// Collection still independently requires actual Work/storage/task return.
+    pub(crate) fn acknowledge(self) {
+        self.original
+            .cell
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .acknowledged = true;
+    }
+}
+struct Publisher {
+    handle: Handle,
+    serial: u64,
+    settled: bool,
+}
+impl Publisher {
+    fn stage(&mut self, outcome: Outcome, work: Option<VoiceCallActivationWork>) {
+        let mut pending = Some(outcome);
+        {
+            let mut state = self
+                .handle
+                .cell
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(inv) = state
+                .invocation
+                .as_mut()
+                .filter(|inv| inv.serial == self.serial)
+            {
+                let same = match (&inv.work, &work) {
+                    (Some(a), Some(b)) => a.is_same(b),
+                    (None, None) => true,
+                    _ => false,
+                };
+                if same && inv.outcome.is_none() {
+                    inv.outcome = pending.take();
+                }
+            }
+        }
+        if pending.is_some() {
+            self.handle.close();
+        }
+        self.settled = true;
+        self.handle.cell.changed.notify_waiters();
+        drop(pending);
+    }
+}
+impl VoiceCallActivationPublisher for Publisher {
+    fn accepted(&mut self, work: VoiceCallActivationWork) -> Result<(), VoiceEndpointError> {
+        let mut state = self
+            .handle
+            .cell
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let inv = state
+            .invocation
+            .as_mut()
+            .filter(|inv| inv.serial == self.serial)
+            .ok_or(VoiceEndpointError::Stopped)?;
+        if inv.work.is_some() {
+            return Err(VoiceEndpointError::Protocol(VoiceError::RetryMismatch));
+        }
+        inv.work = Some(work);
+        if inv.kind == Kind::Select && self.handle.original().is_closed() {
+            Err(VoiceEndpointError::Stopped)
+        } else {
+            Ok(())
+        }
+    }
+    fn completed(
+        mut self: Box<Self>,
+        result: VoiceCallActivationResult,
+        work: VoiceCallActivationWork,
+    ) {
+        self.stage(Outcome::Completed(result), Some(work));
+    }
+    fn refused(
+        mut self: Box<Self>,
+        error: VoiceEndpointError,
+        work: Option<VoiceCallActivationWork>,
+        payment: Option<ActivationRpcPermit>,
+    ) {
+        self.stage(Outcome::Unstarted(error, payment), work);
+    }
+}
+impl Drop for Publisher {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.stage(Outcome::Uncertain, self.handle.work());
+        }
+    }
+}
+
+#[derive(Clone)]
+struct Context {
+    servers: Weak<Mutex<HashMap<u64, ServerEntry>>>,
+    store: Weak<Mutex<Option<crate::ServerStore>>>,
+    resumable: Weak<Mutex<bool>>,
+    requested: Weak<AtomicBool>,
+    generation: Weak<AtomicU64>,
+    authorized: Weak<AtomicU64>,
+    commit: Weak<Mutex<()>>,
+    authority: Weak<StdMutex<voice_authority::Coordinator>>,
+}
+struct LiveContext {
+    servers: Arc<Mutex<HashMap<u64, ServerEntry>>>,
+    store: Arc<Mutex<Option<crate::ServerStore>>>,
+    resumable: Arc<Mutex<bool>>,
+    requested: Arc<AtomicBool>,
+    generation: Arc<AtomicU64>,
+    authorized: Arc<AtomicU64>,
+    commit: Arc<Mutex<()>>,
+    authority: Arc<StdMutex<voice_authority::Coordinator>>,
+}
+impl Context {
+    fn new(state: &AppState) -> Self {
+        Self {
+            servers: Arc::downgrade(&state.servers),
+            store: Arc::downgrade(&state.store),
+            resumable: Arc::downgrade(&state.session_resumable),
+            requested: Arc::downgrade(&state.session_lock_requested),
+            generation: Arc::downgrade(&state.ui_session_generation),
+            authorized: Arc::downgrade(&state.ui_authorized_generation),
+            commit: Arc::downgrade(&state.ui_session_commit),
+            authority: Arc::downgrade(&state.voice_authority),
+        }
+    }
+    fn upgrade(&self) -> Option<LiveContext> {
+        Some(LiveContext {
+            servers: self.servers.upgrade()?,
+            store: self.store.upgrade()?,
+            resumable: self.resumable.upgrade()?,
+            requested: self.requested.upgrade()?,
+            generation: self.generation.upgrade()?,
+            authorized: self.authorized.upgrade()?,
+            commit: self.commit.upgrade()?,
+            authority: self.authority.upgrade()?,
+        })
+    }
+    fn generation_current(&self, expected: u64) -> bool {
+        let (Some(requested), Some(generation), Some(authorized)) = (
+            self.requested.upgrade(),
+            self.generation.upgrade(),
+            self.authorized.upgrade(),
+        ) else {
+            return false;
+        };
+        !requested.load(Ordering::Acquire)
+            && generation.load(Ordering::Acquire) == expected
+            && authorized.load(Ordering::Acquire) == expected
+    }
+}
+impl LiveContext {
+    fn gate(&self) -> UiSessionGate<'_> {
+        UiSessionGate {
+            resumable: &self.resumable,
+            requested: &self.requested,
+            generation: &self.generation,
+            authorized: &self.authorized,
+            store: &self.store,
+        }
+    }
+}
+
+/// Marker owns no Cell/Root/Actor backedge. It follows all actual task arguments,
+/// before the final plain payer. The original signal is never a caller-supplied bool.
+struct TaskReturned {
+    signal: Arc<AtomicU64>,
+    serial: u64,
+    cell: Weak<Cell>,
+    _funding: Arc<Funding>,
+}
+impl Drop for TaskReturned {
+    fn drop(&mut self) {
+        self.signal.store(self.serial, Ordering::Release);
+        if let Some(cell) = self.cell.upgrade() {
+            cell.changed.notify_waiters();
+        }
+    }
+}
+struct Worker {
+    commit: Option<OwnedMutexGuard<()>>,
+    context: Context,
+    handle: Handle,
+    negative_only: bool,
+    // A previously closed native owner can still have heavy Grant/Room tails.
+    // Its final destruction must follow this task's original UI guard release.
+    deferred_retired: Option<voice_authority::Owner>,
+    // Before run(), this is LAST so an abandoned Worker returns its arguments
+    // first. run() moves it OUTSIDE the boxed execution future before polling.
+    returned: Option<TaskReturned>,
+}
+impl Drop for Worker {
+    fn drop(&mut self) {
+        // Taking the guard local also orders unwind if a framework wake panics:
+        // the shared gate is closed before it can be released, and heavy fields
+        // then destroy outside UI. This RAII exists BEFORE spawn/first polling.
+        let commit = self.commit.take();
+        self.handle.latch_refusal(Failure::Interrupted);
+        drop(commit);
+        drop(self.deferred_retired.take());
+        self.handle.notify_closed();
+    }
+}
+impl Handle {
+    fn initial_worker(&self, context: Context, commit: OwnedMutexGuard<()>) -> Worker {
+        let (signal, serial) = {
+            let mut state = self.cell.state.lock().unwrap_or_else(|e| e.into_inner());
+            assert!(!state.task_started, "one canonical task");
+            state.task_started = true;
+            (state.task.returned.clone(), state.task.serial)
+        };
+        Worker {
+            commit: Some(commit),
+            context,
+            handle: self.clone(),
+            negative_only: false,
+            deferred_retired: None,
+            returned: Some(TaskReturned {
+                signal,
+                serial,
+                cell: Arc::downgrade(&self.cell),
+                _funding: self.funding.clone(),
+            }),
+        }
+    }
+    fn negative_worker(&self, context: Context) -> Option<Worker> {
+        let (signal, serial) = {
+            let mut state = self.cell.state.lock().unwrap_or_else(|e| e.into_inner());
+            if !self.original().is_closed()
+                || state.cleanup_done
+                || !state.task_started
+                || !state.task.has_returned()
+            {
+                return None;
+            }
+            // Consume the EXACT old returned ticket under the SAME Cell. Concurrent
+            // close/prepare/recovery hooks cannot allocate overlapping workers on
+            // one payer. No positive path is reachable from a replacement task.
+            let serial = state.task.serial.checked_add(1)?;
+            state.task.serial = serial;
+            (state.task.returned.clone(), serial)
+        };
+        Some(Worker {
+            commit: None,
+            context,
+            handle: self.clone(),
+            negative_only: true,
+            deferred_retired: None,
+            returned: Some(TaskReturned {
+                signal,
+                serial,
+                cell: Arc::downgrade(&self.cell),
+                _funding: self.funding.clone(),
+            }),
+        })
+    }
+    fn control(&self) -> Option<VoiceActivationControl> {
+        self.cell
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .control
+            .clone()
+    }
+    /// Exact original routing only, not endpoint or key permission. The separate
+    /// admitted-key command repeats NativeActive/grant/current-Actor admission.
+    pub(crate) fn publication_control(&self) -> Option<VoiceActivationControl> {
+        self.control()
+    }
+    /// Construct cancellation custody BEFORE retaining/selecting the native
+    /// candidate. The opaque task cannot be polled until the final CAS returns.
+    pub(crate) fn prepare_task(
+        &self,
+        state: &AppState,
+        commit: OwnedMutexGuard<()>,
+    ) -> PreparedTask {
+        PreparedTask(self.initial_worker(Context::new(state), commit))
+    }
+    /// Recover negative work only after the exact previous execution returned.
+    /// No new Grant, positive selection or original RPC payment is created.
+    pub(crate) fn drive_negative(&self, state: &AppState) {
+        if let Some(worker) = self.negative_worker(Context::new(state)) {
+            drop(tokio::spawn(worker.run()));
+        }
+    }
+    /// Actual outside-Box return, distinct from logical close/Root destruction.
+    pub(crate) async fn wait_execution_return(&self) {
+        loop {
+            let changed = self.cell.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self
+                .cell
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .task
+                .has_returned()
+            {
+                return;
+            }
+            changed.await;
+        }
+    }
+    fn restore_payment(&self, kind: Kind, payment: Option<ActivationRpcPermit>) {
+        let Some(payment) = payment else { return };
+        let mut state = self.cell.state.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = match kind {
+            Kind::Select => &mut state.select_payment,
+            Kind::Clear => &mut state.clear_payment,
+        };
+        if slot.is_none() {
+            *slot = Some(payment);
+        }
+    }
+    fn capture_storage(&self) -> bool {
+        let proof = self
+            .original()
+            .root_returned()
+            .map(StorageProof::Returned)
+            .or_else(|| {
+                self.original()
+                    .seal_unclaimed_residence()
+                    .map(StorageProof::Unclaimed)
+            });
+        if let Some(proof) = proof {
+            self.cell
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .storage = Some(proof);
+            true
+        } else {
+            false
+        }
+    }
+    fn release_grant(&self) {
+        let grant = self
+            .cell
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .grant
+            .take();
+        drop(grant); // after actual argument retirement; never under Cell/UI/Coordinator
+    }
+}
+pub(crate) struct PreparedTask(Worker);
+impl PreparedTask {
+    pub(crate) fn with_retired(mut self, owner: Option<voice_authority::Owner>) -> Self {
+        self.0.deferred_retired = owner;
+        self
+    }
+    pub(crate) fn run(self) -> impl Future<Output = ()> + Send {
+        self.0.run()
+    }
+}
+impl Worker {
+    fn run(mut self) -> RunningWorker {
+        // Arm the return owner BEFORE allocating or first polling. An inner Drop
+        // marker would publish return before its future's backing was freed, and
+        // could let a replacement reuse the SAME fee while that backing survived.
+        let mut running = RunningWorker {
+            future: None,
+            returned: self.returned.take(),
+        };
+        running.future = Some(Box::pin(self.execute()));
+        running
+    }
+    fn release_commit(&mut self) {
+        drop(self.commit.take());
+        drop(self.deferred_retired.take());
+    }
+    fn fail(&mut self, failure: Failure) {
+        self.handle.latch_refusal(failure);
+        self.release_commit();
+        self.handle.notify_closed();
+    }
+    fn final_admission(&self, selected: RootSelectedCall) -> Result<(), Failure> {
+        let guard = self.commit.as_ref().ok_or(Failure::Revoked)?;
+        let live = self.context.upgrade().ok_or(Failure::Revoked)?;
+        if !Arc::ptr_eq(OwnedMutexGuard::mutex(guard), &live.commit) {
+            return Err(Failure::Revoked);
+        }
+        live.gate()
+            .check_generation(self.handle.binding().generation)
+            .map_err(|_| Failure::Revoked)?;
+        {
+            let servers = live.servers.try_lock().map_err(|_| Failure::Capacity)?;
+            let binding = self.handle.binding();
+            if !servers.get(&binding.server).is_some_and(|entry| {
+                entry.instance == binding.instance && entry.group_id == binding.group
+            }) {
+                return Err(Failure::Revoked);
+            }
+        }
+        let mut authority = live.authority.lock().unwrap_or_else(|e| e.into_inner());
+        // Pure final check of the ORIGINAL held guard/generation; do NOT reacquire it.
+        live.gate()
+            .check_generation(self.handle.binding().generation)
+            .map_err(|_| Failure::Revoked)?;
+        authority
+            .finish_admitted_activation(&self.handle, selected)
+            .map_err(Failure::Protocol)
+    }
+    fn retire_original_native_owner(&self) {
+        if let Some(live) = self.context.upgrade() {
+            let owner = live
+                .authority
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retire_admitted_activation(&self.handle);
+            drop(owner); // no last affine Grant/Room destructor under Coordinator/UI
+        }
+    }
+    async fn wait_actual_invocation(&self) {
+        self.handle.outcome_ready().await;
+        if let Some(work) = self.handle.work() {
+            work.wait_retired().await;
+        }
+    }
+    /// Observe the SAME original phase and UI generation. Do not subscribe an
+    /// admitted child-watch waiter here: inherited Runtime/Coordinator revocation
+    /// may send that watch while its guards are held. The Clock supplies only a
+    /// bounded observation wake; it cannot keep an expired/closed gate current.
+    async fn wait_close_fence(&self) -> Result<(), Failure> {
+        loop {
+            if self.handle.original().is_closed()
+                || !self
+                    .context
+                    .generation_current(self.handle.binding().generation)
+            {
+                return Ok(());
+            }
+            cadence_tick(self.handle.cell.clock.as_ref()).await?;
+        }
+    }
+    async fn execute(mut self) {
+        if !self.negative_only && !self.handle.original().is_closed() {
+            let queued = match (
+                self.handle.control(),
+                self.handle.grant(),
+                self.handle.begin(Kind::Select),
+            ) {
+                (Some(control), Some(grant), Ok((_, payment, publisher))) => {
+                    let result = control.try_queue_voice_call_selection(
+                        grant,
+                        self.handle.original().clone(),
+                        payment,
+                        publisher,
+                    );
+                    drop(result); // original canonical Work/outcome, not this observer, owns it
+                    true
+                }
+                (_, _, Err(error)) => {
+                    self.fail(error);
+                    false
+                }
+                _ => {
+                    self.fail(Failure::Stopped);
+                    false
+                }
+            };
+            if queued {
+                let closed = tokio::select! {
+                    biased;
+                    closed = self.wait_close_fence() => Some(closed),
+                    _ = self.wait_actual_invocation() => None,
+                };
+                if let Some(closed) = closed {
+                    self.fail(closed.err().unwrap_or(Failure::Revoked));
+                } else {
+                    match self.handle.take_outcome() {
+                        Some(Outcome::Completed(VoiceCallActivationResult::Selected(Ok(
+                            selected,
+                        )))) => {
+                            if let Err(error) = self.final_admission(selected) {
+                                self.fail(error);
+                            } else {
+                                self.release_commit();
+                                self.handle.cell.changed.notify_waiters();
+                            }
+                        }
+                        Some(Outcome::Completed(VoiceCallActivationResult::Selected(Err(
+                            error,
+                        )))) => self.fail(Failure::Protocol(error)),
+                        Some(Outcome::Unstarted(error, payment)) => {
+                            self.handle.restore_payment(Kind::Select, payment);
+                            self.fail(match error {
+                                VoiceEndpointError::Stopped => Failure::Stopped,
+                                VoiceEndpointError::Protocol(VoiceError::Capacity) => {
+                                    Failure::Capacity
+                                }
+                                VoiceEndpointError::Protocol(error) => Failure::Protocol(error),
+                            });
+                        }
+                        _ => self.fail(Failure::Interrupted),
+                    }
+                }
+            }
+        } else {
+            self.fail(Failure::Revoked);
+        }
+        if self.handle.active() {
+            // No UI guard/SDK/HTTP/network is held while the logical call is active.
+            if let Err(error) = self.wait_close_fence().await {
+                self.fail(error);
+            }
+        }
+        self.handle.close();
+        self.release_commit();
+        self.retire_original_native_owner();
+        // Cancellation never discards actual command/argument custody. A parked
+        // Actor can outlive lock completion while this original paid task waits here.
+        if self
+            .handle
+            .cell
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .invocation
+            .is_some()
+        {
+            self.wait_actual_invocation().await;
+            drop(self.handle.take_outcome());
+        }
+        self.handle.release_grant();
+        self.negative_cleanup().await;
+    }
+    async fn negative_cleanup(&self) {
+        loop {
+            let Some(control) = self.handle.control() else {
+                if self.handle.capture_storage() {
+                    break;
+                }
+                if cadence_tick(self.handle.cell.clock.as_ref()).await.is_err() {
+                    return;
+                }
+                continue;
+            };
+            let clear = self.handle.begin(Kind::Clear);
+            if let Ok((_, payment, publisher)) = clear {
+                drop(control.try_queue_voice_call_clear(
+                    self.handle.original().clone(),
+                    payment,
+                    publisher,
+                ));
+                drop(control);
+                self.wait_actual_invocation().await;
+                match self.handle.take_outcome() {
+                    Some(Outcome::Completed(VoiceCallActivationResult::Cleared(Ok(())))) => {
+                        let control = self
+                            .handle
+                            .cell
+                            .state
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .control
+                            .take();
+                        drop(control);
+                    }
+                    Some(Outcome::Unstarted(error, payment)) => {
+                        self.handle.restore_payment(Kind::Clear, payment);
+                        if error == VoiceEndpointError::Stopped {
+                            let control = self
+                                .handle
+                                .cell
+                                .state
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .control
+                                .take();
+                            drop(control);
+                        }
+                    }
+                    _ => {
+                        let control = self
+                            .handle
+                            .cell
+                            .state
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .control
+                            .take();
+                        drop(control);
+                    }
+                }
+            } else {
+                // An entered ambiguous/queued-destruction path cannot mint another
+                // payment or restart an Actor. Its real return marker stays decisive.
+                drop(control);
+                let control = self
+                    .handle
+                    .cell
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .control
+                    .take();
+                drop(control);
+            }
+            if self.handle.capture_storage() {
+                break;
+            }
+            // A faulty clock leaves bounded paid negative debt in the canonical
+            // Cell. Do not spin, mint another task/payment, or pretend collection.
+            if cadence_tick(self.handle.cell.clock.as_ref()).await.is_err() {
+                return;
+            }
+        }
+        let owners = {
+            let mut state = self
+                .handle
+                .cell
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            state.cleanup_done = true;
+            (
+                state.owner.take(),
+                state.control.take(),
+                state.select_payment.take(),
+                state.clear_payment.take(),
+            )
+        };
+        drop(owners);
+        self.handle.cell.changed.notify_waiters();
+    }
+}
+
+/// Own the actual execution allocation outside its future. Returning means that
+/// the SAME Box and all its captures have been destroyed, not just that a marker
+/// inside it started dropping. A completed outer executor shell has no native
+/// captures; this does not claim synchronous Tokio scheduler-cell collection.
+struct RunningWorker {
+    future: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
+    returned: Option<TaskReturned>,
+}
+impl RunningWorker {
+    fn retire(&mut self) {
+        drop(self.future.take());
+        drop(self.returned.take());
+    }
+}
+impl Future for RunningWorker {
+    type Output = ();
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<()> {
+        let Some(future) = &mut self.future else {
+            return Poll::Ready(());
+        };
+        if future.as_mut().poll(cx).is_pending() {
+            return Poll::Pending;
+        }
+        self.retire();
+        Poll::Ready(())
+    }
+}
+impl Drop for RunningWorker {
+    fn drop(&mut self) {
+        self.retire();
+        // If inner destruction unwinds, Rust still drops the remaining return
+        // owner only after Box's own allocation teardown has unwound completely.
+    }
+}
+
+/// Complete separately paid native graph, including weak-retained Context Arc
+/// allocations, actual opaque execution storage and its independently boxed Clock
+/// sleeper. Root preparation, actor control and each RPC have their own original
+/// payments; only their native aliases belong here. Allocator/RSS slack is excluded.
+fn native_layout_bytes() -> usize {
+    use std::mem::size_of;
+    #[repr(C, align(2))]
+    struct ArcAllocation<T> {
+        strong: usize,
+        weak: usize,
+        value: T,
+    }
+    fn execution_bytes<F: Future>(_: fn(Worker) -> F) -> usize {
+        std::mem::size_of::<F>()
+    }
+    let weak_context = size_of::<ArcAllocation<Mutex<HashMap<u64, ServerEntry>>>>()
+        + size_of::<ArcAllocation<Mutex<Option<crate::ServerStore>>>>()
+        + size_of::<ArcAllocation<Mutex<bool>>>()
+        + size_of::<ArcAllocation<AtomicBool>>()
+        + 2 * size_of::<ArcAllocation<AtomicU64>>()
+        + size_of::<ArcAllocation<Mutex<()>>>()
+        + size_of::<ArcAllocation<StdMutex<voice_authority::Coordinator>>>();
+    size_of::<ArcAllocation<Cell>>()
+        + size_of::<ArcAllocation<Funding>>()
+        + size_of::<ArcAllocation<AtomicU64>>() // SAME exact stamped allocation forever
+        + MAX_ACTIVATIONS * size_of::<Handle>() // entire actual index backing, not one slot
+        + 64 + 64 + 128 // constructor-capped owned id/controller/group buffers
+        + 64 + 128 // current Coordinator Owner duplicates its id and binding.group
+        + execution_bytes(Worker::execute)
+        + size_of::<RunningWorker>() + size_of::<Worker>() // construction and return frames
+        + 2 * size_of::<Context>() + size_of::<LiveContext>() + size_of::<UiSessionGate<'_>>()
+        + 2 * size_of::<Publisher>() // callback/Box construction and completion overlap
+        + 2 * size_of::<Outcome>() + size_of::<Invocation>()
+        + 2 * size_of::<Reply>() + size_of::<VoiceActivation>() + 3 * 64
+        + size_of::<voice_authority::DetachedActivation>()
+        // A closed original which never bound a physical intent has no separate
+        // history payer. Its bounded no-intent projection belongs to THIS fee.
+        + crate::voice_handoff::commands::no_physical_intent_reply_layout_bytes()
+        + weak_context + CLOCK_OWNER_BYTES + CLOCK_SLEEP_BYTES
+        // Pinned Tokio1.53.3 task header/trailer, Box/Pin/callout and Notify waiter
+        // bookkeeping. The large execution body is measured above, not hidden here.
+        + 1024
+}
+
+/// One sanctioned positive-duration Clock registration. A broken inline/early/
+/// backwards/exhausted source is a local refusal, never an always-ready retry loop
+/// or a deadline extension. A completed Root command remains independently
+/// pollable and cancels this exact original timer future.
+async fn cadence_tick(clock: &dyn Clock) -> Result<(), Failure> {
+    let before = clock.monotonic_ms();
+    let deadline = before.checked_add(CADENCE_MS).ok_or(Failure::Interrupted)?;
+    let sleeper = clock.sleep(std::time::Duration::from_millis(CADENCE_MS));
+    tokio::pin!(sleeper);
+    let mut suspended = false;
+    let actually_suspended = poll_fn(|cx| match sleeper.as_mut().poll(cx) {
+        Poll::Pending => {
+            suspended = true;
+            Poll::Pending
+        }
+        Poll::Ready(()) => Poll::Ready(suspended),
+    })
+    .await;
+    let after = clock.monotonic_ms();
+    if !actually_suspended || after < deadline {
+        return Err(Failure::Interrupted);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) mod tests;

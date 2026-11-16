@@ -16,7 +16,8 @@ function ledger(hook: () => void = () => {}, released: () => void = () => {}) {
   const budget: VoiceAudioCaptureBudget = { reserve() {
     hook(); paid += VOICE_AUDIO_CAPTURE_BYTES; reserves++;
     let returned = false;
-    return { release() { assert.equal(returned, false); returned = true; returns++; paid -= VOICE_AUDIO_CAPTURE_BYTES; released(); } };
+    return { release() { assert.equal(returned, false); returned = true; returns++; paid -= VOICE_AUDIO_CAPTURE_BYTES; released(); },
+      trackTask(_task: Promise<void>) {}, noTaskEntered() {} };
   } };
   return { budget, paid: () => paid, reserves: () => reserves, returns: () => returns };
 }
@@ -29,6 +30,21 @@ function stream(options: { kind?: string; count?: number; onTracks?(): void; onE
   const actual = { getTracks() { options.onTracks?.(); return Array.from({ length: options.count ?? 1 }, () => track); } } as unknown as MediaStream;
   return { actual, enabled: () => enabled, stopped: () => stopped };
 }
+
+test("failed trusted task observation refuses deferred SDK without inventing a no-task completion", async () => {
+  const pool = new VoiceAudioCapturePool(); let releases = 0, noTasks = 0, sdk = 0;
+  const session = pool.session({ reserve() { return {
+    release() { releases++; },
+    trackTask(_actual: Promise<void>) { throw new Error("observer registration refused"); },
+    noTaskEntered() { noTasks++; },
+  }; } });
+  assert.equal(session.request(authority(), "", { async getUserMedia() { sdk++; return stream().actual; } }), false);
+  assert.equal(releases, 0, "actual finalizer remains owned before its return");
+  assert.equal(pool.pending, true);
+  await pool.settlement();
+  assert.equal(sdk, 0); assert.equal(noTasks, 0); assert.equal(releases, 1);
+  assert.equal(pool.pending, false); assert.equal(session.available, false); session.close();
+});
 
 test("capture owns a large-parent device substring before SDK IO within the same8KiB inventory", async () => {
   const pool = new VoiceAudioCapturePool(), fees = ledger(), session = pool.session(fees.budget), live = authority();

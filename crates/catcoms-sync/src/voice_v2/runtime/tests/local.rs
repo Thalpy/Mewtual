@@ -80,8 +80,7 @@ fn final_response_ticket_clock_is_outside_guards_and_busy_views_refuse_without_w
     let ticket = actor
         .admit_transport_verification(device(2), b"exact response")
         .unwrap();
-    *clock.owners.lock().unwrap() =
-        Some((Arc::downgrade(&actor.group), Arc::downgrade(&actor.gate)));
+    *clock.owners.lock().unwrap() = Some((actor.group.probe(), Arc::downgrade(&actor.gate)));
     ticket.check_response(&actor, b"exact response").unwrap();
     assert!(clock.samples.load(Ordering::Acquire) > 0);
     assert!(clock.outside.load(Ordering::Acquire));
@@ -291,8 +290,7 @@ fn ready_member_prepayment_samples_outside_native_guards_and_refuses_contention(
     });
     let runtime = Runtime::new(clock.clone());
     let actor = active(&runtime, 1);
-    *clock.owners.lock().unwrap() =
-        Some((Arc::downgrade(&actor.group), Arc::downgrade(&actor.gate)));
+    *clock.owners.lock().unwrap() = Some((actor.group.probe(), Arc::downgrade(&actor.gate)));
     {
         let _group = actor.group.state.lock().unwrap();
         assert_eq!(
@@ -329,8 +327,7 @@ fn local_origin_and_effect_sample_clock_outside_guards_and_refuse_contention() {
     });
     let runtime = Runtime::new(clock.clone());
     let actor = active(&runtime, 1);
-    *clock.owners.lock().unwrap() =
-        Some((Arc::downgrade(&actor.group), Arc::downgrade(&actor.gate)));
+    *clock.owners.lock().unwrap() = Some((actor.group.probe(), Arc::downgrade(&actor.gate)));
     let before = clock.samples.load(Ordering::Acquire);
     {
         let _group = actor.group.state.lock().unwrap();
@@ -476,8 +473,7 @@ fn source_context_samples_outside_native_guards_and_refuses_contention() {
     });
     let runtime = Runtime::new(clock.clone());
     let actor = active(&runtime, 1);
-    *clock.owners.lock().unwrap() =
-        Some((Arc::downgrade(&actor.group), Arc::downgrade(&actor.gate)));
+    *clock.owners.lock().unwrap() = Some((actor.group.probe(), Arc::downgrade(&actor.gate)));
     let observed = actor.source_context(context().scope).unwrap();
     assert_eq!((observed.now, observed.epoch), (1000, 1));
     assert!(clock.outside.load(Ordering::Acquire));

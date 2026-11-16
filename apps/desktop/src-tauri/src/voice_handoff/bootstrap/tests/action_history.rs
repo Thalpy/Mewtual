@@ -232,7 +232,7 @@ async fn actual_channel_collection_keeps_final_proof_until_late_root_input_retir
 pub(in crate::voice_handoff) fn installed(
     registry: &Registry,
     selected: Arc<SelectedHandoffOwner>,
-) -> (Arc<SetupOutput>, Route) {
+) -> (SetupOutputRef, Route) {
     let resources = selected.resources();
     let Begin::Work(ticket) = registry.begin(selected, [3; 32]).unwrap_or_else(|error| {
         panic!(
@@ -253,7 +253,7 @@ pub(in crate::voice_handoff) async fn installed_when_available(
     selected: Arc<SelectedHandoffOwner>,
     clock: &dyn catcoms_rt::Clock,
     deadline: u64,
-) -> (Arc<SetupOutput>, Route) {
+) -> (SetupOutputRef, Route) {
     loop {
         assert!(
             clock.monotonic_ms() < deadline,
@@ -283,12 +283,15 @@ pub(in crate::voice_handoff) async fn installed_when_available(
     }
 }
 
-fn complete_install(registry: &Registry, mut ticket: Ticket) -> (Arc<SetupOutput>, Route) {
+fn complete_install(registry: &Registry, mut ticket: Ticket) -> (SetupOutputRef, Route) {
     let (session, public, setup) = ticket.compute(&mut Rng::new()).unwrap();
-    let output = Arc::new(SetupOutput {
-        public,
-        _credit: ticket.row._credit.clone(),
-    });
+    let output = SetupOutputRef::new(
+        SetupOutput {
+            public,
+            _credit: ticket.row._credit.clone(),
+        },
+        ticket.row._credit.clone(),
+    );
     let mut prepared = Some((session, output.clone(), setup));
     ticket.install(&mut prepared).unwrap();
     drop(ticket);

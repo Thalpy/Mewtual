@@ -6,6 +6,7 @@ use crate::voice_v2::crypto_authority::CryptoAuthority;
 use crate::voice_v2::presence::PairSetup;
 use catcoms_crypto::DeviceKeypair;
 use catcoms_rt::ManualClock;
+mod group_claim;
 mod handoff;
 mod progress;
 
@@ -190,8 +191,7 @@ fn four_closed_workflows_release_idle_process_slots_but_an_actual_late_lower_kee
 }
 
 #[test]
-fn real_confirmation_and_sdp_share_capacity_under_full_ordinary_pressure_without_cross_close() {
-    use crate::voice_v2::negotiation::{Exchange, Stage};
+fn original_and_transferred_sdp_share_capacity_under_full_ordinary_pressure_without_cross_close() {
     let pool = Arc::new(Resources::default());
     let bound = binding(1);
     let group = bound.scope.group;
@@ -204,12 +204,20 @@ fn real_confirmation_and_sdp_share_capacity_under_full_ordinary_pressure_without
         .as_ref()
         .unwrap()
         .clone();
-    let exchange =
-        Exchange::new_for_test(pool.clone(), group, Arc::new(slots::Slots::default())).unwrap();
     let confirmation_lower = workflow
         .charge(&pool, group, 512, ResourceKind::Forward)
         .unwrap();
-    let sdp_lower = exchange.charge(Stage::Lower, 512).unwrap();
+    let control = workflow.confirmation_control();
+    let ticket = control
+        .transfer_sdp_capacity(control.prepare_sdp_capacity().unwrap())
+        .unwrap();
+    let successor = ticket.into_parts();
+    // The same transferred claim excludes an independent standalone Exchange. This
+    // test isolates actual paid Lower capacity, without inventing Ready/SDP permission.
+    let sdp_lower = successor
+        .lowers
+        .charge(&pool, group, &successor.reserve, 512)
+        .unwrap();
     // The actual phase pair reserves only TWO positions. Ordinary public/helper traffic can
     // use the other two without borrowing another phase's protocol or prepaid byte authority.
     let ordinary: Vec<_> = (0..2)
@@ -224,23 +232,33 @@ fn real_confirmation_and_sdp_share_capacity_under_full_ordinary_pressure_without
         .unwrap();
     let before = pool.counts();
     assert_eq!(
-        exchange.charge(Stage::Lower, 512).err(),
+        successor
+            .lowers
+            .charge(&pool, group, &successor.reserve, 512)
+            .err(),
         Some(VoiceError::Capacity)
     );
     assert_eq!(pool.counts(), before);
     drop(confirmation_lower); // actual old transport returns its original shared position
-    let sdp_next = exchange.charge(Stage::Lower, 512).unwrap();
+    let sdp_next = successor
+        .lowers
+        .charge(&pool, group, &successor.reserve, 512)
+        .unwrap();
     chain.close();
     drop(sdp_lower);
     // Closing the original confirmation phase cannot close the surviving SDP owner's lane.
-    let sdp_after_close = exchange.charge(Stage::Lower, 512).unwrap();
+    let sdp_after_close = successor
+        .lowers
+        .charge(&pool, group, &successor.reserve, 512)
+        .unwrap();
     assert!(workflow
         .charge(&pool, group, 1, ResourceKind::Forward)
         .is_err());
     drop((
         sdp_next,
         sdp_after_close,
-        exchange,
+        successor,
+        control,
         ordinary,
         fill,
         workflow,

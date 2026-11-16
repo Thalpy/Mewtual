@@ -8,6 +8,9 @@
 //! a `u64` server id. Every command takes a `server` id selecting which one to act on, and
 //! every forwarded event is tagged with its server id so the UI routes it correctly.
 
+#[cfg(all(test, target_os = "windows", target_env = "msvc"))]
+mod native_test_manifest;
+
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io::{Read, Write};
@@ -75,6 +78,11 @@ mod studio_exports;
 #[cfg(test)]
 mod voice_activation_tests;
 mod voice_authority;
+// Fixed admitted-profile native activation/key commands. App V2 selection stays
+// off until operational bilateral agreement, Ready and RTC consumers are wired.
+mod voice_admitted_call;
+mod voice_admitted_key;
+mod voice_call_activation;
 // Authenticated action dispatch exists, but App V2 call selection is still off. Remove the
 // temporary unused-item allowance as the App driver takes ownership of these private APIs.
 #[allow(dead_code)]
@@ -11126,6 +11134,9 @@ async fn activate_voice_owner_inner(
             }
             (binding.generation, Some(grant))
         }
+        voice_authority::CandidateKind::AdmittedCall { .. } => {
+            return Err("this voice candidate needs native admitted activation".into());
+        }
     };
     let _commit = require_ui_session_generation(state, generation).await?;
     if let voice_authority::CandidateKind::Call { binding, .. } = &kind {
@@ -11227,6 +11238,7 @@ async fn end_voice_owner_inner(state: &AppState, owner: &str) {
         }
     }
     state.voice_channels.collect_retired(&state.voice_handoff);
+    voice_admitted_call::collect_retired(state);
 }
 
 async fn admit_voice_crypto_inner(
@@ -18945,6 +18957,9 @@ pub fn run() {
             end_call_mapping_owner,
             prepare_voice_controller,
             prepare_voice_owner,
+            voice_admitted_call::prepare_admitted_voice_owner,
+            voice_admitted_call::activate_admitted_voice_owner,
+            voice_admitted_call::acknowledge_admitted_voice_activation,
             activate_voice_owner,
             end_voice_owner,
             admit_voice_crypto,
@@ -18952,7 +18967,17 @@ pub fn run() {
             voice_join_key::admit_voice_join_key,
             voice_join_key::publish_voice_join_key,
             voice_join_key::settle_voice_join_key,
+            voice_admitted_key::admit_admitted_voice_join_key,
+            voice_admitted_key::admit_admitted_physical_voice_join_key,
+            voice_admitted_key::publish_admitted_voice_join_key,
+            voice_admitted_key::settle_admitted_voice_join_key,
+            voice_admitted_key::acknowledge_admitted_voice_key_publication,
             voice_handoff::commands::setup_voice_channel,
+            voice_handoff::commands::setup_admitted_voice_channel,
+            voice_handoff::commands::settle_admitted_voice_channel_setup,
+            voice_handoff::commands::collect_admitted_voice_channel,
+            voice_handoff::commands::observe_admitted_voice_channel,
+            voice_handoff::commands::acknowledge_admitted_voice_channel,
             voice_handoff::commands::read_voice_channel_work,
             voice_handoff::commands::settle_voice_channel_setup,
             voice_handoff::commands::collect_voice_channel,

@@ -23,13 +23,18 @@ async fn work_reply_is_serial_paid_bounded_and_available_after_end_and_lock() {
     registration.mark_handoff().unwrap();
     drop(registration);
     let pool = selected.resources();
+    let group = selected.binding().scope.group;
     let pressure = pool
         .charge(
-            selected.binding().scope.group,
-            catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.counts().0,
+            group,
+            catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.group_counts(group).unwrap().0,
             catcoms_sync::voice_v2::resources::ResourceKind::Retained,
         )
         .unwrap();
+    assert_eq!(
+        pool.group_counts(group).unwrap().0,
+        catcoms_sync::voice_v2::resources::GROUP_BYTES
+    );
     let before = pool.counts();
     let reply = read_inner(&f.state, owner.clone(), executor.clone(), 0).unwrap();
     assert_eq!(pool.counts(), before);

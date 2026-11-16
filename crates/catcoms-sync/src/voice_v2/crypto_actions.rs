@@ -639,8 +639,10 @@ impl InactiveAction {
         self.action.check_pending_at(mono, wall)
     }
 }
-#[cfg(test)]
-pub(super) fn fixed_record_layout_bytes() -> usize {
+/// Complete fixed action payload used by both the compiled growth regressions
+/// and the production chain preallocation fence. Keep this independent of
+/// Clock, pool state and allocation so capacity is refused before side effects.
+pub(super) const fn fixed_record_layout_bytes() -> usize {
     // Engine embeds terminal-result metadata; count it once through CryptoAction. Input/body
     // buffers have their own credit. The 128-byte logical map/bookkeeping allowance, like the
     // existing plan growth guard, excludes allocator slack and map-node spare capacity.
