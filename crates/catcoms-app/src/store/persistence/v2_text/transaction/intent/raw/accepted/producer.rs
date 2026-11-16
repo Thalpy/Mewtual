@@ -161,7 +161,7 @@ impl PreparedV2TextAcceptedCreate {
             let plain = encode_record_batch(
                 BatchBinding {
                     vault: &c.layout.vault,
-                    profile: &source.data().profile,
+                    profile: source.data().profile,
                     role: PageRole::AcceptanceRecords,
                     operation: &operation,
                     append: Some(v.body),
@@ -218,7 +218,7 @@ impl PreparedV2TextAcceptedCreate {
             let plain = encode_record_batch(
                 BatchBinding {
                     vault: &c.layout.vault,
-                    profile: &source.data().profile,
+                    profile: source.data().profile,
                     role: PageRole::HeaderBodyRecords,
                     operation: &operation,
                     append: Some(v.body),

@@ -11,10 +11,11 @@ pub(in crate::store) use create::{
     RetiredV2TextCreateLane, V2_TEXT_CREATE_RETIREMENT_LAYOUT_BYTES,
 };
 mod promotion;
+#[cfg(test)]
+pub(in crate::store) use create::V2_TEXT_CREATE_LANE_BYTES;
 pub(in crate::store) use create::{
     OriginalV2TextCreateLaneObservation, PreparedV2TextCreateLane, V2TextCreateBinding,
     V2TextCreateControlWriteEnd, V2TextCreateLane, V2TextCreateWorkspaceEnd,
-    V2_TEXT_CREATE_LANE_BYTES,
 };
 mod query;
 use crate::store::critical_namespaces::read_pool::CatalogReadReservation;
@@ -36,7 +37,6 @@ pub(in crate::store) use query::{
 };
 pub(in crate::store) use query::{
     PreparedV2TextQueryLease, V2TextQueryLease, V2_TEXT_QUERY_READER_LAYOUT_BYTES,
-    V2_TEXT_QUERY_REGISTRY_BACKING_BYTES,
 };
 pub(in crate::store) use query::{
     PreparedV2TextRetirementRootsClose, RemovedV2TextRetirementRootGenerations,

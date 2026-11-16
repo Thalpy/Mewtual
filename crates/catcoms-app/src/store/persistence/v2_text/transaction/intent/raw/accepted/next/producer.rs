@@ -115,7 +115,7 @@ impl PreparedV2TextAcceptedCreate {
             let plain = encode_record_batch(
                 BatchBinding {
                     vault: &c.layout.vault,
-                    profile: &source.data().profile,
+                    profile: source.data().profile,
                     role: PageRole::AcceptanceRecords,
                     operation: &operation,
                     append: Some(v.body),
@@ -177,7 +177,7 @@ impl PreparedV2TextAcceptedCreate {
             let plain = encode_record_batch(
                 BatchBinding {
                     vault: &c.layout.vault,
-                    profile: &source.data().profile,
+                    profile: source.data().profile,
                     role: PageRole::HeaderBodyRecords,
                     operation: &operation,
                     append: Some(v.body),
@@ -304,7 +304,7 @@ impl PreparedV2TextAcceptedCreate {
             })?;
             let plain = only_accepted_leaf(&rewritten, 2)?;
             self.require_original_candidates(store, source)?;
-            self.actions = Some(self.prepare_page(&key, &plain, rng)?);
+            self.actions = Some(self.prepare_page(&key, plain, rng)?);
             self.require_original_candidates(store, source)?;
         }
         if self.directory.is_none() {
@@ -369,7 +369,7 @@ impl PreparedV2TextAcceptedCreate {
             })?;
             let plain = only_accepted_leaf(&rewritten, 1)?;
             self.require_original_candidates(store, source)?;
-            self.directory = Some(self.prepare_page(&key, &plain, rng)?);
+            self.directory = Some(self.prepare_page(&key, plain, rng)?);
             self.require_original_candidates(store, source)?;
         }
         if self.publication.is_none() {
@@ -442,7 +442,7 @@ impl PreparedV2TextAcceptedCreate {
                 .map_err(|_| refused())?;
             let plain = only_private_leaf(&rewritten, 2)?;
             self.require_original_candidates(store, source)?;
-            self.publications = Some(self.prepare_page(&key, &plain, rng)?);
+            self.publications = Some(self.prepare_page(&key, plain, rng)?);
             self.require_original_candidates(store, source)?;
         }
         if self.candidate.is_none() {

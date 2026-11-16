@@ -596,10 +596,12 @@ mod persistence {
     mod cold_source_read;
     #[cfg(target_os = "linux")]
     mod exact_inventory_linux;
+    #[cfg(test)]
+    pub(in crate::store) use cold_source_read::V2TextResidentParentData;
     pub(in crate::store) use cold_source_read::{
         OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
         PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
-        PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis, V2TextResidentParentData,
+        PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis,
     };
     mod current_group;
     mod current_layout;
@@ -616,9 +618,8 @@ mod persistence {
     pub use cold_source_read::RetainedBootstrapSourceData;
     pub(super) use cold_source_read::{
         GenesisCurrentOwnerRef, GenesisSourceDataRef, OriginalBootstrapReadObservation,
-        PreparedV2TextSourceObserver, V2TextOwnedCurrent, V2TextOwnerRef,
-        V2TextSourceNegativeObserver, ORIGINAL_BOOTSTRAP_READ_OBSERVATION_BYTES,
-        V2_TEXT_SOURCE_OBSERVER_BYTES,
+        V2TextOwnedCurrent, V2TextOwnerRef, V2TextSourceNegativeObserver,
+        ORIGINAL_BOOTSTRAP_READ_OBSERVATION_BYTES,
     };
     pub use cold_source_read::{
         GenesisSeedBudget, GenesisSeedRefusal, MemberSaveJob, MemberSaveJobReport,
@@ -628,6 +629,10 @@ mod persistence {
         UnexposedColdV2GenesisCurrent, UnexposedRepairedV2GenesisCurrent,
         UnexposedV2GenesisCurrent, V2MemberDependency, V2MemberSaveOutcome, V2MemberSaveRefusal,
         V2MemberSignRequest, V2TextHostPolicy,
+    };
+    #[cfg(test)]
+    pub(super) use cold_source_read::{
+        PreparedV2TextSourceObserver, V2_TEXT_SOURCE_OBSERVER_BYTES,
     };
     pub(in crate::store) use current_layout::{
         CurrentCanonicalFilenameAssociation, CURRENT_FILENAME_SCRATCH_FEE,

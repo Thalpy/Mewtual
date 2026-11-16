@@ -1,5 +1,30 @@
 # Mewtual; Handover
 
+## Consolidated Chat V2 integration (16 November; validation in progress)
+
+The backlog is consolidated from64 to9 open PRs. The dependent Chat histories
+are in PR89 and the parked voice histories in PR77; those are feature-branch
+merges, not completed main merges. Existing adversarial reviews remain accepted.
+The combined foundation/security candidate PR84 is still awaiting fresh CI.
+
+PR89 now incorporates that foundation candidate and the unique reviewed PR97
+native consumer startup fix. The merge retains both diagnostics and the union
+of all13 real native scenarios. Actual-diff review reports no blocker/high/medium.
+The separately reviewed alias/borrow cleanup preserves production observers,
+all original admission checks, custody fields, fees and drop order.
+
+Fresh compiled inventory proves187 Net tests and36 native-key lifecycle tests;
+their exact-count guards are corrected. The App inventory, focused regression
+execution and fresh complete validation remain pending. Strict App lint remains
+an open merge gate: the fresh baseline reports516 dead-code,16 unused-import
+and24 style diagnostics before the contained cleanup. Do not remove production
+proofs, widen private APIs or suppress whole modules to make that gate green.
+
+Chat V2 remains disabled and incomplete. Covering invite issuance, production
+joining, shared message delivery/history and complete multi-member acceptance
+remain implementation work. This integration does not claim those outcomes.
+
+
 ## Native consumer startup fixture (13 November; focused validation)
 
 The separate `chat-v2-native-consumer-startup-fixture` branch corrects a test-only

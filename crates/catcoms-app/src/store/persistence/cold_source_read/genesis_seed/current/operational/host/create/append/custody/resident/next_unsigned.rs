@@ -128,7 +128,7 @@ impl PreparedV2NextUnsignedAppend {
             // caller boolean, old WC, token row or inherited historical miss.
             next_a
                 .saved_data()
-                .validate_selected_under_current_guard(&mut guard)?;
+                .validate_selected_under_current_guard(&guard)?;
             accepted.validate_completed_under_current_guard(&mut guard)?;
             if let Some(current) = next.as_ref() {
                 current.require_current_source_under_guard(&guard)?;

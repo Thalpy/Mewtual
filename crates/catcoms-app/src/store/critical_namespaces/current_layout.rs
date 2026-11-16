@@ -41,7 +41,12 @@ pub(in crate::store) use text::{
     PreparedV2TextRetainScratchLease, V2TextRetainRecoverySourceSlot,
     V2_TEXT_RETAIN_RECOVERY_ADMISSION_LAYOUT_BYTES,
 };
-pub(in crate::store) use text::{PreparedV2TextAcceptedQueryLease, V2TextAcceptedQueryLease};
+// Tests use this facade; production prepares the original lease in canonical::text_lane.
+#[cfg(test)]
+pub(in crate::store) use text::PreparedV2TextAcceptedQueryLease;
+#[cfg(test)]
+pub(in crate::store) use text::PreparedV2TextQueryLease;
+pub(in crate::store) use text::V2TextAcceptedQueryLease;
 pub(in crate::store) use text::{
     SavedCompletedV2TextFinishGuard, V2_TEXT_COMPLETED_FINISH_LAYOUT_BYTES,
 };
@@ -64,8 +69,8 @@ pub(in crate::store) use text::{
     AdmittedV2TextRetainCommit, AdmittedV2TextRetainStage, V2_TEXT_RETAIN_ADMISSION_LAYOUT_BYTES,
 };
 pub(in crate::store) use text::{
-    AdmittedV2TextTokenQuery, PreparedV2TextQueryLease, PreparedV2TextTokenQueryCapture,
-    V2TextQueryLease, V2TextTokenQuerySourceSlot, V2_TEXT_TOKEN_QUERY_ADMISSION_LAYOUT_BYTES,
+    AdmittedV2TextTokenQuery, PreparedV2TextTokenQueryCapture, V2TextQueryLease,
+    V2TextTokenQuerySourceSlot, V2_TEXT_TOKEN_QUERY_ADMISSION_LAYOUT_BYTES,
 };
 pub(in crate::store) use text::{
     AdmittedV2TextWorkspaceRead, BoundV2TextCreatePredecessor, PreparedV2TextWorkspaceReadCapture,

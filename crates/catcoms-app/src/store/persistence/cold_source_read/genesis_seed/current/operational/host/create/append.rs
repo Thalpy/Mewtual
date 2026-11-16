@@ -179,8 +179,8 @@ impl FirstUnsignedAppendData {
         // every account wait before any new SDK work; accepted-history lookup is still
         // a separate prerequisite for persisting I and can never be inferred here.
         store.with_v2_text_current(&source, |admission| {
-            let mut guard = store.lock_v2_text_current_group(admission, &resources)?;
-            saved.validate_selected_under_current_guard(&mut guard)
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            saved.validate_selected_under_current_guard(&guard)
         })?;
         drop(source);
         if current.prepared.is_none() {

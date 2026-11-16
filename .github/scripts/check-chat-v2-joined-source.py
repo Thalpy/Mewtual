@@ -26,7 +26,7 @@ COHORTS = (
     ("retained-bootstrap-signing", "catcoms-sync", "retained_bootstrap", 10),
     ("retained-bootstrap-owner", "catcoms-app", "retained_bootstrap", 3),
     # Includes the genuine whole-Host observation/ordinary-UI-lock distinction.
-    ("native-key-lifecycle", "catcoms-rt", "native_chat_key::", 32),
+    ("native-key-lifecycle", "catcoms-rt", "native_chat_key::", 36),
     ("native-authentication-life", "catcoms-app", "chat_admission::revocation::tests", 5),
     ("native-warm-sdk-tail", "catcoms-sync", "native_warm_sdk_tail_", 1),
     ("native-founder-sdk", "catcoms-app", "native_sdk_", 5),

@@ -9,7 +9,6 @@ use crate::store::persistence::v2_text::completed_workspace::{
     ReadyV2TextCompletedWorkspace,
 };
 use crate::store::persistence::v2_text::retirement::{RetirementEntryData, RetirementKindData};
-use crate::store::persistence::OriginalV2TextResidentObservation;
 pub(in crate::store) use resident_source::NextRetainedAResidentSourceData;
 
 pub(super) struct CompletedRetainOrigin {

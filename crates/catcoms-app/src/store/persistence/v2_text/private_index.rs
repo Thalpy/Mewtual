@@ -21,9 +21,8 @@ pub(in crate::store) use path::{
     PrivateIndexPathData, PRIVATE_INDEX_BOUNDARY_OPEN_BYTES, PRIVATE_INDEX_PATH_METADATA_BYTES,
 };
 pub(in crate::store) use rewrite::{
-    rewrite_private_branch_data, rewrite_private_leaf_data, EncodedPrivateIndexNodeData,
-    PrivateIndexBranchChildData, PrivateIndexRewriteData, PRIVATE_INDEX_REWRITE_METADATA_BYTES,
-    PRIVATE_INDEX_REWRITE_TEMPORARY_BYTES,
+    rewrite_private_branch_data, rewrite_private_leaf_data, PrivateIndexRewriteData,
+    PRIVATE_INDEX_REWRITE_METADATA_BYTES, PRIVATE_INDEX_REWRITE_TEMPORARY_BYTES,
 };
 
 const TOKEN_DOMAIN: &[u8] = b"catcoms/private-chat-text-token-index/v1\0";

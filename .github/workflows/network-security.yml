@@ -68,7 +68,7 @@ jobs:
               ('vendor-library', ['--manifest-path', 'vendor/libp2p-gossipsub/Cargo.toml', '--lib'], 159),
               # Foundation security/publication cases plus the later reviewed
               # native transport identity and lifetime regressions.
-              ('net', ['-p', 'catcoms-net', '--lib'], 177),
+              ('net', ['-p', 'catcoms-net', '--lib'], 187),
               ('protocol-rng', ['-p', 'catcoms-rt', '--lib', 'protocol_rng::tests'], 3),
           )
           for label, arguments, count in cohorts:
