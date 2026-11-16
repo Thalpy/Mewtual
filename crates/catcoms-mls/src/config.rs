@@ -24,12 +24,22 @@ pub(crate) fn capabilities() -> Capabilities {
 /// The group-creation config: pinned ciphersuite, ciphertext-only wire format,
 /// ratchet-tree extension (so Welcomes carry the tree), locked capabilities.
 pub(crate) fn create_config() -> MlsGroupCreateConfig {
+    create_config_builder().build()
+}
+
+fn create_config_builder() -> MlsGroupCreateConfigBuilder {
     MlsGroupCreateConfig::builder()
         .ciphersuite(CIPHERSUITE)
         .wire_format_policy(PURE_CIPHERTEXT_WIRE_FORMAT_POLICY)
         .use_ratchet_tree_extension(true)
         .capabilities(capabilities())
-        .build()
+}
+
+/// Test-only: the production create config with an explicit founder-leaf lifetime. The frozen
+/// stored-state fixtures use a never-expiring lifetime so wall-clock time cannot fail them.
+#[cfg(test)]
+pub(crate) fn create_config_with_lifetime(lifetime: Lifetime) -> MlsGroupCreateConfig {
+    create_config_builder().lifetime(lifetime).build()
 }
 
 /// The join config, matching the create config's wire format and ratchet-tree use.

@@ -6,6 +6,33 @@ COPY . .
 RUN test -f Cargo.toml \
     && test -f crates/catcoms-app/src/store.rs \
     && test -f apps/desktop/src/App.svelte \
+    && test -f apps/desktop/scripts/test-svelte.mjs \
+    && test -f apps/desktop/scripts/svelte-loader.mjs \
+    && test -f apps/desktop/scripts/flow-processes.mjs \
+    && test -f apps/desktop/scripts/flow-processes.test.mjs \
+    && test -f apps/desktop/scripts/startup-env.mjs \
+    && test -f apps/desktop/scripts/startup-env.test.mjs \
+    && test -f apps/desktop/scripts/vite-watch.test.mjs \
+    && test -f apps/desktop/scripts/voice-app-interop.ts \
+    && test -f apps/desktop/scripts/voice-native-interop.ts \
+    && test -f apps/desktop/scripts/voice-native-control.ts \
+    && test -f apps/desktop/scripts/voice-native-reply-loss.ts \
+    && test -f apps/desktop/scripts/fixtures/LightboxPictureHarness.svelte \
+    && test -f apps/desktop/scripts/fixtures/PixaViewerHarness.svelte \
+    && test -f apps/desktop/scripts/fixtures/StudioSoundHarness.svelte \
+    && test -f apps/desktop/scripts/fixtures/StudioPlaybackHarness.svelte \
+    && test -f apps/desktop/src-tauri/src/voice_handoff/channel/vectors.json \
+    && test -f apps/desktop/src-tauri/src/voice_handoff/requests/vectors.json \
+    && test -f apps/desktop/src-tauri/src/voice_handoff/requests/confirmation/vectors.json \
+    && test -f apps/desktop/src-tauri/src/voice_handoff/requests/transition/vectors.json \
+    && test -f apps/desktop/src-tauri/src/voice_handoff/replies/vectors.json \
+    && test -f apps/desktop/src-tauri/src/voice_handoff/sdp-history-vectors.json \
+    && test -f apps/desktop/src-tauri/src/voice_handoff/sdp-engine-vectors.json \
+    && test -f apps/desktop/src-tauri/src/voice_handoff/requests/key-session-vectors.json \
+    && test -f apps/desktop/src-tauri/src/voice_handoff/requests/sdp-vectors.json \
+    && test -f apps/desktop/src-tauri/src/voice_handoff/requests/sdk-vectors.json \
+    && test -f apps/desktop/src-tauri/src/voice_handoff/requests/pc-vectors.json \
+    && test -f apps/desktop/src-tauri/src/voice_handoff/requests/sdp-action-vectors.json \
     && test -f assets/mewtual-logo.svg \
     && test -f assets/cat/mascot-idle.svg \
     && test ! -e .claude/review-secret \
@@ -20,7 +47,7 @@ RUN test -f Cargo.toml \
 # outside this headless container's claims; see docs/LINUX-TESTING.md.
 FROM node:22-bookworm-slim AS node-runtime
 
-FROM rust:1.89-bookworm
+FROM rust:1.94-bookworm
 
 ARG MEWTUAL_TEST_UID=1000
 ARG MEWTUAL_TEST_GID=1000

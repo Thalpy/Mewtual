@@ -2,10 +2,9 @@
  * The host side of the pre-upload video editor: which video is being reviewed, which are waiting,
  * and how each review settles.
  *
- * App.svelte can run more than one composer batch at a time (a paste into the status composer
- * while a chat drop is still uploading, for example). Each batch awaits `request` for every video
- * it carries. The rules that keep those batches from trampling each other live here, apart from
- * App, so they can be tested directly:
+ * App.svelte admits one batch of at most32 files before retaining its FileList. This queue also
+ * caps its own inventory so another caller cannot retain unlimited waiting reviews. Each batch
+ * awaits `request` for every video it carries. The rules live here so they can be tested directly:
  *
  * - One editor is open at a time. A later request waits its turn; it never closes the open one.
  *   (Closing it would discard edits the person is in the middle of making.)
@@ -34,6 +33,7 @@ export type OpenReview = {
 type Pending = OpenReview & { resolve: (result: VideoEditorResult) => void };
 
 const SKIP: VideoEditorResult = { kind: "skip" };
+const MAX_REVIEWS = 16;
 
 export class VideoReviewQueue {
   #open: Pending | null = null;
@@ -58,6 +58,9 @@ export class VideoReviewQueue {
 
   /** Ask for a review of `file`, bound to `scope`. Resolves once, with the person's answer or `skip`. */
   request(file: File, position: ReviewPosition, scope: string, context: VideoEditorContext): Promise<VideoEditorResult> {
+    // App gives a visible refusal before starting another batch. This is a defensive bound for
+    // other callers; overflow owns no resolver, queued File or editor identity.
+    if (this.#waiting.length + (this.#open ? 1 : 0) >= MAX_REVIEWS) return Promise.resolve(SKIP);
     return new Promise((resolve) => {
       this.#waiting.push({ id: ++this.#seq, file, position, scope, context, resolve });
       if (!this.#open) this.#advance();

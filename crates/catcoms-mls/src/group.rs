@@ -15,6 +15,32 @@ use crate::device::MlsDevice;
 use crate::invite::{membership_from_key_package, InviteError, InviteLedger, InviteToken};
 use crate::{proto, MlsError};
 
+mod commit_gate;
+pub use commit_gate::{
+    check_commit_header, commit_header, AppliedCommit, CommitHeader, CommitRefusal,
+};
+
+mod catalog;
+pub use catalog::{
+    MemberCatalogCursor, MemberCatalogEntry, MemberCatalogError, MemberCatalogPage,
+    MemberCatalogView, MAX_MEMBER_CATALOG_CREDENTIAL_BYTES, MAX_MEMBER_CATALOG_PROBES,
+};
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod add_explicit_time;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod merge_explicit_time;
+mod owner_observation;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod private_text_add;
+mod text_current;
+// Native, independently paid private Add, completed DATA and exact-receiver
+// whole-pair ownership handoff. Root governance/Source/save admission and
+// publication stay separate; no raw SDK extraction or mutable getter exists.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod text_current_add;
+pub use owner_observation::{LocalMembershipChange, LocalMembershipChangeKind};
+
 /// The result of adding a member: the joiner's Welcome, the Commit to fan out to
 /// existing members, and the epoch the commit was built at.
 #[derive(Debug, Clone)]
@@ -63,11 +89,31 @@ pub enum Incoming {
 /// One server/connection: a wrapper over an MLS group.
 pub struct ServerGroup {
     group: MlsGroup,
+    // Native observation only: fresh for every create/join/load, never serialized. Catalog
+    // pages cannot accidentally reuse a summary from a same-epoch replacement group instance.
+    catalog: catalog::CatalogCache,
+    // LAST and shared with the actual device: either half may outlive the public tuple's other.
+    pub(crate) sdk_graph_lease: Option<crate::persist::OwnerSdkGraphLease>,
 }
 
 impl ServerGroup {
+    /// Negative fence for a closed restored graph BEFORE making a candidate/legacy copy or
+    /// entering a mutative SDK call. Ok preserves the ordinary unrestricted legacy path; it
+    /// is NOT payment, source provenance or permission to run an SDK operation. A closed graph
+    /// has no later operation admission in this initial slice and always refuses here.
+    pub fn require_sdk_operation_admission(&self, device: &MlsDevice) -> Result<(), MlsError> {
+        device.require_sdk_operation_admission()?;
+        if self.sdk_graph_lease.is_some() {
+            return Err(MlsError::Internal(
+                "closed SDK graph needs explicit operation admission",
+            ));
+        }
+        Ok(())
+    }
+
     /// Found a new group with `device` as the only member.
     pub fn create(device: &MlsDevice) -> Result<Self, MlsError> {
+        device.require_sdk_operation_admission()?;
         let group = MlsGroup::new(
             device.provider(),
             device.signer(),
@@ -75,23 +121,140 @@ impl ServerGroup {
             device.credential(),
         )
         .map_err(proto)?;
-        Ok(Self { group })
+        Ok(Self {
+            group,
+            catalog: Default::default(),
+            sdk_graph_lease: None,
+        })
+    }
+
+    /// Test-only: [`ServerGroup::create`] with an explicit founder-leaf lifetime (frozen fixtures).
+    #[cfg(test)]
+    pub(crate) fn create_with_lifetime(
+        device: &MlsDevice,
+        lifetime: Lifetime,
+    ) -> Result<Self, MlsError> {
+        device.require_sdk_operation_admission()?;
+        let group = MlsGroup::new(
+            device.provider(),
+            device.signer(),
+            &crate::config::create_config_with_lifetime(lifetime),
+            device.credential(),
+        )
+        .map_err(proto)?;
+        Ok(Self {
+            group,
+            catalog: Default::default(),
+            sdk_graph_lease: None,
+        })
+    }
+
+    /// Test-only: `not_after` of every KeyPackage-sourced leaf in the tree. openmls checks these
+    /// lifetimes against the wall clock when a Welcome is joined or an Add is processed.
+    #[cfg(test)]
+    pub(crate) fn key_package_leaf_not_after(&self) -> Vec<u64> {
+        self.group
+            .members()
+            .filter_map(|m| self.group.public_group().leaf(m.index))
+            .filter_map(|leaf| match leaf.leaf_node_source() {
+                openmls::treesync::LeafNodeSource::KeyPackage(lifetime) => {
+                    Some(lifetime.not_after())
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// Join an existing group from a serialized Welcome (as produced by
     /// [`ServerGroup::add_member`]).
     pub fn join(device: &MlsDevice, welcome_bytes: &[u8]) -> Result<Self, MlsError> {
+        device.require_sdk_operation_admission()?;
+        Self::join_inner(device, welcome_bytes, None)
+    }
+
+    /// Join only if MLS actually selects this live attempt's exact KeyPackage reference.
+    /// A provider can retain older init keys, so merely opening a signed Welcome does not bind
+    /// it to the current request. This establishes attempt binding, not historical membership
+    /// time or permission to renew a retired local admission.
+    pub fn join_for_key_package(
+        device: &MlsDevice,
+        welcome_bytes: &[u8],
+        expected: &[u8; 32],
+    ) -> Result<Self, MlsError> {
+        device.require_sdk_operation_admission()?;
+        Self::join_inner(device, welcome_bytes, Some(expected))
+    }
+
+    fn join_inner(
+        device: &MlsDevice,
+        welcome_bytes: &[u8],
+        expected: Option<&[u8; 32]>,
+    ) -> Result<Self, MlsError> {
         let msg_in = MlsMessageIn::tls_deserialize(&mut &welcome_bytes[..]).map_err(proto)?;
         let welcome = match msg_in.extract() {
             MlsMessageBodyIn::Welcome(w) => w,
             _ => return Err(MlsError::WrongMessageType),
         };
-        let group =
-            StagedWelcome::new_from_welcome(device.provider(), &join_config(), welcome, None)
-                .map_err(proto)?
-                .into_group(device.provider())
-                .map_err(proto)?;
-        Ok(Self { group })
+        if expected.is_some_and(|expected| {
+            !welcome
+                .secrets()
+                .iter()
+                .any(|entry| entry.new_member().as_slice() == expected)
+        }) {
+            // Refuse an old-only Welcome BEFORE OpenMLS consumes any stored init key.
+            return Err(MlsError::Protocol(
+                "Welcome does not address this join attempt".into(),
+            ));
+        }
+        // Leaf lifetimes in the received tree are NOT checked (docs/design-mls-leaf-lifetime.md).
+        //
+        // A leaf added from a KeyPackage keeps that KeyPackage's lifetime (openmls default: 84
+        // days) until its owner replaces it. Only the designated committer commits, and the app
+        // has no MLS Update flow, so every other member's leaf keeps its join-time lifetime for
+        // good. openmls's default join compares every such leaf with the wall clock, so 84 days
+        // after the first non-committer joined, every Welcome to the group failed. openmls offers
+        // this switch for exactly that case (RFC 9420 section 7.3; openmls issue #1810), with the
+        // same API on 0.8 and 0.9.
+        //
+        // Only the lifetime comparison on tree leaves is skipped. Still checked here: the
+        // GroupInfo signature, tree hash, parent hashes, leaf signatures, capabilities,
+        // credentials and key uniqueness, and the caller's own checks (Welcome signed by the
+        // invite's inviter or the granted owner, group id). Still checked elsewhere: the joiner's
+        // KeyPackage lifetime when it is admitted, by the committer and by every member that
+        // processes the Add, so a stale KeyPackage is still refused. An expired leaf is a member
+        // that has not rotated its leaf key, which every existing member already lives with;
+        // refusing to join never removed it.
+        //
+        // `build_from_welcome` consumes the KeyPackage's private material, as `new_from_welcome`
+        // did, so a refused join cannot be retried with the same Welcome.
+        let builder = StagedWelcome::build_from_welcome(device.provider(), &join_config(), welcome)
+            .map_err(proto)?
+            .skip_lifetime_validation();
+        if let Some(expected) = expected {
+            // A multi-entry Welcome may mention the new reference but select an older local
+            // bundle first. Inspect the ACTUAL selection, not merely presence in its envelope.
+            let selected = builder
+                .processed_welcome()
+                .own_key_package()
+                .ok_or_else(|| {
+                    MlsError::Protocol("Welcome has no local KeyPackage selection".into())
+                })?;
+            if &device.key_package_reference(selected)? != expected {
+                return Err(MlsError::Protocol(
+                    "Welcome selected another join attempt".into(),
+                ));
+            }
+        }
+        let group = builder
+            .build()
+            .map_err(proto)?
+            .into_group(device.provider())
+            .map_err(proto)?;
+        Ok(Self {
+            group,
+            catalog: Default::default(),
+            sdk_graph_lease: None,
+        })
     }
 
     /// Reconstruct a group from a `device` whose provider storage was **restored** from a
@@ -102,7 +265,29 @@ impl ServerGroup {
         let group = MlsGroup::load(device.provider().storage(), &gid)
             .map_err(|e| MlsError::Protocol(format!("{e:?}")))?
             .ok_or(MlsError::Internal("group missing from restored storage"))?;
-        Ok(Self { group })
+        Ok(Self {
+            group,
+            catalog: Default::default(),
+            sdk_graph_lease: None,
+        })
+    }
+
+    /// The CLOSED resource consumer uses fixed errors: formatting a storage error under an
+    /// exhausted graph account would allocate a diagnostic String outside its invoice. Legacy
+    /// load keeps its original error contract. GroupId16 is prepaid before entering this path.
+    pub(crate) fn load_owner_checkpoint(
+        device: &MlsDevice,
+        group_id: &[u8],
+    ) -> Result<Self, MlsError> {
+        let gid = GroupId::from_slice(group_id);
+        let group = MlsGroup::load(device.provider().storage(), &gid)
+            .map_err(|_| MlsError::Internal("closed SDK group restore refused"))?
+            .ok_or(MlsError::Internal("closed SDK group is missing"))?;
+        Ok(Self {
+            group,
+            catalog: Default::default(),
+            sdk_graph_lease: None,
+        })
     }
 
     /// Add `key_package`'s device and merge the commit. Returns the [`AddOutcome`]:
@@ -115,6 +300,7 @@ impl ServerGroup {
         device: &MlsDevice,
         key_package: KeyPackage,
     ) -> Result<AddOutcome, MlsError> {
+        self.require_sdk_operation_admission(device)?;
         let (commit, welcome, _group_info) = self
             .group
             .add_members(device.provider(), device.signer(), &[key_package])
@@ -278,6 +464,7 @@ impl ServerGroup {
         ledger: &mut InviteLedger,
         now_ms: u64,
     ) -> Result<AddOutcome, MlsError> {
+        self.require_sdk_operation_admission(inviter)?;
         let group_id = self.group_id();
         if token.group_id != group_id {
             return Err(InviteError::WrongGroup.into());
@@ -371,6 +558,7 @@ impl ServerGroup {
     /// Remove the member with `target` device id and merge the commit (this
     /// advances the epoch, healing forward secrecy / post-compromise security).
     pub fn remove_member(&mut self, device: &MlsDevice, target: &DeviceId) -> Result<(), MlsError> {
+        self.require_sdk_operation_admission(device)?;
         let index = self
             .group
             .members()
@@ -397,6 +585,7 @@ impl ServerGroup {
         device: &MlsDevice,
         key_package: KeyPackage,
     ) -> Result<StagedOutcome, MlsError> {
+        self.require_sdk_operation_admission(device)?;
         let base_authenticator = self.epoch_authenticator_id();
         let commit_epoch = self.epoch();
         let (commit, welcome, _group_info) = self
@@ -417,6 +606,7 @@ impl ServerGroup {
         device: &MlsDevice,
         target: &DeviceId,
     ) -> Result<StagedOutcome, MlsError> {
+        self.require_sdk_operation_admission(device)?;
         let index = self
             .group
             .members()
@@ -443,6 +633,7 @@ impl ServerGroup {
     /// Adopt this group's own staged commit (advances the epoch). The inverse of
     /// [`ServerGroup::abort_staged`].
     pub fn merge_staged_self(&mut self, device: &MlsDevice) -> Result<(), MlsError> {
+        self.require_sdk_operation_admission(device)?;
         self.group
             .merge_pending_commit(device.provider())
             .map_err(proto)
@@ -452,6 +643,7 @@ impl ServerGroup {
     /// epoch secrets intact (openmls `clear_pending_commit` only flips the group
     /// state back to Operational). The fork **loser**'s primitive.
     pub fn abort_staged(&mut self, device: &MlsDevice) -> Result<(), MlsError> {
+        self.require_sdk_operation_admission(device)?;
         self.group
             .clear_pending_commit(device.provider().storage())
             .map_err(proto)
@@ -463,6 +655,7 @@ impl ServerGroup {
         device: &MlsDevice,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, MlsError> {
+        self.require_sdk_operation_admission(device)?;
         let out = self
             .group
             .create_message(device.provider(), device.signer(), plaintext)
@@ -471,11 +664,16 @@ impl ServerGroup {
     }
 
     /// Process a serialized inbound MLS message (application message or commit).
+    ///
+    /// `Ok` means "processed", not "a commit was merged": application messages and proposals
+    /// succeed too. Anything that will be recorded or counted as a membership commit must go
+    /// through [`ServerGroup::apply_commit`] instead, which refuses every non-commit.
     pub fn process_incoming(
         &mut self,
         device: &MlsDevice,
         bytes: &[u8],
     ) -> Result<Incoming, MlsError> {
+        self.require_sdk_operation_admission(device)?;
         let msg_in = MlsMessageIn::tls_deserialize(&mut &bytes[..]).map_err(proto)?;
         let protocol = msg_in
             .try_into_protocol_message()
@@ -588,7 +786,22 @@ impl ServerGroup {
                     .map_err(proto)?;
                 Ok(Incoming::CommitApplied { removed })
             }
-            _ => Ok(Incoming::Other),
+            // openmls 0.9 reports a message this client authored (or one whose encrypted sender
+            // data merely CLAIMS our leaf, which any member can write) as a successful process
+            // with no content, where 0.8 returned an error. Keep 0.8's contract: refuse it.
+            // `Incoming::Other` means "processed, nothing to apply", and the sync layer records a
+            // commit as applied on any `Ok` (`apply_commit_in_order`), so mapping these to `Other`
+            // would mark an unmerged, or forged, commit as applied while the epoch stayed put.
+            // Our own staged commit is adopted only through `merge_staged_self`.
+            ProcessedMessageContent::OwnPrivateMessage
+            | ProcessedMessageContent::OwnPendingCommit => Err(MlsError::Protocol(
+                "refused a message attributed to this device's own leaf".into(),
+            )),
+            // Named, not `_`: an openmls upgrade that adds a variant must fail to compile here
+            // rather than silently become "processed, nothing to apply" (that is how the two
+            // variants above would have slipped through).
+            ProcessedMessageContent::ProposalMessage(_)
+            | ProcessedMessageContent::ExternalJoinProposalMessage(_) => Ok(Incoming::Other),
         }
     }
 
@@ -615,9 +828,17 @@ impl ServerGroup {
         self.group.group_id().as_slice().to_vec()
     }
 
+    /// Borrow the exact group label before a bounded reader/persistence path checks its fee.
+    /// This supplies namespace bytes only, never membership or historical authority.
+    pub fn group_id_ref(&self) -> &[u8] {
+        self.group.group_id().as_slice()
+    }
+
     /// The number of current members.
     pub fn member_count(&self) -> usize {
-        self.group.members().count()
+        // This observation already traversed the whole native roster. Retain its small summary
+        // once per actual epoch, rather than making bounded catalog pages repeat that traversal.
+        self.observe_member_catalog().member_count()
     }
 
     /// The device ids of all current members.
@@ -631,6 +852,29 @@ impl ServerGroup {
     /// Whether `id` is a current member.
     pub fn contains_device(&self, id: &DeviceId) -> bool {
         self.member_device_ids().contains(id)
+    }
+
+    /// Compare this actual MLS instance's borrowed local leaf signing key with `id`.
+    /// Unlike members(), own_leaf() borrows without cloning credentials/keys. Bounded
+    /// native admission must not materialize a roster (or clone one oversized restored
+    /// remote Member) before it can pay for work. This is stronger than finding `id`
+    /// anywhere in the roster: a misbound local device cannot borrow another member's role.
+    /// Authentication callers must also require is_active(); a removed instance is unusable.
+    pub fn has_local_device(&self, id: &DeviceId) -> bool {
+        self.group.own_leaf().is_some_and(|leaf| {
+            DeviceId::from_public_key_bytes(leaf.signature_key().as_slice()) == *id
+        })
+    }
+
+    /// Exact full signature-key binding of this instance's own leaf. Local managed authoring
+    /// uses this in addition to active membership rather than treating a decoded device label
+    /// or roster entry as proof that this particular MLS instance belongs to its signer.
+    pub fn has_local_signer(&self, public_key: &[u8]) -> bool {
+        public_key.len() == 32
+            && self
+                .group
+                .own_leaf()
+                .is_some_and(|leaf| leaf.signature_key().as_slice() == public_key)
     }
 
     /// Whether this local MLS instance still belongs to the group after applied removals.
@@ -649,8 +893,123 @@ impl fmt::Debug for ServerGroup {
 }
 
 #[cfg(test)]
+mod own_echo_tests;
+
+#[cfg(test)]
+mod suite_refusal_tests;
+
+#[cfg(test)]
+mod commit_gate_tests;
+
+#[cfg(test)]
 mod m1_tests {
     use super::*;
+
+    #[test]
+    fn a_welcome_mentioning_fresh_and_old_init_keys_must_select_the_fresh_one() {
+        let alice = MlsDevice::generate().unwrap();
+        let charlie = MlsDevice::generate().unwrap();
+        let bob = MlsDevice::generate().unwrap();
+        let bob_local = ServerGroup::create(&bob).unwrap();
+        let mut old_group = ServerGroup::create(&alice).unwrap();
+        let mut fresh_group = ServerGroup::create(&charlie).unwrap();
+        let old_package = bob.key_package().unwrap();
+        let old_welcome = old_group.add_member(&alice, old_package).unwrap().welcome;
+        let fresh_package = bob.key_package().unwrap();
+        let fresh_reference = bob.key_package_reference(&fresh_package).unwrap();
+        let fresh_welcome = fresh_group
+            .add_member(&charlie, fresh_package)
+            .unwrap()
+            .welcome;
+        let parse = |bytes: &[u8]| match MlsMessageIn::tls_deserialize(&mut &bytes[..])
+            .unwrap()
+            .extract()
+        {
+            MlsMessageBodyIn::Welcome(welcome) => welcome,
+            _ => panic!("expected the actual Welcome fixture"),
+        };
+        let mut value = serde_json::to_value(parse(&old_welcome)).unwrap();
+        value["secrets"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::to_value(&parse(&fresh_welcome).secrets()[0]).unwrap());
+        let mixed: Welcome = serde_json::from_value(value).unwrap();
+        let mixed_bytes = MlsMessageOut::from_welcome(mixed, ProtocolVersion::Mls10)
+            .tls_serialize_detached()
+            .unwrap();
+        let captured = crate::snapshot_server(&bob, &bob_local).unwrap();
+        let (restored, _) = crate::restore_server(&captured).unwrap();
+        assert!(
+            ServerGroup::join(&restored, &mixed_bytes).is_ok(),
+            "control proves the first locally available old entry really selects the old group"
+        );
+        assert!(
+            ServerGroup::join_for_key_package(&bob, &mixed_bytes, &fresh_reference).is_err(),
+            "mentioning fresh material is insufficient when OpenMLS actually selected old material"
+        );
+        assert_eq!(
+            ServerGroup::join_for_key_package(&bob, &fresh_welcome, &fresh_reference)
+                .unwrap()
+                .group_id(),
+            fresh_group.group_id()
+        );
+    }
+
+    #[test]
+    fn welcome_for_an_old_init_key_cannot_complete_a_new_attempt_from_a_restored_provider() {
+        let alice = MlsDevice::generate().unwrap();
+        let bob = MlsDevice::generate().unwrap();
+        let bob_local = ServerGroup::create(&bob).unwrap();
+        let mut group = ServerGroup::create(&alice).unwrap();
+        let old = bob
+            .key_package_for_invite(&group.group_id(), [1; 16])
+            .unwrap();
+        let old_reference = bob.key_package_reference(&old).unwrap();
+        let admitted = group.add_member(&alice, old).unwrap();
+        let fresh = bob
+            .key_package_for_invite(&group.group_id(), [2; 16])
+            .unwrap();
+        let fresh_reference = bob.key_package_reference(&fresh).unwrap();
+        assert_ne!(old_reference, fresh_reference);
+        let captured = crate::snapshot_server(&bob, &bob_local).unwrap();
+        let (restored, _) = crate::restore_server(&captured).unwrap();
+        assert!(
+            ServerGroup::join(&restored, &admitted.welcome).is_ok(),
+            "the captured provider really can still open the old Welcome"
+        );
+        assert!(
+            ServerGroup::join_for_key_package(&bob, &admitted.welcome, &fresh_reference).is_err()
+        );
+        let checked =
+            ServerGroup::join_for_key_package(&bob, &admitted.welcome, &old_reference).unwrap();
+        assert_eq!(
+            checked.group_id(),
+            group.group_id(),
+            "mismatch refusal did not consume the old init key"
+        );
+    }
+
+    #[test]
+    fn local_device_query_does_not_adopt_another_current_member() {
+        let alice = MlsDevice::generate().unwrap();
+        let bob = MlsDevice::generate().unwrap();
+        let absent = MlsDevice::generate().unwrap();
+        let mut group = ServerGroup::create(&alice).unwrap();
+        assert!(group.has_local_device(&alice.device_id()));
+        assert!(!group.has_local_device(&bob.device_id()));
+        let package = bob
+            .key_package_for_invite(&group.group_id(), [17; 16])
+            .unwrap();
+        group.add_member(&alice, package).unwrap();
+        assert!(group.contains_device(&alice.device_id()));
+        assert!(group.contains_device(&bob.device_id()));
+        assert!(!group.has_local_device(&bob.device_id()));
+        assert!(!group.contains_device(&absent.device_id()));
+        group.remove_member(&alice, &bob.device_id()).unwrap();
+        assert!(group.contains_device(&alice.device_id()));
+        assert!(!group.contains_device(&bob.device_id()));
+        assert!(group.has_local_device(&alice.device_id()));
+    }
 
     /// The leaf identity excludes the HPKE encryption key, so a key rotation is not a discontinuity.
     ///
@@ -762,3 +1121,8 @@ mod m1_tests {
         assert_eq!(carol_group.designated_committer(), Some(alice.device_id()));
     }
 }
+
+// Expired KeyPackage leaves and Welcome joins (docs/design-mls-leaf-lifetime.md). Declared last so
+// the openmls-upgrade branch's test modules above `m1_tests` merge without touching this line.
+#[cfg(test)]
+mod leaf_lifetime_tests;

@@ -14,7 +14,7 @@
 //! [`Server::sync_once`]. The background run-loop + live event stream and multi-server
 //! management land with the Tauri bridge (8b), where the real async runtime lives.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use automerge::transaction::Transactable;
@@ -30,7 +30,9 @@ pub use catcoms_crypto::DeviceId;
 use catcoms_crypto::verify_with_public_bytes;
 pub use catcoms_crypto::{DeviceCertificate, DeviceRevocation};
 pub use catcoms_mls::GroupMode;
-use catcoms_mls::{InviteToken, MlsDevice, MlsError, ServerGroup};
+#[cfg(test)]
+use catcoms_mls::ServerGroup;
+use catcoms_mls::{InviteToken, MlsDevice, MlsError};
 use catcoms_rt::{
     Clock, CryptoRngCore, DiscoveredPeer, MeshTransport, PeerId, RequestCancellation,
 };
@@ -53,9 +55,13 @@ use catcoms_wire::DocType;
 use thiserror::Error;
 
 mod actor;
+pub mod admin_chat_ledger;
+pub mod cache_housekeeping;
+pub mod cache_plan;
 pub mod creative;
 pub mod durable_chat;
 mod file_resolution;
+pub mod file_source;
 mod moderation;
 pub mod pairing;
 pub mod registry_catchup;
@@ -67,7 +73,22 @@ pub mod shutdown;
 pub mod store;
 pub mod studio;
 pub mod studio_exchange;
-pub use actor::{spawn, AppCommand, AppEvent, Envelope, ServerActor, Trace, TracedEvent};
+pub use actor::{
+    spawn, spawn_with_lifetime, voice_context_queue_bytes, voice_initial_media_rpc_bytes,
+    voice_sdp_delivery_rpc_bytes, voice_sdp_engine_rpc_bytes, voice_sdp_input_rpc_bytes,
+    voice_sdp_rpc_bytes, AppCommand, AppEvent, DownloadExportEdge, DownloadExportTransition,
+    DownloadPreflight, DownloadReady, Envelope, InitialSdpCompletion, InitialSdpPending,
+    ServerActor, Trace, TracedEvent, VoiceConfirmationBody, VoiceConfirmationCompletion,
+    VoiceContextPending, VoiceEndpointCommand, VoiceEndpointError, VoiceInitialMediaPublisher,
+    VoiceInitialMediaWork, VoiceSdpBody, VoiceSdpBodyRefusal, VoiceSdpCompletion,
+    VoiceSdpDeliveryPublisher, VoiceSdpDeliveryWork, VoiceSdpEnginePublisher, VoiceSdpEngineWork,
+    VoiceSdpInputPublisher, VoiceSdpInputWork, VoiceSdpPending, VoiceSdpPublication,
+    VoiceSdpRecordedInput, VoiceSdpRecordedQueue, VoiceSdpResult, VoiceSdpResultInput,
+    VoiceSdpResultPublisher, VoiceSdpResultQueue, INITIAL_SDP_RPC_BYTES,
+    VOICE_CONFIRMATION_BODY_METADATA_BYTES, VOICE_INITIAL_MEDIA_RPC_BYTES,
+    VOICE_SDP_DELIVERY_RPC_BYTES, VOICE_SDP_ENGINE_RPC_BYTES, VOICE_SDP_INPUT_RPC_BYTES,
+    VOICE_SDP_RPC_FIXED_BYTES, VOICE_SDP_RPC_METADATA_BYTES,
+};
 pub use moderation::{
     ModerationEvent, ModerationState, ModerationVote, MAX_MOD_EVIDENCE_BYTES, MAX_MOD_EVIDENCE_IDS,
     MAX_MOD_REASON_BYTES,
@@ -81,8 +102,8 @@ pub use pairing::{
 // `PairingSecrets` and duplicates its device per granted server.
 pub use catcoms_mls::MlsDevice as PairedDevice;
 pub use store::{
-    ReconnectPolicy, ReconnectRoute, ServerNet, ServerRecord, ServerStore, MAX_RECONNECT_ROUTES,
-    MAX_RECONNECT_ROUTE_BYTES,
+    ReconnectPolicy, ReconnectRoute, SavedFilesLoad, SavedLimitLoad, ServerNet, ServerRecord,
+    ServerStore, MAX_RECONNECT_ROUTES, MAX_RECONNECT_ROUTE_BYTES,
 };
 
 /// The Display prefix of [`AppError::CommittedButNotDurable`], published so a boundary that only
@@ -492,6 +513,72 @@ fn read_channel_index(doc: &AutoCommit) -> Vec<ChannelInfo> {
     out
 }
 
+/// Native V2 authority has a bounded/fallible directory reader rather than using the UI's full
+/// catalog projection. `general` is a permanent compatibility room, including missing old
+/// catalogs and a deleted general key. Invalid entries grant no room; overflow closes V2 room
+/// authority instead of retaining a stale/truncated permission set. This changes no chat data.
+fn voice_directory_snapshot(
+    doc: Option<&AutoCommit>,
+) -> Result<BTreeSet<u128>, catcoms_sync::voice_v2::VoiceError> {
+    use catcoms_sync::voice_v2::directory::{MAX_DIRECTORY_KEYS, MAX_DIRECTORY_ROOMS};
+    use catcoms_sync::voice_v2::VoiceError;
+    let mut rooms = BTreeSet::from([channel_id("general")]);
+    let Some(doc) = doc else { return Ok(rooms) };
+    for (index, key) in doc.keys(ROOT).enumerate() {
+        if index >= MAX_DIRECTORY_KEYS {
+            return Err(VoiceError::Capacity);
+        }
+        if key.len() != 32 {
+            continue;
+        }
+        let Ok(id) = u128::from_str_radix(&key, 16) else {
+            continue;
+        };
+        let Some((value, _)) = doc.get(ROOT, &key).map_err(|_| VoiceError::Malformed)? else {
+            continue;
+        };
+        let Some(name) = value.to_str() else { continue };
+        if name.len() > MAX_CHANNEL_NAME_CHARS * 4 || name.is_empty() {
+            continue;
+        }
+        if channel_id(name) == id {
+            rooms.insert(id);
+        }
+        if rooms.len() > MAX_DIRECTORY_ROOMS {
+            return Err(VoiceError::Capacity);
+        }
+    }
+    Ok(rooms)
+}
+
+/// Inspect only newly accepted authenticated original changes. Projection alone misses a
+/// buffered deletion/recreation or both actions in one change. Decoding uses the replication
+/// scanner's raw/action/RLE bounds first; refusal retires V2 authority without changing history.
+fn voice_directory_deletions(
+    change: &automerge::Change,
+) -> Result<BTreeSet<u128>, catcoms_sync::voice_v2::VoiceError> {
+    use automerge::legacy::{Key, ObjectId, OpType};
+    use catcoms_sync::voice_v2::VoiceError;
+    let expanded =
+        catcoms_replication::decode_change_projection(change).map_err(|_| VoiceError::Bounds)?;
+    let mut removed = BTreeSet::new();
+    for op in expanded.operations {
+        if op.obj != ObjectId::Root || !matches!(op.action, OpType::Delete) {
+            continue;
+        }
+        if let Key::Map(key) = op.key {
+            if key.len() == 32 {
+                if let Ok(id) = u128::from_str_radix(&key, 16) {
+                    if id != channel_id("general") {
+                        removed.insert(id);
+                    }
+                }
+            }
+        }
+    }
+    Ok(removed)
+}
+
 /// Wall-clock ceiling on a join handshake. Past this the joiner gives up (and the user can
 /// retry); so an Option-C admin invite whose owner never comes online can't wedge it forever.
 const JOIN_TIMEOUT_SECS: u64 = 120;
@@ -585,7 +672,17 @@ pub fn append_message(
 ) -> Result<(), AutomergeError> {
     let list = match doc.get(ROOT, MESSAGES)? {
         Some((Value::Object(ObjType::List), id)) => id,
-        _ => doc.put_object(ROOT, MESSAGES, ObjType::List)?,
+        _ => match doc
+            .get_all(ROOT, MESSAGES)?
+            .into_iter()
+            .find_map(|(value, list)| matches!(value, Value::Object(ObjType::List)).then_some(list))
+        {
+            // A concurrent malformed scalar may win the root property while valid lists remain
+            // visible. Replacing that property would causally hide every observed list and make
+            // an ordinary new message erase the visible conversation. Reuse a live list instead.
+            Some(list) => list,
+            None => doc.put_object(ROOT, MESSAGES, ObjType::List)?,
+        },
     };
     let index = doc.length(&list);
     let msg = doc.insert_object(&list, index, ObjType::Map)?;
@@ -783,6 +880,45 @@ fn read_message(doc: &AutoCommit, msg: &ObjId) -> ChatMessage {
 /// Separator (0x1F); a control char that appears in neither emoji nor hex fingerprints.
 const REACTION_SEP: char = '\u{1f}';
 
+/// An exact visible message object and its list element. Concurrent first writers may create
+/// several live `messages` lists, all of which the reader displays. Addressing only the winning
+/// root property would acknowledge edits/deletes without changing the message the user sees.
+struct MessageLocation {
+    list: ObjId,
+    index: usize,
+    object: ObjId,
+}
+
+/// Resolve the same objects that `read_messages` renders, before any mutation. A repeated id is
+/// ambiguous even within one list: never authorize one author's row and change another one's.
+/// Legacy id-less rows remain readable but cannot be addressed. No history is rewritten or pruned.
+fn resolve_message(doc: &AutoCommit, id: &str) -> Result<Option<MessageLocation>, AutomergeError> {
+    if id.is_empty() {
+        return Ok(None);
+    }
+    let mut found = None;
+    for (value, list) in doc.get_all(ROOT, MESSAGES)? {
+        if !matches!(value, Value::Object(ObjType::List)) {
+            continue;
+        }
+        for item in doc.list_range(&list, ..) {
+            if matches!(item.value, automerge::ValueRef::Object(ObjType::Map))
+                && str_field(doc, &item.id(), MSG_ID) == id
+            {
+                if found.is_some() {
+                    return Ok(None);
+                }
+                found = Some(MessageLocation {
+                    list: list.clone(),
+                    index: item.index,
+                    object: item.id(),
+                });
+            }
+        }
+    }
+    Ok(found)
+}
+
 /// Whether `emoji` is one this server will store as a reaction key. An emoji carrying the key
 /// separator would forge a second field on the message map, so the flat-key layout only holds if
 /// every document that uses it applies the same rule; hence one predicate rather than a copy per
@@ -803,49 +939,31 @@ fn toggle_reaction_in_doc(
     emoji: &str,
     fp: &str,
 ) -> Result<bool, AutomergeError> {
-    let Some((Value::Object(ObjType::List), list)) = doc.get(ROOT, MESSAGES)? else {
+    let Some(location) = resolve_message(doc, id)? else {
         return Ok(false);
     };
-    for i in 0..doc.length(&list) {
-        let Some((Value::Object(ObjType::Map), msg)) = doc.get(&list, i)? else {
-            continue;
-        };
-        if str_field(doc, &msg, MSG_ID) != id {
-            continue;
-        }
-        let key = format!("{emoji}{REACTION_SEP}{fp}");
-        if doc.get(&msg, &key)?.is_some() {
-            doc.delete(&msg, &key)?;
-        } else {
-            doc.put(&msg, &key, true)?;
-        }
-        return Ok(true);
+    let key = format!("{emoji}{REACTION_SEP}{fp}");
+    if doc.get(&location.object, &key)?.is_some() {
+        doc.delete(&location.object, &key)?;
+    } else {
+        doc.put(&location.object, &key, true)?;
     }
-    Ok(false)
+    Ok(true)
 }
 
 /// Pin or unpin the message with `id` by setting/removing a `pinned` flag **directly on its message
 /// map** (which always exists); so concurrent pins of different messages never conflict and a
 /// pin/unpin race on one message is a clean last-writer-wins. Returns whether the message was found.
 fn set_pin_in_doc(doc: &mut AutoCommit, id: &str, pinned: bool) -> Result<bool, AutomergeError> {
-    let Some((Value::Object(ObjType::List), list)) = doc.get(ROOT, MESSAGES)? else {
+    let Some(location) = resolve_message(doc, id)? else {
         return Ok(false);
     };
-    for i in 0..doc.length(&list) {
-        let Some((Value::Object(ObjType::Map), msg)) = doc.get(&list, i)? else {
-            continue;
-        };
-        if str_field(doc, &msg, MSG_ID) != id {
-            continue;
-        }
-        if pinned {
-            doc.put(&msg, PINNED, true)?;
-        } else {
-            doc.delete(&msg, PINNED)?;
-        }
-        return Ok(true);
+    if pinned {
+        doc.put(&location.object, PINNED, true)?;
+    } else {
+        doc.delete(&location.object, PINNED)?;
     }
-    Ok(false)
+    Ok(true)
 }
 
 /// Read a channel document's topic (empty when it was never set; every channel written before
@@ -1042,44 +1160,35 @@ fn valid_juke_link(link: &str) -> bool {
 }
 
 /// Edit the text of the message with `id` in a channel document, stamping `edited`. Returns
-/// whether a message was found + changed. (Honest-client own-message gating is the caller's job.)
+/// whether an unambiguous message was found + changed. (Honest-client own-message gating is the
+/// caller's job.) All conflicting first-writer containers remain addressable.
 fn edit_message_in_doc(
     doc: &mut AutoCommit,
     id: &str,
     new_text: &str,
     edited_ts: u64,
 ) -> Result<bool, AutomergeError> {
-    let Some((Value::Object(ObjType::List), list)) = doc.get(ROOT, MESSAGES)? else {
+    let Some(location) = resolve_message(doc, id)? else {
         return Ok(false);
     };
-    for i in 0..doc.length(&list) {
-        if let Some((Value::Object(ObjType::Map), msg)) = doc.get(&list, i)? {
-            if str_field(doc, &msg, MSG_ID) == id {
-                doc.put(&msg, TEXT, new_text)?;
-                doc.put(&msg, EDITED, edited_ts as i64)?;
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
+    doc.put(&location.object, TEXT, new_text)?;
+    doc.put(&location.object, EDITED, edited_ts as i64)?;
+    Ok(true)
 }
 
-/// Delete the message with `id` from a channel document. Returns whether one was removed. Ids are
-/// unique, so it removes (at most) the single matching element and returns.
+/// Delete the uniquely addressed message from a channel document. Missing, id-less and ambiguous
+/// duplicate ids return false without mutation; the signed history of the deleted row is retained.
 fn delete_message_in_doc(doc: &mut AutoCommit, id: &str) -> Result<bool, AutomergeError> {
-    let Some((Value::Object(ObjType::List), list)) = doc.get(ROOT, MESSAGES)? else {
+    let Some(location) = resolve_message(doc, id)? else {
         return Ok(false);
     };
-    for i in 0..doc.length(&list) {
-        if let Some((Value::Object(ObjType::Map), msg)) = doc.get(&list, i)? {
-            if str_field(doc, &msg, MSG_ID) == id {
-                doc.delete(&list, i)?;
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
+    doc.delete(&location.list, location.index)?;
+    Ok(true)
 }
+
+#[cfg(test)]
+#[path = "chat_history_tests.rs"]
+mod chat_history_tests;
 
 #[cfg(test)]
 mod message_list_conflict_tests {
@@ -2761,20 +2870,22 @@ pub const FILE_EXPIRY_DEFAULT_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 /// under two names/folders (content dedup in [`Server::add_file`]) carry two independent
 /// deadlines.
 ///
-/// **NOTHING ENFORCES THIS YET.** As of this change the deadline is *recorded and displayed*
-/// metadata only; no eviction, no drop-from-circulation, no GC consults it. `catcoms-storage`'s
-/// [`RetentionIndex`](catcoms_storage::RetentionIndex) is a complete 3-scope expiry + GC engine,
-/// but it is **not wired into this layer at all**: the shared-file index records expiry, the blob
-/// store evicts nothing, and an "expired" file keeps circulating exactly as before. The point of
-/// stamping it now is that the eventual enforcement pass has honest inputs; including
-/// [`Server::wiki_pinned_cids`], which it MUST consult (wiki-embedded files never decay).
+/// **Nothing enforces this deadline.** It is *recorded and displayed* metadata only; no
+/// drop-from-circulation consults it, and `catcoms-storage`'s
+/// [`RetentionIndex`](catcoms_storage::RetentionIndex) is not wired in. Separately, each device's
+/// cache follows its own per-server size limit ([`cache_plan`], [`cache_housekeeping`]), which
+/// drops the oldest listings first and ignores this field: "never expires" (`FileExpiry::Never`)
+/// and wiki embeds are circulation rules members set for everyone, so they are deliberately not
+/// cache pins. A future expiry-enforcement pass must still consult
+/// [`Server::wiki_pinned_cids`] (wiki-embedded files never drop out of circulation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileExpiry {
     /// No deadline was ever recorded; a listing written before this field existed, or by a peer
     /// that predates it. Distinct from [`FileExpiry::Never`]: we do not know what was intended,
     /// so the UI says "not recorded (older share)" rather than promising anything.
     Unrecorded,
-    /// Explicitly kept forever ("keep forever"): never drops out of circulation.
+    /// Explicitly "never expires" (the Properties button, formerly "Keep forever"): never drops
+    /// out of circulation. Not a cache pin; see the type docs.
     Never,
     /// Drops out of circulation at this absolute ms-epoch instant.
     At(u64),
@@ -3040,7 +3151,12 @@ pub struct StorageHealth {
     pub listed_files: usize,
     pub referenced_chunks: usize,
     pub verified_chunks: usize,
+    /// Absent chunks of this device's own uploads: this device is their original source, so
+    /// their absence is damage and Repair fetches them.
     pub missing_chunks: usize,
+    /// Absent chunks of other members' files: normal for a size-limited cache (never fetched,
+    /// or dropped by the limit). Repair leaves them alone; opening the file fetches them.
+    pub not_cached_chunks: usize,
     pub unreadable_chunks: usize,
     pub invalid_manifests: usize,
     /// Exact manifest digests whose every exact chunk reference passed sealed-record,
@@ -3284,9 +3400,22 @@ fn bounded_file_bytes(doc: &AutoCommit, obj: &ObjId, key: &str, max: usize) -> O
 /// Materialize the file index document into the UI's file list (size/mime/cid come from the
 /// decoded `FileRef`; entries with a malformed ref are skipped).
 fn read_file_entries(doc: &AutoCommit, group_id: &[u8]) -> Vec<FileEntry> {
+    read_file_rows(doc, group_id)
+        .map(|rows| rows.into_iter().map(|(_, entry)| entry).collect())
+        .unwrap_or_default()
+}
+
+/// As [`read_file_entries`], but each entry carries its position in the bounded projection (the
+/// listing order cache eviction uses), and a projection failure is an error rather than an empty
+/// list. Cache housekeeping must never read "unreadable" as "nothing is listed".
+fn read_file_rows(
+    doc: &AutoCommit,
+    group_id: &[u8],
+) -> Result<Vec<(usize, FileEntry)>, AutomergeError> {
     let mut out = Vec::new();
-    if let Ok(positions) = file_index_positions(doc) {
-        for (_, _, row) in positions {
+    {
+        let positions = file_index_positions(doc)?;
+        for (position, (_, _, row)) in positions.into_iter().enumerate() {
             if let Some(entry) = row {
                 let Some(ref_bytes) = bounded_file_bytes(doc, &entry, F_REF, MAX_FILE_REF_BYTES)
                 else {
@@ -3331,29 +3460,32 @@ fn read_file_entries(doc: &AutoCommit, group_id: &[u8]) -> Vec<FileEntry> {
                                     signature,
                                 )
                             });
-                    out.push(FileEntry {
-                        name,
-                        author,
-                        author_identity: if author_verified {
-                            hex::encode(signer_id.as_bytes())
-                        } else {
-                            String::new()
+                    out.push((
+                        position,
+                        FileEntry {
+                            name,
+                            author,
+                            author_identity: if author_verified {
+                                hex::encode(signer_id.as_bytes())
+                            } else {
+                                String::new()
+                            },
+                            author_verified,
+                            size: manifest.total_size,
+                            mime: manifest.mime.clone(),
+                            // The file's identity is the whole-file PLAINTEXT cid (a chunked file
+                            // has no single ciphertext blob); this is the download/embed handle.
+                            cid: manifest.plaintext_cid.as_bytes().to_vec(),
+                            path,
+                            file_ref: ref_bytes,
+                            expires: expiry_field(doc, &entry),
                         },
-                        author_verified,
-                        size: manifest.total_size,
-                        mime: manifest.mime.clone(),
-                        // The file's identity is the whole-file PLAINTEXT cid (a chunked file has
-                        // no single ciphertext blob); this is the download/embed handle.
-                        cid: manifest.plaintext_cid.as_bytes().to_vec(),
-                        path,
-                        file_ref: ref_bytes,
-                        expires: expiry_field(doc, &entry),
-                    });
+                    ));
                 }
             }
         }
     }
-    out
+    Ok(out)
 }
 
 fn raw_file_index_row_count(doc: &AutoCommit) -> usize {
@@ -3536,6 +3668,8 @@ pub struct Server<T: MeshTransport, R: CryptoRngCore> {
     /// across a call that could re-enter it. Derived state; never persisted; a `RefCell` (not a
     /// lock) because a `Server` is owned by exactly one actor task.
     messages_cache: std::cell::RefCell<HashMap<u128, MaterializedChannel>>,
+    /// Privileged original-history cache; ephemeral and never part of ordinary message DTOs.
+    admin_chat_ledger: admin_chat_ledger::AdminLedgerCache,
     /// Total order of delivery snapshots issued by this actor session. Queries and emitted events
     /// share it, so a delayed IPC query can never overwrite a newer event in the webview.
     delivery_snapshot_revision: u64,
@@ -3555,6 +3689,9 @@ pub struct Server<T: MeshTransport, R: CryptoRngCore> {
     /// different mount (lock and unlock opens a new one) never matches. A `Weak` keeps the old
     /// mount's allocation alive, so a later mount cannot reuse its address and compare equal.
     studio_saved_snapshot: Option<(u64, std::sync::Weak<()>, [u8; 32])>,
+    /// Cache housekeeping state (limit, files in use, pass pacing). Derived and process-local;
+    /// see [`cache_housekeeping`].
+    cache: cache_housekeeping::CacheRuntime,
 }
 
 /// How many of this device's most recent messages per channel carry delivery state. Bounded so a
@@ -3567,13 +3704,14 @@ pub const MAX_TRACKED_OWN_MESSAGES: usize = 50;
 pub struct DeliveryState {
     /// The message id, as it appears in [`ChatMessage::id`].
     pub id: String,
-    /// How many **other current-roster** members have proved they hold this message. Evidence is
+    /// How many **other current-roster** members have confirmed receipt. Evidence is
     /// positive and one-sided, but the count may fall when membership changes. `0` means "no proof
     /// yet", *not* "not delivered", so a renderer must not turn it into a failure by itself.
     pub delivered: usize,
     /// How many current members claim a transport peer connected here; the same self-asserted
     /// projection that drives [`Server::online_members`]. Independent of `delivered`, which can
-    /// exceed it (a member that received the message and has since disconnected still holds it).
+    /// exceed it (disconnecting does not undo the historical receipt). Neither count proves
+    /// continuing custody or a receiver disk save.
     pub reachable: usize,
     /// Whether this node has a live peer that previously served a roster-verified signed catch-up.
     /// This is intentionally stricter than `reachable`: a self-asserted descriptor claim or bare
@@ -3610,8 +3748,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         display_name: impl Into<String>,
     ) -> Result<Self, AppError> {
         let device_id = device.device_id();
-        let group = ServerGroup::create(&device)?;
-        let mut sync = ChannelSync::new(transport, group, device, rng, clock);
+        let mut sync = ChannelSync::found(transport, device, rng, clock)?;
         sync.initialize_new_group_policy()?;
         Ok(Self {
             sync,
@@ -3619,9 +3756,11 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             device_id,
             own_message_changes: HashMap::new(),
             messages_cache: std::cell::RefCell::new(HashMap::new()),
+            admin_chat_ledger: Default::default(),
             delivery_snapshot_revision: 0,
             devices_sig: None,
             studio_saved_snapshot: None,
+            cache: Default::default(),
         })
     }
 
@@ -3682,10 +3821,45 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             device_id,
             own_message_changes: HashMap::new(),
             messages_cache: std::cell::RefCell::new(HashMap::new()),
+            admin_chat_ledger: Default::default(),
             delivery_snapshot_revision: 0,
             devices_sig: None,
             studio_saved_snapshot: None,
+            cache: Default::default(),
         })
+    }
+
+    /// Fixed private managed-client consumer of the actual completed handshake and SAME owned
+    /// transport/event prefix. There is no raw group/proof constructor or await here. The Store's later
+    /// original admission/canonical/Current barriers remain necessary before any exposure.
+    pub(crate) fn from_completed_direct(
+        transport: T,
+        completed: catcoms_sync::CompletedDirectJoin,
+        connection_handoff: PreOwnerConnectionHandoff,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+        display_name: impl Into<String>,
+        contact: (PeerId, DeviceId),
+    ) -> Self {
+        let (inviter, inviter_device) = contact;
+        let (device, group, routing) = completed.into_parts();
+        let device_id = device.device_id();
+        let mut sync = ChannelSync::new_joined(transport, group, device, rng, clock, routing);
+        sync.adopt_pre_owner_connections(connection_handoff);
+        sync.note_candidate_peer(inviter);
+        sync.note_member_finalization_candidate(inviter, inviter_device);
+        Self {
+            sync,
+            display_name: display_name.into(),
+            device_id,
+            own_message_changes: HashMap::new(),
+            messages_cache: std::cell::RefCell::new(HashMap::new()),
+            admin_chat_ledger: Default::default(),
+            delivery_snapshot_revision: 0,
+            devices_sig: None,
+            studio_saved_snapshot: None,
+            cache: Default::default(),
+        }
     }
 
     /// Join through a reachable existing member when the inviter could not accept a direct dial.
@@ -3730,9 +3904,11 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             device_id,
             own_message_changes: HashMap::new(),
             messages_cache: std::cell::RefCell::new(HashMap::new()),
+            admin_chat_ledger: Default::default(),
             delivery_snapshot_revision: 0,
             devices_sig: None,
             studio_saved_snapshot: None,
+            cache: Default::default(),
         })
     }
 
@@ -3814,9 +3990,11 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 device_id,
                 own_message_changes: HashMap::new(),
                 messages_cache: std::cell::RefCell::new(HashMap::new()),
+                admin_chat_ledger: Default::default(),
                 delivery_snapshot_revision: 0,
                 devices_sig: None,
                 studio_saved_snapshot: None,
+                cache: Default::default(),
             },
             contact,
         ))
@@ -3869,9 +4047,11 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 device_id,
                 own_message_changes: HashMap::new(),
                 messages_cache: std::cell::RefCell::new(HashMap::new()),
+                admin_chat_ledger: Default::default(),
                 delivery_snapshot_revision: 0,
                 devices_sig: None,
                 studio_saved_snapshot: None,
+                cache: Default::default(),
             },
             contact,
         ))
@@ -3963,9 +4143,11 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             device_id,
             own_message_changes: HashMap::new(),
             messages_cache: std::cell::RefCell::new(HashMap::new()),
+            admin_chat_ledger: Default::default(),
             delivery_snapshot_revision: 0,
             devices_sig: None,
             studio_saved_snapshot: None,
+            cache: Default::default(),
         })
     }
 
@@ -3974,6 +4156,23 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// [`crate::store::ServerStore`] seals them under the vault key before writing.
     pub fn snapshot(&mut self) -> Result<zeroize::Zeroizing<Vec<u8>>, AppError> {
         Ok(self.sync.snapshot()?)
+    }
+
+    /// Private canonical initialization only. The caller owns the actual original creation,
+    /// configured buffer reservation and staged Active scope; Sync preflights the closed field
+    /// grammar and provider map before allocating. This is secret data, not a save receipt or
+    /// a way to publish an arbitrary restored Server. Legacy snapshot framing is unchanged.
+    pub(crate) fn snapshot_owner_initialization(
+        &mut self,
+        max_snapshot_bytes: usize,
+        max_mls_bytes: usize,
+        max_mls_backing_bytes: usize,
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, AppError> {
+        Ok(self.sync.snapshot_owner_initialization(
+            max_snapshot_bytes,
+            max_mls_bytes,
+            max_mls_backing_bytes,
+        )?)
     }
 
     /// Reconstruct a server from a [`Server::snapshot`] blob plus a **fresh** transport (the
@@ -3987,17 +4186,91 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         display_name: impl Into<String>,
     ) -> Result<Self, AppError> {
         let sync = ChannelSync::restore(snapshot, transport, rng, clock)?;
+        Ok(Self::from_restored_sync(sync, display_name))
+    }
+
+    /// Actual opaque canonical checkpoint restore only. Borrowed outer/metadata preflight
+    /// precedes common-decoder clones; nested provider-map admission precedes its allocation
+    /// and SDK load inside the bounded MLS decoder.
+    /// This confers no Current/head/pin or fresh-admission authority; the original factory
+    /// consumer must still cross its exact saved/current/head handoff. Typed SDK heap and
+    /// active-server resource admission are separately required before production activation.
+    pub(crate) fn restore_owner_initialization(
+        snapshot: &[u8],
+        transport: T,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+        display_name: impl Into<String>,
+        limits: catcoms_sync::OwnerInitializationRestoreLimits,
+    ) -> Result<Self, AppError> {
+        let sync =
+            ChannelSync::restore_owner_initialization(snapshot, transport, rng, clock, limits)?;
+        Ok(Self::from_restored_sync(sync, display_name))
+    }
+
+    /// The strict first-Add body, selected ONLY by the original authenticated v5 canonical v2
+    /// source. Complete borrowed framing precedes clones/SDK, then actual pin/Current/head
+    /// validation still gates any runtime. No generic legacy decode is an operation fallback.
+    pub(crate) fn restore_owner_operation_checkpoint(
+        snapshot: &[u8],
+        transport: T,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+        display_name: impl Into<String>,
+        limits: catcoms_sync::OwnerInitializationRestoreLimits,
+    ) -> Result<Self, AppError> {
+        let sync = ChannelSync::restore_owner_operation_checkpoint(
+            snapshot, transport, rng, clock, limits,
+        )?;
+        Ok(Self::from_restored_sync(sync, display_name))
+    }
+
+    /// Actual private original-source caller supplies this non-Clone host graph reservation.
+    /// SDK row/type admission precedes SIGNER; original pin/head/Current still gate take_ready.
+    pub(crate) fn restore_owner_initialization_with_sdk(
+        snapshot: &[u8],
+        transport: T,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+        display_name: impl Into<String>,
+        limits: catcoms_sync::OwnerInitializationRestoreLimits,
+        admission: catcoms_mls::persist::OwnerSdkRestoreAdmission,
+    ) -> Result<Self, AppError> {
+        let sync = ChannelSync::restore_owner_initialization_with_sdk(
+            snapshot, transport, rng, clock, limits, admission,
+        )?;
+        Ok(Self::from_restored_sync(sync, display_name))
+    }
+    /// The matching first-Add closed grammar, with independent parent graph admission later.
+    pub(crate) fn restore_owner_operation_checkpoint_with_sdk(
+        snapshot: &[u8],
+        transport: T,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+        display_name: impl Into<String>,
+        limits: catcoms_sync::OwnerInitializationRestoreLimits,
+        admission: catcoms_mls::persist::OwnerSdkRestoreAdmission,
+    ) -> Result<Self, AppError> {
+        let sync = ChannelSync::restore_owner_operation_checkpoint_with_sdk(
+            snapshot, transport, rng, clock, limits, admission,
+        )?;
+        Ok(Self::from_restored_sync(sync, display_name))
+    }
+
+    fn from_restored_sync(sync: ChannelSync<T, R>, display_name: impl Into<String>) -> Self {
         let device_id = sync.device_id();
-        Ok(Self {
+        Self {
             sync,
             display_name: display_name.into(),
             device_id,
             own_message_changes: HashMap::new(),
             messages_cache: std::cell::RefCell::new(HashMap::new()),
+            admin_chat_ledger: Default::default(),
             delivery_snapshot_revision: 0,
             devices_sig: None,
             studio_saved_snapshot: None,
-        })
+            cache: Default::default(),
+        }
     }
 
     /// This server's MLS group id (stable across restarts); keys its on-disk blob directory.
@@ -4045,6 +4318,63 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     name: "general".into(),
                 }]
             })
+    }
+
+    /// Ephemeral voice-v2 admission uses the current MLS member/policy and known channel
+    /// directory. Opening an arbitrary document is not authority to invent a voice room.
+    pub fn voice_v2_context(&self, room: u128) -> Result<catcoms_sync::voice_v2::Context, String> {
+        let directory = voice_directory_snapshot(
+            self.sync
+                .doc(DocType::ChannelIndex, CHANNEL_INDEX_DOC)
+                .map(|doc| doc.doc()),
+        )
+        .map_err(|error| error.to_string())?;
+        if !directory.contains(&room) {
+            return Err("voice room is not in this server".into());
+        }
+        self.sync
+            .voice_v2_context(room)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Sole-actor housekeeping remains active across lock and needs no UI call authority.
+    pub(crate) fn collect_expired_voice(&mut self) {
+        self.sync.collect_expired_voice();
+    }
+    pub(crate) fn voice_housekeeping_wake(&self) -> Option<(Arc<dyn Clock>, u64)> {
+        self.sync.voice_housekeeping_wake()
+    }
+    pub fn prepare_voice_actor(
+        &mut self,
+        runtime: &catcoms_sync::voice_v2::runtime::Runtime,
+        ticket: &catcoms_sync::voice_v2::runtime::SessionTicket,
+    ) -> Result<catcoms_sync::voice_v2::runtime::ActorRegistration, String> {
+        self.sync
+            .prepare_voice_actor(
+                runtime,
+                ticket,
+                CHANNEL_INDEX_DOC,
+                voice_directory_snapshot,
+                voice_directory_deletions,
+            )
+            .map_err(|error| error.to_string())
+    }
+    pub fn voice_call_lease(
+        &mut self,
+        room: u128,
+    ) -> Result<catcoms_sync::voice_v2::CallLease, String> {
+        self.sync
+            .voice_call_lease(room)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn voice_call_grant(
+        &mut self,
+        room: u128,
+    ) -> Result<catcoms_sync::voice_v2::CallGrant, String> {
+        self.sync
+            .voice_call_grant(room)
+            .map_err(|error| error.to_string())
     }
 
     /// Add a channel to the shared directory and subscribe to its message document locally.
@@ -4172,9 +4502,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         }
         let me = self.my_fingerprint();
         let Some(current) = self
-            .messages(channel)
-            .into_iter()
-            .find(|m| m.id == id && m.author == me)
+            .addressable_message(channel, id)
+            .filter(|m| m.author == me)
         else {
             return Err(AppError::Invalid(
                 "you can only edit your own messages".into(),
@@ -4209,7 +4538,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             ));
         }
         let me = self.my_fingerprint();
-        let Some(msg) = self.messages(channel).into_iter().find(|m| m.id == id) else {
+        let Some(msg) = self.addressable_message(channel, id) else {
             return Err(AppError::Invalid("no such message".into()));
         };
         let moderator = matches!(self.my_role(), Role::Owner | Role::Admin);
@@ -4249,7 +4578,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             ));
         }
         let me = self.my_fingerprint();
-        if !self.messages(channel).iter().any(|m| m.id == id) {
+        if self.addressable_message(channel, id).is_none() {
             return Err(AppError::Invalid("no such message".into()));
         }
         let id = id.to_string();
@@ -4280,7 +4609,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 "a message with no id cannot be addressed".into(),
             ));
         }
-        let Some(msg) = self.messages(channel).into_iter().find(|m| m.id == id) else {
+        let Some(msg) = self.addressable_message(channel, id) else {
             return Err(AppError::Invalid("no such message".into()));
         };
         if msg.pinned == pinned {
@@ -5525,6 +5854,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         // the same sealed bytes paired with a different wrapped key are a different claim. More
         // than the small exact-ref cap is treated as ambiguity, not multiplied crypto work.
         let (refs, file_refs, invalid_manifests) = storage_ref_index(files);
+        // Completed Keep copies verify through the composite store's read fallback, so a cache
+        // duplicate housekeeping dropped is not counted as absent at all.
+        let own = self.own_upload_chunk_set(files);
 
         let mut health = StorageHealth {
             listed_files: files.len(),
@@ -5557,7 +5889,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                         }
                     }
                     None if self.sync.has_blob(&cid) => health.unreadable_chunks += 1,
-                    None => health.missing_chunks += 1,
+                    None if own.contains(&cid) => health.missing_chunks += 1,
+                    None => health.not_cached_chunks += 1,
                 },
             }
         }
@@ -5588,15 +5921,19 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         health
     }
 
-    /// Re-fetch every repairable missing or unreadable referenced chunk from the best connected
-    /// member, then verify the whole set again. Contradictory over-cap exact references remain
-    /// visibly unreadable without a fetch: content addressing would return the same ciphertext and
-    /// cannot reconcile different wrapped keys. The sync/storage path authenticates the responder
-    /// and CID before replacing an unreadable record; no unreferenced blob is garbage-collected.
+    /// Re-fetch every repairable damaged chunk from the best connected member, then verify the
+    /// whole set again. Damaged means held but failing its checks, or absent from one of this
+    /// device's own uploads. A chunk that is simply not cached (never fetched, or dropped by the
+    /// cache limit) is left alone: fetching every one back would fight the limit, and opening the
+    /// file fetches what it needs. Contradictory over-cap exact references remain visibly
+    /// unreadable without a fetch: content addressing would return the same ciphertext and cannot
+    /// reconcile different wrapped keys. The sync/storage path authenticates the responder and
+    /// CID before replacing an unreadable record; no unreferenced blob is garbage-collected.
     pub async fn repair_storage(&mut self) -> Result<StorageRepair, AppError> {
         let before = self.storage_health();
         let mut candidates = HashSet::new();
         let files = self.files();
+        let own = self.own_upload_chunk_set(&files);
         let (refs, _, _) = storage_ref_index(&files);
         for (cid, exact_refs) in refs {
             let BoundedFileRefs::Exact(exact_refs) = exact_refs else {
@@ -5604,16 +5941,18 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 // wrapped keys. Leave this CID visibly unreadable without wasting peer traffic.
                 continue;
             };
-            let readable = self
-                .sync
-                .get_blob(&cid)
-                .map(|bytes| {
-                    exact_refs
-                        .values()
-                        .all(|chunk| self.sync.open_file(&bytes, chunk).is_ok())
-                })
-                .unwrap_or(false);
-            if !readable {
+            let held = self.sync.get_blob(&cid);
+            let readable = held.as_ref().is_some_and(|bytes| {
+                exact_refs
+                    .values()
+                    .all(|chunk| self.sync.open_file(bytes, chunk).is_ok())
+            });
+            let damaged = if held.is_some() {
+                !readable
+            } else {
+                self.sync.has_blob(&cid) || own.contains(&cid)
+            };
+            if damaged {
                 candidates.insert(cid);
             }
         }
@@ -5654,6 +5993,11 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
 
     pub fn finalized_member_peers(&self) -> Vec<PeerId> {
         self.sync.finalized_member_peers()
+    }
+
+    /// Successful outbound kind26 exchanges on the current live connections, for scheduling.
+    pub fn member_finalization_ready_peers(&self) -> Vec<PeerId> {
+        self.sync.member_finalization_ready_peers()
     }
 
     pub fn member_mesh_allowed(&self) -> bool {
@@ -5892,9 +6236,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// the protocol residual is identical to invites and member removal.
     ///
     /// Setting a deadline does **not** cause anything to happen at that instant; see
-    /// [`FileExpiry`]: this records metadata for a retention pass that does not exist yet, and a
-    /// deadline on a wiki-embedded file is overridden by [`wiki_pinned_cids`](Self::wiki_pinned_cids)
-    /// in any case.
+    /// [`FileExpiry`]: this records circulation metadata that no pass enforces yet, and a deadline
+    /// on a wiki-embedded file is overridden by [`wiki_pinned_cids`](Self::wiki_pinned_cids) in any
+    /// case. Neither a deadline nor "never expires" changes what a device's cache limit drops.
     pub async fn set_file_expiry(
         &mut self,
         cid: &Cid,
@@ -5934,9 +6278,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// either marker grammar (`![alt](cid:HEX)` embeds and `[label](file:HEX)` chips).
     ///
     /// **The never-decay set.** Product rule: a file embedded in a wiki page must never drop out
-    /// of circulation. Any future retention/GC pass; in this crate or in
-    /// `catcoms-storage`; **MUST** consult this set and treat a member of it as un-expirable,
-    /// whatever [`FileEntry::expires`] says.
+    /// of circulation. Any future *expiry* pass **MUST** consult this set and treat a member of it
+    /// as un-expirable, whatever [`FileEntry::expires`] says. This is not a local cache pin: any
+    /// member can embed any listed file (even in a pending edit), so the per-device cache limit
+    /// ([`cache_housekeeping`]) deliberately does not consult it.
     ///
     /// It is **derived, never stored**: the answer is recomputed from the wiki document every
     /// time, so editing the embed out of a page (or deleting the page) un-pins the file with no
@@ -7766,6 +8111,20 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.with_messages(channel, |msgs| msgs.to_vec())
     }
 
+    /// Product authorization must address the same unique visible object as the writer. Reject
+    /// duplicated ids before posting: a false helper result otherwise republishes the previous
+    /// local change under the legacy replication API while incorrectly acknowledging success.
+    fn addressable_message(&self, channel: u128, id: &str) -> Option<ChatMessage> {
+        if id.is_empty() {
+            return None;
+        }
+        self.with_messages(channel, |messages| {
+            let mut matches = messages.iter().filter(|message| message.id == id);
+            let first = matches.next()?;
+            matches.next().is_none().then(|| first.clone())
+        })
+    }
+
     /// Run `f` over the channel's current messages without copying them. The list is materialized
     /// at most once per document version; every later call at the same version borrows it.
     ///
@@ -8385,14 +8744,21 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     /// Dial the cached previously-proven members (policy-gated; candidates only, never promoted
-    /// into the trusted catch-up pool). Returns the number of peers dialed.
-    pub async fn dial_cached_peers(&mut self) -> usize {
-        self.sync.dial_cached_peers().await
+    /// into the trusted catch-up pool). Returns locally admitted jobs; the sync loop applies
+    /// driver acknowledgements later. No network/command-channel wait borrows this Server.
+    pub async fn dial_cached_peers(&mut self) -> usize
+    where
+        T: 'static,
+    {
+        self.sync.queue_cached_dials().await
     }
 
-    /// Run one bounded SWIM/reciprocal/topology repair pass.
-    pub async fn drive_mesh_repair(&mut self) -> usize {
-        self.sync.drive_mesh_repair().await
+    /// Locally queue one bounded SWIM/reciprocal/topology repair pass.
+    pub async fn drive_mesh_repair(&mut self) -> usize
+    where
+        T: 'static,
+    {
+        self.sync.queue_mesh_repair().await
     }
 
     /// Queue a paced reconciliation of open documents with currently proven neighbours.
@@ -8405,12 +8771,19 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.sync.has_pending_reciprocal()
     }
 
-    pub async fn drive_pending_reciprocal(&mut self) -> usize {
-        self.sync.drive_pending_reciprocal().await
+    /// Admit reciprocal jobs without awaiting a driver acknowledgement inside the actor.
+    pub async fn drive_pending_reciprocal(&mut self) -> usize
+    where
+        T: 'static,
+    {
+        self.sync.queue_pending_reciprocal().await
     }
 
     /// Explicit fallback redial that preserves every shared safety budget.
-    pub async fn manual_fallback_redial(&mut self) -> catcoms_sync::ManualRedialOutcome {
+    pub async fn manual_fallback_redial(&mut self) -> catcoms_sync::ManualRedialOutcome
+    where
+        T: 'static,
+    {
         self.sync.manual_fallback_redial().await
     }
 
@@ -8585,6 +8958,106 @@ mod tests {
             "alice",
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn voice_v2_requires_a_directory_room_instead_of_an_arbitrary_open_document() {
+        let mut server = founder();
+        assert!(server.voice_v2_context(channel_id("general")).is_ok());
+        let invented = channel_id("not in the directory");
+        server.open_channel(invented).await.unwrap();
+        assert!(server.voice_v2_context(invented).is_err());
+        server.open_channel_index().await.unwrap();
+        let created = server.create_channel("new voice room").await.unwrap();
+        assert!(server.voice_v2_context(created.id).is_ok());
+    }
+
+    #[test]
+    fn voice_directory_schema_is_bounded_and_preserves_permanent_general() {
+        use catcoms_sync::voice_v2::{directory::MAX_DIRECTORY_KEYS, VoiceError};
+        let general = channel_id("general");
+        let room = channel_id("room");
+        assert_eq!(
+            voice_directory_snapshot(None).unwrap(),
+            BTreeSet::from([general])
+        );
+        let mut doc = AutoCommit::new();
+        doc.put(ROOT, format!("{room:032x}"), "room").unwrap();
+        doc.put(ROOT, "invalid-key", "ignored").unwrap();
+        doc.put(
+            ROOT,
+            format!("{:032x}", channel_id("redirected")),
+            "somewhere else",
+        )
+        .unwrap();
+        assert_eq!(
+            voice_directory_snapshot(Some(&doc)).unwrap(),
+            BTreeSet::from([general, room])
+        );
+        doc.put(ROOT, format!("{general:032x}"), "general").unwrap();
+        doc.delete(ROOT, format!("{general:032x}")).unwrap();
+        assert!(voice_directory_snapshot(Some(&doc))
+            .unwrap()
+            .contains(&general));
+        for index in 0..MAX_DIRECTORY_KEYS {
+            doc.put(ROOT, format!("invalid{index}"), true).unwrap();
+        }
+        assert_eq!(
+            voice_directory_snapshot(Some(&doc)),
+            Err(VoiceError::Capacity)
+        );
+    }
+
+    #[test]
+    fn voice_directory_deletions_see_compound_changes_but_exempt_general_and_bound_expansion() {
+        use catcoms_sync::voice_v2::VoiceError;
+        let general = channel_id("general");
+        let room = channel_id("room");
+        let mut doc = AutoCommit::new().with_actor(automerge::ActorId::from(vec![1; 32]));
+        doc.put(ROOT, format!("{general:032x}"), "general").unwrap();
+        doc.put(ROOT, format!("{room:032x}"), "room").unwrap();
+        doc.commit();
+        doc.delete(ROOT, format!("{general:032x}")).unwrap();
+        doc.delete(ROOT, format!("{room:032x}")).unwrap();
+        doc.put(ROOT, format!("{room:032x}"), "room").unwrap();
+        doc.commit();
+        assert_eq!(
+            voice_directory_deletions(&doc.get_last_local_change().unwrap()).unwrap(),
+            BTreeSet::from([room])
+        );
+        for index in 0..513 {
+            doc.put(ROOT, format!("invalid{index}"), true).unwrap();
+        }
+        doc.commit();
+        assert_eq!(
+            voice_directory_deletions(&doc.get_last_local_change().unwrap()),
+            Err(VoiceError::Bounds)
+        );
+    }
+
+    #[tokio::test]
+    async fn product_voice_attachment_uses_current_directory_incarnations_after_unlock() {
+        use catcoms_sync::voice_v2::runtime::Runtime;
+        let mut server = founder();
+        server.open_channel_index().await.unwrap();
+        let room = server.create_channel("voice room").await.unwrap().id;
+        let runtime = Runtime::new(Arc::new(ManualClock::new(1000)));
+        let ticket = runtime.session_ticket();
+        let registration = server.prepare_voice_actor(&runtime, &ticket).unwrap();
+        registration.register().unwrap();
+        assert!(server.voice_call_lease(room).is_err());
+        runtime.activate_session(&ticket).unwrap();
+        let old = server.voice_call_lease(room).unwrap();
+        server
+            .sync
+            .post(DocType::ChannelIndex, CHANNEL_INDEX_DOC, |doc| {
+                doc.delete(ROOT, format!("{room:032x}"))?;
+                doc.put(ROOT, format!("{room:032x}"), "voice room")
+            })
+            .await
+            .unwrap();
+        assert!(!old.is_live());
+        assert!(server.voice_call_lease(room).unwrap().is_live());
     }
 
     // ---------- multi-device: companion admission by certificate (M3) ----------
@@ -11486,6 +11959,10 @@ mod tests {
         assert_eq!(alice.download_file(&cid).await.unwrap(), data);
     }
 
+    /// Contract changed with cache housekeeping: a chunk of another member's file that this
+    /// device never fetched (or dropped under its cache limit) is "not cached", which is normal,
+    /// and Repair leaves it alone. Only this device's own uploads report a missing chunk as damage,
+    /// and Repair restores exactly those through the authenticated member path.
     #[tokio::test]
     async fn storage_health_detects_missing_chunks_and_authenticated_repair_recovers_them() {
         let hub = Hub::new();
@@ -11516,17 +11993,68 @@ mod tests {
             .unwrap();
         let _ = tokio::join!(bob.request_files_catchup(alice_peer), alice.sync_once());
 
-        let missing = bob.storage_health();
-        assert_eq!(missing.listed_files, 1);
-        assert_eq!(missing.referenced_chunks, 1);
-        assert_eq!(missing.missing_chunks, 1);
-        assert_eq!(missing.verified_chunks, 0);
+        let not_cached = bob.storage_health();
+        assert_eq!(not_cached.listed_files, 1);
+        assert_eq!(not_cached.referenced_chunks, 1);
+        assert_eq!(not_cached.not_cached_chunks, 1);
+        assert_eq!(
+            not_cached.missing_chunks, 0,
+            "not this device's upload: not damage"
+        );
+        assert_eq!(not_cached.verified_chunks, 0);
+        // No network turn on Alice's side: a Repair that sends nothing must not need one.
+        let repair = bob.repair_storage().await.unwrap();
+        assert_eq!(
+            repair.attempted_chunks, 0,
+            "Repair never fetches merely uncached chunks back, which would fight the limit"
+        );
 
-        let (repair, _) = tokio::join!(bob.repair_storage(), alice.sync_once());
+        // Bob shares a file of his own, and Alice holds a copy of its chunk. Bob then loses it:
+        // for his own upload that is missing (damage), and Repair restores it from Alice.
+        bob.add_file("mine.txt", "text/plain", "", b"bob's own bytes")
+            .await
+            .unwrap();
+        let mine = bob
+            .files()
+            .into_iter()
+            .find(|entry| entry.name == "mine.txt")
+            .unwrap();
+        let chunk = FileManifest::decode_or_legacy(&mine.file_ref)
+            .unwrap()
+            .chunks[0]
+            .ciphertext_cid;
+        alice
+            .sync
+            .put_blob(&bob.sync.get_blob(&chunk).unwrap())
+            .unwrap();
+        assert!(bob.sync.delete_blob(&chunk).unwrap());
+        let missing = bob.storage_health();
+        assert_eq!(missing.missing_chunks, 1, "bob's own upload");
+        assert_eq!(
+            missing.not_cached_chunks, 1,
+            "alice's file, still merely not cached"
+        );
+
+        // Alice may first have Bob's index gossip to handle, so keep her turning until Bob's
+        // repair completes rather than granting exactly one turn.
+        let repair = {
+            let repair = bob.repair_storage();
+            tokio::pin!(repair);
+            loop {
+                tokio::select! {
+                    done = &mut repair => break done,
+                    _ = alice.sync_once() => {}
+                }
+            }
+        };
         let repair = repair.unwrap();
-        assert_eq!(repair.attempted_chunks, 1);
+        assert_eq!(
+            repair.attempted_chunks, 1,
+            "only the own-upload chunk is fetched"
+        );
         assert_eq!(repair.recovered_chunks, 1);
         assert_eq!(repair.health.missing_chunks, 0);
+        assert_eq!(repair.health.not_cached_chunks, 1);
         assert_eq!(repair.health.unreadable_chunks, 0);
         assert_eq!(repair.health.verified_chunks, 1);
         assert_eq!(repair.health.verified_manifest_versions.len(), 1);

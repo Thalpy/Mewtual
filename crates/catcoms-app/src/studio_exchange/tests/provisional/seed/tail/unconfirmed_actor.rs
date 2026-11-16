@@ -183,7 +183,7 @@ fn recorded_provenance(p: &mut Pair, target: StudioTarget) -> Option<StudioOverl
 
 /// A receiver holding one real, ready preview of the channel's Index, and the ticket for a Save on
 /// it. The saving member is a plain joiner, so no stage of the Save may consult a tenure (8.5).
-async fn ready_receiver() -> (Pair, StudioReceiver, StudioTarget, [u8; 32], [u8; 32]) {
+async fn ready_receiver() -> (Box<Pair>, StudioReceiver, StudioTarget, [u8; 32], [u8; 32]) {
     let mut p = pages::proven_pair().await;
     let target = StudioTarget::Index { channel: channel() };
     p.watch = p

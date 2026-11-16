@@ -71,6 +71,30 @@ function registeredCommands(source: string): string[] {
 }
 
 /**
+ * The privileged read router captures original custody synchronously, before async CommandArg
+ * parsing would run. Include its actual canonical command array, while keeping macro function
+ * parity independent: inventing dummy command functions would hide a second dispatch path.
+ * This is an inventory/drift guard. Native MockRuntime tests exercise real Tauri ACL/dispatch.
+ */
+function manualCommands(sources: Map<string, string>): string[] {
+  const source = sources.get("admin_chat_ledger/mod.rs");
+  assert.ok(source, "the synchronous admin history router must remain visible to the audit");
+  const body = /^pub\(super\) const COMMANDS: &\[&str\] = &\[([^\]]*)\];/m.exec(source)?.[1];
+  assert.ok(body, "manual command names must remain a literal enumerable array");
+  const names = [...body.matchAll(/"([a-z][a-z0-9_]*)"/g)].map((match) => match[1]);
+  assert.match(body.replace(/"[a-z][a-z0-9_]*"/g, ""), /^[\s,]*$/, "unsupported manual command inventory syntax");
+  assert.deepEqual(names, ["get_admin_chat_ledger", "get_admin_chat_ledger_detail"], "review any new manual surface explicitly");
+  const bridge = sources.get("lib.rs") ?? "";
+  assert.match(bridge.replace(/\s+/g, ""), /\.invoke_handler\(native_text::with_commands\(admin_chat_ledger::with_commands\(tauri::generate_handler!\[/,
+    "the reviewed manual router must wrap the actual normal handler");
+  return names;
+}
+
+function allRegisteredCommands(sources = nativeSources()): string[] {
+  return [...registeredCommands(sources.get("lib.rs") ?? ""), ...manualCommands(sources)];
+}
+
+/**
  * Command functions, wherever they are defined and whatever their visibility.
  *
  * The module commands are `pub(crate)`, which the old `(?:pub\s+)?` could not match. That is the
@@ -348,7 +372,8 @@ function frontendSources(dir: string): string[] {
 
 test("every native command is registered exactly once and classified for security review", () => {
   const sources = nativeSources();
-  const registered = registeredCommands(sources.get("lib.rs") ?? "");
+  const generated = registeredCommands(sources.get("lib.rs") ?? "");
+  const registered = allRegisteredCommands(sources);
   const functions = [...sources.values()].flatMap(commandFunctions);
   // The IPC name is the function name, which is what makes stripping the module path the right
   // answer above. A configured attribute (`#[tauri::command(rename = "...")]`, or an async-runtime
@@ -367,7 +392,7 @@ test("every native command is registered exactly once and classified for securit
   );
   assert.equal(new Set(registered).size, registered.length, "duplicate command registration");
   assert.equal(new Set(REVIEWED_TAURI_COMMANDS).size, REVIEWED_TAURI_COMMANDS.length, "duplicate ledger entry");
-  assert.deepEqual([...registered].sort(), [...functions].sort(), "command functions and handler list diverged");
+  assert.deepEqual([...generated].sort(), [...functions].sort(), "command functions and macro handler list diverged");
   assert.deepEqual([...registered].sort(), [...REVIEWED_TAURI_COMMANDS].sort(), "update the security ledger");
 });
 
@@ -388,7 +413,7 @@ test("the enforced permission chain holds end to end: registered, classified, gr
   const capability = JSON.parse(readFileSync(join(nativeDir, "..", "capabilities", "main.json"), "utf8"));
   const config = JSON.parse(readFileSync(join(nativeDir, "..", "tauri.conf.json"), "utf8"));
 
-  const registered = registeredCommands(nativeSources().get("lib.rs") ?? "");
+  const registered = allRegisteredCommands();
   const classified = policy.map((entry) => entry.command);
   assert.equal(new Set(classified).size, classified.length, "duplicate command-policy entry");
   assert.deepEqual(
@@ -437,7 +462,7 @@ test("the enforced permission chain holds end to end: registered, classified, gr
 });
 
 test("the frontend invokes only registered, security-classified literal commands", () => {
-  const registered = new Set(registeredCommands(readFileSync(bridgePath, "utf8")));
+  const registered = new Set(allRegisteredCommands());
   const reviewed = new Set<string>(REVIEWED_TAURI_COMMANDS);
   const sources = frontendSources(sourceDir);
   // An aliased import would rename every call through it past the marker below, which is this
@@ -461,6 +486,75 @@ test("the frontend invokes only registered, security-classified literal commands
   }
 });
 
+test("save_group_file's signature cannot carry a path from the renderer", () => {
+  // "Save as" must keep the native side as the only source of a destination: the dialog runs in
+  // native code and the renderer sends only a flag. Pin the exact parameter list so a path,
+  // folder or destination parameter cannot be added unnoticed.
+  const source = readFileSync(bridgePath, "utf8");
+  const start = source.indexOf("async fn save_group_file(");
+  assert.ok(start > 0, "save_group_file is declared in lib.rs");
+  const close = source.indexOf(") -> Result<SavedFileResult, String>", start);
+  assert.ok(close > start, "save_group_file's signature parses");
+  // Split on top-level commas only: `State<'_, AppState>` carries one inside its generics.
+  const list = source.slice(start + "async fn save_group_file(".length, close);
+  const parts: string[] = [];
+  let depth = 0, current = "";
+  for (const char of list) {
+    if (char === "<") depth += 1;
+    if (char === ">") depth -= 1;
+    if (char === "," && depth === 0) {
+      parts.push(current);
+      current = "";
+    } else current += char;
+  }
+  parts.push(current);
+  const params = parts
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => part.split(":")[0].trim());
+  // PR #56 added `replace_older`, "Replace my older saved copy": a flag, like `save_as`. Native
+  // replaces only a copy its sealed saved-files list names and proves is its own and unchanged.
+  assert.deepEqual(params, [
+    "app", "state", "server", "cid", "name", "resume", "expected_intent", "operation", "fresh_copy", "save_as",
+    "replace_older",
+  ]);
+  for (const param of params) {
+    assert.doesNotMatch(param, /path|folder|dir|destination|location|target/i, param);
+  }
+  const saveAs = source.slice(start, close);
+  assert.match(saveAs, /save_as:\s*Option<bool>/, "Save as is a flag, never a value");
+  assert.match(saveAs, /replace_older:\s*Option<bool>/, "replace older is a flag, never a value");
+});
+
+test("saved-files list commands take only a server and an entry ID", () => {
+  // PR #56: no path, folder or name can reach native through them.
+  const source = readFileSync(new URL("../src-tauri/src/saved_files.rs", import.meta.url), "utf8");
+  for (const [command, expected] of [
+    ["get_saved_files", ["app", "state", "server"]],
+    ["check_saved_files", ["state", "server"]],
+    ["reveal_saved_file", ["state", "server", "entry"]],
+    ["forget_saved_file", ["state", "server", "entry"]],
+    ["reset_saved_files", ["state", "server"]],
+    ["get_saved_files_limit", ["state", "server"]],
+    ["set_saved_files_limit", ["state", "server", "limit", "apply", "expected_forgets"]],
+  ] as const) {
+    const start = source.indexOf(`pub(super) async fn ${command}(`);
+    assert.ok(start > 0, `${command} is declared`);
+    const close = source.indexOf(") -> Result<", start);
+    const list = source.slice(start + `pub(super) async fn ${command}(`.length, close);
+    const params: string[] = [];
+    let depth = 0, current = "";
+    for (const char of list) {
+      if (char === "<") depth += 1;
+      if (char === ">") depth -= 1;
+      if (char === "," && depth === 0) { params.push(current); current = ""; } else current += char;
+    }
+    params.push(current);
+    assert.deepEqual(params.map((p) => p.trim()).filter(Boolean).map((p) => p.split(":")[0].trim()), expected, command);
+  }
+  assert.match(source, /async fn reveal_saved_file\([^)]*entry: String/);
+});
+
 test("every non-bootstrap native command visibly crosses the unlocked-session gate", () => {
   const segments = commandSegments(nativeSources());
   // Commands that must work before, or without, an unlocked session. The log_ui pair is here for
@@ -478,6 +572,14 @@ test("every non-bootstrap native command visibly crosses the unlocked-session ga
     "close_vault_window",
     // Idempotent, reveals no token-existence bit, and only removes bounded native work.
     "cancel_inline_download",
+    // Exact native revocation/settlement survives UI lock. No fresh work or existence bit.
+    "end_call_mapping_owner", "unmap_call_port", "end_voice_owner", "settle_voice_crypto", "settle_voice_join_key",
+    // Original-owner channel closure/collection remain callable after lock/End. Native admits
+    // no fresh effect and reports success only for actually drained, permanently closed setup.
+    "settle_voice_channel_setup", "collect_voice_channel",
+    // Own original-channel public work history is needed to recover unseen Pending after
+    // End/lock. Native verifies the retained owner/executor and admits no new effect/data.
+    "read_voice_channel_work",
     "log_ui",
     "log_ui_batch",
     "record_ui_events",
@@ -525,6 +627,25 @@ test("every non-bootstrap native command visibly crosses the unlocked-session ga
       `${command} does not visibly cross the native session gate`,
     );
   }
+});
+
+test("the synchronous privileged router has a separately reviewed original-scope session fence", () => {
+  const sources = nativeSources();
+  manualCommands(sources); // also verifies the installed real wrapper and exact closed names
+  const router = sources.get("admin_chat_ledger/mod.rs")!;
+  const capture = router.slice(router.indexOf("fn capture("), router.indexOf("enum Request"));
+  assert.match(capture, /keep_session::current\(state, generation\)/);
+  assert.match(capture, /state\.servers\.try_lock\(\)/);
+  assert.match(capture, /entry\.files\.scope\(account\)/);
+  const execute = router.slice(router.indexOf("async fn execute("), router.indexOf("async fn execute_actor("));
+  assert.match(execute, /require_ui_session_generation\(state, captured\.generation\)/);
+  assert.match(execute, /origin\.cancelled\(\)/);
+  const publish = router.slice(router.indexOf("async fn publish("), router.indexOf("pub(super) fn with_commands"));
+  assert.match(publish, /require_ui_session_generation\(state, captured\.generation\)/);
+  assert.match(publish, /entry\.actor\.same_instance\(&captured\.actor\)/);
+  assert.match(publish, /captured\.origin\.is_cancelled\(\)/);
+  // This is intentionally a source drift guard, not an authentication proof. The native
+  // MockRuntime and barrier tests execute Tauri dispatch, both lock orders and Actor custody.
 });
 
 /**

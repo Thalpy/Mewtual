@@ -16,7 +16,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
-use catcoms_app::{channel_id, spawn, Server, ServerActor};
+use catcoms_app::{channel_id, spawn, DeviceId, Server, ServerActor};
 use catcoms_mls::{InviteToken, MlsDevice};
 use catcoms_net::{phase0_peer_id, target_peer_in_multiaddr, MeshService};
 use catcoms_rt::{MeshTransport, OsCryptoRng, RngCore, SystemClock, TransportEvent};
@@ -57,7 +57,17 @@ impl ChildGuard {
                 Some(status) if status.success() => return,
                 Some(status) => {
                     let log = fs::read_to_string(&self.log).unwrap_or_default();
-                    panic!("{} child exited {status}\n{log}", self.role);
+                    // A failed Alice can strand restarted Bob's online wait. Preserve that
+                    // earlier cause rather than reporting only the later timeout's symptom.
+                    let alice_log = if self.role != "alice" {
+                        fs::read_to_string(self.log.with_file_name("alice.log")).unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    panic!(
+                        "{} child exited {status}\n{log}\nAlice companion log:\n{alice_log}",
+                        self.role
+                    );
                 }
                 None => std::thread::sleep(POLL),
             }
@@ -65,7 +75,15 @@ impl ChildGuard {
         let _ = self.child.kill();
         let _ = self.child.wait();
         let log = fs::read_to_string(&self.log).unwrap_or_default();
-        panic!("{} child timed out\n{log}", self.role);
+        let alice_log = if self.role != "alice" {
+            fs::read_to_string(self.log.with_file_name("alice.log")).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        panic!(
+            "{} child timed out\n{log}\nAlice companion log:\n{alice_log}",
+            self.role
+        );
     }
 }
 
@@ -278,7 +296,31 @@ async fn run_alice(dir: &Path, port: u16) -> Result<(), String> {
         .drive_discovery()
         .await
         .map_err(|_| "Alice actor stopped during PEX".to_string())?;
-    let _ = alice.member_count().await;
+    let bob_member = alice
+        .members()
+        .await
+        .into_iter()
+        .find(|member| !member.is_self)
+        .ok_or_else(|| "joined Bob is missing from Alice's roster".to_string())?;
+    let bob_device = DeviceId::from_canonical_hex(&bob_member.identity)
+        .ok_or_else(|| "Bob's roster identity is not canonical".to_string())?;
+    let bob_transport: libp2p::PeerId = tokio::fs::read_to_string(dir.join("bob-initial-peer.txt"))
+        .await
+        .map_err(|error| error.to_string())?
+        .parse()
+        .map_err(|error: libp2p::identity::ParseError| error.to_string())?;
+    let bob_peer = phase0_peer_id(&bob_transport);
+    // Discovery queues detached work. A following command proves only that the actor accepted
+    // it, not that PEX learned Bob's signed device-to-transport binding. Keep the first Bob alive
+    // until that exact recovery prerequisite exists; otherwise a correct PeerBinding refusal
+    // in Alice strands restarted Bob and is misreported as a reconnect failure.
+    timeout(WAIT, async {
+        while alice.member_transport_peer(bob_device).await != Some(bob_peer) {
+            sleep(POLL).await;
+        }
+    })
+    .await
+    .map_err(|_| "Alice never learned Bob's signed transport record before restart".to_string())?;
     tokio::fs::write(dir.join("alice-release-bob"), b"ok")
         .await
         .map_err(|error| error.to_string())?;

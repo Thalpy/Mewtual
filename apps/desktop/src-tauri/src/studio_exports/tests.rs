@@ -101,14 +101,16 @@ fn studio_gif_safe_download_never_overwrites_and_reports_reveal_failure() {
     let gif = encode_gif(&golden(), GIF_MAX_BYTES, || false).unwrap();
     let abandoned = stage_gif(dir.path(), &gif, || false, || {}).unwrap();
     assert_eq!(std::fs::read(&abandoned.staging).unwrap(), gif);
-    assert_eq!(
-        std::fs::read(&abandoned.path).unwrap(),
-        b"",
-        "the reserved name holds no bytes"
+    assert!(
+        !abandoned.path.exists(),
+        "the final name stays absent until publication"
     );
     drop(abandoned);
     let mut staged = stage_gif(dir.path(), &gif, || false, || {}).unwrap();
     staged.publish().unwrap();
+    // Publication is only the link; settling removes our staging name (and says nothing when it
+    // went).
+    assert_eq!(staged.settle(), "");
     let saved = revealed(&staged.path, |_| Err("no desktop".into()));
     drop(staged);
     assert!(!saved.displayed);
@@ -126,14 +128,60 @@ fn studio_gif_safe_download_never_overwrites_and_reports_reveal_failure() {
     assert_eq!(
         std::fs::read_dir(dir.path()).unwrap().count(),
         2,
-        "an unpublished stage removes both its staging file and its reserved name"
+        "an unpublished stage removes only its own staging file"
+    );
+}
+
+#[test]
+fn studio_export_collision_never_replaces_or_cleans_up_another_local_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let gif = encode_gif(&golden(), GIF_MAX_BYTES, || false).unwrap();
+    for publish in [false, true] {
+        let mut staged = stage_gif(dir.path(), &gif, || false, || {}).unwrap();
+        let final_path = staged.path.clone();
+        let staging_path = staged.staging.clone();
+        std::fs::write(&final_path, b"local file created during export").unwrap();
+        if publish {
+            assert!(staged.publish().is_err());
+        }
+        drop(staged);
+        assert_eq!(
+            std::fs::read(final_path).unwrap(),
+            b"local file created during export"
+        );
+        assert!(!staging_path.exists());
+    }
+}
+
+#[test]
+fn studio_export_link_is_committed_when_staging_cleanup_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let gif = encode_gif(&golden(), GIF_MAX_BYTES, || false).unwrap();
+    let mut staged = stage_gif(dir.path(), &gif, || false, || {}).unwrap();
+    let (path, staging) = (staged.path.clone(), staged.staging.clone());
+    staged.publish().unwrap();
+    assert!(staged.published);
+    // The settling after the commit fails: the export stays committed and the note says the
+    // temporary copy, still provably ours, could not be removed (review M-5).
+    let note = settle_published_staging_with(&staged.file, &staging, |_, _| {
+        Err(std::io::ErrorKind::PermissionDenied.into())
+    });
+    assert!(
+        note.contains("could not be removed; delete it yourself"),
+        "{note}"
+    );
+    drop(staged);
+    assert_eq!(std::fs::read(path).unwrap(), gif);
+    assert!(
+        staging.exists(),
+        "Drop cannot reclassify a committed export as abandoned"
     );
 }
 
 async fn unlocked_state(vault: &Path) -> (AppState, u64) {
     let state = AppState::default();
     *state.store.lock().await =
-        Some(ServerStore::open(vault, b"correct horse", &mut OsCryptoRng).unwrap());
+        Some((ServerStore::open(vault, b"correct horse", &mut OsCryptoRng).unwrap()).into());
     *state.session_resumable.lock().await = true;
     let generation = unlocked_ui_session_generation(&state).await.unwrap();
     (state, generation)
@@ -158,9 +206,10 @@ async fn register_server(
     let group_id = server.group_id();
     let device_id = server.device_id();
     let (actor, events, task) = spawn(server);
-    state.servers.lock().await.insert(
+    state.servers.lock().await.install_legacy_fixture(
         12,
         ServerEntry {
+            files: keep_session::EntryOwner::new(),
             actor: actor.clone(),
             instance,
             group_id,
@@ -175,6 +224,7 @@ async fn register_server(
             is_dm: false,
             switchboard: false,
             record_seq: 0,
+            voice: None,
             persist: PersistCounters::default(),
         },
     );
@@ -235,7 +285,7 @@ async fn studio_gif_stale_session_and_missing_server_never_write_or_reveal() {
     .await
     .is_err());
     let before_commit = async {
-        state.ui_session_generation.fetch_add(1, Ordering::AcqRel);
+        state.ui_session_generation.fetch_add(1, Ordering::SeqCst);
     };
     // The current instance, so the session fence after staging is what refuses publication.
     assert!(save_gif(
@@ -253,7 +303,37 @@ async fn studio_gif_stale_session_and_missing_server_never_write_or_reveal() {
     .await
     .is_err());
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    assert_eq!(
+        unlocked_ui_session_generation(&state).await.unwrap_err(),
+        "the vault is locked",
+        "a changed generation is not an authenticated unlock"
+    );
+    {
+        let _commit = state.ui_session_commit.lock().await;
+        // This fixture already holds an unlocked vault. Explicitly model successful native
+        // authentication before allowing fresh work; never restore authority to the old token.
+        state.ui_authorized_generation.store(
+            state.ui_session_generation.load(Ordering::SeqCst),
+            Ordering::SeqCst,
+        );
+    }
     let current = unlocked_ui_session_generation(&state).await.unwrap();
+    assert_ne!(current, generation);
+    assert!(save_gif(
+        &state,
+        12,
+        41,
+        generation,
+        dir.path().to_path_buf(),
+        gif.clone(),
+        &cancellation,
+        || {},
+        std::future::ready(()),
+        |_| panic!("unlock must not revive the old generation")
+    )
+    .await
+    .is_err());
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     let result = save_gif(
         &state,
         12,

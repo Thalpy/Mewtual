@@ -401,8 +401,7 @@ impl AddressValue {
         // at all rather than being rendered because it did not look like a number.
         let transport = addr
             .split('/')
-            .filter(|part| TRANSPORTS.contains(part))
-            .next_back()
+            .rfind(|part| TRANSPORTS.contains(part))
             .unwrap_or("unknown");
         AddressValue {
             family,

@@ -108,10 +108,10 @@ async fn native_studio_inspection_expiring_after_conversion_is_rejected() {
                 f.clock.advance_ms(5000);
                 assert!(!delivery.is_current());
                 assert_eq!(
-                    state.ui_session_generation.load(Ordering::Acquire),
+                    state.ui_session_generation.load(Ordering::SeqCst),
                     generation
                 );
-                assert!(!state.session_lock_requested.load(Ordering::Acquire));
+                assert!(!state.session_lock_requested.load(Ordering::SeqCst));
                 assert!(state.servers.try_lock().is_err());
                 assert!(state.ui_session_commit.try_lock().is_err());
                 Ok(value)
@@ -126,7 +126,16 @@ async fn native_studio_inspection_expiring_after_conversion_is_rejected() {
             result.expect_err("expired inspection escaped final native delivery fence"),
             "Studio response belongs to a locked or changed UI session"
         );
-        assert_eq!(state.servers.lock().await[&fixture::SERVER].instance, 1);
+        assert_eq!(
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&fixture::SERVER)
+                .expect("Legacy fixture row")
+                .instance,
+            1
+        );
         f.shutdown().await;
     }
 }
@@ -134,8 +143,11 @@ async fn native_studio_inspection_expiring_after_conversion_is_rejected() {
 #[tokio::test]
 async fn native_studio_inspection_original_session_request_and_instance_span_both_visits() {
     let f = InspectionFixture::new(true).await;
-    let state = state(&f).await;
     for mode in 0..3 {
+        // Each fault starts from its own explicitly unlocked test registry, retaining the real
+        // actor/store. Mode 0 retires UI authorization as well as its captured operation; reusing
+        // that registry would refuse the next case before it can exercise the intended fence.
+        let state = state(&f).await;
         let reached = std::cell::Cell::new(false);
         let result = read_with(
             &state,
@@ -146,13 +158,13 @@ async fn native_studio_inspection_original_session_request_and_instance_span_bot
                 assert!(state.ui_session_commit.try_lock().is_ok());
                 assert!(original.view_request.as_ref().unwrap().is_current());
                 assert_eq!(
-                    state.ui_session_generation.load(Ordering::Acquire),
+                    state.ui_session_generation.load(Ordering::SeqCst),
                     original.generation
                 );
                 reached.set(true);
                 match mode {
                     0 => {
-                        state.ui_session_generation.fetch_add(1, Ordering::AcqRel);
+                        state.ui_session_generation.fetch_add(1, Ordering::SeqCst);
                     }
                     1 => {
                         drop(requests::ViewRequest::begin(
@@ -166,21 +178,41 @@ async fn native_studio_inspection_original_session_request_and_instance_span_bot
                             .servers
                             .try_lock()
                             .unwrap()
-                            .get_mut(&fixture::SERVER)
+                            .legacy_mut(&fixture::SERVER)
                             .unwrap()
                             .instance += 1;
                     }
                 }
             },
-            |_| panic!("obsolete first inspection was legitimized by second custody visit"),
+            |_| panic!("original inspection context was replaced during second custody visit"),
         )
         .await;
         assert!(
             reached.get(),
-            "must rebuild before changing original operation context"
+            "mode {mode} must rebuild before changing original operation context"
         );
-        assert!(result.is_err());
+        assert_eq!(
+            result
+                .expect_err("original inspection context was replaced during second custody visit"),
+            match mode {
+                0 => "Studio request belongs to a locked or changed UI session",
+                1 => "Studio view request was superseded; refresh",
+                _ => "server changed before Studio commit",
+            },
+            // Reconstructing context can refuse earlier (e.g. "the vault is locked") instead
+            // of reaching conversion. That still violates this exact original-context result;
+            // the mutation gate must recognize this assertion without accepting arbitrary failure.
+            "original inspection context was replaced during second custody visit"
+        );
+        if mode == 0 {
+            assert_eq!(
+                read(&state, fixture::SERVER, f.target).await.unwrap_err(),
+                "the vault is locked",
+                "refusing the stale operation must not authorize a new UI session"
+            );
+        }
     }
+    let state = state(&f).await;
     check(&read(&state, fixture::SERVER, f.target).await.unwrap(), &f);
     f.shutdown().await;
 }
@@ -220,7 +252,7 @@ async fn native_studio_inspection_session_and_request_changed_after_conversion_a
                 converted.set(true);
                 assert!(delivery.is_current());
                 if session {
-                    state.session_lock_requested.store(true, Ordering::Release);
+                    state.session_lock_requested.store(true, Ordering::SeqCst);
                 } else {
                     drop(requests::ViewRequest::begin(
                         &state,
@@ -247,7 +279,7 @@ async fn native_studio_inspection_session_and_request_changed_after_conversion_a
                 "Studio view request was superseded; refresh"
             }
         );
-        state.session_lock_requested.store(false, Ordering::Release);
+        state.session_lock_requested.store(false, Ordering::SeqCst);
     }
     f.shutdown().await;
 }

@@ -14,6 +14,117 @@ fn take(receiver: &mut mpsc::Receiver<Command>) -> Publication {
 }
 
 #[tokio::test]
+async fn publication_service_and_original_custody_outlive_input_and_cancelled_waiter() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    #[derive(Debug)]
+    struct Credit(Arc<AtomicUsize>);
+    impl Drop for Credit {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    struct Input {
+        bytes: Vec<u8>,
+        retired: Arc<AtomicBool>,
+    }
+    impl AsRef<[u8]> for Input {
+        fn as_ref(&self) -> &[u8] {
+            &self.bytes
+        }
+    }
+    impl Drop for Input {
+        fn drop(&mut self) {
+            self.retired.store(true, Ordering::SeqCst);
+        }
+    }
+    let retired = Arc::new(AtomicUsize::new(0));
+    let input_retired = Arc::new(AtomicBool::new(false));
+    let (owner, receiver) = tokio::sync::watch::channel(false);
+    let authority = RequestCancellation::new(receiver, Some(Arc::new(Credit(retired.clone()))))
+        .retain_custody(Arc::new(Credit(retired.clone())));
+    let (tx, mut rx) = mpsc::channel(1);
+    let slots = Arc::new(Semaphore::new(1));
+    let mut future = Box::pin(publish_once_with_authority(
+        &tx,
+        &slots,
+        topic(),
+        Bytes::from_owner(Input {
+            bytes: vec![7; 1024],
+            retired: input_retired.clone(),
+        }),
+        Some(authority),
+    ));
+    assert!(poll!(&mut future).is_pending());
+    let queued = take(&mut rx);
+    assert!(
+        input_retired.load(Ordering::SeqCst),
+        "driver compacted its actual lower copy"
+    );
+    drop(future);
+    drop(owner);
+    assert_eq!(
+        retired.load(Ordering::SeqCst),
+        0,
+        "queued lower bytes retain both owners"
+    );
+    queued.run_with(|_, _| panic!("abandoned original wait must not enter gossip"));
+    assert_eq!(retired.load(Ordering::SeqCst), 2);
+    assert_eq!(slots.available_permits(), 1);
+}
+
+#[tokio::test]
+async fn original_publication_authority_is_checked_at_driver_handoff() {
+    let (tx, mut rx) = mpsc::channel(1);
+    let slots = Arc::new(Semaphore::new(1));
+    let (owner, observer) = tokio::sync::watch::channel(false);
+    let authority = RequestCancellation::new(observer, None);
+    let mut future = Box::pin(publish_once_with_authority(
+        &tx,
+        &slots,
+        topic(),
+        Bytes::from_static(b"original"),
+        Some(authority),
+    ));
+    assert!(poll!(&mut future).is_pending());
+    let queued = take(&mut rx);
+    owner.send_replace(true);
+    assert_eq!(
+        slots.available_permits(),
+        0,
+        "escaped queue custody is still charged"
+    );
+    queued.run_with(|_, _| panic!("retired mount must not enter gossip"));
+    assert_eq!(future.await, Err(PublishOnceError::Revoked));
+    assert_eq!(slots.available_permits(), 1);
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn retirement_after_publication_admission_does_not_retract_submission() {
+    let (tx, mut rx) = mpsc::channel(1);
+    let slots = Arc::new(Semaphore::new(1));
+    let (owner, observer) = tokio::sync::watch::channel(false);
+    let mut future = Box::pin(publish_once_with_authority(
+        &tx,
+        &slots,
+        topic(),
+        Bytes::from_static(b"admitted"),
+        Some(RequestCancellation::new(observer, None)),
+    ));
+    assert!(poll!(&mut future).is_pending());
+    take(&mut rx).run_with(|_, bytes| {
+        // This is after the final original-authority check. A later retirement cannot turn
+        // an admitted send into a clean refusal or authorize refunding live transport work.
+        owner.send_replace(true);
+        assert_eq!(bytes.as_ref(), b"admitted");
+        assert_eq!(slots.available_permits(), 0);
+        Ok(PublishSubmission::Submitted)
+    });
+    assert_eq!(future.await, Ok(PublishSubmission::Submitted));
+    assert_eq!(slots.available_permits(), 1);
+}
+
+#[tokio::test]
 async fn publish_once_waits_for_driver_result_and_never_requeues_failure() {
     let (tx, mut rx) = mpsc::channel(4);
     let slots = Arc::new(Semaphore::new(MAX_IN_FLIGHT));

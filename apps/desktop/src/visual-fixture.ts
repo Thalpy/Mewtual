@@ -3,12 +3,20 @@ import type { InvokeArgs } from "@tauri-apps/api/core";
 import { pageOfList, type PageRequest, type UnreadProbe } from "./message-paging.ts";
 import { visualStudioFixtureResponse } from "./visual-studio-fixture.ts";
 import { createVisualFileUploads } from "./visual-file-uploads.ts";
+import { VISUAL_SAVED_FILES, visualTransfersResponse } from "./visual-transfers-fixture.ts";
+import { visualChatLedgerResponse } from "./visual-chat-ledger-fixture.ts";
+import { createVisualNativeTextFixture } from "./visual-native-text-fixture.ts";
 
 export const VISUAL_FIXTURE_NOW = Date.UTC(2026, 7, 20, 12, 0, 0);
 
 const ME = "a4f29c110b7d8365a4f29c110b7d8365";
 const JUNIPER = "62e80f475ac4931162e80f475ac49311";
 const MOSS = "9b31d5a277c04efa9b31d5a277c04efa";
+const CHAT_CHANNELS = [
+  { id: "1", name: "general" },
+  { id: "2", name: "design" },
+  { id: "3", name: "field-notes" },
+];
 
 type Message = {
   id: string;
@@ -62,6 +70,16 @@ const CHANNEL_MESSAGES: Record<string, Message[]> = {
     message("dm-2", ME, "Perfect — one stable URL per state is the goal.", 22),
   ],
 };
+
+/** A channel's messages. The Transfers fixture (`transfers=1`) adds one message sharing a file
+ * the device already saved, so its chat card shows the "Saved" mark (PR #56). */
+function channelMessages(key: string, transfers: boolean): Message[] {
+  const rows = CHANNEL_MESSAGES[key] ?? [];
+  if (!transfers || key !== "general") return rows;
+  const saved = VISUAL_SAVED_FILES[0].file;
+  // A file reference on a line of its own renders as a file card (`[label](file:CID)`).
+  return [...rows, message("msg-6", JUNIPER, `Here is the kit again:\n[${saved.name}](file:${saved.cid})`, 3)];
+}
 
 const PROFILES = [
   {
@@ -161,16 +179,33 @@ const BRIDGED = "LOG.TRACING.EVENT";
  * call fail loudly. That is preferable to a screenshot which looks plausible while silently
  * omitting a newly-added backend dependency.
  */
-export function visualFixtureResponse(command: string, payload: InvokeArgs = {}, studio = false): unknown {
+export function visualFixtureResponse(command: string, payload: InvokeArgs = {}, studio = false, transfers = false, pendingRecovery = false): unknown {
   const args: Record<string, unknown> =
     Array.isArray(payload) || payload instanceof ArrayBuffer || payload instanceof Uint8Array
       ? {}
       : payload;
+  // Explicit screenshot opt-in for the old oversized-edit recovery path. Preserve the default
+  // fixture and the complete original request; production never installs these IPC mocks.
+  if (pendingRecovery && command === "get_ui_state") {
+    const ordinary = JSON.parse(visualFixtureResponse(command, payload) as string);
+    const token = "0a".repeat(16);
+    return JSON.stringify({ ...ordinary, version: 2, pendingSends: {
+      [token]: { kind: "edit", token, server: 1, channel: "35", expectedContext: "a".repeat(64),
+        messageId: "original-edit", target: "b".repeat(64), text: "Saved edit text. ".repeat(4097),
+        replyTo: "", acceptance: "ambiguous", resolution: "recover" },
+    } });
+  }
+  // `transfers=1`: one private download row in every Transfers state (Transfers UX, PR #51).
+  if (transfers) {
+    const response = visualTransfersResponse(command, args,
+      () => visualFixtureResponse("get_files", payload, studio) as { has_peers: boolean; files: Array<Record<string, unknown>> });
+    if (response.handled) return response.value;
+  }
   if (studio) {
     const response = visualStudioFixtureResponse(command, args, VISUAL_FIXTURE_NOW);
     if (response.handled) return response.value;
-    // Existing chat fixture ids are descriptive strings; native Studio deliberately requires
-    // canonical decimal channels. The explicit opt-in remaps the fixture, never its parser.
+    // Studio and ordinary chat both use native decimal channel identities. Keep the opt-in
+    // response independent so mutating one screenshot's roster cannot alter the default.
     if (command === "resume_session") {
       const servers = visualFixtureResponse(command, payload) as Array<{ server: number; channel: string; channels: { id: string; name: string }[] }>;
       for (const server of servers) if (server.server === 1) { server.channel = "1"; server.channels = server.channels.map((channel, index) => ({ ...channel, id: String(index + 1) })); }
@@ -185,29 +220,39 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
     return visualFixtureResponse(command, { ...args, ...(channel === undefined ? {} : { channel }) });
   }
   const server = Number(args.server ?? 1);
-  const channel = String(args.channel ?? "general");
+  // Human-readable keys are internal fixture lookup names only. IPC responses use the same
+  // canonical decimal IDs as native, including before the frontend's new Send preflight.
+  const rawChannel = String(args.channel ?? "1");
+  const channel = ({ "1": "general", "2": "design", "3": "notes" } as Record<string, string>)[rawChannel] ?? rawChannel;
 
   switch (command) {
+    // The visual fixture has no router. It still explicitly models controller acquisition so
+    // unlocked App lifecycle cannot silently bypass a newly added native command.
+    case "prepare_call_mapping_controller":
+      return "fixture-call-controller";
+    case "prepare_call_mapping_owner":
+      return "fixture-call-owner";
+    case "activate_call_mapping_owner":
+      return String(args.candidate);
+    case "end_call_mapping_owner":
+    case "unmap_call_port":
+      return null;
     case "resume_session":
       return clone([
         {
           server: 1,
           name: "Lantern Room",
           invite: "fixture-invite-not-for-pairing",
-          channel: "general",
-          channels: [
-            { id: "general", name: "general" },
-            { id: "design", name: "design" },
-            { id: "notes", name: "field-notes" },
-          ],
+          channel: "1",
+          channels: CHAT_CHANNELS,
           is_dm: false,
         },
         {
           server: 2,
           name: "Juniper",
           invite: "",
-          channel: "dm",
-          channels: [{ id: "dm", name: "Juniper" }],
+          channel: "1",
+          channels: [{ id: "1", name: "Juniper" }],
           is_dm: true,
         },
       ]);
@@ -216,18 +261,36 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
     case "get_ui_state":
       return JSON.stringify({
         version: 1,
-        drafts: { "1:general": "A deterministic composer draft" },
-        readMarks: { "1:general": VISUAL_FIXTURE_NOW - 25 * 60_000 },
+        drafts: { "1:1": "A deterministic composer draft" },
+        readMarks: { "1:1": VISUAL_FIXTURE_NOW - 25 * 60_000 },
       });
     case "save_ui_state":
       return null;
+    case "get_channels":
+      return clone(server === 2 ? [{ id: "1", name: "Juniper" }] : CHAT_CHANNELS);
+    // Existing native lock metadata, with a fixed opaque generation for this UI fixture.
+    // This mock does not establish native command polling or persistence guarantees.
+    case "lock_session":
+      return { continuity_error: null, generation: "7" };
+    // Explicit metadata/result mocks keep the real queue available in visual validation.
+    // They model a durable local terminal, never a peer delivery acknowledgement.
+    case "durable_send_context":
+      return "a".repeat(64);
+    case "durable_mutation_context":
+      return { context: "a".repeat(64), target: "b".repeat(64) };
+    case "send_message":
+    case "edit_message":
+    case "delete_message":
+      return { accepted: true, persistence: { status: "durable" }, message_id: String(args.id ?? "fixture-message"), replayed: false, disposition: "committed" };
+    case "stop_durable_chat":
+      return { accepted: false, persistence: { status: "durable" }, message_id: "", replayed: false, disposition: "stopped-before-commit" };
     case "get_inbox":
       return clone([
         {
           server: 1,
           server_name: "Lantern Room",
           is_dm: false,
-          channel: "general",
+          channel: "1",
           message_id: "msg-4",
           author: JUNIPER,
           author_name: "Juniper",
@@ -238,9 +301,9 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
         },
       ]);
     case "get_messages":
-      return clone(CHANNEL_MESSAGES[server === 2 ? "dm" : channel] ?? []);
+      return clone(channelMessages(server === 2 ? "dm" : channel, transfers));
     case "get_message_page": {
-      const rows = clone(CHANNEL_MESSAGES[server === 2 ? "dm" : channel] ?? []) as Message[];
+      const rows = clone(channelMessages(server === 2 ? "dm" : channel, transfers)) as Message[];
       const request: PageRequest = {
         anchor: (args.anchor as PageRequest["anchor"]) ?? { kind: "tail" },
         before: typeof args.before === "number" ? args.before : 0,
@@ -250,11 +313,11 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
       return pageOfList(rows, request, ME, "@[Rowan]", 1, probe);
     }
     case "get_pinned_messages":
-      return clone((CHANNEL_MESSAGES[server === 2 ? "dm" : channel] ?? []).filter((m) => m.pinned));
+      return clone((channelMessages(server === 2 ? "dm" : channel, transfers)).filter((m) => m.pinned));
     case "get_messages_by_id": {
       // The arrival read: the named rows wherever they sort, each with its addressing bit. Ids
       // that name nothing are absent, exactly as the native command answers.
-      const all = clone(CHANNEL_MESSAGES[server === 2 ? "dm" : channel] ?? []) as Array<{
+      const all = clone(channelMessages(server === 2 ? "dm" : channel, transfers)) as Array<{
         id: string;
         text: string;
       }>;
@@ -264,7 +327,7 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
         .map((row) => ({ ...row, targets_me: row.text.includes("@[Rowan]") }));
     }
     case "get_message_tail": {
-      const all = clone(CHANNEL_MESSAGES[server === 2 ? "dm" : channel] ?? []) as Array<{ id: string; text: string }>;
+      const all = clone(channelMessages(server === 2 ? "dm" : channel, transfers)) as Array<{ id: string; text: string }>;
       const limit = typeof args.limit === "number" && args.limit > 0 ? Math.trunc(args.limit) : all.length;
       const cursor = typeof args.afterId === "string" ? args.afterId : "";
       const at = cursor ? all.findIndex((row) => row.id === cursor) : -1;
@@ -311,8 +374,77 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
           },
         ],
       });
+    case "get_private_downloads": return [];
+    // A Saved row's read-only file check: one of four words, never a path. The fixture lists no
+    // saved rows, so this answers "present" if a captured state ever asks.
+    case "check_saved_download": return "present";
+    // Show in folder: native checks the file and opens the system file manager; nothing returns.
+    case "reveal_saved_download": return null;
+    // PR #56: the saved-files list. The chat fixture has saved nothing; `transfers=1` lists one
+    // entry per row state. Its check answers nothing, and the list actions change nothing.
+    case "get_saved_files": return { state: "ok", files: [] };
+    case "check_saved_files": return [];
+    case "reveal_saved_file":
+    case "forget_saved_file":
+    case "reset_saved_files":
+      return null;
+    // "Remember saved files" (Server settings, Storage). Lantern Room's list is said to hold 212
+    // entries (display data for that page only), so a lower choice previews what it forgets. A
+    // choice is clamped and echoed back like native, never persisted.
+    case "get_saved_files_limit":
+      return { state: "ok", limit: 256, listed: server === 1 ? 212 : 0, min: 16, max: 4096, default: 256 };
+    case "set_saved_files_limit": {
+      const asked = typeof args.limit === "number" ? args.limit : 256;
+      const limit = Math.min(4096, Math.max(16, Math.trunc(asked)));
+      const forgets = Math.max(0, (server === 1 ? 212 : 0) - limit);
+      // Like native, an apply holds only for the count the user confirmed.
+      if (args.apply === true && args.expectedForgets !== forgets) {
+        throw new Error("The list of saved files changed meanwhile, so Mewtual kept the current setting. Choose again.");
+      }
+      return { limit, forgets, applied: args.apply === true };
+    }
+    case "save_group_file": {
+      // Mirrors the native contract: the renderer sends a name and an optional `saveAs` flag,
+      // never a path or folder. A fixture "Save as" behaves as if the user closed the dialog, so
+      // screenshots never imply a real destination was chosen.
+      if (["path", "folder", "dir", "destination"].some((key) => key in args)) {
+        throw new Error("save_group_file never accepts a path from the renderer");
+      }
+      if (args.saveAs === true) throw new Error("Save as was cancelled.");
+      const name = typeof args.name === "string" ? args.name : "download";
+      // A one-click save lands directly in Downloads, which native asserts with `inDownloads`.
+      return { path: `C:\\Users\\fixture\\Downloads\\${name}`, displayed: true, inDownloads: true };
+    }
+    case "get_cache_status":
+    case "set_cache_limit": {
+      // Lantern Room sits just past the 90% warning so the footer shows its amber bar and the
+      // leaving-soon chip; the DM is calm. A limit choice is echoed back, not persisted.
+      const GIB = 1024 ** 3;
+      const chosen = command === "set_cache_limit" ? (args.bytes as number | null) : 5 * GIB;
+      if (server !== 1) {
+        return { usage_bytes: Math.round(0.4 * GIB), limit_bytes: 5 * GIB, unlimited: false, pinned_bytes: 0,
+          leaving_soon_files: 0, leaving_soon_bytes: 0, nearly_full: false, over_limit: false,
+          held_by_pins: false, paused: null };
+      }
+      const usage = Math.round(4.6 * GIB);
+      return {
+        usage_bytes: usage, limit_bytes: chosen, unlimited: chosen === null,
+        pinned_bytes: Math.round(0.8 * GIB),
+        leaving_soon_files: chosen === null ? 0 : 3,
+        leaving_soon_bytes: chosen === null ? 0 : Math.round(0.4 * GIB),
+        nearly_full: chosen !== null && usage * 100 > chosen * 90,
+        over_limit: chosen !== null && usage > chosen,
+        held_by_pins: false, paused: null,
+      };
+    }
+    case "get_storage_health":
+      return { listed_files: 2, unique_files: 2, referenced_chunks: 2, verified_chunks: 2,
+        missing_chunks: 0, not_cached_chunks: 0, unreadable_chunks: 0, invalid_manifests: 0, verified_bytes: 2048,
+        has_peers: true, checked_at_ms: VISUAL_FIXTURE_NOW, logical_bytes: 2048,
+        local_estimated_bytes: 2048, pinned_files: 0, pinned_logical_bytes: 0,
+        pinned_local_estimated_bytes: 0, categories: [], largest_files: [], local_files: [] };
     case "get_kept_files":
-      return { supported: true, allocated_bytes: 0, limit_bytes: 1073741824, files: [], error: null };
+      return { supported: true, allocated_bytes: 0, limit_bytes: 1073741824, files: [], transfers: [], error: null };
     case "file_available":
       return true;
     case "get_file_usage":
@@ -370,6 +502,9 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
       return [];
     case "get_moderation":
       return { events: [], votes: [] };
+    case "get_admin_chat_ledger":
+    case "get_admin_chat_ledger_detail":
+      return visualChatLedgerResponse(command, payload as Record<string, unknown>);
     case "get_connectivity":
       return clone({
         action: "found",
@@ -668,7 +803,7 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
         relay_likely_required: true,
         router_maps: true,
         advice:
-          "This device is behind NAT and no member is offering to host. Calls to peers who are also behind NAT need a relay.",
+          "Voice tries its own direct connection checks. If voice cannot connect, configure TURN in Settings, Calls.",
       });
     case "get_debug_logging":
     case "test_debug_logging":
@@ -701,14 +836,6 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
         ],
         reason: "This device has an advertised public or relayed candidate route it can offer.",
       });
-    case "get_channels":
-      return server === 1
-        ? clone([
-            { id: "general", name: "general" },
-            { id: "design", name: "design" },
-            { id: "notes", name: "field-notes" },
-          ])
-        : clone([{ id: "dm", name: "Juniper" }]);
     case "plugin:window|is_maximized":
       return false;
     case "plugin:updater|check":
@@ -726,14 +853,19 @@ export function installVisualFixture(name: string): void {
 
   mockWindows("main");
   // The existing DEV+localhost entry point still owns availability and readiness. Nothing in
-  // production recognizes this flag, and default chat fixtures remain byte-for-byte unchanged.
+  // production recognizes these flags; displayed chat content, clock and readiness stay stable.
   const studio = new URLSearchParams(window.location.search).get("studio") === "1";
+  const transfers = new URLSearchParams(window.location.search).get("transfers") === "1";
+  const pendingRecovery = new URLSearchParams(window.location.search).get("pending") === "oversized";
+  const nativeMode = new URLSearchParams(window.location.search).get("nativeText");
+  const nativeText = nativeMode ? createVisualNativeTextFixture(nativeMode === "empty") : null;
   const uploads = studio ? createVisualFileUploads(ME.repeat(2)) : null;
   mockIPC(
     (command, payload) => {
       const args = payload as Record<string, unknown> ?? {};
       const fileResponse = uploads?.response(command, args);
-      let response = fileResponse?.handled ? fileResponse.value : visualFixtureResponse(command, payload, studio);
+      const nativeResponse = nativeText?.(command, args);
+      let response = nativeResponse?.handled ? nativeResponse.value : fileResponse?.handled ? fileResponse.value : visualFixtureResponse(command, payload, studio, transfers, pendingRecovery);
       if (uploads && command === "get_files") {
         const list = response as { files: unknown[]; has_peers: boolean };
         response = { ...list, files: [...list.files, ...uploads.files(Number(args.server))] };
@@ -742,7 +874,7 @@ export function installVisualFixture(name: string): void {
       // fonts and the next task so Svelte can flush its pending microtasks. Do not use
       // requestAnimationFrame here: screenshot browsers intentionally run in the background and
       // Chromium may throttle background frames indefinitely.
-      if (command === "get_moderation") {
+      if (command === "get_moderation" || (nativeText && (command === "get_message_page" || (nativeMode === "empty" && command === "resume_session")))) {
         void document.fonts.ready.then(() => {
           setTimeout(() => {
             document.documentElement.dataset.visualReady = name;

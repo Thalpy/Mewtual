@@ -11,27 +11,33 @@
 //! - [`pad`]; deterministic size quantization (P10): a padded frame that goes **inside** the
 //!   AEAD, so a forwarder measuring ciphertext lengths sees a bucket instead of the payload's
 //!   exact size. Shared by [`filecrypto`] and by `catcoms-replication`'s sealed ops.
-//! - [`retention`]; the adjustable expiry model (global → server → file,
-//!   most-specific wins), and a GC engine with **decorrelated eviction** (per-file
-//!   jitter so the whole group doesn't drop a blob at once) and a **holder probe**
-//!   (never evict the last copy). Eviction drops the bytes but keeps the metadata,
-//!   so an expired file stays re-fetchable by CID.
+//! - [`cache`]; the size-limited primary cache's bookkeeping: crash-safe temporary
+//!   names (write, sync, rename), the metadata-only directory scan with its mount set,
+//!   and the filesystem steps of leave cleanup. The eviction policy itself (listing
+//!   order and pins) lives in `catcoms-app::cache_plan`.
+//! - [`retention`]; an expiry-and-GC engine (global → server → file expiry, decorrelated
+//!   eviction, holder probe). **The application does not use it**: circulation expiry is
+//!   recorded and displayed only, and the per-server cache limit (see [`cache`]) is the
+//!   only eviction. It remains as tested building blocks for a future holder-aware pass.
 //!
-//! The metadata index is an in-memory projection here (it is local and
-//! rebuildable from CRDT sync); the SQLCipher-backed persistence is wired up with
-//! the platform/keystore layer.
+//! Persistence is the sealed vault and sealed blob files; there is no SQLCipher database.
 
 pub mod blob;
+mod blob_read;
+pub mod cache;
 pub mod cid;
 pub mod filecrypto;
 pub mod kept;
 pub mod pad;
+pub mod private_chat_page;
 pub mod retention;
 pub mod vault;
 
 use thiserror::Error;
 
 pub use blob::{BlobStore, FsBlobStore, MemoryBlobStore, SealingBlobStore};
+pub use blob_read::{BlobReadPlan, BlobReadResult};
+pub use cache::{CacheIndex, CacheScanReport, CacheUsage, Removal};
 pub use cid::{Cid, CidHasher};
 pub use filecrypto::{open_file, seal_file, FileManifest, FileRef, MAX_CHUNKS};
 // `FileRef::wrapped_key` is a public field of this type, so a caller cannot read or build a
@@ -46,8 +52,10 @@ pub use retention::{
     ServerId, ONE_MONTH_MS,
 };
 pub use vault::{
-    acquire_vault_session, change_vault_passphrase, open_or_create_vault, vault_exists,
-    verify_vault_passphrase, VaultSessionGuard, MAX_VAULT_SECRET_BYTES,
+    acquire_vault_session, change_vault_passphrase, open_or_create_vault,
+    open_or_create_vault_classified, vault_exists, verify_critical_vault_passphrase_for_keys,
+    verify_vault_passphrase, OpenedVault, VaultFormat, VaultPhysicalWorkLease, VaultSessionGuard,
+    MAX_VAULT_SECRET_BYTES,
 };
 
 /// Errors from the storage layer.
@@ -59,6 +67,12 @@ pub enum StorageError {
     /// The plaintext (or its fixed-overhead sealed frame) exceeds the caller's limit.
     #[error("blob exceeds declared size limit")]
     BlobSizeLimit,
+    /// The exact retained transfer needs an explicit compare-and-swap Retry grant. Restart,
+    /// another provider, UI refresh and automatic resume never replenish this allowance.
+    #[error("transfer paused: choose Retry to continue")]
+    KeepExhausted,
+    #[error("transfer paused: resume to continue")]
+    KeepWorkExpired,
     /// A sealing/opening error (wrong key or tampered ciphertext).
     #[error(transparent)]
     Crypto(#[from] catcoms_crypto::KeystoreError),

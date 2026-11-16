@@ -1,0 +1,59 @@
+name: Chat V2 member storage regressions
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/chat-v2-member-save.yml'
+      - '.github/scripts/check-chat-v2-member-save.py'
+      - '.github/predecessor/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chat-v2-member-save-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  member-storage:
+    name: Member storage (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # The namespace5 predecessor gate builds the pinned predecessor commit after the head
+    # cohorts (its workspace crates again; registry crates come from the shared target).
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      CARGO_BUILD_JOBS: 1
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check nonempty/exact-count guards
+        run: python .github/scripts/check-chat-v2-member-save.py --self-test
+      # Execute the ordinary focused cargo-test commands independently of the existing
+      # strict Clippy job, as the Studio native workflow already does. Warnings remain
+      # visible; no lint/advisory rule or mandatory full-suite gate is replaced or relaxed.
+      # Root save tests use test native custody and do not establish native authorization.
+      # The same step then runs the namespace5 predecessor gate: head-written fixture vaults
+      # against the public openers of an unmodified `ce402364` worktree (the script fetches
+      # that one commit; the harness file is the only addition and is proven so).
+      - name: Run member storage and save regressions
+        run: python .github/scripts/check-chat-v2-member-save.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chat-v2-member-storage-${{ matrix.os }}
+          path: logs/chat-v2-member-save/

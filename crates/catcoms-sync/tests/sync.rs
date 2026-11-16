@@ -6,7 +6,7 @@
 use automerge::transaction::Transactable;
 use automerge::{AutoCommit, ReadDoc, ROOT};
 use catcoms_mls::{InviteLedger, MlsDevice, ServerGroup};
-use catcoms_rt::{Hub, ManualClock, MemNetwork, PeerId};
+use catcoms_rt::{Clock, Hub, ManualClock, MemNetwork, PeerId, SystemClock};
 use catcoms_sync::{fingerprint, ChannelSync, SyncError};
 use catcoms_wire::DocType;
 use rand_chacha::ChaCha20Rng;
@@ -1455,18 +1455,61 @@ async fn relocate(
     moved
 }
 
-/// One catch-up exchange: what the requester applied from a single round.
+/// One catch-up exchange: what the requester applied from a single round. A serving turn can
+/// consume queued gossip or an automatic recovery completion before this explicit request, so
+/// keep driving the real serving owner until the exact requester future finishes. The outer
+/// real-clock watchdog bounds fixture failure even though protocol time is intentionally fixed.
 async fn sync_round(
     requester: &mut ChannelSync<MemNetwork, ChaCha20Rng>,
     server: &mut ChannelSync<MemNetwork, ChaCha20Rng>,
     server_peer: u64,
 ) -> usize {
-    let (applied, served) = tokio::join!(
-        requester.request_catchup(PeerId::from_u64(server_peer), DocType::Channel, CHANNEL),
-        server.run_once(),
+    let request =
+        requester.request_catchup(PeerId::from_u64(server_peer), DocType::Channel, CHANNEL);
+    let watchdog = SystemClock.sleep(std::time::Duration::from_secs(10));
+    tokio::pin!(request, watchdog);
+    loop {
+        tokio::select! {
+            // Ready recovery work must neither delay an already completed request nor renew
+            // or hide the watchdog. Neither original future is recreated between turns.
+            biased;
+            applied = &mut request => break applied.expect("catch-up"),
+            _ = &mut watchdog => panic!("catch-up fixture did not finish serving peer {server_peer}"),
+            served = server.run_once() => assert!(served.expect("the serving transport stays open")),
+        }
+    }
+}
+
+#[tokio::test]
+async fn catchup_fixture_serves_queued_gossip_before_the_exact_request() {
+    let (mut alice, mut bob, _, _) = pair();
+    alice.open_channel(DocType::Channel, CHANNEL).await.unwrap();
+    bob.open_channel(DocType::Channel, CHANNEL).await.unwrap();
+    alice
+        .post(DocType::Channel, CHANNEL, |doc| {
+            doc.put(ROOT, "alice_history", "still missing at Bob")
+        })
+        .await
+        .unwrap();
+    // This real signed gossip is ahead of Bob's request at Alice. Handling it is useful work,
+    // but cannot stand in for serving the request. No ready result or endpoint proof is seeded.
+    bob.post(DocType::Channel, CHANNEL, |doc| {
+        doc.put(ROOT, "queued_gossip", "from Bob")
+    })
+    .await
+    .unwrap();
+    assert_eq!(sync_round(&mut bob, &mut alice, P_A).await, 1);
+    assert_eq!(
+        get_str(&alice, "queued_gossip").as_deref(),
+        Some("from Bob")
     );
-    assert!(served.expect("the serving transport stays open"));
-    applied.expect("catch-up")
+    assert_eq!(
+        get_str(&bob, "alice_history").as_deref(),
+        Some("still missing at Bob")
+    );
+    assert_eq!(ops(&alice), 2);
+    assert_eq!(ops(&bob), 2);
+    assert_eq!(heads(&alice), heads(&bob));
 }
 
 /// Pull everything `server` holds that `requester` does not, driving both sides until the

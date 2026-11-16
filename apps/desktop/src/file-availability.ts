@@ -1,12 +1,36 @@
 /** Possession evidence is separate from peer connectivity and shared-index publication. */
 export type KeptFile = { cid: string; manifest_version: string; checked: boolean };
+export type KeptTransfer = {
+  cid: string; manifest_version: string; transfer: string; phase: "paused" | "completed" | "deleting";
+  verified_chunks: number; total_chunks: number; running: boolean; user_paused: boolean; blocked: boolean; intent: string; exhausted: boolean; grant: string;
+};
 export type KeptFiles = {
   supported: boolean;
   allocated_bytes: number;
   limit_bytes: number;
   files: KeptFile[];
+  transfers: KeptTransfer[];
   error: string | null;
 };
+
+export function keptTransferLabel(transfer: KeptTransfer): string {
+  if (transfer.phase === "deleting") return "Removing…";
+  // Healthy completed transfers are shown through `files`. A completed transfer left only
+  // here has failed storage publication and must remain visible without a verified-copy claim.
+  if (transfer.phase === "completed") return "Storage needs checking";
+  const state = transfer.blocked ? "Needs checking" : transfer.exhausted ? "Retry required" : transfer.running ? "Saving\u2026" : transfer.user_paused ? "Paused" : "Waiting to resume";
+  return `${state} · ${transfer.verified_chunks} of ${transfer.total_chunks} parts saved`;
+}
+
+/** A failed release may hide a poisoned completed copy from `files` while its reservation
+ * remains in `transfers`. Use the identity union, never phase arithmetic, for the quota count. */
+export function keptAllocationCount(view: KeptFiles): number {
+  return new Set([...view.files, ...view.transfers].map(copy => copy.cid)).size;
+}
+export function keptTransferRows(view: KeptFiles): KeptTransfer[] {
+  const completed = new Set(view.files.map(copy => copy.cid));
+  return view.transfers.filter(copy => !completed.has(copy.cid));
+}
 
 export function fileAvailability(held: number, total: number, hasPeers: boolean) {
   if (total > 0 && held >= total) return { cls: "local", icon: "●", label: "Cached here" };

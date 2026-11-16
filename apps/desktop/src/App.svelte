@@ -1,12 +1,15 @@
 <script lang="ts">
+  import ChatAdminLedger from "./ChatAdminLedger.svelte";
+  import type { LedgerReads } from "./chat-admin-ledger.ts";
   import { memberRole, identityForRoleLabel } from "./member-role.ts";
   import { invoke } from "@tauri-apps/api/core";
-  import { fileAvailability, keptCopyLabel, fileInventoryRequests, mutateFileInventory, type KeptFiles } from "./file-availability";
+  import { fileAvailability, keptCopyLabel, keptTransferLabel, keptAllocationCount, keptTransferRows, fileInventoryRequests, mutateFileInventory, type KeptFiles, type KeptTransfer } from "./file-availability";
   import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { check, type Update } from "@tauri-apps/plugin-updater";
   import { relaunch } from "@tauri-apps/plugin-process";
   import { onDestroy, onMount, tick, untrack } from "svelte";
+  import { CallMappingSession } from "./call-mappings.ts";
   import { renderMessage, renderTextDocument, renderWiki, parseRedirect, tocDirective } from "./render";
   import {
     TEXT_PREVIEW_MAX_BYTES, decodeTextFile, lineCountLabel, textFileKind,
@@ -39,7 +42,7 @@
     type MessagePage, type PageAnchor, type PageRequest, type PagedRowContext, type UnreadSummary,
   } from "./message-paging";
   import { persistenceWarning, sendAndRefresh, sendOutcome, type SendMessageResult, type SendOutcome } from "./message-send";
-  import { addPendingSend, matchingPendingSend, pendingSendRetryBlock, resolvePendingSend, sendRefusedUnaccepted, type PendingResolution, type PendingSend, type PendingSends } from "./pending-sends";
+  import { addPendingSend, durableStopOriginal, durableStopTerminal, retiredStopWarning, matchingPendingSend, matchingPendingMutation, samePendingIntent, pendingActionLabel, pendingSendRetryBlock, resolvePendingSend, recoverQuarantinedIntent, quarantinedPendingIntent, validateMutationPayload, validateSendPayload, pendingContinuityVersion, sendRefusedUnaccepted, type PendingResolution, type PendingSend, type PendingSends } from "./pending-sends";
   import PendingSendManager from "./PendingSendManager.svelte";
   import { PendingSendRetry } from "./pending-send-retry";
   import { ImageSrcCache } from "./image-src";
@@ -93,8 +96,22 @@
     type StoredTone, type ToneOverride,
   } from "./notification-sounds";
   import {
-    completedDownload, downloadSavedNotice, guideSavedNotice, saveGroupFile, saveSpaceGuide,
+    completedDownload, downloadSavedNotice, guideSavedNotice, isSaveAsCancelled, saveGroupFile, resumeGroupFile, saveSpaceGuide,
   } from "./native-download";
+  import { acceptSaveProgress, checkedPrivateDownloads, checkedSavedCheck, privateDownloadChatLabel, privateDownloadChatSave, privateDownloadOffers, privateDownloadSaveAsIsNewCopy, type PrivateDownload, type PrivateDownloadActionKind, type SavedCheck } from "./private-downloads";
+  import { SAVED_ROW_GROUPS, TRANSFER_ICONS, compactControls, compactListControls, confirmWords, groupSavedRows, savedRowTransitions, savedRowView, type CompactControl, type CompactControls, type SavedListRowAction, type SavedRowAction, type SavedRowGroup, type SavedRowLive, type SavedRowView, type TransferIcon } from "./transfer-rows";
+  import {
+    REPLACE_OLDER_HELP, REPLACE_OLDER_KEY, REPLACE_OLDER_LABEL, SAVED_LIMIT_CHOICES, SAVED_LIMIT_HELP,
+    SAVED_LIMIT_LABEL, SAVED_MARK_LABEL, SAVED_MARK_TITLE,
+    checkedSavedFileChecks, checkedSavedFiles, checkedSavedFilesLimit, checkedSavedLimitChange,
+    liveTransferShown, replaceOlderFrom, savedCidSet, savedFileCheckKey, savedLimitDone, savedLimitLabel,
+    savedLimitWarning, savedListNotice, savedListRowView, savedListRows, type SavedFile, type SavedFilesList,
+    type SavedFilesLimit, type SavedListAction,
+  } from "./saved-files";
+  import {
+    CACHE_LIMIT_CHOICES, cacheBytes, cacheFooter, cachePauseText, cacheShown, checkedCacheStatus, leaveLoss,
+    leaveReportText, limitLabel, lowerLimitWarning, pinnedSummary, type CacheStatus, type LeaveLoss,
+  } from "./cache-status";
   import {
     newVaultSecretError, vaultSecretChangeNotice, type VaultSecretChangeResult,
   } from "./vault-secret-change";
@@ -103,8 +120,10 @@
   import { disposeStreamAudioGraph } from "./stream-audio";
   import {
     bufferIce, directionIdle, hangupTargets, heartbeatRecovery, isCurrentVoiceRoom, mergePeerState,
-    videoSlotPlan, VIDEO_BITRATE, type PeerState, type SlotDirection, type VideoKind,
+    legacyCallSignalAdmission, legacyCallSignalEgress, legacyCallSignalKind,
+    videoSlotPlan, VIDEO_BITRATE, type CallSignalMode, type PeerState, type SlotDirection, type VideoKind,
   } from "./voice-signaling";
+  import { voiceV2Activation } from "./voice-v2-call";
   import {
     DEFAULT_STREAM_SETTINGS, MAX_STREAM_AUDIO_SOURCES, PeerVideoBudgetController, captureResolutionKnownAfterConstraint,
     estimatedMeshMbps, isStreamHeight,
@@ -192,8 +211,13 @@
     type ModerationEvent, type ModerationState, type TimelineMessage,
   } from "./moderation";
   import { MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity } from "./ui-continuity";
+  import type { NativeTextIntents } from "./native-text-intents";
+  import { createNativeTextDriver } from "./native-text-driver";
+  import { decodeRestoredChatSession, type NativeTextServer } from "./native-text-session";
+  import { readNativeOriginals, type NativeOriginal } from "./native-text-history";
+  import NativeSavedChat from "./NativeSavedChat.svelte";
   import {
-    captureLockContinuity, NativeVaultLockCoordinator, type NativeVaultCloseOutcome, type NativeVaultLockOutcome,
+    captureLockContinuity, closeContinuityAcknowledgement, NativeVaultLockCoordinator, type NativeVaultCloseOutcome, type NativeVaultLockOutcome,
   } from "./window-close";
   import {
     DEFAULT_FILE_TRUST_POLICY, authorOverride, fileTrustPolicyFor, mayAutoLoadFile, mayAutoLoadRemoteUrl,
@@ -245,7 +269,7 @@
     withOrderedSwitchboardStatus,
   } from "./joinreply";
   import {
-    callBarStatus, mappableIcePort, mappingAddressPolicy, routerMappedCandidate,
+    callBarStatus, mappableIcePort, mappingAddressPolicy, routerMappedCandidate, mappedIceIsCurrent,
     shouldSignalHostCandidate, type MappedPort,
   } from "./callroutes";
   import { JamEngine, jamSequenceAccepted, type JamArchivalPlayback } from "./jam-engine";
@@ -338,11 +362,14 @@
   // `wiki_pages.length > 0`: a wiki-embedded file never drops out of circulation.
   type UiFileUsage = { wiki_pages: string[]; status_count: number; chat_count: number; event_count: number; pinned: boolean };
   type Found = { server: number; channel: string; channels?: Channel[]; is_dm: boolean; storage_warning?: string | null };
-  type Reloaded = { server: number; name: string; invite: string; channel: string; channels?: Channel[]; is_dm: boolean; reconnect_warning?: string | null };
+  type Reloaded = { server: number; name: string; invite: string; channel: string; channels?: Channel[]; is_dm: boolean; reconnect_warning?: string | null; backend?: "text-v2"; context?: string; display_name?: string };
 
   // One server in the rail (each its own encrypted group). Per-server UI state lives here;
   // messages/roster/profiles/files are loaded for the active server on switch + events.
   type ServerState = {
+    backend?: "text-v2";
+    context?: string;
+    displayName?: string;
     id: number;
     name: string;
     channels: Channel[];
@@ -356,12 +383,24 @@
   };
 
   let servers = $state<ServerState[]>([]);
+  let chatBackend = $state<"legacy" | "text-v2" | null>(null);
+  let nativeOriginals = $state.raw<NativeOriginal[]>([]);
+  let nativeCursor = $state<{next:string;end:string}|null>(null);
+  let nativeHistoryLoading = $state(false);
+  let nativeHistoryLoaded = $state(false);
+  let nativeHistoryError = $state<string|null>(null);
+  let nativeHistoryRevision = 0;
+  let nativeRetryGeneration = $state<number|null>(null);
   let activeServerId = $state<number | null>(null);
   // Bumped by every move that changes WHICH group the panes show. An async refresh captures it
   // on entry and re-checks after its awaits: a slow answer from the group you just left must
   // never paint over the one you moved to. Channel-scoped reads pair this with the channel id,
   // which switchTo changes without changing the group.
   let viewGeneration = 0;
+  // Only this pane's mount key is reactive. Making the shared async correlation counter
+  // reactive would also subscribe older effects that intentionally read it just once.
+  // Lock and unlock already unmount the pane through locked/uiStateReady below.
+  let chatLedgerMount = $state(0);
   // True from the moment a group's panes are emptied until its first batch of reads lands. Panes
   // whose empty state makes a CLAIM ("No messages yet", "No matching members") must consult this:
   // an empty collection mid-switch means "not read yet", not "there is nothing".
@@ -400,6 +439,7 @@
     }, MESSAGES_STALL_MS);
   }
   function beginViewSwitch(): number {
+    untrack(() => { chatLedgerMount += 1; });
     return ++viewGeneration;
   }
   // Is the captured context still the one on screen? Both halves matter: the generation catches
@@ -464,6 +504,7 @@
   let fileTrustPolicies = $state<FileTrustPolicies>({});
   // Roving-tabindex arrows for the start tabs: with two tabs, either arrow means "the other one".
   function startTabArrows(e: KeyboardEvent) {
+    if(chatBackend==="text-v2")return;
     if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
     e.preventDefault();
     startTab = startTab === "join" ? "found" : "join";
@@ -589,6 +630,7 @@
     { id: "joinlog", label: "Join Log", cat: "People" },
     { id: "emoji", label: "Emoji & Stickers", cat: "Content" },
     { id: "filetrust", label: "File Trust", cat: "Content" },
+    { id: "storage", label: "Storage", cat: "Content" },
     { id: "studio", label: "Studio", cat: "Content" },
     { id: "calls", label: "Calls & Relay", cat: "Voice" },
     { id: "leave", label: "Leave Server", cat: "Danger", danger: true },
@@ -714,6 +756,7 @@
   }
 
   function openServerSettings(id: number | null = null, page: string = serverSettingsPage) {
+    if(chatBackend==="text-v2" || (id===null?cur:servers.find(server=>server.id===id))?.backend==="text-v2")return;
     // Every settings request owns navigation, including one for the server already on screen. A
     // newer request thereby retires an older one still waiting on a Studio Save to switch servers:
     // that switch then never commits, so it can neither close this dialog (clearServerView) nor
@@ -1507,6 +1550,9 @@
   let locked = $state(true);
   let passphrase = $state("");
   let unlocking = $state(false);
+  // Attempt ownership is separate from UI generation: a successful restore advances
+  // the latter, while only the owning authentication may release its busy flag.
+  let unlockAttempt = 0;
   type VaultChangeStep = "" | "current" | "new" | "confirm";
   let vaultChangeStep = $state<VaultChangeStep>("");
   let vaultChangeCurrent = $state("");
@@ -1671,6 +1717,8 @@
   // What Enter (and the primary button) means on the gate, which is not always "unlock": during
   // setup the same keystroke must advance the wizard, never write the vault early.
   function gateSubmit() {
+    if(uiSessionRetired)return;
+    if (!locked || unlocking || windowCloseInFlight) return;
     if (!unlockSecret()) return;
     if (!inSetup) {
       unlock();
@@ -1687,13 +1735,17 @@
   }
   // Last step: this is the call that writes the vault. Everything before it is reversible.
   async function setupFinish() {
-    if (!setupFirst) return;
-    syncIntent = setupPath === "sync";
-    await unlock(setupFirst);
-    if (!locked) {
+    if(uiSessionRetired)return;
+    if (!setupFirst || !locked || unlocking || windowCloseInFlight) return;
+    const requestedSync = setupPath === "sync";
+    const opened = await unlock(setupFirst);
+    // An old setup continuation cannot complete somebody else's newer unlock.
+    if (opened && opened.attempt === unlockAttempt && opened.generation === uiStateLoadGeneration
+      && !locked && !windowCloseInFlight) {
       setupFirst = "";
       vaultExists = true;
-      if (syncIntent) pairBegin(); // the companion's half of the ceremony, ready to hand over
+      syncIntent = requestedSync;
+      if (requestedSync) pairBegin(); // the companion's half of the ceremony, ready to hand over
     }
   }
 
@@ -3535,6 +3587,8 @@
   // completes asynchronously after unlock.
   let uiStateReady = $state(false);
   let pendingSends = $state<PendingSends>({});
+  let uiContinuityVersion: 1 | 2 | 3 | 4 = 1;
+  let nativeTextIntents = $state<NativeTextIntents>({});
   let recoveredSendDrafts = $state<PendingSends>({});
   // Holds submissions/result mutations while a user's explicit resolution crosses the vault barrier.
   let pendingSendResolution = $state<string | null>(null);
@@ -3544,18 +3598,26 @@
   let uiStateSaveFailed = $state(false);
   let uiStateFailureToast = 0;
   let uiStateLoadGeneration = 0;
+  let uiStateHydrationAttempt = 0;
+  // Monotone component lifetime, independent of the still-live native vault.
+  // A remounted App gets a new flag; an old callback can never re-open this one.
+  let uiSessionRetired = false;
   const pendingSendRetry = new PendingSendRetry(async (session) => {
     if (!locked && uiStateReady && session === uiStateLoadGeneration) await retryPendingSends(true);
   });
+  // Register before ANY other onMount/onDestroy cleanup: a later media or
+  // preview teardown may throw, and Svelte does not finally-run later hooks.
+  onDestroy(retireUiSessionOnUnmount);
   $effect(() => {
     pendingSendRetry.update(
       !locked && uiStateReady && !windowCloseInFlight ? uiStateLoadGeneration : null,
-      Object.values(pendingSends).some(intent => !intent.retryBlock),
-      sending || retryingPendingSends || pendingManagerOpen || pendingSendResolution !== null,
+      chatBackend==="text-v2" ? Object.keys(nativeTextIntents).length>0 : Object.values(pendingSends).some(intent => !quarantinedPendingIntent(intent) && (intent.resolution || !intent.retryBlock)),
+      sending || (chatBackend==="text-v2" ? nativeHistoryLoading || busy || nativeRetryGeneration===uiStateLoadGeneration : retryingPendingSends || pendingManagerOpen || pendingSendResolution !== null),
     );
   });
   onMount(() => () => pendingSendRetry.cancel());
   function queueUiStateSave(json: string | (() => string), afterSave: () => void = () => {}): Promise<void> {
+    if(uiSessionRetired)return Promise.reject(new Error("The app view was replaced before continuity could be saved."));
     // Close drains entries already admitted here, including their afterSave memory commits.
     // New work must not extend that drain or race the fresh final snapshot captured afterward.
     if (windowCloseInFlight) return Promise.reject(new Error("The window is closing; no new continuity save can start."));
@@ -3563,13 +3625,13 @@
     // chain additionally prevents two ordinary same-session saves from overtaking one another.
     const generation = uiStateLoadGeneration;
     const save = uiStateSaveChain.then(async () => {
-      if (locked || generation !== uiStateLoadGeneration) {
+      if (uiSessionRetired || locked || generation !== uiStateLoadGeneration) {
         throw new Error("the UI session changed before continuity could be saved");
       }
       // Ordinary saves build from current state at execution, so a queued typing save cannot
       // resurrect a request retired by an earlier resolution in this same chain.
       await invoke<void>("save_ui_state", { json: typeof json === "function" ? json() : json });
-      if (locked || generation !== uiStateLoadGeneration) {
+      if (uiSessionRetired || locked || generation !== uiStateLoadGeneration) {
         throw new Error("the UI session changed before continuity finished saving");
       }
       afterSave();
@@ -3589,7 +3651,9 @@
     }
   }
   function continuityJson(): string {
-    return JSON.stringify({ version: 1, drafts, readMarks, statusCursors, fileTrustPolicies, latePast, embedAutoLoad, pendingSends, recoveredSendDrafts,
+    if (Object.keys(nativeTextIntents).length && uiContinuityVersion !== 4) throw new Error("Native chat requests require continuity version 4.");
+    return JSON.stringify({ version: uiContinuityVersion, drafts, readMarks, statusCursors, fileTrustPolicies, latePast, embedAutoLoad, pendingSends, recoveredSendDrafts,
+      ...(uiContinuityVersion === 4 ? { nativeTextIntents } : {}),
       studioDraft: studioSnapshot?.() ?? restoredStudioDraft });
   }
   /**
@@ -3598,7 +3662,7 @@
    * restore a more permissive policy. A hard process/OS failure can still interrupt any disk write.
    */
   async function saveUiStateImmediately(): Promise<boolean> {
-    if (!uiStateReady || locked || windowCloseInFlight) return false;
+    if (uiSessionRetired || !uiStateReady || locked || windowCloseInFlight) return false;
     const session = uiStateLoadGeneration;
     clearTimeout(uiStateSaveTimer);
     try {
@@ -3624,7 +3688,7 @@
     }
   }
   function scheduleUiStateSave() {
-    if (!uiStateReady || locked || windowCloseInFlight) return;
+    if (uiSessionRetired || !uiStateReady || locked || windowCloseInFlight) return;
     clearTimeout(uiStateSaveTimer);
     uiStateSaveTimer = setTimeout(() => {
       void saveUiStateImmediately();
@@ -3648,18 +3712,45 @@
     }, 750);
   }
   async function loadUiContinuity(generation: number) {
+    if (uiSessionRetired || generation !== uiStateLoadGeneration || locked) return;
+    const attempt = ++uiStateHydrationAttempt;
+    const current = () => !uiSessionRetired && generation === uiStateLoadGeneration && attempt === uiStateHydrationAttempt && !locked;
+    // studio-exit: forced edge. Only restoreReloaded calls this reader during initial mount or
+    // completed unlock, when Studio is absent; lock has already captured its owned draft queue.
+    uiStateReady = false;
     let loaded = false;
     try {
-      let next = sanitizeUiContinuity(JSON.parse(await invoke<string>("get_ui_state")));
-      if (generation !== uiStateLoadGeneration || locked) return;
+      // A reload must read after previously admitted writes. Only the newest load in
+      // this session may expose its snapshot; an older get/covering write can finish late.
+      await uiStateSaveChain;
+      if (!current()) return;
+      const original = JSON.parse(await invoke<string>("get_ui_state"));
+      let next = sanitizeUiContinuity(original);
+      if (!current()) return;
+      if (uiContinuityVersion > next.version) next = { ...next, version: uiContinuityVersion };
+      if (next.version >= 3) {
+        // Preserve the complete original root, not a sanitized replacement. Old v2 native
+        // readers must reject before their frontend silently drops these Send copies.
+        // Re-save even already-v3 roots: a preceding rename may have succeeded while its
+        // parent-sync acknowledgement failed. Only this actual barrier opens the UI.
+        await queueUiStateSave(() => {
+          if (!current()) throw new Error("The continuity load was replaced before its upgrade could be saved.");
+          return JSON.stringify({ ...original, version: next.version });
+        });
+        if (!current()) return;
+      }
       // Older builds kept read positions in plaintext localStorage. Migrate that one app-owned
       // key only when the sealed record has none, and erase it only after the native save succeeds.
       // A failed save leaves the legacy copy recoverable for the next launch.
       try {
         const migration = planLegacyReadMarkMigration(next, localStorage.getItem("catcoms.readmarks"));
         if (migration.saveBeforeRemoval) {
-          await queueUiStateSave(JSON.stringify(migration.state));
+          await queueUiStateSave(() => {
+            if (!current()) throw new Error("The continuity load changed before read marks could be saved.");
+            return JSON.stringify(migration.state);
+          });
         }
+        if (!current()) return;
         if (migration.removeLegacy) {
           localStorage.removeItem("catcoms.readmarks");
         }
@@ -3667,9 +3758,11 @@
       } catch (migrationError) {
         console.warn("Legacy read-mark migration failed", migrationError);
       }
-      if (generation !== uiStateLoadGeneration || locked) return;
+      if (!current()) return;
       pendingSends = next.pendingSends;
+      uiContinuityVersion = next.version;
       recoveredSendDrafts = next.recoveredSendDrafts;
+      nativeTextIntents = next.nativeTextIntents ?? {};
       drafts = next.drafts;
       readMarks = next.readMarks;
       statusCursors = next.statusCursors;
@@ -3680,14 +3773,14 @@
       if (restoredStudioDraft && studioRestore) { studioRestore(restoredStudioDraft); restoredStudioDraft = null; }
       loaded = true;
     } catch (e) {
-      if (generation !== uiStateLoadGeneration || locked) return;
+      if (!current()) return;
       console.warn("UI continuity load failed", e);
       // Preserve the last sealed record and block replacements until a successful load.
       // An unreadable record may contain the only retry identity for an accepted message.
       embedAutoLoad = false; // an unreadable record is not permission to start contacting anyone
       error = `Durable history could not be authenticated and was not loaded: ${e}`;
     } finally {
-      if (generation === uiStateLoadGeneration && !locked) {
+      if (current()) {
         uiStateReady = loaded;
         // Anything marked read while this was in flight was held rather than written, because the
         // assignments above would have overwritten it. Replay it now, against what actually loaded.
@@ -3846,33 +3939,110 @@
   // availability hint refreshed with the file list). This is stricter than `onlineMembers`.
   let hasPeers = $state(false);
   let keptFiles = $state<KeptFiles | null>(null);
+  let privateDownloads = $state<PrivateDownload[]>([]);
+  // Cache housekeeping for the selected server, as the native planner reports it (footer segment
+  // and Storage settings page). Never recomputed here: the counts are what the planner would do.
+  let cacheStatus = $state<CacheStatus | null>(null);
+  let cacheStatusSeq = 0;
+  // The Storage page's limit picker: the chosen option's bytes as a string ("null" = No limit),
+  // plus whether the user has seen the "removes files now" warning for that choice.
+  let cacheLimitDraft = $state("");
+  let cacheLimitConfirming = $state(false);
+  let cacheLimitBusy = $state(false);
+  // The Storage page's "Remember saved files" picker (PR #56 follow-up): the stored setting, the
+  // chosen count as a string, and, once native previewed a lower choice, how many of the oldest
+  // entries it forgets (shown before the user confirms; `null` = not asked yet).
+  let savedLimit = $state<SavedFilesLimit | null>(null);
+  let savedLimitDraft = $state("");
+  let savedLimitForgets = $state<number | null>(null);
+  let savedLimitBusy = $state(false);
+  // Leave confirmation: what leaving will permanently delete from this device, loaded on request.
+  let leaveConfirm = $state<{ id: number; name: string; loss: LeaveLoss | null } | null>(null);
+  // Second review R2-M1: the Pause/Remove/Keep (and pre-acquisition Resume) owner of each row, by
+  // download ID. Native removal can wait indefinitely on an external folder, so one row's pending
+  // mutation must never disable or refuse actions on another row; native also claims per download.
+  let privateDownloadBusy = $state<Record<string, symbol>>({});
+  let privateDownloadSaves = $state<Record<string, symbol>>({});
+  // User decision, 23 October: what native's read-only check found at each Saved row's file, for
+  // the exact row revision it checked and the Transfers visit it ran in. A row only shows a result
+  // whose revision matches its own. `savedChecking` is the in-flight owner per row (not rendered);
+  // `savedCheckVisit` counts Transfers visits, so each visit checks every Saved row once again.
+  let savedChecks = $state<Record<string, { intent: string; result: SavedCheck; visit: number }>>({});
+  let savedChecking: Record<string, symbol> = {};
+  let savedCheckVisit = 0;
+  let privateDownloadError = $state("");
+  // PR #56: this server's saved-files list on this device (display data only; native keeps the
+  // folders), the latest check of each entry keyed by ID and name (`savedFileCheckKey`) with the
+  // Transfers visit it ran in, and the per-entry owner of a pending Clear or Show in folder.
+  let savedFiles = $state<SavedFilesList>({ state: "ok", files: [] });
+  let savedFileChecks = $state<Record<string, { result: SavedCheck; visit: number }>>({});
+  let savedFilesChecking: { visit: number; server: number } | null = null;
+  let savedFileBusy = $state<Record<string, boolean>>({});
+  // "Replace my older saved copy" (PR #56): a device preference, off by default.
+  let replaceOlder = $state(readReplaceOlder());
+  function readReplaceOlder(): boolean {
+    try { return replaceOlderFrom(localStorage.getItem(REPLACE_OLDER_KEY)); } catch { return false; }
+  }
+  function setReplaceOlder(on: boolean) {
+    replaceOlder = on;
+    try {
+      if (on) localStorage.setItem(REPLACE_OLDER_KEY, "on");
+      else localStorage.removeItem(REPLACE_OLDER_KEY);
+    } catch { /* the choice still holds for this session */ }
+  }
   const fileInventoryGate = fileInventoryRequests();
   let keptTransfer = $state<{ server: number; cid: string; cancellation: string } | null>(null);
+  // A primitive identity survives Svelte's deep state proxies unchanged.
+  let keptMutation = $state<symbol | null>(null);
 
+  // View teardown clears only pending UI ownership. The native requested job belongs to the
+  // unlocked account session; explicit Pause below changes durable intent separately.
   function cancelKeptTransfer() {
     const transfer = keptTransfer;
     keptTransfer = null;
-    if (transfer) void invoke("cancel_inline_download", { cancellation: transfer.cancellation }).catch(() => {});
+    if (transfer?.cancellation) void invoke("cancel_inline_download", { cancellation: transfer.cancellation }).catch(() => {});
   }
   $effect(() => {
     if (keptTransfer && (locked || keptTransfer.server !== activeServerId)) untrack(cancelKeptTransfer);
   });
 
   async function keepFileHere(cid: string) {
-    const server = activeServerId;
-    const gen = viewGeneration;
-    if (server === null || locked || keptTransfer) return;
-    const transfer = { server, cid, cancellation: `keep-${crypto.randomUUID()}` };
+    const server = activeServerId, gen = viewGeneration;
+    if (server === null || locked || keptTransfer || keptMutation) return;
+    const mutation = Symbol("kept admission");
+    keptMutation = mutation;
+    keptTransfer = { server, cid, cancellation: "" };
+    fileInventoryGate.invalidate();
+    try {
+      await mutateFileInventory(() => invoke("request_kept_file", { server, cid }), refreshFiles,
+        () => unlockedViewCurrent(gen, server));
+    } catch (e) {
+      if (unlockedViewCurrent(gen, server)) error = String(e);
+    } finally {
+      if (keptMutation === mutation) { keptMutation = null; keptTransfer = null; }
+    }
+  }
+
+  // Completed-copy checks keep their explicit cancelable runtime lease. Stopping a check
+  // never releases the saved copy, changes durable intent or creates automatic repair work.
+  async function checkKeptFile(cid: string) {
+    const server = activeServerId, gen = viewGeneration;
+    if (server === null || locked || keptTransfer || keptMutation) return;
+    const transfer = { server, cid, cancellation: `keep-check-${crypto.randomUUID()}` };
     keptTransfer = transfer;
     fileInventoryGate.invalidate();
     try {
+      const saved = keptFiles?.transfers.find(row => row.cid === cid && row.phase === "completed");
+      if (saved && (saved.user_paused || saved.blocked)) {
+        await invoke("set_kept_paused", { server, cid, transfer: saved.transfer, expectedIntent: saved.intent, paused: false });
+      }
+      if (keptTransfer?.cancellation !== transfer.cancellation || !unlockedViewCurrent(gen, server)) return;
       await invoke("begin_inline_download", { cancellation: transfer.cancellation });
       if (keptTransfer?.cancellation !== transfer.cancellation || !unlockedViewCurrent(gen, server)) {
         await invoke("cancel_inline_download", { cancellation: transfer.cancellation });
         return;
       }
       await invoke("keep_file", { server, cid, cancellation: transfer.cancellation });
-      if (unlockedViewCurrent(gen, server)) await refreshFiles();
     } catch (e) {
       if (keptTransfer?.cancellation === transfer.cancellation && unlockedViewCurrent(gen, server)) error = String(e);
     } finally {
@@ -3881,10 +4051,34 @@
     }
   }
 
+  async function setKeptPaused(copy: KeptTransfer, paused: boolean) {
+    const server = activeServerId, gen = viewGeneration;
+    if (server === null || locked || keptTransfer || keptMutation) return;
+    const mutation = Symbol("kept intent");
+    keptMutation = mutation;
+    fileInventoryGate.invalidate();
+    try {
+      await mutateFileInventory(() => invoke("set_kept_paused", {
+        server, cid: copy.cid, transfer: copy.transfer, expectedIntent: copy.intent, paused,
+      }), refreshFiles, () => unlockedViewCurrent(gen, server));
+      if (keptMutation === mutation) keptMutation = null;
+      if (!paused && unlockedViewCurrent(gen, server)) await keepFileHere(copy.cid);
+    } catch (e) {
+      if (unlockedViewCurrent(gen, server)) error = String(e);
+    } finally {
+      if (keptMutation === mutation) keptMutation = null;
+    }
+  }
+  async function resumeKeptFile(copy: KeptTransfer) {
+    await setKeptPaused(copy, false);
+  }
+
   async function forgetKeptFile(cid: string) {
     const server = activeServerId;
     const gen = viewGeneration;
-    if (server === null || locked || keptTransfer) return;
+    if (server === null || locked || keptTransfer || keptMutation) return;
+    const mutation = Symbol("kept mutation");
+    keptMutation = mutation;
     fileInventoryGate.invalidate();
     try {
       await mutateFileInventory(
@@ -3893,9 +4087,42 @@
       );
     } catch (e) {
       if (unlockedViewCurrent(gen, server)) error = String(e);
+    } finally {
+      if (keptMutation === mutation) keptMutation = null;
+    }
+  }
+  async function retryKeptFile(copy: KeptTransfer) {
+    const server = activeServerId;
+    const gen = viewGeneration;
+    if (server === null || locked || keptTransfer || keptMutation) return;
+    const mutation = Symbol("kept mutation");
+    keptMutation = mutation;
+    fileInventoryGate.invalidate();
+    // Native CAS binds this request to the saved transfer and exhausted grant. A lost reply
+    // cannot grant twice, even if a later inventory refresh or a new window retries the button.
+    const request = crypto.randomUUID().replaceAll("-", "");
+    try {
+      await mutateFileInventory(() => invoke("retry_kept_file", {
+        server, cid: copy.cid, transfer: copy.transfer, expectedGrant: copy.grant, request,
+      }), refreshFiles, () => unlockedViewCurrent(gen, server));
+      if (keptMutation === mutation) keptMutation = null;
+      if (unlockedViewCurrent(gen, server)) {
+        // Retry can migrate an older journal and change its explicit intent revision. Use the
+        // freshly read same native owner, never the pre-Retry projection or a replacement CID.
+        const current = keptFiles?.transfers.find(row => row.cid === copy.cid && row.transfer === copy.transfer);
+        if (current && !current.running && !current.exhausted) {
+          if (current.phase === "completed") await checkKeptFile(current.cid);
+          else if (current.phase === "paused") await resumeKeptFile(current);
+        }
+      }
+    } catch (e) {
+      if (unlockedViewCurrent(gen, server)) error = String(e);
+    } finally {
+      if (keptMutation === mutation) keptMutation = null;
     }
   }
   let uploading = $state(false);
+  let windowCloseInFlight = $state(false);
   let folder = $state(""); // current folder in the Files tab
   let newFolder = $state(""); // new-folder name input
   let dragOver = $state(false); // composer drag-over highlight
@@ -4071,7 +4298,7 @@
   }
   function setTextEffectValue(target: TextEffectTarget, value: string) {
     if (target === "chat") { draft = value; saveDraftFor(chanKey()); }
-    else if (target === "chat-edit") editDraft = value;
+    else if (target === "chat-edit") { editDraft = value; editRevision += 1; }
     else if (target === "announcement") statusDraft = value;
     else if (target === "wiki") { wikiBody = value; wikiDirty = true; }
     else if (target === "bio") pDescription = value;
@@ -4291,7 +4518,9 @@
   }
   type StorageHealth = {
     listed_files: number; referenced_chunks: number; verified_chunks: number;
-    missing_chunks: number; unreadable_chunks: number; invalid_manifests: number;
+    // `missing` = absent chunks of this device's own uploads (damage); `not_cached` = absent
+    // chunks of other members' files, which is normal for a size-limited cache.
+    missing_chunks: number; not_cached_chunks: number; unreadable_chunks: number; invalid_manifests: number;
     verified_bytes: number; has_peers: boolean;
     checked_at_ms: number; unique_files: number; logical_bytes: number;
     local_estimated_bytes: number; pinned_files: number; pinned_logical_bytes: number;
@@ -4309,6 +4538,8 @@
   let storageRepairNote = $state("");
   let storageCategoryMax = $derived(Math.max(1, ...(storageHealth?.categories ?? []).map((row) => row.local_estimated_bytes)));
   let moderation = $state<ModerationState>({ events: [], votes: [] });
+  let moderationTab = $state<"activity" | "history">("activity");
+  let moderationHistoryRefresh = $state(0);
   let moderationMessages = $state<TimelineMessage[]>([]);
   let moderationLoading = $state(false);
   let moderationReason = $state("");
@@ -4363,7 +4594,7 @@
   // message corpus behind the privileged timeline is every message in every channel, and only the
   // moderation surface reads it, so it loads with that surface. `withCorpus` defaults to whether
   // the surface is actually open, which is the right answer at every existing call site.
-  async function refreshModeration(withCorpus = moderationSurfaceOpen(view, inboxView, spaceOpen)) {
+  async function refreshModeration(withCorpus = moderationSurfaceOpen(view, inboxView, spaceOpen) && moderationTab === "activity") {
     const gen = viewGeneration;
     const server = activeServerId;
     if (server === null || cur?.isDm) {
@@ -4400,6 +4631,31 @@
       if (viewCurrent(gen, server)) moderationLoading = false;
     }
   }
+  function chatLedgerReads(server: number): LedgerReads {
+    // Capture the ORIGINAL scalar scope, never consult a later server as the target of a
+    // deferred callback. Native separately fences its actual generation/Actor/reader policy.
+    const session = uiStateLoadGeneration, generation = viewGeneration;
+    const current = () => !locked && uiStateReady && !windowCloseInFlight && canModerate
+      && activeServerId === server && uiStateLoadGeneration === session && viewGeneration === generation
+      && view === "moderation" && moderationTab === "history";
+    const retired = () => ({ status: "unavailable", code: "session-unavailable" });
+    return {
+      page: async (cursor) => {
+        if (!current()) return retired();
+        try {
+          const reply = await invoke<unknown>("get_admin_chat_ledger", { server, cursor, limit: 32 });
+          return current() ? reply : retired();
+        } catch (reason) { if (!current()) return retired(); throw reason; }
+      },
+      detail: async (rowId, expectedRevision, frameOffset) => {
+        if (!current()) return retired();
+        try {
+          const reply = await invoke<unknown>("get_admin_chat_ledger_detail", { server, rowId, expectedRevision, frameOffset });
+          return current() ? reply : retired();
+        } catch (reason) { if (!current()) return retired(); throw reason; }
+      },
+    };
+  }
   async function warnModerationSelection() {
     // Captured once, not re-read per iteration: the channel and message ids come from THIS
     // server's corpus, so a switch mid-loop would address the rest of them to a different server.
@@ -4431,16 +4687,11 @@
       return;
     }
     try {
-      // One trace for the whole sweep rather than one per message: a moderator deleting eleven
-      // messages performed one action, and eleven unrelated traces would hide that the failure on
-      // the ninth belonged to the same operation as the eight that worked.
-      const sweep = traceSource.next();
+      // Admit each deletion through the same sealed queue as an ordinary local delete.
+      // Pause the sweep on uncertainty; the retained exact intent will retry on its own.
       for (const message of selected) {
-        await invokeDebugged(
-          "delete_message",
-          { server, channel: message.channel, msgId: message.id },
-          { trace: sweep },
-        );
+        const result = await queueMessageMutation(server, message.channel, message.id, "delete", "");
+        if (result.persistence.status !== "durable") throw new Error("A deletion is awaiting its history save. Review Pending messages before continuing the sweep.");
       }
       moderationSelected = new Set();
       moderationDeleteArmed = false;
@@ -4494,6 +4745,7 @@
   // the first time a pane that can render cards is live. The ref-card effect tracks wikiMap, so
   // the cards re-resolve themselves when it lands.
   async function ensureWikiMap() {
+    if(chatBackend==="text-v2")return;
     const gen = viewGeneration;
     const server = activeServerId;
     if (server === null || wikiMapFor === server) return;
@@ -4507,7 +4759,8 @@
   }
   let wikiMeta = $state<Record<string, string>>({}); // name -> "md" | "wiki" (per-page format, shared)
   let activeWikiPage = $state("");
-  // Bumped by every assignment of activeWikiPage: see wikiPane().
+  // Exact displayed-page identity for delayed writes. A same-name reopen is a replacement too;
+  // server/view generation alone cannot distinguish it from the page an old rename captured.
   let wikiPaneSerial = 0;
   let wikiBody = $state("");
   let newWikiPage = $state("");
@@ -6132,6 +6385,7 @@
     void wikiMap;
     void ensureWikiMap(); // fills the page summaries the wiki cards below want
     void profiles; // cards name the author, so a renamed member re-reads
+    void savedCids; // PR #56: cards built before the saved-files list loaded get their mark
     void view; // switching tabs destroys + recreates this DOM (fresh, unresolved placeholders)
     void inboxView; // returning from the inbox recreates the chat DOM too
     tick().then(() => {
@@ -6143,6 +6397,8 @@
       resolveRemoteMedia(statusEl);
       resolveEmoji(statusEl);
       resolveRefCards(statusEl);
+      markSavedCards(messagesEl);
+      markSavedCards(statusEl);
       // Every one of those can add height to the log. Re-pin rather than leave the reader looking
       // at whatever the newly inserted cards pushed the newest message past.
       chatMediaSettled();
@@ -6317,18 +6573,23 @@
 
   // Upload an image as a custom emoji `:code:` (stored under the "emoji" folder).
   async function addEmoji(fileList: FileList | null) {
-    const code = newEmojiCode.trim().toLowerCase().replace(/[^a-z0-9_+-]/g, "");
+    const originalCode = newEmojiCode;
+    const code = originalCode.trim().toLowerCase().replace(/[^a-z0-9_+-]/g, "");
     const file = fileList?.[0];
-    if (!code || !file || activeServerId === null) return;
+    if (!code || !file || !canStartUpload(1)) return;
+    const session = uiStateLoadGeneration, gen = viewGeneration, server = activeServerId;
+    const current = () => !locked && uiStateReady && !windowCloseInFlight && session === uiStateLoadGeneration && viewCurrent(gen, server);
     uploading = true;
     try {
       // Encode an optional size into the file name (`code~px`) so it's shared with everyone.
       const sz = Math.min(Math.max(newEmojiSize, 0), EMOJI_MAX_SIZE);
       await addSharedFile(file, "emoji", sz ? `${code}~${sz}` : code, file.type || "image/png");
-      newEmojiCode = "";
-      await refreshFiles();
+      if (current()) {
+        if (newEmojiCode === originalCode) newEmojiCode = "";
+        await refreshFiles();
+      }
     } catch (e) {
-      error = String(e);
+      if (current()) error = String(e);
     } finally {
       uploading = false;
     }
@@ -6357,8 +6618,29 @@
 
   // Unlock the vault with the entered passphrase and reload persisted servers (9f). A wrong
   // passphrase fails (the vault won't decrypt) and we stay locked, showing the error.
-  function restoreReloaded(reloaded: Reloaded[]) {
+  async function refreshVaultGate() {
+    if(uiSessionRetired)return;
+    const generation = uiStateLoadGeneration, attempt = unlockAttempt;
+    const current = () => generation === uiStateLoadGeneration && attempt === unlockAttempt
+      && locked && !unlocking && !windowCloseInFlight;
+    if (!current()) return;
+    try {
+      const exists = await invoke<boolean>("vault_exists");
+      if (current()) vaultExists = exists;
+    } catch { if (current()) vaultExists = true; }
+  }
+  function restoreReloaded(value: unknown) {
+    // Restoration is an entry edge, never an in-session refresh. In particular it
+    // must not reset readiness underneath a live Studio and its retained work.
+    if (uiSessionRetired || !locked || windowCloseInFlight) return false;
+    const restored = decodeRestoredChatSession<Reloaded>(value);
+    if (restored === null) return false;
+    const reloaded: Reloaded[] = restored.backend === "text-v2"
+      ? restored.servers.map(row=>({...row,invite:"",channels:[{id:row.channel,name:"general"}]})) : restored.servers;
+    chatBackend = restored.backend;
+    startTab = restored.backend === "text-v2" ? "found" : "join";
     servers = reloaded.map((r) => ({
+      backend:r.backend,context:r.context,displayName:r.display_name,
       id: r.server,
       name: r.name,
       channels: r.channels?.length ? r.channels : [{ id: r.channel, name: "general" }],
@@ -6368,6 +6650,7 @@
       isDm: r.is_dm,
     }));
     locked = false;
+    if(chatBackend === "legacy") void callMappingSession.claimController();
     const reconnectWarnings = reloaded.filter((r) => r.reconnect_warning);
     if (reconnectWarnings.length) {
       toast(reconnectWarnings.map((r) => `${r.name}: ${r.reconnect_warning}`).join("\n"), "warn", 0);
@@ -6377,9 +6660,18 @@
     // Drafts/read boundaries must land before switchServer restores the active composer and
     // snapshots its divider. The native actors are already running, so this is only local UI state.
     const continuityGeneration = ++uiStateLoadGeneration;
-    void loadUiContinuity(continuityGeneration).finally(() => {
+    // Claim AFTER establishing this UI generation, still before the first
+    // hydration await. A claim from the preceding generation is already stale
+    // when switchServer checks it and would leave every restored row unopened.
+    const route=studioExit.begin();
+    void loadUiContinuity(continuityGeneration).finally(async () => {
       if (continuityGeneration !== uiStateLoadGeneration || locked) return;
-      if (firstServer) void switchServer(firstServer.id);
+      if(chatBackend === "text-v2") {
+        if(firstServer) await switchServer(firstServer.id,()=>{},route);
+        if(continuityGeneration===uiStateLoadGeneration && !locked) void retryNativeTextRequests();
+        return;
+      }
+      if (firstServer) void switchServer(firstServer.id,()=>{},route);
       // Unread badges start empty here because nothing durable holds them. Anything that arrived
       // while the vault was locked (the native bridge drops those events on purpose) or while the
       // app was closed has no event left to raise a badge, so rebuild them from each channel's
@@ -6394,35 +6686,68 @@
       // feeds into a count instead of an announcement of everything that ever happened.
       void loadNews();
     });
-    refreshAllDmRequests();
-    loadInbox();
-    refreshAllServerIcons();
+    if(chatBackend === "legacy") {refreshAllDmRequests();loadInbox();refreshAllServerIcons();}
+    return true;
   }
 
-  async function unlock(secret = unlockSecret()) {
-    if (!secret) return;
+  async function unlock(secret = unlockSecret()): Promise<{ attempt: number; generation: number } | null> {
+    if(uiSessionRetired)return null;
     // Close and unlock are competing generation changes. The close handler sets this before its
     // first await, so an unlock can never reopen native IPC underneath an older close operation.
-    if (windowCloseInFlight) return;
+    if (!locked || unlocking || windowCloseInFlight || !secret) return null;
+    const attempt = ++unlockAttempt;
+    const generation = uiStateLoadGeneration;
+    const current = () => attempt === unlockAttempt && generation === uiStateLoadGeneration
+      && locked && !windowCloseInFlight;
     unlocking = true;
     error = "";
     // The summon starts alongside the KDF call and never gates it: the animation fills
     // latency that exists anyway, and a failed unlock aborts it below.
-    if (unlockMethod === "sigil") startSummon();
     try {
+      if (unlockMethod === "sigil") startSummon();
       // Ctrl+L clears the webview immediately but native persistence can still be finishing. Join
       // that exact request before authenticating a new generation; otherwise a late old lock could
       // invalidate the session immediately after this unlock appears to succeed.
-      await nativeVaultLock.settle();
+      const requireGeneration = (outcome: NativeVaultLockOutcome | null): string => {
+        const generation = outcome?.generation;
+        if (typeof generation !== "string" || !/^(0|[1-9][0-9]{0,19})$/.test(generation)
+          || BigInt(generation) > (1n << 64n) - 1n) {
+          throw new Error("Could not confirm this unlock session. Restart Mewtual and try again.");
+        }
+        return generation;
+      };
+      const prior = await nativeVaultLock.settle();
+      if (!current()) return null;
+      if (prior !== null) {
+        // Join and validate original custody BEFORE retiring it. A malformed present
+        // result must not silently fall through to a replacement/guessed generation.
+        requireGeneration(prior);
+        nativeVaultLock.reset();
+      }
+      // A confirmed window close may have registered another native lock without a
+      // reusable token. Establish one fresh barrier for THIS authentication rather
+      // than submit an otherwise valid cached generation which is now stale. A null
+      // snapshot preserves native pending bytes; never reset a newer pending JS lock.
+      nativeVaultLock.begin(null);
+      const barrier = await nativeVaultLock.settle();
+      if (!current()) return null;
+      const expectedUiGeneration = requireGeneration(barrier);
+      // Retire only this fulfilled fresh lock, before auth leaves this JS turn.
+      // A fresh Ctrl+L can now issue its own null-snapshot native lock. Native
+      // command admission must check THIS barrier generation at first poll and final
+      // publication, rather than adopt its then-current generation. The UI ticket also
+      // refuses stale replies. Never reset a newer lock or substitute local UI counters.
+      // Fulfilled valid-snapshot IO debt is retained by native pending_ui_lock_snapshot
+      // and retried before native unlock opens IPC. Rejected bridges keep JS custody.
+      nativeVaultLock.reset();
       // The passphrase is an argument and never a recorded field: invokeDebugged records the
       // command name and its outcome, not what it was called with.
-      const { value: reloaded } = await invokeDebugged<Reloaded[]>("unlock", { passphrase: secret });
-      // The prior session's native lock promise (settled or otherwise) must never be reused after
-      // an authenticated unlock establishes a new command generation.
-      nativeVaultLock.reset();
+      const { value: reloaded } = await invokeDebugged<Reloaded[]>("unlock", { passphrase: secret, expectedUiGeneration });
+      if (!current()) return null;
       closeAfterContinuityError = false;
+      closeContinuityRevision = null;
       passphrase = "";
-    revealPassphrase = false; // never leave a lock screen showing the next thing typed into it
+      revealPassphrase = false; // never leave a lock screen showing the next thing typed into it
       sigilStrokes = [];
       sigilDrawing = [];
       sigilColors = Array(19).fill(0);
@@ -6430,14 +6755,23 @@
       sigilWord = "";
       stopPlayback();
       melodySeq = [];
-      restoreReloaded(reloaded);
+      if (!restoreReloaded(reloaded)) return null;
+      return { attempt, generation: uiStateLoadGeneration };
     } catch (e) {
+      if (!current()) return null;
       abortSummon(); // wrong secret ⇒ no cat: the failure must read as a failure
       // `unlock` returns a typed AppError. Stringifying that object produces only
       // "[object Object]"; the shared reader preserves its useful message, code and trace.
       error = vaultUnlockErrorText(e);
+      return null;
     } finally {
-      unlocking = false;
+      // The successful restore itself advances UI generation. Ticket ownership,
+      // rather than the pre-restore predicate, releases only this attempt's busy state.
+      if (attempt === unlockAttempt) {
+        unlocking = false;
+        // A manual attempt may have superseded startup before its gate query landed.
+        if (locked && vaultExists === null && !windowCloseInFlight) void refreshVaultGate();
+      }
     }
   }
 
@@ -6447,7 +6781,11 @@
   // passphrase again. Re-entering calls `unlock`, which no-ops on an already-open vault and hands
   // back the registered servers, so no actor or transport is duplicated.
   function lockScreen(nativeAlreadyLocked = false) {
+    unlockAttempt += 1;
+    unlocking = false;
+    abortSummon();
     pendingSendRetry.cancel();
+    callMappingSession.resetController();
     // Lock also cancels calls still waiting on a native permission prompt; those have not yet set
     // `inCall`, so the ordinary leave path alone cannot see or invalidate them.
     callLifecycleSession.invalidate();
@@ -6458,7 +6796,22 @@
     storageHealthCache.clear();
     imageSrcCache.clear(); // avatars and icons are member content; do not retain them behind lock
     stopSearchWorker(); // likewise its copy of the searched history
-    if (locked) return;
+    if (locked) {
+      // Ctrl+L can arrive during settle/auth while the gate is still visible. Revoke
+      // both UI and native entry; a later unlock must join this exact negative call.
+      uiStateLoadGeneration += 1;
+      // studio-exit: forced edge. Already locked; any former Studio queue was captured by its first lock.
+      uiStateReady = false;
+      clearUnlockEntry();
+      try { sessionStorage.setItem("catcoms.explicit-lock", "1"); } catch { /* best effort */ }
+      if (!nativeAlreadyLocked) void nativeVaultLock.begin(null).then(
+        (outcome) => { if (outcome.continuity_error) console.warn("Session locked; final UI continuity save failed", outcome.continuity_error); },
+        (e) => console.warn("Could not confirm the native session lock", e),
+      );
+      // Canceling an initial startup read must not leave a permanently blank gate.
+      if (vaultExists === null && !windowCloseInFlight) void refreshVaultGate();
+      return;
+    }
     // Lock wins over an in-progress secret change and drops every transient secret first.
     vaultChangeCurrent = "";
     vaultChangeFirst = "";
@@ -6555,6 +6908,7 @@
     drafts = {};
     pendingSends = {};
     recoveredSendDrafts = {};
+    resetNativeTextForLock();
     pendingSendResolution = null;
     pendingSendErrors = {};
     retryingPendingSends = false;
@@ -6579,15 +6933,143 @@
     locked = true; // studio-exit: forced edge (lock, as above)
   }
 
+  function resetNativeTextForLock() {
+    // A lost old Found reply must not keep the next unlocked UI busy. Its
+    // generation-owned finally is separately forbidden from releasing a new
+    // Found after this synchronous redaction has retired the original owner.
+    if(chatBackend==="text-v2")busy=false;
+    nativeTextIntents = {};
+    chatBackend = null;
+    nativeOriginals = [];nativeCursor=null;nativeHistoryLoading=false;nativeHistoryRevision++;
+    nativeHistoryLoaded=false;nativeHistoryError=null;
+    nativeRetryGeneration=null;
+  }
+  function nativeTextDriver(session:number, sealed:()=>void=()=>{}) {
+    const current=()=>!uiSessionRetired && chatBackend==="text-v2" && !locked && uiStateReady && !windowCloseInFlight && session===uiStateLoadGeneration;
+    return createNativeTextDriver({
+      read:()=>nativeTextIntents,
+      replace:next=>{if(!current())throw new Error("The chat session changed.");nativeTextIntents=next;uiContinuityVersion=4;},
+      seal:()=>queueUiStateSave(()=>{if(!current())throw new Error("The chat session changed.");return continuityJson();}),
+      current,
+      token:()=>Array.from(crypto.getRandomValues(new Uint8Array(32)),byte=>byte.toString(16).padStart(2,"0")).join(""),
+      invoke:async(command,args)=>{
+        if(command==="found_server")return(await invokeDebugged<unknown>("found_server",args)).value;
+        if(command==="send_message")return(await invokeDebugged<unknown>("send_message",args)).value;
+        throw new Error("Unsupported native chat request.");
+      },
+      sealed:()=>sealed?.(),
+    });
+  }
+  function installNativeServer(row:NativeTextServer) {
+    const previous=servers.find(server=>server.id===row.server);
+    if(previous && (previous.backend!=="text-v2" || previous.context!==row.context)) throw new Error("The group changed. Unlock again.");
+    const entry:ServerState={id:row.server,name:row.name,backend:"text-v2",context:row.context,displayName:row.display_name,
+      channels:[{id:row.channel,name:"general"}],active:row.channel,unread:[],invite:"",isDm:row.is_dm};
+    servers=previous?servers.map(server=>server.id===row.server?entry:server):[...servers,entry];
+  }
+  function nativeDraftRetirement(server:number,channel:string,context:string,text:string) {
+    const key=chatScopeKey(server,channel),revision=draftRevisions[key]??0;
+    const original=activeServerId===server && cur?.active===channel ? draft : drafts[key]??"";
+    return ()=>{
+      if(original.trim()!==text || (draftRevisions[key]??0)!==revision || servers.find(row=>row.id===server)?.context!==context)return;
+      const active=activeServerId===server && cur?.active===channel && cur?.context===context;
+      if(active && draft!==original)return;
+      if(!active && drafts[key]!==original)return;
+      drafts={...drafts,[key]:""};draftRevisions[key]=revision+1;
+      if(active)draft="";
+    };
+  }
+  async function retryNativeTextRequests() {
+    if(nativeRetryGeneration===uiStateLoadGeneration || nativeHistoryLoading || busy || sending || locked || !uiStateReady || windowCloseInFlight || chatBackend!=="text-v2" || !Object.keys(nativeTextIntents).length)return;
+    const session=uiStateLoadGeneration;nativeRetryGeneration=session;
+    try {
+      for(const intent of Object.values(nativeTextIntents)) {
+        if(locked || session!==uiStateLoadGeneration || windowCloseInFlight || chatBackend!=="text-v2")return;
+        if(!nativeTextIntents[intent.token])continue;
+        try {
+          if(intent.kind==="found") {
+            // Only open a recovered first group while this original empty-view
+            // navigation still owns the screen. A retry must not hijack a newer
+            // selection made while its persistence/native reply was pending.
+            const route=activeServerId===null&&!showAdd?studioExit.begin():null;
+            const result=await nativeTextDriver(session).found(intent);
+            if(result){installNativeServer(result.server);if(route?.current()&&activeServerId===null&&!showAdd){await switchServer(result.server.server,()=>{},route);}}
+          }
+          else {const row=servers.find(row=>row.id===intent.server);if(row?.backend!=="text-v2" || row.context!==intent.expectedContext)continue;
+            await nativeTextDriver(session,nativeDraftRetirement(intent.server,intent.channel,intent.expectedContext,intent.text)).send(intent.server,intent.channel,intent.expectedContext,intent.text);}
+        }catch { /* Keep exact custody; a later scheduled retry reuses it. */ }
+      }
+    }finally{
+      if(nativeRetryGeneration===session){
+        nativeRetryGeneration=null;
+        // Navigation during a write selects immediately but defers its read.
+        // Once this owner retires, read the CURRENT view, including on refusal.
+        if(!locked && session===uiStateLoadGeneration && cur?.backend==="text-v2")await refreshNativeHistory();
+      }
+    }
+  }
+  async function refreshNativeHistory(append=false) {
+    const selected=cur,server=activeServerId;
+    if(selected?.backend!=="text-v2" || !selected.context || server===null || locked || !uiStateReady)return;
+    // Reads and writes share native admission. The write owner always refreshes
+    // the latest selected view after retiring, so a switch need not compete for
+    // that permit or lose its history when the write's original view changed.
+    if(sending || busy || nativeRetryGeneration!==null)return;
+    if(nativeHistoryLoading)return;
+    const session=uiStateLoadGeneration,viewToken=viewGeneration,revision=++nativeHistoryRevision,channel=selected.active,context=selected.context;
+    const current=()=>!locked && session===uiStateLoadGeneration && viewToken===viewGeneration && revision===nativeHistoryRevision && activeServerId===server && cur?.active===channel && cur?.context===context;
+    nativeHistoryLoading=true;nativeHistoryError=null;
+    try {
+      const result=await readNativeOriginals((_command,args)=>invoke<unknown>("get_message_page",args),{server,channel,context},current,append?nativeCursor:null);
+      if(!result || !current())return;
+      // This is a local original list. Do not populate Legacy pageTotal,
+      // unread/version anchors or derive full-group absence from this subset.
+      nativeOriginals=append?[...nativeOriginals,...result.items].slice(-256):result.items;
+      nativeCursor={next:result.next,end:result.end};
+      nativeHistoryLoaded=true;
+    }catch(failure){if(current()){nativeHistoryError="Saved messages could not be loaded. Try again.";error=errorText(failure);}}
+    finally{if(revision===nativeHistoryRevision)nativeHistoryLoading=false;}
+  }
+  async function sendNativeText(text:string,server:number,channel:string):Promise<SendOutcome> {
+    const selected=cur;if(selected?.backend!=="text-v2" || !selected.context)return "refused";
+    const session=uiStateLoadGeneration,context=selected.context,operation=++pendingSendNonce;
+    const retireDraft=nativeDraftRetirement(server,channel,context,text);
+    sending=true;
+    try {
+      const result=await nativeTextDriver(session,retireDraft).send(server,channel,context,text);
+      if(!result)return "uncertain";
+      if(result.disposition==="uncertain")return "uncertain";
+      return "sent"; // press outcome only; UI status remains Saved here
+    }catch(failure){if(!locked && session===uiStateLoadGeneration)error=errorText(failure);return "uncertain";}
+    finally{
+      if(pendingSendNonce===operation){sending=false;if(!locked && session===uiStateLoadGeneration)await refreshNativeHistory();}
+    }
+  }
+
   async function found() {
+    if(uiSessionRetired)return;
+    if(chatBackend === "text-v2" && (!uiStateReady || locked || windowCloseInFlight || nativeHistoryLoading || nativeRetryGeneration===uiStateLoadGeneration || busy)) return;
     busy = true;
     error = "";
     const operationGeneration = viewGeneration;
+    const nativeSession=chatBackend==="text-v2"?uiStateLoadGeneration:null;
+    const route=chatBackend==="text-v2"?studioExit.begin():null;
     try {
       // The group's name and your name in it are two different things. Naming the group is
       // optional; left blank it is labelled after the person who founded it, which is at least
       // a description of what it is rather than a second copy of your own name.
       const serverName = newServerName.trim() || `${displayName}'s server`;
+      if(chatBackend === "text-v2") {
+        const session=uiStateLoadGeneration;
+        const result=await nativeTextDriver(session).found({displayName,serverName,advertise,relay,rendezvous,isDm:false});
+        if(!result || locked || session!==uiStateLoadGeneration) return;
+        installNativeServer(result.server);
+        if(sessionContinuationCurrent(operationGeneration,viewGeneration,locked)) {
+          showAdd=false;newServerName="";if(route)await switchServer(result.server.server,()=>{},route);
+        }
+        if(result.cleanupPending) toast("The group was created. Its saved retry will be checked again.","warn",5000);
+        return;
+      }
       const { value: r } = await invokeDebugged<Found>("found_server", { displayName, advertise, relay, rendezvous, isDm: false, serverName });
       if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
       addServer(r, serverName, displayName);
@@ -6609,11 +7091,13 @@
     } catch (e) {
       if (sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) error = errorText(e);
     } finally {
-      busy = false;
+      if(nativeSession===null)busy=false;
+      else if(nativeSession===uiStateLoadGeneration && !locked){busy=false;await refreshNativeHistory();}
     }
   }
 
   async function join() {
+    if(chatBackend==="text-v2")return;
     busy = true;
     error = "";
     joinReplyReady = null;
@@ -6680,6 +7164,7 @@
   }
 
   async function applyJoinReply(replace = false) {
+    if(chatBackend==="text-v2")return;
     const server = activeServerId;
     if (server === null || !joinReplyInput.trim()) return;
     const operationGeneration = viewGeneration;
@@ -6754,6 +7239,7 @@
   // Start a new DM: found a 1:1 group named after the friend; the invite that comes back is the
   // "friend code" to share. Your own profile name is unchanged (a DM's label is the friend's name).
   async function newDm() {
+    if(chatBackend==="text-v2")return;
     const name = dmName.trim();
     if (!name) return;
     busy = true;
@@ -6776,6 +7262,7 @@
 
   // Accept a friend code: join the friend's 1:1 group, flagged as a DM.
   async function addFriend() {
+    if(chatBackend==="text-v2")return;
     const name = dmName.trim();
     if (!name) return;
     busy = true;
@@ -6958,6 +7445,7 @@
   // Open the DMs area (the friends/DM list); land on the first DM if there is one, else an empty
   // DM-home (no active group) ready for a New DM / Add friend.
   function enterDmHome() {
+    if(chatBackend==="text-v2")return;
     // DM home with no DM clears the active group, which takes the Studio off screen.
     leaveStudioThen((route) => {
       dmHome = true;
@@ -6983,6 +7471,9 @@
   // the previous group's messages, roster, files and branding stay on screen for the whole
   // round-trip, which reads as the switch not having taken.
   function clearServerView() {
+    // Inline edit plaintext belongs to this view. Lock/switch/removal must drop it
+    // and invalidate old admission callbacks, including after a failed first seal.
+    cancelEdit();
     view = "chat";
     moderationSelected = new Set();
     moderationDeleteArmed = false;
@@ -7027,6 +7518,19 @@
     files = [];
     hasPeers = false;
     keptFiles = null;
+    privateDownloads = [];
+    privateDownloadError = "";
+    privateDownloadBusy = {};
+    privateDownloadSaves = {};
+    savedChecks = {};
+    savedChecking = {};
+    confirmRemove = {};
+    revealingSaved = {};
+    // PR #56: another server's saved files must never mark this server's files or rows.
+    savedFiles = { state: "ok", files: [] };
+    savedFileChecks = {};
+    savedFilesChecking = null;
+    savedFileBusy = {};
     fileInventoryGate.invalidate();
     cancelKeptTransfer();
     wikiPinned = new Set();
@@ -7075,7 +7579,8 @@
     // The wiki editor and the chat/fileshare affordances below used to be reset only by
     // switchServer, so the paths that end with no active group (leaving your last server, empty
     // DM-home, locking) kept a page body and its drafts in memory as plaintext.
-    activeWikiPage = ""; wikiPaneSerial++;
+    activeWikiPage = "";
+    wikiPaneSerial++;
     wikiBody = "";
     wikiDirty = false;
     wikiEdit = false;
@@ -7095,11 +7600,13 @@
     mentionChannels = new Set(); // mention badges are scoped to the active server
   }
   function openNewDm() {
+    if(chatBackend==="text-v2")return;
     showNewDm = true;
     showAddFriend = false;
     dmName = "";
   }
   function openAddFriend() {
+    if(chatBackend==="text-v2")return;
     showAddFriend = true;
     showNewDm = false;
     dmName = "";
@@ -7124,6 +7631,7 @@
   async function switchServer(id: number, committed: () => void = () => {}, route: StudioRoute = studioExit.begin()): Promise<boolean> {
     if (windowCloseInFlight) return false;
     if ((!route.current() || studioHasWork?.()) && !(await route.scope())) return false;
+    if (!route.current() || windowCloseInFlight) return false;
     saveDraftFor(chanKey()); // stash the current channel's draft before switching servers
     const gen = beginViewSwitch(); // everything still in flight for the old group is now stale
     activeServerId = id;
@@ -7135,6 +7643,14 @@
     groupLoading = true;
     messagesLoading = true;
     const s = servers.find((x) => x.id === id);
+    if(s?.backend==="text-v2") {
+      dmHome=s.isDm;showNewDm=false;showAddFriend=false;notice="";
+      nativeOriginals=[];nativeCursor=null;nativeHistoryLoading=false;nativeHistoryLoaded=false;nativeHistoryError=null;nativeHistoryRevision++;
+      loadDraftFor(chanKey());committed();
+      await refreshNativeHistory();
+      if(viewCurrent(gen,id)){groupLoading=false;messagesLoading=false;}
+      return true;
+    }
     // Nothing is cleared here. Arriving at a server is not reading its channels, and the rail's
     // badge is derived from the unread channel list rather than kept beside it, so opening one
     // channel can no longer blank the evidence that the other eleven have something in them.
@@ -7256,7 +7772,7 @@
   /// Servers whose native leave is in flight, each with whether its `server-closed` has arrived. The
   /// stopping actor emits that event before leave_server returns, and only leave_server's outcome
   /// says whether this was a leave, so the event waits for it (serverClosed).
-  const leavingServers = new Map<number, boolean>();
+  const leavingServers = new Map<number, { session: number; closed: boolean }>();
 
   /// The server a draft restored at unlock belongs to, read from App's copy without loading the
   /// Studio chunk (studio-draft.ts's `scope.server`). Null when unreadable: such a draft fails to
@@ -7267,7 +7783,10 @@
   }
 
   async function leaveServer(id: number) {
-    if (windowCloseInFlight || locked) return;
+    if (windowCloseInFlight || locked || !uiStateReady) return;
+    const session = uiStateLoadGeneration;
+    const current = () => !locked && uiStateReady && session === uiStateLoadGeneration;
+    if (leavingServers.get(id)?.session === session) return;
     // The Studio's unsaved work for this server is settled while its actor can still take it.
     // After leave_server nothing can, and serverGone drops whatever is left (review of d2548a37).
     // A restored draft for it installs only when its channel opens, so that is where the member
@@ -7281,37 +7800,202 @@
       const route = studioExit.begin();
       if (!(await route.scope())) {
         // A refused Save has said why. A newer action (a click, a lock) retiring this one has not.
-        if (!locked && !windowCloseInFlight && !route.current()) toast("Leaving the server was cancelled by a newer action. Leave again if you still want to.", "info", 5000);
+        if (current() && !windowCloseInFlight && !route.current()) toast("Leaving the server was cancelled by a newer action. Leave again if you still want to.", "info", 5000);
         return; // nothing has left
       }
     }
+    // A Save gate may have waited through lock/unlock. It cannot authorize a native leave in
+    // the replacement session, even if the same server is selected there again.
+    if (!current() || windowCloseInFlight || leavingServers.get(id)?.session === session) return;
     // Leaving a server is also a privacy boundary. End its independent WebRTC session before the
     // native request can hang or fail so a forgotten server can never retain a hot mic, display or
     // separately granted application-audio source.
     if (inCall && callServer === id) leaveVoice();
-    leavingServers.set(id, false);
+    const operation = { session, closed: false };
+    leavingServers.set(id, operation);
+    // Captured now: once the leave lands the server is gone from the rail and its name with it.
+    const leftName = servers.find((s) => s.id === id)?.name ?? "the server";
+    let leaveReport: unknown = null;
     try {
-      await invoke("leave_server", { server: id });
+      leaveReport = await invoke("leave_server", { server: id });
     } catch (e) {
-      const closed = leavingServers.get(id) ?? false;
-      leavingServers.delete(id);
-      if (!locked) error = String(e); // never over the lock screen's own message
+      const owns = leavingServers.get(id) === operation;
+      if (owns) leavingServers.delete(id);
+      if (!owns || !current()) return;
+      error = String(e);
       // The leave failed after the actor had stopped: still a member, but the server is gone from
       // this session, so it is handled as a closure and its Studio edits are kept.
-      if (closed) serverGone(id, false);
+      if (operation.closed) serverGone(id, false);
       return;
     }
-    leavingServers.delete(id);
+    // The operation object also fences bookkeeping: an old completion cannot remove a new
+    // session's leave of the same server or retire its Studio draft and file-trust policy.
+    const owns = leavingServers.get(id) === operation;
+    if (owns) leavingServers.delete(id);
+    if (!owns || !current()) return;
     const { [id]: _removedTrust, ...remainingTrust } = fileTrustPolicies;
     fileTrustPolicies = remainingTrust;
     serverGone(id, true); // first, so the continuity saved next no longer carries its Studio work
     void saveUiStateImmediately();
+    toast(leaveReportText(leftName, checkedLeaveReport(leaveReport)), "ok", 6000);
+  }
+
+  /** Native's leave report, or `null` when it is missing or malformed (the toast then claims nothing). */
+  function checkedLeaveReport(raw: unknown): { freed_bytes: number; kept_bytes: number; failed: number; cleaned: boolean } | null {
+    if (!raw || typeof raw !== "object") return null;
+    const r = raw as Record<string, unknown>;
+    const n = (v: unknown) => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+    return n(r.freed_bytes) && n(r.kept_bytes) && n(r.failed) && typeof r.cleaned === "boolean"
+      ? { freed_bytes: r.freed_bytes as number, kept_bytes: r.kept_bytes as number, failed: r.failed as number, cleaned: r.cleaned }
+      : null;
+  }
+
+  /** Every Leave entry point comes here first: load what leaving would permanently delete from
+   * this device (Keep copies and unfinished Downloads, by name) and ask before leaving. */
+  async function requestLeave(id: number) {
+    const name = servers.find((s) => s.id === id)?.name ?? "this server";
+    leaveConfirm = { id, name, loss: null };
+    const [kept, downloads, listed] = await Promise.allSettled([
+      invoke<KeptFiles>("get_kept_files", { server: id }),
+      invoke<unknown>("get_private_downloads", { server: id }).then(checkedPrivateDownloads),
+      invoke<UiFile[]>("get_files", { server: id }),
+    ]);
+    if (leaveConfirm?.id !== id) return; // dismissed or replaced meanwhile
+    leaveConfirm = {
+      id,
+      name,
+      // An inventory that could not be read is passed as null, so the dialog says it could not
+      // check instead of claiming there is nothing to lose.
+      loss: leaveLoss(
+        kept.status === "fulfilled" ? kept.value : null,
+        downloads.status === "fulfilled" ? downloads.value : null,
+        listed.status === "fulfilled" ? listed.value : [],
+      ),
+    };
+  }
+
+  function confirmLeave() {
+    const target = leaveConfirm;
+    if (!target) return;
+    leaveConfirm = null;
+    showServerSettings = false;
+    void leaveServer(target.id);
+  }
+
+  /** This server's cache status (cheap natively). A stale reply for another server is dropped. */
+  async function refreshCacheStatus(server: number | null = activeServerId) {
+    const seq = ++cacheStatusSeq;
+    if (server === null || locked || chatBackend==="text-v2") {
+      cacheStatus = null;
+      return;
+    }
+    try {
+      const status = checkedCacheStatus(await invoke<unknown>("get_cache_status", { server }));
+      if (seq === cacheStatusSeq && server === activeServerId) cacheStatus = status;
+    } catch {
+      if (seq === cacheStatusSeq) cacheStatus = null;
+    }
+  }
+
+  // The footer follows the selected server; native pushes changes as `cache-status` events.
+  $effect(() => {
+    const server = activeServerId;
+    untrack(() => void refreshCacheStatus(server));
+  });
+  // Opening the Storage page re-reads the status and seeds the picker with the current limit.
+  $effect(() => {
+    if (!showServerSettings || serverSettingsPage !== "storage") return;
+    untrack(() => {
+      cacheLimitConfirming = false;
+      void refreshCacheStatus().then(() => {
+        cacheLimitDraft = !cacheStatus ? "" : cacheStatus.unlimited ? "null" : String(cacheStatus.limit_bytes ?? "");
+      });
+      void refreshSavedLimit();
+    });
+  });
+
+  /** This server's "Remember saved files" setting for the Storage page, seeding its picker. A
+   * reply for a server that is no longer selected is dropped. */
+  async function refreshSavedLimit(server: number | null = activeServerId) {
+    savedLimitForgets = null;
+    if (server === null || locked) {
+      savedLimit = null;
+      return;
+    }
+    try {
+      const view = checkedSavedFilesLimit(await invoke<unknown>("get_saved_files_limit", { server }));
+      if (server !== activeServerId) return;
+      savedLimit = view;
+      savedLimitDraft = view.limit === null ? "" : String(view.limit);
+    } catch {
+      if (server === activeServerId) savedLimit = null;
+    }
+  }
+
+  /** Apply the Storage page's "Remember saved files". Native first previews the choice (nothing
+   * changes); when it would forget entries, the page says how many before the user confirms. */
+  async function applySavedLimit() {
+    const server = activeServerId;
+    const limit = Number(savedLimitDraft);
+    if (server === null || !savedLimit || savedLimitBusy || !savedLimitDraft || !Number.isSafeInteger(limit)) return;
+    savedLimitBusy = true;
+    try {
+      // The count the user confirmed (or a preview's zero): native applies only while the choice
+      // still forgets exactly that many, so saves made meanwhile can never be forgotten unseen.
+      let expectedForgets = savedLimitForgets;
+      if (expectedForgets === null) {
+        const preview = checkedSavedLimitChange(await invoke<unknown>("set_saved_files_limit",
+          { server, limit, apply: false, expectedForgets: null }));
+        if (preview.forgets > 0) {
+          if (server === activeServerId) savedLimitForgets = preview.forgets;
+          return;
+        }
+        expectedForgets = 0;
+      }
+      const done = checkedSavedLimitChange(await invoke<unknown>("set_saved_files_limit",
+        { server, limit, apply: true, expectedForgets }));
+      toast(savedLimitDone(done), "ok", 4000);
+      // A shorter list: Transfers and the chat mark follow it.
+      if (done.forgets > 0 && server === activeServerId) void refreshFiles();
+      await refreshSavedLimit(server);
+    } catch (e) {
+      savedLimitForgets = null;
+      // A failure after the list was shortened says so; the list on screen follows the disk.
+      if (server === activeServerId) void refreshFiles();
+      toast(`Couldn't change how many saved files are remembered: ${e}`, "err", 6000);
+    } finally {
+      savedLimitBusy = false;
+    }
+  }
+
+  /** Apply the Storage page's limit. Lowering below what is cached asks once before applying. */
+  async function applyCacheLimit() {
+    const server = activeServerId;
+    if (server === null || !cacheStatus || cacheLimitBusy) return;
+    const bytes = cacheLimitDraft === "null" ? null : Number(cacheLimitDraft);
+    if (bytes !== null && !Number.isSafeInteger(bytes)) return;
+    if (lowerLimitWarning(cacheStatus, bytes) && !cacheLimitConfirming) {
+      cacheLimitConfirming = true;
+      return;
+    }
+    cacheLimitBusy = true;
+    try {
+      const status = checkedCacheStatus(await invoke<unknown>("set_cache_limit", { server, bytes }));
+      if (server === activeServerId) cacheStatus = status;
+      toast(`Cache limit on this device: ${limitLabel(bytes)}`, "ok", 3500);
+    } catch (e) {
+      toast(`Couldn't change the cache limit: ${e}`, "err", 6000);
+    } finally {
+      cacheLimitBusy = false;
+      cacheLimitConfirming = false;
+    }
   }
 
   /// `server-closed`: the server's actor stopped. During this server's own leave the leave decides
   /// (it calls serverGone once it knows how leave_server ended); otherwise this is a closure.
   function serverClosed(id: number) {
-    if (leavingServers.has(id)) { leavingServers.set(id, true); return; }
+    const operation = leavingServers.get(id);
+    if (operation?.session === uiStateLoadGeneration) { operation.closed = true; return; }
     serverGone(id, false);
   }
 
@@ -7346,20 +8030,26 @@
   }
 
   async function addChannel() {
+    if(chatBackend==="text-v2")return;
     const name = newChannel.trim().replace(/^#/, "");
-    if (!name || activeServerId === null) return;
+    if (!name || activeServerId === null || windowCloseInFlight) return;
     newChannel = "";
     const route = studioExit.begin(); // a newer action taken while the channel opens wins
+    const gen = viewGeneration, server = activeServerId;
     try {
-      const id = await invoke<string>("open_channel", { server: activeServerId, name });
+      const id = await invoke<string>("open_channel", { server, name });
+      // Opening may finish after switching groups, locking or a newer navigation. Its native
+      // effect belongs to the original server; it must not seed the replacement sidebar.
+      if (!unlockedViewCurrent(gen, server) || !route.current() || windowCloseInFlight) return;
       if (cur && !cur.channels.some((c) => c.id === id)) cur.channels.push({ id, name });
       switchTo(id, false, route);
     } catch (e) {
-      error = String(e);
+      if (unlockedViewCurrent(gen, server) && route.current() && !windowCloseInFlight) error = String(e);
     }
   }
 
   async function refreshChannels(server: number) {
+    if(chatBackend==="text-v2")return;
     try {
       const channels = await invoke<Channel[]>("get_channels", { server });
       const s = servers.find((x) => x.id === server);
@@ -7391,6 +8081,7 @@
     if (windowCloseInFlight) return false;
     if (!cur) return false;
     if ((!route.current() || studioHasWork?.()) && !(await route.scope())) return false;
+    if (!route.current() || windowCloseInFlight) return false;
     saveDraftFor(chanKey()); // stash the current channel's draft before leaving it
     // Channel-scoped content, dropped before the move rather than when the read returns: the
     // group's own state (roster, files, branding) is unchanged by a channel hop and stays put.
@@ -7457,6 +8148,7 @@
   let refreshRevision = 0;
   async function refresh(animateArrivals = false) {
     if (!cur || !cur.active || activeServerId === null) return;
+    if(cur.backend==="text-v2"){await refreshNativeHistory();return;}
     const server = activeServerId;
     const channel = cur.active;
     const revision = ++refreshRevision;
@@ -7660,6 +8352,7 @@
    * while the scan is in flight must not be thrown away by its answer.
    */
   async function rebuildUnread(server: number) {
+    if(chatBackend==="text-v2")return;
     try {
       const heads = await invoke<ChannelHead[]>("get_channel_heads", { server });
       if (locked) return;
@@ -7715,6 +8408,7 @@
   let deliverySnapshot = $state({ revision: 0, reports: {} as Record<string, DeliveryState> });
   let delivery = $derived(deliverySnapshot.reports);
   async function refreshDelivery() {
+    if(chatBackend==="text-v2")return;
     const gen = viewGeneration;
     const server = activeServerId;
     const channel = cur?.active;
@@ -7764,7 +8458,7 @@
       latest: isLatestOwn(mi),
     };
   }
-  // The gutter tick for one of your messages: ✕ nobody reachable · ◌ no proof yet · ~ held by
+  // The gutter tick for one of your messages: ✕ nobody reachable · ◌ no proof yet · ~ received by
   // part of the roster · ✓✓ the whole roster confirmed. We intentionally do not infer "all live
   // peers confirmed" from two unrelated counts. Shown on EVERY message of yours
   // the actor still has evidence for, not only the newest: the point of a per-message tick is to
@@ -7858,6 +8552,7 @@
     }
   }
   async function refreshFiles() {
+    if(cur?.backend==="text-v2")return;
     const gen = viewGeneration;
     const server = activeServerId;
     if (server === null) return;
@@ -7866,10 +8561,13 @@
       // Wiki-pinned content addresses are derived fresh from the wiki on the backend each call: a
       // file embedded in a live page never drops out of circulation, whatever its expiry says. It
       // is a second round-trip, so it rides alongside the listing rather than after it.
-      const [listing, pinned, kept] = await Promise.allSettled([
+      const [listing, pinned, kept, savedDownloads, savedList] = await Promise.allSettled([
         invoke<{ files: UiFile[]; has_peers: boolean }>("get_files", { server }),
         invoke<string[]>("get_wiki_pinned_cids", { server }),
         invoke<KeptFiles>("get_kept_files", { server }),
+        invoke<unknown>("get_private_downloads", { server }).then(checkedPrivateDownloads),
+        // PR #56: the saved-files list (local only, no network): Saved rows and the chat mark.
+        invoke<unknown>("get_saved_files", { server }).then(checkedSavedFiles),
       ]);
       if (!fileInventoryGate.current(request, unlockedViewCurrent(gen, server))) return; // another group's shared files
       // Applied independently: a failing pin lookup must not blank the listing it only decorates.
@@ -7881,6 +8579,15 @@
       }
       if (pinned.status === "fulfilled") wikiPinned = new Set(pinned.value);
       keptFiles = kept.status === "fulfilled" ? kept.value : null;
+      privateDownloads = savedDownloads.status === "fulfilled" ? savedDownloads.value : [];
+      privateDownloadError = savedDownloads.status === "fulfilled" ? "" : "Download progress could not be read. Open Transfers again to retry.";
+      // An answer that could not be read keeps the last list on screen rather than claiming none.
+      if (savedList.status === "fulfilled") savedFiles = savedList.value;
+      // Saved rows are checked only while Transfers is shown, once per visit and revision.
+      if (view === "downloads") {
+        void checkSavedRows();
+        void checkSavedListRows();
+      }
     } catch (e) {
       if (fileInventoryGate.current(request, unlockedViewCurrent(gen, server))) error = String(e);
     }
@@ -8145,6 +8852,7 @@
     }
   }
   async function refreshConnectivity() {
+    if(chatBackend==="text-v2")return;
     const generation = ++connectivityRefreshGeneration;
     try {
       const refreshed = await invoke<Connectivity>("get_connectivity");
@@ -8459,17 +9167,19 @@
   // one that threw may still have posted), for "post now" to report; every other caller ignores it.
   async function postStatus(): Promise<SendOutcome> {
     const text = statusDraft.trim();
-    if (!text || activeServerId === null || statusPosting) return "refused";
+    if (!text || activeServerId === null || statusPosting || locked || !uiStateReady || windowCloseInFlight) return "refused";
+    const session = uiStateLoadGeneration, gen = viewGeneration, server = activeServerId;
+    const current = () => !locked && uiStateReady && !windowCloseInFlight && session === uiStateLoadGeneration && viewCurrent(gen, server);
     statusPosting = true;
     // Kept until the invoke returns, not cleared on the way in: a member posting into a feed that
     // is closed to them is now refused natively, and clearing first would take the words with it.
     // Cleared only if it is still what was posted: text typed meanwhile is the next announcement.
     try {
-      await invokeDebugged("post_status", { server: activeServerId, text });
-      if (statusDraft.trim() === text) statusDraft = "";
+      await invokeDebugged("post_status", { server, text });
+      if (current() && statusDraft.trim() === text) statusDraft = "";
       return "sent";
     } catch (e) {
-      error = errorText(e);
+      if (current()) error = errorText(e);
       return "failed";
     } finally {
       statusPosting = false;
@@ -8610,11 +9320,11 @@
   let restoredStudioDraft: string | null = null;
   let studioNavigation = 0;
   // Every route that takes the main pane away from the Studio asks a route from this gate BEFORE it
-  // changes `view`, opens the inbox or enters DM home: `releaseStudio` for a one-step action,
-  // `leaveStudioThen` for a synchronous one, `studioExit.begin()` for an action that awaits more
-  // than its own departure. That last kind carries its route across every await and asks
+  // changes `view`, opens the inbox or enters DM home: `leaveStudioThen` for a synchronous
+  // action, `studioExit.begin()` for an awaiting action. It carries its route across every await and asks
   // `route.leave()` again right before the screen changes (see studio-exit.ts for why a fresh
-  // claim there would be wrong). switchView, switchServer and switchTo take an optional route so
+  // claim there would be wrong), then rechecks currency/close in the mutation's own continuation.
+  // switchView, switchServer and switchTo take an optional route so
   // a composite action stays one owner. studio-exit-routes.test.ts audits this file.
   const studioExit = createStudioExit({
     onStudio: () => view === "studio",
@@ -8704,6 +9414,7 @@
   /// is never the test; the gate's own `mustLeave` is, for callers arriving with a route that has
   /// already left (review of 13792739, P1: re-checking "has work" looped forever without yielding).
   function switchView(v: Tab, route: StudioRoute = studioExit.begin(), released = false) {
+    if(chatBackend==="text-v2" && v!=="chat")return;
     if (windowCloseInFlight || !route.current()) return;
     if (!released && view === "studio" && v !== "studio" && studioExit.mustLeave()) {
       void route.leave().then((ok) => { if (ok) switchView(v, route, true); }); return;
@@ -8723,7 +9434,8 @@
     }
     view = v;
     if (v === "wiki") refreshWiki();
-    if (v === "files") refreshFiles(); // re-evaluate availability each time the tab opens
+    if (v === "downloads") savedCheckVisit++; // each visit checks every Saved row's file again
+    if (v === "files" || v === "downloads") refreshFiles(); // includes saved private progress after restart
     // The policy is read with the surface rather than with the server, because it is only ever
     // needed by the surface and a server switch already carries enough round-trips.
     if (v === "status") { refreshStatuses(); void refreshStatusPolicy(); } // a read that failed during the switch gets a retry here
@@ -8769,7 +9481,7 @@
       const page = el.getAttribute("data-wikilink") ?? "";
       if (page) {
         const route = studioExit.begin();
-        if (!(await route.leave())) return;
+        if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
         view = "wiki";
         await openWikiPage(page, {}, route);
       }
@@ -9463,7 +10175,8 @@
     saveDraftFor(chanKey());
     // The text is already in this channel's draft, so a refused Studio Save loses nothing: the
     // member stays with the work Save could not confirm and finds the text in Chat later.
-    if (!(await releaseStudio())) return;
+    const route = studioExit.begin();
+    if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
     view = "chat";
     await tick();
     composerEl?.focus();
@@ -9594,11 +10307,17 @@
     });
   }
 
+  /** The plain save item's label for `f`: "Save to chosen place" while its row remembers a Save as
+   * choice that this item would use, else "Download" (`privateDownloadChatLabel`). */
+  function downloadLabel(f: UiFile): string {
+    return privateDownloadChatLabel(privateDownloads.find((row) => row.cid === f.cid));
+  }
   function fileMenu(f: UiFile): MenuItem[] {
     const items: MenuItem[] = [
       { head: true, kind: "file", title: f.name },
       { label: "Open details", icon: "info", onSelect: () => openFileInfo(f) },
-      { label: "Download", icon: "down", onSelect: () => downloadFile(f) },
+      { label: downloadLabel(f), icon: "down", onSelect: () => downloadFile(f) },
+      { label: "Save as", icon: "down", onSelect: () => downloadFile(f, true) },
       { label: "Post to chat", icon: "reply", onSelect: () => appendToDraft(`![${f.name}](cid:${f.cid})`) },
       { divider: true },
       { label: "Copy address (CID)", icon: "fp", onSelect: () => copyText(f.cid) },
@@ -9638,6 +10357,7 @@
   }
 
   function serverMenu(s: ServerState): MenuItem[] {
+    if(s.backend==="text-v2")return [{head:true,kind:"server",title:s.name},{label:"Open saved messages",onSelect:()=>{void switchServer(s.id);}}];
     const items: MenuItem[] = [{ head: true, kind: s.isDm ? "dm" : "server", title: s.name }];
     if (s.invite) items.push({ label: "Copy invite", icon: "link", onSelect: () => void copyFreshInvite(s.id) });
     items.push({
@@ -9653,7 +10373,9 @@
       label: "Leave server",
       icon: "leave",
       danger: true,
-      onSelect: () => confirmInMenu(`Leave ${s.name}`, () => leaveServer(s.id)),
+      // A full confirmation, not the in-menu one: it has to name the Keep copies and unfinished
+      // Downloads that leaving permanently deletes from this device.
+      onSelect: () => void requestLeave(s.id),
     });
     return items;
   }
@@ -9661,6 +10383,7 @@
   // A sidebar channel row. Channels are a frontend list keyed by name, so there is no backend
   // read cursor to set here: "mark as read" clears the badge, which is what the row shows.
   function channelMenu(c: Channel): MenuItem[] {
+    if(chatBackend==="text-v2")return [];
     const sv = activeServerId;
     if (sv === null || !cur) return [];
     const unread = cur.unread.includes(c.id) || mentionChannels.has(c.id);
@@ -9679,10 +10402,10 @@
   // changes nothing. The topic editor and the search open only once the move landed.
   async function editTopicOf(id: string) {
     const route = studioExit.begin();
-    if (!(await route.leave())) return;
+    if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
     if (view === "studio") view = "chat";
     if (cur?.active !== id && !(await switchTo(id, false, route))) return; // never edit the channel left on screen
-    if (!(await route.leave())) return;
+    if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
     view = "chat";
     await tick();
     if (!route.current()) return;
@@ -9691,10 +10414,10 @@
   }
   async function searchInChannel(id: string) {
     const route = studioExit.begin();
-    if (!(await route.leave())) return;
+    if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
     if (view === "studio") view = "chat";
     if (cur?.active !== id && !(await switchTo(id, false, route))) return;
-    if (!(await route.leave())) return;
+    if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
     view = "chat";
     openSearch();
   }
@@ -9993,7 +10716,10 @@
         items.push({ label: "View image", icon: "img", onSelect: () => openLightbox(el) });
       }
       items.push({ label: "Properties", icon: "info", onSelect: () => openFileRef(cid) });
-      if (embedded) items.push({ label: "Download", icon: "down", onSelect: () => downloadFile(embedded) });
+      if (embedded) {
+        items.push({ label: downloadLabel(embedded), icon: "down", onSelect: () => downloadFile(embedded) });
+        items.push({ label: "Save as", icon: "down", onSelect: () => downloadFile(embedded, true) });
+      }
       items.push({ label: "Copy address (CID)", icon: "fp", onSelect: () => copyText(cid) });
       // An image can cover its whole message row, so keep the message actions reachable here:
       // right-clicking the picture offers the same Reply/Edit/Delete as right-clicking the text.
@@ -10195,7 +10921,7 @@
   /// redirect may have changed). A continuation that acts on "the open page" (rename, delete,
   /// edit) must check that, or a retired request would arm it on whatever page is still shown.
   async function openWikiPage(name: string, opts: { noRedirect?: boolean } = {}, route: StudioRoute = studioExit.begin()): Promise<boolean> {
-    if (!(await route.leave())) return false;
+    if (!(await route.leave()) || !route.current() || windowCloseInFlight) return false;
     const gen = viewGeneration;
     const server = activeServerId;
     if (server === null) return false;
@@ -10218,14 +10944,15 @@
       }
       // The same action, asked again (never a fresh claim, which would revive a retired request);
       // a superseded response is discarded here, before it can replace the screen.
-      if (!(await route.leave())) return false;
+      if (!(await route.leave()) || !route.current() || windowCloseInFlight) return false;
       // The whole point of the guard: without it this page's text lands in the editor of whatever
       // server you moved to, and because that server's wikiPages lacks the name it opens in EDIT
       // mode, one Ctrl+S from publishing one server's wiki content into another's.
       if (!viewCurrent(gen, server)) return false;
       wikiRedirectedFrom = from;
       wikiBody = body;
-      activeWikiPage = name; wikiPaneSerial++;
+      activeWikiPage = name;
+      wikiPaneSerial++;
       wikiDirty = false;
       wikiRenaming = false;
       wikiDeleteArmed = false;
@@ -10279,24 +11006,27 @@
     if (!to || to === activeWikiPage || activeServerId === null || !activeWikiPage) return;
     // One action: if the member moved on while the rename and the page list ran, the renamed page
     // does not pull them back (the rename itself has landed and the toast still says so).
-    // The page is the pane's captured identity, not its name (see wikiPane): Save writes the
-    // current server's page of the current name, so the pane is only touched while it is still
-    // the one this rename started from.
-    const route = studioExit.begin(), pane = wikiPane(), { server, gen, page: from } = pane;
+    const route = studioExit.begin(), from = activeWikiPage;
+    const gen = viewGeneration, server = activeServerId, pageGeneration = wikiPaneSerial;
+    // A retired navigation can still reconcile the exact original page's new name. It cannot
+    // adopt a same-name page opened later, another server or an authenticated replacement session.
+    const ownsPage = () => unlockedViewCurrent(gen, server) && !windowCloseInFlight &&
+      wikiPaneSerial === pageGeneration && activeWikiPage === from;
     try {
       await invoke("rename_wiki_page", { server, from, to });
-      if (viewCurrent(gen, server)) {
-        await refreshWiki();
-        // A retired open leaves the pane on a name that no longer exists, where Edit and Save would
-        // recreate the old page. The renamed page has the same body, so point the pane at it, but
-        // only if nothing has been opened into it since: native reads run in order, so a later
-        // open of the old name read the post-rename (empty) page, and that pane must stay as it is.
-        const opened = await openWikiPage(to, { noRedirect: true }, route);
-        if (!opened && wikiPaneCurrent(pane)) { activeWikiPage = to; wikiPaneSerial++; }
+      if (!ownsPage()) return;
+      await refreshWiki();
+      if (!ownsPage()) return;
+      // A retired open leaves the pane on a name that no longer exists, where Edit and Save would
+      // recreate the old page. Reconcile only the unchanged original page, preserving local edits.
+      if (!(await openWikiPage(to, { noRedirect: true }, route))) {
+        if (!ownsPage()) return;
+        activeWikiPage = to;
+        wikiPaneSerial++;
       }
-      toast(`Renamed to "${to}" · links to the old name go red`, "ok", 5000);
+      if (unlockedViewCurrent(gen, server) && !windowCloseInFlight) toast(`Renamed to "${to}" · links to the old name go red`, "ok", 5000);
     } catch (e) {
-      toast(`Rename failed: ${e}`, "err", 9000);
+      if (unlockedViewCurrent(gen, server) && !windowCloseInFlight) toast(`Rename failed: ${e}`, "err", 9000);
     }
   }
 
@@ -10481,13 +11211,16 @@
   // `embedMedia`: a file uploaded after the person moved on is shared under the page it was meant
   // for, but not inserted into whatever page is open now.
   async function wikiEmbed(fileList: FileList | null, asIs = false) {
-    if (!fileList || fileList.length === 0 || activeServerId === null || !activeWikiPage) return;
+    if (!fileList || !activeWikiPage || !canStartUpload(fileList.length)) return;
     const files = Array.from(fileList);
     const review = videoReviewPlan(files, asIs);
-    const page = activeWikiPage;
+    const pane = wikiPane(), page = pane.page;
+    const session = uiStateLoadGeneration;
+    const sessionCurrent = () => !locked && uiStateReady && !windowCloseInFlight && session === uiStateLoadGeneration;
     const scope = videoEditorScope;
     const epoch = videoScopeEpoch;
-    const here = () => videoEditorScope === scope && videoScopeEpoch === epoch && activeWikiPage === page;
+    // A page name can be opened again while a review waits. Only the original pane may receive it.
+    const here = () => sessionCurrent() && videoEditorScope === scope && videoScopeEpoch === epoch && wikiPaneCurrent(pane);
     let abandoned = 0;
     uploading = true;
     try {
@@ -10507,20 +11240,20 @@
         try {
           const cid = await addSharedFile(upload, `wiki/${page}`, uploadName);
           if (!here()) {
-            updateToast(tid, `Shared ${uploadName}, not embedded: the page changed`, "info", 7000);
+            if (sessionCurrent()) updateToast(tid, `Shared ${uploadName}, not embedded: the page changed`, "info", 7000);
             continue;
           }
           const alt = uploadName.replace(/[[\]]/g, " ");
           insertIntoWikiBody(`![${alt}](cid:${cid})`);
           updateToast(tid, `Embedded ${uploadName} · save the page to publish`, "ok", 5000);
         } catch (e) {
-          updateToast(tid, `Upload of ${uploadName} failed: ${e}`, "err", 9000);
+          if (sessionCurrent()) updateToast(tid, `Upload of ${uploadName} failed: ${e}`, "err", 9000);
         }
       }
-      if (abandoned > 0 && !locked) {
+      if (abandoned > 0 && sessionCurrent()) {
         toast(`${abandoned} file${abandoned === 1 ? " was" : "s were"} not embedded: the page changed`, "info", 7000);
       }
-      await refreshFiles();
+      if (sessionCurrent()) await refreshFiles();
     } finally {
       uploading = false;
     }
@@ -10542,11 +11275,15 @@
     try {
       const { value: queued } = await invokeDebugged<boolean>("save_wiki_page", { server, name: page, body });
       if (wikiPaneCurrent(pane)) {
-        // The pane owns this page's text, so any stash of it is older (openWikiPage restores a stash
-        // without removing it); leaving it would bring that older draft back over the saved page.
-        // Leaving the pane dirty again stashes its current text afresh.
-        if (wikiBody === body) wikiDirty = false;
-        wikiDrafts.delete(page);
+        if (wikiBody === body) {
+          wikiDirty = false;
+          wikiDrafts.delete(page); // the saved bytes cover both the pane and its older stash
+        } else {
+          // An outgoing page read may already have stashed newer typing while this pane remains
+          // visible. Preserve its current text now: that read can replace the pane as soon as
+          // this Save returns, without another opportunity to stash the edits it did not cover.
+          wikiDrafts.set(page, wikiBody);
+        }
       } else if (viewCurrent(gen, server) && wikiDrafts.get(page) === body) wikiDrafts.delete(page);
       if (queued) {
         // Review mode: the save became a proposal. The page itself is unchanged until an
@@ -10947,13 +11684,15 @@
   // `embedMedia` is: a review can take minutes, and a file should not land in whichever folder or
   // server happens to be open by the time it uploads.
   async function uploadFile(fileList: FileList | null, asIs = false) {
-    if (!fileList?.length || activeServerId === null) return;
+    if (!fileList || !canStartUpload(fileList.length)) return;
     const files = Array.from(fileList);
     const review = videoReviewPlan(files, asIs);
     const into = folder;
+    const session = uiStateLoadGeneration;
+    const sessionCurrent = () => !locked && uiStateReady && !windowCloseInFlight && session === uiStateLoadGeneration;
     const scope = videoEditorScope;
     const epoch = videoScopeEpoch;
-    const here = () => videoEditorScope === scope && videoScopeEpoch === epoch;
+    const here = () => sessionCurrent() && videoEditorScope === scope && videoScopeEpoch === epoch;
     let abandoned = 0;
     uploading = true;
     try {
@@ -10967,15 +11706,15 @@
         const tid = toast(`Sharing ${uploadName}…`, "info", 0);
         try {
           await addSharedFile(upload, into, uploadName);
-          updateToast(tid, `Shared ${uploadName}`, "ok");
+          if (sessionCurrent()) updateToast(tid, `Shared ${uploadName}`, "ok");
         } catch (e) {
-          updateToast(tid, `Sharing ${uploadName} failed: ${e}`, "err", 9000);
+          if (sessionCurrent()) updateToast(tid, `Sharing ${uploadName} failed: ${e}`, "err", 9000);
         }
       }
-      if (abandoned > 0 && !locked) {
+      if (abandoned > 0 && sessionCurrent()) {
         toast(`${abandoned} file${abandoned === 1 ? " was" : "s were"} not shared: you moved elsewhere`, "info", 7000);
       }
-      await refreshFiles();
+      if (sessionCurrent()) await refreshFiles();
     } finally {
       uploading = false;
     }
@@ -10999,7 +11738,8 @@
   // member's embed folder, then insert a `![name](cid:HEX)` marker into the draft for the
   // shared renderer to resolve inline. Non-media files are shared as plain attachments.
   async function embedFiles(target: "chat" | "status", fileList: FileList | null, asIs = false) {
-    if (!fileList) return;
+    // Refuse before Array.from retains an arbitrarily large FileList for a waiting batch.
+    if (!fileList || !canStartUpload(fileList.length)) return;
     await embedMedia(target, Array.from(fileList).map((file) => ({ file, name: file.name })), asIs);
   }
 
@@ -11021,13 +11761,15 @@
   // waits for that send to settle first: until it does, the send owns the composer, and a file
   // appended meanwhile would leave the sent text and video behind in the draft beside it.
   async function embedMedia(target: "chat" | "status", items: { file: File; name: string }[], asIs = false) {
-    if (items.length === 0 || activeServerId === null) return;
+    if (!canStartUpload(items.length)) return;
+    const session = uiStateLoadGeneration;
+    const sessionCurrent = () => !locked && uiStateReady && !windowCloseInFlight && session === uiStateLoadGeneration;
     const review = videoReviewPlan(items.map(({ file }) => file), asIs);
     const scope = videoEditorScope;
     // The epoch catches a round trip (channel A, B, then A again, or a lock and unlock) that the
     // key alone would miss: the batch was still interrupted, and its context may have changed.
     const epoch = videoScopeEpoch;
-    const here = () => videoEditorScope === scope && videoScopeEpoch === epoch;
+    const here = () => sessionCurrent() && videoEditorScope === scope && videoScopeEpoch === epoch;
     let abandoned = 0;
     uploading = true;
     try {
@@ -11050,7 +11792,7 @@
           const cid = await addSharedFile(upload, myEmbedFolder, uploadName);
           if (!here()) {
             // Shared where the batch started, but the composer on screen now belongs elsewhere.
-            updateToast(tid, `Shared ${uploadName}, not attached: you moved to another channel`, "info", 7000);
+            if (sessionCurrent()) updateToast(tid, `Shared ${uploadName}, not attached: you moved to another channel`, "info", 7000);
             continue;
           }
           const unchanged = post && composerState(target) === pressed;
@@ -11077,9 +11819,9 @@
               // telling the person to press Send then would send it twice (found in review). An
               // uncertain one must not be sent again either, and an announcement that threw may
               // have posted (it has no retry token to make a second post safe). Reported before a
-              // move away ends the batch, since the outcome is known either way, but not behind
-              // the lock screen, which explains itself (as the batch's own messages are not).
-              if (locked) { /* nothing shown while locked */ }
+              // move away ends the batch, since the outcome is known either way. The original
+              // UI session must still own the toast, including after a completed lock/unlock.
+              if (!sessionCurrent()) { /* the original session no longer owns this toast */ }
               else if (outcome === "sent") updateToast(tid, `Attached ${uploadName}, sent`, "ok");
               else if (outcome === "uncertain") updateToast(tid, `Attached ${uploadName}, not confirmed yet: don't send it again`, "info", 9000);
               else if (outcome === "failed" && target === "status") updateToast(tid, `Attached ${uploadName}, may not have posted: check the feed before posting again`, "err", 9000);
@@ -11089,13 +11831,13 @@
             }
           }
         } catch (e) {
-          updateToast(tid, `Upload of ${uploadName} failed: ${e}`, "err", 9000);
+          if (sessionCurrent()) updateToast(tid, `Upload of ${uploadName} failed: ${e}`, "err", 9000);
         }
       }
-      if (abandoned > 0 && !locked) {
+      if (abandoned > 0 && sessionCurrent()) {
         toast(`${abandoned} file${abandoned === 1 ? " was" : "s were"} not attached: you moved to another channel`, "info", 7000);
       }
-      await refreshFiles();
+      if (sessionCurrent()) await refreshFiles();
     } finally {
       uploading = false;
     }
@@ -11106,10 +11848,19 @@
   // they were asked of, and every request settled (as `skip` once its scope is gone).
   let videoEditor = $state.raw<OpenReview | null>(null);
   const videoReviews = new VideoReviewQueue((open) => { videoEditor = open; });
+  // One batch owns `uploading` until its real finally runs, including across lock and close.
+  // Do not reset it at those boundaries: an old completion must not release a newer batch.
+  const MAX_UPLOAD_BATCH_FILES = 32;
+  function canStartUpload(count: number): boolean {
+    if (count === 0 || activeServerId === null || locked || !uiStateReady || windowCloseInFlight) return false;
+    if (uploading) { toast("Wait for the current upload to finish before adding more files.", "info", 5000); return false; }
+    if (count > MAX_UPLOAD_BATCH_FILES) { toast(`Choose at most ${MAX_UPLOAD_BATCH_FILES} files at a time.`, "warn", 5000); return false; }
+    return true;
+  }
   // Everything a review is bound to, as one primitive so the effect below only reruns when it
   // actually changes. Reading `cur?.active` straight from an effect would rerun it whenever the
   // server list is replaced, and that would close an editor mid-edit for nothing.
-  const videoEditorScope = $derived(`${locked ? "locked" : "open"}|${activeServerId ?? ""}|${chanKey() ?? ""}`);
+  const videoEditorScope = $derived(`${locked ? "locked" : windowCloseInFlight ? "closing" : !uiStateReady ? "loading" : "open"}|${uiStateLoadGeneration}|${activeServerId ?? ""}|${chanKey() ?? ""}`);
   // The protocol ceiling on a single file (catcoms-app MAX_FILE_BYTES); the cap the editor uses
   // while this server's own limit has not been read. The native side enforces the real one.
   const VIDEO_EDITOR_FALLBACK_CAP = 1024 * 1024 * 1024;
@@ -11188,7 +11939,7 @@
       const { closedOpen, closedContext, dropped } = videoReviews.rescope(scope);
       const lost = (closedOpen ? 1 : 0) + dropped;
       // Not on lock: the lock screen is its own explanation, and a toast would sit behind it.
-      if (lost === 0 || scope.startsWith("locked")) return;
+      if (lost === 0 || !scope.startsWith("open|")) return;
       toast(closedOpen && dropped === 0 && closedContext
         ? `The video you were editing was not ${editorWords(closedContext).done}: you moved elsewhere`
         : `${lost} videos were not added: you moved elsewhere`, "info", 7000);
@@ -11231,7 +11982,9 @@
   // default on those would swallow ordinary text pastes, and copying a region of a web page puts
   // an HTML flavour on the clipboard beside the picture.
   function onComposerPaste(target: "chat" | "status", e: ClipboardEvent) {
-    const media = pastedMedia(e.clipboardData?.files);
+    const files = e.clipboardData?.files;
+    if (files?.length && !canStartUpload(files.length)) { e.preventDefault(); return; }
+    const media = pastedMedia(files);
     if (!media.length) return;
     e.preventDefault();
     // One instant for the whole paste, so a multi-image paste keeps its clipboard order in the
@@ -11939,6 +12692,26 @@
     }
   }
 
+  /** PR #56: the "already saved" mark on file cards already built in `container`. Cards are built
+   * once (`resolveRefCards`), so a list that loads or changes later is applied here: a small
+   * element added or removed, its text and attributes set as text, never as markup. */
+  function markSavedCards(container: HTMLElement | undefined) {
+    if (!container) return;
+    for (const card of Array.from(container.querySelectorAll<HTMLElement>(".ref-card.file-card[data-file-cid]"))) {
+      const saved = savedCids.has((card.getAttribute("data-file-cid") ?? "").toLowerCase());
+      const mark = card.querySelector<HTMLElement>(":scope > .ref-card-saved");
+      if (saved && !mark) {
+        const badge = document.createElement("span");
+        badge.className = "ref-card-saved";
+        badge.title = SAVED_MARK_TITLE;
+        badge.textContent = SAVED_MARK_LABEL;
+        card.appendChild(badge);
+      } else if (!saved && mark) {
+        mark.remove();
+      }
+    }
+  }
+
   function enterFolder(seg: string) {
     folder = folder === "" ? seg : `${folder}/${seg}`;
   }
@@ -11946,10 +12719,32 @@
     folder = breadcrumbs.slice(0, i + 1).join("/");
   }
 
-  async function downloadFile(f: UiFile) {
+  // `saveAs`: native opens the OS "Save as" dialog itself (no path is ever sent from here). A
+  // default value, never an optional parameter: `x?: T` in a .svelte script breaks the app at load.
+  async function downloadFile(f: UiFile, saveAs = false) {
     if (activeServerId === null) return;
     const server = activeServerId;
     const key = dlKey(server, f.cid);
+    if (saveInProgress(f.cid)) return;
+    const existing = privateDownloads.find(row => row.cid === f.cid);
+    if (existing) {
+      // Rows that need an explicit choice open Transfers instead. For Save as that is any row that
+      // does not offer it (running, removing, exhausted, partly saved); for a plain save, running,
+      // halted, saved, removing or exhausted rows. Decided before the row resumes: switching view
+      // once that has begun would take a fresh navigation claim (studio-exit-routes.test.ts scans
+      // this function's text, comments included).
+      const direct = saveAs
+        ? privateDownloadOffers(existing, "saveAs")
+        : privateDownloadChatSave(existing) !== "transfers";
+      if (!direct) { switchView("downloads"); return; }
+      // Save as on a known file goes through its row; native opens the dialog itself.
+      await resumePrivateDownload(existing, false, saveAs);
+      return;
+    }
+    const gen = viewGeneration;
+    const operation = `save-${crypto.randomUUID()}`;
+    error = "";
+    activeSaves[key] = operation;
     const started = Date.now();
     const held = Math.min(f.held, f.total);
     downloads[key] = {
@@ -11957,6 +12752,7 @@
       cid: f.cid,
       name: f.name,
       author: f.author,
+      operation,
       status: "queued",
       progress: f.total > 0 ? held / f.total : 0,
       done: held,
@@ -11971,25 +12767,691 @@
       ts: started,
     };
     try {
-      const saved = await saveGroupFile(invoke, server, f.cid, f.name);
-      if (downloads[key]) {
+      // PR #56: the "Replace my older saved copy" preference travels as a flag; native decides.
+      const saved = await saveGroupFile(invoke, server, f.cid, f.name, { operation, saveAs, replaceOlder });
+      if (!unlockedViewCurrent(gen, server)) return;
+      if (downloads[key]?.operation === operation) {
         Object.assign(downloads[key], completedDownload(downloads[key], saved, Date.now()));
       }
-      const notice = downloadSavedNotice(f.name, saved);
+      const notice = downloadSavedNotice(f.name, saved, !saveAs);
       toast(notice.text, notice.kind, notice.ms);
-      refreshFiles(); // the file's chunks are now held locally: update its availability
+      refreshFiles();
     } catch (e) {
+      if (!unlockedViewCurrent(gen, server)) return;
+      // Closing the dialog started nothing: drop the pending row quietly, no error.
+      if (saveAs && isSaveAsCancelled(e)) {
+        if (downloads[key]?.operation === operation) delete downloads[key];
+        return;
+      }
       error = String(e);
-      if (downloads[key]) {
+      if (downloads[key]?.operation === operation) {
         downloads[key].status = "failed";
         downloads[key].error = String(e);
         downloads[key].updatedAt = Date.now();
       }
+    } finally {
+      if (activeSaves[key] === operation) delete activeSaves[key];
+      if (!unlockedViewCurrent(gen, server) && downloads[key]?.operation === operation) delete downloads[key];
+      if (unlockedViewCurrent(gen, server)) void refreshFiles();
     }
   }
 
+  // `saveAs` asks native to open the OS dialog for this save; on a halted or saved row it also
+  // means a new copy (the old journal is forgotten, exactly as for Save new copy).
+  async function resumePrivateDownload(row: PrivateDownload, fresh = false, saveAs = false) {
+    const server = activeServerId, gen = viewGeneration;
+    const offer = saveAs ? "saveAs" : fresh ? "fresh" : "resume";
+    if (server === null || locked || privateDownloadBusy[row.id] || privateDownloadSaves[row.id] || saveInProgress(row.cid) || !privateDownloadOffers(row, offer)) return;
+    const newCopy = fresh || (saveAs && privateDownloadSaveAsIsNewCopy(row));
+    const mutation = Symbol("private download");
+    error = "";
+    privateDownloadBusy[row.id] = mutation;
+    privateDownloadSaves[row.id] = mutation;
+    fileInventoryGate.invalidate();
+    const operation = `save-${crypto.randomUUID()}`;
+    const key = dlKey(server, row.cid);
+    try {
+      if (row.status === "exhausted") {
+        await invoke("retry_private_download", { server, download: row.id, expectedGrant: row.grant,
+          request: crypto.randomUUID().replaceAll("-", "") });
+        if (!unlockedViewCurrent(gen, server)) return;
+      }
+      const name = filesByCid.get(row.cid)?.name ?? `download-${row.cid.slice(0, 12)}`;
+      const file = filesByCid.get(row.cid), started = Date.now();
+      activeSaves[key] = operation;
+      downloads[key] = { server, cid: row.cid, name, operation, author: file?.author ?? "", fresh: newCopy,
+        status: "queued", progress: row.verifiedChunks / row.totalChunks, done: row.verifiedChunks,
+        total: row.totalChunks, heldBefore: row.verifiedChunks, bytesDone: 0, bytesTotal: file?.size ?? 0,
+        networkBytesDone: 0, speed: 0, lastRateAt: started, updatedAt: started, ts: started };
+      // Acquisition may wait for a member. Keep Pause/Remove available during that wait;
+      // this separate token blocks only a duplicate Save of this same native owner.
+      if (privateDownloadBusy[row.id] === mutation) delete privateDownloadBusy[row.id];
+      const saved = await resumeGroupFile(invoke, server, row.cid, name, row.id, row.intent, operation, newCopy, saveAs, replaceOlder);
+      if (!unlockedViewCurrent(gen, server)) return;
+      if (downloads[key]?.operation === operation) Object.assign(downloads[key], completedDownload(downloads[key], saved, Date.now()));
+      // A resumed row may be saving anywhere (a remembered choice or an earlier partial), so the
+      // notice names Downloads only for a plain first save of a row that never chose a place.
+      const toDownloads = !saveAs && !row.chosenPlace && row.status === "ready" && row.savedChunks === 0;
+      const notice = downloadSavedNotice(name, saved, toDownloads);
+      toast(notice.text, notice.kind, notice.ms);
+    } catch (e) {
+      // Closing the dialog started nothing: drop the pending row quietly, no error.
+      if (saveAs && isSaveAsCancelled(e)) {
+        if (downloads[key]?.operation === operation) delete downloads[key];
+        return;
+      }
+      if (unlockedViewCurrent(gen, server)) {
+        error = String(e);
+        if (downloads[key]?.operation === operation) Object.assign(downloads[key], { status: "failed", error: String(e), updatedAt: Date.now() });
+      }
+    } finally {
+      if (activeSaves[key] === operation) delete activeSaves[key];
+      if (!unlockedViewCurrent(gen, server) && downloads[key]?.operation === operation) delete downloads[key];
+      if (privateDownloadBusy[row.id] === mutation) delete privateDownloadBusy[row.id];
+      if (privateDownloadSaves[row.id] === mutation) delete privateDownloadSaves[row.id];
+      if (unlockedViewCurrent(gen, server)) await refreshFiles();
+    }
+  }
+  async function changePrivateDownload(row: PrivateDownload, remove: boolean, keepPartial = false) {
+    const server = activeServerId, gen = viewGeneration;
+    // R2-M1: only a second action on this same row is refused while one is pending; a Remove
+    // stalled on an external folder leaves every other row's actions available.
+    if (server === null || locked || privateDownloadBusy[row.id]) return;
+    const mutation = Symbol("private download intent");
+    privateDownloadBusy[row.id] = mutation;
+    fileInventoryGate.invalidate();
+    try {
+      // Remove deletes encrypted progress and only a partly saved file native proves it created;
+      // keepPartial releases the record and leaves that file in place. Native returns a notice
+      // when a file of this save stays on disk, so a removal never silently leaves plaintext.
+      if (remove) {
+        const notice = await invoke<string | null>("cancel_private_download", { server, download: row.id, ...(keepPartial ? { keepPartial: true } : {}) });
+        if (typeof notice === "string" && notice && unlockedViewCurrent(gen, server)) toast(notice, "info", 9000);
+      } else await invoke("set_private_download_paused", { server, download: row.id, expectedIntent: row.intent, paused: true });
+    } catch (e) { if (unlockedViewCurrent(gen, server)) error = String(e); }
+    finally {
+      if (privateDownloadBusy[row.id] === mutation) delete privateDownloadBusy[row.id];
+      if (unlockedViewCurrent(gen, server)) await refreshFiles();
+    }
+  }
+  // User decision, 23 October: check each Saved row's file once per Transfers visit and row
+  // revision, off the async runtime natively (bounded, read-only). An answer is kept only while
+  // the view and the row are still the ones it was asked for, so a stale answer never relabels a
+  // newer row; a failed or stale check claims nothing.
+  async function checkSavedRows(rerun = true) {
+    const server = activeServerId, gen = viewGeneration, visit = savedCheckVisit;
+    if (server === null || locked) return;
+    let dropped = false;
+    const due = privateDownloads.filter((row) => row.status === "saved" && !savedChecking[row.id] &&
+      !(savedChecks[row.id]?.intent === row.intent && savedChecks[row.id]?.visit === visit));
+    // One check at a time (decisions review M1): native runs at most two workers and waits for a
+    // free one within its bound, so a burst of rows never turns into "could not check". The whole
+    // batch is claimed up front, so an overlapping refresh never asks for the same rows again.
+    const token = Symbol("saved checks");
+    for (const row of due) savedChecking[row.id] = token;
+    try {
+      for (const row of due) {
+        if (!unlockedViewCurrent(gen, server)) return;
+        let result: SavedCheck = "unknown";
+        try {
+          result = checkedSavedCheck(await invoke<unknown>("check_saved_download",
+            { server, download: row.id, expectedIntent: row.intent }));
+        } catch {
+          // Native refused (a changed row, Lock) or the answer was unreadable: claim nothing new.
+          result = "unknown";
+        }
+        if (!unlockedViewCurrent(gen, server)) return;
+        const now = privateDownloads.find((other) => other.id === row.id);
+        if (!now || now.status !== "saved" || now.intent !== row.intent) {
+          dropped = true;
+          continue;
+        }
+        savedChecks[row.id] = { intent: row.intent, result, visit };
+      }
+    } finally {
+      for (const row of due) if (savedChecking[row.id] === token) delete savedChecking[row.id];
+    }
+    // Re-review LOW 2: a row that changed while the batch ran (its answer was dropped) was skipped
+    // by any refresh in the meantime because the batch held it; check it once more now. Only once,
+    // so a row that keeps changing cannot keep this going.
+    if (rerun && dropped && view === "downloads" && unlockedViewCurrent(gen, server)) {
+      await checkSavedRows(false);
+    }
+  }
+  /** The latest check of `row`'s file for this exact revision, or `null`. */
+  function savedCheckFor(row: PrivateDownload): SavedCheck | null {
+    const checked = savedChecks[row.id];
+    return checked && checked.intent === row.intent && row.status === "saved" ? checked.result : null;
+  }
+
+  // PR #56: the saved-files list's rows. Native checks every checkable entry read-only in one
+  // bounded batch, once per Transfers visit; an answer is kept for the entry's ID and name only
+  // (a replace that moved a file changes its name), and an entry native did not reach in time has
+  // no answer at all, so it reads as not checked yet, never as "could not check".
+  async function checkSavedListRows() {
+    const server = activeServerId, gen = viewGeneration, visit = savedCheckVisit;
+    if (server === null || locked || savedFiles.state !== "ok") return;
+    if (!savedFiles.files.some((file) => file.checkable && savedFileChecks[savedFileCheckKey(file)]?.visit !== visit)) return;
+    if (savedFilesChecking && savedFilesChecking.visit === visit && savedFilesChecking.server === server) return;
+    const claim = { visit, server };
+    savedFilesChecking = claim;
+    try {
+      const answers = checkedSavedFileChecks(await invoke<unknown>("check_saved_files", { server }));
+      if (!unlockedViewCurrent(gen, server)) return;
+      for (const answer of answers) savedFileChecks[savedFileCheckKey(answer)] = { result: answer.check, visit };
+    } catch {
+      // Refused (Lock, a changed list) or unreadable: claim nothing new.
+    } finally {
+      if (savedFilesChecking === claim) savedFilesChecking = null;
+    }
+  }
+  function savedFileCheckFor(file: SavedFile): SavedCheck | null {
+    return savedFileChecks[savedFileCheckKey(file)]?.result ?? null;
+  }
+  /** Locale day for a list row's where line, for example "26 Oct". */
+  function savedDay(ms: number): string {
+    return new Date(ms).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+  }
+  let savedListFiles = $derived(savedListRows(savedFiles, privateDownloads));
+  let savedListViews = $derived(savedListFiles.map((file) => savedListRowView(file, savedFileCheckFor(file),
+    filesByCid.has(file.cid), savedDay,
+    { busy: !!savedFileBusy[file.id], saving: saveInProgress(file.cid) })));
+  // The chat mark: files this device recorded saving (the list only; no network, no disk).
+  let savedCids = $derived(savedCidSet(savedFiles));
+
+  /** A list row's action: Save again is the ordinary chat save of that file (still listed);
+   * Clear forgets the entry and never touches the file. */
+  async function runSavedListAction(file: SavedFile, action: SavedListAction) {
+    if (action.disabled) return; // aria-disabled stays focusable, so its reason can be read
+    if (action.kind === "again") {
+      const listed = filesByCid.get(file.cid);
+      if (listed) await downloadFile(listed);
+      return;
+    }
+    const server = activeServerId, gen = viewGeneration;
+    if (server === null || locked || savedFileBusy[file.id]) return;
+    savedFileBusy[file.id] = true;
+    try {
+      await invoke("forget_saved_file", { server, entry: file.id });
+    } catch (e) {
+      if (unlockedViewCurrent(gen, server)) toast(String(e), "warn", 6000);
+    } finally {
+      delete savedFileBusy[file.id];
+      if (unlockedViewCurrent(gen, server)) await refreshFiles();
+    }
+  }
+  /** Show in folder for a list row: native checks the file read-only first, then shows it selected
+   * in the system file manager. No path comes back; a refusal is one fixed sentence, and the row is
+   * checked again so it says what is there now. */
+  async function revealSavedListRow(file: SavedFile) {
+    const server = activeServerId, gen = viewGeneration;
+    if (server === null || locked || savedFileBusy[file.id]) return;
+    savedFileBusy[file.id] = true;
+    try {
+      await invoke("reveal_saved_file", { server, entry: file.id });
+    } catch (e) {
+      if (!unlockedViewCurrent(gen, server)) return;
+      toast(String(e), "warn", 6000);
+      delete savedFileChecks[savedFileCheckKey(file)];
+      void checkSavedListRows();
+    } finally {
+      delete savedFileBusy[file.id];
+    }
+  }
+  /** "Start a new list": only offered for a damaged record; native refuses anything else. */
+  async function resetSavedList() {
+    const server = activeServerId, gen = viewGeneration;
+    if (server === null || locked) return;
+    try {
+      await invoke("reset_saved_files", { server });
+    } catch (e) {
+      if (unlockedViewCurrent(gen, server)) toast(String(e), "warn", 6000);
+    } finally {
+      if (unlockedViewCurrent(gen, server)) await refreshFiles();
+    }
+  }
+  function runPrivateDownloadAction(row: PrivateDownload, kind: PrivateDownloadActionKind) {
+    // Acting on a Saved row checks its file again when the list refreshes afterwards. The last
+    // answer stays on screen until then (decisions review L3): a row known to be missing never
+    // flashes back to plain "Saved".
+    const checked = savedChecks[row.id];
+    if (row.status === "saved" && checked) savedChecks[row.id] = { ...checked, visit: -1 };
+    if (kind === "resume") return resumePrivateDownload(row);
+    if (kind === "fresh") return resumePrivateDownload(row, true);
+    if (kind === "saveAs") return resumePrivateDownload(row, false, true);
+    if (kind === "pause") return changePrivateDownload(row, false);
+    return changePrivateDownload(row, true, kind === "keep");
+  }
+
+  // Transfers UX (PR #51): one row per file. A save of a private download shows its live progress
+  // in that download's row (the renderer's own record of the active invocation, the same one the
+  // live list used to show), and the live list leaves that file out (`liveTransferList`). A save
+  // that finishes releases its record natively, so its row goes and the live list shows it done,
+  // as before; `savedRowView` takes any row, so keeping finished saves listed later only needs rows.
+  function liveSaveFor(row: PrivateDownload): SavedRowLive | null {
+    if (activeServerId === null) return null;
+    const key = dlKey(activeServerId, row.cid);
+    const live = downloads[key];
+    // Only once this save has written something: before that the row keeps native's state.
+    return live && activeSaves[key] === live.operation && live.savedDone !== undefined
+      ? { done: live.savedDone, total: live.total, bytesDone: live.savedBytes ?? 0, bytesTotal: live.bytesTotal,
+          fresh: live.fresh === true }
+      : null;
+  }
+  function savedRowName(row: PrivateDownload): string {
+    return filesByCid.get(row.cid)?.name ?? `File ${row.cid.slice(0, 12)}`;
+  }
+  let savedRowViews = $derived(privateDownloads.map((row) => savedRowView(row, savedCheckFor(row),
+    savedRowName(row), liveSaveFor(row),
+    { busy: !!privateDownloadBusy[row.id], saving: !!privateDownloadSaves[row.id] || saveInProgress(row.cid) })));
+  let savedRowGroups = $derived(groupSavedRows(savedRowViews));
+  let privateDownloadCids = $derived(new Set(privateDownloads.map((row) => row.cid)));
+
+  // Inline confirmation of Remove (or Clear) per row: the button becomes "Confirm remove" and
+  // "Cancel". It holds only while the row is still the state and revision it was asked for, so a
+  // row that changed meanwhile never confirms on stale terms; Escape and Cancel clear it.
+  let confirmRemove = $state<Record<string, string>>({});
+  const confirmToken = (row: PrivateDownload) => `${row.status}:${row.intent}`;
+  function confirmingRemove(row: PrivateDownload): boolean {
+    return confirmRemove[row.id] === confirmToken(row);
+  }
+  async function askRemove(row: PrivateDownload) {
+    confirmRemove[row.id] = confirmToken(row);
+    await tick();
+    document.querySelector<HTMLButtonElement>(`[data-sdl-confirm="${row.id}"]`)?.focus();
+  }
+  async function cancelRemove(row: PrivateDownload) {
+    delete confirmRemove[row.id];
+    await tick();
+    document.querySelector<HTMLButtonElement>(`[data-sdl-remove="${row.id}"]`)?.focus();
+  }
+  /** Where focus goes when the control that had it disappeared: while the row is still there, its
+   * Remove (back from a confirmation) or its first action; else the next row of the same group,
+   * the group's heading, the first row of any group, and last the tab's own heading. */
+  function rowFocusTarget(rowId: string, group: SavedRowGroup, nextId: string | undefined, fromConfirm: boolean): HTMLElement | null {
+    // A row's controls are its icon buttons (primary, more, the x) or, while confirming, the pair.
+    const control = ":is(.sdl-ico-btn, .sdl-act)";
+    const remove = document.querySelector<HTMLElement>(`[data-sdl-row="${rowId}"] [data-sdl-remove]`);
+    const first = document.querySelector<HTMLElement>(`[data-sdl-row="${rowId}"] ${control}`);
+    return (fromConfirm ? remove ?? first : first)
+      ?? (nextId ? document.querySelector<HTMLElement>(`[data-sdl-row="${nextId}"] ${control}`) : null)
+      ?? document.getElementById(`sdl-${group}`)
+      ?? document.querySelector<HTMLElement>(`.sdl-row ${control}`)
+      ?? document.getElementById("transfers-title");
+  }
+  const focusLost = () => document.activeElement === document.body || !document.activeElement;
+  /** Run a row's action. Focus moves only when the control that had it was taken away (the
+   * confirmation, or the row itself) and focus fell to `<body>`, never otherwise: a long save that
+   * finishes while the user is elsewhere moves nothing. */
+  async function runSavedRowAction(row: PrivateDownload, action: SavedRowAction, group: SavedRowGroup) {
+    const had = document.activeElement instanceof HTMLElement && document.activeElement !== document.body
+      ? document.activeElement : null;
+    delete confirmRemove[row.id];
+    const rows = savedRowGroups[group];
+    const next = rows[rows.findIndex((view) => view.id === row.id) + 1];
+    await tick();
+    let holder = had;
+    // The confirmation that had focus is gone now; keep focus on this row meanwhile.
+    if (had && !had.isConnected && focusLost()) {
+      holder = rowFocusTarget(row.id, group, next?.id, action.confirm);
+      holder?.focus();
+    }
+    // Only this press's own marker is cleared: a later press on the same row (Remove while a
+    // resumed save still runs) keeps its busy ring when this action settles.
+    const press = pressedBy.get(row.id);
+    try {
+      await runPrivateDownloadAction(row, action.kind);
+    } finally {
+      if (press !== undefined && pressedBy.get(row.id) === press) {
+        pressedBy.delete(row.id);
+        delete pressedControl[row.id];
+      }
+    }
+    await tick();
+    if (holder && !holder.isConnected && focusLost()) rowFocusTarget(row.id, group, next?.id, action.confirm)?.focus();
+  }
+  // A control that had focus can also disappear on its own, for example Confirm clear when a
+  // check finds the saved file present. Remember the focused row control and, when it leaves the
+  // page while focus falls to <body>, put focus back on that row (or its neighbours). Moving focus
+  // anywhere else, or leaving Transfers, forgets it, so nothing is restored the user did not lose.
+  let lastRowFocus: { element: HTMLElement; row: string; group: SavedRowGroup } | null = null;
+  function noteRowFocus(event: FocusEvent) {
+    const element = event.target instanceof HTMLElement ? event.target : null;
+    const row = element?.closest<HTMLElement>("[data-sdl-row]")?.dataset.sdlRow;
+    const group = savedRowViews.find((view) => view.id === row)?.group;
+    lastRowFocus = element && row && group ? { element, row, group } : null;
+  }
+  function forgetRowFocus(event: FocusEvent) {
+    const element = event.target;
+    // A control taken out of the page may report focus leaving too; only a control that is still
+    // there means the user moved away.
+    queueMicrotask(() => {
+      if (lastRowFocus?.element === element && element instanceof HTMLElement && element.isConnected) lastRowFocus = null;
+    });
+  }
+  function rowButtonClick(row: PrivateDownload, action: SavedRowAction, group: SavedRowGroup) {
+    if (action.disabled) return; // aria-disabled stays focusable, so its reason can be read
+    if (action.kind === "remove" && clearingSaved[row.id]) return; // Clear's re-check is running
+    if (action.confirm && !confirmingRemove(row)) return void askRemove(row);
+    // Clear of a Saved row is unconfirmed only while its file was found present, and that answer
+    // can be from earlier in this visit: check again before releasing the private copy.
+    if (!action.confirm && action.kind === "remove" && row.status === "saved") return void clearSavedRow(row, action, group);
+    pressRowControl(row.id, action.kind === "remove" ? "remove" : "primary");
+    void runSavedRowAction(row, action, group);
+  }
+
+  // Compact Transfers rows (design compact.md): which control of a row started its running action,
+  // so that control (and only it) shows the busy ring. Each press gets its own number in
+  // `pressedBy`, and an action clears the marker only while it is still its own.
+  let pressedControl = $state<Record<string, "primary" | "more" | "remove">>({});
+  const pressedBy = new Map<string, number>();
+  let pressCount = 0;
+  function pressRowControl(rowId: string, slot: "primary" | "more" | "remove") {
+    pressedBy.set(rowId, ++pressCount);
+    pressedControl[rowId] = slot;
+  }
+  // One "more" menu open at a time across the tab, mounted at the top level and positioned fixed
+  // from its button (`top` or `bottom`, and `right`); `key` is the row's state, group and menu
+  // items when it opened, so a row whose state or menu changes closes it; `group` lets focus fall
+  // back to a neighbouring row when this one goes.
+  /** A compact row's controls, for a private download row or a saved-files list row (PR #56). */
+  type AnyCompactControls = CompactControls<SavedRowAction | SavedListRowAction>;
+  let rowMenu = $state<{ rowId: string; group: SavedRowGroup; top: number | null; bottom: number | null; right: number; up: boolean; key: string } | null>(null);
+  let rowMenuFocus = $state(0);
+  // Whether focus has been inside the open menu: the menu is mounted outside the tab, and by the
+  // time a refresh removes it the focused item is already gone, so this is what tells the stale
+  // close (below) to put focus back.
+  let rowMenuHadFocus = false;
+  let rowMenuView = $derived(rowMenu ? savedRowViews.find((view) => view.id === rowMenu?.rowId) ?? null : null);
+  // PR #56: a saved-files list row in SAVED uses the same menu, button and focus machinery under
+  // the row id `saved-<entry id>` (never a private download's 64-digit id).
+  let rowMenuListView = $derived(rowMenu?.rowId.startsWith("saved-")
+    ? savedListViews.find((view) => `saved-${view.id}` === rowMenu?.rowId) ?? null : null);
+  let rowMenuShown = $derived(rowMenuView ? { name: rowMenuView.name, menu: compactControls(rowMenuView).menu as AnyCompactControls["menu"] }
+    : rowMenuListView ? { name: rowMenuListView.name, menu: compactListControls(rowMenuListView).menu as AnyCompactControls["menu"] } : null);
+  const menuKey = (view: { state: string; group: string }, controls: AnyCompactControls) => `${view.state}:${view.group}:` + controls.menu
+    .map((item) => item.kind === "action" ? item.action.kind : item.kind).join(",");
+  /** Where the menu goes for a More button: below it, or above when there is no room. */
+  function rowMenuPlace(button: HTMLElement): { top: number | null; bottom: number | null; right: number; up: boolean } {
+    const rect = button.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const up = spaceBelow < 160 && rect.top > spaceBelow; // five items is about 160px
+    return {
+      up,
+      right: Math.max(8, window.innerWidth - rect.right),
+      top: up ? null : rect.bottom + 4,
+      bottom: up ? window.innerHeight - rect.top + 4 : null,
+    };
+  }
+  /** The reason every menu item is unavailable (the row's busy reason), or `null` when at least
+   * one item can run. A More button with nothing to run is `aria-disabled` with that reason. */
+  function rowMenuDisabled(controls: AnyCompactControls): string | null {
+    const items = controls.menu.filter((item) => item.kind !== "separator");
+    const off = items.every((item) => item.kind === "action" && item.action.disabled);
+    return off ? items.find((item) => item.kind === "action")?.action.disabledReason ?? null : null;
+  }
+  const rowMenuItems = () => [...document.querySelectorAll<HTMLElement>(".sdl-menu [role=menuitem]")];
+  const rowMoreButton = (rowId: string) => document.querySelector<HTMLElement>(`[data-sdl-more="${rowId}"]`);
+  const focusInRowMenu = () => !!document.activeElement?.closest?.(".sdl-menu");
+  /** Open a row's menu below its button (above when there is no room) and focus its first item,
+   * or its last for ArrowUp. Opening by click focuses the first item too. */
+  async function openRowMenu(rowId: string, controls: AnyCompactControls, button: HTMLElement, last = false) {
+    // A private download row, or (PR #56) a saved-files list row, which always sits in SAVED.
+    const view = savedRowViews.find((v) => v.id === rowId)
+      ?? (savedListViews.some((v) => `saved-${v.id}` === rowId) ? { state: "saved", group: "saved" as const } : null);
+    if (!view) return;
+    rowMenuHadFocus = false;
+    rowMenu = { rowId, group: view.group, key: menuKey(view, controls), ...rowMenuPlace(button) };
+    const items = controls.menu.filter((item) => item.kind !== "separator");
+    rowMenuFocus = controls.menu.indexOf(last ? items[items.length - 1] : items[0]);
+    await tick();
+    const elements = rowMenuItems();
+    (last ? elements[elements.length - 1] : elements[0])?.focus();
+  }
+  /** Close the open menu; with `refocus`, focus goes back to its More button if it is still there. */
+  function closeRowMenu(refocus: boolean) {
+    const open = rowMenu;
+    if (!open) return;
+    rowMenu = null;
+    rowMenuHadFocus = false;
+    if (refocus) rowMoreButton(open.rowId)?.focus();
+  }
+  function moreClick(rowId: string, controls: AnyCompactControls, event: MouseEvent) {
+    if (rowMenu?.rowId === rowId) return closeRowMenu(true);
+    if (rowMenuDisabled(controls) !== null || pressedControl[rowId] === "more") return;
+    void openRowMenu(rowId, controls, event.currentTarget as HTMLElement);
+  }
+  function moreKeydown(rowId: string, controls: AnyCompactControls, event: KeyboardEvent) {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    event.preventDefault();
+    if (rowMenuDisabled(controls) !== null) return;
+    void openRowMenu(rowId, controls, event.currentTarget as HTMLElement, event.key === "ArrowUp");
+  }
+  /** Keys inside the menu: arrows move with wrap-around, Home and End jump, Escape closes and
+   * returns focus to the More button. Tab closes too: the menu is mounted at the end of the page,
+   * so focus first goes back to More and the browser's own Tab then moves on from there (to the x,
+   * or with Shift to the primary) instead of leaving the page (review HIGH 1). */
+  function rowMenuKeydown(event: KeyboardEvent) {
+    const items = rowMenuItems();
+    const at = items.indexOf(document.activeElement as HTMLElement);
+    const move = (index: number) => {
+      event.preventDefault();
+      items[(index + items.length) % items.length]?.focus();
+    };
+    switch (event.key) {
+      case "ArrowDown": return move(at + 1);
+      case "ArrowUp": return move(at < 0 ? items.length - 1 : at - 1);
+      case "Home": return move(0);
+      case "End": return move(items.length - 1);
+      case "Escape":
+        event.preventDefault();
+        event.stopPropagation();
+        return closeRowMenu(true);
+      case "Tab": return closeRowMenu(true);
+    }
+  }
+  /** Activate a menu item: close the menu (focus back on More), then run it. A disabled item does
+   * nothing and leaves the menu open, its reason in the title. */
+  async function runRowMenuItem(rowId: string, item: CompactControl<SavedRowAction | SavedListRowAction>) {
+    if (item.kind === "action" && item.action.disabled) return;
+    closeRowMenu(true);
+    const row = privateDownloads.find((r) => r.id === rowId);
+    const view = savedRowViews.find((v) => v.id === rowId);
+    if (!row || !view) return runListMenuItem(rowId, item);
+    if (item.kind === "reveal") return revealSavedRow(row);
+    pressRowControl(rowId, "more");
+    await runSavedRowAction(row, item.action as SavedRowAction, view.group);
+  }
+  /** A saved-files list row's menu item (PR #56): Save again, or Show in folder when it is not the
+   * row's primary. The entry is looked up again by its row id, so an entry cleared meanwhile does
+   * nothing. */
+  async function runListMenuItem(rowId: string, item: CompactControl<SavedRowAction | SavedListRowAction>) {
+    const file = savedListFiles.find((f) => `saved-${f.id}` === rowId);
+    if (!file) return;
+    if (item.kind === "reveal") return revealSavedListRow(file);
+    await runSavedListAction(file, item.action as SavedListRowAction);
+  }
+  /** A pointer press outside the open menu and its More button closes it; focus stays wherever
+   * the pointer put it. */
+  function rowMenuPointerDown(event: PointerEvent) {
+    const open = rowMenu;
+    if (!open) return;
+    const target = event.target as Node | null;
+    if (target && (document.querySelector(".sdl-menu")?.contains(target) || rowMoreButton(open.rowId)?.contains(target))) return;
+    closeRowMenu(false);
+  }
+  /** A resize, or a scroll of something holding the More button (the Transfers panel, the page),
+   * makes the menu's fixed position stale: close it, returning focus to More when focus was in the
+   * menu. Scrolls elsewhere (the chat, the menu itself) leave it open (review LOW 5). */
+  function rowMenuMoved(event: Event) {
+    const open = rowMenu;
+    if (!open) return;
+    if (event.type === "scroll") {
+      const target = event.target as Node | null;
+      const more = rowMoreButton(open.rowId);
+      const holdsMore = !target || target === document || !more || target.contains?.(more);
+      if (!holdsMore) return;
+    }
+    closeRowMenu(focusInRowMenu());
+  }
+  /** Whether the open menu must close: Transfers was left, its row left the list or is being
+   * confirmed for removal, or the row's state, group or menu items changed since it opened. */
+  function rowMenuStale(views: SavedRowView[], shown: boolean): boolean {
+    const open = rowMenu;
+    if (!open) return false;
+    // PR #56: a list row's menu is stale once its entry left the list or its items changed.
+    if (open.rowId.startsWith("saved-")) {
+      const listed = savedListViews.find((v) => `saved-${v.id}` === open.rowId);
+      return !shown || !listed || menuKey({ state: "saved", group: "saved" }, compactListControls(listed)) !== open.key;
+    }
+    const current = views.find((v) => v.id === open.rowId);
+    const row = privateDownloads.find((r) => r.id === open.rowId);
+    return !shown || !current || !row || confirmingRemove(row) || menuKey(current, compactControls(current)) !== open.key;
+  }
+  /** After a refresh: close a stale menu, and when focus was in it put focus back on its More
+   * button or, if that went with the row's change, on the row or its neighbours (review MEDIUM 2),
+   * but only if focus fell to `<body>`. A menu that stays open follows its button, which a list
+   * reflow can move without any scroll. */
+  function settleRowMenu(views: SavedRowView[], shown: boolean) {
+    const open = rowMenu;
+    if (!open) return;
+    if (!rowMenuStale(views, shown)) {
+      void tick().then(() => {
+        const more = rowMoreButton(open.rowId);
+        if (rowMenu !== open || !more) return;
+        const place = rowMenuPlace(more);
+        if (place.top !== open.top || place.bottom !== open.bottom || place.right !== open.right || place.up !== open.up) {
+          rowMenu = { ...open, ...place };
+        }
+      });
+      return;
+    }
+    const refocus = rowMenuHadFocus || focusInRowMenu();
+    rowMenu = null;
+    rowMenuHadFocus = false;
+    if (!refocus || !shown) return;
+    void tick().then(() => {
+      if (!focusLost()) return;
+      const rows = savedRowGroups[open.group];
+      const at = rows.findIndex((v) => v.id === open.rowId);
+      (rowMoreButton(open.rowId) ?? rowFocusTarget(open.rowId, open.group, at >= 0 ? rows[at + 1]?.id : rows[0]?.id, false))?.focus();
+    });
+  }
+  $effect(() => {
+    if (!rowMenu) return;
+    window.addEventListener("pointerdown", rowMenuPointerDown, true);
+    window.addEventListener("resize", rowMenuMoved);
+    document.addEventListener("scroll", rowMenuMoved, true);
+    return () => {
+      window.removeEventListener("pointerdown", rowMenuPointerDown, true);
+      window.removeEventListener("resize", rowMenuMoved);
+      document.removeEventListener("scroll", rowMenuMoved, true);
+    };
+  });
+  // Each refresh settles the open menu (closes it when stale, else keeps it by its button).
+  $effect(() => {
+    const views = savedRowViews;
+    void savedListViews; // PR #56: a list row's menu settles with the list too
+    const shown = view === "downloads";
+    untrack(() => settleRowMenu(views, shown));
+  });
+  // Fix-the-lows round, review L9: Clear releases a Saved row's private copy, which is the only
+  // copy left once the saved file is gone. The row skips the confirmation when a check found the
+  // file present, but that check ran once per visit, so a file deleted since would be released
+  // without asking. Clear now checks the file again first and runs at once only on a fresh
+  // "present"; any other answer (missing, replaced, unknown, a refused or unreadable check) is
+  // recorded on the row and turns the press into the inline confirmation instead. The remaining
+  // window is this check's own round trip. While it runs (up to native's 3 s bound) the Clear
+  // button is marked busy, like Show in folder, and a second press does nothing.
+  let clearingSaved = $state<Record<string, boolean>>({});
+  async function clearSavedRow(row: PrivateDownload, action: SavedRowAction, group: SavedRowGroup) {
+    const server = activeServerId, gen = viewGeneration, visit = savedCheckVisit;
+    if (server === null || locked || clearingSaved[row.id]) return;
+    clearingSaved[row.id] = true;
+    let result: SavedCheck = "unknown";
+    try {
+      result = checkedSavedCheck(await invoke<unknown>("check_saved_download",
+        { server, download: row.id, expectedIntent: row.intent }));
+    } catch {
+      result = "unknown"; // a refused or failed check proves nothing, so it asks
+    } finally {
+      delete clearingSaved[row.id];
+    }
+    if (!unlockedViewCurrent(gen, server)) return;
+    // A row that changed while it was checked has other actions now; do nothing on stale terms.
+    const now = privateDownloads.find((other) => other.id === row.id);
+    if (!now || now.status !== "saved" || now.intent !== row.intent) return;
+    savedChecks[row.id] = { intent: row.intent, result, visit };
+    if (result === "present") {
+      pressRowControl(row.id, "remove");
+      return runSavedRowAction(now, action, group);
+    }
+    await askRemove(now);
+  }
+
+  // "Show in folder" for a Saved row: native checks the file read-only first and shows it selected
+  // in the system file manager. No path comes back; a refusal is one fixed sentence, and the row
+  // is checked again so it says what is there now.
+  let revealingSaved = $state<Record<string, boolean>>({});
+  async function revealSavedRow(row: PrivateDownload) {
+    const server = activeServerId, gen = viewGeneration;
+    if (server === null || locked || revealingSaved[row.id]) return;
+    revealingSaved[row.id] = true;
+    try {
+      await invoke("reveal_saved_download", { server, download: row.id, expectedIntent: row.intent });
+    } catch (e) {
+      if (!unlockedViewCurrent(gen, server)) return;
+      toast(String(e), "warn", 6000);
+      const checked = savedChecks[row.id];
+      if (checked) savedChecks[row.id] = { ...checked, visit: -1 };
+      void checkSavedRows();
+    } finally {
+      delete revealingSaved[row.id];
+    }
+  }
+
+  // State transitions, announced politely through one live region (never chunk ticks). The region
+  // is emptied first, so the same sentence later is read out again. Each refresh also drops
+  // confirmations that no longer match their row and restores focus lost with a removed control.
+  let transfersAnnouncement = $state("");
+  let announcedRowWords: Map<string, string> | null = null;
+  $effect(() => {
+    const views = savedRowViews;
+    const shown = view === "downloads";
+    untrack(() => {
+      for (const id of Object.keys(confirmRemove)) {
+        const row = privateDownloads.find((r) => r.id === id);
+        if (!row || confirmRemove[id] !== confirmToken(row)) delete confirmRemove[id];
+      }
+      if (!shown) {
+        announcedRowWords = null;
+        lastRowFocus = null;
+        return;
+      }
+      const { announcement, words } = savedRowTransitions(announcedRowWords, views);
+      announcedRowWords = words;
+      if (announcement) {
+        transfersAnnouncement = "";
+        void tick().then(() => { transfersAnnouncement = announcement; });
+      }
+      const lost = lastRowFocus;
+      void tick().then(() => {
+        if (lost && lastRowFocus === lost && !lost.element.isConnected && focusLost()) {
+          lastRowFocus = null;
+          const rows = savedRowGroups[lost.group];
+          const at = rows.findIndex((v) => v.id === lost.row);
+          rowFocusTarget(lost.row, lost.group, at >= 0 ? rows[at + 1]?.id : rows[0]?.id,
+            lost.element.hasAttribute("data-sdl-confirm"))?.focus();
+        }
+      });
+    });
+  });
+
   // The file info pane: click a file to inspect it (preview, availability, uploader, delete).
   let fileInfo = $state<UiFile | null>(null);
+  let fileInfoKeptCopy = $derived(keptFiles?.files.find((copy) => copy.cid === fileInfo?.cid));
+  let fileInfoKeptRecord = $derived(keptFiles?.transfers.find((copy) => copy.cid === fileInfo?.cid));
+  let fileInfoKeptTransfer = $derived(fileInfoKeptCopy ? undefined : fileInfoKeptRecord);
   let fileInfoAvail = $state<boolean | null>(null); // null = still checking
   let fileInfoPreview = $state<string>(""); // a data: URL for image/video/audio previews
   let fileInfoPreviewError = $state(false); // the preview fetch failed (so "Loading…" doesn't hang)
@@ -12026,8 +13488,9 @@
   }
 
   // The "Circulates until" row. Precedence: a wiki embed pins the file regardless of any recorded
-  // deadline; then an explicit keep-forever; then a date; then a legacy listing that never
-  // recorded one. `kind` drives the styling, `text` is the row's wording.
+  // deadline; then an explicit "never expires"; then a date; then a legacy listing that never
+  // recorded one. `kind` drives the styling, `text` is the row's wording. None of these is a
+  // cache pin: circulation is server-wide, while each device's cache follows its own limit.
   type ExpiryView = { kind: "pinned" | "forever" | "date" | "unknown"; text: string };
   let fileInfoExpiry = $derived.by((): ExpiryView => {
     const f = fileInfo;
@@ -12035,23 +13498,23 @@
     if (isPinned(f.cid) || fileInfoUsage?.pinned)
       return { kind: "pinned", text: "pinned: embedded in the wiki, never drops from sharing" };
     if (!f.expires_known) return { kind: "unknown", text: "not recorded (older share)" };
-    if (f.expires === null) return { kind: "forever", text: "forever" };
+    if (f.expires === null) return { kind: "forever", text: "never expires" };
     return { kind: "date", text: `${fmtDay(f.expires)} · ${relDay(f.expires, nowTick)}` };
   });
   // Expiry is per listing and the gate is uploader / owner / admin, matching the backend.
   let canSetExpiry = $derived(
     !!fileInfo && (fileInfo.author === myFp || myRole === "owner" || myRole === "admin")
   );
-  let keptForever = $derived(!!fileInfo && fileInfo.expires_known && fileInfo.expires === null);
+  let neverExpires = $derived(!!fileInfo && fileInfo.expires_known && fileInfo.expires === null);
 
-  /** Toggle this listing between "keep forever" and a fresh 30-day circulation window. */
-  async function toggleKeepForever() {
+  /** Toggle this listing between "never expires" and a fresh 30-day circulation window. */
+  async function toggleNeverExpires() {
     if (activeServerId === null || !fileInfo) return;
     const f = fileInfo;
-    const forever = !keptForever; // the state we're moving TO
+    const forever = !neverExpires; // the state we're moving TO
     const expires = forever ? null : Date.now() + FILE_EXPIRY_DEFAULT_MS;
     fileInfoExpiryBusy = true;
-    const tid = toast(forever ? "Keeping forever…" : "Restoring 30-day expiry…", "info", 0);
+    const tid = toast(forever ? "Marking it never expires…" : "Restoring 30-day expiry…", "info", 0);
     try {
       await invoke("set_file_expiry", { server: activeServerId, cid: f.cid, path: f.path, expires });
       await refreshFiles();
@@ -12061,7 +13524,7 @@
       updateToast(
         tid,
         forever
-          ? `${f.name} will be kept in circulation forever`
+          ? `${f.name} never expires from circulation`
           : `${f.name} circulates until ${fmtDay(expires as number)}`,
         "ok"
       );
@@ -12079,12 +13542,20 @@
     cid: string;
     name: string;
     author: string; // the uploader (the file's source)
+    operation: string; // native progress correlation, never an authority token
     provider?: string; // the live serving peer's fingerprint, when bytes came over the network
     status: "queued" | "waiting" | "downloading" | "verifying" | "done" | "failed";
     progress: number; // 0..1
     done: number;
     total: number;
     heldBefore: number;
+    /** Chunks and bytes this save has written to the file so far (Transfers UX), unset before
+     * any; `done` and `bytesDone` above also count chunks already held locally. */
+    savedDone?: number;
+    savedBytes?: number;
+    /** This save starts a new file (Save new copy, Save again, Save another copy, or Save as on a
+     * row with a journal): the row's durable saved counts belong to the earlier file. */
+    fresh?: boolean;
     bytesDone: number;
     bytesTotal: number;
     networkBytesDone: number;
@@ -12098,7 +13569,13 @@
   // Keyed by `${server}:${cid}` so a download is scoped to its server (the same content cid can
   // exist on two servers, and switching servers must not show the other's transfers).
   let downloads = $state<Record<string, DownloadInfo>>({});
+  // Actual invocation ownership is independent of historical display status. A completion in
+  // another view must retire its own busy token without publishing a stale path or notice.
+  let activeSaves = $state<Record<string, string>>({});
   const dlKey = (server: number, cid: string) => `${server}:${cid}`;
+  function saveInProgress(cid: string): boolean {
+    return activeServerId !== null && !!activeSaves[dlKey(activeServerId, cid)];
+  }
   type UploadInfo = {
     server: number;
     id: string;
@@ -12138,6 +13615,23 @@
       ...uploadList.map((u): TransferRow => ({ ...u, direction: "upload", key: `upload:${u.id}` })),
     ].sort((a, b) => b.ts - a.ts)
   );
+  // The Transfers tab's live list: everything except a download whose private row is listed
+  // above it, which carries that save's progress itself (one row per file). The status bar keeps
+  // counting every transfer.
+  // PR #56: a finished download whose file is now listed as saved shows once, in the Saved group.
+  let liveTransferList = $derived(
+    transferList.filter((t) => (t.direction !== "download" || !privateDownloadCids.has(t.cid)) &&
+      liveTransferShown(t, savedCids))
+  );
+  let liveMovingTransfers = $derived(
+    liveTransferList.filter((t) => transferIsActive(t) && transferConnected(t)).length
+  );
+  let liveWaitingTransfers = $derived(Math.max(0, liveTransferList.filter((t) =>
+    t.status === "queued" || t.status === "waiting" || t.status === "downloading" ||
+    t.status === "verifying" || t.status === "reading" || t.status === "uploading" ||
+    t.status === "publishing"
+  ).length - liveMovingTransfers));
+  let liveFinishedTransfers = $derived(liveTransferList.filter((t) => t.status === "done" || t.status === "failed").length);
   let activeTransfers = $derived(
     transferList.filter((t) =>
       t.status === "queued" || t.status === "waiting" || t.status === "downloading" ||
@@ -12705,7 +14199,7 @@
       toast("Announcements are a server noticeboard; a DM does not have one", "info", 3500);
       return;
     }
-    if (!(await route.leave())) return; // nor through switchView's Studio Save, so it runs its own
+    if (!(await route.leave()) || !route.current() || windowCloseInFlight) return; // nor through switchView's Studio Save, so it runs its own
     view = "status";
     void refreshStatusPolicy(); // this route reaches the surface without going through switchView
     if (!statuses.some((s) => s.id === id)) await refreshStatuses();
@@ -12866,6 +14360,7 @@
   /// The inbox replaces the main pane, so opening it takes the Studio off screen. `then` runs only
   /// once the inbox actually opened (never after a refused Studio Save).
   function openInbox(then: () => void = () => {}) {
+    if(chatBackend==="text-v2")return;
     leaveStudioThen(() => {
       inboxView = true;
       dmHome = false;
@@ -12888,7 +14383,7 @@
       inboxView = false;
       // A refused or superseded switch leaves another server on screen; never jump within it.
       if (!(await arriveAtServer(it.server, route))) return;
-      if (!(await route.leave())) return; // the switch awaited the server's load
+      if (!(await route.leave()) || !route.current() || windowCloseInFlight) return; // the switch awaited the server's load
       view = "chat";
       // The entry's channel was scanned (so it's open in the backend) but may not be in this UI's
       // sidebar list: register it so it renders + selects, then switch to it.
@@ -12914,6 +14409,9 @@
     fp: string;
     server: number;
     channel: string;
+    // A channel name can be left and rejoined. RTC callbacks belong to this exact join,
+    // as well as this exact peer object; identity or room equality cannot renew them.
+    callLease: number;
     pc: RTCPeerConnection;
     dc: RTCDataChannel | null;
     polite: boolean;
@@ -12954,6 +14452,14 @@
   // Call-server members whose fingerprint another member shares, so call labels can say so.
   let callSharedIds = $state<ReadonlySet<string>>(new Set());
   let activeCallLease = 0; // binds async call-only caches to this exact room lifecycle
+  // Which signalling protocol owns the current join (voice-signaling.ts CallSignalMode). Pinned by
+  // joinVoice before anything is sent and reset only by leaveVoice, so a V2 join never falls back
+  // to legacy. V2 is not chosen yet (voiceV2Activation lists what is missing), so every call is
+  // legacy today and the V2 gates in handleCallSignal/sendSignal stay inert until activation.
+  let callSignalMode: CallSignalMode = "legacy";
+  // Legacy kinds already diagnosed as excluded in this join: each protocol word is recorded once,
+  // so legacy peers pinging a V2 room every five seconds cannot flood the diagnostics ring.
+  const legacyExcludedKinds = new Set<string>();
   // Names and avatars on the call surfaces MUST resolve against the room's server, never the
   // viewed one. `profiles` is replaced wholesale on every server switch (see refreshProfiles),
   // so reading it from the call bar re-labelled you and every peer the moment you clicked
@@ -13002,6 +14508,15 @@
   let localStream: MediaStream | null = null;
   const micCaptureSession = new MediaCaptureSession();
   const callLifecycleSession = new MediaCaptureSession();
+  const callMappingSession = new CallMappingSession(invoke);
+  function destroyVoiceOnUnmount() {
+    // HMR can replace this component without destroying the WebView. Revoke old callbacks
+    // before teardown, then close RTC/media and pending capture through the ordinary leave path.
+    callLifecycleSession.invalidate();
+    try { leaveVoice(); }
+    finally { callMappingSession.destroy(); }
+  }
+  onDestroy(destroyVoiceOnUnmount);
   const callPeers: Record<string, CallPeer> = {};
   // Trickle ICE may beat the offer over independent Tauri invokes. Hold it until that peer has a
   // remote description instead of throwing it away and making the call depend on event timing.
@@ -13223,8 +14738,11 @@
     // wrote, so it is safe to record and it is what turns a wall of identical warnings into
     // "every ice candidate failed while the offer got through".
     const kind = typeof msg.type === "string" ? msg.type : "unknown";
+    // Nothing legacy leaves for a V2 join's room: a legacy hello or ping would invite older builds
+    // into the protected call, and a legacy bye is not how a V2 join leaves (the native end is).
+    if (legacyCallSignalEgress({ mode: callSignalMode, inCall, callServer, callChannel, server, channel: msg.callId }) === "suppress") return false;
     try {
-      const { value: delivered } = await invokeDebugged<boolean>("send_call_signal", {
+      const { value: submitted } = await invokeDebugged<boolean>("send_call_signal", {
         server,
         target,
         payload: b64enc(JSON.stringify(msg)),
@@ -13232,7 +14750,7 @@
       // The incident this whole section exists for: the roster shows a claimed path and the
       // transport has nowhere to send to. A run of these is a call that is about to die, and it
       // used to be a console.warn nobody had open.
-      if (!delivered) {
+      if (!submitted) {
         diagRecord({
           section: "voice",
           code: "VOICE.SIGNAL.NO_MEMBER_ROUTE",
@@ -13240,7 +14758,7 @@
           fields: { kind },
         });
       }
-      return delivered;
+      return submitted;
     } catch (e) {
       diagRecord({
         section: "voice",
@@ -13270,7 +14788,12 @@
   function broadcast(msg: Record<string, unknown>) {
     const server = callServer;
     const selfId = callSelfId;
-    if (server !== null && selfId) void broadcastOn(server, selfId, msg);
+    if (server === null || !selfId) return;
+    // Decide legacy egress now, for the join that created this message. broadcastOn awaits the
+    // roster first; by then teardown (or the next call) may have reset the global mode, and the
+    // final check in sendSignal would judge this old V2-room message by the new state.
+    if (legacyCallSignalEgress({ mode: callSignalMode, inCall, callServer, callChannel, server, channel: msg.callId }) === "suppress") return;
+    void broadcastOn(server, selfId, msg);
   }
   /**
    * Say goodbye, on every route at once, before the room is torn down.
@@ -13293,6 +14816,11 @@
    */
   function announceHangup(server: number, selfId: string, channel: string) {
     const farewell = { callId: channel, type: "bye" };
+    // Bind the legacy decision to the join being left, before the roster await below: leaveVoice
+    // resets callSignalMode synchronously after this returns, so a check at send time would let a
+    // V2 join's farewell out as a legacy bye. A V2 join leaves through its native end instead.
+    const legacyFarewell =
+      legacyCallSignalEgress({ mode: callSignalMode, inCall, callServer, callChannel, server, channel }) === "send";
     const edges: string[] = [];
     for (const [id, peer] of Object.entries(callPeers)) {
       edges.push(id);
@@ -13300,6 +14828,7 @@
         try { peer.dc.send(JSON.stringify({ t: "bye" })); } catch { /* edge already gone */ }
       }
     }
+    if (!legacyFarewell) return;
     void (async () => {
       // Peers with an edge are told whatever the roster read does, including nothing at all: an
       // established edge is better evidence that someone is in this room than the online list is.
@@ -15872,6 +17401,7 @@
     tweenSpaceCamera(spaceClusterAnchor(id), fxMotionOff ? 1 : duration);
   }
   function toggleSpace() {
+    if(chatBackend==="text-v2")return;
     clearTimeout(spaceEnterTimer);
     stopSpaceCameraTween();
     spaceEntering = null;
@@ -18502,11 +20032,22 @@
   );
   let focusCols = $derived(focusTiles.length <= 1 ? 1 : focusTiles.length <= 4 ? 2 : 3);
 
+  // Account lock and call invalidation can precede map cleanup. Check both owners, including
+  // after every RTC await; only the state-change handler may retain a closed PC for cleanup.
+  function isCurrentCallJoin(lease: number, server: number, channel: string): boolean {
+    return !locked && inCall && callServer === server && callChannel === channel &&
+      lease === activeCallLease && callLifecycleSession.isCurrent(lease);
+  }
+  function isCurrentCallPeer(peer: CallPeer, allowClosed = false): boolean {
+    return isCurrentCallJoin(peer.callLease, peer.server, peer.channel) &&
+      callPeers[peer.fp] === peer && (allowClosed || peer.pc.signalingState !== "closed");
+  }
   async function negotiatePeer(peer: CallPeer) {
-    if (callPeers[peer.fp] !== peer || peer.pc.signalingState === "closed") return;
+    if (!isCurrentCallPeer(peer)) return;
     try {
       peer.makingOffer = true;
       await peer.pc.setLocalDescription();
+      if (!isCurrentCallPeer(peer)) return;
       if (peer.pc.localDescription?.type === "offer") {
         void sendSignal(peer.server, peer.fp, {
           callId: peer.channel,
@@ -18521,10 +20062,11 @@
     }
   }
   async function flushWaitingIce(peer: CallPeer) {
-    if (!peer.pc.remoteDescription) return;
+    if (!isCurrentCallPeer(peer) || !peer.pc.remoteDescription) return;
     const queued = waitingIce[peer.fp] ?? [];
     delete waitingIce[peer.fp];
     for (const candidate of queued) {
+      if (!isCurrentCallPeer(peer)) return;
       try {
         await peer.pc.addIceCandidate(new RTCIceCandidate(candidate));
       } catch (e) {
@@ -18533,6 +20075,7 @@
     }
   }
   function recoverPeer(peer: CallPeer) {
+    if (!isCurrentCallPeer(peer)) return;
     const now = Date.now();
     if (now - peer.lastRetry < 4000) return;
     const action = heartbeatRecovery({
@@ -18562,9 +20105,12 @@
   // difference in what leaks and the room deserves to be told, so it is surfaced rather than
   // averaged away. Best-effort throughout: on any miss the badge stays unknown, which is an
   // honest answer, where guessing "direct" would not be.
-  async function sniffTransport(fp: string, pc: RTCPeerConnection) {
+  async function sniffTransport(peer: CallPeer) {
+    if (!isCurrentCallPeer(peer)) return;
+    const { fp, pc } = peer;
     try {
       const stats = await pc.getStats();
+      if (!isCurrentCallPeer(peer)) return;
       let codecId = "";
       stats.forEach((stat) => {
         const outbound = stat as RTCStats & {
@@ -18618,12 +20164,11 @@
   // UDP ports this call asked the router to open (bound-interface IGD on the native side, the
   // same path the invite reachability fix proved out). One mapping per local ICE port; the
   // granted public socket is signalled to the peer as an extra srflx candidate. A router mapping
-  // forwards from any source, so ONE mapped side connects the pair no matter how hostile the
-  // other side's NAT is: the same one-public-route-suffices shape as invites. `null` marks a
-  // port that was tried and refused, so renegotiations don't re-ask the router every time.
+  // forwards from any source, so ONE mapped side can help the pair traverse NAT. An empty
+  // grant marks a pending/refused attempt, so renegotiations do not repeatedly ask the router.
   // The eligibility rule, the candidate builder and the status phrasing live in callroutes.ts,
   // where they are unit-tested.
-  const mappedCallPorts = new Map<number, MappedPort | null>();
+  const mappedCallPorts = new Map<number, { granted: MappedPort | null; pending: Promise<MappedPort | null> | null }>();
   // Reactive shadow of how many router-mapped routes this call holds, for the status line: a
   // plain Map mutation is invisible to $derived.
   let callMappedRoutes = $state(0);
@@ -18635,37 +20180,53 @@
   // silently, because a filter nobody can see is indistinguishable from a bug when a call fails.
   let suppressedIceCandidates = $state(0);
   async function refreshDefaultRoute() {
+    const lease = activeCallLease, server = callServer, channel = callChannel;
+    if (server === null || !channel || !isCurrentCallJoin(lease, server, channel)) return;
+    // A prior call's interface is not evidence for this one, especially after a network change.
+    // Unknown route signals all candidates while lookup awaits; suppressed ICE is not replayed.
+    defaultRouteIpv4 = null;
     try {
-      defaultRouteIpv4 = await invoke<string | null>("default_route_address");
+      const address = await invoke<string | null>("default_route_address");
+      if (isCurrentCallJoin(lease, server, channel)) defaultRouteIpv4 = address;
     } catch {
-      defaultRouteIpv4 = null; // unknown route: signal everything, as before
+      if (isCurrentCallJoin(lease, server, channel)) defaultRouteIpv4 = null;
     }
   }
 
   async function signalMappedCandidate(peer: CallPeer, c: RTCIceCandidate) {
+    if (!isCurrentCallPeer(peer)) return;
     if (!mappableIcePort(c)) return;
     const policy = mappingAddressPolicy(c.address);
     if (!policy.map) return; // an IPv6/hostname socket is not what an IPv4 mapping reaches
     const port = c.port as number;
-    if (!mappedCallPorts.has(port)) {
-      mappedCallPorts.set(port, null); // claim before the await so a concurrent candidate doesn't double-map
-      try {
-        const granted = await invoke<MappedPort>("map_call_port", { port, address: policy.claim });
-        mappedCallPorts.set(port, granted);
-        callMappedRoutes += 1;
-        console.info("voice: router mapped the media port", {
-          port,
-          via: granted.mechanism,
-          confirmed: granted.confirmed,
-        });
-      } catch (e) {
-        // Advisory: STUN/TURN candidates still flow; the router simply couldn't help this call.
-        console.warn("voice: router would not map the media port", { port, error: String(e) });
-        return;
-      }
+    const localSdp = peer.pc.localDescription?.sdp ?? null;
+    let owned = mappedCallPorts.get(port);
+    if (!owned) {
+      // Mapping custody is call-wide, not peer-wide: a replaced peer must not strand a live
+      // call's grant. The owned slot additionally rejects a same-port clear/replacement ABA.
+      const slot = { granted: null as MappedPort | null, pending: null as Promise<MappedPort | null> | null };
+      mappedCallPorts.set(port, slot);
+      owned = slot;
+      // Every current peer using this port waits on the same acquisition. Its completion owns
+      // only call-wide mapping custody; each waiter supplies its own candidate and ICE generation.
+      slot.pending = (async () => {
+        try {
+          const granted = await callMappingSession.map(peer.callLease, port, policy.claim);
+          if (!granted || !isCurrentCallJoin(peer.callLease, peer.server, peer.channel) || mappedCallPorts.get(port) !== slot) return null;
+          slot.granted = granted;
+          callMappedRoutes += 1;
+          console.info("voice: router mapped the media port", { port, via: granted.mechanism, confirmed: granted.confirmed });
+          return granted;
+        } catch (e) {
+          // Advisory: STUN/TURN candidates still flow; the router simply couldn't help this call.
+          console.warn("voice: router would not map the media port", { port, error: String(e) });
+          return null;
+        }
+      })();
     }
-    const ext = mappedCallPorts.get(port);
-    if (!ext) return;
+    const ext = await owned.pending;
+    if (!ext || mappedCallPorts.get(port) !== owned || !isCurrentCallPeer(peer)
+      || !mappedIceIsCurrent(c, localSdp, peer.pc.localDescription?.sdp ?? null)) return;
     void sendSignal(peer.server, peer.fp, {
       callId: peer.channel,
       type: "ice",
@@ -18674,9 +20235,8 @@
   }
 
   function releaseMappedCallPorts() {
-    for (const [port, granted] of mappedCallPorts) {
-      if (granted) void invoke("unmap_call_port", { port }).catch(() => {});
-    }
+    // Revoke the native owner, including acquisitions that have not returned a grant yet.
+    callMappingSession.endCall();
     mappedCallPorts.clear();
     callMappedRoutes = 0;
   }
@@ -18685,12 +20245,13 @@
     if (callPeers[fp]) return callPeers[fp];
     const server = callServer;
     const channel = callChannel;
-    if (server === null || !channel || !callSelfId) return null;
+    if (locked || !inCall || server === null || !channel || !callSelfId || !callLifecycleSession.isCurrent(activeCallLease)) return null;
     const pc = new RTCPeerConnection({ iceServers: iceServers() });
     const peer: CallPeer = {
       fp,
       server,
       channel,
+      callLease: activeCallLease,
       pc,
       dc: null,
       polite: isPoliteTowards(callSelfId, fp),
@@ -18736,11 +20297,15 @@
       ensureJamEngine().setSourceLevel(fp, peerInstLevelFor(fp) / 100); // the trim you set for them last time
       const dc = peer.dc;
       dc.onopen = () => {
+        if (!isCurrentCallPeer(peer) || peer.dc !== dc || dc.readyState !== "open") return;
         pushInstState();
         void openJamOutboundEdge(dc); // publication barrier before this edge's first note/drum
         jamMetHello(dc); // and, if I anchor the grid, the running metronome
       };
-      dc.onmessage = (e) => handleJamFrame(fp, jamChan, jamDec, e.data);
+      dc.onmessage = (e) => {
+        if (!isCurrentCallPeer(peer) || peer.dc !== dc) return;
+        handleJamFrame(fp, jamChan, jamDec, e.data);
+      };
     } catch {
       /* data channels unavailable: voice still works */
     }
@@ -18749,7 +20314,7 @@
     const claims = drawClaims;
     if (claims) {
       peer.draw = openDrawEdge(pc, claims, fp, {
-        live: () => callPeers[fp] === peer,
+        live: () => isCurrentCallPeer(peer),
         changed: () => {
           if (drawClaims === claims) syncDrawClaims();
         },
@@ -18759,6 +20324,7 @@
     // later. The no-argument setLocalDescription picks offer/answer from the signaling state.
     pc.onnegotiationneeded = () => void negotiatePeer(peer);
     pc.onicecandidate = (e) => {
+      if (!isCurrentCallPeer(peer)) return;
       if (e.candidate) {
         // A candidate on one of this machine's virtual adapters can never be reached from
         // outside, and sending it costs the far end a connectivity check before ICE settles.
@@ -18770,13 +20336,17 @@
         void signalMappedCandidate(peer, e.candidate);
       }
     };
-    pc.onicecandidateerror = (e) => console.warn("voice ICE server/candidate error", {
-      peer: displayKey(fp),
-      code: e.errorCode,
-      text: e.errorText,
-      url: e.url,
-    });
+    pc.onicecandidateerror = (e) => {
+      if (!isCurrentCallPeer(peer)) return;
+      console.warn("voice ICE server/candidate error", {
+        peer: displayKey(fp),
+        code: e.errorCode,
+        text: e.errorText,
+        url: e.url,
+      });
+    };
     pc.ontrack = (e) => {
+      if (!isCurrentCallPeer(peer)) return;
       const stream = e.streams[0];
       if (!stream) return;
       if (e.track.kind === "audio") {
@@ -18790,19 +20360,22 @@
       // that arrived first, in which case that audio moves to the share chain.
       if (remoteAudioRouter.noteVideo(fp, stream.id)) regroupRemoteAudio(fp, stream.id);
       remoteStreams = { ...remoteStreams, [fp]: stream };
-      e.track.onended = () => dropRemoteVideo(fp, stream);
+      e.track.onended = () => { if (isCurrentCallPeer(peer)) dropRemoteVideo(fp, stream); };
       stream.onremovetrack = () => {
+        if (!isCurrentCallPeer(peer)) return;
         if (!stream.getVideoTracks().length) dropRemoteVideo(fp, stream);
       };
     };
     pc.onconnectionstatechange = () => {
+      // A current closed PC still owns its cleanup. A retired PC owns no replacement state.
+      if (!isCurrentCallPeer(peer, true)) return;
       callPeerStates = { ...callPeerStates, [fp]: pc.connectionState };
       // Claims never outlive a dead link, and an unreachable peer is absent until this side sees
       // it "connected" again (draw-wiring.ts).
       if (claims && callPeers[fp] === peer && drawClaims === claims) {
         drawConnectionState(claims, fp, pc.connectionState, peer.draw, syncDrawClaims);
       }
-      if (pc.connectionState === "connected") void sniffTransport(fp, pc);
+      if (pc.connectionState === "connected") void sniffTransport(peer);
       if (pc.connectionState === "failed") recoverPeer(peer);
       else if (pc.connectionState === "closed") removePeer(fp);
     };
@@ -19042,6 +20615,9 @@
     // slow: nothing was set, so the button did nothing, no error appeared, and the only visible
     // fact was that leaving a call had cost the ability to join another one. So the room is entered
     // first and the microphone attaches to it when (and if) the device answers.
+    // Pin the protocol before the room becomes current and before the first hello, so no legacy
+    // signal is admitted into (or sent from) a V2 join in between.
+    callSignalMode = voiceV2Activation().available ? "v2" : "legacy";
     localStream = null;
     micOn = false;
     callServer = server;
@@ -19055,6 +20631,7 @@
     callServerName = servers.find((s) => s.id === server)?.name ?? "";
     inCall = true;
     activeCallLease = joinLease;
+    callMappingSession.start(joinLease, server, channel);
     ensureJamEngine(); // fresh engine, session nonce and sequence domain for this call
     void ensurePublishedJamPatch(); // local echo + every edge wait on the same verified recipe
     void refreshCallProfiles();
@@ -19088,7 +20665,7 @@
         // Re-read the winning candidate pair: an ICE restart can migrate a live call from
         // direct to relayed (or back) with no connection-state change to notice it by.
         for (const [fp, p] of Object.entries(callPeers)) {
-          if (p.pc.connectionState === "connected") void sniffTransport(fp, p.pc);
+          if (p.pc.connectionState === "connected") void sniffTransport(p);
         }
       }
     }, 5000);
@@ -19226,6 +20803,10 @@
     callSelfId = "";
     callSharedIds = new Set();
     activeCallLease = 0;
+    // After announceHangup above: a V2 room's legacy bye stays suppressed until the call is gone.
+    callSignalMode = "legacy";
+    legacyExcludedKinds.clear();
+    defaultRouteIpv4 = null;
     callProfiles = {};
     peerTransport = {};
     peerVideoCodec = {};
@@ -19383,9 +20964,24 @@
     } catch {
       return;
     }
-    const cid = msg.callId as string | undefined;
-    const type = msg.type as string | undefined;
-    if (!cid || !type) return;
+    // Validate the parsed shape before any gate or state. Room and type must be non-empty strings:
+    // presence keys are built with `${server}:${channel}`, which coerced other values into a real
+    // room (an array ["7"] or the number 7 became "7") after they had slipped past the V2 fence.
+    if (!msg || typeof msg !== "object" || Array.isArray(msg)) return;
+    const cid = msg.callId;
+    const type = msg.type;
+    if (typeof cid !== "string" || !cid || typeof type !== "string" || !type) return;
+    // A V2 join's room has no legacy writer: no legacy presence, peer, SDP, ICE or bye may touch it,
+    // whatever capability fields are missing or whichever helper relayed it (VOICE-SIGNALLING-V2.md).
+    // This runs before the presence writes below. Other rooms keep their legacy presence meaning.
+    if (legacyCallSignalAdmission({ mode: callSignalMode, inCall, callServer, callChannel, server, channel: cid }) === "exclude") {
+      const kind = legacyCallSignalKind(type);
+      if (!legacyExcludedKinds.has(kind)) {
+        legacyExcludedKinds.add(kind);
+        diagRecord({ section: "voice", code: "VOICE.V2.LEGACY_EXCLUDED", level: "info", fields: { kind } });
+      }
+      return;
+    }
     const currentRoom = inCall && isCurrentVoiceRoom(callServer, callChannel, server, cid);
     // Presence: both "hello" (a newcomer) and "voice-ping" (heartbeat) mean someone's in a room.
     if (type === "hello" || type === "voice-ping") {
@@ -19443,7 +21039,7 @@
       createPeer(fromFp); // its tracks + data channel raise onnegotiationneeded, which sends the offer
     } else if (type === "offer") {
       const peer = callPeers[fromFp] ?? createPeer(fromFp);
-      if (!peer) return;
+      if (!peer || !isCurrentCallPeer(peer)) return;
       const pc = peer.pc;
       // Perfect negotiation, answer side: on a collision the impolite end ignores the incoming
       // offer (its own is in flight and will win); the polite end lets setRemoteDescription
@@ -19453,11 +21049,14 @@
       if (peer.ignoreOffer) return;
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit));
+        if (!isCurrentCallPeer(peer)) return;
         for (const transceiver of pc.getTransceivers()) {
           if (transceiver.receiver.track.kind === "video") preferVideoCodecs(transceiver);
         }
         await flushWaitingIce(peer);
+        if (!isCurrentCallPeer(peer)) return;
         await pc.setLocalDescription(); // no-arg picks "answer" from the have-remote-offer state
+        if (!isCurrentCallPeer(peer)) return;
         void sendSignal(server, fromFp, { callId: cid, type: "answer", sdp: pc.localDescription });
       } catch (e) {
         console.warn("voice offer handling failed", { peer: displayKey(fromFp), error: String(e) });
@@ -19466,9 +21065,10 @@
       const peer = callPeers[fromFp];
       const pc = peer?.pc;
       // Guard against a stale answer landing after a rollback settled the state.
-      if (peer && pc && pc.signalingState === "have-local-offer") {
+      if (peer && pc && isCurrentCallPeer(peer) && pc.signalingState === "have-local-offer") {
         try {
           await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit));
+          if (!isCurrentCallPeer(peer)) return;
           await flushWaitingIce(peer);
         } catch (e) {
           console.warn("voice answer handling failed", { peer: displayKey(fromFp), error: String(e) });
@@ -19527,6 +21127,9 @@
   // `onDispatch` is told just before the request leaves for the native side: from then on it may
   // have committed whatever comes back (see `send`).
   async function submitPendingSend(intent: PendingSend, session: number, originalDraftRevision: number | undefined = undefined, onDispatch: () => void = () => {}): Promise<SendMessageResult> {
+    // Native Stop validates the original mutation too. Never dispatch this old invalid
+    // payload, including a previously sealed resolution, or rewrite its diagnostics.
+    if (quarantinedPendingIntent(intent)) throw new Error("Open Pending messages to recover this saved request. It cannot be retried.");
     const draftKey = chatScopeKey(intent.server, intent.channel);
     const draftRevision = originalDraftRevision ?? draftRevisions[draftKey] ?? 0;
     let result: SendMessageResult;
@@ -19534,21 +21137,39 @@
       if (!pendingSubmissionCurrent(intent, session)) throw new Error("This pending request is being resolved or its session changed.");
       // Seal uncertainty before dispatch, even on retry. Native errors and token conflicts do
       // not prove absence: a previous invocation may already have committed this identity.
-      pendingSends[intent.token] = { ...pendingSends[intent.token], acceptance: "ambiguous" };
+      if (!intent.resolution) pendingSends[intent.token] = { ...pendingSends[intent.token], acceptance: "ambiguous" };
       // Also covers retry after an earlier continuity-write failure. No native authoring
       // request may outlive the only copy of its caller identity.
       if (!(await saveUiStateImmediately()) || !pendingSubmissionCurrent(intent, session)) {
         throw new Error("Save the pending message in this vault before retrying it.");
       }
       onDispatch();
-      result = (await invokeDebugged<SendMessageResult>("send_message", {
-        server: intent.server, channel: intent.channel, text: intent.text, replyTo: intent.replyTo,
-        retryToken: intent.token, expectedContext: intent.expectedContext,
-      })).value;
+      const common = { server: intent.server, channel: intent.channel,
+        retryToken: intent.token, expectedContext: intent.expectedContext };
+      // A saved negative decision always wins. Errors/restarts cannot turn Stop back
+      // into the positive operation, even when the original reply was never observed.
+      if (intent.resolution) {
+        result = (await invokeDebugged<SendMessageResult>("stop_durable_chat", {
+          server: intent.server, original: durableStopOriginal(intent),
+        })).value;
+      } else if (intent.kind === "edit") {
+        result = (await invokeDebugged<SendMessageResult>("edit_message", {
+          ...common, id: intent.messageId, target: intent.target,
+          text: intent.text,
+        })).value;
+      } else if (intent.kind === "delete") {
+        result = (await invokeDebugged<SendMessageResult>("delete_message", {
+          ...common, id: intent.messageId, target: intent.target,
+        })).value;
+      } else {
+        result = (await invokeDebugged<SendMessageResult>("send_message", {
+          ...common, text: intent.text, replyTo: intent.replyTo,
+        })).value;
+      }
     } catch (failure) {
       if (pendingSubmissionCurrent(intent, session)) {
         pendingSendErrors[intent.token] = errorText(failure);
-        const block = pendingSendRetryBlock(errorText(failure));
+        const block = intent.resolution ? undefined : pendingSendRetryBlock(errorText(failure));
         const current = pendingSends[intent.token];
         if (current && current.retryBlock !== block) {
           pendingSends[intent.token] = { ...current, retryBlock: block };
@@ -19557,22 +21178,61 @@
       }
       throw failure;
     }
-    if (pendingSubmissionCurrent(intent, session) && result.persistence.status === "superseded") {
+    if (!intent.resolution && result.disposition === "stopped-retired" && durableStopTerminal(result)
+      && pendingSubmissionCurrent(intent, session)) {
+      // A stale positive continuity copy can encounter a native fence saved by a
+      // different session. The synced negative terminal grants no new authoring.
+      // Seal negative custody before removal so lock/cleanup failure can only
+      // repeat Stop. Keep send/edit text for explicit recovery rather than lose it.
+      let resolving: PendingSend | undefined;
+      await savePendingDecision(intent.token, () => {
+        if (!samePendingIntent(pendingSends[intent.token], intent)) throw new Error("The retired request changed before its Stop decision was saved.");
+        resolving = { ...pendingSends[intent.token], acceptance: "ambiguous",
+          resolution: intent.kind === "delete" ? "cancel" : "recover" };
+        const next = { ...pendingSends, [intent.token]: resolving };
+        if (uiContinuityVersion < 2) uiContinuityVersion = 2;
+        return { json: JSON.stringify({ ...JSON.parse(continuityJson()), pendingSends: next }),
+          commit: () => { pendingSends = next; } };
+      });
+      if (resolving && pendingSubmissionCurrent(resolving, session)) intent = resolving;
+    }
+    if (!intent.resolution && pendingSubmissionCurrent(intent, session) && result.persistence.status === "superseded") {
       pendingSends[intent.token] = { ...pendingSends[intent.token], retryBlock: "context_changed" };
       await saveUiStateImmediately();
     } else if (pendingSubmissionCurrent(intent, session) && result.persistence.status !== "durable" && pendingSends[intent.token]?.retryBlock) {
       pendingSends[intent.token] = { ...pendingSends[intent.token], retryBlock: undefined };
       await saveUiStateImmediately();
     }
-    if (pendingSubmissionCurrent(intent, session) && result.accepted && result.persistence.status === "durable") {
+    if (intent.resolution && pendingSubmissionCurrent(intent, session)) {
+      if (durableStopTerminal(result)) {
+        // Native has saved an exact-token terminal. Only now may continuity release
+        // its slot; a failed cleanup write safely replays the same Stop after reload.
+        await savePendingDecision(intent.token, () => {
+          if (!samePendingIntent(pendingSends[intent.token], intent)) throw new Error("The pending Stop decision changed.");
+          // A retired-server fence establishes only future non-publication. Preserve
+          // historical ambiguity in any recovered copy, even for a legacy fresh marker.
+          const pending = result.disposition === "stopped-retired"
+            ? { ...pendingSends, [intent.token]: { ...pendingSends[intent.token], acceptance: "ambiguous" as const } }
+            : pendingSends;
+          const next = resolvePendingSend(pending, recoveredSendDrafts, intent.token, intent.resolution!);
+          return { json: JSON.stringify({ ...JSON.parse(continuityJson()), pendingSends: next.pending, recoveredSendDrafts: next.recovered }),
+            commit: () => { pendingSends = next.pending; recoveredSendDrafts = next.recovered; delete pendingSendErrors[intent.token]; } };
+        });
+        if (result.disposition === "stopped-retired" && !locked && session === uiStateLoadGeneration) toast(retiredStopWarning(intent), "warn", 12000);
+      }
+    } else if (pendingSubmissionCurrent(intent, session) && result.accepted && result.persistence.status === "durable" && result.disposition !== "stopped-retired"
+      && ((intent.kind !== "edit" && intent.kind !== "delete") || result.disposition === "committed")) {
       delete pendingSends[intent.token];
       delete pendingSendErrors[intent.token];
-      const key = chatScopeKey(intent.server, intent.channel);
-      const sameDraft = (draftRevisions[key] ?? 0) === draftRevision;
-      if (sameDraft && drafts[key]?.trim() === intent.text) delete drafts[key];
-      if (sameDraft && activeServerId === intent.server && cur?.active === intent.channel && draft.trim() === intent.text) {
-        draft = "";
-        replyingTo = "";
+      // Mutations never own the composer, even when their text happens to match it.
+      if (intent.kind !== "edit" && intent.kind !== "delete") {
+        const key = chatScopeKey(intent.server, intent.channel);
+        const sameDraft = (draftRevisions[key] ?? 0) === draftRevision;
+        if (sameDraft && drafts[key]?.trim() === intent.text) delete drafts[key];
+        if (sameDraft && activeServerId === intent.server && cur?.active === intent.channel && draft.trim() === intent.text) {
+          draft = "";
+          replyingTo = "";
+        }
       }
       // If cleanup cannot persist, replaying the still-sealed token is safe on next unlock.
       await saveUiStateImmediately();
@@ -19583,8 +21243,7 @@
   function pendingSubmissionCurrent(intent: PendingSend, session: number): boolean {
     const current = pendingSends[intent.token];
     return !locked && uiStateReady && !windowCloseInFlight && session === uiStateLoadGeneration && pendingSendResolution === null
-      && !!current && current.server === intent.server && current.channel === intent.channel
-      && current.text === intent.text && current.replyTo === intent.replyTo && current.expectedContext === intent.expectedContext;
+      && !!current && samePendingIntent(current, intent);
   }
 
   /** A resolution owns this queue entry until both the sealed write and local commit finish. */
@@ -19615,13 +21274,38 @@
   }
 
   async function resolvePendingMessage(token: string, action: PendingResolution): Promise<void> {
+    if (pendingSends[token] && quarantinedPendingIntent(pendingSends[token])) {
+      if (action !== "recover") throw new Error("Open Pending messages to recover this saved request. This request will stay paused.");
+      // This local custody move makes no claim about the original native outcome.
+      // Failure keeps BOTH shelves unchanged; the saved original is never truncated.
+      await savePendingDecision(token, () => {
+        const next = recoverQuarantinedIntent(pendingSends, recoveredSendDrafts, token);
+        return { json: JSON.stringify({ ...JSON.parse(continuityJson()), pendingSends: next.pending, recoveredSendDrafts: next.recovered }),
+          commit: () => { pendingSends = next.pending; recoveredSendDrafts = next.recovered; delete pendingSendErrors[token]; } };
+      });
+      return;
+    }
+    const session = uiStateLoadGeneration;
+    // First seal the irreversible choice with the complete original request. No native
+    // Stop may outlive this recovery identity, and no later retry may author positively.
     await savePendingDecision(token, () => {
-      const next = resolvePendingSend(pendingSends, recoveredSendDrafts, token, action);
+      const original = pendingSends[token];
+      if (!original) throw new Error("This pending message has already been resolved.");
+      if (original.resolution && original.resolution !== action) throw new Error("This request already has a saved Stop decision.");
+      // Check recovery capacity before committing Stop: retain the requested full copy.
+      resolvePendingSend(pendingSends, recoveredSendDrafts, token, action);
+      if (uiContinuityVersion < 2) uiContinuityVersion = 2;
+      const next = { ...pendingSends, [token]: { ...original, resolution: action } };
       return {
-        json: JSON.stringify({ ...JSON.parse(continuityJson()), pendingSends: next.pending, recoveredSendDrafts: next.recovered }),
-        commit: () => { pendingSends = next.pending; recoveredSendDrafts = next.recovered; delete pendingSendErrors[token]; },
+        json: JSON.stringify({ ...JSON.parse(continuityJson()), pendingSends: next }),
+        commit: () => { pendingSends = next; },
       };
     });
+    const intent = pendingSends[token];
+    if (!intent || !pendingSubmissionCurrent(intent, session)) throw new Error("This pending request is being resolved or its session changed. The saved Stop decision is retained.");
+    const result = await submitPendingSend(intent, session);
+    if (locked || session !== uiStateLoadGeneration) throw new Error("The UI session changed while Stop was awaiting confirmation. Reopen Pending messages after unlocking.");
+    if (pendingSends[token]) throw new Error(`Stop is still awaiting a durable confirmation (${result.persistence.status}). Its saved decision will retry.`);
   }
 
   async function removeRecoveredSendDraft(token: string): Promise<void> {
@@ -19637,7 +21321,7 @@
   async function useRecoveredSendDraft(token: string): Promise<void> {
     await savePendingDecision(token, () => {
       const item = recoveredSendDrafts[token], key = chanKey();
-      if (!item || !key || activeServerId === null || !cur?.active) throw new Error("Open a conversation before using this saved text.");
+      if (!item || item.kind === "delete" || !key || activeServerId === null || !cur?.active) throw new Error("Open a conversation before using this saved text.");
       if (draft.trim() && draft !== item.text) throw new Error("Keep or clear the current composer draft first.");
       if (item.text.length > MAX_DRAFT_CHARS) throw new Error("This text exceeds the composer draft limit. Copy the saved text instead; the full copy remains here.");
       const revision = draftRevisions[key] ?? 0;
@@ -19662,6 +21346,7 @@
   }
 
   async function retryPendingSends(automatic = false) {
+    if(chatBackend==="text-v2"){await retryNativeTextRequests();return;}
     if (locked || !uiStateReady || windowCloseInFlight || retryingPendingSends || sending || pendingSendResolution !== null || (automatic && pendingManagerOpen)) return;
     const session = uiStateLoadGeneration;
     retryingPendingSends = true;
@@ -19669,11 +21354,16 @@
       for (const intent of Object.values(pendingSends)) {
         if (locked || windowCloseInFlight || session !== uiStateLoadGeneration || pendingSendResolution !== null || (automatic && pendingManagerOpen)) return;
         if (!pendingSubmissionCurrent(intent, session)) continue;
-        if (automatic && intent.retryBlock) continue;
+        if (quarantinedPendingIntent(intent)) continue;
+        if (automatic && intent.retryBlock && !intent.resolution) continue;
+        // A refusal now cannot establish absence of an older invocation whose reply was lost.
+        const priorMayHaveGone = intent.acceptance !== "not_accepted";
         try {
           const result = await submitPendingSend(intent, session);
           if (locked || session !== uiStateLoadGeneration) return;
-          const warning = persistenceWarning(result);
+          const warning = intent.resolution
+            ? (pendingSends[intent.token] ? "Stop is awaiting a durable confirmation. Its saved decision will retry; an already saved change cannot be retracted." : null)
+            : persistenceWarning(result, priorMayHaveGone);
           if (warning) error = warning;
         } catch (failure) {
           if (locked || session !== uiStateLoadGeneration) return;
@@ -19689,10 +21379,12 @@
   // Resolves to what the press came to (`SendOutcome`), for "post now" to report; every other
   // caller ignores it.
   async function send(): Promise<SendOutcome> {
+    if(cur?.backend==="text-v2" && (nativeHistoryLoading || busy || nativeRetryGeneration===uiStateLoadGeneration))return "refused";
     const text = draft.trim();
     if (!text || !cur?.active || activeServerId === null || sending || retryingPendingSends || locked || !uiStateReady || windowCloseInFlight || pendingSendResolution !== null || pendingManagerOpen) return "refused";
     const server = activeServerId;
     const channel = cur.active;
+    if(cur.backend==="text-v2")return sendNativeText(text,server,channel);
     const session = uiStateLoadGeneration;
     const sessionCurrent = () => !locked && !windowCloseInFlight && session === uiStateLoadGeneration;
     const reply_to = replyingTo;
@@ -19702,14 +21394,17 @@
     const operation = ++pendingSendNonce;
     const pendingId = `pending:${operation}`;
     let intent: PendingSend | undefined;
-    // Whether this message's identity may have reached the native side, by this press or an
-    // earlier attempt that reused it. Kept here rather than read back from `pendingSends` after a
+    // Keep earlier-attempt uncertainty separately: a definite refusal of this press cannot
+    // disprove a previous invocation. Neither fact can be read from `pendingSends` after a
     // failure: the pending-message manager can recover or stop the entry while the request is
     // still out, and its absence then proves nothing about whether it committed (found in review).
     let mayHaveGone = false;
+    let priorMayHaveGone = false;
     try {
       intent = matchingPendingSend(pendingSends, server, channel, text, reply_to);
-      if (intent) mayHaveGone = intent.acceptance !== "not_accepted";
+      if (intent) priorMayHaveGone = intent.acceptance !== "not_accepted";
+      validateSendPayload(server, channel, text, reply_to);
+      if (intent?.resolution) throw new Error("This exact request is awaiting Stop confirmation. Review Pending messages before sending it again.");
       if (!intent) {
         const expectedContext = await invoke<string>("durable_send_context", { server });
         if (!sessionCurrent() || pendingSendResolution !== null || pendingManagerOpen) return "refused";
@@ -19717,6 +21412,7 @@
           text, replyTo: reply_to, expectedContext, acceptance: "not_accepted" };
         pendingSends = addPendingSend(pendingSends, intent);
       }
+      if (pendingContinuityVersion(intent) === 3 && uiContinuityVersion < 3) uiContinuityVersion = 3;
       // Keep the composer intact until its retry identity and payload have crossed the vault
       // barrier. A lock at either await captures the draft or this resumable intent.
       clearTimeout(uiStateSaveTimer);
@@ -19749,25 +21445,26 @@
           if (sessionCurrent() && activeServerId === server && cur?.active === channel) await refresh();
         },
       );
-      if (!sessionCurrent()) return sendOutcome(result);
-      const warning = persistenceWarning(result);
+      if (!sessionCurrent()) return sendOutcome(result, priorMayHaveGone);
+      const warning = persistenceWarning(result, priorMayHaveGone);
       if (warning) toast(warning, "warn", 12000);
       if (refreshError) error = `Message result saved, but the conversation could not refresh: ${errorText(refreshError)}`;
-      return sendOutcome(result);
+      return sendOutcome(result, priorMayHaveGone);
     } catch (e) {
       // A throw is not "failed" when the message may still go or may already have gone: native
       // errors do not prove absence. It is "uncertain" when its sealed identity stays pending
       // without a retry block (the quiet retry sends it by itself), when a lock kept it in the
       // vault to retry after unlock, or when it may have been dispatched (`mayHaveGone`) and the
       // native side has not proved it unaccepted, even if the pending-message manager has since
-      // recovered or stopped the entry. Calling those unsent invited a second send under a new
-      // token (found in review). Only a send that sealed nothing, never reached the native side,
-      // or that the native side proved unaccepted (`sendRefusedUnaccepted`, which is wider than
-      // the retry block: capacity refuses unaccepted yet a retained entry still retries), failed.
+      // recovered or stopped the entry. The unaccepted classifier includes capacity refusals,
+      // which permit automatic retry while the entry remains. A prior ambiguous attempt still
+      // stays uncertain even when THIS attempt is proven unaccepted; otherwise a retry refusal
+      // could invite a duplicate send under a new token.
       const kept = intent ? pendingSends[intent.token] : undefined;
       const provenUnaccepted = sendRefusedUnaccepted(errorText(e));
       const outcome: SendOutcome = !intent ? "failed"
-        : !sessionCurrent() || (kept && !kept.retryBlock) ? "uncertain"
+        : !sessionCurrent() || (kept && !kept.retryBlock && !quarantinedPendingIntent(kept)) ? "uncertain"
+        : priorMayHaveGone ? "uncertain"
         : mayHaveGone && !provenUnaccepted ? "uncertain"
         : "failed";
       if (!sessionCurrent()) return outcome;
@@ -19789,37 +21486,85 @@
     }
   }
 
+  /** All production edit/delete callers share send custody, capacity and retry scheduling. */
+  async function queueMessageMutation(server: number, channel: string, messageId: string,
+    kind: "edit" | "delete", text: string, onSealed: () => void = () => {}): Promise<SendMessageResult> {
+    if (locked || !uiStateReady || windowCloseInFlight || sending || retryingPendingSends || pendingSendResolution !== null || pendingManagerOpen) {
+      throw new Error("Wait until the vault is ready before changing this message.");
+    }
+    // Reject before context lookup or queue insertion so an editor admission error
+    // cannot strand continuity behind a request that even native Stop will refuse.
+    validateMutationPayload(server, channel, messageId, kind, text);
+    const session = uiStateLoadGeneration;
+    const operation = ++pendingSendNonce;
+    sending = true;
+    try {
+      // Reuse ambiguous original custody before looking up a now-deleted target or a
+      // changed epoch. A failed reply never licenses a new token for the same request.
+      let intent = matchingPendingMutation(pendingSends, server, channel, messageId, undefined, kind, text);
+      if (intent?.resolution) throw new Error("This exact change is awaiting Stop confirmation. Review Pending messages before changing it again.");
+      if (!intent) {
+        const metadata = await invoke<{ context: string; target: string }>("durable_mutation_context", { server, channel, id: messageId });
+        if (locked || windowCloseInFlight || session !== uiStateLoadGeneration || pendingSendResolution !== null) throw new Error("The UI session changed before the message intent was saved.");
+        if (!/^[a-f0-9]{64}$/.test(metadata.context) || !/^[a-f0-9]{64}$/.test(metadata.target)) throw new Error("Invalid native mutation context.");
+        intent = { token: crypto.randomUUID().replaceAll("-", ""), server, channel, expectedContext: metadata.context,
+          kind, messageId, target: metadata.target, text, replyTo: "", acceptance: "not_accepted" } as PendingSend;
+        pendingSends = addPendingSend(pendingSends, intent);
+      }
+      // Sticky v2 must cross the sealed barrier before any mutation dispatch. Old native
+      // strict-v1 readers will reject this envelope instead of posting recovered edit text.
+      if (uiContinuityVersion < 2) uiContinuityVersion = 2;
+      clearTimeout(uiStateSaveTimer);
+      await queueUiStateSave(continuityJson);
+      if (!pendingSubmissionCurrent(intent, session)) throw new Error("The message intent was taken over before dispatch.");
+      onSealed();
+      const result = await submitPendingSend(intent, session);
+      if (!locked && session === uiStateLoadGeneration && activeServerId === server && cur?.active === channel) {
+        const warning = persistenceWarning(result, intent.acceptance !== "not_accepted");
+        if (warning) error = warning;
+        await refresh();
+      }
+      return result;
+    } finally {
+      if (pendingSendNonce === operation) sending = false;
+    }
+  }
+
   // Inline edit of one of your own messages.
   let editingId = $state("");
   let editDraft = $state("");
+  let editRevision = 0;
   function startEdit(m: Msg) {
+    editRevision += 1;
     editingId = m.id;
     editDraft = m.text;
   }
   function cancelEdit() {
+    editRevision += 1;
     editingId = "";
     editDraft = "";
   }
   async function saveEdit(m: Msg) {
     const text = editDraft.trim();
     const ch = cur?.active;
-    if (!text || activeServerId === null || !ch) {
-      cancelEdit();
-      return;
-    }
-    cancelEdit();
-    if (text === m.text) return; // no change
+    const server = activeServerId, messageId = m.id, revision = editRevision, session = uiStateLoadGeneration;
+    if (!text || server === null || !ch) return;
     try {
-      await invokeDebugged("edit_message", { server: activeServerId, channel: ch, msgId: m.id, text });
+      await queueMessageMutation(server, ch, messageId, "edit", text, () => {
+        // Admission owns this old editor only; later typing/opening survives any late reply.
+        if (session === uiStateLoadGeneration && activeServerId === server && cur?.active === ch
+          && editingId === messageId && editRevision === revision && editDraft.trim() === text) cancelEdit();
+      });
     } catch (e) {
       error = errorText(e);
     }
   }
   async function deleteMessage(m: Msg) {
     const ch = cur?.active;
-    if (activeServerId === null || !ch) return;
+    const server = activeServerId, messageId = m.id;
+    if (server === null || !ch) return;
     try {
-      await invokeDebugged("delete_message", { server: activeServerId, channel: ch, msgId: m.id });
+      await queueMessageMutation(server, ch, messageId, "delete", "");
     } catch (e) {
       error = errorText(e);
     }
@@ -20360,7 +22105,7 @@
     try {
       // One action from first step to last: each step after an await asks the same route again.
       const route = studioExit.begin();
-      if (!(await route.leave())) return false;
+      if (!(await route.leave()) || !route.current() || windowCloseInFlight) return false;
       if (loc.area === "inbox") {
         openInbox();
         return (applied = true);
@@ -20377,13 +22122,13 @@
         // included: Back from the Studio to a chat in another channel would otherwise move the
         // channel and then find itself retired before showing it. From anywhere else the channel
         // moves first, so a refused move changes nothing on screen.
-        if (!(await route.leave())) return false;
+        if (!(await route.leave()) || !route.current() || windowCloseInFlight) return false;
         const fromStudio = view === "studio";
         if (fromStudio) switchView("chat", route);
         if (loc.channel && cur?.active !== loc.channel && !(await switchTo(loc.channel, false, route))) return false;
         if (!fromStudio) switchView("chat", route);
       } else if (loc.view === "wiki" && loc.page) {
-        if (!(await route.leave())) return false; // the server switch awaited its load
+        if (!(await route.leave()) || !route.current() || windowCloseInFlight) return false; // the server switch awaited its load
         menu = null;
         view = "wiki";
         // Awaited, not left to switchView: openWikiPage reads the page list to decide read vs
@@ -20518,7 +22263,7 @@
     try {
       const route = studioExit.begin();
       if (!(await arriveAtServer(server, route))) return;
-      if (!(await route.leave())) return; // the switch awaited the server's load
+      if (!(await route.leave()) || !route.current() || windowCloseInFlight) return; // the switch awaited the server's load
       menu = null;
       view = "wiki";
       await refreshWiki();
@@ -20533,7 +22278,7 @@
       const route = studioExit.begin();
       inboxView = false;
       if (!(await arriveAtServer(server, route))) return;
-      if (!(await route.leave())) return;
+      if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
       view = "chat";
       // A channel update can arrive before its channel-list event. Register a readable fallback
       // so the click can still land instead of silently selecting an absent sidebar entry.
@@ -20823,7 +22568,7 @@
     try {
       // Save the Studio first; switchView's own deferred Save would otherwise race switchTo's.
       const route = studioExit.begin();
-      if (!(await route.leave())) return;
+      if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
       switchView("chat", route);
       await switchTo(channel, false, route);
     } finally {
@@ -20854,11 +22599,11 @@
     (uiStateJson) => invoke<NativeVaultLockOutcome>("lock_session", { uiStateJson }),
   );
   let winMaximized = $state(false);
-  let windowCloseInFlight = $state(false);
   $effect(() => { if (!windowCloseInFlight) studioEndClose?.(); });
   // The first continuity failure leaves a confirmed-locked window open with a warning. Repeating
   // close is the user's explicit acknowledgement that exiting without that latest snapshot is OK.
   let closeAfterContinuityError = false;
+  let closeContinuityRevision: string | null = null;
   // The live frontend-logging installation, kept so unmount can stop it. Not reactive state: it is
   // held purely so the teardown has something to call.
   let uiLogging: UiLogging | null = null;
@@ -20939,7 +22684,7 @@
       if (activeServerId !== null && cur?.active) await channelEventRefresh.request(true);
       // A lost member-route or membership event otherwise leaves Connectivity stale forever.
       // Refresh only while that projection is visible; the backend read is local and bounded.
-      if (memberRoutesVisible(activeServerId, view)) await refreshMemberRoutes();
+      if (cur?.backend!=="text-v2" && memberRoutesVisible(activeServerId, view)) await refreshMemberRoutes();
       diagRecord({
         section: "ipc",
         code: "UI.RESYNC.APPLIED",
@@ -21060,18 +22805,20 @@
     // the ordinary vault gate.
     let explicitlyLocked = false;
     try { explicitlyLocked = sessionStorage.getItem("catcoms.explicit-lock") === "1"; } catch { /* best effort */ }
-    const chooseGate = () => invoke<boolean>("vault_exists")
-      .then((v) => (vaultExists = v))
-      .catch(() => (vaultExists = true));
-    if (explicitlyLocked) chooseGate();
-    else invoke<Reloaded[] | null>("resume_session")
+    const resumeGeneration = uiStateLoadGeneration, resumeAttempt = unlockAttempt;
+    const resumeCurrent = () => !uiSessionRetired && resumeGeneration === uiStateLoadGeneration && resumeAttempt === unlockAttempt
+      && locked && !unlocking && !windowCloseInFlight;
+    const chooseGate = () => { if (resumeCurrent()) return refreshVaultGate(); };
+    if (explicitlyLocked) void chooseGate();
+    else if (resumeCurrent()) void invoke<Reloaded[] | null>("resume_session")
       .then((running) => {
+        if (!resumeCurrent()) return;
         if (running) {
           vaultExists = true;
           restoreReloaded(running);
         } else chooseGate();
       })
-      .catch(chooseGate);
+      .catch(() => { if (resumeCurrent()) void chooseGate(); });
     // Where the stream is, before listening to it. Read first on purpose: anything emitted between
     // this answer and the listeners going live is genuinely missed, and seeding is what makes that
     // a detected gap rather than an invisible one. Unseeded, the tracker takes whatever it sees
@@ -21098,6 +22845,19 @@
           return;
         }
         windowCloseInFlight = true;
+        // A close may later be refused and clear its flag. Startup work captured
+        // before that boundary must stay retired rather than become current again.
+        unlockAttempt += 1;
+        const releaseClose = () => {
+          windowCloseInFlight = false;
+          // Startup may have yielded to closing before its gate query completed.
+          // A surviving locked window needs its own fresh read after that barrier.
+          if (locked && vaultExists === null && !unlocking) void refreshVaultGate();
+        };
+        // Cancel review ownership immediately, before Studio/native close can await or snapshot.
+        // A refused close cannot revive an earlier batch even if the derived key returns to open.
+        videoScopeEpoch++;
+        videoReviews.rescope(videoEditorScope);
         // Set when Studio work without a native receipt rides only in the final snapshot below, so
         // a failure to write that snapshot is reported as losing those edits, not "screen state".
         let studioOnlyInSnapshot = false;
@@ -21115,7 +22875,7 @@
             // close and come back uncertain instead of simply queued.
             const token = studioAuthorToken?.() ?? null;
             const kept = uiStateReady && !locked && token !== null;
-            if (!kept) { windowCloseInFlight = false; if (!locked) error = String(e); return; }
+            if (!kept) { releaseClose(); if (!locked) error = String(e); return; }
             // A checkpoint may already have sealed exactly this work; the record it wrote survives
             // a failed final write, so the edits come back on the next unlock either way.
             studioOnlyInSnapshot = studioSealedAuthor === null || token !== studioSealedAuthor;
@@ -21133,7 +22893,7 @@
         // afterSave commit. Keep that logical transaction alive, then take fresh state. A stalled
         // bridge defers this close attempt; it is not a reason to destroy the webview below.
         if (!(await drainUiStateForClose())) {
-          windowCloseInFlight = false;
+          releaseClose();
           if (!locked && closingGeneration === uiStateLoadGeneration) {
             error = "Vault state is still saving. The window remains open; wait and try closing again.";
           }
@@ -21143,7 +22903,7 @@
           // Ctrl+L can interrupt a decision and a replacement session has different authority.
           // Neither may reuse this close attempt. An already-locked fresh close below reuses the
           // lock coordinator's exact snapshot; it never reads the cleared UI state as a snapshot.
-          windowCloseInFlight = false;
+          releaseClose();
           return;
         }
         const finalContinuityJson = locked
@@ -21156,19 +22916,25 @@
           const result = await invoke<NativeVaultCloseOutcome>("close_vault_window", {
             uiStateJson: finalContinuityJson,
             discardContinuityError: closeAfterContinuityError,
+            discardContinuityRevision: closeContinuityRevision,
           });
           // A response means the window deliberately remained alive (continuity warning or native
           // destroy failure) and native locking is confirmed, so frontend teardown is now safe.
           lockScreen(true);
-          windowCloseInFlight = false;
+          releaseClose();
           if (result.history_error) {
             closeAfterContinuityError = false;
+            closeContinuityRevision = null;
             error = `The vault is locked, but message history has not finished saving. ${result.history_error}`;
           } else if (result.deferred) {
-            closeAfterContinuityError = true;
-            error = studioOnlyInSnapshot
-              ? `The vault is locked, but Mewtual could not save the latest screen state, including Studio edits that had not finished saving: ${result.continuity_error}. Close the window again to exit without them.`
-              : `The vault is locked, but Mewtual could not save the latest screen state: ${result.continuity_error}. Close the window again to exit without that latest screen state.`;
+            const acknowledgement = closeContinuityAcknowledgement(result);
+            closeAfterContinuityError = acknowledgement.discard;
+            closeContinuityRevision = acknowledgement.revision;
+            error = acknowledgement.discard
+              ? studioOnlyInSnapshot
+                ? `The vault is locked, but Mewtual could not save the latest screen state, including Studio edits that had not finished saving: ${result.continuity_error}. Close the window again to exit without them.`
+                : `The vault is locked, but Mewtual could not save the latest screen state: ${result.continuity_error}. Close the window again to exit without that latest screen state.`
+              : "The vault is locked. Screen state is still being saved. Try closing again.";
           } else if (result.destroy_error) {
             error = `The vault is locked, but the window could not close: ${result.destroy_error}`;
           }
@@ -21184,7 +22950,7 @@
             try {
               await relaunch();
             } catch (restartError) {
-              windowCloseInFlight = false;
+              releaseClose();
               error = `Mewtual could not confirm the native vault lock or close this window. Treat this session as unlocked; save your work and try again. Lock error: ${errorText(e)}. Window error: ${errorText(destroyError)}. Restart error: ${errorText(restartError)}.`;
             }
           }
@@ -21349,6 +23115,12 @@
         // being viewed, which is precisely when the active-server refresh above does nothing.
         if (e.payload.server === callServer) void refreshCallProfiles();
       }),
+      listen<{ server: number; status: unknown }>("cache-status", (e) => {
+        if (e.payload.server !== activeServerId) return;
+        // Newer than any get_cache_status still in flight: retire those replies.
+        cacheStatusSeq++;
+        cacheStatus = checkedCacheStatus(e.payload.status);
+      }),
       listen<{ server: number }>("files-updated", (e) => {
         spaceActivityAt[e.payload.server] = Date.now();
         if (e.payload.server === activeServerId) {
@@ -21383,7 +23155,7 @@
           jukeFetch = fetchPhase(e.payload);
         }
         const d = downloads[dlKey(e.payload.server, e.payload.cid)];
-        if (!d) return; // only track explicitly-initiated downloads
+        if (!d || activeSaves[dlKey(e.payload.server, e.payload.cid)] !== d.operation || !acceptSaveProgress(d, e.payload)) return;
         const now = Date.now();
         if (e.payload.network_bytes_done > d.networkBytesDone) {
           d.speed = sampleRate(
@@ -21398,6 +23170,10 @@
         d.networkBytesDone = e.payload.network_bytes_done;
         d.total = e.payload.total;
         d.done = Math.max(d.heldBefore, e.payload.done);
+        // The chunks written to the file by this save (native emits these events only while
+        // writing), without the already-held floor above: the merged Transfers row counts them.
+        d.savedDone = Math.max(d.savedDone ?? 0, e.payload.done);
+        d.savedBytes = Math.max(d.savedBytes ?? 0, e.payload.bytes_done);
         d.bytesTotal = e.payload.bytes_total;
         d.bytesDone = Math.max(d.bytesDone, e.payload.bytes_done);
         d.progress = d.total > 0 ? Math.min(1, d.done / d.total) : 0;
@@ -21451,7 +23227,10 @@
         if (e.payload.server === activeServerId) refreshRoles();
       }),
       listen<{ server: number }>("moderation-updated", (e) => {
-        if (e.payload.server === activeServerId) refreshModeration();
+        if (e.payload.server === activeServerId) {
+          moderationHistoryRefresh += 1;
+          refreshModeration();
+        }
       }),
       listen<{ server: number }>("livery-changed", (e) => {
         refreshServerIconFor(e.payload.server); // rail icon may have changed for any server
@@ -21833,7 +23612,7 @@
     const tick = setInterval(() => {
       nowTick = Date.now();
       pruneTicker(); // stale news stops being news
-      if (memberRoutesVisible(activeServerId, view)) void refreshMemberRoutes();
+      if (cur?.backend!=="text-v2" && memberRoutesVisible(activeServerId, view)) void refreshMemberRoutes();
     }, 60_000);
     // A moving transfer must stop looking active when no new chunk has arrived. This small UI-only
     // clock drives that freshness check; it does not poll the network or alter transfer state.
@@ -21863,6 +23642,7 @@
       if (changed) voiceRooms = next;
     }, 4000);
     return () => {
+      retireUiSessionOnUnmount();
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("contextmenu", onFallbackContext);
       window.removeEventListener("keyup", onKeyUp);
@@ -21889,6 +23669,21 @@
       uiLogging = null;
     };
   });
+  function retireUiSessionOnUnmount() {
+    if(uiSessionRetired)return;
+    // Retire BEFORE teardown: callbacks starting later must also refuse, not
+    // capture the bumped local generation as if it were a new authorized view.
+    // Already-submitted native work retains its own ordering/custody. Do not
+    // lock/close the vault or submit an empty continuity snapshot on remount.
+    uiSessionRetired=true;
+    uiStateLoadGeneration++;
+    uiStateHydrationAttempt++;
+    unlockAttempt++;
+    viewGeneration++;
+    uiStateReady=false;
+    clearTimeout(uiStateSaveTimer);
+    pendingSendRetry.cancel();
+  }
 </script>
 
 {#snippet styledName(name: string, color: string, font: string, effect: string)}
@@ -23235,6 +25030,15 @@
   </svg>
 {/snippet}
 
+{#snippet transferIcon(name: TransferIcon)}
+  <!-- Transfers UX (PR #51): the 16x16 transfer state icons (design icons.md). The round caps turn
+       the `h.01` / `v.01` dots into discs, so keep this wrapper as it is. -->
+  <svg class="ico sdl-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    {#each TRANSFER_ICONS[name] as shape}
+      {#if "d" in shape}<path d={shape.d} />{:else}<rect x={shape.rect.x} y={shape.rect.y} width={shape.rect.width} height={shape.rect.height} rx={shape.rect.rx} />{/if}
+    {/each}
+  </svg>
+{/snippet}
 {#snippet icoStorage()}
   <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
     <ellipse cx="12" cy="5.5" rx="8" ry="3" /><path d="M4 5.5v6c0 1.65 3.58 3 8 3s8-1.35 8-3v-6" /><path d="M4 11.5v6c0 1.65 3.58 3 8 3s8-1.35 8-3v-6" /><path d="m9 17.2 1.8 1.8 4-4" />
@@ -24951,9 +26755,9 @@
         </li>
       {/each}
     </ul>
-    <form class="join-channel" onsubmit={(e) => { e.preventDefault(); addChannel(); }}>
+    {#if chatBackend !== "text-v2"}<form class="join-channel" onsubmit={(e) => { e.preventDefault(); addChannel(); }}>
       <input bind:value={newChannel} placeholder="+ join or create #channel" />
-    </form>
+    </form>{/if}
   {/if}
 {/snippet}
 
@@ -25544,6 +27348,17 @@
       {@render brandMark("opening your vault")}
       <p class="muted small">Loading encrypted preferences before servers can fetch shared content.</p>
     </div>
+  {:else if chatBackend === "text-v2" && (servers.length === 0 || showAdd) && !showSettings}
+    <section class="start gate" aria-label="Create a local group">
+      {@render brandMark("your vault is ready")}
+      <h2>Create a local group</h2>
+      <p class="muted small">Messages are saved on this device. Joining and shared history are not available yet.</p>
+      <label class="field"><span>Your name</span><input bind:value={displayName} /></label>
+      <label class="field"><span>Group name</span><input bind:value={newServerName} placeholder="Optional" /></label>
+      <button onclick={found} disabled={busy || nativeRetryGeneration !== null || !displayName.trim()}>{busy ? "Creating…" : "Create group"}</button>
+      {#if servers.length}<button class="ghost" onclick={() => showAdd=false}>Back to saved messages</button>{/if}
+      {#if error}<p role="status">{error}</p>{/if}
+    </section>
   {:else if (servers.length === 0 || showAdd) && !showSettings}
     <!-- The start surface uses the window. It was a single 480px column stacking identity,
          the trust choice, the tabs, the pane, pairing and diagnostics, which squeezed the one
@@ -26065,6 +27880,7 @@
            the middle (however many servers you join), and feedback/settings pinned at the
            bottom. Only the middle band scrolls, so the fixed destinations never slide away. -->
       <nav class="rail">
+        {#if chatBackend !== "text-v2"}
         <div class="rail-fixed">
           <button
             class="server-icon dm-circle"
@@ -26092,6 +27908,7 @@
           </button>
           <div class="rail-sep"></div>
         </div>
+        {/if}
         <div class="rail-scroll">
           {#each railServers as s}
             <button
@@ -26115,7 +27932,7 @@
         </div>
         <div class="rail-fixed rail-foot">
           <div class="rail-sep"></div>
-          <button class="server-icon orbit-btn" class:active={spaceOpen} title="Server space (Ctrl+O)" aria-label="Open the 360 server space" onclick={toggleSpace}>{@render icoOrbit()}</button>
+          {#if chatBackend !== "text-v2"}<button class="server-icon orbit-btn" class:active={spaceOpen} title="Server space (Ctrl+O)" aria-label="Open the 360 server space" onclick={toggleSpace}>{@render icoOrbit()}</button>{/if}
           <button class="server-icon feedback-btn" title="Send feedback (bug / feature request)" aria-label="Send feedback" onclick={() => (showFeedback = true)}>{@render icoFeedback()}</button>
           <button class="server-icon gear" title="Settings" aria-label="Settings" onclick={() => openSettings()}>{@render icoGear()}</button>
         </div>
@@ -26344,7 +28161,7 @@
         {/if}
         <div class="server-head">
           <strong class="server-title" title={cur?.name}>{cur?.name ?? ""}</strong>
-          <button class="ghost icon-btn" title="Server settings" onclick={() => openServerSettings()}>{@render icoWrench()}</button>
+          {#if chatBackend !== "text-v2"}<button class="ghost icon-btn" title="Server settings" onclick={() => openServerSettings()}>{@render icoWrench()}</button>{/if}
         </div>
         {@render contextNav(false)}
 
@@ -26358,10 +28175,10 @@
               {#if moderationCases.length}<b>{moderationCases.length}</b>{/if}
             </button>
           {/if}
-          <div class="sidebar-ops">
+          {#if chatBackend !== "text-v2"}<div class="sidebar-ops">
             <button type="button" class:active={view === "storage"} title="Storage health & repair" aria-label="Storage health and repair" onclick={() => switchView("storage")}>{@render icoStorage()}<span>Storage</span></button>
             <button type="button" class:active={view === "connectivity"} title="Connectivity assistant" aria-label="Connectivity assistant" onclick={() => switchView("connectivity")}>{@render icoConnectivity()}<span>Connect</span></button>
-          </div>
+          </div>{/if}
         </div>
         {@render youPanel()}
         {/if}
@@ -26374,7 +28191,7 @@
             <p class="muted">Pick a conversation on the left, or start a <strong>New DM</strong> / <strong>Add a friend</strong> with their code. A DM is a private, end-to-end-encrypted 1:1: your identity here stays unlinkable to your servers.</p>
           </div>
         {:else}
-        {#if cur}
+        {#if cur && cur.backend !== "text-v2"}
           <!-- Surface strip: the content column's own nav. The sidebar is contextual to whatever
                is selected here (channels for chat, pages for the wiki, folders for files, …). -->
           <nav class="surface-bar" aria-label="Surfaces">
@@ -26431,7 +28248,11 @@
             {/if}
           </nav>
         {/if}
-        {#if view === "chat"}
+        {#if cur?.backend === "text-v2"}
+          <NativeSavedChat rows={nativeOriginals} loading={nativeHistoryLoading} loaded={nativeHistoryLoaded} failure={nativeHistoryError} more={!!nativeCursor && nativeCursor.next!==nativeCursor.end}
+            text={draft} busy={sending || nativeHistoryLoading || nativeRetryGeneration!==null} send={()=>{void send();}} refresh={()=>{void refreshNativeHistory();}} loadMore={()=>{void refreshNativeHistory(true);}}
+            change={(value)=>{draft=value;saveDraftFor(chanKey());}} />
+        {:else if view === "chat"}
           <!-- Header: identity on the left, the channel's description filling the middle, every
                action on the right. The member count lives in the members column, not here. -->
           <h2 class="chan-head" use:headBottom>
@@ -26803,6 +28624,7 @@
                     <textarea
                       bind:this={editMessageEl}
                       bind:value={editDraft}
+                      oninput={() => { editRevision += 1; }}
                       rows="2"
                       onselect={() => onTextEffectSelection("chat-edit")}
                       onkeydown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); saveEdit(m); } else if (e.key === "Escape") { e.preventDefault(); cancelEdit(); } }}
@@ -26943,7 +28765,8 @@
                 <summary>{Object.keys(pendingSends).length} message(s) awaiting save confirmation</summary>
                 <p>Pending messages keep their original identity. Temporary save failures retry automatically while unlocked.</p>
                 {#each Object.values(pendingSends).filter((item) => item.server === activeServerId) as item (item.token)}
-                  <p>{item.text}</p>
+                  <p>{pendingActionLabel(item)}{quarantinedPendingIntent(item) ? " · Saved request needs recovery" : item.resolution ? " · Stop awaiting confirmation" : ""}</p>
+                  {#if item.kind !== "delete"}<p>{item.text}</p>{/if}
                   {#if item.retryBlock}<p>Automatic retry paused. Review this message before retrying.</p>{/if}
                   {#if pendingSendErrors[item.token]}
                     <p>{pendingSendErrors[item.token]}</p>
@@ -27021,11 +28844,24 @@
             <header class="ops-head">
               <div>
                 <span class="stx-crumb">SERVER // SAFETY // MODERATION</span>
-                <h2>Moderation plane</h2>
-                <p class="muted small">A public, signed history. Warnings preserve what was seen; kick votes advise the owner and never bypass MLS authorization.</p>
+                <h2>Moderation</h2>
+                <p class="muted small">Warnings, member reviews and chat history.</p>
               </div>
-              <button class="ghost small" disabled={moderationLoading} onclick={() => refreshModeration(true)}>{moderationLoading ? "Loading…" : "Refresh"}</button>
+              {#if moderationTab === "activity"}<button class="ghost small" disabled={moderationLoading} onclick={() => refreshModeration(true)}>{moderationLoading ? "Loading…" : "Refresh"}</button>{/if}
             </header>
+            <nav class="history-admin-tabs" aria-label="Moderation views">
+              <button class="ghost small" aria-pressed={moderationTab === "activity"} onclick={() => { moderationTab = "activity"; void refreshModeration(true); }}>Warnings &amp; reviews</button>
+              <button class="ghost small" aria-pressed={moderationTab === "history"} onclick={() => { moderationTab = "history"; }}>Chat history</button>
+            </nav>
+            {#if moderationTab === "history"}
+              {#if uiStateReady && !windowCloseInFlight && activeServerId !== null}
+                {#key `${activeServerId}:${chatLedgerMount}:${myRole}`}
+                  {@const reads = chatLedgerReads(activeServerId)}
+                  <ChatAdminLedger {reads} refreshTick={moderationHistoryRefresh} {nameOfIdentity}
+                    channelName={(id) => cur?.channels.find((channel) => channel.id === id)?.name ?? id} />
+                {/key}
+              {:else}<p role="status">Opening history…</p>{/if}
+            {:else}
             {#if canModerate}
               <section class="mod-batch">
                 <div><strong>{selectedModerationMessages().length} message{selectedModerationMessages().length === 1 ? "" : "s"} selected</strong><span class="muted small">Click a box; Shift-click extends the range.</span></div>
@@ -27141,6 +28977,7 @@
                 {/if}
               </aside>
             </div>
+            {/if}
           </div>
         {:else if view === "storage"}
           <div class="operations-pane tab-pane">
@@ -27154,7 +28991,7 @@
                 <div><h3>{!storageHealth.missing_chunks && !storageHealth.unreadable_chunks && !storageHealth.invalid_manifests ? "Storage is healthy" : "Storage needs attention"}</h3><p>{storageHealth.verified_chunks} of {storageHealth.referenced_chunks} unique chunks verified · {fmtSize(storageHealth.verified_bytes)} encrypted content</p></div>
               </div>
               <div class="health-cards">
-                <article><b>{fmtSize(storageHealth.verified_bytes)}</b><span>verified encrypted content</span></article><article><b>{storageHealth.unique_files}</b><span>unique files · {storageHealth.listed_files} listings</span></article><article><b>{storageHealth.missing_chunks}</b><span>missing chunks</span></article><article><b>{storageHealth.unreadable_chunks + storageHealth.invalid_manifests}</b><span>unreadable / invalid</span></article>
+                <article><b>{fmtSize(storageHealth.verified_bytes)}</b><span>verified encrypted content</span></article><article><b>{storageHealth.unique_files}</b><span>unique files · {storageHealth.listed_files} listings</span></article><article><b>{storageHealth.missing_chunks}</b><span>missing from your uploads</span></article><article><b>{storageHealth.not_cached_chunks ?? 0}</b><span>not cached on this device</span></article><article><b>{storageHealth.unreadable_chunks + storageHealth.invalid_manifests}</b><span>unreadable / invalid</span></article>
               </div>
               <div class="storage-breakdown">
                 <section class="storage-categories">
@@ -27287,9 +29124,9 @@
               {#if callTransport}
                 <ul class="conn-facts">
                   <li>
-                    <span class="stage-label">DIRECT ROUTE</span>
-                    <span class={callTransport.public_direct ? "ok-t" : "fail-t"}>
-                      {callTransport.public_direct ? "this device is directly reachable" : "behind NAT"}
+                    <span class="stage-label">MESH ADDRESS</span>
+                    <span class="muted small">
+                      {callTransport.public_direct ? "public mesh address advertised" : "no public mesh address advertised"}
                     </span>
                   </li>
                   <li><span class="stage-label">AUTONAT</span><span class="muted small">{callTransport.autonat}</span></li>
@@ -27297,8 +29134,8 @@
                     <span class="stage-label">ROUTER</span>
                     <span class={callTransport.router_maps ? "ok-t" : "muted small"}>
                       {callTransport.router_maps
-                        ? "opens ports on request; each call's media socket is offered a mapped route"
-                        : "has not granted a mapping; calls rely on STUN hole punching or TURN"}
+                        ? "mesh mapping granted; calls can try a separate UDP mapping"
+                        : "no mesh mapping reported; calls can still try STUN or TURN"}
                     </span>
                   </li>
                   {#if callTransport.public_ipv6.length}
@@ -27308,7 +29145,7 @@
                     <li><span class="stage-label">PUBLIC IPV4</span><span class="muted small">{callTransport.public_ipv4.join(", ")}</span></li>
                   {/if}
                   <li>
-                    <span class="stage-label">RELAY HOSTS</span>
+                    <span class="stage-label">MESH HELPERS</span>
                     <span class={callTransport.bridges.length ? "ok-t" : "muted small"}>
                       {callTransport.bridges.length
                         ? `${callTransport.bridges.length} member(s) offering, ${callTransport.bridges.filter((b) => b.direct).length} with a public route`
@@ -27399,17 +29236,30 @@
           </div>
           {#if keptFiles?.supported}
             <details class="kept-copies-panel">
-              <summary>Kept on this device ? {keptFiles.files.length}/32 ? {fmtSize(keptFiles.allocated_bytes)} of {fmtSize(keptFiles.limit_bytes)} allocated</summary>
+              <summary>Kept on this device · {keptAllocationCount(keptFiles)}/32 · {fmtSize(keptFiles.allocated_bytes)} of {fmtSize(keptFiles.limit_bytes)} allocated</summary>
               <p class="muted small">These encrypted copies survive ordinary cache cleanup and shared-list removal. Export still requires a shared listing. Releasing a copy frees its reserved storage; other cached bytes may remain.</p>
               {#if keptFiles.error}<p role="alert">{keptFiles.error}</p>{/if}
               {#each keptFiles.files as copy (copy.cid)}
+                {@const saved = keptFiles.transfers.find(row => row.cid === copy.cid)}
                 <div class="kept-copy-row">
-                  <span>{files.find((f) => f.cid === copy.cid)?.name ?? `${copy.cid.slice(0, 16)}? (unlisted)`} ? {keptCopyLabel(copy)}</span>
-                  <button class="ghost small" disabled={!!keptTransfer || !!keptFiles.error} onclick={() => keepFileHere(copy.cid)}>Check and repair</button>
-                  <button class="ghost small" disabled={!!keptTransfer || !!keptFiles.error} onclick={() => forgetKeptFile(copy.cid)}>Release kept copy</button>
+                  <span>{files.find((f) => f.cid === copy.cid)?.name ?? `${copy.cid.slice(0, 16)}… (unlisted)`} · {keptCopyLabel(copy)}</span>
+                  <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || !!keptFiles.error} onclick={() => saved?.exhausted ? retryKeptFile(saved) : checkKeptFile(copy.cid)}>{saved?.exhausted ? "Retry check" : "Check and repair"}</button>
+                  <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || !!keptFiles.error} onclick={() => forgetKeptFile(copy.cid)} title="Deletes this device's kept copy. A checked kept copy replaces the cache's duplicate, so this can remove the last copy on this device; members who still have the file can send it again.">Release kept copy</button>
                 </div>
               {/each}
-              {#if keptTransfer}<button class="ghost small" onclick={cancelKeptTransfer}>Cancel keeping</button>{/if}
+              {#each keptTransferRows(keptFiles) as copy (copy.cid)}
+                <div class="kept-copy-row">
+                  <span>{files.find((file) => file.cid === copy.cid)?.name ?? copy.cid.slice(0, 16)} · {keptTransferLabel(copy)}</span>
+                  <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || copy.running || copy.phase === "deleting" || !!keptFiles.error}
+                    onclick={() => copy.exhausted ? retryKeptFile(copy) : resumeKeptFile(copy)}>{copy.exhausted ? "Retry" : "Resume"}</button>
+                  {#if copy.running || (!copy.user_paused && !copy.exhausted && !copy.blocked && copy.phase === "paused")}
+                    <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || !!keptFiles.error} onclick={() => setKeptPaused(copy, true)}>Pause</button>
+                  {/if}
+                  <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || copy.phase === "deleting" || !!keptFiles.error}
+                    onclick={() => forgetKeptFile(copy.cid)}>Cancel transfer</button>
+                </div>
+              {/each}
+              {#if keptTransfer?.cancellation}<button class="ghost small" onclick={cancelKeptTransfer}>Stop checking</button>{/if}
             </details>
           {/if}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -27434,6 +29284,10 @@
                 </button>
                 {#if isPinned(f.cid)}
                   <span class="file-pin" title="Embedded in a wiki page: never drops out of circulation">📌</span>
+                {/if}
+                {#if savedCids.has(f.cid)}
+                  <!-- PR #56: saved on this device (from the local list; no network, no disk). -->
+                  <span class="file-saved" title={SAVED_MARK_TITLE}>{@render transferIcon("saved")}<span>{SAVED_MARK_LABEL}</span></span>
                 {/if}
                 <span class="muted file-size">{fmtSize(f.size)} · {nameOf(f.author)} · <span class="avail-text {av.cls}">{av.label}</span></span>
               </li>
@@ -27963,8 +29817,207 @@
             {/if}
           </div>
         {:else if view === "downloads"}
-          <h2>Transfers</h2>
-          <div class="downloads-tab tab-pane">
+          <h2 id="transfers-title" tabindex="-1">Transfers</h2>
+          <div class="downloads-tab tab-pane" onfocusin={noteRowFocus} onfocusout={forgetRowFocus}>
+            {#if privateDownloadError}<p class="muted" role="status">{privateDownloadError}</p>{/if}
+            <!-- Transfers UX (PR #51): one polite live region announces state changes of the rows
+                 below (never chunk ticks). -->
+            <div class="sdl-sr" aria-live="polite" aria-atomic="true">{transfersAnnouncement}</div>
+            {#each SAVED_ROW_GROUPS as group (group.id)}
+              {@const listNotice = group.id === "saved" ? savedListNotice(savedFiles.state) : null}
+              {#if savedRowGroups[group.id].length || (group.id === "saved" && (savedListViews.length || listNotice))}
+                <section class="sdl" aria-labelledby={`sdl-${group.id}`}>
+                  <h3 class="sdl-group" id={`sdl-${group.id}`} tabindex="-1">{group.heading}</h3>
+                  {#if listNotice}
+                    <!-- PR #56: the saved-files list could not be read; only a damaged one can be
+                         started anew (native refuses anything else). -->
+                    <p class="sdl-why sdl-list-note" role="status">
+                      {listNotice}
+                      {#if savedFiles.state === "damaged"}
+                        <button class="sdl-act ghost" type="button" onclick={resetSavedList}>Start a new list</button>
+                      {/if}
+                    </p>
+                  {/if}
+                  <ul class="sdl-list" aria-labelledby={`sdl-${group.id}`}>
+                    {#each savedRowGroups[group.id] as saved (saved.id)}
+                      {@const row = privateDownloads.find((r) => r.id === saved.id)}
+                      {#if row}
+                        {@const controls = compactControls(saved)}
+                        {@const remove = controls.remove}
+                        {@const confirming = !!remove && remove.confirm && confirmingRemove(row)}
+                        {@const offId = `sdl-why-off-${saved.id}`}
+                        <!-- Compact row (design compact.md): status symbol, name, then one cluster of
+                             controls: the primary icon, the chip word, "more" and the red x. -->
+                        <li class="sdl-row" data-sdl-row={saved.id} data-state={saved.state} data-tone={saved.tone}
+                          data-check={saved.check ?? undefined} aria-busy={saved.busy ? "true" : undefined}>
+                          <div class="sdl-head">
+                            <span class="sdl-status" title={saved.statusTitle}>
+                              {@render transferIcon(saved.icon)}
+                              {#if !saved.showWhy}<span class="sdl-sr">{saved.statusTitle}</span>{/if}
+                            </span>
+                            <span class="sdl-name" title={saved.name}>{saved.name}</span>
+                            <span class="sdl-ctl">
+                              {#if !confirming && controls.primary}
+                                {@const primary = controls.primary}
+                                {#if primary.kind === "reveal"}
+                                  <button class="sdl-ico-btn" type="button" data-sdl-primary={saved.id}
+                                    title={revealingSaved[saved.id] ? "Checking the saved file" : primary.label}
+                                    aria-label={primary.accessibleName}
+                                    aria-disabled={revealingSaved[saved.id] ? "true" : undefined}
+                                    aria-busy={revealingSaved[saved.id] ? "true" : undefined}
+                                    onclick={() => revealSavedRow(row)}>{@render transferIcon(primary.icon)}</button>
+                                {:else}
+                                  <button class="sdl-ico-btn" class:go={primary.look === "go"} class:stop={primary.look === "stop"}
+                                    type="button" data-sdl-primary={saved.id}
+                                    title={primary.action.disabledReason ?? primary.action.label}
+                                    aria-label={primary.action.accessibleName}
+                                    aria-disabled={primary.action.disabled || (saved.busy && pressedControl[saved.id] === "primary") ? "true" : undefined}
+                                    aria-busy={saved.busy && pressedControl[saved.id] === "primary" ? "true" : undefined}
+                                    aria-describedby={primary.action.disabled ? offId : undefined}
+                                    onclick={() => rowButtonClick(row, primary.action, saved.group)}>{@render transferIcon(primary.icon)}</button>
+                                {/if}
+                              {/if}
+                              <span class="sdl-chip">{saved.word}</span>
+                              {#if confirming && remove}
+                                {@const words = confirmWords(remove, saved.name)}
+                                <!-- Escape on either button cancels, like Cancel. -->
+                                <span class="sdl-confirm" role="group" aria-label={words.group}>
+                                  <button class="sdl-act danger" type="button" data-sdl-confirm={saved.id}
+                                    aria-label={words.confirmName}
+                                    aria-disabled={remove.disabled ? "true" : undefined}
+                                    aria-describedby={remove.disabled ? offId : undefined}
+                                    title={remove.disabledReason ?? undefined}
+                                    onkeydown={(e) => { if (e.key === "Escape") { e.stopPropagation(); void cancelRemove(row); } }}
+                                    onclick={() => rowButtonClick(row, remove, saved.group)}>{words.confirm}</button>
+                                  <button class="sdl-act ghost" type="button" aria-label={words.cancelName}
+                                    onkeydown={(e) => { if (e.key === "Escape") { e.stopPropagation(); void cancelRemove(row); } }}
+                                    onclick={() => cancelRemove(row)}>Cancel</button>
+                                </span>
+                              {:else}
+                                {#if controls.menu.length}
+                                  {@const menuOff = rowMenuDisabled(controls)}
+                                  <button class="sdl-ico-btn sdl-more" type="button" data-sdl-more={saved.id}
+                                    aria-haspopup="menu" aria-expanded={rowMenu?.rowId === saved.id ? "true" : "false"}
+                                    aria-controls={rowMenu?.rowId === saved.id ? `sdl-menu-${saved.id}` : undefined}
+                                    title={menuOff ?? "More actions"} aria-label={`More actions for ${saved.name}`}
+                                    aria-disabled={menuOff || (saved.busy && pressedControl[saved.id] === "more") ? "true" : undefined}
+                                    aria-busy={saved.busy && pressedControl[saved.id] === "more" ? "true" : undefined}
+                                    aria-describedby={menuOff ? offId : undefined}
+                                    onclick={(e) => moreClick(saved.id, controls, e)}
+                                    onkeydown={(e) => moreKeydown(saved.id, controls, e)}>{@render transferIcon("more")}</button>
+                                {/if}
+                                {#if remove}
+                                  {@const removeBusy = clearingSaved[saved.id] || (saved.busy && pressedControl[saved.id] === "remove")}
+                                  <button class="sdl-ico-btn danger" type="button" data-sdl-remove={saved.id}
+                                    title={clearingSaved[saved.id] ? "Checking the saved file" : remove.disabledReason ?? remove.label}
+                                    aria-label={remove.accessibleName}
+                                    aria-disabled={remove.disabled || removeBusy ? "true" : undefined}
+                                    aria-busy={removeBusy ? "true" : undefined}
+                                    aria-describedby={remove.disabled ? offId : undefined}
+                                    onclick={() => rowButtonClick(row, remove, saved.group)}>{@render transferIcon("cancel-x")}</button>
+                                {/if}
+                              {/if}
+                            </span>
+                          </div>
+                          {#if saved.bar}
+                            <div class="sdl-bar" role="progressbar" aria-label={saved.bar.accessibleName}
+                              aria-valuemin="0" aria-valuemax={saved.bar.valueMax} aria-valuenow={saved.bar.valueNow}
+                              aria-valuetext={saved.bar.valueText}>
+                              <span class="sdl-bar-fill" style:--p={saved.bar.fraction}></span>
+                              {#if saved.bar.label}<span class="sdl-bar-label" aria-hidden="true">{saved.bar.label}</span>{/if}
+                            </div>
+                            <span class="sdl-chunks">{saved.chunks}</span>
+                          {/if}
+                          {#if saved.showWhy}<p class="sdl-why">{saved.why}</p>{/if}
+                          {#if saved.actions.some((a) => a.disabled)}
+                            <span class="sdl-sr" id={offId}>{saved.actions.find((a) => a.disabled)?.disabledReason}</span>
+                          {/if}
+                          {#if saved.where || saved.hint}
+                            <p class="sdl-where">
+                              {#if saved.where}<span>{saved.where}</span>{/if}
+                              {#if saved.hint}<span class="sdl-hint">{saved.hint}</span>{/if}
+                            </p>
+                          {/if}
+                        </li>
+                      {/if}
+                    {/each}
+                    {#if group.id === "saved"}
+                      <!-- PR #56: finished saves from the saved-files list, newest first, as the same
+                           compact rows as a Saved private row in SAVED (compactListControls): status
+                           symbol, name, Show in folder as the primary, the chip, "more" (Save again)
+                           and the red x (Clear, which only forgets the entry). A copy a Saved private
+                           row stands for is that row instead. -->
+                      {#each savedListViews as listed (listed.id)}
+                        {@const file = savedListFiles.find((f) => f.id === listed.id)}
+                        {#if file}
+                          {@const listRowId = `saved-${listed.id}`}
+                          {@const listControls = compactListControls(listed)}
+                          {@const forget = listControls.remove}
+                          {@const listOffId = `sdl-why-off-${listRowId}`}
+                          <li class="sdl-row" data-sdl-row={listRowId} data-state="saved" data-tone={listed.tone}
+                            data-check={listed.check ?? undefined} data-saved-entry={listed.id}
+                            aria-busy={listed.busy ? "true" : undefined}>
+                            <div class="sdl-head">
+                              <span class="sdl-status" title={listed.statusTitle}>
+                                {@render transferIcon(listed.icon)}
+                                <span class="sdl-sr">{listed.statusTitle}</span>
+                              </span>
+                              <span class="sdl-name" title={listed.name}>{listed.name}</span>
+                              <span class="sdl-ctl">
+                                {#if listControls.primary?.kind === "reveal"}
+                                  {@const reveal = listControls.primary}
+                                  <button class="sdl-ico-btn" type="button" data-sdl-primary={listRowId}
+                                    title={savedFileBusy[listed.id] ? "Checking the saved file" : reveal.label}
+                                    aria-label={reveal.accessibleName}
+                                    aria-disabled={savedFileBusy[listed.id] ? "true" : undefined}
+                                    aria-busy={savedFileBusy[listed.id] ? "true" : undefined}
+                                    onclick={() => revealSavedListRow(file)}>{@render transferIcon(reveal.icon)}</button>
+                                {:else if listControls.primary?.kind === "action"}
+                                  {@const again = listControls.primary}
+                                  <button class="sdl-ico-btn" class:go={again.look === "go"} type="button" data-sdl-primary={listRowId}
+                                    title={again.action.disabledReason ?? again.action.label}
+                                    aria-label={again.action.accessibleName}
+                                    aria-disabled={again.action.disabled ? "true" : undefined}
+                                    aria-describedby={again.action.disabled ? listOffId : undefined}
+                                    onclick={() => runSavedListAction(file, again.action)}>{@render transferIcon(again.icon)}</button>
+                                {/if}
+                                <span class="sdl-chip">{listed.word}</span>
+                                {#if listControls.menu.length}
+                                  {@const listMenuOff = rowMenuDisabled(listControls)}
+                                  <button class="sdl-ico-btn sdl-more" type="button" data-sdl-more={listRowId}
+                                    aria-haspopup="menu" aria-expanded={rowMenu?.rowId === listRowId ? "true" : "false"}
+                                    aria-controls={rowMenu?.rowId === listRowId ? `sdl-menu-${listRowId}` : undefined}
+                                    title={listMenuOff ?? "More actions"} aria-label={`More actions for ${listed.name}`}
+                                    aria-disabled={listMenuOff ? "true" : undefined}
+                                    aria-describedby={listMenuOff ? listOffId : undefined}
+                                    onclick={(e) => moreClick(listRowId, listControls, e)}
+                                    onkeydown={(e) => moreKeydown(listRowId, listControls, e)}>{@render transferIcon("more")}</button>
+                                {/if}
+                                {#if forget}
+                                  <button class="sdl-ico-btn danger" type="button" data-sdl-remove={listRowId}
+                                    title={forget.disabledReason ?? forget.label}
+                                    aria-label={forget.accessibleName}
+                                    aria-disabled={forget.disabled ? "true" : undefined}
+                                    aria-describedby={forget.disabled ? listOffId : undefined}
+                                    onclick={() => runSavedListAction(file, forget)}>{@render transferIcon("cancel-x")}</button>
+                                {/if}
+                              </span>
+                            </div>
+                            {#if listed.actions.some((a) => a.disabled)}
+                              <span class="sdl-sr" id={listOffId}>{listed.actions.find((a) => a.disabled)?.disabledReason}</span>
+                            {/if}
+                            <p class="sdl-where">
+                              <span>{listed.where}</span>
+                              {#if listed.hint}<span class="sdl-hint">{listed.hint}</span>{/if}
+                            </p>
+                          </li>
+                        {/if}
+                      {/each}
+                    {/if}
+                  </ul>
+                </section>
+              {/if}
+            {/each}
             <button class="transfer-health" onclick={() => switchView("storage")}>
               {@render icoStorage()}
               {#if storageHealth}
@@ -27974,14 +30027,16 @@
               {/if}
               <i>Open →</i>
             </button>
-            {#if transferList.length === 0}
-              <p class="muted">No transfers yet. Shared files and downloads will appear here.</p>
+            {#if liveTransferList.length === 0}
+              {#if privateDownloads.length === 0 && savedListViews.length === 0}
+                <p class="muted">No transfers yet. Shared files and downloads will appear here.</p>
+              {/if}
             {:else}
               <div class="dl-toolbar">
                 <span class="muted small">
-                  {movingTransfers} active{#if waitingTransfers} · {waitingTransfers} waiting{/if} · {transferList.length} total
+                  {liveMovingTransfers} active{#if liveWaitingTransfers} · {liveWaitingTransfers} waiting{/if} · {liveTransferList.length} total
                 </span>
-                <button class="ghost small" disabled={finishedTransfers === 0} onclick={clearFinishedTransfers}>Clear finished</button>
+                <button class="ghost small" disabled={liveFinishedTransfers === 0} onclick={clearFinishedTransfers}>Clear finished</button>
               </div>
               <div class="transfer-legend" aria-label="Transfer piece colours">
                 <span><i class="transfer-piece held"></i>ready</span>
@@ -27990,7 +30045,7 @@
                 <span><i class="transfer-piece offline"></i>no connection</span>
               </div>
               <ul class="dl-list">
-                {#each transferList as d (d.key)}
+                {#each liveTransferList as d (d.key)}
                   {@const pieces = transferPieceStates(d)}
                   <li class="dl-item">
                     <div class="dl-item-main">
@@ -28043,7 +30098,7 @@
 
       <!-- Studio reserves this width for the drawing and its controls. The member-list
            preference is preserved for chat; call frame claims remain in Studio's Art tab. -->
-      {#if !dmHome && cur && !cur.isDm && membersOpen && view !== "studio"}
+      {#if !dmHome && cur && cur.backend !== "text-v2" && !cur.isDm && membersOpen && view !== "studio"}
         <aside class="members-col" aria-label="Members">
           <h3><span>Members · {onlineCount}/{members} claimed here</span></h3>
           {#if roster.length > 6}
@@ -28105,6 +30160,22 @@
         </button>
       {/if}
       <span class="sb-spacer"></span>
+      {#if cur && !dmHome && !inboxView && cacheShown(cacheStatus)}
+        {@const foot = cacheFooter(cacheStatus)}
+        <button
+          class="seg sb-cache"
+          data-tone={foot.tone}
+          title={foot.title}
+          onclick={() => openServerSettings(activeServerId, "storage")}
+        >
+          <span class="sb-cache-label">cache</span>
+          {#if foot.bar !== null}
+            <span class="sb-cache-bar" role="progressbar" aria-label="Cache used on this device" aria-valuemin="0" aria-valuemax="100" aria-valuenow={foot.bar}><i style={`width:${foot.bar}%`}></i></span>
+          {/if}
+          <span class="sb-cache-value">{foot.value}</span>
+          {#if foot.chip}<span class="sb-cache-chip">{foot.chip}</span>{/if}
+        </button>
+      {/if}
       {#if myFp}<span class="seg" title="Your fingerprint on this server: click a member and compare out of band to verify">id {myFp.slice(0, 4)}·{myFp.slice(4, 8)}</span>{/if}
     </footer>
 
@@ -28753,6 +30824,42 @@
             </div>
           </div>
         {/if}
+      </div>
+    {/if}
+
+    {#if leaveConfirm}
+      {@const leaving = leaveConfirm}
+      <div class="overlay" role="presentation" use:dismissOnBackdrop={() => (leaveConfirm = null)}>
+        <div class="overlay-card leave-confirm" role="alertdialog" aria-modal="true" aria-labelledby="leave-confirm-title">
+          <header class="overlay-head">
+            <div><span class="name-studio-label">LEAVE // {leaving.name.toUpperCase()}</span><h2 id="leave-confirm-title">Leave {leaving.name}?</h2></div>
+            <button class="ghost" title="Stay" onclick={() => (leaveConfirm = null)}>✕</button>
+          </header>
+          <p>Leaving forgets this server on this device and removes its cached files from this device. Coming back needs a fresh invite. Studio work keeps the files it still uses.</p>
+          <!-- PR #56: leaving forgets the server's list of saved files, never the files. -->
+          <p class="muted small">Files you saved from it stay where they are. Mewtual forgets where they went.</p>
+          {#if !leaving.loss}
+            <p class="muted small">Checking what this device keeps for it…</p>
+          {:else}
+            {#if leaving.loss.keep.length}
+              <h3>These Keep copies will be permanently deleted</h3>
+              <ul class="leave-loss">{#each leaving.loss.keep as name (name)}<li>{name}</li>{/each}</ul>
+            {/if}
+            {#if leaving.loss.downloads.length}
+              <h3>These unfinished downloads will be permanently deleted</h3>
+              <ul class="leave-loss">{#each leaving.loss.downloads as name (name)}<li>{name}</li>{/each}</ul>
+            {/if}
+            {#if leaving.loss.unknown}
+              <p class="warn-t small">Keep copies or unfinished downloads could not be checked. Leaving may delete any this device has for this server.</p>
+            {:else if !leaving.loss.keep.length && !leaving.loss.downloads.length}
+              <p class="muted small">No Keep copies or unfinished downloads on this device.</p>
+            {/if}
+          {/if}
+          <div class="leave-confirm-actions">
+            <button class="ghost" onclick={() => (leaveConfirm = null)}>Stay</button>
+            <button class="danger-btn" disabled={!leaving.loss} onclick={confirmLeave}>Leave and delete</button>
+          </div>
+        </div>
       </div>
     {/if}
 
@@ -30119,6 +32226,20 @@
                   <b>Server settings → File Trust</b>.
                 </p>
               </section>
+              <!-- PR #56: off by default. The renderer only passes a flag; native replaces only a
+                   copy its sealed list names and that it proves is its own and unchanged. -->
+              <section class="set-section saved-files-set">
+                <h3>Saved files</h3>
+                <label class="toggle">
+                  <input
+                    type="checkbox"
+                    checked={replaceOlder}
+                    onchange={(e) => setReplaceOlder(e.currentTarget.checked)}
+                  />
+                  <span>{REPLACE_OLDER_LABEL}</span>
+                </label>
+                <p class="muted small">{REPLACE_OLDER_HELP}</p>
+              </section>
             {:else if settingsPage === "keybinds"}
               <div class="stx-crumb">SETTINGS // APP // KEYBINDS</div>
               <h1>Keybinds</h1>
@@ -31011,13 +33132,90 @@
               </form>
               <p class="muted small">Size sets how big <code>:code:</code> renders in messages (reactions stay small).</p>
               </section>
+            {:else if serverSettingsPage === "storage"}
+              <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // STORAGE</div>
+              <h1>Storage on this device</h1>
+              <section class="set-section cache-set">
+                <h3>Cache</h3>
+                {#if cacheStatus}
+                  {@const foot = cacheFooter(cacheStatus)}
+                  <div class="cache-meter" data-tone={foot.tone}>
+                    {#if foot.bar !== null}
+                      <span class="cache-bar" role="progressbar" aria-label="Cache used" aria-valuemin="0" aria-valuemax="100" aria-valuenow={foot.bar}><i style={`width:${foot.bar}%`}></i></span>
+                    {/if}
+                    <b>{cacheBytes(cacheStatus.usage_bytes)}</b>
+                    <span class="muted small">{cacheStatus.unlimited ? "cached, no limit" : cacheStatus.limit_bytes !== null ? `of ${cacheBytes(cacheStatus.limit_bytes)}` : "cached"}</span>
+                    {#if foot.chip}<span class="cache-chip">{foot.chip}</span>{/if}
+                  </div>
+                  {#if cacheStatus.paused && cacheStatus.paused !== "not-ready"}
+                    <p class="warn-t small">{cachePauseText(cacheStatus.paused)}</p>
+                  {/if}
+                  {#if cacheStatus.leaving_soon_files > 0 && !cacheStatus.held_by_pins}
+                    <p class="small">{cacheStatus.leaving_soon_files} {cacheStatus.leaving_soon_files === 1 ? "file is" : "files are"} next to leave ({cacheBytes(cacheStatus.leaving_soon_bytes)}) when new files arrive.</p>
+                  {/if}
+                  <p class="muted small">{pinnedSummary(cacheStatus)}</p>
+                {:else}
+                  <p class="muted small">This device's cache has not been measured yet.</p>
+                {/if}
+                <p class="muted small">Files you open or save stay here so they show without fetching again, and this device can share them with members. Over the limit, the files shared longest ago leave first; anyone who still has them can send them again.</p>
+              </section>
+              <section class="set-section">
+                <h3>Limit on this device</h3>
+                <form class="rename-row" onsubmit={(e) => { e.preventDefault(); void applyCacheLimit(); }}>
+                  <select bind:value={cacheLimitDraft} onchange={() => (cacheLimitConfirming = false)} aria-label="Cache limit on this device" disabled={!cacheStatus || cacheLimitBusy}>
+                    {#if cacheStatus && !cacheStatus.unlimited && cacheStatus.limit_bytes !== null && !CACHE_LIMIT_CHOICES.some((c) => c.bytes === cacheStatus?.limit_bytes)}
+                      <option value={String(cacheStatus.limit_bytes)}>{limitLabel(cacheStatus.limit_bytes)}</option>
+                    {/if}
+                    {#each CACHE_LIMIT_CHOICES as choice (choice.label)}
+                      <option value={String(choice.bytes)}>{choice.label}</option>
+                    {/each}
+                  </select>
+                  <button class="ghost small" disabled={!cacheStatus || cacheLimitBusy || !cacheLimitDraft}>
+                    {cacheLimitBusy ? "Saving…" : cacheLimitConfirming ? "Remove and apply" : "Apply"}
+                  </button>
+                </form>
+                {#if cacheLimitConfirming && cacheStatus}
+                  <p class="warn-t small">{lowerLimitWarning(cacheStatus, cacheLimitDraft === "null" ? null : Number(cacheLimitDraft))}</p>
+                {/if}
+                <p class="muted small">Only this device. Other members choose their own, and nothing here changes what the server shares.</p>
+              </section>
+              <!-- PR #56 follow-up: how many saves this server's list keeps on this device. Native
+                   clamps the choice into its range; a lower one is previewed first, and the page
+                   says how many of the oldest entries go (never files) before the user confirms. -->
+              <section class="set-section saved-limit-set">
+                <h3>Saved files</h3>
+                <label class="saved-limit-label" for="saved-limit">{SAVED_LIMIT_LABEL}</label>
+                <form class="rename-row" onsubmit={(e) => { e.preventDefault(); void applySavedLimit(); }}>
+                  <select id="saved-limit" bind:value={savedLimitDraft} onchange={() => (savedLimitForgets = null)} disabled={!savedLimit || savedLimitBusy}>
+                    {#if savedLimit?.state === "unreadable"}
+                      <option value="" disabled>Choose again</option>
+                    {/if}
+                    {#if savedLimit && savedLimit.limit !== null && !SAVED_LIMIT_CHOICES.includes(savedLimit.limit)}
+                      <option value={String(savedLimit.limit)}>{savedLimitLabel(savedLimit.limit, savedLimit.default)}</option>
+                    {/if}
+                    {#each SAVED_LIMIT_CHOICES as choice (choice)}
+                      <option value={String(choice)}>{savedLimitLabel(choice, savedLimit?.default ?? 256)}</option>
+                    {/each}
+                  </select>
+                  <button class="ghost small" disabled={!savedLimit || savedLimitBusy || !savedLimitDraft || (savedLimitForgets === null && savedLimit.limit !== null && String(savedLimit.limit) === savedLimitDraft)}>
+                    {savedLimitBusy ? "Saving…" : savedLimitForgets !== null ? "Forget and apply" : "Apply"}
+                  </button>
+                </form>
+                {#if savedLimitForgets !== null}
+                  <p class="warn-t small">{savedLimitWarning(savedLimitForgets)}</p>
+                {/if}
+                {#if savedLimit?.state === "unreadable"}
+                  <p class="warn-t small">Mewtual could not read this setting, so it lists no new saves for this server until you choose one again.</p>
+                {/if}
+                <p class="muted small">{savedLimit && savedLimit.listed !== null ? `The list holds ${savedLimit.listed} saved ${savedLimit.listed === 1 ? "file" : "files"} now. ` : ""}{SAVED_LIMIT_HELP}</p>
+              </section>
             {:else if serverSettingsPage === "leave"}
               <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // LEAVE</div>
               <h1>Leave Server</h1>
               {#if activeServerId !== null}
                 <section class="set-section danger">
-                  <p class="muted small">Leaving forgets this server on this device. Coming back needs a fresh invite.</p>
-                  <button class="ghost leave" onclick={() => { const id = activeServerId; showServerSettings = false; if (id !== null) leaveServer(id); }}>
+                  <p class="muted small">Leaving forgets this server on this device and removes its cached files, Keep copies and unfinished downloads from this device. Files you saved from it stay where they are. Coming back needs a fresh invite.</p>
+                  <button class="ghost leave" onclick={() => { const id = activeServerId; if (id !== null) void requestLeave(id); }}>
                     Leave this server
                   </button>
                 </section>
@@ -31053,7 +33251,8 @@
           </button>
           <button class="ghost small" onclick={() => lightbox && openFileRef(lightbox.cid)}>Properties</button>
           {#if lightboxFile}
-            <button class="ghost small" onclick={() => lightboxFile && downloadFile(lightboxFile)}>Download</button>
+            <button class="ghost small" onclick={() => lightboxFile && downloadFile(lightboxFile)}>{lightboxFile ? downloadLabel(lightboxFile) : "Download"}</button>
+            <button class="ghost small" onclick={() => lightboxFile && downloadFile(lightboxFile, true)}>Save as</button>
           {/if}
           <span class="lightbox-div" aria-hidden="true"></span>
           <button class="ghost small" aria-label="Close" title="Close (Esc)" onclick={closeLightbox}>✕</button>
@@ -31103,6 +33302,10 @@
         <div class="overlay-card">
           <header class="overlay-head">
             <h2 class="file-info-title">📄 {fileInfo.name}</h2>
+            {#if savedCids.has(fileInfo.cid)}
+              <!-- PR #56: saved on this device; Transfers shows where. -->
+              <span class="file-saved" title={SAVED_MARK_TITLE}>{@render transferIcon("saved")}<span>{SAVED_MARK_LABEL}</span></span>
+            {/if}
             <button class="ghost" onclick={closeFileInfo}>✕</button>
           </header>
           <div class="overlay-body file-info">
@@ -31199,12 +33402,16 @@
               </dd>
               <dt>Kept copy</dt>
               <dd>
-                <span>{keptCopyLabel(keptFiles?.files.find((copy) => copy.cid === fileInfo?.cid))}</span>
+                <span>{fileInfoKeptTransfer ? keptTransferLabel(fileInfoKeptTransfer) : keptCopyLabel(fileInfoKeptCopy)}</span>
                 {#if keptFiles?.supported && !keptFiles.error}
-                  <button class="ghost small" disabled={!!keptTransfer} onclick={() => fileInfo && keepFileHere(fileInfo.cid)}>
-                    {keptFiles.files.some((copy) => copy.cid === fileInfo?.cid) ? "Check and repair copy" : "Keep on this device"}
+                  <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || !!fileInfoKeptTransfer?.running || fileInfoKeptTransfer?.phase === "deleting"}
+                    onclick={() => fileInfoKeptCopy && fileInfo ? (fileInfoKeptRecord?.exhausted ? retryKeptFile(fileInfoKeptRecord) : checkKeptFile(fileInfo.cid)) : fileInfoKeptTransfer ? (fileInfoKeptTransfer.exhausted ? retryKeptFile(fileInfoKeptTransfer) : resumeKeptFile(fileInfoKeptTransfer)) : fileInfo && keepFileHere(fileInfo.cid)}>
+                    {fileInfoKeptCopy ? (fileInfoKeptRecord?.exhausted ? "Retry check" : "Check and repair copy") : fileInfoKeptTransfer?.exhausted ? "Retry" : fileInfoKeptTransfer ? "Resume" : "Keep on this device"}
                   </button>
-                  {#if keptTransfer?.cid === fileInfo.cid}<button class="ghost small" onclick={cancelKeptTransfer}>Cancel keeping</button>{/if}
+                  {#if keptTransfer?.cid === fileInfo.cid && keptTransfer.cancellation}<button class="ghost small" onclick={cancelKeptTransfer}>Stop checking</button>{/if}
+                  {#if fileInfoKeptTransfer && !fileInfoKeptTransfer.user_paused && !fileInfoKeptTransfer.exhausted && !fileInfoKeptTransfer.blocked && fileInfoKeptTransfer.phase === "paused"}
+                    <button class="ghost small" disabled={!!keptMutation || !!keptTransfer} onclick={() => fileInfoKeptTransfer && setKeptPaused(fileInfoKeptTransfer, true)}>Pause</button>
+                  {/if}
                   <p class="muted small">Stores a verified encrypted copy within this server's 1 GiB / 32-file limit. Checking may fetch missing chunks. Remote copies remain unconfirmed.</p>
                 {:else if keptFiles?.error}<p class="muted small">{keptFiles.error}</p>{/if}
               </dd>
@@ -31269,10 +33476,19 @@
               {#if mediaKind(fileInfo.name, fileInfo.mime) === "pixa"}
                 <button class="primary" disabled={!mayFetchPixa(fileInfo.size)} onclick={() => fileInfo && openPixaViewer(fileInfo)}>Open flipnote</button>
               {/if}
-              <button class="primary" onclick={() => fileInfo && downloadFile(fileInfo)}>↓ Download</button>
+              <button class="primary" onclick={() => fileInfo && downloadFile(fileInfo)}>↓ {fileInfo ? downloadLabel(fileInfo) : "Download"}</button>
+              <button class="ghost" onclick={() => fileInfo && downloadFile(fileInfo, true)}>Save as</button>
               {#if canSetExpiry}
-                <button class="ghost" disabled={fileInfoExpiryBusy} onclick={toggleKeepForever}>
-                  {fileInfoExpiryBusy ? "Saving…" : keptForever ? "Restore 30-day expiry" : "♾ Keep forever"}
+                <!-- "Never expires" is a server-wide circulation flag, not a promise that this or
+                     any device keeps the bytes: caches still drop it under their limit. Keep is
+                     the per-device pin. The old "Keep forever" label read as the latter. -->
+                <button
+                  class="ghost"
+                  disabled={fileInfoExpiryBusy}
+                  onclick={toggleNeverExpires}
+                  title={neverExpires ? "Give this listing a fresh 30-day circulation window" : "Keep this listing in circulation for everyone with no end date. Devices can still drop it from their cache; use Keep to hold a copy here."}
+                >
+                  {fileInfoExpiryBusy ? "Saving…" : neverExpires ? "Restore 30-day expiry" : "♾ Never expires"}
                 </button>
               {/if}
               {#if myRole === "owner" || myRole === "admin"}
@@ -31421,6 +33637,39 @@
       >
         {@render menuRows(menu.items, 0)}
         <div class="ctx-foot" aria-hidden="true"><span>↑↓ move</span><span>⏎ pick</span><span>type to jump</span><span class="sp"></span><span>esc</span></div>
+      </div>
+    {/if}
+
+    {#if rowMenu && rowMenuShown}
+      {@const menuRowId = rowMenu.rowId}
+      <!-- Compact Transfers rows: a row's "more" menu, mounted here (not inside the row) and fixed
+           from its button, so the scrolling panel never clips it (design compact.md, 5.5). A
+           saved-files list row (PR #56) uses the same menu with its own items. -->
+      <div class="sdl-menu" class:up={rowMenu.up} id={`sdl-menu-${rowMenu.rowId}`} role="menu"
+        aria-label={`More actions for ${rowMenuShown.name}`} tabindex="-1"
+        style:top={rowMenu.top === null ? undefined : `${rowMenu.top}px`}
+        style:bottom={rowMenu.bottom === null ? undefined : `${rowMenu.bottom}px`}
+        style:right={`${rowMenu.right}px`}
+        onfocusin={() => (rowMenuHadFocus = true)}
+        onkeydown={rowMenuKeydown}>
+        {#each rowMenuShown.menu as item, index (index)}
+          {#if item.kind === "separator"}
+            <div class="sdl-menu-sep" role="separator"></div>
+          {:else if item.kind === "reveal"}
+            <button class="sdl-menu-item" role="menuitem" type="button" data-sdl-item={index}
+              tabindex={rowMenuFocus === index ? 0 : -1} aria-label={item.accessibleName}
+              onfocus={() => (rowMenuFocus = index)}
+              onclick={() => runRowMenuItem(menuRowId, item)}>{@render transferIcon(item.icon)} {item.label}</button>
+          {:else}
+            <button class="sdl-menu-item" role="menuitem" type="button" data-sdl-item={index}
+              tabindex={rowMenuFocus === index ? 0 : -1} aria-label={item.action.accessibleName}
+              aria-disabled={item.action.disabled ? "true" : undefined}
+              aria-describedby={item.action.disabled ? `sdl-why-off-${menuRowId}` : undefined}
+              title={item.action.disabledReason ?? undefined}
+              onfocus={() => (rowMenuFocus = index)}
+              onclick={() => runRowMenuItem(menuRowId, item)}>{@render transferIcon(item.icon)} {item.action.label}</button>
+          {/if}
+        {/each}
       </div>
     {/if}
   {/if}

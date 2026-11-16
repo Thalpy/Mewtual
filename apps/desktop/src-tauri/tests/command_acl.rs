@@ -143,21 +143,59 @@ fn a_remote_origin_resolves_nothing_even_on_main() {
     // is determined at runtime, which is a separate question about header trust.
     let mut context = context();
     let authority = context.runtime_authority_mut();
-    let remote = Origin::Remote {
-        url: "https://open.spotify.com/embed/track/x"
-            .parse()
-            .expect("url"),
-    };
     let mut leaked = Vec::new();
-    for entry in policy() {
-        if allowed(authority, &entry.command, "main", &remote) {
-            leaked.push(entry.command.clone());
+    // Remote-labelled loopback/lookalike URLs do not acquire local authority. This exercises
+    // the generated policy, not the separate runtime classification of a trusted dev window.
+    for url in [
+        "https://open.spotify.com/embed/track/x",
+        "http://localhost:1420/",
+        "http://127.0.0.1:1420/",
+        "http://[::1]:1420/",
+        "http://localhost.evil.example:1420/",
+        "http://localhost@evil.example:1420/",
+        "tauri://localhost/",
+    ] {
+        let remote = Origin::Remote {
+            url: url.parse().expect("url"),
+        };
+        for entry in policy() {
+            if allowed(authority, &entry.command, "main", &remote) {
+                leaked.push(format!("{} for {url}", entry.command));
+            }
         }
     }
     assert!(
         leaked.is_empty(),
         "these commands resolve for a remote origin: {leaked:#?}",
     );
+}
+
+#[test]
+fn remote_url_pattern_keeps_scheme_host_port_and_path_boundaries() {
+    // Exercise the parser Tauri uses for explicitly remote capabilities after its dependency
+    // upgrade. The current app grants no remote capability; the authority test above pins that
+    // policy independently. These positive controls prevent a reject-everything false pass.
+    let pattern: tauri::utils::acl::RemoteUrlPattern =
+        "https://voice.example:8443/voice/*".parse().unwrap();
+    for url in [
+        "https://voice.example:8443/voice/one",
+        "https://voice.example:8443/voice/one?frame=1#position",
+    ] {
+        assert!(pattern.test(&url.parse().unwrap()), "expected match: {url}");
+    }
+    for url in [
+        "http://voice.example:8443/voice/one",
+        "https://voice.example.evil.example:8443/voice/one",
+        "https://voice.example@evil.example:8443/voice/one",
+        "https://voice.example:8444/voice/one",
+        "https://voice.example:8443/private/one",
+        "https://voice.example:8443/voice/../private/one",
+    ] {
+        assert!(
+            !pattern.test(&url.parse().unwrap()),
+            "unexpected match: {url}"
+        );
+    }
 }
 
 #[test]

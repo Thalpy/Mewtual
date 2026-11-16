@@ -1077,7 +1077,7 @@ async fn a_release_withheld_by_the_final_session_fence_is_uncertain_and_is_on_di
             action: Action::ReleaseOverlayArchive(Box::new(request)),
         }),
         |response| {
-            state.session_lock_requested.store(true, Ordering::Release);
+            state.session_lock_requested.store(true, Ordering::SeqCst);
             match response {
                 InvokeResponse::Control(response) => response_value(response),
                 _ => Err("mismatched release response".into()),
@@ -1086,7 +1086,7 @@ async fn a_release_withheld_by_the_final_session_fence_is_uncertain_and_is_on_di
     )
     .await
     .expect_err("a release blocked by the final fence must not be delivered");
-    state.session_lock_requested.store(false, Ordering::Release);
+    state.session_lock_requested.store(false, Ordering::SeqCst);
     assert!(
         withheld.starts_with(super::super::UNDELIVERED_RELEASE),
         "a completed release must be reported uncertain, said: {withheld}"
@@ -1132,7 +1132,7 @@ async fn a_disposal_withheld_by_the_final_session_fence_is_uncertain_and_is_on_d
             action: Action::DisposeOverlay(Box::new(request)),
         }),
         |response| {
-            state.session_lock_requested.store(true, Ordering::Release);
+            state.session_lock_requested.store(true, Ordering::SeqCst);
             match response {
                 InvokeResponse::Control(response) => response_value(response),
                 _ => Err("mismatched disposal response".into()),
@@ -1141,7 +1141,7 @@ async fn a_disposal_withheld_by_the_final_session_fence_is_uncertain_and_is_on_d
     )
     .await
     .expect_err("a disposal blocked by the final fence must not be delivered");
-    state.session_lock_requested.store(false, Ordering::Release);
+    state.session_lock_requested.store(false, Ordering::SeqCst);
     assert!(
         withheld.starts_with(super::super::UNDELIVERED_DISPOSE),
         "a completed disposal must be reported uncertain, said: {withheld}"

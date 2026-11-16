@@ -1,5 +1,10 @@
 //! Adjustable expiry and the garbage-collection engine.
 //!
+//! **Not used by the application.** Nothing outside tests constructs a [`RetentionIndex`]:
+//! circulation expiry is displayed only, and eviction is the per-server cache limit
+//! (`catcoms-app::cache_plan` over [`crate::cache`]), which orders by listing and does not
+//! probe holders. What follows describes this engine, not current app behaviour.
+//!
 //! Expiry is resolved most-specific-first (per-file → per-server → global, default
 //! one month). "Expired" means the cached bytes are dropped and the blob leaves
 //! the auto-share set; but its index entry is kept, so it stays re-fetchable by

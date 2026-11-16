@@ -1,0 +1,415 @@
+//! "Save as" through the [`DestinationChooser`] seam: no real dialog ever opens. One sequential
+//! test, because the one-dialog turn is process-wide and parallel tests would contend for it.
+use super::*;
+use catcoms_storage::kept::ChoiceRefusal;
+
+/// Answers with a scripted result, optionally waiting on a gate first (a dialog left open).
+struct Scripted {
+    answer: StdMutex<Option<Result<Option<PathBuf>, String>>>,
+    asked: StdMutex<Vec<(Option<PathBuf>, String)>>,
+    gate: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+}
+impl Scripted {
+    fn answering(answer: Result<Option<PathBuf>, String>) -> Self {
+        Self {
+            answer: StdMutex::new(Some(answer)),
+            asked: StdMutex::new(Vec::new()),
+            gate: tokio::sync::Mutex::new(None),
+        }
+    }
+}
+#[async_trait::async_trait]
+impl DestinationChooser for Scripted {
+    async fn choose(
+        &self,
+        directory: Option<PathBuf>,
+        suggested_name: String,
+    ) -> Result<Option<PathBuf>, String> {
+        self.asked.lock().unwrap().push((directory, suggested_name));
+        if let Some(gate) = self.gate.lock().await.take() {
+            let _ = gate.await;
+        }
+        self.answer.lock().unwrap().take().expect("asked once")
+    }
+}
+
+/// [`choose_destination`] for an invocation that is never cancelled while its dialog is open.
+async fn choose_now(
+    chooser: &dyn DestinationChooser,
+    downloads: Option<PathBuf>,
+    name: &str,
+) -> Result<Option<ChosenDestination>, String> {
+    choose_destination(chooser, downloads, name, std::future::pending()).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn save_as_selection_through_the_chooser_seam() {
+    let root = tempfile::tempdir().unwrap();
+    let downloads = root.path().join("Downloads");
+    let chosen = root.path().join("Chosen place");
+    std::fs::create_dir_all(&downloads).unwrap();
+    std::fs::create_dir_all(&chosen).unwrap();
+
+    // Defaults: the dialog starts in Downloads with the sanitized peer name. Cancel changes
+    // nothing and creates nothing.
+    let cancel = Scripted::answering(Ok(None));
+    let picked = choose_now(&cancel, Some(downloads.clone()), "a/b:c.txt")
+        .await
+        .unwrap();
+    assert!(picked.is_none());
+    assert_eq!(
+        cancel.asked.lock().unwrap()[0],
+        (Some(downloads.clone()), "b_c.txt".to_string())
+    );
+    assert_eq!(std::fs::read_dir(&chosen).unwrap().count(), 0);
+
+    // An existing name is refused, even though the OS dialog already asked to replace it, and the
+    // file is left byte-identical.
+    let existing = chosen.join("report.bin");
+    std::fs::write(&existing, b"the user's own report").unwrap();
+    let replace = Scripted::answering(Ok(Some(existing.clone())));
+    let refused = choose_now(&replace, Some(downloads.clone()), "report.bin")
+        .await
+        .unwrap_err();
+    assert_eq!(refused, ChoiceRefusal::Exists.to_string());
+    assert_eq!(std::fs::read(&existing).unwrap(), b"the user's own report");
+
+    // A usable choice comes back validated, with the exact name the user typed.
+    let fresh = Scripted::answering(Ok(Some(chosen.join("Renamed.bin"))));
+    let choice = choose_now(&fresh, Some(downloads.clone()), "report.bin")
+        .await
+        .unwrap()
+        .expect("a valid choice");
+    assert_eq!(choice.name(), "Renamed.bin");
+    assert_eq!(
+        std::fs::read_dir(&chosen).unwrap().count(),
+        1,
+        "nothing created"
+    );
+
+    // A relative or otherwise unusable result is refused.
+    let relative = Scripted::answering(Ok(Some(PathBuf::from("relative.bin"))));
+    assert_eq!(
+        choose_now(&relative, Some(downloads.clone()), "x")
+            .await
+            .unwrap_err(),
+        ChoiceRefusal::InvalidName.to_string()
+    );
+
+    // One dialog at a time (picker review M4): while one is open, another is refused; after it
+    // closes, a new one may open.
+    let (release, gate) = tokio::sync::oneshot::channel();
+    let open = Arc::new(Scripted::answering(Ok(None)));
+    *open.gate.lock().await = Some(gate);
+    let first = tokio::spawn({
+        let open = open.clone();
+        let downloads = Some(downloads.clone());
+        async move { choose_now(&*open, downloads, "one.bin").await }
+    });
+    while open.asked.lock().unwrap().is_empty() {
+        tokio::task::yield_now().await;
+    }
+    let second = Scripted::answering(Ok(None));
+    assert_eq!(
+        choose_now(&second, Some(downloads.clone()), "two.bin")
+            .await
+            .unwrap_err(),
+        DIALOG_BUSY
+    );
+    assert!(
+        second.asked.lock().unwrap().is_empty(),
+        "no second dialog opened"
+    );
+    release.send(()).unwrap();
+    assert!(first.await.unwrap().unwrap().is_none());
+    let again = Scripted::answering(Ok(None));
+    assert!(choose_now(&again, Some(downloads.clone()), "three.bin")
+        .await
+        .unwrap()
+        .is_none());
+
+    // A chooser error releases the turn too.
+    let broken = Scripted::answering(Err("The Save as window could not be opened.".into()));
+    assert!(choose_now(&broken, Some(downloads.clone()), "x")
+        .await
+        .is_err());
+    let after = Scripted::answering(Ok(None));
+    assert!(choose_now(&after, Some(downloads), "x").await.is_ok());
+
+    // Picker review L6: with no resolvable Downloads folder the dialog still opens, at the OS
+    // default, and its choice is validated the same way.
+    let nowhere = Scripted::answering(Ok(Some(chosen.join("Without downloads.bin"))));
+    let choice = choose_now(&nowhere, None, "report.bin")
+        .await
+        .unwrap()
+        .expect("Save as works without a Downloads folder");
+    assert_eq!(choice.name(), "Without downloads.bin");
+    assert_eq!(
+        nowhere.asked.lock().unwrap()[0],
+        (None, "report.bin".to_string())
+    );
+
+    // A peer-chosen name never suggests `%VAR%`, which the Windows dialog would expand into a
+    // path the user did not see.
+    let expand = Scripted::answering(Ok(None));
+    choose_now(&expand, None, "%APPDATA%_x.txt").await.unwrap();
+    assert_eq!(expand.asked.lock().unwrap()[0].1, "_APPDATA__x.txt");
+
+    // Re-review 2 residual: a dialog that never answers (a GTK future that never completes) no
+    // longer wedges Save as for the life of the process. Cancelling the invocation (Lock, unlock,
+    // a server replacement) ends the wait and releases the one-dialog turn.
+    let (_never_answers, gate) = tokio::sync::oneshot::channel();
+    let hung = Scripted::answering(Ok(None));
+    *hung.gate.lock().await = Some(gate);
+    let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
+    let abandoned = choose_destination(&hung, None, "hung.bin", async {
+        let _ = cancelled.await;
+    });
+    // Lock lands only once the dialog is open.
+    let lock_lands = async {
+        while hung.asked.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+        cancel.send(()).unwrap();
+    };
+    // Bounded, so a regression fails here instead of hanging the suite.
+    let (ended, ()) = tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::join!(abandoned, lock_lands)
+    })
+    .await
+    .expect("cancelling the invocation ends the dialog wait");
+    assert_eq!(ended.unwrap_err(), DIALOG_ABANDONED);
+    assert_eq!(hung.asked.lock().unwrap().len(), 1, "the dialog had opened");
+    let next = Scripted::answering(Ok(None));
+    assert!(
+        choose_now(&next, None, "next.bin").await.unwrap().is_none(),
+        "the turn was released"
+    );
+
+    // Re-review 3 LOW 3: an invocation already cancelled (Lock landed before the dialog) never
+    // asks for a dialog at all, so no orphan window opens.
+    let late = Scripted::answering(Ok(None));
+    assert_eq!(
+        choose_destination(&late, None, "late.bin", std::future::ready(()))
+            .await
+            .unwrap_err(),
+        DIALOG_ABANDONED
+    );
+    assert!(
+        late.asked.lock().unwrap().is_empty(),
+        "no dialog was opened"
+    );
+
+    // Second review R2-M2: the dialog answered, then validation stalls on the chosen folder (a
+    // dead share). Cancelling the invocation ends the wait at once; the one-dialog turn ended with
+    // the dialog, so another Save as opens before the stalled check returns; the stalled worker
+    // holds one slot of a bounded pool until it finishes, and its late result goes nowhere.
+    let slots = Arc::new(tokio::sync::Semaphore::new(1));
+    let (unstall, stalled) = std::sync::mpsc::channel::<()>();
+    let (entered_tx, entered) = std::sync::mpsc::channel::<()>();
+    let checked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = checked.clone();
+    let picked_place = Scripted::answering(Ok(Some(chosen.join("Stalled.bin"))));
+    let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
+    let stalled_choice = choose_destination_with(
+        slots.clone(),
+        &picked_place,
+        None,
+        "stalled.bin",
+        async {
+            let _ = cancelled.await;
+        },
+        move |picked| {
+            let _ = entered_tx.send(());
+            let _ = stalled.recv_timeout(Duration::from_secs(20));
+            seen.store(true, std::sync::atomic::Ordering::SeqCst);
+            ChosenDestination::validate(&picked)
+        },
+    );
+    // While the check is stalled inside its worker (its invocation still live), another Save as
+    // can already open: the turn ended with the first dialog. Then Lock lands.
+    let lock_lands = async {
+        while entered.try_recv().is_err() {
+            tokio::task::yield_now().await;
+        }
+        let meanwhile = Scripted::answering(Ok(None));
+        let opened = choose_now(&meanwhile, None, "meanwhile.bin").await;
+        cancel.send(()).unwrap();
+        (opened, meanwhile)
+    };
+    let (ended, (opened, meanwhile)) = tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::join!(stalled_choice, lock_lands)
+    })
+    .await
+    .expect("cancelling the invocation ends the wait for a stalled check");
+    assert!(
+        opened.unwrap().is_none(),
+        "a second dialog opened meanwhile"
+    );
+    assert_eq!(meanwhile.asked.lock().unwrap().len(), 1);
+    assert_eq!(ended.unwrap_err(), DIALOG_ABANDONED);
+    assert!(
+        !checked.load(std::sync::atomic::Ordering::SeqCst),
+        "the check is still stalled"
+    );
+    let another = Scripted::answering(Ok(None));
+    assert!(
+        choose_now(&another, None, "another.bin")
+            .await
+            .unwrap()
+            .is_none(),
+        "another Save as opens while the old check is still stalled"
+    );
+    assert_eq!(another.asked.lock().unwrap().len(), 1, "its dialog opened");
+    // Bounded: with the pool's only slot held by the stalled check, a Save as through that pool
+    // is refused before any dialog opens.
+    let refused = Scripted::answering(Ok(None));
+    assert_eq!(
+        choose_destination_with(
+            slots.clone(),
+            &refused,
+            None,
+            "x",
+            std::future::pending(),
+            |picked| ChosenDestination::validate(&picked),
+        )
+        .await
+        .unwrap_err(),
+        VALIDATION_BUSY
+    );
+    assert!(refused.asked.lock().unwrap().is_empty());
+    // The check finally returns: its result is discarded, nothing is created, the slot returns.
+    unstall.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while slots.available_permits() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the stalled worker gives its slot back when it finishes");
+    assert!(checked.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(!chosen.join("Stalled.bin").exists(), "nothing was created");
+}
+
+#[test]
+fn the_record_not_the_invocation_selects_where_a_fresh_save_goes() {
+    // Picker review coverage: the selection that used to be inline in save_group_file.
+    let root = tempfile::tempdir().unwrap();
+    let downloads = root.path().join("Downloads");
+    let choice = Arc::new(ChosenDestination::validate(&root.path().join("chosen.bin")).unwrap());
+    let unused = || -> Result<PathBuf, String> { panic!("Downloads is not the destination") };
+
+    // A remembered choice wins, whether this invocation chose it or an earlier one did.
+    for chose_now in [true, false] {
+        match select_destination(Some(Ok(choice.clone())), chose_now, unused) {
+            Ok(Destination::Chosen(picked)) => assert_eq!(*picked, *choice),
+            _ => panic!("the remembered choice is the destination"),
+        }
+    }
+    // A choice this platform cannot decode is refused, never redirected to Downloads.
+    assert_eq!(
+        select_destination(Some(Err(ChoiceRefusal::FolderUnavailable)), false, unused).err(),
+        Some(ChoiceRefusal::FolderUnavailable.to_string())
+    );
+    // This Save as found its choice already consumed by another save of the same file.
+    assert_eq!(
+        select_destination(None, true, unused).err().as_deref(),
+        Some(PLACE_CHANGED)
+    );
+    // The one-click default resolves Downloads only now, and reports its failure.
+    match select_destination(None, false, || Ok(downloads.clone())) {
+        Ok(Destination::Downloads(folder)) => assert_eq!(folder, downloads),
+        _ => panic!("the one-click default is Downloads"),
+    }
+    assert_eq!(
+        select_destination(None, false, || Err("no Downloads folder".into()))
+            .err()
+            .as_deref(),
+        Some("no Downloads folder")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_remembered_choice_that_cannot_be_used_is_refused_before_reverification() {
+    // Re-review 2 LOW 3: the Resume preflight for a record with a remembered Save as choice.
+    let root = tempfile::tempdir().unwrap();
+    let folder = root.path().join("Chosen place");
+    std::fs::create_dir(&folder).unwrap();
+    let choice = Arc::new(ChosenDestination::validate(&folder.join("report.bin")).unwrap());
+    assert_eq!(plan_preflight(None).await, Ok(()));
+    assert_eq!(plan_preflight(Some(Ok(choice.clone()))).await, Ok(()));
+    assert_eq!(
+        plan_preflight(Some(Err(ChoiceRefusal::FolderUnavailable))).await,
+        Err(ChoiceRefusal::FolderUnavailable.to_string()),
+        "a choice this platform cannot decode is refused, not redirected"
+    );
+    // The drive holding the chosen folder was unplugged.
+    std::fs::remove_dir(&folder).unwrap();
+    assert_eq!(
+        plan_preflight(Some(Ok(choice))).await,
+        Err(ChoiceRefusal::FolderUnavailable.to_string())
+    );
+    assert!(!folder.exists(), "the preflight creates nothing");
+}
+
+#[test]
+fn a_save_counts_as_in_downloads_only_directly_inside_the_downloads_folder() {
+    // Picker re-review LOW 1b and its re-check: the result's inDownloads flag fails closed.
+    let root = tempfile::tempdir().unwrap();
+    let downloads = root.path().join("Downloads");
+    assert!(saved_in_downloads(
+        Some(&downloads),
+        &downloads.join("c (1).bin")
+    ));
+    // A resumed or recovered journal kept its own (earlier chosen) folder.
+    assert!(!saved_in_downloads(
+        Some(&downloads),
+        &root.path().join("Chosen place").join("c.bin")
+    ));
+    assert!(!saved_in_downloads(
+        Some(&downloads),
+        &downloads.join("nested").join("c.bin")
+    ));
+    // No resolvable Downloads folder asserts nothing.
+    assert!(!saved_in_downloads(None, &downloads.join("c.bin")));
+}
+
+#[test]
+fn the_projection_says_a_choice_is_remembered_without_naming_it() {
+    let status = DownloadStatus {
+        id: DownloadId::from_bytes([5; 32]),
+        state: catcoms_storage::kept::KeptTransfer {
+            plan: catcoms_storage::kept::KeepPlan {
+                cid: catcoms_storage::Cid::of(b"plaintext"),
+                version: [1; 32],
+                manifest: Vec::new(),
+                chunks: vec![(catcoms_storage::Cid::of(b"a"), 5)],
+            },
+            listing: [0; 32],
+            transfer: [5; 32],
+            phase: KeepPhase::Resumable,
+            verified_chunks: 0,
+            running: false,
+            user_paused: false,
+            blocked: false,
+            intent: 2,
+            exhausted: false,
+            grant: 1,
+            remaining: catcoms_storage::kept::KeepAllowance {
+                requests: 1,
+                pages: 1,
+                bytes: 1,
+                slices: 1,
+            },
+        },
+        checked: false,
+        export: ExportView::None,
+        planned: true,
+        bytes: None,
+    };
+    let json = serde_json::to_string(&project(status, None, None)).unwrap();
+    assert!(json.contains("\"chosenPlace\":true"), "{json}");
+    // An unreadable manifest sends no byte counts rather than zeros.
+    assert!(json.contains("\"totalBytes\":null"), "{json}");
+    assert!(!json.contains("path") && !json.contains("folder"), "{json}");
+}

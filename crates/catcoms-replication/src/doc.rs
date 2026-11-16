@@ -28,6 +28,14 @@ use crate::op::{SealedOp, SignedOp};
 use crate::ReplError;
 use crate::{CheckpointOrigin, VerifiedCheckpoint};
 
+mod history;
+mod saved_local_recovery;
+pub use history::{
+    SignedHistoryError, SignedHistoryIndex, SignedHistoryProgress, SignedHistoryRow,
+    HISTORY_HASH_BYTES_PER_TURN, HISTORY_RECORDS_PER_TURN, HISTORY_SIGNATURES_PER_TURN,
+    HISTORY_SIGNATURE_BYTES_PER_TURN,
+};
+
 /// Cap on how many changes one [`EncryptedDoc::holders_of`] query may ask about; each
 /// target takes one bit of the propagation mask the single DAG pass carries.
 pub const MAX_DELIVERY_TARGETS: usize = 64;
@@ -43,8 +51,299 @@ pub struct AppliedOp {
     pub change: ChangeHash,
 }
 
+/// An exact original local chat operation retained by a storage preparation. Its private
+/// envelope is never a general inbound admission API: construction verifies the local device,
+/// document scope, signature and exact Automerge hash. Applying it repairs saved history only;
+/// it grants neither current membership nor publication authority.
+#[derive(Clone)]
+pub struct SavedLocalChatOp(SignedOp);
+const MAX_SAVED_LOCAL_CHAT_BYTES: usize = 256 * 1024;
+/// Bounded progress while recovering one accepted legacy original from retained signed history.
+/// Private document-incarnation and exact-target bindings prevent cursor reuse across a replaced
+/// graph. This cursor is derived, untrusted for admission, and never persisted.
+pub struct SavedLocalChatRecovery {
+    document: std::sync::Arc<()>,
+    signer: Vec<u8>,
+    change: ChangeHash,
+    position: usize,
+    found: Option<SavedLocalChatOp>,
+    active: Option<saved_local_recovery::RecoveryPhase>,
+    #[cfg(test)]
+    last_work: saved_local_recovery::RecoveryWork,
+}
+impl fmt::Debug for SavedLocalChatRecovery {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // This cursor owns a full signer and may retain original signed plaintext. Neither
+        // those values nor archive position/document identity belong in diagnostics.
+        f.debug_struct("SavedLocalChatRecovery")
+            .finish_non_exhaustive()
+    }
+}
+pub const MAX_LOCAL_CHAT_RECOVERY_SCANNED_OPS: usize = 128;
+pub const MAX_LOCAL_CHAT_RECOVERY_SCANNED_BYTES: usize = 512 * 1024;
+#[derive(Default)]
+struct CreatorEvidenceIndex {
+    indexed: usize,
+    // Append-only derived archive metadata. Queries parse each log entry at most once; the
+    // object actor narrows later range/signature checks without trusting it as authorship.
+    ranges: HashMap<ActorId, Vec<(u64, u64, usize)>>,
+}
+
+impl fmt::Debug for SavedLocalChatOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SavedLocalChatOp")
+            .field("doc_id", &self.0.doc_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SavedLocalChatOp {
+    /// Restore a bounded preparation after its containing encrypted snapshot was authenticated.
+    pub fn decode(
+        bytes: &[u8],
+        device: &MlsDevice,
+        channel: u128,
+        change: ChangeHash,
+    ) -> Result<Self, ReplError> {
+        if bytes.len() > MAX_SAVED_LOCAL_CHAT_BYTES {
+            return Err(ReplError::Malformed);
+        }
+        let op = SignedOp::decode(bytes)?;
+        // These preparations are emitted from Change::raw_bytes(). Reject compressed/document
+        // chunks before Automerge can allocate decompressed state. General legacy ingress keeps
+        // its existing compatibility grammar; this is only the saved-local proof constructor.
+        if op.delta.len() < 10 || op.delta[..4] != [0x85, 0x6f, 0x4a, 0x83] || op.delta[8] != 1 {
+            return Err(ReplError::Malformed);
+        }
+
+        if op.doc_type != DocType::Channel
+            || op.doc_id != channel
+            || op.author_device != device.device_id()
+            || !op.verify()
+            || op.domain_op.is_some()
+        {
+            return Err(ReplError::BadSignature);
+        }
+        let parsed = Change::from_bytes(op.delta.clone())
+            .map_err(|e| ReplError::Automerge(e.to_string()))?;
+        if parsed.hash() != change || parsed.actor_id().to_bytes() != device.device_id().as_bytes()
+        {
+            return Err(ReplError::ActorMismatch);
+        }
+        Ok(Self(op))
+    }
+
+    /// Exact original bytes; no signature or encryption is regenerated on retry.
+    pub fn encode(&self) -> Vec<u8> {
+        self.0.encode()
+    }
+}
+
+#[cfg(test)]
+mod saved_local_chat_tests {
+    use super::*;
+    use rand_core::SeedableRng;
+    #[test]
+    fn retained_original_recovery_yields_on_real_archive_history_without_losing_progress() {
+        let device = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&device).unwrap();
+        let mut rng = rand_chacha::ChaCha20Rng::from_seed([0x94; 32]);
+        let mut document = EncryptedDoc::new(DocType::Channel, 5, &device.device_id());
+        let (_, target) = document
+            .edit_tracked(&device, &group, &mut rng, |graph| {
+                graph.put(ROOT, "accepted", "original")
+            })
+            .unwrap();
+        let other = MlsDevice::generate().unwrap();
+        let mut foreign =
+            AutoCommit::new().with_actor(ActorId::from(other.device_id().as_bytes().to_vec()));
+        for index in 0..MAX_LOCAL_CHAT_RECOVERY_SCANNED_OPS + 2 {
+            foreign.put(ROOT, "counter", index as u64).unwrap();
+            foreign.commit();
+            let signed = SignedOp::sign(
+                &other,
+                DocType::Channel,
+                5,
+                foreign
+                    .get_last_local_change()
+                    .unwrap()
+                    .raw_bytes()
+                    .to_vec(),
+            )
+            .unwrap();
+            document
+                .apply_signed_tracked_observed(signed, |_, _| {})
+                .unwrap();
+        }
+        let mut progress = document.start_saved_local_chat_recovery(&device, target);
+        assert_eq!(format!("{progress:?}"), "SavedLocalChatRecovery { .. }");
+        assert!(document
+            .recover_saved_local_chat_op(&device, &mut progress)
+            .unwrap()
+            .is_none());
+        assert_eq!(progress.position, MAX_LOCAL_CHAT_RECOVERY_SCANNED_OPS);
+        assert!(document
+            .recover_saved_local_chat_op(&device, &mut progress)
+            .unwrap()
+            .is_some());
+        assert_eq!(progress.position, document.log.len());
+    }
+
+    #[test]
+    fn accepted_local_original_recovery_reverifies_retained_log_and_exact_identity() {
+        let device = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&device).unwrap();
+        let mut rng = rand_chacha::ChaCha20Rng::from_seed([0x91; 32]);
+        let mut doc = EncryptedDoc::new(DocType::Channel, 5, &device.device_id());
+        let (sealed, change) = doc
+            .edit_tracked(&device, &group, &mut rng, |graph| {
+                graph.put(ROOT, "message", "original")
+            })
+            .unwrap();
+        let original =
+            EncryptedDoc::capture_local_chat_op(&sealed, &group, &device, change).unwrap();
+        let snapshot = doc.snapshot().unwrap();
+        let mut restored = EncryptedDoc::restore_for_actor(&snapshot, &device.device_id()).unwrap();
+        let mut progress = restored.start_saved_local_chat_recovery(&device, change);
+        assert_eq!(
+            restored
+                .recover_saved_local_chat_op(&device, &mut progress)
+                .unwrap()
+                .unwrap()
+                .encode(),
+            original.encode()
+        );
+        let mut missing = restored.start_saved_local_chat_recovery(&device, ChangeHash([0; 32]));
+        assert!(restored
+            .recover_saved_local_chat_op(&device, &mut missing)
+            .is_err());
+        assert!(restored
+            .recover_saved_local_chat_op(&MlsDevice::generate().unwrap(), &mut progress)
+            .is_err());
+        restored.log[0].signature[0] ^= 1;
+        let mut tampered = restored.start_saved_local_chat_recovery(&device, change);
+        assert!(restored
+            .recover_saved_local_chat_op(&device, &mut tampered)
+            .is_err());
+        assert!(
+            restored
+                .recover_saved_local_chat_op(&device, &mut tampered)
+                .is_err(),
+            "retry cannot skip the envelope that failed verification"
+        );
+        assert!(
+            doc.recover_saved_local_chat_op(&device, &mut progress)
+                .is_err(),
+            "cursor cannot skip a replaced document's prefix"
+        );
+    }
+
+    #[test]
+    fn encrypted_chat_document_and_saved_proof_remain_send_sync() {
+        fn require_send_sync<T: Send + Sync>() {}
+        require_send_sync::<EncryptedDoc>();
+        require_send_sync::<SavedLocalChatOp>();
+    }
+
+    #[test]
+    fn poisoned_creator_evidence_rebuilds_and_reverifies_original_signed_log() {
+        let device = MlsDevice::generate().unwrap();
+        let mut document = EncryptedDoc::new(DocType::Channel, 5, &device.device_id());
+        let mut graph =
+            AutoCommit::new().with_actor(ActorId::from(device.device_id().as_bytes().to_vec()));
+        let object = graph
+            .put_object(ROOT, "message", automerge::ObjType::Map)
+            .unwrap();
+        graph.put(&object, "text", "verified original").unwrap();
+        graph.commit();
+        let op = SignedOp::sign(
+            &device,
+            DocType::Channel,
+            5,
+            graph.get_last_local_change().unwrap().raw_bytes().to_vec(),
+        )
+        .unwrap();
+        document
+            .apply_signed_tracked_observed(op, |_, _| {})
+            .unwrap();
+        assert_eq!(
+            document.verified_object_creator(&object).unwrap(),
+            Some(device.device_id())
+        );
+        let poison = |document: &EncryptedDoc| {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut cache = document.creator_evidence.lock().unwrap();
+                // A stale partial cursor/range would panic or skip the original evidence if
+                // the next query merely trusted the poisoned value.
+                cache.indexed = usize::MAX;
+                let automerge::ObjId::Id(_, actor, _) = &object else {
+                    unreachable!()
+                };
+                cache
+                    .ranges
+                    .insert(actor.clone(), vec![(0, u64::MAX, usize::MAX)]);
+                panic!("interrupt creator-index update");
+            }));
+            assert!(result.is_err());
+            assert!(document.creator_evidence.is_poisoned());
+        };
+        poison(&document);
+        assert_eq!(
+            document.verified_object_creator(&object).unwrap(),
+            Some(device.device_id())
+        );
+        assert!(!document.creator_evidence.is_poisoned());
+        assert_eq!(
+            document.creator_evidence.lock().unwrap().indexed,
+            document.log.len()
+        );
+        document.log[0].signature[0] ^= 1;
+        poison(&document);
+        assert!(matches!(
+            document.verified_object_creator(&object),
+            Err(ReplError::BadSignature)
+        ));
+        assert!(!document.creator_evidence.is_poisoned());
+    }
+
+    #[test]
+    fn saved_local_chat_proof_rejects_wrong_scope_device_hash_compression_and_size() {
+        let device = MlsDevice::generate().unwrap();
+        let mut graph = AutoCommit::new();
+        graph.set_actor(ActorId::from(device.device_id().as_bytes().to_vec()));
+        graph.put(ROOT, "text", "repeat".repeat(4_000)).unwrap();
+        graph.commit();
+        let mut change = graph.get_last_local_change().unwrap();
+        let hash = change.hash();
+        let raw =
+            SignedOp::sign(&device, DocType::Channel, 5, change.raw_bytes().to_vec()).unwrap();
+        assert!(SavedLocalChatOp::decode(&raw.encode(), &device, 5, hash).is_ok());
+        assert!(SavedLocalChatOp::decode(&raw.encode(), &device, 6, hash).is_err());
+        assert!(
+            SavedLocalChatOp::decode(&raw.encode(), &MlsDevice::generate().unwrap(), 5, hash)
+                .is_err()
+        );
+        assert!(SavedLocalChatOp::decode(&raw.encode(), &device, 5, ChangeHash([0; 32])).is_err());
+        let compressed = change.bytes().into_owned();
+        assert_eq!(compressed[8], 2);
+        let compressed = SignedOp::sign(&device, DocType::Channel, 5, compressed).unwrap();
+        assert!(SavedLocalChatOp::decode(&compressed.encode(), &device, 5, hash).is_err());
+        assert!(SavedLocalChatOp::decode(
+            &vec![0; MAX_SAVED_LOCAL_CHAT_BYTES + 1],
+            &device,
+            5,
+            hash
+        )
+        .is_err());
+    }
+}
+
 /// One encrypted, replicated CRDT document.
 pub struct EncryptedDoc {
+    /// Nonserialized identity of this exact retained log. A restored/replaced document receives
+    /// a fresh allocation even when counts and bytes match. An index retains the allocation,
+    /// preventing address-reuse ABA without ambient randomness or a portable authority token.
+    history_owner: std::sync::Arc<()>,
     doc_type: DocType,
     doc_id: u128,
     doc: AutoCommit,
@@ -58,6 +357,10 @@ pub struct EncryptedDoc {
     change_authors: HashMap<ChangeHash, DeviceId>,
     /// How many entries of `log` are already reflected in `change_authors`.
     authors_indexed: usize,
+    // Disposable derived metadata must preserve EncryptedDoc's shared-read contract, which
+    // is also inherited by retained documents inside ServerStore.
+    creator_evidence: std::sync::Mutex<CreatorEvidenceIndex>,
+    local_recovery_identity: std::sync::Arc<()>,
     /// The last [`EncryptedDoc::snapshot`] and the exact document state it describes: the
     /// automerge heads plus the op-log length, which together are everything the serialization
     /// reads. Persistence re-serializes every open document of a server on every write, so an
@@ -98,6 +401,7 @@ impl EncryptedDoc {
         let mut doc = AutoCommit::new();
         doc.set_actor(ActorId::from(actor.as_bytes().to_vec()));
         Self {
+            history_owner: std::sync::Arc::new(()),
             doc_type,
             doc_id,
             doc,
@@ -105,6 +409,8 @@ impl EncryptedDoc {
             applied: HashSet::new(),
             change_authors: HashMap::new(),
             authors_indexed: 0,
+            creator_evidence: Default::default(),
+            local_recovery_identity: std::sync::Arc::new(()),
             snapshot_cache: None,
             checkpoint: None,
             catchup_index: AncestryIndex::default(),
@@ -259,6 +565,129 @@ impl EncryptedDoc {
         &self.doc
     }
 
+    /// Capture the exact original local preparation before the first storage attempt. Opening
+    /// the just-created packet proves its scope and signer without exposing raw SignedOp input.
+    pub fn capture_local_chat_op(
+        sealed: &SealedOp,
+        group: &ServerGroup,
+        device: &MlsDevice,
+        change: ChangeHash,
+    ) -> Result<SavedLocalChatOp, ReplError> {
+        if sealed.epoch != group.epoch() {
+            return Err(ReplError::EpochUnavailable(sealed.epoch));
+        }
+        let key = group.channel_secret(device, DocType::Channel, sealed.doc_id)?;
+        let op = sealed.open(&key)?;
+        SavedLocalChatOp::decode(&op.encode(), device, sealed.doc_id, change)
+    }
+
+    /// Additive historical repair from an opaque original local preparation. Current-epoch
+    /// sealing is deliberately absent, so membership churn cannot lose a possibly saved change.
+    pub fn repair_local_chat_op(&mut self, original: &SavedLocalChatOp) -> Result<(), ReplError> {
+        self.apply_signed_tracked_observed(original.0.clone(), |_, _| {})
+            .map(|_| ())
+    }
+
+    /// Recover the exact original of an already accepted local receipt after its sealing epoch
+    /// expired. This reads the retained signed log, not rendered author fields or MLS roster
+    /// membership. The caller must separately prove that the receipt was durably accepted in
+    /// this same local admission; this proof grants neither new authoring nor publication.
+    ///
+    /// Start this outside any final storage lease, then advance with bounded recovery steps.
+    /// Conflicting envelopes for one change refuse promotion; no matching original is fabricated.
+    pub fn start_saved_local_chat_recovery(
+        &self,
+        device: &MlsDevice,
+        change: ChangeHash,
+    ) -> SavedLocalChatRecovery {
+        SavedLocalChatRecovery {
+            document: self.local_recovery_identity.clone(),
+            signer: device.public_key_bytes(),
+            change,
+            position: 0,
+            found: None,
+            active: None,
+            #[cfg(test)]
+            last_work: saved_local_recovery::RecoveryWork::default(),
+        }
+    }
+
+    /// Inspect at most the documented operation/byte budget. None means genuine unfinished
+    /// work, so the host retries on another owner turn without holding a metadata save lease.
+    /// A completed but missing/contradictory original refuses promotion visibly; a later appended
+    /// authenticated catch-up can be scanned on a subsequent retry with this same cursor.
+    pub fn recover_saved_local_chat_op(
+        &self,
+        device: &MlsDevice,
+        progress: &mut SavedLocalChatRecovery,
+    ) -> Result<Option<SavedLocalChatOp>, ReplError> {
+        if self.doc_type != DocType::Channel
+            || !std::sync::Arc::ptr_eq(&progress.document, &self.local_recovery_identity)
+            || progress.signer != device.public_key_bytes()
+            || progress.position > self.log.len()
+        {
+            return Err(ReplError::Malformed);
+        }
+        saved_local_recovery::recover(self, device, progress)
+    }
+
+    /// Verified signer of the change that created an object, where that signed history exists.
+    /// Actor bytes alone are not authorship. Contradictory envelopes refuse rather than choosing
+    /// one signer. Legacy missing evidence stays None; v1 does not prove historical MLS tenure.
+    pub fn verified_object_creator(
+        &self,
+        object: &automerge::ObjId,
+    ) -> Result<Option<DeviceId>, ReplError> {
+        let automerge::ObjId::Id(counter, actor, _) = object else {
+            return Err(ReplError::Malformed);
+        };
+        let mut evidence = self.creator_evidence.lock().unwrap_or_else(|poisoned| {
+            // A panic may leave the derived cursor/ranges partially updated. They are not
+            // authority: discard every cached entry, then reparse and reverify the original
+            // signed log below. Clearing poison is safe only after that complete reset.
+            let mut evidence = poisoned.into_inner();
+            *evidence = CreatorEvidenceIndex::default();
+            self.creator_evidence.clear_poison();
+            evidence
+        });
+        while evidence.indexed < self.log.len() {
+            let index = evidence.indexed;
+            let change = Change::from_bytes(self.log[index].delta.clone())
+                .map_err(|e| ReplError::Automerge(e.to_string()))?;
+            evidence
+                .ranges
+                .entry(change.actor_id().clone())
+                .or_default()
+                .push((change.start_op().get(), change.max_op(), index));
+            evidence.indexed += 1;
+        }
+        let mut found = None;
+        for &(start, end, index) in evidence.ranges.get(actor).into_iter().flatten() {
+            if *counter < start || *counter > end {
+                continue;
+            }
+            let op = &self.log[index];
+            if op.doc_type != self.doc_type
+                || op.doc_id != self.doc_id
+                || !op.verify()
+                || (actor.to_bytes().len() == op.author_device.as_bytes().len()
+                    && actor.to_bytes() != op.author_device.as_bytes())
+            {
+                return Err(ReplError::BadSignature);
+            }
+            if found.is_some_and(|signer| signer != op.author_device) {
+                return Err(ReplError::BadSignature);
+            }
+            found = Some(op.author_device);
+        }
+        if found.is_none() && actor.to_bytes().len() == 32 {
+            // Modern device actors require their actual signed creator. A peer-provided actor
+            // string cannot turn missing/contradictory evidence into legacy authorship.
+            return Err(ReplError::BadSignature);
+        }
+        Ok(found)
+    }
+
     /// This document's type (for re-keying a restored doc in the sync layer's map).
     pub fn doc_type(&self) -> DocType {
         self.doc_type
@@ -297,6 +726,15 @@ impl EncryptedDoc {
             .collect();
         heads.sort_unstable();
         heads
+    }
+
+    /// Whether every named change is already present, including non-head ancestors.
+    /// This is a bounded caller's retry hint check, not proof that an unknown hash exists.
+    /// It never imports bytes, traverses dependency closures or changes document state.
+    pub fn knows_changes(&self, hashes: &[[u8; 32]]) -> bool {
+        hashes
+            .iter()
+            .all(|hash| self.doc.get_change_by_hash(&ChangeHash(*hash)).is_some())
     }
 
     /// What this node tells a serving peer it already holds, for an incremental catch-up: its
@@ -434,17 +872,18 @@ impl EncryptedDoc {
         Ok(out)
     }
 
-    /// Which devices **provably hold** each of `targets` (automerge change hashes), from the
+    /// Which devices signed causal receipt evidence for `targets` (Automerge change hashes), from the
     /// document alone; the read-only half of the delivery-state query.
     ///
     /// A device `D` counts for target `C` when `D` authored some change whose causal history
-    /// contains `C`: `D` could not have built on `C` without holding it, and the change carrying
-    /// that proof is signed by `D`. This is the same predicate the design's `their_heads` route
+    /// contains `C`. An ordinary writer received `C` before building on it; a modified writer can
+    /// also name a known dependency hash without retaining its contents. The signature attributes
+    /// the claim, not continuing storage or a disk save. This is the predicate the `their_heads` route
     /// describes ("the peer's confirmed heads causally include the op"), evaluated against
     /// evidence already in the doc rather than against a sync session; Mewtual replicates by
     /// broadcasting sealed ops, so no per-peer automerge sync state exists to read.
     ///
-    /// The result is *sound but incomplete*: a device that received `C` and has not written since
+    /// The result is incomplete: a device that received `C` and has not written since
     /// leaves no evidence and is simply absent. Callers must render absence as "unknown", never
     /// as "not delivered". Returns one entry per element of `targets` (sorted, deduped); targets
     /// past [`MAX_DELIVERY_TARGETS`] always come back empty.
@@ -591,6 +1030,7 @@ impl EncryptedDoc {
         };
         d.finish().map_err(|_| ReplError::Malformed)?;
         Ok(Self {
+            history_owner: std::sync::Arc::new(()),
             doc_type,
             doc_id,
             doc,
@@ -598,6 +1038,8 @@ impl EncryptedDoc {
             applied,
             change_authors: HashMap::new(),
             authors_indexed: 0,
+            creator_evidence: Default::default(),
+            local_recovery_identity: std::sync::Arc::new(()),
             snapshot_cache: None,
             checkpoint,
             catchup_index,
@@ -646,24 +1088,51 @@ impl EncryptedDoc {
     where
         F: FnOnce(&mut AutoCommit) -> Result<(), automerge::AutomergeError>,
     {
-        if is_epoch_managed(self.doc_type) {
-            // New P1 types have no legacy writers. A v1 operation here would bypass durable
-            // intents, semantic validation and the shared epoch lifecycle gate.
-            return Err(ReplError::EpochScope);
-        }
-        edit(&mut self.doc).map_err(|e| ReplError::Automerge(e.to_string()))?;
-        self.doc.commit();
-        let change = self
-            .doc
-            .get_last_local_change()
-            .ok_or(ReplError::NoChange)?;
-        let hash = change.hash();
-        let delta = change.raw_bytes().to_vec();
+        self.edit_tracked_observed(device, group, rng, edit, |_, _| {})
+    }
 
-        let op = SignedOp::sign(device, self.doc_type, self.doc_id, delta)?;
-        let sealed = SealedOp::seal(&op, group, device, rng)?;
-        self.record(op);
-        Ok((sealed, hash))
+    /// A synchronous observer sees the exact newly accepted authenticated change, including
+    /// deletion followed by recreation inside one change. `None` reports a possibly mutated
+    /// projection on error; it never authorizes replaying an unaccepted change's operations.
+    pub fn edit_tracked_observed<F>(
+        &mut self,
+        device: &MlsDevice,
+        group: &ServerGroup,
+        rng: &mut impl CryptoRngCore,
+        edit: F,
+        mut observe: impl FnMut(&AutoCommit, Option<&Change>),
+    ) -> Result<(SealedOp, ChangeHash), ReplError>
+    where
+        F: FnOnce(&mut AutoCommit) -> Result<(), automerge::AutomergeError>,
+    {
+        let mut accepted = None;
+        let outcome = (|| {
+            if is_epoch_managed(self.doc_type) {
+                // New P1 types have no legacy writers. A v1 operation here would bypass durable
+                // intents, semantic validation and the shared epoch lifecycle gate.
+                return Err(ReplError::EpochScope);
+            }
+            edit(&mut self.doc).map_err(|e| ReplError::Automerge(e.to_string()))?;
+            self.doc.commit();
+            let change = self
+                .doc
+                .get_last_local_change()
+                .ok_or(ReplError::NoChange)?;
+            let hash = change.hash();
+            let delta = change.raw_bytes().to_vec();
+
+            let op = SignedOp::sign(device, self.doc_type, self.doc_id, delta)?;
+            let sealed = SealedOp::seal(&op, group, device, rng)?;
+            // A no-op commit returns the previous local change. Preserve legacy publication
+            // behavior, but a previously recorded operation cannot replay deletion authority
+            // against a room incarnation created after that operation was first observed.
+            if self.record(op) {
+                accepted = Some(change);
+            }
+            Ok((sealed, hash))
+        })();
+        observe(&self.doc, accepted.as_ref());
+        outcome
     }
 
     /// Author a P1 operation through the epoch lifecycle gate.
@@ -965,13 +1434,24 @@ impl EncryptedDoc {
         group: &ServerGroup,
         device: &MlsDevice,
     ) -> Result<Option<AppliedOp>, ReplError> {
+        self.ingest_tracked_observed(sealed, group, device, |_, _| {})
+    }
+    /// Tracked ingress with exact new-change observation. Duplicate/rejected changes cannot
+    /// exercise the observer's deletion effects; it still sees partial mutation errors.
+    pub fn ingest_tracked_observed(
+        &mut self,
+        sealed: &SealedOp,
+        group: &ServerGroup,
+        device: &MlsDevice,
+        observe: impl FnMut(&AutoCommit, Option<&Change>),
+    ) -> Result<Option<AppliedOp>, ReplError> {
         self.check_doc(sealed.doc_type, sealed.doc_id)?;
         if sealed.epoch != group.epoch() {
             return Err(ReplError::EpochUnavailable(sealed.epoch));
         }
         let key = group.channel_secret(device, self.doc_type, self.doc_id)?;
         let op = sealed.open(&key)?;
-        self.apply_signed_tracked(op)
+        self.apply_signed_tracked_observed(op, observe)
     }
 
     /// Decrypt, verify and apply an inbound sealed op using an **externally
@@ -1005,12 +1485,22 @@ impl EncryptedDoc {
         expected_epoch: u64,
         key: &[u8; 32],
     ) -> Result<Option<AppliedOp>, ReplError> {
+        self.ingest_with_key_tracked_observed(sealed, expected_epoch, key, |_, _| {})
+    }
+    /// The same observer contract on authenticated retained-epoch ingress.
+    pub fn ingest_with_key_tracked_observed(
+        &mut self,
+        sealed: &SealedOp,
+        expected_epoch: u64,
+        key: &[u8; 32],
+        observe: impl FnMut(&AutoCommit, Option<&Change>),
+    ) -> Result<Option<AppliedOp>, ReplError> {
         self.check_doc(sealed.doc_type, sealed.doc_id)?;
         if sealed.epoch != expected_epoch {
             return Err(ReplError::EpochUnavailable(sealed.epoch));
         }
         let op = sealed.open(key)?;
-        self.apply_signed_tracked(op)
+        self.apply_signed_tracked_observed(op, observe)
     }
 
     /// Export the full signed-op log, re-sealed under the current epoch, so a
@@ -1254,6 +1744,21 @@ impl EncryptedDoc {
         group: &ServerGroup,
         device: &MlsDevice,
     ) -> (Vec<AppliedOp>, Result<(), ReplError>) {
+        self.import_catchup_tracked_observed(ops, group, device, |_, _| {})
+    }
+
+    /// The tracked import with synchronous materialized-state observation after each attempted
+    /// signed-op application, including an error after mutation. Native ephemeral authority
+    /// (such as room incarnations) must see intermediate deletion/recreation and accepted prefixes,
+    /// rather than only the bundle's final projection. The observer must be bounded, must not
+    /// publish/await, and cannot alter document acceptance or the original signed-operation log.
+    pub fn import_catchup_tracked_observed(
+        &mut self,
+        ops: &[SealedOp],
+        group: &ServerGroup,
+        device: &MlsDevice,
+        mut observe: impl FnMut(&AutoCommit, Option<&Change>),
+    ) -> (Vec<AppliedOp>, Result<(), ReplError>) {
         let key = match group.channel_secret(device, self.doc_type, self.doc_id) {
             Ok(key) => key,
             Err(error) => return (Vec::new(), Err(error.into())),
@@ -1270,7 +1775,8 @@ impl EncryptedDoc {
                 Ok(op) => op,
                 Err(error) => return (applied, Err(error)),
             };
-            match self.apply_signed_tracked(op) {
+            let result = self.apply_signed_tracked_observed(op, &mut observe);
+            match result {
                 Ok(Some(tracked)) => applied.push(tracked),
                 Ok(None) => {}
                 Err(error) => return (applied, Err(error)),
@@ -1279,7 +1785,11 @@ impl EncryptedDoc {
         (applied, Ok(()))
     }
 
-    fn apply_signed_tracked(&mut self, op: SignedOp) -> Result<Option<AppliedOp>, ReplError> {
+    fn apply_signed_tracked_observed(
+        &mut self,
+        op: SignedOp,
+        mut observe: impl FnMut(&AutoCommit, Option<&Change>),
+    ) -> Result<Option<AppliedOp>, ReplError> {
         self.check_doc(op.doc_type, op.doc_id)?;
         if is_epoch_managed(self.doc_type) {
             // Epoch-managed types must bind logical scope, semantic validation and lifecycle
@@ -1299,25 +1809,47 @@ impl EncryptedDoc {
         // A locally authored SignedOp always carries exactly one Automerge change. Parse that
         // exact frame before moving it into the document so a receipt can name a stable hash;
         // malformed or multi-change bytes fail closed exactly as load_incremental would.
-        let change = Change::from_bytes(op.delta.clone())
-            .map_err(|e| ReplError::Automerge(e.to_string()))?
-            .hash();
-        let author_device = op.author_device;
-        self.doc
-            .load_incremental(&op.delta)
+        let parsed = Change::from_bytes(op.delta.clone())
             .map_err(|e| ReplError::Automerge(e.to_string()))?;
+        // Modern writers use their complete DeviceId as their actor. Letting another signer
+        // occupy that (actor, sequence) first permanently rejects the genuine writer's change,
+        // so replicas can disagree solely because they received the two envelopes in a different
+        // order. Refuse before touching Automerge, its pending dependency graph or the op log.
+        //
+        // Do not blanket-require equality for legacy v1 history: before restore_for_actor was
+        // deployed, an honest reopened document used Automerge's generated 16-byte actor. Other
+        // historical lengths remain legacy too. This protects the modern device namespace only;
+        // it is not same-device equivocation repair or a migration of previously poisoned graphs.
+        let actor = parsed.actor_id().to_bytes();
+        if actor.len() == op.author_device.as_bytes().len() && actor != op.author_device.as_bytes()
+        {
+            return Err(ReplError::ActorMismatch);
+        }
+        let change = parsed.hash();
+        let author_device = op.author_device;
+        let outcome = self
+            .doc
+            .load_incremental(&op.delta)
+            .map_err(|e| ReplError::Automerge(e.to_string()));
+        if let Err(error) = outcome {
+            observe(&self.doc, None);
+            return Err(error);
+        }
         self.record(op);
+        observe(&self.doc, Some(&parsed));
         Ok(Some(AppliedOp {
             author_device,
             change,
         }))
     }
 
-    fn record(&mut self, op: SignedOp) {
+    fn record(&mut self, op: SignedOp) -> bool {
         if self.applied.insert(op.hash()) {
             Self::index_catchup_op(&mut self.catchup_index, &self.doc, self.log.len(), &op);
             self.log.push(op);
+            return true;
         }
+        false
     }
 
     fn index_catchup_op(
@@ -1681,16 +2213,15 @@ mod tests {
             .unwrap();
         let seed = ancestor.export_catchup(&group, &author, &mut rng).unwrap();
 
-        // Concurrent writers. Distinct automerge actor ids are what make these changes
-        // concurrent; which device signs them is irrelevant to the frontier arithmetic under
-        // test here, and the sealing key is per group rather than per author.
+        // Concurrent writers use their own authenticated device actors. The founder re-seals
+        // their unchanged signatures, just as an ordinary relay serves third-party history.
         let mut every_op = seed.clone();
         for i in 0..BRANCHES {
-            let actor = DeviceId::from_public_key_bytes(&[(i as u8).wrapping_add(1); 32]);
-            let mut branch = EncryptedDoc::new(DocType::Channel, 5, &actor);
+            let writer = MlsDevice::generate().unwrap();
+            let mut branch = EncryptedDoc::new(DocType::Channel, 5, &writer.device_id());
             branch.import_catchup(&seed, &group, &author).unwrap();
             branch
-                .edit(&author, &group, &mut rng, |d| {
+                .edit(&writer, &group, &mut rng, |d| {
                     d.put(ROOT, format!("k{i}"), i as u64)
                 })
                 .unwrap();
@@ -1781,11 +2312,11 @@ mod tests {
 
         let mut every_op = seed.clone();
         for i in 0..BRANCHES {
-            let actor = DeviceId::from_public_key_bytes(&[(i as u8).wrapping_add(1); 32]);
-            let mut branch = EncryptedDoc::new(DocType::Channel, 6, &actor);
+            let writer = MlsDevice::generate().unwrap();
+            let mut branch = EncryptedDoc::new(DocType::Channel, 6, &writer.device_id());
             branch.import_catchup(&seed, &group, &author).unwrap();
             branch
-                .edit(&author, &group, &mut rng, |d| {
+                .edit(&writer, &group, &mut rng, |d| {
                     d.put(ROOT, format!("k{i}"), i as u64)
                 })
                 .unwrap();
@@ -1797,17 +2328,14 @@ mod tests {
         requester
             .import_catchup(&every_op, &group, &author)
             .unwrap();
-        let mut server = EncryptedDoc::new(
-            DocType::Channel,
-            6,
-            &DeviceId::from_public_key_bytes(&[0xBB; 32]),
-        );
+        let provider = MlsDevice::generate().unwrap();
+        let mut server = EncryptedDoc::new(DocType::Channel, 6, &provider.device_id());
         server.import_catchup(&every_op, &group, &author).unwrap();
 
         // The one thing the requester is actually missing, authored last and therefore last in
         // the server's log.
         server
-            .edit(&author, &group, &mut rng, |d| {
+            .edit(&provider, &group, &mut rng, |d| {
                 d.put(ROOT, "the_message_that_matters", "here")
             })
             .unwrap();
@@ -1873,11 +2401,11 @@ mod tests {
 
         let mut every_op = seed.clone();
         for i in 0..BRANCHES {
-            let actor = DeviceId::from_public_key_bytes(&[(i as u8).wrapping_add(1); 32]);
-            let mut branch = EncryptedDoc::new(DocType::Channel, 7, &actor);
+            let writer = MlsDevice::generate().unwrap();
+            let mut branch = EncryptedDoc::new(DocType::Channel, 7, &writer.device_id());
             branch.import_catchup(&seed, &group, &author).unwrap();
             branch
-                .edit(&author, &group, &mut rng, |d| {
+                .edit(&writer, &group, &mut rng, |d| {
                     d.put(ROOT, format!("k{i}"), i as u64)
                 })
                 .unwrap();
@@ -1889,14 +2417,11 @@ mod tests {
         requester
             .import_catchup(&every_op, &group, &author)
             .unwrap();
-        let mut server = EncryptedDoc::new(
-            DocType::Channel,
-            7,
-            &DeviceId::from_public_key_bytes(&[0xCC; 32]),
-        );
+        let provider = MlsDevice::generate().unwrap();
+        let mut server = EncryptedDoc::new(DocType::Channel, 7, &provider.device_id());
         server.import_catchup(&every_op, &group, &author).unwrap();
         server
-            .edit(&author, &group, &mut rng, |d| {
+            .edit(&provider, &group, &mut rng, |d| {
                 d.put(ROOT, "the_message_that_matters", "here")
             })
             .unwrap();
@@ -2006,6 +2531,27 @@ mod page_work_tests {
             .unwrap();
         assert_eq!(legacy.len(), 1);
         assert_eq!(next, None);
+    }
+
+    #[test]
+    fn known_change_hint_accepts_ancestors_and_rejects_unknown_hashes_without_mutation() {
+        let author = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&author).unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(915);
+        let mut doc = EncryptedDoc::new(DocType::Channel, 915, &author.device_id());
+        assert!(doc.knows_changes(&[]));
+        doc.edit(&author, &group, &mut rng, |doc| doc.put(ROOT, "count", 1))
+            .unwrap();
+        let ancestor = doc.heads();
+        doc.edit(&author, &group, &mut rng, |doc| doc.put(ROOT, "count", 2))
+            .unwrap();
+        let heads = doc.heads();
+        let count = doc.op_count();
+        assert!(doc.knows_changes(&ancestor));
+        assert!(doc.knows_changes(&heads));
+        assert!(!doc.knows_changes(&[[0xff; 32]]));
+        assert_eq!(doc.op_count(), count);
+        assert_eq!(doc.heads(), heads);
     }
 
     #[test]

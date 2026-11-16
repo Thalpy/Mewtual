@@ -10,10 +10,10 @@
   // - picking a LIBRARY tile never writes to the document. The recipe reaches the document only
   //   when "add to frame"/"save changes" is pressed (`commit`), so browsing recipes cannot
   //   pollute the 64-slot recipe list;
-  // - every async step (file read, `onpatch`) is fenced on the same model reference, the same
-  //   frame, the same form generation and the component still being mounted before it writes,
-  //   because the frame can change under an in-flight add and a marker must never land on a
-  //   frame the author did not have in front of them.
+  // - async steps require the same frame/form generation and a mounted component. File reads
+  //   also require their captured model; commit permits onpatch's expected projection replacement
+  //   so the paired marker can still be added. The host keys this component by document identity:
+  //   switching documents destroys it, and an old marker must never land in the new document.
   import { onDestroy, untrack } from "svelte";
   import type { JamPatch } from "./jam-contract.ts";
   import { FLIPNOTE_MAX_PATCHES, FLIPNOTE_MAX_SFX } from "./studio-contract.ts";

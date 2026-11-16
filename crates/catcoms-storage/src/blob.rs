@@ -20,27 +20,159 @@ use crate::StorageError;
 /// and promotes the whole set once its manifest is published, so an upload that never finishes
 /// leaves nothing in the store to account for. See [`put_staged`](BlobStore::put_staged).
 pub trait BlobStore {
+    /// Optional private durable-download engine. Cache-only stores refuse this capability;
+    /// callers must not silently fall back to non-resumable shared-cache acquisition.
+    fn private_downloads(&self) -> Option<&dyn crate::kept::DownloadStore> {
+        None
+    }
+    /// Mutating half of the same mounted, quota-sharing engine. Its opaque Download runs are
+    /// intentionally distinct from Keep runs and from public content-addressed blob reads.
+    fn private_downloads_mut(&mut self) -> Option<&mut dyn crate::kept::DownloadStore> {
+        None
+    }
+    /// Bind retention once to the actual MLS namespace/full native device before it can expose
+    /// saved bytes or mutate V2 ownership. Unsupported cache-only stores have no retained effects.
+    fn configure_keep_scope(&mut self, _scope: crate::kept::KeepScope) -> Result<(), StorageError> {
+        Ok(())
+    }
+    /// A failed immutable attachment must disable retained exposure as well as new admission.
+    /// Ordinary cache/upload storage remains usable. This handle can never clear that failure.
+    fn disable_retention(&mut self) {}
     /// Explicit local copies have a separate quota and ownership from fetched/uploaded cache
     /// bytes. Unsupported stores (especially memory/FIFO stores) never claim durable retention.
     fn kept_files(&self) -> crate::kept::KeptFiles {
         crate::kept::KeptFiles::default()
     }
     /// Reserve the complete exact plan before accepting any retained network bytes.
-    fn begin_keep(&mut self, _plan: crate::kept::KeepPlan) -> Result<u64, StorageError> {
+    fn begin_keep(
+        &mut self,
+        _plan: crate::kept::KeepPlan,
+    ) -> Result<crate::kept::KeepRun, StorageError> {
         Err(StorageError::Io(
             "kept copies require the encrypted disk store".into(),
         ))
     }
+    fn begin_keep_with_listing(
+        &mut self,
+        plan: crate::kept::KeepPlan,
+        _listing: [u8; 32],
+    ) -> Result<crate::kept::KeepRun, StorageError> {
+        self.begin_keep(plan)
+    }
+    /// Native-only original plans, for closed manifest/equivalence validation before a new run.
+    /// No current index lookup may enrich this saved set after restart or unlisting.
+    fn kept_saved_plans(&self, _cid: &Cid) -> Option<Vec<crate::kept::KeepPlan>> {
+        None
+    }
+    /// Reserve the entire original compatible candidate set before publishing the first intent.
+    /// Unsupported stores fail closed; silently retaining just one candidate loses resume authority.
+    fn begin_keep_variants(
+        &mut self,
+        _plans: Vec<crate::kept::KeepPlan>,
+        _selected: usize,
+        _listing: [u8; 32],
+    ) -> Result<crate::kept::KeepRun, StorageError> {
+        Err(StorageError::Malformed)
+    }
+    /// Whole-variant fallback preserves all durable budgets. It retires the exact old run before
+    /// publication; the optional result is a fresh run plus its saved exact plan, never an IPC grant.
+    fn fallback_keep(
+        &mut self,
+        _run: crate::kept::KeepRun,
+        _expected: &[u8; 32],
+        _tried: &[[u8; 32]],
+        _bad_current: bool,
+    ) -> Result<Option<(crate::kept::KeepRun, crate::kept::KeepPlan)>, StorageError> {
+        Err(StorageError::Malformed)
+    }
     /// Write only into the reservation selected by this process-local token.
-    fn put_keep(&mut self, _token: u64, _bytes: &[u8]) -> Result<(), StorageError> {
+    fn put_keep(
+        &mut self,
+        _token: crate::kept::KeepRun,
+        _bytes: &[u8],
+    ) -> Result<(), StorageError> {
         Err(StorageError::Malformed)
     }
     /// Called only after the application has verified the complete ordered plaintext CID.
-    fn finish_keep(&mut self, _token: u64) -> Result<(), StorageError> {
+    fn finish_keep(&mut self, _token: crate::kept::KeepRun) -> Result<(), StorageError> {
         Err(StorageError::Malformed)
     }
     /// Cancel this exact reservation. Failed cleanup must not refund its capacity.
-    fn abort_keep(&mut self, _token: u64) -> Result<(), StorageError> {
+    fn abort_keep(&mut self, _token: crate::kept::KeepRun) -> Result<(), StorageError> {
+        Err(StorageError::Malformed)
+    }
+    /// Runtime pause preserves the exact saved plan/progress/allowance. It invalidates only this
+    /// process run; explicit Cancel/release is a distinct durable Deleting transition.
+    fn pause_keep(&mut self, _token: crate::kept::KeepRun) -> Result<(), StorageError> {
+        Err(StorageError::Malformed)
+    }
+    /// Local user intent, separate from transient worker cancellation. The exact saved owner
+    /// and intent revision prevent delayed UI actions changing a replacement transfer. This never refills
+    /// allowance; an exhausted transfer requires its separate explicit Retry grant.
+    fn set_keep_paused(
+        &mut self,
+        _cid: &Cid,
+        _transfer: [u8; 32],
+        _expected_intent: u64,
+        _paused: bool,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::Malformed)
+    }
+    /// Suppress repeated unchanged deterministic integrity failures until an explicit Resume.
+    fn block_keep(&mut self, _run: crate::kept::KeepRun) -> Result<(), StorageError> {
+        Err(StorageError::Malformed)
+    }
+    fn keep_progress(&self, _cid: &Cid) -> Option<crate::kept::KeepProgress> {
+        None
+    }
+    /// Cheap exact-run fence; callers need not clone opaque manifest inventories per page.
+    fn keep_run_current(
+        &self,
+        _run: crate::kept::KeepRun,
+        _cid: &Cid,
+        _version: &[u8; 32],
+    ) -> bool {
+        false
+    }
+    /// Cheap possession hint for auto-resume without a connected source. Authentication still
+    /// occurs under a fresh run; this hint never makes partial bytes publicly serveable.
+    fn keep_plausibly_local(&self, _cid: &Cid) -> bool {
+        false
+    }
+    /// Metadata-only bounded scan; no manifest copying, disk reads, network or new reservation.
+    /// Returns a non-running resumable intent in CID order, wrapping after the previous turn.
+    fn automatic_keep_candidate(&self, _after: Option<Cid>) -> Option<Cid> {
+        None
+    }
+    /// Private partial bytes are readable only by their current opaque run, never blob service.
+    fn get_keep(
+        &self,
+        _token: crate::kept::KeepRun,
+        _cid: &Cid,
+        _max: usize,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        Err(StorageError::Malformed)
+    }
+    fn keep_work(
+        &mut self,
+        _token: crate::kept::KeepRun,
+        _network: Option<crate::kept::KeepNetworkWork>,
+        _mono: u64,
+    ) -> Result<crate::kept::KeepWork, StorageError> {
+        Err(StorageError::Malformed)
+    }
+    fn validate_keep_work(
+        &self,
+        _work: &crate::kept::KeepWork,
+        _mono: u64,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::Malformed)
+    }
+    fn retry_kept(
+        &mut self,
+        _cid: &Cid,
+        _request: crate::kept::KeepRetry,
+    ) -> Result<crate::kept::KeepRetryReceipt, StorageError> {
         Err(StorageError::Malformed)
     }
     /// Explicit local release; replicated expiry/unlisting never calls this operation.
@@ -55,6 +187,21 @@ pub trait BlobStore {
 
     /// Store `bytes`, returning their content address.
     fn put(&mut self, bytes: &[u8]) -> Result<Cid, StorageError>;
+
+    /// Prepare an opaque public held-blob read for an owned blocking worker. Native callers
+    /// must prepay BlobReadPlan::memory_bound(max_bytes) BEFORE preparation (memory stores take
+    /// a bounded snapshot), retain it through actual worker/result retirement and revalidate
+    /// the returned storage fence plus application authority before signing or storing anything.
+    /// Unsupported stores refuse; never fall back to an actor-blocking/unbounded get.
+    fn prepare_read_bounded(
+        &self,
+        _cid: &Cid,
+        _max_bytes: usize,
+    ) -> Result<crate::BlobReadPlan, StorageError> {
+        Err(StorageError::Io(
+            "background blob reads are unavailable".into(),
+        ))
+    }
 
     /// Fetch the bytes for `cid`, verifying their integrity. `None` if absent.
     fn get(&self, cid: &Cid) -> Result<Option<Vec<u8>>, StorageError>;
@@ -110,6 +257,44 @@ pub trait BlobStore {
     /// staged content that outlived the process that staged it can never be claimed, because the
     /// only thing that knew what it was for was that process.
     fn clear_staging(&mut self) -> Result<usize, StorageError>;
+
+    /// Scan the size-limited primary cache directory (metadata only) and replace this handle's
+    /// [`CacheIndex`](crate::cache::CacheIndex). `recover` is for the first scan of a mount: it
+    /// also removes abandoned temporary writes and torn records and fixes the mount set. Stores
+    /// without a size-limited cache refuse; callers must then never evict.
+    fn cache_scan(
+        &mut self,
+        _recover: bool,
+    ) -> Result<crate::cache::CacheScanReport, StorageError> {
+        Err(StorageError::Io(
+            "this store has no size-limited cache".into(),
+        ))
+    }
+
+    /// A copy of this handle's cache index, or `None` before the first scan or for stores without
+    /// a size-limited cache. `None` and an incomplete index both mean "do not evict".
+    fn cache_index(&self) -> Option<crate::cache::CacheIndex> {
+        None
+    }
+
+    /// Usage and completeness of this handle's cache index without copying it, or `None` like
+    /// [`cache_index`](BlobStore::cache_index). Cheap enough to check every actor turn.
+    fn cache_usage(&self) -> Option<crate::cache::CacheUsage> {
+        None
+    }
+
+    /// Blobs this group must keep for Studio (durable references plus live job holds), or `None`
+    /// while that set is unknown. Only the outermost reference-protecting adapter knows it; inner
+    /// stores have no Studio state and answer the empty set. `None` must pause eviction.
+    fn protected_cids(&self) -> Option<std::collections::BTreeSet<Cid>> {
+        Some(std::collections::BTreeSet::new())
+    }
+
+    /// Chunks that a completed, publicly served Keep copy holds on disk. Reads and serving fall
+    /// back to those copies, so a cache duplicate of such a chunk may be dropped.
+    fn retained_chunks(&self) -> std::collections::BTreeSet<Cid> {
+        std::collections::BTreeSet::new()
+    }
 }
 
 fn verify(cid: &Cid, bytes: Vec<u8>) -> Result<Vec<u8>, StorageError> {
@@ -138,6 +323,7 @@ pub struct MemoryBlobStore {
     order: VecDeque<Cid>,
     total_bytes: usize,
     max_bytes: usize,
+    read_epoch: crate::blob_read::ReadEpoch,
 }
 
 impl Default for MemoryBlobStore {
@@ -160,6 +346,7 @@ impl MemoryBlobStore {
             order: VecDeque::new(),
             total_bytes: 0,
             max_bytes,
+            read_epoch: crate::blob_read::ReadEpoch::default(),
         }
     }
 
@@ -170,6 +357,7 @@ impl MemoryBlobStore {
             if let Some(old) = self.order.pop_front() {
                 if let Some(b) = self.blobs.remove(&old) {
                     self.total_bytes -= b.len();
+                    self.read_epoch.retire();
                 }
             }
         }
@@ -177,6 +365,18 @@ impl MemoryBlobStore {
 }
 
 impl BlobStore for MemoryBlobStore {
+    fn prepare_read_bounded(
+        &self,
+        cid: &Cid,
+        max: usize,
+    ) -> Result<crate::BlobReadPlan, StorageError> {
+        crate::BlobReadPlan::memory(
+            *cid,
+            max,
+            self.blobs.get(cid).map(Vec::as_slice),
+            self.read_epoch.guard(),
+        )
+    }
     fn put(&mut self, bytes: &[u8]) -> Result<Cid, StorageError> {
         let cid = Cid::of(bytes);
         if let Entry::Vacant(e) = self.blobs.entry(cid) {
@@ -211,6 +411,7 @@ impl BlobStore for MemoryBlobStore {
         if let Some(b) = self.blobs.remove(cid) {
             self.total_bytes -= b.len();
             self.order.retain(|c| c != cid);
+            self.read_epoch.retire();
             Ok(true)
         } else {
             Ok(false)
@@ -273,7 +474,8 @@ const STAGING_DIR: &str = "staging";
 
 /// Inspect the opened file before reading. `take` also bounds a file that grows after metadata
 /// is checked. Never reserve from an untrusted on-disk length or fall back to `fs::read`.
-pub(crate) fn read_bounded(path: &Path, max_bytes: usize) -> Result<Option<Vec<u8>>, StorageError> {
+/// `Ok(None)` means the file does not exist; a directory or an oversized file is an error.
+pub fn read_bounded(path: &Path, max_bytes: usize) -> Result<Option<Vec<u8>>, StorageError> {
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -296,6 +498,16 @@ pub(crate) fn read_bounded(path: &Path, max_bytes: usize) -> Result<Option<Vec<u
         return Err(StorageError::BlobSizeLimit);
     }
     Ok(Some(bytes))
+}
+
+/// Write `bytes` to `path` and sync it before closing. Used for staged blobs, whose later
+/// promotion is a rename that must publish content already on stable storage.
+fn write_synced(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
+    use std::io::Write;
+    let mut file = std::fs::File::create(path).map_err(|e| StorageError::Io(e.to_string()))?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|e| StorageError::Io(e.to_string()))
 }
 
 fn flush_promoted(dir: &Path, cid: &Cid) -> Result<(), StorageError> {
@@ -399,6 +611,7 @@ fn clear_staging_dir(dir: &Path) -> Result<usize, StorageError> {
 #[derive(Debug)]
 pub struct FsBlobStore {
     dir: PathBuf,
+    read_epoch: crate::blob_read::ReadEpoch,
 }
 
 impl FsBlobStore {
@@ -428,7 +641,10 @@ impl FsBlobStore {
     pub fn open(dir: impl AsRef<Path>) -> Result<Self, StorageError> {
         let dir = dir.as_ref().to_path_buf();
         create_blob_directory(&dir)?;
-        Ok(Self { dir })
+        Ok(Self {
+            dir,
+            read_epoch: crate::blob_read::ReadEpoch::default(),
+        })
     }
 
     fn path(&self, cid: &Cid) -> PathBuf {
@@ -437,6 +653,13 @@ impl FsBlobStore {
 }
 
 impl BlobStore for FsBlobStore {
+    fn prepare_read_bounded(
+        &self,
+        cid: &Cid,
+        max: usize,
+    ) -> Result<crate::BlobReadPlan, StorageError> {
+        crate::BlobReadPlan::plain(*cid, max, self.path(cid), self.read_epoch.guard())
+    }
     fn is_persistent(&self) -> bool {
         true
     }
@@ -483,6 +706,7 @@ impl BlobStore for FsBlobStore {
     }
 
     fn delete(&mut self, cid: &Cid) -> Result<bool, StorageError> {
+        self.read_epoch.retire();
         let path = self.path(cid);
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(true),
@@ -534,6 +758,23 @@ pub struct SealingBlobStore<R: CryptoRngCore> {
     dir: PathBuf,
     key: Zeroizing<[u8; 32]>,
     rng: R,
+    read_epoch: crate::blob_read::ReadEpoch,
+    /// Present only for the primary cache ([`SealingBlobStore::open_cache`]). Keep reuses this type
+    /// for its own per-file directories, whose loaders reject unexpected entries, so those stores
+    /// must keep the plain write path and never create `incoming/`.
+    cache: Option<CacheMode>,
+}
+
+/// Crash-safe write state and the size index of a primary cache handle.
+struct CacheMode {
+    generation: crate::cache::MountGeneration,
+    sequence: u64,
+    index: Option<crate::cache::CacheIndex>,
+    /// The handle's shared hold on the namespace's attach lock, for its whole lifetime, so a leave
+    /// cleanup can prove the namespace unattached (see [`crate::cache::ATTACH_LOCK`]). `None` only
+    /// for the cleanup's own handle, opened under the exclusive hold by
+    /// [`SealingBlobStore::open_cache_under`].
+    _attach: Option<crate::cache::AttachShared>,
 }
 
 impl<R: CryptoRngCore> SealingBlobStore<R> {
@@ -565,11 +806,114 @@ impl<R: CryptoRngCore> SealingBlobStore<R> {
             dir,
             key: Zeroizing::new(key),
             rng,
+            read_epoch: crate::blob_read::ReadEpoch::default(),
+            cache: None,
         })
+    }
+
+    /// Open the **primary cache** of a server: like [`open`](Self::open), plus crash-safe writes
+    /// (temporary name in `incoming/`, sync, rename) and a size index filled by
+    /// [`BlobStore::cache_scan`]. Only the primary may use this; see the `cache` field.
+    ///
+    /// The handle holds the namespace's attach lock shared for its lifetime. Fails with
+    /// [`StorageError::VaultBusy`] while a leave cleanup holds that lock exclusively.
+    pub fn open_cache(dir: impl AsRef<Path>, key: [u8; 32], rng: R) -> Result<Self, StorageError> {
+        let mut store = Self::open(dir, key, rng)?;
+        let attach = crate::cache::attach_shared(&store.dir)?;
+        store.cache = Some(CacheMode {
+            generation: crate::cache::MountGeneration::register(),
+            sequence: 0,
+            index: None,
+            _attach: Some(attach),
+        });
+        Ok(store)
+    }
+
+    /// The leave cleanup's own primary handle on `dir`, opened while `held` (the exclusive attach
+    /// hold on that same namespace) proves nothing else has it open. It takes no shared hold of
+    /// its own, which would conflict with `held`. The caller keeps `held` alive for as long as it
+    /// uses this handle. Refuses a hold taken on another directory.
+    pub fn open_cache_under(
+        dir: impl AsRef<Path>,
+        key: [u8; 32],
+        rng: R,
+        held: &crate::cache::AttachExclusive,
+    ) -> Result<Self, StorageError> {
+        if held.namespace() != dir.as_ref() {
+            return Err(StorageError::Io(
+                "the attach hold covers another namespace".into(),
+            ));
+        }
+        let mut store = Self::open(dir, key, rng)?;
+        store.cache = Some(CacheMode {
+            generation: crate::cache::MountGeneration::register(),
+            sequence: 0,
+            index: None,
+            _attach: None,
+        });
+        Ok(store)
     }
 
     fn path(&self, cid: &Cid) -> PathBuf {
         self.dir.join(cid.to_hex())
+    }
+
+    /// Write one sealed record so its CID name only ever appears with complete, synced content.
+    /// The temporary file is opened `create_new`, so even a stale name collision cannot make two
+    /// writers share a file. No directory flush follows the rename: power loss may then lose the
+    /// entry, which is simply fetched again, but cannot leave a torn record under the CID name.
+    fn write_atomic(&mut self, cid: &Cid, encoded: &[u8]) -> Result<(), StorageError> {
+        use std::io::Write;
+        let incoming = self.dir.join(crate::cache::INCOMING_DIR);
+        std::fs::create_dir_all(&incoming).map_err(|e| StorageError::Io(e.to_string()))?;
+        let mode = self
+            .cache
+            .as_mut()
+            .expect("atomic writes are only used in cache mode");
+        let mut attempts = 0;
+        let (temp, mut file) = loop {
+            mode.sequence = mode.sequence.wrapping_add(1);
+            let temp = incoming.join(crate::cache::temp_name(
+                cid,
+                mode.generation.value(),
+                mode.sequence,
+            ));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp)
+            {
+                Ok(file) => break (temp, file),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempts < 16 => {
+                    attempts += 1;
+                }
+                Err(e) => return Err(StorageError::Io(e.to_string())),
+            }
+        };
+        let written = file
+            .write_all(encoded)
+            .and_then(|()| file.sync_all())
+            .map_err(|e| StorageError::Io(e.to_string()));
+        drop(file);
+        let renamed = written.and_then(|()| {
+            std::fs::rename(&temp, self.path(cid)).map_err(|e| StorageError::Io(e.to_string()))
+        });
+        if renamed.is_err() {
+            // Best effort: mount recovery removes anything this misses once the handle is gone.
+            let _ = std::fs::remove_file(&temp);
+        }
+        renamed
+    }
+
+    /// Record a held record's current on-disk length in the size index (cache mode only).
+    fn note_held(&mut self, cid: &Cid) {
+        let len = std::fs::metadata(self.path(cid)).map(|m| m.len()).ok();
+        if let Some(index) = self.cache.as_mut().and_then(|mode| mode.index.as_mut()) {
+            match len {
+                Some(len) => index.note_written(*cid, len),
+                None => index.note_removed(cid),
+            }
+        }
     }
 }
 
@@ -603,6 +947,19 @@ pub(crate) fn decode_sealed(bytes: &[u8]) -> Result<SealedBlob, StorageError> {
 }
 
 impl<R: CryptoRngCore> BlobStore for SealingBlobStore<R> {
+    fn prepare_read_bounded(
+        &self,
+        cid: &Cid,
+        max: usize,
+    ) -> Result<crate::BlobReadPlan, StorageError> {
+        crate::BlobReadPlan::sealed(
+            *cid,
+            max,
+            self.path(cid),
+            *self.key,
+            self.read_epoch.guard(),
+        )
+    }
     fn is_persistent(&self) -> bool {
         true
     }
@@ -614,8 +971,17 @@ impl<R: CryptoRngCore> BlobStore for SealingBlobStore<R> {
         // deduplicating so an authenticated peer fetch can replace it with freshly sealed bytes.
         if !matches!(self.get_bounded(&cid, bytes.len()), Ok(Some(_))) {
             let sealed = seal(&self.key, bytes, &mut self.rng)?;
-            std::fs::write(&path, encode_sealed(&sealed))
-                .map_err(|e| StorageError::Io(e.to_string()))?;
+            let encoded = encode_sealed(&sealed);
+            if self.cache.is_some() {
+                self.write_atomic(&cid, &encoded)?;
+            } else {
+                std::fs::write(&path, encoded).map_err(|e| StorageError::Io(e.to_string()))?;
+            }
+        }
+        if self.cache.is_some() {
+            // Also for a healthy duplicate: a re-put during this mount is a fresh claim on the
+            // blob, so it must leave the mount set (never classed as unclaimed this mount).
+            self.note_held(&cid);
         }
         Ok(cid)
     }
@@ -652,6 +1018,7 @@ impl<R: CryptoRngCore> BlobStore for SealingBlobStore<R> {
         if !promote_staged_file(&self.dir, cid, healthy)? {
             return Ok(false);
         }
+        self.note_held(cid);
         self.get_bounded(cid, max_bytes)?
             .ok_or(StorageError::Malformed)?;
         flush_promoted(&self.dir, cid)?;
@@ -663,12 +1030,41 @@ impl<R: CryptoRngCore> BlobStore for SealingBlobStore<R> {
     }
 
     fn delete(&mut self, cid: &Cid) -> Result<bool, StorageError> {
+        self.read_epoch.retire();
         let path = self.path(cid);
-        match std::fs::remove_file(&path) {
+        let removed = match std::fs::remove_file(&path) {
             Ok(()) => Ok(true),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(e) => Err(StorageError::Io(e.to_string())),
+        };
+        if removed.is_ok() {
+            if let Some(index) = self.cache.as_mut().and_then(|mode| mode.index.as_mut()) {
+                index.note_removed(cid);
+            }
         }
+        removed
+    }
+
+    fn cache_scan(&mut self, recover: bool) -> Result<crate::cache::CacheScanReport, StorageError> {
+        let Some(mode) = self.cache.as_mut() else {
+            return Err(StorageError::Io(
+                "this store has no size-limited cache".into(),
+            ));
+        };
+        let (index, report) = crate::cache::scan(&self.dir, true, recover, mode.index.as_ref());
+        mode.index = Some(index);
+        Ok(report)
+    }
+
+    fn cache_index(&self) -> Option<crate::cache::CacheIndex> {
+        self.cache.as_ref().and_then(|mode| mode.index.clone())
+    }
+
+    fn cache_usage(&self) -> Option<crate::cache::CacheUsage> {
+        self.cache
+            .as_ref()
+            .and_then(|mode| mode.index.as_ref())
+            .map(crate::cache::CacheIndex::summary)
     }
 
     fn cids(&self) -> Vec<Cid> {
@@ -684,18 +1080,25 @@ impl<R: CryptoRngCore> BlobStore for SealingBlobStore<R> {
 
     fn put_staged(&mut self, bytes: &[u8]) -> Result<Cid, StorageError> {
         // Sealed exactly as a held blob is: promotion is a rename, so a staged blob has to already
-        // be in its final on-disk form.
+        // be in its final on-disk form. Synced before close, so the promoting rename publishes
+        // durable bytes rather than a name whose content may still be in a write cache.
         let cid = Cid::of(bytes);
         let path = staged_target(&self.dir, &cid)?;
         let sealed = seal(&self.key, bytes, &mut self.rng)?;
-        std::fs::write(&path, encode_sealed(&sealed))
-            .map_err(|e| StorageError::Io(e.to_string()))?;
+        write_synced(&path, &encode_sealed(&sealed))?;
         Ok(cid)
     }
 
     fn promote_staged(&mut self, cid: &Cid) -> Result<bool, StorageError> {
         let healthy = matches!(self.get(cid), Ok(Some(_)));
-        promote_staged_file(&self.dir, cid, healthy)
+        let promoted = promote_staged_file(&self.dir, cid, healthy)?;
+        if promoted {
+            self.note_held(cid);
+            // Best-effort barrier, matching `promote_staged_bounded`: the rename is already
+            // visible and the content was synced at staging, so a failed flush cannot tear it.
+            let _ = flush_promoted(&self.dir, cid);
+        }
+        Ok(promoted)
     }
 
     fn drop_staged(&mut self, cid: &Cid) -> Result<bool, StorageError> {

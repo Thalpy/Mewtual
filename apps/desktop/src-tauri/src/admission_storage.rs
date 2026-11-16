@@ -49,14 +49,14 @@ pub(super) async fn prune_stale_pending(state: &AppState) {
     retain_current(state, &registry);
 }
 
-fn retain_current(state: &AppState, registry: &HashMap<u64, ServerEntry>) {
+fn retain_current(state: &AppState, registry: &ServerTable) {
     state
         .pending_server_nets
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .retain(|id, pending| {
             registry
-                .get(id)
+                .legacy(id)
                 .is_some_and(|entry| entry.instance == pending.instance)
         });
 }
@@ -115,7 +115,7 @@ pub(super) async fn persist_server_net(
     let registry = state.servers.lock().await;
     retain_current(state, &registry);
     let Some(entry) = registry
-        .get(&server)
+        .legacy(&server)
         .filter(|entry| entry.instance == instance)
     else {
         return PersistOutcome::Superseded;
@@ -125,6 +125,7 @@ pub(super) async fn persist_server_net(
     }
     let observed = match guard
         .as_ref()
+        .and_then(MountedVault::as_legacy)
         .map(|store| store.load_server_net(server))
         .transpose()
     {
@@ -173,7 +174,7 @@ pub(super) async fn persist_server_net(
             },
         );
     }
-    let Some(store) = guard.as_ref() else {
+    let Some(store) = guard.as_ref().and_then(MountedVault::as_legacy) else {
         return pending(PersistFailure::StoreUnavailable);
     };
     write_net(state, store, server, instance, &candidate)
@@ -222,7 +223,7 @@ pub(super) async fn retry_server_net(
     let registry = state.servers.lock().await;
     retain_current(state, &registry);
     let Some(entry) = registry
-        .get(&server)
+        .legacy(&server)
         .filter(|entry| entry.instance == instance)
     else {
         return Some(PersistOutcome::Superseded);
@@ -237,7 +238,7 @@ pub(super) async fn retry_server_net(
     if !matches_live_identity(entry, &retained.net) {
         return Some(pending(PersistFailure::WriteFailed));
     }
-    let Some(store) = guard.as_ref() else {
+    let Some(store) = guard.as_ref().and_then(MountedVault::as_legacy) else {
         return Some(pending(PersistFailure::StoreUnavailable));
     };
     let current = match store.load_server_net(server) {
@@ -288,7 +289,7 @@ pub(super) async fn retry_registry(state: &AppState) -> Option<PersistOutcome> {
 
 async fn write_registry(state: &AppState) -> PersistOutcome {
     let guard = state.store.lock().await;
-    let Some(store) = guard.as_ref() else {
+    let Some(store) = guard.as_ref().and_then(MountedVault::as_legacy) else {
         return pending(PersistFailure::StoreUnavailable);
     };
     let registry = state.servers.lock().await;
@@ -298,7 +299,7 @@ async fn write_registry(state: &AppState) -> PersistOutcome {
         .unwrap_or_else(|e| e.into_inner())
         .requested;
     let records: Vec<_> = registry
-        .iter()
+        .legacy_iter()
         .map(|(id, entry)| ServerRecord {
             id: *id,
             display_name: entry.name.clone(),
@@ -325,7 +326,7 @@ pub(super) async fn before_shutdown(state: &AppState) -> Result<(), String> {
         .servers
         .lock()
         .await
-        .iter()
+        .legacy_iter()
         .map(|(id, entry)| (*id, entry.instance))
         .collect();
     for (server, instance) in entries {
@@ -359,6 +360,7 @@ pub(super) async fn load_or_init_server_net(
     let guard = state.store.lock().await;
     let store = guard
         .as_ref()
+        .and_then(MountedVault::as_legacy)
         .ok_or_else(|| "vault is not mounted".to_string())?;
     let registry = state.servers.lock().await;
     if registry.contains_key(&server) {
@@ -409,9 +411,10 @@ mod tests {
         let device_id = server.device_id();
         let (actor, mut events, task) = spawn(server);
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
-        state.servers.lock().await.insert(
+        state.servers.lock().await.install_legacy_fixture(
             1,
             ServerEntry {
+                files: keep_session::EntryOwner::new(),
                 actor: actor.clone(),
                 instance,
                 group_id,
@@ -429,6 +432,7 @@ mod tests {
                 is_dm: false,
                 switchboard: false,
                 record_seq: net.record_seq,
+                voice: None,
                 persist: PersistCounters::default(),
             },
         );
@@ -443,7 +447,7 @@ mod tests {
 
     async fn mount(state: &AppState, path: &Path) {
         *state.store.lock().await =
-            Some(ServerStore::open(path, b"admission test", &mut OsCryptoRng).unwrap());
+            Some((ServerStore::open(path, b"admission test", &mut OsCryptoRng).unwrap()).into());
     }
 
     async fn saved_net(state: &AppState) -> ServerNet {
@@ -452,6 +456,8 @@ mod tests {
             .lock()
             .await
             .as_ref()
+            .unwrap()
+            .as_legacy()
             .unwrap()
             .load_server_net(1)
             .unwrap()
@@ -549,6 +555,8 @@ mod tests {
             .await
             .as_ref()
             .unwrap()
+            .as_legacy()
+            .unwrap()
             .save_server_net(1, &newer, &mut OsCryptoRng)
             .unwrap();
         assert_eq!(
@@ -588,6 +596,8 @@ mod tests {
             .lock()
             .await
             .as_ref()
+            .unwrap()
+            .as_legacy()
             .unwrap()
             .save_server_net(1, &new_net, &mut OsCryptoRng)
             .unwrap();
@@ -667,6 +677,8 @@ mod tests {
             .await
             .as_ref()
             .unwrap()
+            .as_legacy()
+            .unwrap()
             .save_server_net(1, &foreign, &mut OsCryptoRng)
             .unwrap();
         assert_eq!(
@@ -694,7 +706,7 @@ mod tests {
             persist_registry(&state).await,
             pending(PersistFailure::WriteFailed)
         );
-        state.servers.lock().await.get_mut(&1).unwrap().name = "latest name".into();
+        state.servers.lock().await.legacy_mut(&1).unwrap().name = "latest name".into();
         assert_eq!(
             persist_registry(&state).await,
             pending(PersistFailure::WriteFailed)
@@ -717,6 +729,8 @@ mod tests {
                 .lock()
                 .await
                 .as_ref()
+                .unwrap()
+                .as_legacy()
                 .unwrap()
                 .load_registry()
                 .unwrap()[0]

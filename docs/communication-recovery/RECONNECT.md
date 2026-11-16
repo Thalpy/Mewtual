@@ -170,11 +170,19 @@ order. This is bounded recovery diversity, not a promise to retain every histori
 Private routes stay local and sealed. Inbound source ports and unverified claims never enter the
 selection.
 
-The runtime installer uses the same bounds and address validation. Each discovery pass considers
-at most two eligible peers, with one actor-owned cursor advanced before scheduler/transport awaits.
-A denied or failed first pair cannot monopolize later passes. Each peer's batch remains at most two
-addresses, and all attempts still consume the existing process, group, peer, endpoint and prefix
-gates. Repeated native hint installation does not reset the cursor.
+The runtime installer uses the same bounds and address validation. Each discovery pass admits
+at most four eligible peers. Its actor-owned cursor advances only after a nonempty scheduler
+reservation, before the transport await. A locally denied reservation preserves the next peer's
+turn; advancing it on denial can repeatedly skip that peer when the discovery cadence and budget
+window differ. A committed reservation advances even if transport later fails or suppresses it;
+there is no refund after ambiguous handoff. Each peer's batch remains at most two addresses,
+and all attempts still consume the existing process, group, peer, endpoint and prefix gates.
+Repeated native hint installation does not reset the cursor.
+
+The default scheduler still permits eight group attempts per 60-second window, 32 process-wide,
+eight per prefix, four per peer and two per endpoint. Four two-address peers can consume the
+whole group window in one pass. This explicit burst/diversity tradeoff does not prove fairness
+between groups; denied passes preserve the next admitted turn across subsequent windows.
 
 The v6 decoder rejects peer-count, per-peer route-count, per-address length and aggregate encoded
 byte overflow. The encoder normalizes arbitrary local route vectors with the same diversity policy,
@@ -187,7 +195,7 @@ Required focused verification, not yet claimed executed for R2:
 cargo test -p catcoms-discovery reconnect_retention
 cargo test -p catcoms-app member_mesh_net_v6
 cargo test -p catcoms-app server_net_reconnect_routes_are_backward_compatible_and_bounded
-cargo test -p catcoms-sync mesh_reconnect_retains_three_peers_and_rotates_two_peer_dial_passes
+cargo test -p catcoms-sync mesh_reconnect_retains_five_peers_and_rotates_four_peer_dial_passes
 cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib mesh_restart_keeps_private_alternative -- --test-threads=1
 ```
 
@@ -199,3 +207,30 @@ identity, author and text through real TCP actors. Initial signed admission uses
 Hub with the same identities; no member proof, route authority or remote history is injected.
 This is loopback integration coverage, not physical NAT testing. Transfer amplification for a large
 archive is measured separately by the R4 reconciliation regression.
+
+
+## 19 October cursor regression
+
+The deterministic eight-peer regression reproduces a denied 45-second pass skipping the next
+peers in a 60-second budget window. After preserving denied turns, both focused reconnect tests
+pass, including actual submitted attempts across successive windows. These unit results do not
+establish the six-client TCP acceptance result or cross-group progress under load.
+
+```text
+cargo test -p catcoms-sync --lib mesh_reconnect_ -j2
+```
+
+## Indirect probe target rotation after checkpoint b867c622
+
+The first indirect target still uses topology priority and local age. Subsequent passes start
+strictly after the last admitted full DeviceId in circular ID order, scanning the complete
+retained descriptor set (at most512), rather than stopping at the connected-snapshot limit320.
+This retains one target and at most two helpers per pass. The fixed cursor is session-only;
+negative replies, descriptor refresh, removal of its record and local capacity refusal do not
+reset it. A successful helper admission commits the cursor immediately before any next helper
+await; cancelling that later wait cannot erase the completed turn.
+
+The helper still shares four requests/device/minute between probes and reciprocal forwards.
+Rotation adds no burst or rate allowance. Fair selection is conditional on a stable eligible set
+and admission opportunities, not a wall-time guarantee under continuous churn or denied capacity.
+Every current-member/descriptor/path and original request-lifetime check remains independent.

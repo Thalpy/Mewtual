@@ -1,0 +1,39 @@
+(async () => {
+  const config=__CONFIGURATIONS__, pause=ms=>new Promise(r=>setTimeout(r,ms)), controls=new Map();let serial=0;
+  window.__memberMediaProbeReply=(id,result)=>controls.get(id)?.(result);
+  const control=operation=>new Promise((resolve,reject)=>{
+    const id=++serial,timer=setTimeout(()=>{controls.delete(id);reject(new Error('probe control timeout'));},3000);
+    controls.set(id,result=>{clearTimeout(timer);controls.delete(id);resolve(result);});
+    window.memberMediaProbeControl(JSON.stringify({id,operation}));
+  });
+  const wait=async (predicate,label,ms=20000)=>{const end=performance.now()+ms;while(!(await predicate())){if(performance.now()>=end)throw new Error(label);await pause(25);}};
+  const a=new RTCPeerConnection({iceTransportPolicy:'relay',iceServers:[config[0]]});
+  const c=new RTCPeerConnection({iceTransportPolicy:'relay',iceServers:[config[1]]});
+  const audio=new AudioContext(), oscillator=audio.createOscillator(), gain=audio.createGain(), stream=audio.createMediaStreamDestination();
+  const echo=new Map(), received=[]; let analyser, player;
+  try {
+    gain.gain.value=.1; oscillator.frequency.value=440;oscillator.connect(gain);gain.connect(stream);oscillator.start();await audio.resume();
+    a.addTrack(stream.stream.getAudioTracks()[0],stream.stream);
+    c.ontrack=e=>{const incoming=new MediaStream([e.track]);player=new Audio();player.srcObject=incoming;player.volume=.000001;void player.play();const input=audio.createMediaStreamSource(incoming);analyser=audio.createAnalyser();const mute=audio.createGain();mute.gain.value=.000001;input.connect(analyser);analyser.connect(mute);mute.connect(audio.destination);};
+    c.ondatachannel=e=>{e.channel.onmessage=m=>{received.push([e.channel.label,m.data]);e.channel.send(m.data);};};
+    const jam=a.createDataChannel('jam'), draw=a.createDataChannel('drawing');
+    for(const d of [jam,draw])d.onmessage=e=>echo.set(d.label,e.data);
+    const gathered=async pc=>wait(()=>pc.iceGatheringState==='complete','ICE gathering',15000);
+    await a.setLocalDescription(await a.createOffer());await gathered(a);await c.setRemoteDescription(a.localDescription);
+    await c.setLocalDescription(await c.createAnswer());await gathered(c);await a.setRemoteDescription(c.localDescription);
+    await wait(()=>a.connectionState==='connected'&&c.connectionState==='connected'&&jam.readyState==='open'&&draw.readyState==='open','relay connection');
+    jam.send('note:60:on');draw.send('stroke:1,2;3,4');await wait(()=>echo.size===2&&analyser,'companion channels');
+    await pause(500);const waveform=new Float32Array(analyser.fftSize);analyser.getFloatTimeDomainData(waveform);
+    const peak=Math.max(...waveform.map(Math.abs));if(peak<.001)throw new Error('decoded generated audio absent '+JSON.stringify({state:audio.state,time:audio.currentTime,stats:[...(await c.getStats()).values()].filter(s=>s.type==='inbound-rtp').map(s=>({kind:s.kind,packets:s.packetsReceived,energy:s.totalAudioEnergy,samples:s.totalSamplesReceived}))}));
+    const stats=await a.getStats(), selected=[...stats.values()].find(s=>s.type==='transport'&&s.selectedCandidatePairId);
+    const pair=stats.get(selected?.selectedCandidatePairId), local=stats.get(pair?.localCandidateId), remote=stats.get(pair?.remoteCandidateId);
+    if(local?.candidateType!=='relay'||remote?.candidateType!=='relay')throw new Error('selected path was not relay-only');
+    const count=async()=>[...(await c.getStats()).values()].find(s=>s.type==='inbound-rtp'&&s.kind==='audio')?.packetsReceived??0;
+    const audioPackets=await count(),cut=await control('cut');if(cut.bridgeLive!==false)throw new Error('bridge cut not acknowledged');jam.send('after-cut');await pause(700);const atCut=await count();await pause(1500);const afterCut=await count(),stopped=await control('status');
+    if(stopped.bridgeLive!==false||stopped.bridgePackets!==cut.bridgePackets||afterCut!==atCut||echo.get('jam')==='after-cut')throw new Error('bridge cut did not stop delivery '+JSON.stringify({atCut,afterCut,cut,stopped,jam:echo.get('jam')}));
+    const resumed=await control('resume');if(resumed.bridgeLive!==true)throw new Error('bridge resume not acknowledged');jam.send('after-resume');await wait(()=>echo.get('jam')==='after-resume','bridge resume');
+    await wait(async()=>(await count())>afterCut,'audio after bridge resume');
+    return {userAgent:navigator.userAgent,localCandidate:local.candidateType,remoteCandidate:remote.candidateType,
+      generatedAudioPeak:peak,audioPackets,jam:echo.get('jam'),drawing:echo.get('drawing'),bridgeCutStoppedAudio:afterCut===atCut,bridgeResumed:true};
+  } finally {delete window.__memberMediaProbeReply;player?.pause();if(player)player.srcObject=null;a.close();c.close();oscillator.stop();for(const track of stream.stream.getTracks())track.stop();await audio.close();}
+})()

@@ -85,9 +85,8 @@ export function createStudioExit(host: StudioExitHost): StudioExit {
     const current = host.claim();
     async function settle(needsSave: () => boolean, step: () => Promise<boolean>): Promise<boolean> {
       for (let round = 0; ; round++) {
-        if (!current()) return false;
+        if (!current() || host.closing()) return false;
         if (!needsSave()) return true;
-        if (host.closing()) return false;
         if (round >= MAX_SAVE_ROUNDS) { host.exhausted?.(); return false; }
         if (!(await step())) return false;
         // Loop: a stroke drawn while Save awaited its receipt (or while the snapshot was written)
@@ -106,8 +105,16 @@ export function createStudioExit(host: StudioExitHost): StudioExit {
   }
   function leaveThen(go: (route: StudioRoute) => void): void {
     const route = begin();
-    if (leaveFree()) { go(route); return; }
-    void route.leave().then((released) => { if (released) go(route); });
+    // Close owns the screen even after its Save has drained all work. A synchronous route
+    // also needs a current claim: locked/replaced hosts must not bypass settle's checks.
+    if (!route.current() || host.closing()) return;
+    if (leaveFree()) {
+      if (route.current() && !host.closing()) go(route);
+      return;
+    }
+    // Promise settlement and this callback are separate turns in the microtask queue. A newer
+    // route or close can intervene after settle's final check, so fence the actual flag writes.
+    void route.leave().then((released) => { if (released && route.current() && !host.closing()) go(route); });
   }
   return { begin, release: () => begin().leave(), leaveThen, mustLeave: () => !leaveFree() };
 }

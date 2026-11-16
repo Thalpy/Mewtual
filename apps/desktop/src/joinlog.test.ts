@@ -278,6 +278,21 @@ test("an async invite refresh updates only the server named by its event", () =>
   });
 });
 
+test("an unavailable invite clears a member's retained code only for that server", () => {
+  const before = [
+    { id: 1, invite: "retained-before-demotion" },
+    { id: 2, invite: "other-server-invite" },
+  ];
+  const after = withOrderedRefreshedInvite(before, 1, null, 2, 2);
+  assert.equal(after[0]?.invite, "");
+  assert.equal(after[1], before[1]);
+  assert.equal(
+    withOrderedRefreshedInvite(after, 1, "older-permitted-result", 1, 2),
+    after,
+    "an older refresh cannot put back the code withdrawn by the current role check",
+  );
+});
+
 test("an older connectivity refresh cannot restore withdrawn reachability", () => {
   const newer = {
     ...emptyReport,

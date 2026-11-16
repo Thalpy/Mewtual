@@ -1,5 +1,17 @@
 # Mewtual: message flow and micelle convergence
 
+Security prerequisite: an incoming subscription retries retained publication
+only for its exact canonical topic. Other retained originals preserve their
+ownership/order and normal periodic retry; wire and delivery claims below are
+unchanged. [Scope](communication-recovery/MAIN-SECURITY-PREREQUISITE.md).
+
+Disabled native V2 invite continuation (15 November): the original runtime can
+prepare one unsigned invite through its same member verifier and actual
+Current4 checks. Its output is hash/expiry DATA and contains no usable contact,
+signed invite or covering receipt. No join/message transport changes follow;
+the active network flow below remains Legacy.
+[Producer status](communication-recovery/CHAT-V2-INVITE-ISSUER.md).
+
 Status: a **trace of what the code does today**. It began as a trace written before any change;
 sections 1 to 5 have since been brought back in line with the fixes recorded in sections 8 to 11,
 so the trace and the fix log describe the same code. It records the send path, the live receive
@@ -21,6 +33,84 @@ separate work.
 
 ---
 
+## Chat history adversarial continuation (20 October)
+
+The disabled Native Text frontend now seals an exact critical4 intent before
+local save, retries the same token automatically and reads bounded pages of its
+own saved originals. Backend mode is explicit even for an empty vault. There is
+still no V2 second-member delivery or shared projection, so the live network
+trace below remains Legacy. [Current native flow](communication-recovery/CHAT-V2-NATIVE-SESSION.md).
+
+15 November disabled native V2 continuation: original-runtime member preparation
+signs once into namespace5; final admission holds actual native custody through
+the local save and restores the runtime afterward. Its own-history reader also
+includes settled originals, using fixed bounded ordinal pages. This Root path
+does not publish a message or receive another member's history. The checked
+native founder/plain-send and own-history routes are implemented behind the
+disabled switch; frontend integration and V2 transport remain unfinished. The
+active desktop send path below still uses the legacy durable transaction.
+[Implementation and evidence](communication-recovery/CHAT-V2-NATIVE-TEXT-OPERATIONS.md).
+
+MLS key epochs do not reset the chat operation graph. The additive ledger, causal edit/delete
+rules, newly found message-addressing and failed-page cursor defects, compatibility-conscious
+writer check, and remaining audit/equivocation limits are traced in
+[CHAT-HISTORY-CONVERGENCE](communication-recovery/CHAT-HISTORY-CONVERGENCE.md).
+Its ten-epoch test explicitly delivers recovery; it is not new automatic network acceptance.
+The dated evidence in the acceptance ledger takes precedence over older coverage summaries here.
+
+## Quiet receipts and sole-owner responsiveness (19 October)
+
+24 October reconnect continuation: event, cadence and shutdown captures now serialize their
+claims observation, latest sealed-route merge and live-route command enqueue per numeric
+server ID. They use a dedicated lock after snapshot persistence, then recheck local policy.
+This prevents an earlier incomplete descriptor snapshot deleting a newly saved bridge route,
+or a late old command replacing the newer vector. The Actor processes those enqueued commands
+in order; actual dials retain all current membership/descriptor/endpoint checks. Cold Noise
+acceptance establishes route use, not application catch-up or an authenticated chat exchange.
+Current validation/failure boundaries are in HANDOVER.
+
+A genuinely new bound member endpoint requests one coalesced reconciliation pass for documents
+already open at authentication. This is independent of the restore's first-source latch: its
+connection may have arrived before it was authorized as a source. The async owner drains that
+obligation through the existing rotating bounded queue. Scheduling and selection recheck current
+membership/connectivity; the flag itself grants no route or dial authority. Repeated proofs of
+the same binding create no new pass, and proofs before any document opens create no future wake.
+The 30-second owned fallback, original response waits, source cooldowns and cursors remain intact.
+
+Serving a current authenticated `KIND_CATCHUP_SINCE` request can also expose a reverse gap: its
+bounded frontier names changes this already-open document does not hold. One best-effort reverse
+read is admitted per document/full member per30seconds without verified progress, under a256-entry
+table. A fully accepted signed incremental response importing new original operations re-arms only
+that same document/authenticated responder. This lets successive bubble acquisitions reopen a
+completed search without waiting for a timer. Empty/duplicate/cursor-only replies, local edits,
+other-source imports and rejected tails cannot refill that allowance. Known ancestors cause no wake; unknown hashes are hints, never evidence that valid operations exist. An unexpired
+full table refuses hints while normal serving continues. A full recovery queue likewise retains
+existing work and falls back to periodic reconciliation; prompt saturated admission is not claimed.
+Only that requester's previous completeness answer is forgotten. A pending older response retains
+a dirty-completeness bit, including through legacy Full fallback, so an old empty answer cannot
+close the newer obligation. Membership, current epoch and actual connectivity are rechecked;
+responses still pass the existing request binding, encryption and original signed-operation checks.
+
+
+A newly verified live or catch-up operation can queue its bounded exact author/document/change
+receipt. `queue_automatic_notifications` admits receipts and repair forwards into the existing
+bounded detached pool; it never waits for a local notification ACK before polling inbound work.
+Their persistent class turn changes only after successful admission, with at most four admissions
+per owner turn. Busy passes preserve the class owed capacity and the original outbox intents.
+This prevents continuous receipt traffic taking every newly released slot before repair forwards.
+
+The notification captures the current signed descriptor, roster/path evidence, original connection
+lease and deadline. The same Flight stays charged through actual lower retirement, including after
+outer cancellation. Queue admission and local driver ACK create no remote delivery evidence. Only
+an actual authenticated receipt matching a bounded recent target can change that evidence. These
+best-effort notifications add no dial authority and promise no delivery under unavailable paths.
+
+`RecoveryProgress` reports the retained catch-up kind, first-polled wait age and configured wait
+limit. Reading these observations starts no work and cannot renew a wait. They distinguish an
+unstarted preparation from an overdue unpolled response, without claiming remote wire receipt.
+The six-client fixture independently bounds history, sealed-store, recovery and route observations;
+a store timeout no longer hides an otherwise responsive actor.
+
 ## 1. Layer map
 
 | Layer | Crate / file | Owns |
@@ -38,6 +128,37 @@ an append-only `Vec<SignedOp>` of the inner-signed changes that built it
 ---
 
 ## 2. Sending a message
+
+### Current desktop send transaction (29 October)
+
+The desktop `send_message` command uses
+[`durable_chat::send`](../apps/desktop/src-tauri/src/durable_chat.rs), not the ordinary
+`Server::send_reply`/`post` path traced below. The UI saves a sealed pending request with one
+stable retry token before dispatch. The actor prepares the original signed operation outside
+exportable history, then the native caller obtains the exact server incarnation, persistence
+serializer, UI-session and mounted-store custody. The
+[`durable chat transaction`](../crates/catcoms-app/src/durable_chat.rs) saves the complete
+candidate snapshot before installing the history or publishing that operation.
+
+Successful desktop acceptance therefore means a covering encrypted local save completed.
+A failed save leaves the preparation unaccepted and unexportable; an ambiguous/lost reply must
+retry the SAME token and request. The saved retry receipt and publication obligation recover
+the original operation across restart. Publication may retry those original bytes; it must not
+author a replacement message. A post-rename storage failure can be ambiguous, so it is never
+evidence that the original operation does not exist.
+
+Received operations still use the background snapshot path in section 3. Their receipt or
+visibility alone is not proof of a completed local save.
+
+The desktop's durable caller-intent path also covers text edits and deletions. It prepares one exact
+signed operation outside the exportable graph, then crosses the encrypted server snapshot barrier
+before acceptance/publication. Identical-text edits save a no-op frontier receipt; exact-token Stop
+saves a negative terminal and never removes saved history. Post-rename uncertainty blocks ordinary
+snapshots until the original operation/terminal is repaired additively with latest received history.
+The ordinary persistence worker owns this repair while UI is locked. The low-level trace below still
+describes the non-durable compatibility APIs; it is not the desktop acceptance contract. R6 remains.
+
+### Ordinary product/sync post path
 
 1. **Product builds the row.** [`Server::send_reply`](../crates/catcoms-app/src/lib.rs#L3993)
    mints a random message id, takes this device's fingerprint, and stamps a timestamp from
@@ -66,18 +187,17 @@ an append-only `Vec<SignedOp>` of the inner-signed changes that built it
 5. **Product tracks it.** [`track_delivery_target`](../crates/catcoms-sync/src/lib.rs) plus a
    bounded per-channel ring of `(message id, change hash)` so the UI can later ask who holds it.
 
-**The acceptance point is the local edit, not the broadcast.** This is stated explicitly in
+**For ordinary `post`, the acceptance point is the local edit, not the broadcast.** This is stated explicitly in
 `post`'s own comment, immediately above its signature. Everything that can
 legitimately refuse a write (unopened document, missing routing secret, seal or Automerge failure)
-happens before the op exists; past that the message is accepted in memory and servable. Local
-disk durability is a separate boundary: the desktop send result reports `durable` only after a
-covering snapshot write succeeds. A failed write returns an accepted `pending` outcome, retains
-the dirty snapshot ticket, and retries through the existing discovery worker. Neither that
-failure nor a later UI refresh failure should invite authoring the same message again.
+happens before the op exists; past that the operation is accepted in memory and servable.
+The later background snapshot is a separate durability boundary. This is not the current desktop
+new-message acceptance contract described above. A later save or UI-refresh failure must not
+invite authoring the same operation again.
 
-**There is no application-level resend.** A message is authored exactly once. It is not re-sent on
-timeout, so there is no duplicate-message hazard from retries, and no `client_message_id`
-deduplication is needed at this layer.
+**Transport retries and a new authored action are different.** Outbox and durable-publication
+retries retain the original signed operation. The desktop additionally uses its persisted
+token-to-request binding to prevent an uncertain caller retry from creating another message.
 
 The desktop's durable caller-intent path separately retains a sealed retry identity when a
 native response is uncertain. Its vault-wide **Settings > Pending messages** manager can
@@ -91,6 +211,14 @@ barrier, bounded recovery storage and session/race checks.
 ---
 
 ## 3. Receiving live (gossip)
+
+The networking driver queues application delivery without awaiting its bounded application sink
+inside the swarm handler. Responses, connection retirement and local command acknowledgements
+therefore continue during application congestion. If gossip cannot be retained, or its original
+carrier connection retires while it waits, a coalesced `RecoveryNeeded` event schedules commit
+catch-up and document reconciliation. It is a local loss signal, not authenticated evidence of
+a particular sender, membership change or missing epoch. Payload, lifecycle and recovery delivery
+rotate fairly; ordinary signed/MLS checks below still decide what may be applied.
 
 [`on_gossip`](../crates/catcoms-sync/src/lib.rs) decodes the `SealedOp` and then:
 
@@ -127,7 +255,8 @@ count. The tracker replaces its map, costs O(open documents), and does not seria
 
 The native event consumer marks the exact server incarnation dirty before the UI lock gate and
 wakes a separate, coalescing persistence worker. That worker requests an initial save and batches
-later wakes in fixed 250-ms windows using the same snapshot tickets/write locks as local sends.
+later wakes in fixed 250-ms windows using existing snapshot tickets and the shared per-server
+write lock. The durable desktop send transaction uses that lock directly, without a snapshot ticket.
 It can write to the mounted encrypted store while the UI is locked. Failures stay dirty for a
 later wake or discovery retry. The consumer never waits on the actor for snapshot I/O, avoiding a
 cycle with the actor's bounded event channel. A marker is not a completed-save acknowledgement;
@@ -138,6 +267,16 @@ received work can still be lost if the actor or process stops before a covering 
 ## 4. Receiving after a gap: the anti-entropy path
 
 This is the path that matters for micelles. Gossip only carries live edits; it replays nothing.
+
+Quiet connected discovery first requests missed MLS commits at its current epoch using the
+existing kind2 exchange. This exposes a lost removal broadcast before future chat is required to
+reveal the gap. Preparation and detached waiting use the same bounded maintenance scheduler as
+PEX/finalization; only the originating Root validates and applies the signed reply. Process
+admission preserves one FIFO turn per Actor across cancelled select observations;
+queued work holds no signed context and samples it only after an actual grant. Empty/failed
+probes continue ordinary discovery. Applied epochs publish member and role updates even when
+remove+add leaves the count unchanged, and request ordinary sealed snapshot persistence. A
+1024-record work cap is separate from the released 16 MiB byte cap; default logs hold 256.
 
 ### 4.1 The requester states what it holds
 
@@ -264,17 +403,25 @@ claimant or by real progress, so one member cannot end another's continuation by
   up ([actor.rs:5056-5070](../crates/catcoms-app/src/actor.rs#L5056-L5070)).
 - **The UI opens a channel.** `request_catchup_best`, which queues on failure rather than
   giving the channel one chance.
+- **The owner reaches its quiet reconciliation deadline.** A current local member with at least
+  one actual connected, both-ends-bound member source arms a thirty-second wake through its
+  injected monotonic Clock. It survives cancelled owner polls and cannot be renewed by UI reads.
+  The deadline gets one bounded local turn even while inbound events remain ready, then ordinary
+  event/response fairness continues. Removal, loss of eligible sources or clock-domain exhaustion
+  disables that wake; it grants no dial or membership authority.
 - **The discovery cadence or successful unlock wakes the actor.** `schedule_reconciliation`
   revisits completed exchanges with current connected members. A neighbor may have acquired
   older history from another member while our local document and their socket stayed unchanged.
   The sweep rotates through open documents within the existing queue limit and preserves active
   transfers and source cooldowns. Cooling queued work can also wake on the injected clock;
-  another live message is not required to resume it. Rotation can admit further documents when
-  queue capacity returns; a queue entirely occupied by unresolved obligations still blocks
-  admission of additional documents. Opposite peer-order directions use 30- and 31-second minimum
+  another live message is not required to resume it. A full queue can park one inactive open-document
+  task to give the next document a bounded turn; its source cursors, continuation claims and
+  cooldowns remain retained. Opposite peer-order directions use 30- and 31-second minimum
   retry delays to break simultaneous reciprocal timeout cycles. The source picker's live tier
   also checks a current transport snapshot so a delayed disconnect event cannot make a departed
-  source outrank a live alternative. This does not detach outbound waits from the sole actor.
+  source outrank a live alternative. The owner retains one original request/nonce/response wait
+  across cancelled polls and polls incoming events alongside it, so a suspended outbound catch-up
+  does not prevent answering another member's request.
 
 ### 4.5 Coverage
 
@@ -297,7 +444,7 @@ a user visiting a channel.
 | Original sender never returns | Authorship is carried in the op, not in the connection | Ops keep flowing |
 | Peers connect only briefly | The catch-up task outlives the attempt and is requeued on failure | Resumes |
 | Clocks disagree | Timestamps affect **display order only**, never which ops survive | Safe for convergence |
-| Membership or keys change during the partition | See section 8, H1 | **Not yet established** |
+| Membership or keys change during the partition | Current-key resealing/retained history tested across ten Adds and author removal; see the 20 October trace | Broad automatic network acceptance remains incomplete |
 
 The three-micelle case (B and C meet, then C and E meet, B and E never meet, several original
 authors gone) follows from the same property: every node's log is the union of what it has ever
@@ -328,6 +475,11 @@ Two independent kinds of positive evidence, both within the current roster:
 - a causally descending change, computed in one DAG pass by
   [`holders_of`](../crates/catcoms-replication/src/doc.rs), where attribution comes from the
   **signed** op envelope, not the Automerge actor id.
+
+These are historical receipt confirmations, not a receiver disk-flush acknowledgement.
+An authenticated receipt is the member's self-report, not independent proof of current storage.
+The recipient can queue its receipt before the background covering snapshot finishes; an abrupt
+receiver crash can lose that tail. Neither evidence type proves durable custody on another device.
 
 The UI verdict function [`deliveryVerdict`](../apps/desktop/src/delivery.ts#L59) maps evidence to
 `pending | waiting | partial | everyone | queued`, or to silence. It refuses to invent a negative:
@@ -381,7 +533,10 @@ guards, not merely by passing):
 
 **Still not covered by any test:**
 
-1. **Convergence across a membership change that happened inside one partition.** See section 8, P2.
+1. **The broader automatic network heal across a partition-local membership change.** The new
+   ten-epoch replication test covers unchanged signatures, retained branches, removal and restart
+   with explicitly delivered commits/history; it does not establish the automatic scheduler path.
+   See section 8, P2 and the dated acceptance ledger for scenario-specific network evidence.
 2. **Epidemic relay for the P1 document family**, which section 8 records as a deliberate scope
    limit rather than a defect. A test would pin the limit, not close it.
 3. **The remaining presentation surfaces downstream of the timestamp sort**: day dividers,
@@ -438,9 +593,17 @@ Which gives two distinct stranded states:
 
 | Gap behind | What happens | Evidence produced |
 |---|---|---|
-| <= 256 | Heals normally | ordinary debug logs |
+| <= 256 | Heals normally, unless a missed Add's KeyPackage has expired since (below) | ordinary debug logs |
 | 257 to 1024 | Records buffer, `drain_pending_commits` cannot chain them | one `tracing::warn!` |
 | > 1024 | Records dropped before buffering; `pending_commits` stays empty | **nothing at all** |
+
+A third way to be stuck inside 256 (26 October, `docs/design-mls-leaf-lifetime.md` section 6):
+openmls re-checks an added KeyPackage's lifetime against the wall clock when the Add is processed,
+so a member offline for longer than that KeyPackage's remaining lifetime (at least 30 days since
+admission enforces a floor; about 84 for honest joiners) cannot apply the Add however close the
+gap is. Catch-up then reports it wrongly: as `Stranded` with a `MembershipChainGap` if later records
+followed in the same answer, or as `Verified { applied: 0 }` if the Add was the newest. A typed
+outcome for "offered at my epoch, refused" is a follow-up.
 
 That warn said "a full rejoin/snapshot is needed" and was the only occurrence of the condition
 anywhere: not a typed state, not a `SyncStats` counter, not an event, not in diagnostics, not in the
@@ -561,8 +724,11 @@ whether that is the intended product promise.
 ### P2. Membership change inside a partition
 
 If one micelle performs a removal while split, the two halves rotate labels independently and the
-control-plane semantics of the heal are not established anywhere I could find. Distinct from P0,
-which is about a member falling behind a *linear* commit chain. No test covers it.
+complete automatic control-plane heal is not established by the new replication test. That test
+crosses a linear ten-Add chain, removes an author and preserves their original signed history
+through current-key relay/restart, with explicit delivery. Independently conflicting membership
+branches and the broader automatic network matrix remain separate acceptance work. P0 concerns
+a member falling behind the available *linear* commit archive.
 
 ### P3. Ordering after a heal (was H5). Tested; better defended than expected.
 
@@ -608,10 +774,11 @@ old notes will otherwise re-derive them.
 - **`delivery.ts` is not a retry state machine.** It has no `sent`/`retrying`/`failed` states, no
   ten-minute cutoff, and no resend. It is a pure function from evidence to a display verdict
   ([delivery.ts:59](../apps/desktop/src/delivery.ts#L59)). The duplicate-message-after-retry
-  hazard described in earlier notes does not exist, because nothing retries a send.
+  hazard described in earlier notes is avoided by retrying the same original operation/token,
+  rather than authoring a replacement message.
 - **Delivery evidence is not a bare local-accept claim.** `post` returning success does mean only
   "accepted locally", and that is documented as intentional, but the UI does not render that as
-  delivered: `waiting` is the state for "sent, nobody has proved they hold it", and `everyone`
+  delivered: `waiting` is the state for "sent, no receipt confirmation yet", and `everyone`
   requires positive per-member evidence.
 
 ---

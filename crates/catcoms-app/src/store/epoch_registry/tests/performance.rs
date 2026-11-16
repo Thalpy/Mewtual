@@ -400,9 +400,11 @@ fn measure(case: &str, build: impl FnOnce(&mut Source), clock: &dyn Clock, max_p
         display_name: "profile".into(),
         own_message_changes: Default::default(),
         messages_cache: Default::default(),
+        admin_chat_ledger: Default::default(),
         delivery_snapshot_revision: 0,
         devices_sig: None,
         studio_saved_snapshot: None,
+        cache: Default::default(),
     };
     let mut provider = server
         .begin_registry_page_provider(&store, SERVER, bucket)

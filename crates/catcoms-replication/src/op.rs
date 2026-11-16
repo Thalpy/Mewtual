@@ -33,6 +33,12 @@ use crate::ReplError;
 const OP_DOMAIN: &str = "catcoms/op/v1";
 const DOMAIN_OP_DOMAIN: &str = "catcoms/op/v2";
 
+mod inspection;
+pub use inspection::{
+    FrameReadError, InspectionSignature, InspectionSignatureLimit, SignedOpFrame,
+    MAX_INSPECTION_FRAME_CHUNK, MAX_INSPECTION_SIGNATURE_BYTES,
+};
+
 /// P1 writers already emit raw Automerge changes. Accepting kind-2 compressed deltas would
 /// charge the compressed bytes while the parser inflates without a bound. Gate this at v2
 /// signing/decoding/verification so every later change parse (including restored logs and close
@@ -119,6 +125,10 @@ mod domain_framing_tests {
 }
 
 /// A CRDT delta authored and inner-signed by one device.
+///
+/// A legacy v1 signature binds type/id/key/change bytes, not the originating MLS group or
+/// authored epoch. Re-encryption by a current member does not prove historical group tenure;
+/// callers must not present this envelope alone as a group-scoped moderation audit proof.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SignedOp {
     /// Which kind of document this op belongs to.
@@ -160,7 +170,10 @@ fn signing_payload(
     if let Some(domain_op) = domain_op {
         e.put_bytes(domain_op).expect("domain operation fits");
     }
-    e.finish()
+    let bytes = e.finish();
+    #[cfg(test)]
+    inspection::record_signing_preimage(bytes.len());
+    bytes
 }
 
 impl SignedOp {
@@ -250,6 +263,8 @@ impl SignedOp {
     /// Canonical plaintext encoding (also the bytes that get sealed). The
     /// `author_device` is omitted; it is recomputed from `author_pubkey`.
     pub fn encode(&self) -> Vec<u8> {
+        #[cfg(test)]
+        inspection::record_full_encode();
         let mut e = Encoder::new();
         e.put_u16(self.doc_type.tag());
         e.put_u128(self.doc_id);

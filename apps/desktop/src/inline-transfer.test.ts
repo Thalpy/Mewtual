@@ -216,6 +216,9 @@ test("saving a file never routes its bytes through the window", () => {
   const sites = invokeSites("save_group_file");
   assert.equal(sites.length, 1, "one save path");
   const [, text] = frontendSources().find(([name]) => name === "native-download.ts") ?? ["", ""];
-  assert.match(text, /invoke<unknown>\("save_group_file", \{ server, cid, name \}\)/);
+  // Start and explicit resume share one native save path. Only fixed native selectors and a
+  // progress correlation ID accompany the address/name; no file-sized argument is admitted.
+  assert.match(text, /invoke<unknown>\("save_group_file", \{\s*server, cid, name,/);
+  assert.match(text, /resume: options\.resume, expectedIntent: options\.expectedIntent/);
   assert.doesNotMatch(text, /dataBase64/, "no bytes argument survives on the save path");
 });

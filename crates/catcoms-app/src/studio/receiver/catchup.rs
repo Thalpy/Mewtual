@@ -569,19 +569,23 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
                 // H4. Same ownership discipline.
                 Self::HandoffAssemble(plan, ownership, context) => {
                     let token = context.token;
-                    let result = tokio::task::spawn_blocking(move || {
-                        let stamp = plan.stamp().clone();
-                        match plan.assemble() {
-                            Ok(commit) => Ok((Box::new(commit), ownership)),
-                            Err(error) => {
-                                drop(ownership);
-                                Err((stamp, Box::new(error)))
-                            }
-                        }
-                    })
-                    .await;
+                    // Box inside the worker: the result is stored boxed anyway, and returning the
+                    // ~300-byte Result by value through the JoinHandle is what Clippy 1.94's
+                    // `result_large_err` flags. Ownership is still dropped inside the worker.
+                    let result =
+                        tokio::task::spawn_blocking(move || -> Box<HandoffAssembleResult> {
+                            let stamp = plan.stamp().clone();
+                            Box::new(match plan.assemble() {
+                                Ok(commit) => Ok((Box::new(commit), ownership)),
+                                Err(error) => {
+                                    drop(ownership);
+                                    Err((stamp, Box::new(error)))
+                                }
+                            })
+                        })
+                        .await;
                     StudioBackgroundResult::Handoff(match result {
-                        Ok(result) => HandoffCompletion::Assembled(token, Box::new(result)),
+                        Ok(result) => HandoffCompletion::Assembled(token, result),
                         Err(_) => HandoffCompletion::Cancelled(token),
                     })
                 }

@@ -11,19 +11,18 @@ pub(super) struct StoppedServer {
 }
 
 impl StoppedServer {
-    pub(super) fn remove(
-        self,
-        servers: &mut HashMap<u64, ServerEntry>,
-    ) -> Result<ServerEntry, String> {
-        if servers
-            .get(&self.server)
-            .is_none_or(|entry| entry.instance != self.instance)
-        {
-            return Err("The conversation changed while stopping; retry leaving it.".into());
-        }
-        Ok(servers
-            .remove(&self.server)
-            .expect("exact incarnation checked above"))
+    pub(super) fn server_id(&self) -> u64 {
+        self.server
+    }
+    pub(super) fn matches_entry(&self, entry: &ServerEntry) -> bool {
+        entry.instance == self.instance
+    }
+    pub(super) fn remove(self, servers: &mut ServerTable) -> Result<Box<ServerEntry>, String> {
+        let mut removed = None;
+        servers
+            .extract_stopped_legacy(self, &mut removed)
+            .map_err(str::to_owned)?;
+        Ok(removed.expect("checked stopped legacy row returned whole"))
     }
 }
 
@@ -36,7 +35,7 @@ pub(super) async fn stop_server(
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .map(|entry| (entry.actor.clone(), entry.instance))
     else {
         return Ok(None);
@@ -54,12 +53,12 @@ pub(super) async fn stop_server(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use catcoms_rt::{Hub, ManualClock};
     use std::future::poll_fn;
 
-    fn running(
+    pub(crate) fn running(
         instance: u64,
     ) -> (
         ServerEntry,
@@ -74,12 +73,60 @@ mod tests {
             "test",
         )
         .unwrap();
+        entry_for(instance, server)
+    }
+
+    /// A running server whose actor has the session's encrypted disk store attached (so it can
+    /// keep private Downloads) and one shared file of its own, for native tests that need a real
+    /// Download record. Returns the file's content address as raw bytes.
+    pub(crate) async fn running_with_file(
+        instance: u64,
+        state: &AppState,
+        data: &[u8],
+    ) -> (
+        ServerEntry,
+        tokio::task::JoinHandle<()>,
+        tokio::task::JoinHandle<()>,
+        Vec<u8>,
+    ) {
+        let mut server = Server::found(
+            Hub::new().join(PeerId::from_u64(instance)),
+            MlsDevice::generate().unwrap(),
+            OsCryptoRng,
+            Box::new(ManualClock::new(1_000)),
+            "test",
+        )
+        .unwrap();
+        crate::attach_blob_store(state, &mut server).await;
+        server.subscribe_control().await.unwrap();
+        server.open_files().await.unwrap();
+        let cid = server
+            .add_file("test.bin", "application/octet-stream", "", data)
+            .await
+            .unwrap();
+        let (entry, task, drain) = entry_for(instance, server);
+        (entry, task, drain, cid.as_bytes().to_vec())
+    }
+
+    fn entry_for<T, R>(
+        instance: u64,
+        server: Server<T, R>,
+    ) -> (
+        ServerEntry,
+        tokio::task::JoinHandle<()>,
+        tokio::task::JoinHandle<()>,
+    )
+    where
+        T: MeshTransport + Send + 'static,
+        R: catcoms_rt::CryptoRngCore + Send + 'static,
+    {
         let group_id = server.group_id();
         let device_id = server.device_id();
         let (actor, mut events, task) = spawn(server);
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
         (
             ServerEntry {
+                files: keep_session::EntryOwner::new(),
                 actor,
                 instance,
                 group_id,
@@ -94,6 +141,7 @@ mod tests {
                 is_dm: false,
                 switchboard: false,
                 record_seq: 0,
+                voice: None,
                 persist: PersistCounters::default(),
             },
             task,
@@ -106,16 +154,29 @@ mod tests {
         let state = AppState::default();
         let (old, old_task, old_drain) = running(911);
         let old_actor = old.actor.clone();
-        state.servers.lock().await.insert(1, old);
+        state.servers.lock().await.install_legacy_fixture(1, old);
         let stopped = stop_server(&state, 1, &ManualClock::new(1_000))
             .await
             .unwrap()
             .unwrap();
         let (replacement, new_task, new_drain) = running(912);
         let new_actor = replacement.actor.clone();
-        state.servers.lock().await.insert(1, replacement);
+        state
+            .servers
+            .lock()
+            .await
+            .install_legacy_fixture(1, replacement);
         assert!(stopped.remove(&mut *state.servers.lock().await).is_err());
-        assert_eq!(state.servers.lock().await[&1].instance, 912);
+        assert_eq!(
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&1)
+                .expect("Legacy fixture row")
+                .instance,
+            912
+        );
         assert!(old_actor
             .send_reply(channel_id("general"), "after retirement", "")
             .await
@@ -137,11 +198,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exact_removal_retires_file_scope_before_the_returned_row_is_dropped() {
+        let state = AppState::default();
+        let (entry, task, drain) = running(914);
+        let account = keep_session::current(&state, 0).unwrap();
+        let captured = entry.files.scope(account.clone());
+        entry.actor.set_keep_session(Some(captured.clone()));
+        state.servers.lock().await.install_legacy_fixture(1, entry);
+        let stopped = stop_server(&state, 1, &ManualClock::new(1000))
+            .await
+            .unwrap()
+            .unwrap();
+        let removed = stopped.remove(&mut *state.servers.lock().await).unwrap();
+        assert!(
+            captured.is_cancelled(),
+            "removed row is still retained here, but has no authority"
+        );
+        assert!(
+            !account.is_cancelled(),
+            "one server removal does not retire the whole account"
+        );
+        assert!(removed.files.scope(account.clone()).is_cancelled());
+        let replacement = keep_session::EntryOwner::new();
+        assert!(!replacement.scope(account).is_cancelled());
+        assert!(captured.is_cancelled());
+        drop(removed);
+        task.await.unwrap();
+        drain.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn leave_timeout_keeps_registry_and_cancels_a_still_queued_stop() {
         let state = AppState::default();
         let (entry, task, drain) = running(913);
         let actor = entry.actor.clone();
-        state.servers.lock().await.insert(1, entry);
+        state.servers.lock().await.install_legacy_fixture(1, entry);
         let ready = actor
             .prepare_durable_send(catcoms_app::durable_chat::DurableSendRequest {
                 token: [1; 16],
@@ -161,7 +252,16 @@ mod tests {
         .await;
         clock.advance_ms(STOP_DEADLINE.as_millis() as u64);
         assert!(stopping.await.is_err());
-        assert_eq!(state.servers.lock().await[&1].instance, 913);
+        assert_eq!(
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&1)
+                .expect("Legacy fixture row")
+                .instance,
+            913
+        );
         drop(ready);
         actor
             .send_reply(channel_id("general"), "still here", "")

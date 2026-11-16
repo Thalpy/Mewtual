@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: dtolnay/rust-toolchain@1.94.0
       - uses: Swatinem/rust-cache@v2
       - name: Store, ownership and actor progress regressions
         run: cargo test --locked -j 4 --config profile.test.package.catcoms-app.debug=0 -p catcoms-app --lib studio_inspection_ -- --test-threads=4

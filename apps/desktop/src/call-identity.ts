@@ -114,6 +114,71 @@ export function isPoliteTowards(self: string, peer: string): boolean {
   return self < peer;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Voice signalling V2 identities (docs/communication-recovery/VOICE-SIGNALLING-V2.md).
+//
+// V2 separates three things the legacy path collapses into "(server, channel, sender)":
+// - the stable ROOM: the native group digest plus the 128-bit channel id;
+// - each participant's fresh JOIN: a native 32-byte nonce minted per call join, never reused;
+// - the NEGOTIATION inside one pair: an `OfferId` naming the offer's full issuer and the native
+//   message id the offer was signed under. Answers and ICE echo that exact OfferId.
+// None of these strings is authority on its own. Native code mints and checks them; the renderer
+// only uses them to fence its own RTC objects so that old work cannot touch a newer join.
+
+const NONCE = /^[0-9a-f]{64}$/;
+const ZERO_NONCE = "0".repeat(64);
+const U128_MAX = (1n << 128n) - 1n;
+
+/**
+ * True for a native 32-byte join or message nonce in canonical spelling (64 lowercase hex). All
+ * zeros is refused: native never mints it, so seeing it means a broken or forged projection.
+ */
+export function isVoiceNonce(value: unknown): value is string {
+  return typeof value === "string" && NONCE.test(value) && value !== ZERO_NONCE;
+}
+
+/**
+ * True for a canonical decimal u128 room id, the only spelling native accepts for a V2 room
+ * (`prepare_voice_owner` refuses leading zeros, signs and anything above 2^128-1). Two spellings
+ * of one number must never name two rooms here either.
+ */
+export function isVoiceRoomId(value: unknown): value is string {
+  if (typeof value !== "string" || !/^(0|[1-9][0-9]{0,38})$/.test(value)) return false;
+  return BigInt(value) <= U128_MAX;
+}
+
+/** One V2 negotiation: the offer's full issuer identity and its native message nonce. */
+export type VoiceOfferId = Readonly<{ issuer: string; message: string }>;
+
+/** Validate a native-projected OfferId. Anything else is refused, never repaired. */
+export function parseVoiceOfferId(value: unknown): VoiceOfferId | null {
+  if (!value || typeof value !== "object") return null;
+  const { issuer, message } = value as { issuer?: unknown; message?: unknown };
+  if (!isCallIdentity(issuer) || !isVoiceNonce(message)) return null;
+  return Object.freeze({ issuer, message });
+}
+
+/** Map key for an OfferId. Both halves are fixed-width hex, so the join cannot be ambiguous. */
+export function voiceOfferKey(offer: VoiceOfferId): string {
+  return `${offer.issuer}:${offer.message}`;
+}
+
+/** Exact OfferId equality; `null` never equals anything, including another `null`. */
+export function sameVoiceOffer(a: VoiceOfferId | null, b: VoiceOfferId | null): boolean {
+  return !!a && !!b && a.issuer === b.issuer && a.message === b.message;
+}
+
+/**
+ * Which end of a V2 pair makes the offer. The lower canonical identity initiates, the same order
+ * native key confirmation uses ("The lower canonical identity initiates"). Lowercase fixed-width
+ * hex compares exactly like the underlying bytes. The first native SDP exchange pins this role and
+ * refuses crossed offers, so the higher identity never sends an unsolicited offer: there is no
+ * glare to resolve, and an offer arriving from the initiator's own counterpart is a crossed offer.
+ */
+export function isVoiceInitiatorTowards(self: string, peer: string): boolean {
+  return isCallIdentity(self) && isCallIdentity(peer) && self < peer;
+}
+
 /** Identities whose fingerprint another roster identity also carries. */
 export function sharedFingerprints(members: readonly CallRosterMember[]): ReadonlySet<string> {
   const byFingerprint = new Map<string, Set<string>>();

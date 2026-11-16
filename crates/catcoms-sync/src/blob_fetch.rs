@@ -4,11 +4,16 @@
 use super::*;
 use catcoms_rt::SharedRequestKeepalive;
 
-/// Independent providers considered for one encrypted variant. Proven live members are preferred;
+/// Provider entries admitted in one search batch, not a cap on the peers a read can consider.
+/// Proven live members are preferred;
 /// the released explicit-read bootstrap may try known live candidates, but never causes fresh dials.
 pub const MAX_BLOB_FETCH_PEERS: usize = 4;
 
-struct FetchContext {
+enum FetchContext {
+    Direct(DirectFetchContext),
+    Bridge(Box<crate::file_service::requester::BridgeContext>),
+}
+struct DirectFetchContext {
     instance: Arc<()>,
     cid: Cid,
     group: Vec<u8>,
@@ -49,6 +54,36 @@ pub enum BlobPageOutcome {
     /// The provider answered empty. On this kind that means it predates paging (or refused the
     /// page under its byte budget), and the caller should fall back to the whole-blob grammar.
     Unsupported,
+    /// An authenticated helper could not complete this source batch. This is retryable
+    /// availability evidence, never signed global absence or permission for legacy forwarding.
+    Unavailable,
+    /// The captured helper connection changed locally. No returned payload is admitted; the
+    /// still-authorized parent read may search/retry within its original execution allowance.
+    RouteChanged,
+}
+
+/// Present-time observation of a completed bridge page's original effect scope. Route churn is
+/// separate from native/session/epoch retirement: it must not turn stale bytes into cache writes
+/// or a bad-key verdict, and it need not cancel an otherwise current user download.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlobEffectStatus {
+    Current,
+    RouteChanged,
+    Retired,
+}
+
+/// Opaque observing owner retained across AEAD and final storage admission. Only the original
+/// sync owner can classify it; possession grants no new read, connection or storage authority.
+pub struct BlobEffectScope {
+    pub(crate) instance: Arc<()>,
+    pub(crate) view: catcoms_mls::group::MemberCatalogView,
+    pub(crate) helper: catcoms_mls::group::MemberCatalogEntry,
+    pub(crate) scope: Arc<crate::file_service::requester::RequesterScope>,
+}
+impl fmt::Debug for BlobEffectScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("BlobEffectScope { .. }")
+    }
 }
 
 #[cfg(test)]
@@ -82,10 +117,89 @@ impl fmt::Debug for CompletedBlobFetch {
     }
 }
 
+impl CompletedBlobFetch {
+    /// Preserve the typed route/global distinction through final CPU/storage effects.
+    pub fn effect_scope(&self) -> Option<BlobEffectScope> {
+        match &self.context {
+            FetchContext::Direct(_) => None,
+            FetchContext::Bridge(context) => Some(context.effect_scope()),
+        }
+    }
+
+    /// Retain this exact response's observing gate through CPU verification and final effects.
+    /// Earlier pages may expire after staging; the original whole-job native/Root owner remains
+    /// mandatory independently and cannot be refreshed by switching helpers.
+    pub fn effect_authority(&self) -> Option<Arc<dyn catcoms_rt::RequestAuthority>> {
+        match &self.context {
+            FetchContext::Direct(_) => None,
+            FetchContext::Bridge(context) => Some(context.scope.clone()),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct BridgeAttemptAuthority {
+    original: RequestCancellation,
+    route: Arc<dyn catcoms_rt::RequestAuthority>,
+}
+#[async_trait::async_trait]
+impl catcoms_rt::RequestAuthority for BridgeAttemptAuthority {
+    fn authorized(&self) -> bool {
+        !self.original.is_cancelled() && self.route.authorized()
+    }
+    async fn revoked(&self) {
+        let mut original = self.original.clone();
+        if self.authorized() {
+            tokio::select! {
+                _ = original.cancelled() => {},
+                _ = self.route.revoked() => {},
+            }
+        }
+    }
+}
+
 impl<T: MeshTransport> PendingBlobFetch<T> {
+    pub(crate) fn bridge(
+        transport: Arc<T>,
+        prepared: crate::file_service::PreparedBridgePage,
+    ) -> Self {
+        Self {
+            transport,
+            peer: prepared.peer,
+            request: prepared.frame,
+            context: FetchContext::Bridge(Box::new(prepared.context)),
+        }
+    }
+
+    /// Original C deadline, fixed before durable debit. All times here use the owning Root's
+    /// clock, which the actor also uses; external runtime authorities compose independently.
+    pub fn effect_deadline(&self) -> Option<u64> {
+        match &self.context {
+            FetchContext::Direct(_) => None,
+            FetchContext::Bridge(context) => Some(context.scope.deadline()),
+        }
+    }
+
     /// Perform only network I/O. The caller owns deadline/cancellation signalling and must retain
     /// its own independent capacity for EACH attempt until the transport's actual terminal event.
     pub async fn fetch(self, cancellation: RequestCancellation) -> CompletedBlobFetch {
+        // with_authority replaces, rather than composes, the supplied authority. Preserve the
+        // original Keep/run/deadline/caller explicitly and let actual lower custody retain BOTH
+        // its old accounting and this same route reservation after an outer future is dropped.
+        let mut publisher = None;
+        let cancellation = if let FetchContext::Bridge(context) = &self.context {
+            let custody: SharedRequestKeepalive =
+                Arc::new((cancellation.keepalive(), context.scope.clone()));
+            let authority = Arc::new(BridgeAttemptAuthority {
+                original: cancellation,
+                route: context.scope.clone(),
+            });
+            let (live, signal) = tokio::sync::watch::channel(false);
+            publisher = Some(live);
+            RequestCancellation::new(signal, Some(custody)).with_authority(authority)
+        } else {
+            cancellation
+        };
         let keepalive = cancellation.keepalive();
         let response = self
             .transport
@@ -96,6 +210,7 @@ impl<T: MeshTransport> PendingBlobFetch<T> {
                 cancellation,
             )
             .await;
+        drop(publisher);
         CompletedBlobFetch {
             context: self.context,
             response,
@@ -105,12 +220,24 @@ impl<T: MeshTransport> PendingBlobFetch<T> {
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
-    /// At most four distinct live peers, preferring previously authenticated member responses.
+    /// First bounded search batch, preferring previously authenticated member responses.
     /// A restored connection may carry file gossip before a new catch-up response; preserve the
     /// existing explicit-read fallback to known live candidates in that case. Such a candidate is
     /// NOT trusted as a member or holder: only its current-member signed response can supply bytes.
     /// Empty/failing blob replies never downgrade unrelated document/membership evidence.
     pub fn blob_fetch_peers(&self) -> Vec<PeerId> {
+        self.blob_fetch_peers_excluding(&HashSet::new())
+    }
+
+    /// Next search batch for this read/round. Its tried set is separate from provider ranking:
+    /// an absent first four must not hide a fifth holder, and reordered proofs cannot make an
+    /// already queued connected provider disappear. Bound total churn as well as each batch.
+    pub fn blob_fetch_peers_excluding(&self, tried: &HashSet<PeerId>) -> Vec<PeerId> {
+        if tried.len() >= catcoms_rt::MAX_CONNECTED_PEER_SNAPSHOT {
+            return Vec::new();
+        }
+        let remaining =
+            MAX_BLOB_FETCH_PEERS.min(catcoms_rt::MAX_CONNECTED_PEER_SNAPSHOT - tried.len());
         let live: HashSet<_> = self
             .transport
             .connection_snapshot()
@@ -119,25 +246,49 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .collect();
         let mut peers = Vec::new();
         for proof in self.member_peers.iter().rev() {
-            if live.contains(&proof.peer)
-                && self.group.contains_device(&proof.device)
+            if !tried.contains(&proof.peer)
+                && live.contains(&proof.peer)
                 && !peers.contains(&proof.peer)
+                && self.group.contains_device(&proof.device)
             {
                 peers.push(proof.peer);
-                if peers.len() == MAX_BLOB_FETCH_PEERS {
+                if peers.len() == remaining {
                     break;
                 }
             }
         }
         for peer in self.known_peers.iter().rev() {
-            if peers.len() == MAX_BLOB_FETCH_PEERS {
+            if peers.len() == remaining {
                 break;
             }
-            if live.contains(peer) && !peers.contains(peer) && *peer != self.local_peer() {
+            if live.contains(peer)
+                && !tried.contains(peer)
+                && !peers.contains(peer)
+                && *peer != self.local_peer()
+            {
                 peers.push(*peer);
             }
         }
         peers
+    }
+
+    /// Actual transport liveness only. Candidate preference and member proof order are not
+    /// connectivity evidence. This never consults remembered routes or causes a fresh dial.
+    pub fn blob_peer_is_connected(&self, peer: PeerId) -> bool {
+        self.transport
+            .connection_snapshot()
+            .iter()
+            .any(|row| row.peer == peer)
+    }
+
+    fn blob_peer_is_candidate(&self, peer: PeerId) -> bool {
+        peer != self.local_peer()
+            && self.blob_peer_is_connected(peer)
+            && (self.known_peers.contains(&peer)
+                || self
+                    .member_peers
+                    .iter()
+                    .any(|proof| proof.peer == peer && self.group.contains_device(&proof.device)))
     }
 
     /// The largest page this node is willing to grow to on `peer`'s current path.
@@ -173,7 +324,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         cid: Cid,
         max_bytes: usize,
     ) -> Result<PendingBlobFetch<T>, SyncError> {
-        if max_bytes > MAX_BOUNDED_BLOB_BYTES || !self.blob_fetch_peers().contains(&peer) {
+        if max_bytes > MAX_BOUNDED_BLOB_BYTES || !self.blob_peer_is_candidate(peer) {
             return Err(SyncError::Malformed);
         }
         let requester = self.device.public_key_bytes();
@@ -197,7 +348,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             transport: self.transport.clone(),
             peer,
             request,
-            context: FetchContext {
+            context: FetchContext::Direct(DirectFetchContext {
                 instance: self.blob_fetch_instance.clone(),
                 cid,
                 group: self.group.group_id(),
@@ -206,7 +357,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 auth,
                 max_bytes,
                 window: None,
-            },
+            }),
         })
     }
 
@@ -224,7 +375,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         max_bytes: usize,
     ) -> Result<PendingBlobFetch<T>, SyncError> {
         let max_bytes = max_bytes.min(MAX_BLOB_PAGE);
-        if max_bytes == 0 || !self.blob_fetch_peers().contains(&peer) {
+        if max_bytes == 0 || !self.blob_peer_is_candidate(peer) {
             return Err(SyncError::Malformed);
         }
         let requester = self.device.public_key_bytes();
@@ -250,7 +401,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             transport: self.transport.clone(),
             peer,
             request,
-            context: FetchContext {
+            context: FetchContext::Direct(DirectFetchContext {
                 instance: self.blob_fetch_instance.clone(),
                 cid,
                 group: self.group.group_id(),
@@ -259,7 +410,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 auth,
                 max_bytes,
                 window: Some(offset),
-            },
+            }),
         })
     }
 
@@ -273,7 +424,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         &self,
         completed: CompletedBlobFetch,
     ) -> Result<BlobPageOutcome, SyncError> {
-        let context = &completed.context;
+        let CompletedBlobFetch {
+            context,
+            response,
+            _keepalive,
+        } = completed;
+        let context = match context {
+            FetchContext::Bridge(context) => {
+                return self.authenticate_bridge_page(*context, response)
+            }
+            FetchContext::Direct(context) => context,
+        };
         let Some(asked_offset) = context.window else {
             return Err(SyncError::Malformed);
         };
@@ -289,7 +450,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         {
             return Err(SyncError::Unauthorized);
         }
-        let response = completed.response?;
+        let response = response?;
         if response.is_empty() {
             return Ok(BlobPageOutcome::Unsupported);
         }
@@ -377,7 +538,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         &self,
         completed: CompletedBlobFetch,
     ) -> Result<Option<(Vec<u8>, String)>, SyncError> {
-        let context = &completed.context;
+        let CompletedBlobFetch {
+            context,
+            response,
+            _keepalive,
+        } = completed;
+        let FetchContext::Direct(context) = context else {
+            return Err(SyncError::Malformed);
+        };
         if !Arc::ptr_eq(&self.blob_fetch_instance, &context.instance)
             || self.group.group_id() != context.group
             || self.group.epoch() != context.auth.epoch
@@ -390,7 +558,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         {
             return Err(SyncError::Unauthorized);
         }
-        let response = completed.response?;
+        let response = response?;
         if response.is_empty() {
             return Ok(None);
         }

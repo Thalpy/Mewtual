@@ -8,6 +8,12 @@
 //! a `u64` server id. Every command takes a `server` id selecting which one to act on, and
 //! every forwarded event is tagged with its server id so the UI routes it correctly.
 
+#[cfg(all(test, target_os = "windows", target_env = "msvc"))]
+mod native_test_manifest;
+
+#[cfg(test)]
+mod native_vault_tests;
+
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io::{Read, Write};
@@ -19,7 +25,7 @@ use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use catcoms_app::store::MAX_UI_STATE_BYTES;
+use catcoms_app::store::{MountedVault, MAX_UI_STATE_BYTES};
 use catcoms_app::{
     channel_id, spawn, AppEvent, Cid, CidHasher, DeviceId, FileListing, FileRef, InviteJoinPlan,
     Livery, PairingLedger, PairingSecrets, PerServerGrant, Profile, ReconnectPolicy,
@@ -44,6 +50,9 @@ use catcoms_rt::{
     Clock, MeshTransport, OsCryptoRng, PeerId, RequestCancellation, RngCore,
     SharedRequestKeepalive, SystemClock, TransportEvent,
 };
+use catcoms_sync::voice_v2::runtime::{
+    ActorRegistration, RegistrationError, Runtime as VoiceRuntime, SessionTicket,
+};
 use catcoms_sync::{fingerprint, join_namespace, PreOwnerConnectionHandoff, JOIN_REPLY_PROOF_KIND};
 use libp2p::multiaddr::Protocol;
 use libp2p::Multiaddr;
@@ -53,17 +62,35 @@ use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::timeout;
 use zeroize::Zeroizing;
 
+mod admin_chat_ledger;
 mod admission_storage;
+mod cache_housekeeping;
+mod call_mappings;
 mod creative_blobs;
 mod discovery_timer;
 mod durable_chat;
 mod errors;
 mod group_policy;
+mod keep_session;
 mod leaving;
 mod media_decode;
 mod media_worker;
 mod member_reconnect;
+mod native_text;
+mod private_downloads;
+mod saved_files;
+mod server_table;
+use server_table::ServerTable;
 mod studio_exports;
+#[cfg(test)]
+mod voice_activation_tests;
+mod voice_authority;
+// Authenticated action dispatch exists, but App V2 call selection is still off. Remove the
+// temporary unused-item allowance as the App driver takes ownership of these private APIs.
+#[allow(dead_code)]
+mod voice_handoff;
+mod voice_join_key;
+
 // This broker model has no registered command consumers yet. Retain its contract tests without
 // presenting the unwired implementation as a production pairing boundary.
 #[cfg(test)]
@@ -73,6 +100,7 @@ mod shutdown;
 mod six_client_recovery;
 mod studio;
 mod tasks;
+mod upload_session;
 use errors::{codes, AppError, ErrorCode};
 
 /// Independent reasons an exact address belongs in this device's aggregate bootstrap set. The
@@ -95,7 +123,13 @@ struct InterfaceRouteIdentity {
 /// One running server: its actor handle, the single-use invite to share (founder only), and
 /// its display name (kept here too so the registry can be re-sealed on disk, Phase 9f).
 struct ServerEntry {
+    /// Sole exact native file-work publisher. Removal/replacement explicitly retires it under
+    /// the row guard; Drop is a final unwind/registry-clear backstop.
+    files: keep_session::EntryOwner,
     actor: ServerActor,
+    /// Exact native registry custody. Removal/replacement revokes detached voice work before
+    /// waiting for the still-network-active actor to process any shutdown command.
+    voice: Option<RegisteredVoiceActor>,
     /// Process-local incarnation of this registry row. Persisted ids are intentionally reused on
     /// reload, so the id alone cannot stop a scan begun for a removed actor from populating a new
     /// actor's cache after that id is installed again.
@@ -141,6 +175,42 @@ struct ServerEntry {
     /// how many the newest completed write covered. See [`persist_server`]. Per incarnation, so a
     /// reinstalled id starts from zero and cannot inherit a departed entry's completions.
     persist: PersistCounters,
+}
+
+struct RegisteredVoiceActor(ActorRegistration);
+impl Drop for RegisteredVoiceActor {
+    fn drop(&mut self) {
+        self.0.revoke();
+    }
+}
+
+/// Called under the native row guard immediately before restore insertion. A competing owner
+/// preserves the previous row; optional preparation expiry/capacity leaves restored chat usable.
+fn install_reloaded_voice(
+    registration: Option<ActorRegistration>,
+) -> Result<Option<RegisteredVoiceActor>, String> {
+    let Some(registration) = registration else {
+        return Ok(None);
+    };
+    match registration.register_install() {
+        Ok(()) => Ok(Some(RegisteredVoiceActor(registration))),
+        Err(RegistrationError::Unavailable(error)) => {
+            registration.revoke();
+            tracing::warn!(%error, "VOICE.ATTACHMENT.UNAVAILABLE");
+            Ok(None)
+        }
+        Err(RegistrationError::Conflict) => {
+            Err("server reload was superseded by another voice actor installation".into())
+        }
+    }
+}
+
+fn voice_runtime(state: &AppState) -> Arc<VoiceRuntime> {
+    state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .runtime()
 }
 
 /// Where one server is between "a change happened" and "a write that contains it finished".
@@ -366,7 +436,12 @@ impl Drop for InlineDownloadLeaseInner {
 /// on-disk store once the user has unlocked it with a passphrase (`None` = in-memory only).
 #[derive(Default)]
 struct AppState {
-    servers: Arc<Mutex<HashMap<u64, ServerEntry>>>,
+    keep_session: StdMutex<Option<(u64, watch::Sender<bool>)>>,
+    /// Privileged admin read scopes are native-issued and globally bounded across all actors.
+    admin_chat_ledger: admin_chat_ledger::Registry,
+    /// Off-by-default owning Chat V2 warm factory; never decoded from IPC.
+    native_text: native_text::Registry,
+    servers: Arc<Mutex<ServerTable>>,
     /// Monotonic process-local source for [`ServerEntry::instance`]. Wrapping would require more
     /// actor installations than the process can perform in its lifetime; zero has no special
     /// meaning and is permitted after that theoretical wrap.
@@ -408,10 +483,20 @@ struct AppState {
     /// Serialize the state-map transition with the actor's revoke/authorize commands. Without
     /// this, concurrent replacement completions can re-install a displaced helper capability.
     join_reply_apply: Mutex<()>,
-    /// Live router mappings for the active call's media UDP ports, keyed by the local port. A
-    /// PCP/NAT-PMP entry's short lease is renewed by the client retained inside the mapping, so
-    /// dropping the entry (call end, or the app closing) is what ends that route.
-    media_mappings: Mutex<HashMap<u16, catcoms_net::MediaPortMapping>>,
+    /// Native call/controller/grant custody. Pending and uncertain effects remain charged across
+    /// lock, leave and remount; neither a UI waiter nor a physical port is release authority.
+    media_mappings: Arc<StdMutex<call_mappings::Coordinator<catcoms_net::MediaPortMapping>>>,
+    /// Distinct voice-session authority and active-or-uncertain process crypto charges. Revoking
+    /// a UI/controller ends effects immediately but cannot refund unresolved engine work.
+    voice_authority: Arc<StdMutex<voice_authority::Coordinator>>,
+    /// Process lifetime, independent of UI lock/controller replacement and invoke waiters.
+    /// The disabled pilot has no command consumer yet; do not clear uncertain rows on End.
+    #[allow(dead_code)]
+    voice_handoff: Arc<voice_handoff::ledger::Ledger>,
+    /// Immutable local-channel setup/counters outlive an invoke waiter. Status bootstrap only;
+    /// End/lock cannot clear uncertain setup or install a new session for the original owner.
+    #[allow(dead_code)]
+    voice_channels: Arc<voice_handoff::bootstrap::Registry>,
     next_id: Mutex<u64>,
     /// Serialize first mount and already-mounted authentication. A duplicate frontend unlock must
     /// never race two reloads, while an explicitly UI-locked session must authenticate against
@@ -425,21 +510,36 @@ struct AppState {
     /// writes did not even serialize against each other. Here they do, and the incarnation check
     /// inside the lock then decides which of them is still entitled to write.
     persist_locks: StdMutex<HashMap<u64, Arc<Mutex<()>>>>,
-    store: Arc<Mutex<Option<ServerStore>>>,
+    /// Order reconnect claims -> sealed merge -> live installation separately from ordinary
+    /// snapshot persistence. Numeric-id lifetime also serializes departing/replaced entries;
+    /// the final registry check still decides which incarnation may write. Never substitute
+    /// persist_locks here: capture itself seals a snapshot through that other lock.
+    reconnect_persist_locks: StdMutex<HashMap<u64, Arc<Mutex<()>>>>,
+    store: Arc<Mutex<Option<MountedVault>>>,
     /// Whether a freshly-mounted frontend may restore the already-unlocked UI session. This stays
     /// true across F5/HMR, but an explicit Ctrl+L clears it so a reload cannot bypass the lock.
-    session_resumable: Mutex<bool>,
+    session_resumable: Arc<Mutex<bool>>,
     /// Set before an explicit lock performs any awaited cleanup. Commands check this as well as
     /// `session_resumable`, so new IPC cannot slip through while the lock is waiting to serialize
     /// against an older command's final native commit.
-    session_lock_requested: AtomicBool,
+    session_lock_requested: Arc<AtomicBool>,
     /// Every explicit lock invalidates work that began in an earlier UI authorization epoch.
     /// Long-running joins carry the captured value to both their reply event and durable commit.
-    ui_session_generation: AtomicU64,
+    ui_session_generation: Arc<AtomicU64>,
+    /// Exact generation last committed by authenticated unlock. Publishing a newer lock
+    /// generation closes IPC even if that thread stops before setting the separate request flag.
+    ui_authorized_generation: Arc<AtomicU64>,
     /// Orders the externally-visible parts of a long command against explicit lock completion.
     /// The lock-request atomic closes new IPC immediately; this mutex makes it impossible for a
     /// reply event or server registration to occur after `lock_session` itself has completed.
     ui_session_commit: Arc<Mutex<()>>,
+    /// Bounded global custody for orphan chat Stops and a restored Actor's pre-registration
+    /// window. It does not allocate a map entry for arbitrary missing numeric server IDs.
+    chat_orphan_commit: Arc<Mutex<()>>,
+    /// Short fence for synchronous actor-event emission only. Event consumers must not wait for
+    /// `ui_session_commit`: its holder can be waiting for this same bounded event sink to drain.
+    /// Never retain this guard across actor/store/registry awaits; lock crosses it separately.
+    ui_event_commit: Mutex<()>,
     /// The newest exact Ctrl+L/close snapshot registered before either command waits on the shared
     /// commit mutex. A remounted close can consume it even though its JS coordinator is gone.
     pending_ui_lock_snapshot: Mutex<Option<PendingUiLockSnapshot>>,
@@ -505,8 +605,11 @@ struct AppState {
     /// One native monitor fans a coalesced generation out to every per-server discovery loop.
     /// Polling remains active, so monitor initialization failure affects latency, not correctness.
     network_changes: NetworkChangeSignal,
-    /// Streamed uploads in flight, keyed by `(server, upload id)`. See [`PendingUpload`].
-    uploads: Mutex<HashMap<UploadKey, PendingUpload>>,
+    /// Streamed uploads in flight, keyed by `(server, native token)`. See [`RegisteredUpload`].
+    uploads: Mutex<HashMap<UploadKey, RegisteredUpload>>,
+    /// Cache housekeeping shared across servers: leave-cleanup claims and the Studio reference
+    /// service's pacing. See [`cache_housekeeping`].
+    cache: cache_housekeeping::CacheBridge,
 }
 
 /// Fixed-size keyed singleflight. Hash collisions only serialize two explicit scans; unlike a map
@@ -574,6 +677,27 @@ struct PendingUpload {
     chunk_total: usize,
     /// When this upload last made progress, for the idle sweep.
     touched_at: u64,
+}
+
+/// Native custody of a streamed upload, separate from its pure slice/parser state. Numeric
+/// server IDs and a later unlock cannot replace the actor/session that began this transfer.
+/// Keeping the original actor also makes cancellation cleanup independent of registry lookup.
+struct RegisteredUpload {
+    pending: PendingUpload,
+    generation: u64,
+    instance: u64,
+    actor: ServerActor,
+}
+impl std::ops::Deref for RegisteredUpload {
+    type Target = PendingUpload;
+    fn deref(&self) -> &Self::Target {
+        &self.pending
+    }
+}
+impl std::ops::DerefMut for RegisteredUpload {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.pending
+    }
 }
 
 // Manual Debug, redacting the buffer: it holds plaintext of the file being shared, and a derived
@@ -713,7 +837,7 @@ const MAX_UPLOAD_ID_BYTES: usize = 64;
 /// always land on a chunk boundary. Sealing happens at [`CHUNK_BYTES`]; this is only about keeping
 /// any single IPC message small enough that serializing it does not stall the webview.
 const UPLOAD_SLICE_BYTES: usize = 1024 * 1024;
-const _: () = assert!(UPLOAD_SLICE_BYTES > 0 && CHUNK_BYTES % UPLOAD_SLICE_BYTES == 0);
+const _: () = assert!(UPLOAD_SLICE_BYTES > 0 && CHUNK_BYTES.is_multiple_of(UPLOAD_SLICE_BYTES));
 
 /// The most a file may be and still be readable through `download_file`, which returns the whole
 /// thing as one base64 string.
@@ -767,18 +891,16 @@ fn upload_chunk_count(size: u64) -> usize {
     (size.max(1) as usize).div_ceil(CHUNK_BYTES)
 }
 
-/// Drop a pending upload's sealed-but-unpublished chunk blobs. Uses the unchecked actor lookup so
-/// cleanup still runs when the vault has just been locked, which is one of the ways an upload ends.
+/// Drop a pending upload's sealed-but-unpublished chunk blobs through its original actor.
+/// Cleanup still runs after lock or registry replacement without adopting a different server.
 ///
 /// Awaited rather than fire-and-forget: cancel and lock report that the upload has been cleaned
 /// up, so they must not return while the blobs are still queued for deletion.
-async fn discard_pending_upload(state: &AppState, upload: PendingUpload) {
+async fn discard_pending_upload(upload: RegisteredUpload) {
     if upload.chunks.is_empty() {
         return;
     }
-    if let Ok(actor) = actor_of_unchecked(state, upload.server).await {
-        actor.discard_upload(upload.chunks).await;
-    }
+    upload.actor.discard_upload(upload.pending.chunks).await;
 }
 
 /// A fresh generation token for one `begin_file_upload`. See [`UploadKey`]: this is the identity
@@ -1006,25 +1128,66 @@ struct PendingGrant {
 /// Reject webview IPC while the explicit UI lock is active. Server actors intentionally continue
 /// networking in the background, but that must not leave their plaintext projections callable by
 /// injected/stale frontend code behind the lock screen.
-async fn require_unlocked_session(state: &AppState) -> Result<(), String> {
-    if state.session_lock_requested.load(Ordering::Acquire) {
-        return Err("the vault is locked".into());
+/// Borrow the actual session policy, including its mounted store. This is not a cached
+/// authorization decision or owned grant. Both ordinary IPC and the native handoff context
+/// use this same implementation so lock/unlock cannot make their policies diverge.
+#[derive(Clone, Copy)]
+struct UiSessionGate<'a> {
+    resumable: &'a Mutex<bool>,
+    requested: &'a AtomicBool,
+    generation: &'a AtomicU64,
+    authorized: &'a AtomicU64,
+    store: &'a Mutex<Option<MountedVault>>,
+}
+impl UiSessionGate<'_> {
+    fn is_closed(&self) -> bool {
+        self.requested.load(Ordering::SeqCst)
+            || self.generation.load(Ordering::SeqCst) != self.authorized.load(Ordering::SeqCst)
     }
-    if *state.session_resumable.lock().await
-        && state.store.lock().await.is_some()
-        && !state.session_lock_requested.load(Ordering::Acquire)
-    {
+    async fn require_unlocked(&self) -> Result<(), String> {
+        if self.is_closed() {
+            return Err("the vault is locked".into());
+        }
+        // Preserve the existing resumable -> actual store lock order and repeat the atomic
+        // fence AFTER both awaits. A lock request can arrive while either mutex is busy.
+        if *self.resumable.lock().await && self.store.lock().await.is_some() && !self.is_closed() {
+            Ok(())
+        } else {
+            Err("the vault is locked".into())
+        }
+    }
+    /// Pure final fence, safe while Coordinator is held. No await or native callback.
+    fn check_generation(&self, expected: u64) -> Result<(), String> {
+        if self.is_closed() || self.generation.load(Ordering::SeqCst) != expected {
+            return Err("the UI session changed while the operation was in progress".into());
+        }
         Ok(())
-    } else {
-        Err("the vault is locked".into())
     }
+}
+impl AppState {
+    fn ui_session_gate(&self) -> UiSessionGate<'_> {
+        UiSessionGate {
+            resumable: &self.session_resumable,
+            requested: &self.session_lock_requested,
+            generation: &self.ui_session_generation,
+            authorized: &self.ui_authorized_generation,
+            store: &self.store,
+        }
+    }
+}
+fn ui_session_closed(state: &AppState) -> bool {
+    state.ui_session_gate().is_closed()
+}
+
+async fn require_unlocked_session(state: &AppState) -> Result<(), String> {
+    state.ui_session_gate().require_unlocked().await
 }
 
 /// Capture an unlocked UI epoch while serialized with the final phase of any older command.
 async fn unlocked_ui_session_generation(state: &AppState) -> Result<u64, String> {
     let _commit = state.ui_session_commit.lock().await;
     require_unlocked_session(state).await?;
-    Ok(state.ui_session_generation.load(Ordering::Acquire))
+    Ok(state.ui_session_generation.load(Ordering::SeqCst))
 }
 
 /// Permit one externally-visible step only if it still belongs to the UI session that began it.
@@ -1036,7 +1199,7 @@ async fn require_ui_session_generation(
 ) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
     let commit = state.ui_session_commit.lock().await;
     require_unlocked_session(state).await?;
-    if state.ui_session_generation.load(Ordering::Acquire) != expected {
+    if state.ui_session_generation.load(Ordering::SeqCst) != expected {
         return Err("the UI session changed while the operation was in progress".into());
     }
     Ok(commit)
@@ -1100,7 +1263,7 @@ async fn actor_of_unchecked(state: &AppState, server: u64) -> Result<ServerActor
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .map(|e| e.actor.clone())
         .ok_or(ActorLookup::NotOpen)
 }
@@ -1126,7 +1289,7 @@ async fn actor_instance_of(
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .map(|entry| (entry.actor.clone(), entry.instance))
         .ok_or(ActorLookup::NotOpen)
 }
@@ -1138,7 +1301,7 @@ async fn server_actor_of(state: &AppState, server: u64) -> Result<ServerActor, S
     require_unlocked_session(state).await?;
     let servers = state.servers.lock().await;
     let entry = servers
-        .get(&server)
+        .legacy(&server)
         .ok_or_else(|| "unknown server".to_string())?;
     if entry.is_dm {
         return Err("moderation is only available in server spaces".into());
@@ -1403,7 +1566,10 @@ struct UiStorageHealth {
     listed_files: usize,
     referenced_chunks: usize,
     verified_chunks: usize,
+    /// Absent chunks of this device's own uploads (damage; Repair restores them).
     missing_chunks: usize,
+    /// Absent chunks of other members' files: normal for a size-limited cache, never "damage".
+    not_cached_chunks: usize,
     unreadable_chunks: usize,
     invalid_manifests: usize,
     verified_bytes: u64,
@@ -1638,6 +1804,7 @@ fn build_storage_report(
         referenced_chunks: health.referenced_chunks,
         verified_chunks: health.verified_chunks,
         missing_chunks: health.missing_chunks,
+        not_cached_chunks: health.not_cached_chunks,
         unreadable_chunks: health.unreadable_chunks,
         invalid_manifests: health.invalid_manifests,
         verified_bytes: health.verified_bytes,
@@ -1950,7 +2117,7 @@ async fn refresh_interface_routes(app: &AppHandle, server: u64) -> bool {
     let state = state.inner();
     let prepared = {
         let mut servers = state.servers.lock().await;
-        let Some(entry) = servers.get_mut(&server) else {
+        let Some(entry) = servers.legacy_mut(&server) else {
             return false;
         };
         let (Some(identity), Some(mesh)) = (entry.interface_routes.clone(), entry.mesh.clone())
@@ -2138,7 +2305,7 @@ fn event_needs_snapshot(event: &AppEvent) -> bool {
 async fn mark_server_dirty(state: &AppState, server: u64, instance: u64) -> bool {
     let mut servers = state.servers.lock().await;
     let Some(entry) = servers
-        .get_mut(&server)
+        .legacy_mut(&server)
         .filter(|entry| entry.instance == instance)
     else {
         return false;
@@ -2189,7 +2356,7 @@ async fn install_persistence_signal(
     instance: u64,
 ) -> Option<watch::Receiver<u64>> {
     let servers = state.servers.lock().await;
-    if servers.get(&server).map(|entry| entry.instance) != Some(instance) {
+    if servers.legacy(&server).map(|entry| entry.instance) != Some(instance) {
         return None;
     }
     let (signal, wake) = watch::channel(0u64);
@@ -2356,6 +2523,19 @@ fn forward_events(
                 AppEvent::FilesUpdated => {
                     emit_tracked(&app, "files-updated", ServerEvt { server }, trace);
                 }
+                AppEvent::CacheStatusChanged(status) => {
+                    emit_tracked(
+                        &app,
+                        "cache-status",
+                        cache_housekeeping::CacheStatusEvt {
+                            server,
+                            status: cache_housekeeping::bridge_status(&status),
+                        },
+                        trace,
+                    );
+                }
+                // Never await an actor or the store from here: the request spawns its own task.
+                AppEvent::CacheNeedsStudioScan => cache_housekeeping::request_studio_scan(&app),
                 AppEvent::StatusUpdated => {
                     emit_tracked(&app, "status-updated", ServerEvt { server }, trace);
                 }
@@ -3354,6 +3534,7 @@ async fn register_server(
     app: &AppHandle,
     state: &AppState,
     actor: ServerActor,
+    registration: Option<ActorRegistration>,
     events: mpsc::Receiver<catcoms_app::TracedEvent>,
     task: tokio::task::JoinHandle<()>,
     group_id: Vec<u8>,
@@ -3368,44 +3549,93 @@ async fn register_server(
     is_dm: bool,
     switchboard: bool,
     record_seq: u64,
-) -> u64 {
+    expected_generation: u64,
+) -> Result<u64, String> {
     let id = {
         let mut n = state.next_id.lock().await;
         *n += 1;
         *n
     };
     let instance = state.next_server_instance.fetch_add(1, Ordering::Relaxed);
-    supervise("server_actor", id, task);
     let timer_actor = actor.clone();
-    state.servers.lock().await.insert(
-        id,
-        ServerEntry {
-            actor,
-            instance,
-            group_id,
-            device_id,
-            invite,
-            name,
-            bootstrap,
-            bootstrap_owners,
-            interface_routes,
-            rendezvous,
-            mesh,
-            is_dm,
-            switchboard,
-            record_seq,
-            persist: PersistCounters::default(),
-        },
+    let cache_group = group_id.clone();
+    // Allocate the complete unpublished owner before borrowing the registry.
+    // Voice stays empty until its exact registration CAS below succeeds.
+    let mut candidate = Box::new(ServerEntry {
+        files: keep_session::EntryOwner::new(),
+        actor,
+        instance,
+        group_id,
+        device_id,
+        invite,
+        name,
+        bootstrap,
+        bootstrap_owners,
+        interface_routes,
+        rendezvous,
+        mesh,
+        is_dm,
+        switchboard,
+        record_seq,
+        voice: None,
+        persist: PersistCounters::default(),
+    });
+    let mut replaced = None;
+    let mut servers = state.servers.lock().await;
+    let install = if state.ui_session_generation.load(Ordering::SeqCst) != expected_generation
+        || ui_session_closed(state)
+        || servers.contains_key(&id)
+    {
+        Err("server registration was superseded by a lock request".into())
+    } else {
+        Ok(())
+    };
+    if let Err(error) = install {
+        drop(servers);
+        if let Some(registration) = &registration {
+            registration.revoke();
+        }
+        drop(registration);
+        drop(events);
+        // Caller holds native commit. Never wait for an actor command here: authority is
+        // already closed, and actual task/lower-work custody survives until cancellation drops it.
+        task.abort();
+        return Err(error);
+    }
+    let publication = servers
+        .prepare_legacy_publication(id, None, &mut replaced)
+        .expect("checked fresh vacancy under the same registry guard");
+    let voice = registration.and_then(|registration| match registration.register() {
+        Ok(()) => Some(RegisteredVoiceActor(registration)),
+        Err(error) => {
+            registration.revoke();
+            tracing::warn!(server = id, %error, "VOICE.ATTACHMENT.UNAVAILABLE");
+            None
+        }
+    });
+    candidate.voice = voice;
+    candidate.actor.set_keep_session(
+        keep_session::current(state, expected_generation)
+            .map(|account| candidate.files.scope(account)),
     );
+    // Exact row guard is already held. No await or fallible operation may separate the voice
+    // registration CAS from publishing the native row that owns it.
+    publication.publish(candidate);
+    drop(servers);
+    drop(replaced);
+    supervise("server_actor", id, task);
     admission_storage::prune_stale_pending(state).await;
     install_persistence_worker(app, id, instance).await;
     forward_events(app.clone(), id, instance, events);
     install_reconnect_capture_worker(app, id, instance, timer_actor.clone());
     studio::spawn_receiver(app.clone(), id, instance, timer_actor.clone());
+    // The blob store attached before this server had a number; resolve its cache limit now.
+    cache_housekeeping::adopt_cache_setting(state, id, &cache_group, &timer_actor).await;
+    cache_housekeeping::request_studio_scan(app);
     // Start only after the entry exists. A zero-millisecond randomized first tick must not race
     // the registry insertion and silently skip the initial interface/discovery refresh.
     spawn_discovery_timer(app.clone(), id, instance, timer_actor);
-    id
+    Ok(id)
 }
 
 /// Draw the next peer-record sequence number for `server` from this launch's reserved block, or
@@ -3413,7 +3643,7 @@ async fn register_server(
 /// anything the next launch's block starts at.
 async fn next_record_seq(state: &AppState, server: u64) -> Option<u64> {
     let mut servers = state.servers.lock().await;
-    let e = servers.get_mut(&server)?;
+    let e = servers.legacy_mut(&server)?;
     e.record_seq = e.record_seq.saturating_add(1);
     Some(e.record_seq)
 }
@@ -3431,7 +3661,7 @@ async fn persist_server(state: &AppState, server: u64) -> PersistOutcome {
     let Some((ticket, instance, actor)) = ({
         let mut servers = state.servers.lock().await;
         servers
-            .get_mut(&server)
+            .legacy_mut(&server)
             .map(|entry| (entry.persist.request(), entry.instance, entry.actor.clone()))
     }) else {
         return PersistOutcome::Superseded;
@@ -3452,7 +3682,7 @@ async fn persist_server_instance(
     let ticket = {
         let mut servers = state.servers.lock().await;
         let Some(entry) = servers
-            .get_mut(&server)
+            .legacy_mut(&server)
             .filter(|entry| entry.instance == instance)
         else {
             return PersistOutcome::Superseded;
@@ -3474,7 +3704,7 @@ async fn retry_pending_persistence(
     let (instance, ticket, actor) = {
         let servers = state.servers.lock().await;
         let entry = servers
-            .get(&server)
+            .legacy(&server)
             .filter(|entry| entry.instance == instance)?;
         if !entry.persist.needs_write(entry.persist.requested) {
             return admission_storage::combine_retries(net, registry);
@@ -3499,12 +3729,12 @@ async fn persist_captured(
     actor: ServerActor,
 ) -> PersistOutcome {
     let lock = persist_lock_for(state, server);
-    let _writing = lock.lock().await;
+    let writing = lock.lock_owned().await;
     // Two questions, now that this writer holds the id's lock. Is the entry still the one this
     // request belongs to; and did a write that started after this ticket already carry it?
     let covering = {
         let servers = state.servers.lock().await;
-        let Some(entry) = servers.get(&server) else {
+        let Some(entry) = servers.legacy(&server) else {
             return PersistOutcome::Superseded;
         };
         if entry.instance != instance {
@@ -3517,6 +3747,66 @@ async fn persist_captured(
         }
         entry.persist.requested
     };
+    // Hidden post-rename chat candidates must be reconciled before an ordinary snapshot.
+    // Ready owns this same Actor; transfer this original serializer guard and acquire only
+    // try-locks afterward. This negative history save deliberately works while the UI is locked.
+    match actor.prepare_durable_chat_repair().await {
+        Ok(Some(ready)) => {
+            let store = match state.store.clone().try_lock_owned() {
+                Ok(store) if store.is_some() => store,
+                _ => {
+                    return PersistOutcome::Pending {
+                        reason: PersistFailure::StoreUnavailable,
+                    }
+                }
+            };
+            let registry = match state.servers.clone().try_lock_owned() {
+                Ok(registry) => registry,
+                Err(_) => {
+                    return PersistOutcome::Pending {
+                        reason: PersistFailure::SnapshotFailed,
+                    }
+                }
+            };
+            if registry
+                .legacy(&server)
+                .is_none_or(|entry| entry.instance != instance)
+            {
+                return PersistOutcome::Superseded;
+            }
+            let lease = match catcoms_app::durable_chat::DurableSendLease::new_mounted(
+                store,
+                server,
+                (writing, registry),
+            ) {
+                Ok(lease) => lease,
+                Err(_) => {
+                    return PersistOutcome::Pending {
+                        reason: PersistFailure::StoreUnavailable,
+                    }
+                }
+            };
+            if let Err(error) = ready.commit(lease).await {
+                tracing::error!(target:"catcoms_app",server,error=%error,"VAULT.CHAT_REPAIR.FAILED");
+                return PersistOutcome::Pending {
+                    reason: PersistFailure::WriteFailed,
+                };
+            }
+            if let Some(entry) = state.servers.lock().await.legacy_mut(&server) {
+                if entry.instance == instance {
+                    entry.persist.completed_through(covering);
+                }
+            }
+            return PersistOutcome::Durable;
+        }
+        Ok(None) => {}
+        Err(_) => {
+            return PersistOutcome::Pending {
+                reason: PersistFailure::SnapshotFailed,
+            }
+        }
+    }
+    let _writing = writing;
     let bytes = match actor.snapshot().await {
         Ok(b) => b,
         Err(e) => {
@@ -3527,7 +3817,7 @@ async fn persist_captured(
         }
     };
     let guard = state.store.lock().await;
-    let Some(store) = guard.as_ref() else {
+    let Some(store) = guard.as_ref().and_then(MountedVault::as_legacy) else {
         return PersistOutcome::Pending {
             reason: PersistFailure::StoreUnavailable,
         };
@@ -3538,7 +3828,7 @@ async fn persist_captured(
     // registry lock, and removal cannot complete between this check and the write while the
     // registry guard below is held.
     let servers = state.servers.lock().await;
-    if servers.get(&server).map(|entry| entry.instance) != Some(instance) {
+    if servers.legacy(&server).map(|entry| entry.instance) != Some(instance) {
         return PersistOutcome::Superseded;
     }
     let mut rng = OsCryptoRng;
@@ -3552,7 +3842,7 @@ async fn persist_captured(
     drop(guard);
     // Only a write that actually reached the disk may retire the requests it covered, and only
     // for the incarnation that made them.
-    if let Some(entry) = state.servers.lock().await.get_mut(&server) {
+    if let Some(entry) = state.servers.lock().await.legacy_mut(&server) {
         if entry.instance == instance {
             entry.persist.completed_through(covering);
         }
@@ -3588,7 +3878,7 @@ async fn persist_address_cache(app: &AppHandle, server: u64) {
     // happens while holding it.
     let key = {
         let guard = state.store.lock().await;
-        match guard.as_ref() {
+        match guard.as_ref().and_then(MountedVault::as_legacy) {
             Some(store) => match store.address_cache_key() {
                 Ok(k) => k,
                 Err(e) => {
@@ -3603,7 +3893,7 @@ async fn persist_address_cache(app: &AppHandle, server: u64) {
         return; // the actor stopped
     };
     let guard = state.store.lock().await;
-    if let Some(store) = guard.as_ref() {
+    if let Some(store) = guard.as_ref().and_then(MountedVault::as_legacy) {
         let mut rng = OsCryptoRng;
         if let Err(e) = store.save_address_cache(server, &bytes, &mut rng) {
             tracing::warn!(target: "catcoms_app", server, error = %e, "VAULT.ADDRESS_CACHE.SEAL_FAILED");
@@ -3643,7 +3933,7 @@ async fn persist_live_local_reconnect_routes_in_state(
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .filter(|entry| entry.instance == instance)
         .and_then(|entry| entry.mesh.clone());
     let Some(mesh) = mesh else {
@@ -3673,7 +3963,7 @@ async fn persist_live_local_reconnect_routes_in_state(
     let now_ms = SystemClock.now_ms();
     let net = {
         let guard = state.store.lock().await;
-        let Some(store) = guard.as_ref() else {
+        let Some(store) = guard.as_ref().and_then(MountedVault::as_legacy) else {
             return;
         };
         match store.load_server_net(server) {
@@ -3754,7 +4044,7 @@ async fn persist_live_local_reconnect_routes_in_state(
         .map(|route| (PeerId::new(route.peer_id), route.address.clone()))
         .collect();
     let guard = state.store.lock().await;
-    let Some(store) = guard.as_ref() else {
+    let Some(store) = guard.as_ref().and_then(MountedVault::as_legacy) else {
         return;
     };
     // Re-read under the final write lock. A recovery-code apply can update only the pending field
@@ -3769,7 +4059,7 @@ async fn persist_live_local_reconnect_routes_in_state(
     let final_now_ms = SystemClock.now_ms();
     let registry = state.servers.lock().await;
     if registry
-        .get(&server)
+        .legacy(&server)
         .is_none_or(|entry| entry.instance != instance)
     {
         return;
@@ -3822,17 +4112,55 @@ async fn attach_blob_store<T: MeshTransport, R: catcoms_rt::CryptoRngCore>(
     state: &AppState,
     server: &mut Server<T, R>,
 ) {
-    let guard = state.store.lock().await;
-    if let Some(store) = guard.as_ref() {
-        let key = hex::encode(server.group_id());
-        match store.blob_store(&key) {
-            Ok(blobs) => server.set_blob_store(blobs),
-            Err(e) => {
-                tracing::error!(target: "catcoms_app", error = %e, "STORAGE.BLOB_STORE.ATTACH_FAILED")
-            }
+    attach_blob_store_inner(state, None, server).await
+}
+
+/// As [`attach_blob_store`], for a registered server: also scans the primary cache, finishes an
+/// interrupted leave of the same group, and hands the actor its sealed (or migrated) cache limit.
+/// Waits while a leave cleanup holds the group, so no live server can attach a namespace that is
+/// being emptied.
+async fn attach_blob_store_for<T: MeshTransport, R: catcoms_rt::CryptoRngCore>(
+    state: &AppState,
+    server_id: u64,
+    server: &mut Server<T, R>,
+) {
+    attach_blob_store_inner(state, Some(server_id), server).await
+}
+
+async fn attach_blob_store_inner<T: MeshTransport, R: catcoms_rt::CryptoRngCore>(
+    state: &AppState,
+    server_id: Option<u64>,
+    server: &mut Server<T, R>,
+) {
+    let group = server.group_id();
+    // Re-check the claim under the store lock: a cleanup takes its claim before it takes the
+    // store lock, so a claim seen here means it is (or will be) deleting this namespace.
+    let guard = loop {
+        state.cache.wait_unclaimed(&group).await;
+        let guard = state.store.clone().lock_owned().await;
+        if !state.cache.claimed(&group) {
+            break guard;
         }
+    };
+    let prepared = tokio::task::spawn_blocking(move || {
+        let store = guard.as_ref().and_then(MountedVault::as_legacy)?;
+        Some(cache_housekeeping::prepare_blob_store(
+            store, server_id, &group,
+        ))
+    })
+    .await
+    .ok()
+    .flatten();
+    match prepared {
+        Some(Ok((blobs, limit))) => {
+            server.set_blob_store(blobs);
+            server.set_cache_limit(limit);
+        }
+        Some(Err(e)) => {
+            tracing::error!(target: "catcoms_app", error = %e, "STORAGE.BLOB_STORE.ATTACH_FAILED")
+        }
+        None => {}
     }
-    drop(guard);
     let swept = server.clear_staged_uploads();
     if swept > 0 {
         tracing::info!(target: "catcoms_app", chunks = swept, "STORAGE.UPLOAD.STAGED_SWEPT");
@@ -4326,7 +4654,7 @@ async fn persist_server_net(state: &AppState, server: u64, net: &ServerNet) -> P
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .map(|entry| entry.instance)
     else {
         return PersistOutcome::Superseded;
@@ -4512,7 +4840,7 @@ async fn fold_bootstrap_entry(
     let state = app.state::<AppState>();
     let changed_and_actor = {
         let mut servers = state.inner().servers.lock().await;
-        let Some(server_entry) = servers.get_mut(&server) else {
+        let Some(server_entry) = servers.legacy_mut(&server) else {
             return false;
         };
         let changed = if add {
@@ -5839,6 +6167,7 @@ async fn found_server_inner(
     ui_session_generation: u64,
     diag: &mut Connectivity,
 ) -> Result<FoundResult, String> {
+    let voice_ticket = voice_runtime(state).session_ticket();
     // This server's own network identity + stable port, minted once here and sealed to disk, so
     // every later launch keeps the same PeerId and port and the invites minted today still resolve
     // tomorrow. Per server, never per device (see `ServerNet`).
@@ -5943,6 +6272,16 @@ async fn found_server_inner(
     let (actor, events, task) = spawn(server);
     actor.open_channel(general).await;
     let channels = ui_channels(actor.channels().await);
+    let registration = match actor
+        .prepare_voice_actor(voice_runtime(state), voice_ticket)
+        .await
+    {
+        Ok(registration) => Some(registration),
+        Err(error) => {
+            tracing::warn!(%error, "VOICE.ATTACHMENT.UNAVAILABLE");
+            None
+        }
+    };
     let session_commit = match require_ui_session_generation(state, ui_session_generation).await {
         Ok(commit) => commit,
         Err(error) => {
@@ -5956,6 +6295,7 @@ async fn found_server_inner(
         app,
         state,
         actor,
+        registration,
         events,
         task,
         group_id,
@@ -5973,8 +6313,9 @@ async fn found_server_inner(
         is_dm,
         net.switchboard,
         net.record_seq,
+        ui_session_generation,
     )
-    .await;
+    .await?;
     // Seal the new server, its network identity and the registry to disk (if the store is
     // unlocked). The identity has to land before the first restart or the invite just minted dies
     // with the process that made it.
@@ -5987,7 +6328,7 @@ async fn found_server_inner(
         .servers
         .lock()
         .await
-        .get(&server_id)
+        .legacy(&server_id)
         .map(|entry| (entry.instance, entry.actor.clone(), entry.mesh.clone()));
     if let Some((instance, actor, Some(mesh))) = registered {
         match member_reconnect::persist(
@@ -6226,6 +6567,7 @@ async fn join_server_inner(
     ui_session_generation: u64,
     diag: &mut Connectivity,
 ) -> Result<FoundResult, String> {
+    let voice_ticket = voice_runtime(state).session_ticket();
     let decoded = decode_and_verify_invite(&invite_hex).inspect_err(|e| {
         diag.steps.push(DiagStep::failed("invite", "", e.clone()));
     })?;
@@ -6740,6 +7082,16 @@ async fn join_server_inner(
     // peer record. A later router mapping or relay reservation is folded into this same set.
     let joiner_bootstrap_owners =
         bootstrap_owners(&joiner_addrs, BootstrapOwner::AutomaticInterface);
+    let registration = match actor
+        .prepare_voice_actor(voice_runtime(state), voice_ticket)
+        .await
+    {
+        Ok(registration) => Some(registration),
+        Err(error) => {
+            tracing::warn!(%error, "VOICE.ATTACHMENT.UNAVAILABLE");
+            None
+        }
+    };
     // Catch-up can take arbitrarily longer than the UI session that initiated it. Serialize the
     // native registration + sealing boundary with explicit lock, and abandon the transient actor
     // if that lock already invalidated this operation. No server id, registry row, or event
@@ -6757,6 +7109,7 @@ async fn join_server_inner(
         app,
         state,
         actor,
+        registration,
         events,
         task,
         group_id,
@@ -6774,8 +7127,9 @@ async fn join_server_inner(
         is_dm,
         net.switchboard,
         net.record_seq,
+        ui_session_generation,
     )
-    .await;
+    .await?;
     // Seal the joined server, its network identity and the registry to disk (if unlocked).
     let membership_save = persist_server(state, server_id).await;
     let network_save = persist_server_net(state, server_id, &net).await;
@@ -6786,7 +7140,7 @@ async fn join_server_inner(
         .servers
         .lock()
         .await
-        .get(&server_id)
+        .legacy(&server_id)
         .map(|entry| (entry.instance, entry.actor.clone(), entry.mesh.clone()));
     if let Some((instance, actor, Some(mesh))) = registered {
         match member_reconnect::persist(
@@ -6937,7 +7291,7 @@ async fn apply_join_reply(
     let (mesh, actor, group_id, device_id) = {
         let servers = state.servers.lock().await;
         let entry = servers
-            .get(&server)
+            .legacy(&server)
             .ok_or_else(|| "server not found".to_string())?;
         (
             entry
@@ -7108,21 +7462,52 @@ fn effective_join_reply_expiry(encoded_expires_at_ms: u64, received_at_ms: u64) 
     encoded_expires_at_ms.min(received_at_ms.saturating_add(catcoms_net::JOIN_REPLY_LIFETIME_MS))
 }
 
-/// Leave a server: shut down its actor and drop it from the registry.
+/// Leave a server: shut down its actor, drop it from the registry, then remove its cached files,
+/// Keep copies and unfinished Downloads from this device (Studio-referenced blobs stay). Returns
+/// what was freed; the frontend confirms with the user, naming the Keep copies and Downloads,
+/// before calling this.
 #[tauri::command]
-async fn leave_server(state: State<'_, AppState>, server: u64) -> Result<(), String> {
+async fn leave_server(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<cache_housekeeping::LeaveReport, String> {
     require_unlocked_session(&state).await?;
     let generation = unlocked_ui_session_generation(&state).await?;
+    // Claim the group's namespace while the server still runs, so no attach of the group can
+    // start between its stop and the marker (see `claim_for_leave` for why that matters).
+    let claim = cache_housekeeping::claim_for_leave(&state, server).await;
     // Stop application publication/authoring before native retirement. Keeping the row while
     // waiting also lets an in-flight Ready/save finish without confusing its incarnation fence.
     let Some(stopped) = leaving::stop_server(&state, server, &SystemClock).await? else {
-        return Ok(());
+        return Ok(Default::default());
     };
     // Drain older captured writes before deleting the file; none can recreate it after leave.
-    let _persist = persist_lock_for(&state, server).lock_owned().await;
-    let _session = require_ui_session_generation(&state, generation).await?;
-    let removed = stopped.remove(&mut *state.servers.lock().await)?;
+    let persist = persist_lock_for(&state, server).lock_owned().await;
+    let session = require_ui_session_generation(&state, generation).await?;
+    let (removed, claim) = {
+        let mut servers = state.servers.lock().await;
+        let removed = stopped.remove(&mut servers)?;
+        // An alias (another server number for the same group: one that was already registered,
+        // or a join that attached before the claim and registered during the stop) still uses
+        // the namespace, so it is left alone entirely and the claim goes. Its own leave claims
+        // next (it may be waiting on this claim right now) and cleans up.
+        let alias = servers
+            .legacy_values()
+            .any(|entry| entry.group_id == removed.group_id);
+        (removed, claim.filter(|_| !alias))
+    };
+    let mappings = state
+        .media_mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retire_server(server, removed.instance);
+    clean_call_mappings(&state.media_mappings, mappings);
     admission_storage::remove_pending_net(&state, server, removed.instance);
+    state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retire_server(server, removed.instance);
     remove_persistence_signal(&state, server, removed.instance);
     state.storage_health.lock().await.remove(&server);
     if let Ok(mut signals) = state.reconnect_capture_signals.lock() {
@@ -7136,17 +7521,45 @@ async fn leave_server(state: State<'_, AppState>, server: u64) -> Result<(), Str
         .lock()
         .await
         .retain(|(candidate_server, _), _| *candidate_server != server);
-    // Drop the sealed snapshot + re-seal the (now smaller) registry.
+    // Mark the namespace for cleanup, drop the sealed snapshot + re-seal the (now smaller)
+    // registry. The marker comes first so a crash anywhere after it resumes the cleanup.
+    let mut marked = false;
     {
         let guard = state.store.lock().await;
-        if let Some(store) = guard.as_ref() {
+        if let Some(store) = guard.as_ref().and_then(MountedVault::as_legacy) {
+            if claim.is_some() {
+                match cache_housekeeping::mark_leaving(store, &removed.group_id) {
+                    Ok(present) => marked = present,
+                    Err(error) => {
+                        tracing::warn!(target: "catcoms_app", server, %error, "STORAGE.CACHE.LEAVE_MARK_FAILED")
+                    }
+                }
+            }
             if let Err(e) = store.remove_server(server) {
                 tracing::warn!(target: "catcoms_app", server, error = %e, "VAULT.SERVER.REMOVE_FAILED");
             }
         }
     }
-    persist_registry(&state).await;
-    Ok(())
+    let registry = persist_registry(&state).await;
+    // The cleanup re-checks the session between batches, so the commit guard must not be held.
+    drop(session);
+    drop(persist);
+    // Only after the registry no longer lists the server: a crash earlier must not bring it
+    // back with half its cache. Without a marker there is nothing to resume, so nothing is
+    // deleted either.
+    let report = match (&claim, marked, registry) {
+        (Some(claim), true, PersistOutcome::Durable) => {
+            cache_housekeeping::clean_namespace(&state, claim, Some(generation), true).await
+        }
+        // Marked, but the smaller registry is not durable yet: the marker stays and a later
+        // unlock or attach carries the leave on, so this is "not finished", not "kept".
+        (_, true, _) => cache_housekeeping::LeaveReport::failed(),
+        // Nothing was marked (an alias, nothing on disk, or the marker could not be written):
+        // nothing is deleted now or later.
+        _ => Default::default(),
+    };
+    drop(claim);
+    Ok(report)
 }
 
 /// Open (create/subscribe) a channel by name; returns its id. Members who open the same
@@ -7207,7 +7620,7 @@ async fn get_available_invite(state: &AppState, server: u64) -> Result<Option<St
     require_unlocked_session(state).await?;
     let (actor, device_id) = {
         let servers = state.servers.lock().await;
-        match servers.get(&server) {
+        match servers.legacy(&server) {
             Some(e) if e.invite.is_some() => (e.actor.clone(), e.device_id),
             _ => return Ok(None),
         }
@@ -7312,7 +7725,7 @@ async fn refresh_or_mint_invite(
     let (bootstrap, rendezvous, handle, stored_invite) = {
         let servers = state.servers.lock().await;
         let e = servers
-            .get(&server)
+            .legacy(&server)
             .ok_or_else(|| "unknown server".to_string())?;
         (
             e.bootstrap.clone(),
@@ -7366,7 +7779,7 @@ async fn refresh_or_mint_invite(
     {
         let mut servers = state.servers.lock().await;
         let e = servers
-            .get_mut(&server)
+            .legacy_mut(&server)
             .ok_or_else(|| "server closed while minting its invite".to_string())?;
         if !invite_routes_still_current(&bootstrap, &rendezvous, &e.bootstrap, &e.rendezvous) {
             return Err(
@@ -7428,7 +7841,7 @@ async fn check_invite_routes(
     let (bootstrap, rendezvous) = {
         let servers = state.servers.lock().await;
         let e = servers
-            .get(&server)
+            .legacy(&server)
             .ok_or_else(|| "unknown server".to_string())?;
         (e.bootstrap.clone(), !e.rendezvous.is_empty())
     };
@@ -7496,7 +7909,7 @@ async fn rename_server(
     if name.is_empty() {
         return Err("name cannot be empty".into());
     }
-    match state.servers.lock().await.get_mut(&server) {
+    match state.servers.lock().await.legacy_mut(&server) {
         Some(e) => e.name = name,
         None => return Err("unknown server".into()),
     }
@@ -7888,9 +8301,13 @@ async fn begin_file_upload(
     );
     // Reaching the actor is both the session gate and proof the server exists, before this
     // reserves a slot for it.
-    let actor = actor_of(&state, server)
+    let generation = keep_session::invocation_generation(&state)
         .await
-        .map_err(|e| op.fail(codes::SERVER_UNAVAILABLE, e))?;
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
+    let (actor, instance) = actor_instance_of(&state, server)
+        .await
+        .map_err(|e| op.fail(e.code(), e.message()))?;
+    let actor = op.bind_actor(actor);
     if upload_id.is_empty()
         || upload_id.len() > MAX_UPLOAD_ID_BYTES
         || !upload_id
@@ -7912,56 +8329,31 @@ async fn begin_file_upload(
     let chunk_total = upload_chunk_count(size);
     let token = mint_upload_token();
     let now = SystemClock.now_ms();
-    let mut uploads = state.uploads.lock().await;
-    // Retire what this begin supersedes, in one pass:
-    //  - the previous generation of the same visible transfer (a restart). It is retired rather
-    //    than reused, so an earlier seal still in flight finds nothing to attach to and collects.
-    //  - anything untouched for long enough that its caller is plainly gone.
-    let retired: Vec<UploadKey> = uploads
-        .iter()
-        .filter(|(k, v)| {
-            (k.0 == server && v.upload_id == upload_id)
-                || v.idle_since(now.saturating_sub(UPLOAD_IDLE_TIMEOUT_MS))
-        })
-        .map(|(k, _)| k.clone())
-        .collect();
-    let retired: Vec<PendingUpload> = retired.iter().filter_map(|k| uploads.remove(k)).collect();
-    if uploads.len() >= MAX_PENDING_UPLOADS {
-        return Err(op.fail(
-            codes::FILE_UPLOAD_REFUSED,
-            "too many uploads are already in flight",
-        ));
-    }
-    // The entry cap does not bound vault growth; this does. Counted against what is already
-    // staged plus what this upload would add if it ran to the end and never finished.
-    let staged: u64 = uploads.values().map(PendingUpload::staged_bytes).sum();
-    if staged.saturating_add(chunk_total as u64 * CHUNK_BYTES as u64) > MAX_STAGED_UPLOAD_BYTES {
-        return Err(op.fail(
-            codes::FILE_UPLOAD_REFUSED,
-            "too much upload data is already waiting to be published",
-        ));
-    }
-    uploads.insert(
-        (server, token.clone()),
-        PendingUpload {
-            server,
-            upload_id,
-            mime,
-            address: CidHasher::new(),
-            buffer: Vec::new(),
-            chunks: Vec::new(),
-            sealing: None,
-            bytes_seen: 0,
-            declared_size: size,
-            chunk_total,
-            touched_at: now,
+    let superseded = upload_session::register(
+        &state,
+        token.clone(),
+        RegisteredUpload {
+            generation,
+            instance,
+            actor,
+            pending: PendingUpload {
+                server,
+                upload_id,
+                mime,
+                address: CidHasher::new(),
+                buffer: Vec::new(),
+                chunks: Vec::new(),
+                sealing: None,
+                bytes_seen: 0,
+                declared_size: size,
+                chunk_total,
+                touched_at: now,
+            },
         },
-    );
-    drop(uploads);
-    let superseded = retired.len();
-    for old in retired {
-        discard_pending_upload(&state, old).await;
-    }
+        now,
+    )
+    .await
+    .map_err(|e| op.fail(codes::FILE_UPLOAD_REFUSED, e))?;
     // Not a terminal phase: the upload has started, not finished. `finish` or `cancel` closes it,
     // and a trace with neither is the orphan.
     op.stage("FILE.UPLOAD.RESERVED");
@@ -8024,22 +8416,30 @@ async fn push_file_chunk(
     let key = (server, token);
     // Validate and buffer under the lock, then seal outside it: an actor round-trip must never
     // happen while holding a lock every other upload needs.
-    let (full_chunk, mime, chunk_total, upload_id) = {
+    let (full_chunk, mime, chunk_total, upload_id, generation) = {
         let mut uploads = state.uploads.lock().await;
         let up = uploads
             .get_mut(&key)
             .ok_or_else(|| "no such upload".to_string())?;
+        if ui_session_closed(&state)
+            || state.ui_session_generation.load(Ordering::SeqCst) != up.generation
+            || !up.actor.same_instance(&actor)
+        {
+            return Err("this upload is no longer active".into());
+        }
         (
             up.admit_slice(offset, &bytes)?,
             up.mime.clone(),
             up.chunk_total,
             up.upload_id.clone(),
+            up.generation,
         )
     };
     let Some(chunk) = full_chunk else {
         return Ok(()); // buffered; the chunk it belongs to is not complete yet
     };
     let done = seal_pending_chunk(&state, &actor, &key, chunk, mime).await?;
+    let _progress_commit = require_ui_session_generation(&state, generation).await?;
     emit_tracked(
         &app,
         "upload-progress",
@@ -8054,38 +8454,6 @@ async fn push_file_chunk(
         external_progress_trace(trace.as_deref()),
     );
     Ok(())
-}
-
-/// Take an upload out of the map if, and only if, it may still be published.
-///
-/// The last gate before an irreversible, group-visible act, so it is deliberately one step: the
-/// upload is removed and returned, or it is removed and destroyed, and there is no state in
-/// between where a lock could arrive and find nothing to cancel. `locked` is read *after* the last
-/// seal, because an answer from before that await says nothing about the session now.
-///
-/// A locked session ends the upload rather than deferring it: the chunks are already sealed, and
-/// holding them across a lock would mean the vault carrying an unpublished transfer the user
-/// believes they closed. An incomplete upload is destroyed for a different reason: its chunks
-/// would be listed under the address of a whole file that was never sent, and every member would
-/// fail the reassembly check forever.
-async fn take_publishable_upload(
-    state: &AppState,
-    key: &UploadKey,
-    locked: bool,
-) -> Result<PendingUpload, String> {
-    let taken = state.uploads.lock().await.remove(key);
-    let Some(pending) = taken else {
-        return Err("no such upload".to_string());
-    };
-    if locked {
-        discard_pending_upload(state, pending).await;
-        return Err("the vault is locked".into());
-    }
-    if !pending.is_complete() {
-        discard_pending_upload(state, pending).await;
-        return Err("the upload did not send every chunk".into());
-    }
-    Ok(pending)
 }
 
 /// Seal one assembled chunk into the vault and record its reference against the pending upload;
@@ -8117,7 +8485,12 @@ async fn seal_pending_chunk(
         Ok(file_ref) => {
             let attached = uploads
                 .get_mut(key)
-                .filter(|up| up.can_accept(index))
+                .filter(|up| {
+                    up.can_accept(index)
+                        && !ui_session_closed(state)
+                        && state.ui_session_generation.load(Ordering::SeqCst) == up.generation
+                        && up.actor.same_instance(actor)
+                })
                 .map(|up| up.chunk_sealed(file_ref.clone()));
             match attached {
                 Some(done) => Ok(done),
@@ -8134,7 +8507,7 @@ async fn seal_pending_chunk(
             let abandoned = uploads.remove(key);
             drop(uploads);
             if let Some(up) = abandoned {
-                discard_pending_upload(state, up).await;
+                discard_pending_upload(up).await;
             }
             Err(e)
         }
@@ -8175,6 +8548,12 @@ async fn finish_file_upload(
         let up = uploads
             .get_mut(&key)
             .ok_or_else(|| op.fail(codes::FILE_UPLOAD_FAILED, "no such upload"))?;
+        if ui_session_closed(&state)
+            || state.ui_session_generation.load(Ordering::SeqCst) != up.generation
+            || !up.actor.same_instance(&actor)
+        {
+            return Err(op.fail(codes::FILE_UPLOAD_FAILED, "this upload is no longer active"));
+        }
         up.take_tail()
             .map_err(|e| op.fail(codes::FILE_UPLOAD_FAILED, e))?
             .map(|chunk| (chunk, up.mime.clone()))
@@ -8184,51 +8563,78 @@ async fn finish_file_upload(
             .await
             .map_err(|e| op.fail(codes::FILE_UPLOAD_FAILED, e))?;
     }
-    let locked = require_unlocked_session(&state).await.is_err();
-    let pending = take_publishable_upload(&state, &key, locked)
+    let admitted = upload_session::take(&state, &key)
         .await
         .map_err(|e| op.fail(codes::FILE_UPLOAD_FAILED, e))?;
-    let cid = pending.address.cid();
-    let chunk_total = pending.chunk_total;
-    let upload_id = pending.upload_id;
-    // Kept for the failure path: a failed publish must not leave sealed bytes nothing names.
-    let sealed = pending.chunks.clone();
-    let published = actor
-        .publish_upload(
-            name,
-            pending.mime,
-            path,
-            *cid.as_bytes(),
-            pending.declared_size,
-            pending.chunks,
-        )
-        .await;
-    let hex = match published {
-        Ok(hex) => hex,
-        Err(e) => {
-            actor.discard_upload(sealed).await;
-            // Sealed bytes existed and were thrown away. Distinguishable from a refusal at begin,
-            // where nothing had been written yet.
-            return Err(op.fail(codes::FILE_UPLOAD_FAILED, e));
-        }
-    };
-    emit_tracked(
-        &app,
-        "upload-progress",
-        UploadProgressEvt {
-            server,
-            upload_id,
-            done: chunk_total + 1,
-            total: chunk_total + 1,
+    let (actor, instance) = admitted.origin();
+    let actor = op.bind_actor(actor);
+    let persist_actor = actor.clone();
+    let op = Arc::new(op);
+    let settled_op = op.clone();
+    let settled_app = app.clone();
+    let progress_trace = op.trace;
+    // No await between admission/removal and transfer to the detached owner. Even a cancelled
+    // invoke waiter cannot release the commit fence while its actor command is still queued.
+    upload_session::spawn_publication(
+        admitted,
+        move |upload| async move {
+            let pending = upload.pending;
+            let cid = pending.address.cid();
+            let chunk_total = pending.chunk_total;
+            let upload_id = pending.upload_id;
+            let sealed = pending.chunks.clone();
+            let published = actor
+                .publish_upload(
+                    name,
+                    pending.mime,
+                    path,
+                    *cid.as_bytes(),
+                    pending.declared_size,
+                    pending.chunks,
+                )
+                .await;
+            let hex = match published {
+                Ok(hex) => hex,
+                Err(error) => {
+                    actor.discard_upload(sealed).await;
+                    return Err(error);
+                }
+            };
+            emit_tracked(
+                &app,
+                "upload-progress",
+                UploadProgressEvt {
+                    server,
+                    upload_id,
+                    done: chunk_total + 1,
+                    total: chunk_total + 1,
+                },
+                progress_trace,
+            );
+            Ok(hex)
         },
-        op.trace,
-    );
-    persist_server(&state, server).await;
-    // Deliberately after persistence, like every other operation here: an upload reported as
-    // succeeding before its index entry reached the disk is the shape of "it uploaded and then it
-    // was gone after a restart".
-    op.succeeded("FILE.UPLOAD.PUBLISHED");
-    Ok(hex)
+        move |outcome| async move {
+            let state = settled_app.state::<AppState>();
+            // Publication has settled before commit releases. Persistence is background-safe and
+            // exact-instance bound; it must run AFTER release to preserve leave's persist?commit
+            // lock order. A lock may complete during persistence, but never ahead of publication.
+            let _ = persist_server_instance(&state, server, instance, persist_actor).await;
+            match outcome {
+                Ok(hex) => {
+                    settled_op.succeeded("FILE.UPLOAD.PUBLISHED");
+                    Ok(hex)
+                }
+                Err(error) => Err(settled_op.fail(codes::FILE_UPLOAD_FAILED, error)),
+            }
+        },
+    )
+    .await
+    .map_err(|e| {
+        op.fail(
+            codes::FILE_UPLOAD_FAILED,
+            format!("upload worker failed: {e}"),
+        )
+    })?
 }
 
 /// Abandon a streamed upload and garbage-collect whatever it had already sealed. Called when the
@@ -8256,7 +8662,7 @@ async fn cancel_file_upload(
     let pending = state.uploads.lock().await.remove(&(server, token));
     let had_reservation = pending.is_some();
     if let Some(up) = pending {
-        discard_pending_upload(&state, up).await;
+        discard_pending_upload(up).await;
     }
     if had_reservation {
         op.succeeded("FILE.UPLOAD.CANCELLED");
@@ -8355,7 +8761,7 @@ async fn storage_health_cache_get(
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .is_some_and(|entry| entry.instance == server_instance);
     if !current {
         return Err("the server changed while storage inspection was in progress".into());
@@ -8377,7 +8783,7 @@ async fn storage_health_cache_publish(
     // clearing the cache, which makes its ordering with this publication atomic.
     let servers = state.servers.lock().await;
     if servers
-        .get(&server)
+        .legacy(&server)
         .is_none_or(|entry| entry.instance != server_instance)
     {
         return Err("the server changed while storage inspection was in progress".into());
@@ -8614,7 +9020,7 @@ async fn mint_member_recovery(
     let candidates = {
         let servers = state.servers.lock().await;
         servers
-            .get(&server)
+            .legacy(&server)
             .map(|entry| entry.bootstrap.clone())
             .ok_or_else(|| "server is not open".to_string())?
     };
@@ -8642,6 +9048,7 @@ async fn authorize_member_recovery_capture(
     let guard = state.store.lock().await;
     let store = guard
         .as_ref()
+        .and_then(MountedVault::as_legacy)
         .ok_or_else(|| "the vault is locked".to_string())?;
     let mut net = store
         .load_server_net(server)
@@ -8739,7 +9146,7 @@ async fn dm_stats(state: State<'_, AppState>) -> Result<Vec<DmStat>, String> {
     let dms: Vec<(u64, ServerActor)> = {
         let servers = state.servers.lock().await;
         servers
-            .iter()
+            .legacy_iter()
             .filter(|(_, e)| e.is_dm)
             .map(|(id, e)| (*id, e.actor.clone()))
             .collect()
@@ -8782,7 +9189,8 @@ async fn send_dm_invite(
 }
 
 /// Push a call-signalling message (base64 payload) to the member whose full device identity is
-/// `target` (64 lowercase hex, `MemberView.identity`). `true` if addressed.
+/// `target` (64 lowercase hex, `MemberView.identity`). `true` means local network submission,
+/// not a peer receipt: the transport may still fail to connect or deliver after this returns.
 ///
 /// The target used to be an 8-hex fingerprint, which a member can collide with a victim's by
 /// grinding a device key; the actor now refuses anything but the canonical full identity, and a
@@ -8793,8 +9201,7 @@ async fn send_dm_invite(
 /// turned into a `console.warn` and nothing else. The `false` is not an error and must not be
 /// recorded as one, but it is the whole diagnosis, so it is recorded as its own outcome.
 ///
-/// The payload is opaque here and stays that way: what is recorded is whether it went, never what
-/// it said.
+/// The payload is opaque here and stays that way: record submission, never its contents.
 #[tauri::command]
 async fn send_call_signal(
     state: State<'_, AppState>,
@@ -8814,18 +9221,18 @@ async fn send_call_signal(
         .decode(payload.as_bytes())
         .map_err(|e| op.fail(codes::VOICE_SIGNAL_FAILED, format!("bad payload: {e}")))?;
     let actor = op.actor(&state, server).await?;
-    let delivered = actor
+    let submitted = actor
         .send_call_signal(target, bytes)
         .await
         .map_err(|e| op.fail(codes::VOICE_SIGNAL_FAILED, e))?;
-    if delivered {
-        op.succeeded("VOICE.SIGNAL.DELIVERED");
+    if submitted {
+        op.succeeded("VOICE.SIGNAL.SUBMITTED");
     } else {
         // The roster says this member is here and the transport has nowhere to send to. Not a
         // failure of this command, and precisely the thing that was invisible.
         op.failed("VOICE.SIGNAL.NO_MEMBER_ROUTE");
     }
-    Ok(delivered)
+    Ok(submitted)
 }
 
 /// This call's E2E media base key (base64) + the MLS epoch it's keyed to. Derived locally from the
@@ -8879,6 +9286,22 @@ struct UiKeptFile {
     manifest_version: String,
     checked: bool,
 }
+#[derive(Serialize)]
+struct UiKeptTransfer {
+    cid: String,
+    manifest_version: String,
+    transfer: String,
+    phase: &'static str,
+    verified_chunks: usize,
+    total_chunks: usize,
+    running: bool,
+    user_paused: bool,
+    blocked: bool,
+    intent: String,
+    exhausted: bool,
+    /// Decimal identity, never an imprecise JavaScript Number.
+    grant: String,
+}
 
 #[derive(Serialize)]
 struct UiKeptFiles {
@@ -8886,6 +9309,7 @@ struct UiKeptFiles {
     allocated_bytes: u64,
     limit_bytes: u64,
     files: Vec<UiKeptFile>,
+    transfers: Vec<UiKeptTransfer>,
     error: Option<String>,
 }
 
@@ -8904,6 +9328,28 @@ fn bridge_kept_files(view: catcoms_storage::kept::KeptFiles) -> UiKeptFiles {
             })
             .collect(),
         error: view.error,
+        transfers: view
+            .transfers
+            .into_iter()
+            .map(|transfer| UiKeptTransfer {
+                cid: transfer.plan.cid.to_hex(),
+                manifest_version: hex::encode(transfer.plan.version),
+                transfer: hex::encode(transfer.transfer),
+                phase: match transfer.phase {
+                    catcoms_storage::kept::KeepPhase::Resumable => "paused",
+                    catcoms_storage::kept::KeepPhase::Completed => "completed",
+                    catcoms_storage::kept::KeepPhase::Deleting => "deleting",
+                },
+                verified_chunks: transfer.verified_chunks,
+                total_chunks: transfer.plan.chunks.len(),
+                running: transfer.running,
+                user_paused: transfer.user_paused,
+                blocked: transfer.blocked,
+                intent: transfer.intent.to_string(),
+                exhausted: transfer.exhausted,
+                grant: transfer.grant.to_string(),
+            })
+            .collect(),
     }
 }
 
@@ -8926,7 +9372,7 @@ async fn get_kept_files(state: State<'_, AppState>, server: u64) -> Result<UiKep
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .map(|entry| entry.instance)
         != Some(instance)
     {
@@ -8944,17 +9390,20 @@ async fn keep_file(
     cid: String,
     cancellation: String,
 ) -> Result<(), String> {
+    let generation = keep_session::invocation_generation(&state).await?;
     let raw = kept_cid(&cid)?;
-    let generation = unlocked_ui_session_generation(&state).await?;
     let (lease, receiver) = claim_inline_download(&state, &cancellation)?;
     let (actor, instance) = actor_instance_of(&state, server).await?;
+    let origin = keep_session::for_actor(&state, server, &actor, generation)
+        .await
+        .ok_or_else(|| "The file read is no longer active.".to_string())?;
     drop(require_ui_session_generation(&state, generation).await?);
     actor
         .keep_file(
             raw,
-            Some(RequestCancellation::new(
-                receiver,
-                Some(lease.request_keepalive()),
+            Some(keep_session::bind_read(
+                origin,
+                RequestCancellation::new(receiver, Some(lease.request_keepalive())),
             )),
         )
         .await?;
@@ -8963,13 +9412,67 @@ async fn keep_file(
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .map(|entry| entry.instance)
         != Some(instance)
     {
         return Err("server changed".into());
     }
     Ok(())
+}
+
+/// Queue an explicitly requested saved copy and return after native admission. This response
+/// proves neither possession nor full verification; progress arrives through inventory/events.
+#[tauri::command]
+async fn request_kept_file(
+    state: State<'_, AppState>,
+    server: u64,
+    cid: String,
+) -> Result<(), String> {
+    let raw = kept_cid(&cid)?;
+    let generation = unlocked_ui_session_generation(&state).await?;
+    let (actor, instance) = actor_instance_of(&state, server).await?;
+    commit_kept_command(
+        &state,
+        server,
+        instance,
+        generation,
+        actor.request_kept_file(raw),
+    )
+    .await
+}
+
+/// Explicit user Pause/Resume changes only the saved intent revision. A late earlier command
+/// cannot pause a resumed/replacement run, and neither action replenishes execution allowance.
+#[tauri::command]
+async fn set_kept_paused(
+    state: State<'_, AppState>,
+    server: u64,
+    cid: String,
+    transfer: String,
+    expected_intent: String,
+    paused: bool,
+) -> Result<(), String> {
+    let raw = kept_cid(&cid)?;
+    let owner: [u8; 32] = kept_cid(&transfer)?
+        .try_into()
+        .map_err(|_| "invalid transfer identity")?;
+    let intent = expected_intent
+        .parse::<u64>()
+        .map_err(|_| "invalid transfer intent")?;
+    if intent.to_string() != expected_intent {
+        return Err("invalid transfer intent".into());
+    }
+    let generation = unlocked_ui_session_generation(&state).await?;
+    let (actor, instance) = actor_instance_of(&state, server).await?;
+    commit_kept_command(
+        &state,
+        server,
+        instance,
+        generation,
+        actor.set_kept_paused(raw, owner, intent, paused),
+    )
+    .await
 }
 
 /// Explicit local release only; unrelated cached chunks or replicated listings are unchanged.
@@ -8981,9 +9484,114 @@ async fn forget_kept_file(
 ) -> Result<(), String> {
     let raw = kept_cid(&cid)?;
     let generation = unlocked_ui_session_generation(&state).await?;
-    let actor = actor_of(&state, server).await?;
-    let _commit = require_ui_session_generation(&state, generation).await?;
-    actor.forget_kept_file(raw).await
+    let (actor, instance) = actor_instance_of(&state, server).await?;
+    commit_kept_command(
+        &state,
+        server,
+        instance,
+        generation,
+        actor.forget_kept_file(raw),
+    )
+    .await
+}
+
+/// The shared UI commit guard orders short local retained-state mutations before a production
+/// same-ID actor replacement. Lock requests revoke the generation *before* waiting for that
+/// guard, so check the atomics again after the actor reply before exposing any stale result.
+async fn commit_kept_command<T>(
+    state: &AppState,
+    server: u64,
+    instance: u64,
+    generation: u64,
+    command: impl Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    let _commit = require_ui_session_generation(state, generation).await?;
+    if state
+        .servers
+        .lock()
+        .await
+        .legacy(&server)
+        .map(|entry| entry.instance)
+        != Some(instance)
+    {
+        return Err("server changed".into());
+    }
+    if ui_session_closed(state) || state.ui_session_generation.load(Ordering::SeqCst) != generation
+    {
+        return Err("the UI session changed while the operation was in progress".into());
+    }
+    let result = command.await;
+    if state
+        .servers
+        .lock()
+        .await
+        .legacy(&server)
+        .map(|entry| entry.instance)
+        != Some(instance)
+    {
+        return Err("server changed".into());
+    }
+    if ui_session_closed(state) || state.ui_session_generation.load(Ordering::SeqCst) != generation
+    {
+        return Err("the UI session changed while the operation was in progress".into());
+    }
+    result
+}
+
+fn kept_retry_request(
+    transfer: &str,
+    expected_grant: &str,
+    request: &str,
+) -> Result<catcoms_storage::kept::KeepRetry, String> {
+    fn fixed<const N: usize>(text: &str) -> Result<[u8; N], String> {
+        if text.len() != 2 * N
+            || !text
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err("invalid transfer identity".into());
+        }
+        hex::decode(text)
+            .map_err(|_| "invalid transfer identity".to_string())?
+            .try_into()
+            .map_err(|_| "invalid transfer identity".into())
+    }
+    let grant = expected_grant
+        .parse::<u64>()
+        .map_err(|_| "invalid transfer grant".to_string())?;
+    if grant == 0 || grant.to_string() != expected_grant {
+        return Err("invalid transfer grant".into());
+    }
+    Ok(catcoms_storage::kept::KeepRetry {
+        transfer: fixed(transfer)?,
+        expected_grant: grant,
+        request: fixed(request)?,
+    })
+}
+/// Explicit Retry only, under the actual unlocked session/actor. Browser identities can select
+/// an existing exhausted grant but cannot choose its allowance or create a new transfer owner.
+#[tauri::command]
+async fn retry_kept_file(
+    state: State<'_, AppState>,
+    server: u64,
+    cid: String,
+    transfer: String,
+    expected_grant: String,
+    request: String,
+) -> Result<String, String> {
+    let raw = kept_cid(&cid)?;
+    let request = kept_retry_request(&transfer, &expected_grant, &request)?;
+    let generation = unlocked_ui_session_generation(&state).await?;
+    let (actor, instance) = actor_instance_of(&state, server).await?;
+    let receipt = commit_kept_command(
+        &state,
+        server,
+        instance,
+        generation,
+        actor.retry_kept_file(raw, request),
+    )
+    .await?;
+    Ok(receipt.granted.to_string())
 }
 
 /// Cheap local presence only. This does not authenticate each chunk or prove remote availability.
@@ -9150,7 +9758,7 @@ fn register_inline_download(state: &AppState, id: &str) -> Result<(), String> {
         .unwrap_or_else(|e| e.into_inner());
     // Lock publishes this flag before acquiring the same table to cancel its contents. Testing it
     // while holding the table closes the otherwise possible sweep-before-insert race.
-    if state.session_lock_requested.load(Ordering::Acquire) {
+    if ui_session_closed(state) {
         return Err("the vault is locked".to_string());
     }
     if let Some(existing) = table.get(id) {
@@ -9207,7 +9815,7 @@ fn claim_internal_inline_download_with(
             .inline_downloads
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if state.session_lock_requested.load(Ordering::Acquire) {
+        if ui_session_closed(state) {
             return Err("the vault is locked".to_string());
         }
         if background {
@@ -9393,6 +10001,9 @@ async fn download_file(
         server,
         None,
     );
+    let generation = keep_session::invocation_generation(&state)
+        .await
+        .map_err(|error| op.fail(codes::SESSION_LOCKED, error))?;
     let raw = hex::decode(cid.trim())
         .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, format!("bad cid: {e}")))?;
     let progress_cancellation = cancellation.clone();
@@ -9416,6 +10027,9 @@ async fn download_file(
         .try_into()
         .map_err(|_| op.fail(codes::FILE_DOWNLOAD_FAILED, "bad cid length"))?;
     let actor = op.actor(&state, server).await?;
+    let origin = keep_session::for_actor(&state, server, &actor, generation)
+        .await
+        .ok_or_else(|| op.fail(codes::SESSION_LOCKED, "The file read is no longer active."))?;
     ensure_inline_download_not_cancelled(cancellation.as_ref())
         .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
     let (total, size) = actor.file_download_plan(raw.clone()).await.ok_or_else(|| {
@@ -9428,7 +10042,7 @@ async fn download_file(
         .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
     ensure_inline_download_not_cancelled(cancellation.as_ref())
         .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
-    require_unlocked_session(&state)
+    let plan_commit = keep_session::read_commit(&state, generation, &origin)
         .await
         .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
     // The plan, before any bytes move. A download that stalls is one of these with no completion
@@ -9450,6 +10064,7 @@ async fn download_file(
         },
         op.trace,
     );
+    drop(plan_commit);
     let mut out = Vec::with_capacity(size as usize);
     let mut network_bytes_done = 0u64;
     for i in 0..total {
@@ -9457,23 +10072,34 @@ async fn download_file(
             .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
         // A transfer can outlive the click that started it. Do not return plaintext or continue
         // emitting file metadata after an explicit lock closes the webview session.
-        require_unlocked_session(&state)
-            .await
-            .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
-        let request_cancellation = cancellation.as_ref().map(|signal| {
-            RequestCancellation::new(
-                signal.clone(),
-                cancellation_lease
-                    .as_ref()
-                    .map(InlineDownloadLease::request_keepalive),
-            )
-        });
+        drop(
+            keep_session::read_commit(&state, generation, &origin)
+                .await
+                .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?,
+        );
+        let request_cancellation = cancellation
+            .as_ref()
+            .map(|signal| {
+                keep_session::bind_read(
+                    origin.clone(),
+                    RequestCancellation::new(
+                        signal.clone(),
+                        cancellation_lease
+                            .as_ref()
+                            .map(InlineDownloadLease::request_keepalive),
+                    ),
+                )
+            })
+            .or_else(|| Some(origin.clone()));
         let (chunk, provider) = actor
             .fetch_file_chunk_cancellable(raw.clone(), i, request_cancellation)
             .await
             .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
         ensure_inline_download_not_cancelled(cancellation.as_ref())
             .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
+        let _commit = keep_session::read_commit(&state, generation, &origin)
+            .await
+            .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
         if provider.is_some() {
             network_bytes_done = network_bytes_done.saturating_add(chunk.len() as u64);
         }
@@ -9520,15 +10146,17 @@ async fn download_file(
             "the reassembled file failed its integrity check",
         ));
     }
-    require_unlocked_session(&state)
-        .await
-        .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
+    drop(
+        keep_session::read_commit(&state, generation, &origin)
+            .await
+            .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?,
+    );
     ensure_inline_download_not_cancelled(cancellation.as_ref())
         .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
     let encoded = B64.encode(&out);
     ensure_inline_download_not_cancelled(cancellation.as_ref())
         .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
-    require_unlocked_session(&state)
+    let _commit = keep_session::read_commit(&state, generation, &origin)
         .await
         .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
     op.succeeded("FILE.DOWNLOAD.COMPLETED");
@@ -9857,7 +10485,7 @@ async fn get_connectivity(state: State<'_, AppState>) -> Result<Connectivity, St
             .servers
             .lock()
             .await
-            .get(&diag.server)
+            .legacy(&diag.server)
             .map(|entry| entry.bootstrap.clone());
         reconcile_advertised(&mut diag.advertised, live);
     }
@@ -9917,7 +10545,7 @@ async fn get_switchboard_status(
     let (actor, offered, eligible) = {
         let servers = state.servers.lock().await;
         let entry = servers
-            .get(&server)
+            .legacy(&server)
             .ok_or_else(|| "unknown server".to_string())?;
         (
             entry.actor.clone(),
@@ -9961,7 +10589,7 @@ async fn set_switchboard_offered(
     let actor = {
         let servers = state.servers.lock().await;
         let entry = servers
-            .get(&server)
+            .legacy(&server)
             .ok_or_else(|| "unknown server".to_string())?;
         let eligible = entry
             .bootstrap
@@ -9976,13 +10604,13 @@ async fn set_switchboard_offered(
         // Revocation is fail-safe: close the protocol gate first. Even if disk sealing fails, the
         // current process and UI state remain off rather than silently continuing to serve.
         actor.set_switchboard_offered(false).await?;
-        if let Some(entry) = state.servers.lock().await.get_mut(&server) {
+        if let Some(entry) = state.servers.lock().await.legacy_mut(&server) {
             entry.switchboard = false;
         }
     }
     let persist_result: Result<(), String> = async {
         let store = state.store.lock().await;
-        if let Some(store) = store.as_ref() {
+        if let Some(store) = store.as_ref().and_then(MountedVault::as_legacy) {
             let mut net = store
                 .load_server_net(server)
                 .map_err(|error| error.to_string())?
@@ -10010,7 +10638,7 @@ async fn set_switchboard_offered(
         // actor has stopped, roll the persisted bit back so a reload cannot surprise-enable it.
         if let Err(error) = actor.set_switchboard_offered(true).await {
             let store = state.store.lock().await;
-            if let Some(store) = store.as_ref() {
+            if let Some(store) = store.as_ref().and_then(MountedVault::as_legacy) {
                 if let Ok(Some(mut net)) = store.load_server_net(server) {
                     net.switchboard = false;
                     let mut rng = OsCryptoRng;
@@ -10019,7 +10647,7 @@ async fn set_switchboard_offered(
             }
             return Err(error);
         }
-        if let Some(entry) = state.servers.lock().await.get_mut(&server) {
+        if let Some(entry) = state.servers.lock().await.legacy_mut(&server) {
             entry.switchboard = true;
         }
     }
@@ -10073,7 +10701,7 @@ fn routable_media_hosts(advertised: &[String]) -> (Vec<String>, Vec<String>) {
     (v4, v6)
 }
 
-/// One member this device could hand its media to when a direct path cannot be built.
+/// One member offering mesh admission help. This grants no media-relay authority or allocation.
 #[derive(Serialize)]
 struct CallBridge {
     /// Short fingerprint, matching the identifier the call UI already renders for a peer.
@@ -10081,19 +10709,18 @@ struct CallBridge {
     /// How many routes the helper published. More routes is a better bet, not a guarantee.
     addresses: usize,
     /// True when at least one published route is a literal public address rather than a circuit.
-    /// A helper reachable only through *another* relay is a poor media bridge: it inherits that
-    /// relay's latency and its liveness.
+    /// This describes the helper's mesh route only; it does not establish a media route.
     direct: bool,
 }
 
-/// What the media plane should do for this server, derived entirely from what the mesh already
-/// proved. The frontend owns ICE; this is the evidence it has never had access to.
+/// Mesh route context for call troubleshooting. Advertisements are distinct from tested
+/// reachability; the frontend's ICE checks establish the separate media route.
 ///
 /// The two planes are otherwise disjoint by construction: the libp2p transport's PCP/UPnP/PCPv6
 /// mappings cover the *mesh* socket, and the webview's ICE agent binds its own ephemeral ports,
 /// so none of that traversal work has ever applied to a call. What does transfer is the
-/// *knowledge*: whether this node is directly reachable, whether it has a global IPv6 route, and
-/// which members have proven they can host for others.
+/// *knowledge*: advertised public mesh addresses, separate AutoNAT observations, and
+/// which members offer mesh admission help. None of these establish a WebRTC media relay.
 #[derive(Serialize)]
 struct CallTransport {
     /// Whether this node advertises at least one non-circuit, globally routable address.
@@ -10106,7 +10733,7 @@ struct CallTransport {
     /// Public IPv6 literals. These matter more than IPv4: IPv6 has no NAT to traverse, so a
     /// direct media path needs only a firewall pinhole rather than a mapping.
     public_ipv6: Vec<String>,
-    /// Members currently offering to host, best candidates first.
+    /// Mesh admission helpers, best routes first; these are not voice-relay allocations.
     bridges: Vec<CallBridge>,
     /// Whether a third-party relay is likely to be required for this node to be heard at all.
     relay_likely_required: bool,
@@ -10126,7 +10753,7 @@ async fn get_call_transport(
     let (actor, advertised, router_maps) = {
         let servers = state.servers.lock().await;
         let entry = servers
-            .get(&server)
+            .legacy(&server)
             .ok_or_else(|| "unknown server".to_string())?;
         let router_maps = entry
             .bootstrap_owners
@@ -10146,9 +10773,8 @@ async fn get_call_transport(
     };
     let (public_ipv4, public_ipv6) = routable_media_hosts(&advertised);
 
-    // Reuse the switchboard's consent-gated offer pool: a member who has already agreed to carry
-    // somebody else's traffic is exactly the member who should be asked to carry their media.
-    // Sorting puts literal-route helpers first so the picker never prefers a relayed helper.
+    // Report the existing consent-gated admission offer pool as mesh context only. Its hosting
+    // consent does not authorize media forwarding, and no WebRTC relay is created by an offer.
     let mut bridges: Vec<CallBridge> = actor
         .switchboard_offers()
         .await
@@ -10172,23 +10798,7 @@ async fn get_call_transport(
     });
 
     let relay_likely_required = !public_direct && public_ipv6.is_empty() && !router_maps;
-    let mut advice = if public_direct {
-        "This device is directly reachable, so a call should connect without a relay. A peer that still fails is behind the stricter NAT.".to_string()
-    } else if !public_ipv6.is_empty() {
-        "This device has a public IPv6 route but no verified IPv4 path. Calls will connect directly to IPv6 peers once the router permits inbound UDP to the app; IPv4-only peers will need a relay.".to_string()
-    } else if bridges.is_empty() {
-        "This device is behind NAT and no member is offering to host. Calls to peers who are also behind NAT need a relay: ask a member with a public route to enable hosting, or set a TURN server in Settings, Calls.".to_string()
-    } else {
-        format!(
-            "This device is behind NAT. {} member(s) are offering to host, so a relayed path is available.",
-            bridges.len()
-        )
-    };
-    if router_maps {
-        advice.push_str(
-            " Your router opens ports on request, so each call also offers a router-mapped direct route; one mapped side is enough for the pair.",
-        );
-    }
+    let advice = call_transport_advice(public_direct, router_maps, !bridges.is_empty());
 
     Ok(CallTransport {
         public_direct,
@@ -10202,9 +10812,32 @@ async fn get_call_transport(
     })
 }
 
+/// Mesh addresses, admission consent and router support are context for troubleshooting; none
+/// proves voice connectivity. Keep this advice independent of any claimed media-relay offer.
+fn call_transport_advice(public_mesh_route: bool, router_maps: bool, mesh_helpers: bool) -> String {
+    let mut advice = if public_mesh_route {
+        "This device advertises a public mesh address. Voice uses its own connection checks."
+            .to_string()
+    } else {
+        "Voice tries its own direct connection checks.".to_string()
+    };
+    if router_maps {
+        advice.push_str(" The call can also try a router-mapped UDP port.");
+    }
+    if mesh_helpers {
+        advice.push_str(
+            " Connection helpers assist with joining the server; voice uses separate routes.",
+        );
+    }
+    advice.push_str(" If voice cannot connect, configure TURN in Settings, Calls.");
+    advice
+}
+
 /// The public socket a router granted for one webview media port.
 #[derive(Serialize)]
 struct MappedCallPort {
+    /// Opaque attempt identity; port-only unmap authority is deliberately unsupported.
+    grant: String,
     ip: String,
     port: u16,
     /// Which protocol granted it, for the log and the call panel.
@@ -10231,52 +10864,566 @@ async fn default_route_address(state: State<'_, AppState>) -> Result<Option<Stri
     Ok(catcoms_net::default_route_ipv4().map(|ip| ip.to_string()))
 }
 
-/// Ask the router to forward one of the active call's media UDP ports to this machine, over the
-/// bound-interface IGD path the invite reachability fix proved out, with PCP/NAT-PMP as the
-/// fallback rung for routers that don't speak UPnP. The webview signals the returned public
-/// socket to the peer as an extra ICE candidate; a router mapping forwards from any source, so
-/// one mapped side connects the pair regardless of the other side's NAT type. This is the
-/// media-plane counterpart of the mesh's mapping workers, which only ever cover the stable
-/// libp2p listen port and never the ICE agent's ephemeral sockets.
+/// Prepare a fresh webview controller without revoking the current controller/call. Activation
+/// is a separate compare-and-swap after the frontend checks that this mount is still current.
+#[tauri::command]
+async fn prepare_call_mapping_controller(state: State<'_, AppState>) -> Result<String, String> {
+    let generation = unlocked_ui_session_generation(&state).await?;
+    let _commit = require_ui_session_generation(&state, generation).await?;
+    state
+        .media_mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .prepare(
+            call_mappings::CandidateKind::Controller { generation },
+            SystemClock.monotonic_ms(),
+        )
+}
+
+#[tauri::command]
+async fn prepare_call_mapping_owner(
+    state: State<'_, AppState>,
+    controller: String,
+    server: u64,
+    room: String,
+) -> Result<String, String> {
+    if room
+        .parse::<u128>()
+        .ok()
+        .map(|id| id.to_string())
+        .as_deref()
+        != Some(room.as_str())
+    {
+        return Err("invalid call room".into());
+    }
+    let generation = unlocked_ui_session_generation(&state).await?;
+    let _commit = require_ui_session_generation(&state, generation).await?;
+    let servers = state.servers.lock().await;
+    let entry = servers
+        .legacy(&server)
+        .ok_or("call server is no longer open")?;
+    let binding = call_mappings::Binding {
+        generation,
+        server,
+        instance: entry.instance,
+        group: entry.group_id.clone(),
+        room,
+    };
+    state
+        .media_mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .prepare(
+            call_mappings::CandidateKind::Call {
+                controller,
+                binding,
+            },
+            SystemClock.monotonic_ms(),
+        )
+}
+
+async fn call_mapping_binding_current(state: &AppState, binding: &call_mappings::Binding) -> bool {
+    let servers = state.servers.lock().await;
+    !ui_session_closed(state)
+        && state.ui_session_generation.load(Ordering::SeqCst) == binding.generation
+        && servers.legacy(&binding.server).is_some_and(|entry| {
+            entry.instance == binding.instance && entry.group_id == binding.group
+        })
+}
+
+fn clean_call_mappings(
+    coordinator: &Arc<StdMutex<call_mappings::Coordinator<catcoms_net::MediaPortMapping>>>,
+    work: Vec<call_mappings::Cleanup<catcoms_net::MediaPortMapping>>,
+) {
+    for cleanup in work {
+        let coordinator = coordinator.clone();
+        // The task, not its IPC caller, owns cleanup. Its slot remains charged even when the
+        // caller disappears. No server actor or UI commit mutex is held across router I/O.
+        tokio::spawn(async move {
+            let reusable = cleanup.grant.release().await;
+            coordinator
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .finish_cleanup(&cleanup.id, reusable);
+        });
+    }
+}
+
+#[tauri::command]
+async fn activate_call_mapping_owner(
+    state: State<'_, AppState>,
+    candidate: String,
+) -> Result<String, String> {
+    let kind = state
+        .media_mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .candidate(&candidate, SystemClock.monotonic_ms())
+        .ok_or("call mapping candidate expired")?;
+    let generation = match &kind {
+        call_mappings::CandidateKind::Controller { generation } => *generation,
+        call_mappings::CandidateKind::Call { binding, .. } => binding.generation,
+    };
+    let _commit = require_ui_session_generation(&state, generation).await?;
+    if let call_mappings::CandidateKind::Call { binding, .. } = &kind {
+        if !call_mapping_binding_current(&state, binding).await {
+            return Err("call server changed".into());
+        }
+    }
+    let work = state
+        .media_mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .activate(&candidate, SystemClock.monotonic_ms())?;
+    clean_call_mappings(&state.media_mappings, work);
+    Ok(candidate)
+}
+
+/// Revoke one exact candidate/controller/call. This closes authority immediately; best-effort
+/// router cleanup continues in native-owned workers and may remain uncertain until process exit.
+#[tauri::command]
+async fn end_call_mapping_owner(state: State<'_, AppState>, owner: String) -> Result<(), String> {
+    let work = state
+        .media_mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .end(&owner);
+    clean_call_mappings(&state.media_mappings, work);
+    Ok(())
+}
+
+/// Optional extra ICE route. Ownership, capacity and the physical port are reserved before a
+/// detached worker starts. A router grant helps connectivity; it does not establish reachability.
 #[tauri::command]
 async fn map_call_port(
+    app: AppHandle,
     state: State<'_, AppState>,
+    owner: String,
     port: u16,
     address: Option<String>,
 ) -> Result<MappedCallPort, String> {
-    require_unlocked_session(&state).await?;
-    let key = port;
     let port = std::num::NonZeroU16::new(port).ok_or("port must be nonzero")?;
     // The candidate's own claimed IPv4, when the webview could read one (mic-granted pages get
     // real IPs; an mDNS-obfuscated candidate passes None and is mapped permissively).
     let claimed = address
         .as_deref()
         .and_then(|a| a.parse::<std::net::Ipv4Addr>().ok());
-    let mapped = catcoms_net::map_media_udp_port(port, claimed).await?;
-    let result = MappedCallPort {
-        ip: mapped.external.ip().to_string(),
-        port: mapped.external.port(),
-        mechanism: mapped.mechanism.to_string(),
-        confirmed: mapped.confirmed,
-    };
-    // Retain the mapping: a PCP/NAT-PMP lease is renewed by the client inside it, and call end
-    // releases it. A same-port remap (shouldn't happen; ICE ports are fresh per call) releases
-    // the entry it replaces rather than leaking its renewal task.
-    if let Some(previous) = state.media_mappings.lock().await.insert(key, mapped) {
-        previous.release().await;
+    let binding = state
+        .media_mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .binding(&owner)
+        .cloned()
+        .ok_or("call mapping owner is no longer active")?;
+    let commit = require_ui_session_generation(&state, binding.generation).await?;
+    if !call_mapping_binding_current(&state, &binding).await {
+        return Err("call server changed".into());
     }
-    Ok(result)
+    let grant = state
+        .media_mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .reserve(&owner, port.get())?;
+    drop(commit);
+    // Dropping the JoinHandle detaches rather than cancels this worker. Even a cancelled Tauri
+    // waiter leaves someone responsible for the router result and its charged slot.
+    call_mappings::spawn_acquisition(
+        state.media_mappings.clone(),
+        grant,
+        async move {
+            catcoms_net::map_media_udp_port(port, claimed)
+                .await
+                .map_err(|e| (e.uncertain, e.to_string()))
+        },
+        move || async move {
+            let state = app.state::<AppState>();
+            // Return the owned commit guard so the shared worker retains it through exact
+            // owner installation. Returning a boolean here would reopen a lock/commit gap.
+            let commit = state.ui_session_commit.clone().lock_owned().await;
+            if require_unlocked_session(&state).await.is_ok()
+                && call_mapping_binding_current(&state, &binding).await
+            {
+                Some(commit)
+            } else {
+                None
+            }
+        },
+        |mapped, grant| MappedCallPort {
+            grant: grant.into(),
+            ip: mapped.external.ip().to_string(),
+            port: mapped.external.port(),
+            mechanism: mapped.mechanism.to_string(),
+            confirmed: mapped.confirmed,
+        },
+        catcoms_net::MediaPortMapping::release,
+    )
+    .await
+    .map_err(|e| format!("router mapping worker failed: {e}"))?
 }
 
-/// Release a call mapping when the call ends. Best-effort at the router; the UPnP lease is
-/// bounded and a dropped PCP/NAT-PMP client stops renewing, so nothing outlives a crash long.
+/// Exact grant release. A queued old release cannot affect a newer same-port grant.
 #[tauri::command]
-async fn unmap_call_port(state: State<'_, AppState>, port: u16) -> Result<(), String> {
-    require_unlocked_session(&state).await?;
-    let mapping = state.media_mappings.lock().await.remove(&port);
-    if let Some(mapping) = mapping {
-        mapping.release().await;
+async fn unmap_call_port(
+    state: State<'_, AppState>,
+    owner: String,
+    grant: String,
+) -> Result<(), String> {
+    let work = state
+        .media_mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .unmap(&owner, &grant);
+    clean_call_mappings(&state.media_mappings, work.into_iter().collect());
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct VoiceActivation {
+    owner: String,
+    group: Option<String>,
+    join: Option<String>,
+}
+
+/// Resolve a consumed activation and a pending candidate under one Coordinator observation.
+/// Otherwise a concurrent winner could consume the candidate between two separate lookups.
+enum VoiceActivationPlan {
+    Accepted(voice_authority::AcceptedActivation),
+    Candidate(voice_authority::CandidateKind),
+}
+
+async fn voice_binding_current(state: &AppState, binding: &voice_authority::Binding) -> bool {
+    let servers = state.servers.lock().await;
+    !ui_session_closed(state)
+        && state.ui_session_generation.load(Ordering::SeqCst) == binding.generation
+        && servers.legacy(&binding.server).is_some_and(|entry| {
+            entry.instance == binding.instance && entry.group_id == binding.group
+        })
+}
+
+/// An actor query can suspend. Its answer is only a snapshot; the command must subsequently
+/// reacquire UI commit and exact native-owner/registry authority before any synchronous effect.
+async fn check_voice_binding(
+    state: &AppState,
+    binding: &voice_authority::Binding,
+) -> Result<(), String> {
+    check_voice_binding_in(&state.servers, binding).await
+}
+
+/// The same exact registry/actor query for ordinary IPC and an upgraded handoff context.
+/// Its result is only a snapshot; both callers still need final commit/selection fencing.
+async fn check_voice_binding_in(
+    servers: &Mutex<ServerTable>,
+    binding: &voice_authority::Binding,
+) -> Result<(), String> {
+    let actor = {
+        let servers = servers.lock().await;
+        let entry = servers
+            .legacy(&binding.server)
+            .filter(|entry| entry.instance == binding.instance && entry.group_id == binding.group)
+            .ok_or("voice server changed")?;
+        entry.actor.clone()
+    };
+    let context = actor.voice_v2_context(binding.scope.room).await?;
+    if context.scope != binding.scope {
+        return Err("voice policy changed; rejoin the call".into());
     }
+    Ok(())
+}
+
+#[tauri::command]
+async fn prepare_voice_controller(state: State<'_, AppState>) -> Result<String, String> {
+    require_unlocked_session(&state).await?;
+    prepare_voice_controller_inner(&state).await
+}
+
+async fn prepare_voice_controller_inner(state: &AppState) -> Result<String, String> {
+    // A last detached IO owner may drain after final-close returned. Reclaim only its proven
+    // dead history BEFORE any new grant/key admission can be blocked by that paid metadata.
+    // This bounded pass is grant-independent and runs outside Coordinator; it refunds no work.
+    state.voice_channels.collect_retired(&state.voice_handoff);
+    let generation = unlocked_ui_session_generation(state).await?;
+    let _commit = require_ui_session_generation(state, generation).await?;
+    state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .prepare(
+            voice_authority::CandidateKind::Controller(generation),
+            SystemClock.monotonic_ms(),
+        )
+}
+
+async fn prepare_voice_owner_inner(
+    state: &AppState,
+    controller: String,
+    server: u64,
+    room: String,
+) -> Result<String, String> {
+    let room_id = room.parse::<u128>().map_err(|_| "invalid voice room")?;
+    if room_id.to_string() != room {
+        return Err("invalid voice room".into());
+    }
+    state.voice_channels.collect_retired(&state.voice_handoff);
+    let generation = unlocked_ui_session_generation(state).await?;
+    let (actor, instance, group) = {
+        let servers = state.servers.lock().await;
+        let entry = servers
+            .legacy(&server)
+            .ok_or("voice server is no longer open")?;
+        (entry.actor.clone(), entry.instance, entry.group_id.clone())
+    };
+    let context = actor.voice_v2_context(room_id).await?;
+    let binding = voice_authority::Binding {
+        generation,
+        server,
+        instance,
+        group,
+        scope: context.scope,
+    };
+    let _commit = require_ui_session_generation(state, generation).await?;
+    if !voice_binding_current(state, &binding).await {
+        return Err("voice server changed".into());
+    }
+    state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .prepare(
+            voice_authority::CandidateKind::Call {
+                controller,
+                binding,
+            },
+            SystemClock.monotonic_ms(),
+        )
+}
+
+#[tauri::command]
+async fn prepare_voice_owner(
+    state: State<'_, AppState>,
+    controller: String,
+    server: u64,
+    room: String,
+) -> Result<String, String> {
+    require_unlocked_session(&state).await?;
+    prepare_voice_owner_inner(&state, controller, server, room).await
+}
+
+async fn activate_voice_owner_inner(
+    state: &AppState,
+    candidate: String,
+) -> Result<VoiceActivation, String> {
+    state.voice_channels.collect_retired(&state.voice_handoff);
+    // Successful activation consumes its candidate. Resolve the original current installation
+    // first, or a lost accepted reply would force a new join/key generation. This is metadata
+    // recovery only: never adopt a past grant or skip the actor/UI/native identity checks.
+    let plan = {
+        let authority = state
+            .voice_authority
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(accepted) = authority.accepted_activation(&candidate) {
+            VoiceActivationPlan::Accepted(accepted)
+        } else {
+            VoiceActivationPlan::Candidate(
+                authority
+                    .candidate(&candidate, SystemClock.monotonic_ms())
+                    .ok_or("voice candidate expired")?,
+            )
+        }
+    };
+    let kind = match plan {
+        VoiceActivationPlan::Accepted(accepted) => {
+            if let Some(owner) = accepted.owner() {
+                check_voice_binding(state, &owner.binding).await?;
+            }
+            let _commit = require_ui_session_generation(state, accepted.generation()).await?;
+            if let Some(owner) = accepted.owner() {
+                if !voice_binding_current(state, &owner.binding).await {
+                    return Err("voice server changed".into());
+                }
+            }
+            let authority = state
+                .voice_authority
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            check_voice_activation_generation(state, accepted.generation())?;
+            authority.validate_accepted_activation(&accepted)?;
+            return Ok(voice_activation_projection(candidate, accepted.owner()));
+        }
+        VoiceActivationPlan::Candidate(kind) => kind,
+    };
+    let (generation, mut grant) = match &kind {
+        voice_authority::CandidateKind::Controller(generation) => (*generation, None),
+        voice_authority::CandidateKind::Call { binding, .. } => {
+            let actor = {
+                let servers = state.servers.lock().await;
+                servers
+                    .legacy(&binding.server)
+                    .filter(|entry| {
+                        entry.instance == binding.instance && entry.group_id == binding.group
+                    })
+                    .ok_or("voice server changed")?
+                    .actor
+                    .clone()
+            };
+            // The reply owns its child grant. Cancellation while waiting for the final native
+            // boundary drops/revokes it, rather than leaving an actor-retained lease live.
+            let grant = actor.voice_call_grant(binding.scope.room).await?;
+            if grant.scope() != binding.scope || !grant.lease().is_live() {
+                return Err("voice policy changed; rejoin the call".into());
+            }
+            (binding.generation, Some(grant))
+        }
+    };
+    let _commit = require_ui_session_generation(state, generation).await?;
+    if let voice_authority::CandidateKind::Call { binding, .. } = &kind {
+        if !voice_binding_current(state, binding).await {
+            return Err("voice server changed".into());
+        }
+    }
+    // Two duplicate invokes can both observe the candidate before either reaches UI commit.
+    // That guard serializes this tail: recover the winner before sampling RNG or publishing.
+    // The unused temporary affine grant is declared before _commit, so all return/error paths
+    // release Coordinator and UI guards before its destructor revokes the unused actor child.
+    {
+        let authority = state
+            .voice_authority
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        check_voice_activation_generation(state, generation)?;
+        if let Some(accepted) = authority.accepted_activation(&candidate) {
+            authority.validate_accepted_activation(&accepted)?;
+            if accepted.generation() != generation {
+                return Err("voice controller changed".into());
+            }
+            return Ok(voice_activation_projection(candidate, accepted.owner()));
+        }
+    }
+    let mut nonce = [0; 32];
+    OsCryptoRng.fill_bytes(&mut nonce);
+    let mut authority = state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    check_voice_activation_generation(state, generation)?;
+    authority.activate(&candidate, nonce, SystemClock.monotonic_ms(), &mut grant)?;
+    let owner = authority.owner(&candidate);
+    Ok(voice_activation_projection(candidate, owner.as_ref()))
+}
+
+/// Lock registration publishes a new generation before it can acquire Coordinator. Repeat its
+/// pure atomic fence inside the final native guard, including after nonce generation, so a
+/// delayed revocation hook cannot make an already registered lock look like a current session.
+fn check_voice_activation_generation(state: &AppState, generation: u64) -> Result<(), String> {
+    state.ui_session_gate().check_generation(generation)
+}
+
+/// Fixed public activation metadata. This does not return a key, actor grant or RTC authority.
+fn voice_activation_projection(
+    owner: String,
+    accepted: Option<&voice_authority::Owner>,
+) -> VoiceActivation {
+    VoiceActivation {
+        owner,
+        group: accepted.map(|owner| hex::encode(owner.binding.scope.group)),
+        join: accepted.map(|owner| hex::encode(owner.join)),
+    }
+}
+
+#[tauri::command]
+async fn activate_voice_owner(
+    state: State<'_, AppState>,
+    candidate: String,
+) -> Result<VoiceActivation, String> {
+    require_unlocked_session(&state).await?;
+    activate_voice_owner_inner(&state, candidate).await
+}
+
+/// Exact revocation is available during lock/destruction. It never refunds unsettled crypto.
+#[tauri::command]
+async fn end_voice_owner(state: State<'_, AppState>, owner: String) -> Result<(), String> {
+    end_voice_owner_inner(&state, &owner).await;
+    Ok(())
+}
+
+/// Logical revocation is synchronous; actual Root participant cleanup uses the original
+/// affine grant even after End. Never look up a replacement by room or serialized join id.
+/// This does not settle outstanding SDK/transport owners: authenticated channel cleanup
+/// retains those original payments and waits on its independent retirement witness.
+async fn end_voice_owner_inner(state: &AppState, owner: &str) {
+    let original = state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .end_with_cleanup(owner);
+    if let Some(original) = original {
+        let actor = {
+            let servers = state.servers.lock().await;
+            servers
+                .legacy(&original.binding.server)
+                .filter(|entry| {
+                    entry.instance == original.binding.instance
+                        && entry.group_id == original.binding.group
+                })
+                .map(|entry| entry.actor.clone())
+        };
+        if let Some(actor) = actor {
+            // Once admitted, the actor applies Stop even if this reply is lost. Cancellation
+            // before mailbox admission is not completion; no code treats it as drainage.
+            // A stopped/removed original actor has no replacement participant to operate on.
+            let _ = actor.stop_voice_endpoint(original.cleanup_grant()).await;
+        }
+    }
+    state.voice_channels.collect_retired(&state.voice_handoff);
+}
+
+async fn admit_voice_crypto_inner(
+    state: &AppState,
+    owner: String,
+    operation: String,
+    bytes: usize,
+) -> Result<String, String> {
+    let operation = voice_authority::Operation::parse(&operation)?;
+    state.voice_channels.collect_retired(&state.voice_handoff);
+    let binding = state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .owner(&owner)
+        .ok_or("voice owner changed")?
+        .binding;
+    check_voice_binding(state, &binding).await?;
+    let _commit = require_ui_session_generation(state, binding.generation).await?;
+    if !voice_binding_current(state, &binding).await {
+        return Err("voice server changed".into());
+    }
+    state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .admit(&owner, operation, bytes)
+}
+
+/// Resource admission alone authorizes no signing, network submission or plaintext delivery.
+#[tauri::command]
+async fn admit_voice_crypto(
+    state: State<'_, AppState>,
+    owner: String,
+    operation: String,
+    bytes: usize,
+) -> Result<String, String> {
+    require_unlocked_session(&state).await?;
+    admit_voice_crypto_inner(&state, owner, operation, bytes).await
+}
+
+/// The trusted window reports real settlement even after its owner retires or the vault locks.
+#[tauri::command]
+async fn settle_voice_crypto(state: State<'_, AppState>, token: String) -> Result<(), String> {
+    state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .settle(&token);
     Ok(())
 }
 
@@ -10394,6 +11541,7 @@ fn bodyless_media_denial(code: http::StatusCode) -> http::Response<Vec<u8>> {
 async fn publish_media_response<F>(
     state: &AppState,
     generation: Option<u64>,
+    origin: Option<&RequestCancellation>,
     response: http::Response<Vec<u8>>,
     publish: F,
 ) where
@@ -10404,7 +11552,8 @@ async fn publish_media_response<F>(
         return;
     };
     match require_ui_session_generation(state, generation).await {
-        Ok(_commit) => publish(response),
+        Ok(_commit) if origin.is_none_or(|origin| !origin.is_cancelled()) => publish(response),
+        Ok(_) => publish(bodyless_media_denial(http::StatusCode::FORBIDDEN)),
         Err(_) => publish(bodyless_media_denial(http::StatusCode::FORBIDDEN)),
     }
 }
@@ -10489,6 +11638,19 @@ async fn serve_media(
     state: &AppState,
     path: &str,
     range: Option<String>,
+    expected_generation: u64,
+) -> (Option<(u64, RequestCancellation)>, http::Response<Vec<u8>>) {
+    let mut origin = None;
+    let response = serve_media_body(state, path, range, expected_generation, &mut origin).await;
+    (origin, response)
+}
+
+async fn serve_media_body(
+    state: &AppState,
+    path: &str,
+    range: Option<String>,
+    expected_generation: u64,
+    captured: &mut Option<(u64, RequestCancellation)>,
 ) -> http::Response<Vec<u8>> {
     let deny = |code: http::StatusCode| bodyless_media_denial(code);
     let Some((server, cid)) = parse_media_path(path) else {
@@ -10496,7 +11658,7 @@ async fn serve_media(
     };
     // The same boundary every native command sits behind: a locked vault serves no plaintext,
     // and a media element left in the DOM must not keep pulling bytes after an explicit lock.
-    let generation = match unlocked_ui_session_generation(state).await {
+    let generation = match keep_session::authorize_invocation(state, expected_generation).await {
         Ok(generation) => generation,
         Err(_) => return deny(http::StatusCode::FORBIDDEN),
     };
@@ -10506,6 +11668,10 @@ async fn serve_media(
     let Ok(actor) = actor_of(state, server).await else {
         return deny(http::StatusCode::NOT_FOUND);
     };
+    let Some(origin) = keep_session::for_actor(state, server, &actor, generation).await else {
+        return deny(http::StatusCode::FORBIDDEN);
+    };
+    *captured = Some((generation, origin.clone()));
     let Ok(raw) = hex::decode(&cid) else {
         return deny(http::StatusCode::BAD_REQUEST);
     };
@@ -10519,7 +11685,7 @@ async fn serve_media(
     // The head comes from the index rather than from chunk 0 for the same reason: reading a whole
     // chunk to learn a size and a mime put a second decrypt on every response and, because the
     // cache is small, evicted the chunk the player was actually reading.
-    let head = match media_head(state, &actor, server, &cid, &raw, generation).await {
+    let head = match media_head(state, &actor, server, &cid, &raw, generation, &origin).await {
         Some(head) => head,
         None => return deny(http::StatusCode::NOT_FOUND),
     };
@@ -10560,6 +11726,7 @@ async fn serve_media(
                 head.manifest_version,
                 index,
                 generation,
+                &origin,
             )
             .await
             {
@@ -10588,7 +11755,7 @@ async fn serve_media(
         // The same last authorization point the windowed path holds, for the same reason: no
         // plaintext crosses the scheme boundary if an explicit lock completed during the reads or
         // during the transcode, which is the longest await on this path.
-        let _response_commit = match require_ui_session_generation(state, generation).await {
+        let _response_commit = match keep_session::read_commit(state, generation, &origin).await {
             Ok(commit) => commit,
             Err(_) => return deny(http::StatusCode::FORBIDDEN),
         };
@@ -10620,6 +11787,7 @@ async fn serve_media(
         head.manifest_version,
         plan.index,
         generation,
+        &origin,
     )
     .await
     {
@@ -10633,7 +11801,7 @@ async fn serve_media(
     // This is the last authorization point and remains held through response construction. If an
     // explicit lock completed during either actor read, no plaintext crosses the scheme boundary;
     // if lock begins after this guard, it cannot complete until this response has been built.
-    let _response_commit = match require_ui_session_generation(state, generation).await {
+    let _response_commit = match keep_session::read_commit(state, generation, &origin).await {
         Ok(commit) => commit,
         Err(_) => return deny(http::StatusCode::FORBIDDEN),
     };
@@ -10701,6 +11869,7 @@ async fn media_head(
     cid: &str,
     raw: &[u8],
     generation: u64,
+    origin: &RequestCancellation,
 ) -> Option<MediaHead> {
     // Re-resolve the cheap index metadata on every request. The claimed plaintext CID is not a
     // trustworthy manifest identity until a full export hashes every byte, and another member may
@@ -10716,7 +11885,7 @@ async fn media_head(
             .cloned()
     };
     if let Some(hit) = cached {
-        let _commit = require_ui_session_generation(state, generation)
+        let _commit = keep_session::read_commit(state, generation, origin)
             .await
             .ok()?;
         return Some(hit);
@@ -10739,12 +11908,14 @@ async fn media_head(
         live.manifest_version,
         0,
         generation,
+        origin,
     )
     .await?;
     let mime = validated_inline_media_mime(&declared, &first)?;
-    media_head_put_for_generation(
+    media_head_put_for_read(
         state,
         generation,
+        Some(origin),
         MediaHead {
             server,
             cid: cid.to_string(),
@@ -10756,15 +11927,28 @@ async fn media_head(
     .await
 }
 
+#[cfg(test)]
 async fn media_head_put_for_generation(
     state: &AppState,
     generation: u64,
+    head: MediaHead,
+) -> Option<MediaHead> {
+    media_head_put_for_read(state, generation, None, head).await
+}
+
+async fn media_head_put_for_read(
+    state: &AppState,
+    generation: u64,
+    origin: Option<&RequestCancellation>,
     head: MediaHead,
 ) -> Option<MediaHead> {
     let _commit = require_ui_session_generation(state, generation)
         .await
         .ok()?;
     let mut heads = state.media_heads.lock().await;
+    if origin.is_some_and(RequestCancellation::is_cancelled) {
+        return None;
+    }
     heads.retain(|existing| existing.server != head.server || existing.cid != head.cid);
     heads.push(head);
     while heads.len() > MEDIA_HEAD_ENTRIES {
@@ -10792,31 +11976,45 @@ async fn media_chunk(
     manifest_version: [u8; 32],
     index: usize,
     generation: u64,
+    origin: &RequestCancellation,
 ) -> Option<Arc<Vec<u8>>> {
     let cached = {
         let mut cache = state.media_cache.lock().await;
         media_cache_take(&mut cache, server, cid, manifest_version, index)
     };
     if let Some(bytes) = cached {
-        let _commit = require_ui_session_generation(state, generation)
+        let _commit = keep_session::read_commit(state, generation, origin)
             .await
             .ok()?;
+        if origin.is_cancelled() {
+            return None;
+        }
         return Some(bytes);
     }
     let start = index as u64 * CHUNK_BYTES as u64;
     let range = actor
-        .read_file_range(raw.to_vec(), manifest_version, start, CHUNK_BYTES)
+        .read_file_range_cancellable(
+            raw.to_vec(),
+            manifest_version,
+            start,
+            CHUNK_BYTES,
+            Some(origin.clone()),
+        )
         .await
         .ok()?;
     // A read past the end is how the caller learns the file is shorter than it guessed; it is not
     // worth a cache entry.
     if range.bytes.is_empty() && start > 0 {
+        let _commit = keep_session::read_commit(state, generation, origin)
+            .await
+            .ok()?;
         return Some(Arc::new(Vec::new()));
     }
     let bytes = Arc::new(range.bytes);
-    media_cache_put_for_generation(
+    media_cache_put_for_read(
         state,
         generation,
+        Some(origin),
         MediaChunk {
             server,
             cid: cid.to_string(),
@@ -10829,15 +12027,28 @@ async fn media_chunk(
     .then_some(bytes)
 }
 
+#[cfg(test)]
 async fn media_cache_put_for_generation(
     state: &AppState,
     generation: u64,
+    chunk: MediaChunk,
+) -> bool {
+    media_cache_put_for_read(state, generation, None, chunk).await
+}
+
+async fn media_cache_put_for_read(
+    state: &AppState,
+    generation: u64,
+    origin: Option<&RequestCancellation>,
     chunk: MediaChunk,
 ) -> bool {
     let Ok(_commit) = require_ui_session_generation(state, generation).await else {
         return false;
     };
     let mut cache = state.media_cache.lock().await;
+    if origin.is_some_and(RequestCancellation::is_cancelled) {
+        return false;
+    }
     media_cache_put(&mut cache, chunk);
     true
 }
@@ -11063,16 +12274,29 @@ fn validate_ui_state_json(json: &str) -> Result<(), String> {
     let object = value
         .as_object_mut()
         .ok_or_else(|| "UI continuity state must be an object".to_string())?;
-    if object.get("version").and_then(serde_json::Value::as_u64) != Some(1)
-        || !object
-            .get("drafts")
-            .is_some_and(serde_json::Value::is_object)
+    if !matches!(
+        object.get("version").and_then(serde_json::Value::as_u64),
+        // v3 protects exact retained Send copies that old v2 frontends silently omitted;
+        // v4 protects native 32-byte requests from all preceding UI readers.
+        // This gates only the sealed UI envelope; native authoring/Stop limits stay intact.
+        Some(1..=4)
+    ) || !object
+        .get("drafts")
+        .is_some_and(serde_json::Value::is_object)
         || !object
             .get("readMarks")
             .is_some_and(serde_json::Value::is_object)
     {
         return Err("unsupported UI continuity state shape".into());
     }
+    native_text::continuity::validate(
+        object,
+        object
+            .get("version")
+            .and_then(serde_json::Value::as_u64)
+            .expect("checked version"),
+    )
+    .map_err(str::to_owned)?;
     // Studio's owned PIX drafts need a larger envelope, not a larger allowance for unrelated
     // chat/read/trust state. Validate each independent budget before the atomic sealed write.
     if let Some(studio) = object.remove("studioDraft") {
@@ -11113,11 +12337,14 @@ async fn get_ui_state(state: State<'_, AppState>) -> Result<String, String> {
     let guard = state.store.lock().await;
     let store = guard
         .as_ref()
+        .and_then(MountedVault::as_legacy)
         .ok_or_else(|| "unlock the vault before loading UI state".to_string())?;
-    let bytes = store.load_ui_state().map_err(|error| error.to_string())?;
-    if bytes.is_empty() {
+    let Some(bytes) = store
+        .load_ui_state_record()
+        .map_err(|error| error.to_string())?
+    else {
         return Ok(r#"{"version":1,"drafts":{},"readMarks":{}}"#.into());
-    }
+    };
     let json = String::from_utf8(bytes).map_err(|_| "UI continuity state is not UTF-8")?;
     validate_ui_state_json(&json)?;
     Ok(json)
@@ -11138,10 +12365,12 @@ async fn save_ui_state_for_generation(
     json: &str,
     generation: u64,
 ) -> Result<(), String> {
+    let _io = state.native_text.ui_state.lane.clone().lock_owned().await;
     let _session_commit = require_ui_session_generation(state, generation).await?;
     let guard = state.store.lock().await;
     let store = guard
         .as_ref()
+        .and_then(MountedVault::as_legacy)
         .ok_or_else(|| "unlock the vault before saving UI state".to_string())?;
     store
         .save_ui_state(json.as_bytes(), &mut OsCryptoRng)
@@ -11586,6 +12815,7 @@ struct SendMessageResult {
     persistence: PersistOutcome,
     message_id: Option<String>,
     replayed: bool,
+    disposition: &'static str,
 }
 
 /// Send a chat message to a channel (by id).
@@ -11634,16 +12864,20 @@ async fn send_message(
     .await
 }
 
-/// Edit one of your own messages (by message id) in a channel.
+/// Edit crosses the same encrypted snapshot barrier as a post; a retry keeps its exact token.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn edit_message(
     state: State<'_, AppState>,
     server: u64,
     channel: String,
-    msg_id: String,
+    id: String,
     text: String,
+    retry_token: String,
+    expected_context: String,
+    target: String,
     trace: Option<String>,
-) -> Result<(), AppError> {
+) -> Result<SendMessageResult, AppError> {
     let op = Operation::start(
         trace,
         catcoms_diagnostics::Section::Channels,
@@ -11651,25 +12885,36 @@ async fn edit_message(
         server,
         Some(&channel),
     );
-    let (id, actor) = channel_target(&state, &op, server, &channel).await?;
-    actor
-        .edit_message(id, msg_id, text)
+    let generation = unlocked_ui_session_generation(&state)
         .await
-        .map_err(|e| op.fail(codes::CHAT_EDIT_REJECTED, e))?;
-    persist_server(&state, server).await;
-    op.succeeded("CHANNEL.EDIT.PERSISTED");
-    Ok(())
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
+    durable_chat::mutation(
+        &state,
+        &op,
+        server,
+        &channel,
+        id,
+        catcoms_app::durable_chat::DurableMutationAction::Edit { text },
+        retry_token,
+        expected_context,
+        target,
+        generation,
+    )
+    .await
 }
-
-/// Delete one of your own messages (by message id) from a channel.
+/// Moderation deletion also retains a sealed caller intent; no non-durable production fallback.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn delete_message(
     state: State<'_, AppState>,
     server: u64,
     channel: String,
-    msg_id: String,
+    id: String,
+    retry_token: String,
+    expected_context: String,
+    target: String,
     trace: Option<String>,
-) -> Result<(), AppError> {
+) -> Result<SendMessageResult, AppError> {
     let op = Operation::start(
         trace,
         catcoms_diagnostics::Section::Channels,
@@ -11677,14 +12922,22 @@ async fn delete_message(
         server,
         Some(&channel),
     );
-    let (id, actor) = channel_target(&state, &op, server, &channel).await?;
-    actor
-        .delete_message(id, msg_id)
+    let generation = unlocked_ui_session_generation(&state)
         .await
-        .map_err(|e| op.fail(codes::CHAT_DELETE_REJECTED, e))?;
-    persist_server(&state, server).await;
-    op.succeeded("CHANNEL.DELETE.PERSISTED");
-    Ok(())
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
+    durable_chat::mutation(
+        &state,
+        &op,
+        server,
+        &channel,
+        id,
+        catcoms_app::durable_chat::DurableMutationAction::Delete,
+        retry_token,
+        expected_context,
+        target,
+        generation,
+    )
+    .await
 }
 
 /// Toggle this member's emoji reaction on a message (by message id) in a channel.
@@ -12196,7 +13449,7 @@ async fn get_inbox(state: State<'_, AppState>) -> Result<Vec<UiInboxItem>, Strin
     let servers: Vec<(u64, String, bool, ServerActor)> = {
         let guard = state.servers.lock().await;
         guard
-            .iter()
+            .legacy_iter()
             .map(|(id, e)| (*id, e.name.clone(), e.is_dm, e.actor.clone()))
             .collect()
     };
@@ -12240,7 +13493,31 @@ struct ReloadedServer {
 /// Transport-independent half of vault reload. Keeping this seam below Tauri's concrete runtime
 /// lets the lifecycle test exercise the exact restore, blob attachment, route restoration and
 /// actor startup used in production with a deterministic in-memory transport.
+/// Cancellation owns an actual Actor abort and leaves custody in that same task until actual
+/// completion. Plain JoinHandle Drop detaches; releasing the absence guard there would let a
+/// retired Stop race an unregistered publisher. Only final registry installation disarms it.
+struct PreRegistrationChatOwner {
+    custody: Arc<std::sync::Mutex<Option<tokio::sync::OwnedMutexGuard<()>>>>,
+    abort: Option<tokio::task::AbortHandle>,
+}
+impl PreRegistrationChatOwner {
+    fn installed(mut self) {
+        self.abort = None;
+        self.custody
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+    }
+}
+impl Drop for PreRegistrationChatOwner {
+    fn drop(&mut self) {
+        if let Some(abort) = self.abort.take() {
+            abort.abort();
+        }
+    }
+}
 struct RestoredActor {
+    chat_fence_commit: PreRegistrationChatOwner,
     actor: ServerActor,
     events: mpsc::Receiver<catcoms_app::TracedEvent>,
     task: tokio::task::JoinHandle<()>,
@@ -12270,6 +13547,32 @@ where
 {
     let mut server = Server::restore(snapshot, transport, rng, clock, &record.display_name)
         .map_err(|error| error.to_string())?;
+    let chat_fence_commit = state.chat_orphan_commit.clone().lock_owned().await;
+    {
+        let mounted = state.store.lock().await;
+        let store = mounted
+            .as_ref()
+            .and_then(MountedVault::as_legacy)
+            .ok_or_else(|| "vault is not mounted during chat fence restore".to_string())?;
+        let registry = state.servers.lock().await;
+        // An actual fence may require a covering server save. Never let this private older
+        // restore overwrite the snapshot of a currently mounted live incarnation.
+        server.apply_retired_chat_fences(store, record.id, |bytes, rng| {
+            if registry.contains_key(&record.id) {
+                return Err(catcoms_sync::durable_chat::ChatSaveError::NotReplaced(
+                    "live conversation superseded fenced restore".into(),
+                ));
+            }
+            store
+                .save_server(record.id, bytes, rng)
+                .map_err(|error| match error {
+                    catcoms_app::AppError::CommittedButNotDurable(e) => {
+                        catcoms_sync::durable_chat::ChatSaveError::ReplacedNotDurable(e)
+                    }
+                    e => catcoms_sync::durable_chat::ChatSaveError::NotReplaced(e.to_string()),
+                })
+        })?;
+    }
     server.set_endpoint_dial_scheduler(state.endpoint_dials.clone());
     // A newer network record can outlive a failed/older core snapshot. Its enum is provenance,
     // never a substitute for the authenticated group policy pin inside that snapshot.
@@ -12280,7 +13583,7 @@ where
         .subscribe_control()
         .await
         .map_err(|error| error.to_string())?;
-    attach_blob_store(state, &mut server).await;
+    attach_blob_store_for(state, record.id, &mut server).await;
     if let Err(error) = server.publish_self_record(bootstrap.to_vec(), record_seq) {
         tracing::warn!(
             target: "catcoms_app",
@@ -12296,7 +13599,7 @@ where
     // best-effort cache data never prevents the authoritative group snapshot from opening.
     {
         let guard = state.store.lock().await;
-        if let Some(store) = guard.as_ref() {
+        if let Some(store) = guard.as_ref().and_then(MountedVault::as_legacy) {
             match (
                 store.address_cache_key(),
                 store.load_address_cache(record.id),
@@ -12336,9 +13639,15 @@ where
 
     let group_id = server.group_id();
     let device_id = server.device_id();
-    let (actor, events, task) = spawn(server);
+    let custody = Arc::new(std::sync::Mutex::new(Some(chat_fence_commit)));
+    let (actor, events, task) = catcoms_app::spawn_with_lifetime(server, Box::new(custody.clone()));
+    let chat_fence_commit = PreRegistrationChatOwner {
+        custody,
+        abort: Some(task.abort_handle()),
+    };
     actor.open_channel(channel_id("general")).await;
     Ok(RestoredActor {
+        chat_fence_commit,
         actor,
         events,
         task,
@@ -12352,7 +13661,7 @@ async fn running_servers(state: &AppState) -> Vec<ReloadedServer> {
         .servers
         .lock()
         .await
-        .iter()
+        .legacy_iter()
         .map(|(id, e)| {
             (
                 *id,
@@ -12388,7 +13697,15 @@ async fn reload_one(
     state: &AppState,
     snapshot: &[u8],
     record: &ServerRecord,
+    expected_generation: u64,
+    voice_ticket: &SessionTicket,
 ) -> Result<(), String> {
+    let previous_instance = state
+        .servers
+        .lock()
+        .await
+        .legacy(&record.id)
+        .map(|entry| entry.instance);
     // 9g used to dial every address in the snapshot's peer records here, straight at the
     // transport: up to `MAX_PEX_ADDRESSES` per record for every record ever stored, unconditional,
     // bypassing `DiscoveryPolicy` and its dial budget entirely, and with no membership check, so a
@@ -12460,6 +13777,7 @@ async fn reload_one(
     let rz_vec: Vec<String> = rz_target.iter().map(|t| t.addr.to_string()).collect();
 
     let RestoredActor {
+        chat_fence_commit,
         actor,
         events,
         task,
@@ -12496,33 +13814,93 @@ async fn reload_one(
         Some(record.invite.clone())
     };
 
+    // Preparation remains outside native commit. Slow actor work cannot delay lock completion;
+    // the exact ticket captured before authentication keeps this result inert until unlock.
+    let registration = actor
+        .prepare_voice_actor(voice_runtime(state), voice_ticket.clone())
+        .await;
+    let registration = match registration {
+        Ok(registration) => Some(registration),
+        Err(error) => {
+            tracing::warn!(server = record.id, %error, "VOICE.ATTACHMENT.UNAVAILABLE");
+            None
+        }
+    };
     // Register under the SAME id as on disk (don't allocate a new one).
-    supervise("server_actor", record.id, task);
     let instance = state.next_server_instance.fetch_add(1, Ordering::Relaxed);
     let timer_actor = actor.clone();
-    state.servers.lock().await.insert(
-        record.id,
-        ServerEntry {
-            actor,
-            instance,
-            group_id,
-            device_id,
-            invite: presented_invite,
-            name: record.display_name.clone(),
-            bootstrap,
-            bootstrap_owners,
-            interface_routes: Some(InterfaceRouteIdentity {
-                port,
-                peer_id: id.clone(),
-            }),
-            rendezvous: rz_vec,
-            mesh: Some(mesh_handle),
-            is_dm: record.is_dm,
-            switchboard: net.switchboard,
-            record_seq: net.record_seq,
-            persist: PersistCounters::default(),
-        },
+    let mut candidate = Box::new(ServerEntry {
+        files: keep_session::EntryOwner::new(),
+        actor,
+        instance,
+        group_id,
+        device_id,
+        invite: presented_invite,
+        name: record.display_name.clone(),
+        bootstrap,
+        bootstrap_owners,
+        interface_routes: Some(InterfaceRouteIdentity {
+            port,
+            peer_id: id.clone(),
+        }),
+        rendezvous: rz_vec,
+        mesh: Some(mesh_handle),
+        is_dm: record.is_dm,
+        switchboard: net.switchboard,
+        record_seq: net.record_seq,
+        voice: None,
+        persist: PersistCounters::default(),
+    });
+    let mut replaced = None;
+    let commit = state.ui_session_commit.lock().await;
+    let mut servers = state.servers.lock().await;
+    let install = if state.ui_session_generation.load(Ordering::SeqCst) != expected_generation
+        || !voice_runtime(state).is_current_ticket(voice_ticket)
+        || servers.legacy(&record.id).map(|entry| entry.instance) != previous_instance
+        || (previous_instance.is_none() && servers.contains_key(&record.id))
+    {
+        Err("server reload was superseded by a lock request".into())
+    } else {
+        Ok(())
+    };
+    if let Err(error) = install {
+        drop(servers);
+        drop(commit);
+        drop(registration);
+        drop(events);
+        candidate.actor.shutdown().await;
+        let _ = task.await;
+        return Err(error);
+    }
+    let publication = servers
+        .prepare_legacy_publication(record.id, previous_instance, &mut replaced)
+        .expect("checked exact legacy incarnation under the same registry guard");
+    let voice = match install_reloaded_voice(registration) {
+        Ok(voice) => voice,
+        Err(error) => {
+            drop(servers);
+            drop(commit);
+            drop(events);
+            candidate.actor.shutdown().await;
+            let _ = task.await;
+            return Err(error);
+        }
+    };
+    candidate.voice = voice;
+    // Restores remain inactive until the authenticated account unlock commits below. If this
+    // reload is within a live unlock, current() still checks that exact account generation.
+    candidate.actor.set_keep_session(
+        keep_session::current(state, expected_generation)
+            .map(|account| candidate.files.scope(account)),
     );
+    publication.publish(candidate);
+    drop(servers);
+    drop(commit);
+    drop(replaced);
+    // Registration is now visible to orphan Stop. Only here can the global absence fence
+    // be released; earlier release would let a new fence race autonomous restored publication.
+    chat_fence_commit.installed();
+    supervise("server_actor", record.id, task);
     admission_storage::prune_stale_pending(state).await;
     install_persistence_worker(app, record.id, instance).await;
     forward_events(app.clone(), record.id, instance, events);
@@ -12770,15 +14148,30 @@ fn safe_download_name(requested: &str) -> String {
     } else {
         trimmed.to_string()
     };
+    // Windows ignores trailing spaces before the extension, so "CON .txt" is still the console.
+    // This must stay at least as strict as storage's `windows_device_name`, which refuses such a
+    // leaf outright (picker review L5): a looser rule here turns a peer-chosen name into a
+    // "malformed data" failure instead of a saved `_CON .txt`.
+    // The same list as storage: COM0-9 and LPT0-9 including superscript ¹ ² ³, and the console
+    // names CONIN$ and CONOUT$.
     let stem = name
         .split('.')
         .next()
         .unwrap_or_default()
+        .trim_end()
         .to_ascii_uppercase();
-    let numbered_device = (stem.starts_with("COM") || stem.starts_with("LPT"))
-        && stem.len() == 4
-        && matches!(stem.as_bytes()[3], b'1'..=b'9');
-    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || numbered_device {
+    let mut chars = stem.chars();
+    let prefix: String = chars.by_ref().take(3).collect();
+    let numbered_device = matches!(prefix.as_str(), "COM" | "LPT")
+        && matches!(
+            (chars.next(), chars.next()),
+            (Some('0'..='9' | '¹' | '²' | '³'), None)
+        );
+    if matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || numbered_device
+    {
         name.insert(0, '_');
     }
     name
@@ -12809,7 +14202,8 @@ fn create_download(
     downloads: &Path,
     requested_name: &str,
 ) -> Result<(std::fs::File, PathBuf), String> {
-    std::fs::create_dir_all(downloads).map_err(|e| e.to_string())?;
+    // Review M-6: a missing Downloads folder is created 0755 on Unix whatever the umask.
+    catcoms_storage::kept::create_folder(downloads).map_err(|e| e.to_string())?;
     let safe_name = safe_download_name(requested_name);
     for number in 0..1_000 {
         let name = numbered_download_name(&safe_name, number);
@@ -12829,54 +14223,262 @@ fn create_download(
 
 /// Write a whole small artefact (a guide image, a layout export) as one download.
 fn write_download(downloads: &Path, requested_name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
-    let (mut file, path) = create_download(downloads, requested_name)?;
-    if let Err(error) = file.write_all(bytes) {
-        let _ = std::fs::remove_file(&path);
-        return Err(error.to_string());
-    }
-    Ok(path)
+    write_download_held(downloads, requested_name, bytes).map_err(FailedWrite::clean_up)
 }
 
-/// Extension for a download still being written. A streamed save fills one of these and renames it
-/// onto the real name only once the whole file has been verified, so the peer-chosen name never
-/// exists holding bytes Mewtual has not authenticated. Crash, kill or power loss during a transfer
-/// therefore leaves a `.part`, not something that looks like the file.
-const DOWNLOAD_STAGING_SUFFIX: &str = "part";
-
-/// Reserve a staging file and the final name it will be renamed onto.
-///
-/// Both are reserved up front with `create_new`, so a second save of the same file cannot pick the
-/// same final name while this one is still writing, and the rename at the end cannot collide.
-fn create_staged_download(
-    downloads: &Path,
-    requested_name: &str,
-) -> Result<(std::fs::File, PathBuf, PathBuf), String> {
-    let (final_file, final_path) = create_download(downloads, requested_name)?;
-    // The reservation is a placeholder, not the download: hold the name, write elsewhere.
-    drop(final_file);
-    let staging_name = format!(
-        "{}.{DOWNLOAD_STAGING_SUFFIX}",
-        final_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("mewtual-download")
-    );
-    match create_download(downloads, &staging_name) {
-        Ok((file, staging_path)) => Ok((file, staging_path, final_path)),
-        Err(e) => {
-            let _ = std::fs::remove_file(&final_path);
-            Err(e)
+/// A whole-file download write that failed, with the file it created still open when there is
+/// one, so the caller can remove it after releasing any guard it holds (combined review LOW 3:
+/// the verified removal is a rename, an unlink and a folder flush on Unix, never to be run under
+/// the session commit guard).
+struct FailedWrite {
+    error: String,
+    held: Option<(std::fs::File, PathBuf)>,
+}
+impl FailedWrite {
+    /// Remove the created file (PR51 H1: only while its name still holds this very file) and
+    /// return the error with a note when it had to stay.
+    fn clean_up(self) -> String {
+        match self.held {
+            Some((file, path)) => {
+                let removal = remove_staging(&file, &path);
+                let id = catcoms_storage::kept::session_id(&file).ok();
+                format!(
+                    "{}{}",
+                    self.error,
+                    left_in_place(&path, &removal, id, Leftover::Partial)
+                )
+            }
+            None => self.error,
         }
     }
 }
 
-/// Move a verified staging file onto its reserved final name.
+/// [`write_download`] without the cleanup, for a caller that must release a guard first.
+fn write_download_held(
+    downloads: &Path,
+    requested_name: &str,
+    bytes: &[u8],
+) -> Result<PathBuf, FailedWrite> {
+    let (mut file, path) = create_download(downloads, requested_name)
+        .map_err(|error| FailedWrite { error, held: None })?;
+    if let Err(error) = file.write_all(bytes) {
+        return Err(FailedWrite {
+            error: error.to_string(),
+            held: Some((file, path)),
+        });
+    }
+    Ok(path)
+}
+
+/// Remove a name this process created exclusively and whose handle it still holds (PR51 H1): the
+/// `.part` of the fallback writer or the GIF export, or a small download whose write failed.
+/// Storage deletes it only while it still holds the object behind `file` (Windows: through a
+/// delete-denying handle verified to be that object; Unix: renamed aside, verified, then unlinked,
+/// and never in a folder other accounts can modify). Holding `file` meanwhile keeps that object's
+/// number from being reused for another file. Never deletes anything it did not verify.
+fn remove_staging(
+    file: &std::fs::File,
+    path: &Path,
+) -> std::io::Result<catcoms_storage::kept::SessionRemoval> {
+    let id = catcoms_storage::kept::session_id(file)?;
+    remove_staging_by_id(id, path)
+}
+
+/// [`remove_staging`] with the number captured when the file was created, for a failure path
+/// whose handle a panicking worker may already have dropped. Prefer [`remove_staging`] whenever
+/// the handle is still held.
+fn remove_staging_by_id(
+    id: catcoms_storage::kept::SessionId,
+    path: &Path,
+) -> std::io::Result<catcoms_storage::kept::SessionRemoval> {
+    let (Some(folder), Some(leaf)) = (path.parent(), path.file_name().and_then(|n| n.to_str()))
+    else {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    };
+    catcoms_storage::kept::remove_if_session(folder, leaf, id, &mut OsCryptoRng)
+}
+
+/// Which leftover a [`left_in_place`] sentence is about.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Leftover {
+    /// The partly written file of a save that failed.
+    Partial,
+    /// The temporary second name of a file that was saved.
+    SavedCopy,
+}
+
+/// The sentence a save appends after trying to remove one of its own names (PR51 H1, review M-4
+/// and M-5). Said only when the removal left something (Unix: a folder other accounts can modify,
+/// where nothing is deleted automatically; anywhere: a removal that failed), and then only after a
+/// read-only look at the name: "delete it yourself" only while it provably still holds our file
+/// (`id`), nothing when it is gone or now holds somebody else's file (telling the user to delete
+/// that would delete a file Mewtual never created), and a hedged sentence when it cannot be
+/// checked. Runs file I/O, so callers in the writers call it on the blocking pool.
+fn left_in_place(
+    path: &Path,
+    removal: &std::io::Result<catcoms_storage::kept::SessionRemoval>,
+    id: Option<catcoms_storage::kept::SessionId>,
+    what: Leftover,
+) -> String {
+    use catcoms_storage::kept::{SessionAt, SessionRemoval};
+    let shared = matches!(removal, Ok(SessionRemoval::SharedFolder));
+    if !shared && removal.is_ok() {
+        return String::new();
+    }
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let at = id.map_or(SessionAt::Unknown, |id| {
+        catcoms_storage::kept::session_at(path, id)
+    });
+    let subject = match what {
+        Leftover::Partial => format!("partly saved file \"{name}\""),
+        Leftover::SavedCopy => format!("temporary copy \"{name}\" of the saved file"),
+    };
+    match at {
+        SessionAt::Absent | SessionAt::Other => String::new(),
+        SessionAt::Ours if shared => format!(
+            " This folder may be changed by other accounts, so the {subject} was left in place; \
+             delete it yourself."
+        ),
+        SessionAt::Ours => format!(" The {subject} could not be removed; delete it yourself."),
+        SessionAt::Unknown => {
+            format!(" Mewtual could not check \"{name}\", so it was left in place.")
+        }
+    }
+}
+
+/// After a committed publication by a writer without a journal (fallback writer, GIF export):
+/// flush the folder so the new name is durable, then remove our staging name, verified, and
+/// return the sentence to append when it had to stay (review L-1 and M-5). Runs outside the
+/// session commit guard and every lock, on the blocking pool.
+fn settle_published_staging(file: &std::fs::File, staging: &Path) -> String {
+    settle_published_staging_with(file, staging, remove_staging)
+}
+
+/// [`settle_published_staging`] with the removal as a seam, so a test can make it fail.
+fn settle_published_staging_with(
+    file: &std::fs::File,
+    staging: &Path,
+    remove: impl FnOnce(&std::fs::File, &Path) -> std::io::Result<catcoms_storage::kept::SessionRemoval>,
+) -> String {
+    if let Some(folder) = staging.parent() {
+        catcoms_storage::kept::flush_folder(folder);
+    }
+    let removal = remove(file, staging);
+    let id = catcoms_storage::kept::session_id(file).ok();
+    left_in_place(staging, &removal, id, Leftover::SavedCopy)
+}
+
+/// Extension for a download still being written. A streamed save fills one of these and publishes
+/// the real name only once the whole file has been verified, so the peer-chosen name never
+/// exists holding bytes Mewtual has not authenticated. Crash, kill or power loss during a transfer
+/// therefore leaves a `.part`, not something that looks like the file.
+const DOWNLOAD_STAGING_SUFFIX: &str = "part";
+
+/// Reserve a staging file corresponding to an unoccupied final name.
 ///
-/// The reservation is an empty file this same call created, so replacing it is not clobbering
-/// anyone: `rename` over it is the atomic publish, and no window exists in which the final name
-/// holds a partial download.
-fn publish_staged_download(staging: &Path, final_path: &Path) -> Result<(), String> {
-    std::fs::rename(staging, final_path).map_err(|e| e.to_string())
+/// The `.part` is the cooperative reservation between Mewtual saves. Final-path existence is
+/// advisory here: another local action may occupy it while chunks are fetched, so publication
+/// must atomically refuse replacement. We never own a destination merely because we chose it.
+fn create_staged_download(
+    downloads: &Path,
+    requested_name: &str,
+) -> Result<(std::fs::File, PathBuf, PathBuf), String> {
+    // Review M-6: a missing Downloads folder is created 0755 on Unix whatever the umask.
+    catcoms_storage::kept::create_folder(downloads).map_err(|e| e.to_string())?;
+    let safe_name = safe_download_name(requested_name);
+    for number in 0..1_000 {
+        let name = numbered_download_name(&safe_name, number);
+        let final_path = downloads.join(&name);
+        match final_path.symlink_metadata() {
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
+        let staging_leaf = format!("{name}.{DOWNLOAD_STAGING_SUFFIX}");
+        let staging_path = downloads.join(&staging_leaf);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging_path)
+        {
+            Ok(file) => {
+                // Re-review 2 LOW 4: publication needs a no-replace hard link. Probe it on the
+                // fresh, empty reservation, so a Downloads folder that cannot link (FAT or exFAT
+                // without the identities a journal needs) is refused before any plaintext is
+                // written instead of failing after the whole file. The probe removes the
+                // reservation when it refuses (only while that name still proves to be this
+                // file, PR51 H1; it is empty, so a reservation left behind discloses nothing).
+                let file = catcoms_storage::kept::confirm_staging_links(
+                    file,
+                    downloads,
+                    &staging_leaf,
+                    &mut OsCryptoRng,
+                )
+                .map_err(|error| error.to_string())?;
+                return Ok((file, staging_path, final_path));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Err("Too many downloads with this name already exist.".into())
+}
+
+/// Atomically add the verified file at an absent destination, never replacing a local file.
+///
+/// `file` is the handle this process created exclusively at `staging` and still holds. Both paths
+/// are in one folder. Hard-link creation refuses an occupied destination; there is deliberately
+/// no overwriting-rename fallback on filesystems without hard links. PR51 M1: storage's
+/// `publish_unjournaled` names exactly the object behind `file` (Linux and Android link from its
+/// descriptor; Windows holds a delete-denying pin on the staging name across the link; macOS
+/// links by path and then confirms the final name holds our object, failing otherwise), so a
+/// staging name swapped after verification is never published as this save.
+///
+/// Once the link succeeds publication is committed. This is only the link: the caller settles the
+/// staging name afterwards with [`settle_published_staging`], outside the session commit guard
+/// (review L-1), and a refused or failed removal there leaves an orphan `.part` (a second name of
+/// the saved file) and a sentence saying so, never a failed or rolled-back download (review M-5).
+fn publish_staged_download(
+    file: &std::fs::File,
+    staging: &Path,
+    final_path: &Path,
+) -> Result<(), String> {
+    publish_staged_download_with(staging, final_path, |from, to| {
+        catcoms_storage::kept::publish_unjournaled(file, from, to)
+    })
+}
+
+/// Publish the fallback writer's verified staging file from the blocking pool, keeping its handle
+/// in `file` for the settling that follows (PR51 H1/M1). A worker that panics drops the handle
+/// there, and the caller's cleanup then falls back to the number captured at staging.
+async fn publish_staged_on_pool(
+    file: &mut private_downloads::OnPool<std::fs::File>,
+    staging: &Path,
+    final_path: &Path,
+) -> Result<(), String> {
+    let (staging, final_path) = (staging.to_path_buf(), final_path.to_path_buf());
+    let session = file.take();
+    let (session, published) = private_downloads::blocking(move || {
+        let published = publish_staged_download(&session, &staging, &final_path);
+        (session, published)
+    })
+    .await?;
+    file.put(session);
+    published
+}
+
+// A private filesystem seam pins the commit boundary without relying on platform-specific
+// permissions or a race with antivirus. Production always uses storage's verified no-replace
+// publication (`publish_staged_download`).
+fn publish_staged_download_with(
+    staging: &Path,
+    final_path: &Path,
+    link: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), String> {
+    link(staging, final_path).map_err(|e| e.to_string())
 }
 
 fn launch_path(path: &Path) -> Result<(), String> {
@@ -12906,26 +14508,82 @@ fn launch_path(path: &Path) -> Result<(), String> {
 fn reveal_path(path: &Path) -> Result<(), String> {
     // Reveal rather than execute arbitrary shared files. This gives every Download button a
     // visible system window without silently launching a peer-supplied executable or document.
-    #[cfg(target_os = "windows")]
-    let mut cmd = {
-        let mut c = std::process::Command::new("explorer.exe");
-        c.arg(format!("/select,{}", path.to_string_lossy()));
-        c
-    };
-    #[cfg(target_os = "macos")]
-    let mut cmd = {
-        let mut c = std::process::Command::new("open");
-        c.arg("-R").arg(path);
-        c
-    };
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let mut cmd = {
-        let mut c = std::process::Command::new("xdg-open");
-        c.arg(path.parent().unwrap_or(path));
-        c
-    };
+    let command = reveal_command(path, std::env::consts::OS)?;
+    let mut cmd = std::process::Command::new(command.program);
+    cmd.args(command.flags);
+    // Windows: the target is already quoted for Explorer's own parser (see `reveal_command`), so
+    // it must reach the command line as is; `arg` would quote it a second time.
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::raw_arg(&mut cmd, &command.target);
+    #[cfg(not(windows))]
+    cmd.arg(&command.target);
     cmd.spawn().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// How [`reveal_path`] asks the system file manager to show `path`. Pure and keyed by `os`
+/// (`std::env::consts::OS` in production), so every platform's form is tested on any host.
+#[derive(Debug, PartialEq, Eq)]
+struct RevealCommand {
+    program: &'static str,
+    /// Fixed flags, each its own argument, before the target.
+    flags: &'static [&'static str],
+    /// The one variable argument. On Windows it is passed raw (`CommandExt::raw_arg`), already in
+    /// Explorer's syntax; elsewhere it is one literal argument, never seen by a shell.
+    target: std::ffi::OsString,
+}
+
+/// Fix-the-lows round (Transfers review L6). The forms, and why each is the safe one:
+///
+/// - Windows: Explorer parses its own command line and splits `/select,` at commas, so an
+///   unquoted path such as `C:\a,b\c.txt` selected the wrong item or opened another folder. The
+///   path is quoted inside the option (`/select,"C:\a,b\c.txt"`) and passed raw. Windows names
+///   cannot contain `"`, so a path with one was not made by Mewtual and is refused rather than
+///   escaped (Explorer has no escape for it).
+/// - macOS: `open -R` reveals the file without opening it.
+/// - Linux and the other Unix systems: `xdg-open` cannot select a file, so it opens the parent
+///   folder, given with a trailing `/` so that a launcher which resolves the path itself refuses
+///   a non-folder put at that path since the check (`ENOTDIR`) instead of opening it with its
+///   default application. A launcher that normalizes the path first (GIO may drop the slash)
+///   still opens what is there then; see THREAT-MODEL. A path with no parent is refused: the old
+///   fallback handed the file itself to `xdg-open`, which opens (and for some types runs) it.
+fn reveal_command(path: &Path, os: &str) -> Result<RevealCommand, String> {
+    const UNSHOWABLE: &str = "This file cannot be shown in its folder.";
+    match os {
+        "windows" => {
+            if path.as_os_str().to_string_lossy().contains('"') {
+                return Err(UNSHOWABLE.into());
+            }
+            let mut target = std::ffi::OsString::from("/select,\"");
+            target.push(path.as_os_str());
+            target.push("\"");
+            Ok(RevealCommand {
+                program: "explorer.exe",
+                flags: &[],
+                target,
+            })
+        }
+        "macos" => Ok(RevealCommand {
+            program: "open",
+            flags: &["-R"],
+            target: path.as_os_str().to_owned(),
+        }),
+        _ => {
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .ok_or(UNSHOWABLE)?;
+            let mut target = parent.as_os_str().to_owned();
+            if !target.to_string_lossy().ends_with('/') {
+                target.push("/");
+            }
+            Ok(RevealCommand {
+                program: "xdg-open",
+                flags: &[],
+                target,
+            })
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -12937,6 +14595,13 @@ struct SavedFileResult {
     /// `matched`, `mismatch`, or `unrecognized` for an allowlisted declared media type. This is
     /// format evidence only—not a promise that a platform decoder is vulnerability-free.
     content_validation: Option<String>,
+    /// `save_group_file` only: native asserts the saved file sits directly in the resolved
+    /// Downloads folder. The renderer's notice names Downloads only when this is set, because its
+    /// own list can be stale and a save can land at a place chosen in Save as, now or earlier
+    /// (picker re-review LOW 1b and its re-check). It fails closed: any path that does not set it
+    /// names no folder. Omitted from the JSON when false, so other results are unchanged.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    in_downloads: bool,
 }
 
 #[derive(Serialize)]
@@ -13074,7 +14739,7 @@ async fn create_backup(
         .servers
         .lock()
         .await
-        .iter()
+        .legacy_iter()
         .map(|(id, entry)| (*id, entry.instance, op.bind_actor(entry.actor.clone())))
         .collect();
     // Share ordinary snapshot ordering. A backup must never capture an old snapshot and later
@@ -13099,12 +14764,13 @@ async fn create_backup(
         let guard = state.store.lock().await;
         let store = guard
             .as_ref()
+            .and_then(MountedVault::as_legacy)
             .ok_or_else(|| op.fail(codes::VAULT_BACKUP_FAILED, "The vault is not mounted."))?;
         let registry = state.servers.lock().await;
         if registry.len() != servers.len()
             || servers.iter().any(|(id, instance, _)| {
                 registry
-                    .get(id)
+                    .legacy(id)
                     .is_none_or(|entry| entry.instance != *instance)
             })
         {
@@ -13114,7 +14780,7 @@ async fn create_backup(
             ));
         }
         let records: Vec<_> = registry
-            .iter()
+            .legacy_iter()
             .map(|(id, entry)| ServerRecord {
                 id: *id,
                 display_name: entry.name.clone(),
@@ -13159,6 +14825,7 @@ async fn change_vault_secret(
     let guard = state.store.lock().await;
     let store = guard
         .as_ref()
+        .and_then(MountedVault::as_legacy)
         .ok_or_else(|| "unlock the vault before changing its secret".to_string())?;
     vault_secret_change_result(store.change_passphrase(
         current_secret.as_bytes(),
@@ -13219,6 +14886,7 @@ async fn save_and_open_space_guide(
         displayed: warning.is_none(),
         warning,
         content_validation: Some("matched".into()), // generator output passed strict PNG checks
+        in_downloads: false,
     })
 }
 
@@ -13243,6 +14911,7 @@ async fn save_space_layout(
         displayed: warning.is_none(),
         warning,
         content_validation: None,
+        in_downloads: false,
     })
 }
 
@@ -13556,8 +15225,15 @@ where
         return Err("the sheet export is not a Mewtual sheet transcript".into());
     }
     before_commit.await;
-    let _commit = require_ui_session_generation(state, generation).await?;
-    let path = write_download(downloads, name, svg.as_bytes())?;
+    let commit = require_ui_session_generation(state, generation).await?;
+    let path = match write_download_held(downloads, name, svg.as_bytes()) {
+        Ok(path) => path,
+        Err(failed) => {
+            // Combined review LOW 3: clean up a failed write only after releasing the guard.
+            drop(commit);
+            return Err(failed.clean_up());
+        }
+    };
     let warning = reveal(&path)
         .err()
         .map(|error| format!("The sheet was saved, but Downloads could not be opened: {error}"));
@@ -13566,6 +15242,7 @@ where
         displayed: warning.is_none(),
         warning,
         content_validation: None,
+        in_downloads: false,
     })
 }
 
@@ -13587,8 +15264,27 @@ trait SaveSource {
 
     /// Atomically cross from verified staging bytes to a visible plaintext file under the
     /// authorization epoch that started this save. Implementations must not split their final
-    /// session check from the rename.
-    async fn publish_verified(&self, staging: &Path, final_path: &Path) -> Result<(), String>;
+    /// session check from the rename. `file` is the still-open staging handle: publication names
+    /// exactly its object (PR51 M1, [`publish_staged_on_pool`]) and hands it back for cleanup.
+    async fn publish_verified(
+        &self,
+        file: &mut private_downloads::OnPool<std::fs::File>,
+        staging: &Path,
+        final_path: &Path,
+    ) -> Result<(), String>;
+
+    /// The invocation's synchronous liveness (origin not cancelled, read epoch current) as an
+    /// owned check a blocking worker evaluates when it actually starts. The async
+    /// `still_unlocked` runs before a step is dispatched; a step can then wait for a pool thread,
+    /// and Lock can land in that gap. Same contract as the journaled path's
+    /// [`private_downloads::ExportPorts::liveness`]: a queued step that starts after retirement
+    /// does nothing; a started step completes.
+    fn liveness(&self) -> private_downloads::Liveness;
+
+    /// The export capacity this save holds. The staging handle, if it ends up closed on the
+    /// blocking pool after the invocation returned, keeps it occupied until that close finishes
+    /// (second review R2-L1).
+    fn custody(&self) -> Option<catcoms_rt::SharedRequestKeepalive>;
 
     /// Report progress. Purely informational; a dropped update never changes the outcome.
     fn progress(
@@ -13600,12 +15296,12 @@ trait SaveSource {
     );
 }
 
-/// Stream a listed file into Downloads and return the path it was published at.
+/// Stream a listed file into Downloads and return the path it was published at, with a sentence
+/// to append to the saved result when a temporary name had to stay (empty otherwise; review M-5).
 ///
-/// Writes into a `.part` and renames onto the reserved name only once the whole file has been
-/// verified: reserving the final name up front stops a second save landing on it, and writing
-/// elsewhere until the end means neither an error here nor a crash can leave the peer's chosen
-/// filename holding bytes this device has not authenticated. Every failure path removes both.
+/// Writes into a `.part` and publishes at an unoccupied name only after whole-file verification.
+/// The final name stays absent until then. Failures remove only our staging path; a destination
+/// created by another local action during a fetch is never overwritten or deleted.
 async fn stream_download_to_disk(
     downloads: &Path,
     name: &str,
@@ -13613,13 +15309,165 @@ async fn stream_download_to_disk(
     size: u64,
     target: &[u8; 32],
     source: &mut impl SaveSource,
-) -> Result<PathBuf, String> {
-    let (mut file, staging, path) = create_staged_download(downloads, name)?;
-    let failed = |error: String| -> String {
-        let _ = std::fs::remove_file(&staging);
-        let _ = std::fs::remove_file(&path);
-        error
-    };
+) -> Result<(PathBuf, String), String> {
+    // Owned copies: the staging closure runs on the blocking pool and must be 'static.
+    let (downloads, name) = (downloads.to_path_buf(), name.to_owned());
+    stream_download_staged(
+        move || create_staged_download(&downloads, &name),
+        total,
+        size,
+        target,
+        source,
+    )
+    .await
+}
+
+/// The same writer at a place the user picked in "Save as", for a location that cannot carry a
+/// journal. Storage's [`catcoms_storage::kept::ChosenDestination::create_unjournaled`] applies
+/// the chosen-location rules: never create the folder, use the exact chosen name, refuse an
+/// existing name or `.part` instead of numbering, and refuse a folder that cannot hard link.
+async fn stream_download_to_chosen(
+    choice: &catcoms_storage::kept::ChosenDestination,
+    total: usize,
+    size: u64,
+    target: &[u8; 32],
+    source: &mut impl SaveSource,
+) -> Result<(PathBuf, String), String> {
+    // The choice is cloned into the blocking-pool closure: identity reads, exclusive creation and
+    // the hard-link probe can stall on exactly the shares that land on this writer.
+    let choice = choice.clone();
+    stream_download_staged(
+        move || {
+            choice
+                .create_unjournaled(&mut OsCryptoRng)
+                .map_err(|error| error.to_string())
+        },
+        total,
+        size,
+        target,
+        source,
+    )
+    .await
+}
+
+/// Error for a fallback-writer step whose blocking worker started after the invocation retired.
+const RETIRED_SAVE: &str = "The file read is no longer active.";
+
+/// Shared body of the non-resumable writer. `stage` reserves the `.part` and names the final path;
+/// it runs only after the first liveness check, so a retired command creates no plaintext file.
+///
+/// Picker review M2: every filesystem step here (staging, each chunk write, the sync, failure
+/// cleanup and, through [`ActorSaveSource::publish_verified`], publication) runs on the blocking
+/// pool through [`private_downloads::blocking`]. Save as sends identity-less SMB, CIFS and FUSE
+/// folders to this writer, and a stalled share there must pin one blocking thread, never a tokio
+/// worker that chat and sync share. Liveness is still checked on the runtime between steps.
+async fn stream_download_staged(
+    stage: impl FnOnce() -> Result<(std::fs::File, PathBuf, PathBuf), String> + Send + 'static,
+    total: usize,
+    size: u64,
+    target: &[u8; 32],
+    source: &mut impl SaveSource,
+) -> Result<(PathBuf, String), String> {
+    // Refuse a command retired during its earlier plan awaits before creating plaintext staging,
+    // and again when the staging worker starts (it may have waited for a pool thread).
+    source.still_unlocked().await?;
+    let live = source.liveness();
+    let (file, id, staging, path) = private_downloads::blocking(move || {
+        if !live() {
+            return Err(RETIRED_SAVE.to_string());
+        }
+        let (file, staging, path) = stage()?;
+        // PR51 H1: the in-session number every later removal of the staging name is verified
+        // against. Without one nothing here could ever be proven ours, so refuse before any
+        // plaintext is written. The reservation is empty, so leaving it discloses nothing.
+        match catcoms_storage::kept::session_id(&file) {
+            Ok(id) => Ok((file, id, staging, path)),
+            Err(error) => Err(format!(
+                "This folder gives no file number Mewtual can check ({error}), so nothing was \
+                 saved. An empty \"{}\" may remain there.",
+                staging
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            )),
+        }
+    })
+    .await??;
+    // Re-review 2 LOW 7: the open handle lives in `OnPool`, so whichever await returns early, it
+    // is closed on the blocking pool and never on a runtime worker, holding the export capacity
+    // until it is closed (R2-L1).
+    let mut file = private_downloads::OnPool::with_custody(file, source.custody());
+    match fill_staged_download(&mut file, &staging, &path, total, size, target, source).await {
+        Ok(()) => {
+            // Published (the commit guard is already released): flush the folder and settle our
+            // staging name on the pool, outside every guard (review L-1). A name that had to stay
+            // is reported with the saved result, never as a failed save (review M-5).
+            let (settling, open) = (staging.clone(), file.release());
+            let note = private_downloads::blocking(move || match &open {
+                Some(handle) => settle_published_staging(handle, &settling),
+                // A panicking step dropped the handle; fall back to the number from staging.
+                None => {
+                    if let Some(folder) = settling.parent() {
+                        catcoms_storage::kept::flush_folder(folder);
+                    }
+                    let removal = remove_staging_by_id(id, &settling);
+                    left_in_place(&settling, &removal, Some(id), Leftover::SavedCopy)
+                }
+            })
+            .await
+            // Combined review LOW 4: a settling worker that panicked removed nothing we know of;
+            // say so instead of staying silent (no filesystem check on the async runtime).
+            .unwrap_or_else(|_| {
+                let name = staging
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                format!(" Mewtual could not check \"{name}\", so it may have been left in place.")
+            });
+            Ok((path, note))
+        }
+        Err(error) => {
+            // Failures remove only our own staging name, never the final path, and only while
+            // that name still proves to be our file (PR51 H1). The handle (if a panicking step did
+            // not drop it) stays open until the removal is over, so its number cannot be reused
+            // meanwhile; then it closes on the same pool thread. Without the handle (only after a
+            // panic) the number from staging is checked alone, which a reused inode could match
+            // (review L-5): accepted for that path only.
+            let (doomed, open) = (staging.clone(), file.release());
+            let note = private_downloads::blocking(move || {
+                let removal = match &open {
+                    Some(handle) => remove_staging(handle, &doomed),
+                    None => remove_staging_by_id(id, &doomed),
+                };
+                let note = left_in_place(&doomed, &removal, Some(id), Leftover::Partial);
+                drop(open);
+                note
+            })
+            .await;
+            // A cleanup worker that panicked removed nothing we know of. No filesystem check here:
+            // this runs on the async runtime, where a stalled share must never be touched.
+            let note = note.unwrap_or_else(|_| {
+                let name = staging
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                format!(" The partly saved file \"{name}\" may have been left in place.")
+            });
+            Err(format!("{error}{note}"))
+        }
+    }
+}
+
+/// Write, verify and publish one staged download. Any error leaves the caller to remove staging.
+async fn fill_staged_download(
+    file: &mut private_downloads::OnPool<std::fs::File>,
+    staging: &Path,
+    path: &Path,
+    total: usize,
+    size: u64,
+    target: &[u8; 32],
+    source: &mut impl SaveSource,
+) -> Result<(), String> {
     source.progress(0, 0, 0, None);
     let mut address = CidHasher::new();
     let mut bytes_done = 0u64;
@@ -13629,16 +15477,9 @@ async fn stream_download_to_disk(
         // across a lock. Check before asking for bytes and again before writing them: the second
         // check is the one that matters, because the first says nothing about a session that
         // closed while the fetch was outstanding.
-        if let Err(e) = source.still_unlocked().await {
-            return Err(failed(e));
-        }
-        let (chunk, provider) = match source.chunk(i).await {
-            Ok(got) => got,
-            Err(e) => return Err(failed(e)),
-        };
-        if let Err(e) = source.still_unlocked().await {
-            return Err(failed(e));
-        }
+        source.still_unlocked().await?;
+        let (chunk, provider) = source.chunk(i).await?;
+        source.still_unlocked().await?;
         if provider.is_some() {
             network_bytes_done = network_bytes_done.saturating_add(chunk.len() as u64);
         }
@@ -13649,40 +15490,50 @@ async fn stream_download_to_disk(
             .checked_add(chunk.len() as u64)
             .filter(|n| *n <= size);
         let Some(next) = next else {
-            return Err(failed(
-                "this file's chunks hold more data than it declares".into(),
-            ));
+            return Err("this file's chunks hold more data than it declares".into());
         };
         address.update(&chunk);
         bytes_done = next;
-        if let Err(e) = file.write_all(&chunk) {
-            return Err(failed(e.to_string()));
-        }
+        // The file moves to the blocking pool and back with each write. A worker that panics
+        // drops it there; the caller still removes the staging name. A write whose worker starts
+        // after Lock or retirement writes nothing.
+        let live = source.liveness();
+        let mut session = file.take();
+        let (session, written) = private_downloads::blocking(move || {
+            if !live() {
+                return (session, Err(RETIRED_SAVE.to_string()));
+            }
+            let written = session.write_all(&chunk).map_err(|e| e.to_string());
+            (session, written)
+        })
+        .await?;
+        file.put(session);
+        written?;
         source.progress(i + 1, bytes_done, network_bytes_done, provider);
     }
-    if let Err(e) = file.sync_all() {
-        return Err(failed(e.to_string()));
-    }
-    drop(file);
+    // The sync runs on the blocking pool too, so a share that stalls cannot hold a runtime worker.
+    // The handle comes back afterwards: publication links exactly its object and any cleanup is
+    // verified against it (PR51 H1/M1), so it stays open until the save is settled.
+    let session = file.take();
+    let (session, synced) = private_downloads::blocking(move || {
+        let synced = session.sync_all();
+        (session, synced)
+    })
+    .await?;
+    file.put(session);
+    synced.map_err(|e| e.to_string())?;
     if bytes_done != size {
-        return Err(failed(
-            "this file's chunks hold less data than it declares".into(),
-        ));
+        return Err("this file's chunks hold less data than it declares".into());
     }
     // End-to-end integrity, the same check the all-in-one download makes: individually valid
     // chunks in the wrong order (or a manifest that lied) must not be saved as the file.
     if address.cid().as_bytes() != target {
-        return Err(failed(
-            "the reassembled file failed its integrity check".into(),
-        ));
+        return Err("the reassembled file failed its integrity check".into());
     }
     // The source owns one indivisible authorization+rename step. A plain check followed by this
     // rename has a lock TOCTOU: explicit lock can complete in the gap and the old command then
     // publishes plaintext under its final name.
-    if let Err(e) = source.publish_verified(&staging, &path).await {
-        return Err(failed(e));
-    }
-    Ok(path)
+    source.publish_verified(file, staging, path).await
 }
 
 fn exported_media_validation(path: &Path, declared_mime: &str) -> Option<String> {
@@ -13713,25 +15564,55 @@ struct ActorSaveSource<'a> {
     app: &'a AppHandle,
     server: u64,
     cid: String,
-    raw: Vec<u8>,
+    ready: catcoms_app::DownloadReady,
     total: usize,
     size: u64,
     generation: u64,
+    origin: RequestCancellation,
+    operation: Option<String>,
 }
 
 impl SaveSource for ActorSaveSource<'_> {
     async fn chunk(&mut self, index: usize) -> Result<(Vec<u8>, Option<String>), String> {
-        self.actor.fetch_file_chunk(self.raw.clone(), index).await
+        self.actor
+            .read_download_chunk(self.ready.clone(), index, self.origin.clone())
+            .await
+            .map(|chunk| (chunk.into_bytes(), None))
     }
 
     async fn still_unlocked(&self) -> Result<(), String> {
         let generation_check = require_ui_session_generation(self.state, self.generation).await?;
         drop(generation_check);
+        if self.origin.is_cancelled() || !self.ready.is_current() {
+            return Err("The file read is no longer active.".into());
+        }
         Ok(())
     }
 
-    async fn publish_verified(&self, staging: &Path, final_path: &Path) -> Result<(), String> {
-        publish_download_for_generation(self.state, self.generation, staging, final_path).await
+    async fn publish_verified(
+        &self,
+        file: &mut private_downloads::OnPool<std::fs::File>,
+        staging: &Path,
+        final_path: &Path,
+    ) -> Result<(), String> {
+        let _commit = require_ui_session_generation(self.state, self.generation).await?;
+        if self.origin.is_cancelled() || !self.ready.is_current() {
+            return Err("The file read is no longer active.".into());
+        }
+        // The guard stays held across the blocking link, so Lock still waits for this one
+        // check-and-link step, the same shape as the journaled path's guarded `link()`. Tauri
+        // commands are not dropped mid-flight; only process exit could release the guard while the
+        // pool thread still links, and then no later Lock exists to race.
+        publish_staged_on_pool(file, staging, final_path).await
+    }
+
+    fn liveness(&self) -> private_downloads::Liveness {
+        let (origin, ready) = (self.origin.clone(), self.ready.clone());
+        Arc::new(move || !origin.is_cancelled() && ready.is_current())
+    }
+
+    fn custody(&self) -> Option<catcoms_rt::SharedRequestKeepalive> {
+        self.ready.export_custody()
     }
 
     fn progress(
@@ -13741,31 +15622,38 @@ impl SaveSource for ActorSaveSource<'_> {
         network_bytes_done: u64,
         provider: Option<String>,
     ) {
-        let _ = self.app.emit(
-            "download-progress",
-            DownloadProgressEvt {
-                server: self.server,
-                cid: self.cid.clone(),
-                cancellation: None,
-                done,
-                total: self.total,
-                bytes_done,
-                bytes_total: self.size,
-                network_bytes_done,
-                provider,
-            },
-        );
+        if !self.ready.is_current() {
+            return;
+        }
+        keep_session::publish_progress(&self.origin, || {
+            let _ = self.app.emit(
+                "download-progress",
+                DownloadProgressEvt {
+                    server: self.server,
+                    cid: self.cid.clone(),
+                    cancellation: self.operation.clone(),
+                    done,
+                    total: self.total,
+                    bytes_done,
+                    bytes_total: self.size,
+                    network_bytes_done,
+                    provider,
+                },
+            );
+        });
     }
 }
 
+#[cfg(test)]
 async fn publish_download_for_generation(
     state: &AppState,
     generation: u64,
+    file: &std::fs::File,
     staging: &Path,
     final_path: &Path,
 ) -> Result<(), String> {
     let _commit = require_ui_session_generation(state, generation).await?;
-    publish_staged_download(staging, final_path)
+    publish_staged_download(file, staging, final_path)
 }
 
 /// Download a listed group file straight into Downloads, one chunk at a time, and reveal it.
@@ -13780,62 +15668,495 @@ async fn publish_download_for_generation(
 /// Unlike `<a download>`, this has an observable result in a Tauri webview. The file is revealed,
 /// never executed automatically.
 #[tauri::command]
+// Each argument is a named Tauri command field. Preserve that existing frontend/native wire
+// contract rather than introducing a differently shaped request just to shorten this signature.
+#[allow(clippy::too_many_arguments)]
 async fn save_group_file(
     app: AppHandle,
     state: State<'_, AppState>,
     server: u64,
     cid: String,
     name: String,
+    resume: Option<String>,
+    expected_intent: Option<String>,
+    operation: Option<String>,
+    fresh_copy: Option<bool>,
+    save_as: Option<bool>,
+    replace_older: Option<bool>,
 ) -> Result<SavedFileResult, String> {
-    let generation = unlocked_ui_session_generation(&state).await?;
+    let generation = keep_session::invocation_generation(&state).await?;
+    if operation.as_ref().is_some_and(|id| {
+        id.is_empty()
+            || id.len() > 128
+            || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    }) {
+        return Err("Invalid download progress ID.".into());
+    }
     let raw = hex::decode(cid.trim()).map_err(|e| format!("bad cid: {e}"))?;
     let target: [u8; 32] = raw
         .clone()
         .try_into()
         .map_err(|_| "bad cid length".to_string())?;
-    let actor = actor_of(&state, server).await?;
-    let (total, size) = actor.file_download_plan(raw.clone()).await.ok_or_else(|| {
-        "this file can't be downloaded; it isn't listed, or its reference is invalid".to_string()
-    })?;
-    let declared_mime = actor
-        .file_head(raw.clone())
+    let resume = resume.as_deref().map(private_downloads::id).transpose()?;
+    let (actor, instance) = actor_instance_of(&state, server).await?;
+    let origin = keep_session::for_actor(&state, server, &actor, generation)
         .await
-        .ok_or_else(|| {
-            "this file can't be inspected; it isn't listed, or its reference is invalid".to_string()
-        })?
-        .mime;
-    if size > MAX_FILE_BYTES as u64 {
-        return Err(format!(
-            "file is larger than the {MAX_FILE_BYTES}-byte limit"
-        ));
-    }
-    let downloads = app.path().download_dir().map_err(|e| e.to_string())?;
-    let mut source = ActorSaveSource {
-        actor,
-        state: &state,
-        app: &app,
-        server,
-        cid,
-        raw,
-        total,
-        size,
-        generation,
+        .ok_or_else(|| "The file read is no longer active.".to_string())?;
+    // "Save as" (picker review M4): native opens the dialog itself (the renderer never supplies a
+    // path), after this invocation's generation and origin are captured and before any export
+    // slot, record, acquisition or allowance is touched, so cancelling changes nothing and an
+    // open dialog holds no slot. At most one dialog is open at a time. The dialog can outlive
+    // Lock, unlock or a server replacement, so all of that is rechecked once it closes.
+    let chosen = if save_as.unwrap_or(false) {
+        // Picker review L6: no resolvable Downloads folder only changes where the dialog starts.
+        // Save as is the remedy offered when Downloads cannot be used, so it must not need it.
+        let downloads = app.path().download_dir().ok();
+        let chooser = private_downloads::NativeChooser::new(app.clone());
+        // Lock, unlock or a server replacement cancels the origin and ends the wait, releasing
+        // the one-dialog turn even if the OS dialog never answers.
+        let mut abandoned = origin.clone();
+        let choice =
+            private_downloads::choose_destination(&chooser, downloads, &name, async move {
+                abandoned.cancelled().await
+            })
+            .await?;
+        let current = actor_instance_of(&state, server)
+            .await
+            .is_ok_and(|(_, now)| now == instance);
+        if origin.is_cancelled()
+            || !current
+            || keep_session::invocation_generation(&state).await? != generation
+        {
+            return Err("The download is no longer active.".into());
+        }
+        match choice {
+            Some(choice) => Some(Arc::new(choice)),
+            None => return Err(private_downloads::SAVE_AS_CANCELLED.into()),
+        }
+    } else {
+        None
     };
-    let path =
-        stream_download_to_disk(&downloads, &name, total, size, &target, &mut source).await?;
-    // Keep inspection and the OS reveal in the same initiating UI epoch as publication. If lock
-    // won after the rename guard was released, the verified file may remain in Downloads, but the
-    // stale command cannot inspect/reveal it or report success behind the lock screen.
-    let _commit = require_ui_session_generation(&state, generation).await?;
-    let content_validation = exported_media_validation(&path, &declared_mime);
-    let warning = reveal_path(&path)
+    let export_slot = private_downloads::export_slot()?;
+    // A file of an abandoned earlier save that stays on disk; reported with the new result.
+    let mut left_behind = None;
+    if let Some(id) = resume {
+        // Explicit Resume changes intent by CAS; it neither supplies a new plan nor replenishes
+        // an exhausted allowance. A newer pause/replacement must defeat this delayed click.
+        let intent = private_downloads::intent(
+            expected_intent
+                .as_deref()
+                .ok_or("Download revision is required.")?,
+        )?;
+        // Save new copy, destination preflight (before re-verification spends allowance) and
+        // the intent CAS. A save the preflight finds already published finishes here.
+        let prepared = private_downloads::prepare_resume(
+            &state,
+            server,
+            instance,
+            generation,
+            &actor,
+            &origin,
+            id,
+            intent,
+            fresh_copy.unwrap_or(false),
+            chosen.is_some(),
+        )
+        .await?;
+        if let Some(mut saved) = prepared.saved {
+            // A recovered save keeps its journal's own folder, which may be a chosen place.
+            saved.in_downloads = private_downloads::saved_in_downloads(
+                app.path().download_dir().ok().as_deref(),
+                Path::new(&saved.path),
+            );
+            // PR #56: it is listed (or the result says why not), and it never replaces.
+            if let Some(note) = prepared.unlisted {
+                private_downloads::append_warning(&mut saved, note);
+            }
+            if replace_older.unwrap_or(false) {
+                private_downloads::append_warning(&mut saved, saved_files::NOT_REPLACED_THIS_TIME);
+            }
+            return Ok(saved);
+        }
+        left_behind = prepared.notice;
+    } else if expected_intent.is_some() || fresh_copy.is_some() {
+        return Err("Download ID is required.".into());
+    }
+    // Second review R2-M3: Save new copy may already have abandoned the old journal, and the
+    // notice about a file it left on disk exists only in `left_behind`. Everything from here on
+    // runs in one block whose result, success or failure, carries that notice.
+    let result: Result<SavedFileResult, String> = async {
+        if origin.is_cancelled() {
+            return Err("The download is no longer active.".into());
+        }
+        // No external .part exists during acquisition. Only encrypted, owner-scoped chunks survive
+        // interruption/restart; resuming always captures this fresh invocation. A new "Save as"
+        // choice is remembered in the sealed record before any network work (picker review H2).
+        let ready = actor
+            .acquire_download_to(raw, resume, chosen.clone(), origin.clone())
+            .await?
+            .with_export_custody(export_slot);
+        if origin.is_cancelled() || !ready.is_current() {
+            return Err("The download is no longer active.".into());
+        }
+        let total = ready.chunks();
+        let size = ready.total_size();
+        let declared_mime = ready.mime().to_owned();
+        if size > MAX_FILE_BYTES as u64 {
+            return Err(format!(
+                "file is larger than the {MAX_FILE_BYTES}-byte limit"
+            ));
+        }
+        // The record, not this invocation, names where a fresh save goes (see select_destination).
+        let destination =
+            private_downloads::select_destination(ready.planned(), chosen.is_some(), || {
+                app.path().download_dir().map_err(|e| e.to_string())
+            })?;
+        // Journaled, resumable export first; the non-resumable writer only when this destination
+        // cannot carry a journal for a fresh save (no stable identity, links unsupported).
+        let context = private_downloads::ExportContext {
+            state: &state,
+            app: &app,
+            actor: &actor,
+            server,
+            instance,
+            generation,
+            origin: &origin,
+            cid: &cid,
+            operation: operation.as_deref(),
+        };
+        let journaled =
+            private_downloads::export_journaled(&context, &ready, &destination, &name).await?;
+        let resumable = journaled.is_some();
+        // Review L3: when the staging name could not be settled, the Published record stays so the
+        // leftover second plaintext name remains visible in Transfers until Clear removes it.
+        let keep_record = journaled
+            .as_ref()
+            .is_some_and(|exported| !exported.staging_cleared);
+        // Review M-5: a temporary name that had to stay is reported with the saved result.
+        let mut staging_note: Option<String> = None;
+        // PR #56: where the saved file is for the saved-files list (identities only from a
+        // journal), and whether this save found an interrupted session's publication instead.
+        let mut journaled_location = None;
+        let mut recovered = false;
+        let mut started_from = None;
+        let path = match journaled {
+            Some(exported) => {
+                staging_note = exported.staging_note.map(str::to_owned);
+                journaled_location = Some(exported.location);
+                recovered = exported.recovered;
+                started_from = exported.started_from;
+                exported.path
+            }
+            None => {
+                let mut source = ActorSaveSource {
+                    actor: actor.clone(),
+                    state: &state,
+                    app: &app,
+                    server,
+                    cid: cid.clone(),
+                    ready: ready.clone(),
+                    total,
+                    size,
+                    generation,
+                    origin: origin.clone(),
+                    operation: operation.clone(),
+                };
+                let written = match &destination {
+                    private_downloads::Destination::Downloads(folder) => {
+                        stream_download_to_disk(folder, &name, total, size, &target, &mut source)
+                            .await
+                    }
+                    private_downloads::Destination::Chosen(choice) => {
+                        stream_download_to_chosen(choice, total, size, &target, &mut source).await
+                    }
+                };
+                let (path, note) = written.map_err(|error| {
+                    format!("{error} {}", private_downloads::NOT_RESUMABLE_NOTE)
+                })?;
+                if !note.is_empty() {
+                    staging_note = Some(note.trim_start().to_owned());
+                }
+                path
+            }
+        };
+        // PR #56: list the publication at once, in every case (design review L10), before
+        // anything below can stop this invocation. "Replace my older saved copy" reads its
+        // candidate from the same locked list, under a per-file claim; a recovered publication
+        // is listed but never replaces.
+        let asked = replace_older.unwrap_or(false);
+        let ask = (asked && !recovered).then(|| saved_files::ReplaceAsk {
+            claim: saved_files::ReplaceClaim::try_acquire(server, target),
+            // Only a fresh one-click save into Downloads names what it asked for; a Save as name,
+            // or a reopened journal's (which may be a Save as name), is never renamed (design
+            // review M2, adversarial review M2). The non-resumable writer has no identity, so it
+            // never replaces anyway.
+            started_from,
+        });
+        let location = journaled_location
+            .or_else(|| catcoms_storage::kept::SavedLocation::unidentified(&path));
+        let recorded = match location {
+            Some(location) => {
+                saved_files::record_save(
+                    &state,
+                    server,
+                    instance,
+                    saved_files::PublishedSave {
+                        cid: ready.cid(),
+                        size,
+                        location,
+                    },
+                    ask,
+                )
+                .await
+            }
+            None => saved_files::Recorded::No { tell: true },
+        };
+        let unlisted = recorded.note();
+        let mut replace_note: Option<&'static str> = None;
+        let plan = match recorded {
+            saved_files::Recorded::Yes {
+                replace: saved_files::ReplaceChoice::Run(plan),
+                ..
+            } if !keep_record => Some(plan),
+            saved_files::Recorded::Yes {
+                replace: saved_files::ReplaceChoice::Skip(note),
+                ..
+            } => {
+                replace_note = note;
+                None
+            }
+            // Not asked, or asked for a save that is not finished tidying up (a kept record),
+            // a recovered publication, or one that could not be listed.
+            _ => {
+                if asked {
+                    replace_note = Some(saved_files::NOT_REPLACED_THIS_TIME);
+                }
+                None
+            }
+        };
+        if let Some(plan) = plan {
+            // The replace branch: release the private record first (its journal names the new
+            // copy's first name, which the replace may drop), then replace, then inspect and
+            // reveal the final name. Releasing retires the storage lease by design, so the
+            // response is fenced by the original invocation, as `finish_recovered_save` is.
+            let released = actor.finish_download_export(ready.clone()).await.is_ok();
+            let (final_path, notes) = if released {
+                let done =
+                    saved_files::run_replace(&state, server, instance, &origin, &ready, *plan)
+                        .await;
+                let final_path = done
+                    .renamed_to
+                    .map_or_else(|| path.clone(), |leaf| path.with_file_name(leaf));
+                (final_path, done.notes)
+            } else {
+                drop(plan);
+                (
+                    path.clone(),
+                    vec![saved_files::NOT_REPLACED_THIS_TIME.into()],
+                )
+            };
+            let mut saved = finish_saved_read_if(
+                &state,
+                generation,
+                &origin,
+                &final_path,
+                &declared_mime,
+                inspect_published,
+                reveal_path,
+                || ready.invocation_current(),
+            )
+            .await?;
+            saved.in_downloads = private_downloads::saved_in_downloads(
+                app.path().download_dir().ok().as_deref(),
+                &final_path,
+            );
+            if let Some(note) = staging_note {
+                private_downloads::append_warning(&mut saved, &note);
+            }
+            if !released {
+                private_downloads::append_warning(&mut saved, DOWNLOAD_COPY_LEFT);
+            }
+            for note in notes {
+                private_downloads::append_warning(&mut saved, &note);
+            }
+            return Ok(saved);
+        }
+        let mut saved = finish_saved_read_if(
+            &state,
+            generation,
+            &origin,
+            &path,
+            &declared_mime,
+            inspect_published,
+            reveal_path,
+            || ready.is_current(),
+        )
+        .await?;
+        // Native, not the renderer's possibly stale list, says whether this is in Downloads.
+        saved.in_downloads =
+            private_downloads::saved_in_downloads(app.path().download_dir().ok().as_deref(), &path);
+        if !resumable {
+            // Say honestly that this location could not have resumed an interrupted save.
+            private_downloads::append_warning(&mut saved, private_downloads::NOT_RESUMABLE_NOTE);
+        }
+        if let Some(note) = staging_note {
+            private_downloads::append_warning(&mut saved, &note);
+        }
+        for note in unlisted.into_iter().chain(replace_note) {
+            private_downloads::append_warning(&mut saved, note);
+        }
+        if keep_record {
+            private_downloads::append_warning(&mut saved, private_downloads::STAGING_LEFT);
+            let _commit = keep_session::read_commit(&state, generation, &origin).await?;
+            if !ready.invocation_current() {
+                return Err("The download is no longer active.".into());
+            }
+            return Ok(saved);
+        }
+        // Publication is already committed. Cleanup failure must never turn that success into a
+        // retryable save error or remove the external file; retained ciphertext remains charged.
+        finish_download_response(
+            &state,
+            generation,
+            &origin,
+            saved,
+            || ready.invocation_current(),
+            actor.finish_download_export(ready.clone()),
+        )
+        .await
+    }
+    .await;
+    private_downloads::report_left_behind(result, left_behind)
+}
+
+/// Said with a successful save whose private encrypted copy could not be released.
+const DOWNLOAD_COPY_LEFT: &str =
+    "The file was saved. Its encrypted download copy could not be removed; remove it from Transfers.";
+
+/// Cleanup can wait behind actor work AFTER external publication. Its completion is not a new
+/// native response capability: the ORIGINAL invocation must still authorize returning a path.
+/// Self-cleanup deliberately retires storage custody, so only the original actor/Root observer
+/// participates in this final fence. A refusal never rolls back the committed external file.
+async fn finish_download_response<A, F>(
+    state: &AppState,
+    generation: u64,
+    origin: &RequestCancellation,
+    mut saved: SavedFileResult,
+    allowed: A,
+    cleanup: F,
+) -> Result<SavedFileResult, String>
+where
+    A: Fn() -> bool,
+    F: Future<Output = Result<(), String>>,
+{
+    if cleanup.await.is_err() {
+        // Picker review L1: append, never replace. Earlier notices (an old partial left on disk,
+        // a location that cannot resume, a failed reveal) must survive a failed cleanup.
+        private_downloads::append_warning(&mut saved, DOWNLOAD_COPY_LEFT);
+    }
+    let _commit = keep_session::read_commit(state, generation, origin).await?;
+    if !allowed() {
+        return Err("The download is no longer active.".into());
+    }
+    Ok(saved)
+}
+
+/// Post-publication inspection/reveal is still part of the ORIGINAL native invocation. Lock
+/// can publish its atomic generation during CPU/OS work even while the commit mutex is held.
+/// Recheck at each synchronous boundary; a file already renamed stays in Downloads on refusal.
+#[cfg(test)]
+async fn finish_saved_read<I, IF, R>(
+    state: &AppState,
+    generation: u64,
+    origin: &RequestCancellation,
+    path: &Path,
+    declared_mime: &str,
+    inspect: I,
+    reveal: R,
+) -> Result<SavedFileResult, String>
+where
+    I: FnOnce(PathBuf, String) -> IF,
+    IF: Future<Output = Option<String>>,
+    R: FnOnce(&Path) -> Result<(), String>,
+{
+    finish_saved_read_if(
+        state,
+        generation,
+        origin,
+        path,
+        declared_mime,
+        inspect,
+        reveal,
+        || true,
+    )
+    .await
+}
+
+/// The media signature check of a published save, on the blocking pool (picker re-review
+/// MEDIUM 1). It opens and reads the file it just published, which sits on whatever share the
+/// user saved to; a stalled share must pin a pool thread, never a tokio worker. A worker that dies
+/// reports "unrecognized", so the notice treats the copy as untrusted rather than as checked.
+async fn inspect_published(path: PathBuf, declared_mime: String) -> Option<String> {
+    inspect_published_with(path, declared_mime, exported_media_validation).await
+}
+
+/// [`inspect_published`] with the inspection injected, so a test can park it.
+async fn inspect_published_with(
+    path: PathBuf,
+    declared_mime: String,
+    inspect: impl FnOnce(&Path, &str) -> Option<String> + Send + 'static,
+) -> Option<String> {
+    private_downloads::blocking(move || inspect(&path, &declared_mime))
+        .await
+        .unwrap_or_else(|_| Some("unrecognized".into()))
+}
+
+/// Inspect and reveal a published save, then return it only if the ORIGINAL invocation is still
+/// authorized. `inspect` runs before the session commit guard is taken (picker re-review
+/// MEDIUM 1): that guard is process-wide (Lock and every other save's checks take it), and the
+/// inspection reads the destination, which can stall. Its result reaches the renderer only after
+/// the guarded recheck below, and a retired invocation is refused before inspection starts.
+// Keep original session/read owners and the independently testable authorization/publication
+// callbacks explicit. Their ordering is a security boundary; an argument-bundle refactor is not
+// needed to preserve this established helper's contract.
+#[allow(clippy::too_many_arguments)]
+async fn finish_saved_read_if<I, IF, R, A>(
+    state: &AppState,
+    generation: u64,
+    origin: &RequestCancellation,
+    path: &Path,
+    declared_mime: &str,
+    inspect: I,
+    reveal: R,
+    allowed: A,
+) -> Result<SavedFileResult, String>
+where
+    I: FnOnce(PathBuf, String) -> IF,
+    IF: Future<Output = Option<String>>,
+    R: FnOnce(&Path) -> Result<(), String>,
+    A: Fn() -> bool,
+{
+    if origin.is_cancelled() || !allowed() {
+        return Err("The download is no longer active.".into());
+    }
+    let content_validation = inspect(path.to_path_buf(), declared_mime.to_owned()).await;
+    let _commit = keep_session::read_commit(state, generation, origin).await?;
+    if origin.is_cancelled() || !allowed() {
+        return Err("The file read is no longer active.".into());
+    }
+    // Folder-neutral: the save may be in Downloads or at a place chosen in Save as.
+    let warning = reveal(path)
         .err()
-        .map(|error| format!("The file was saved, but Downloads could not be opened: {error}"));
+        .map(|error| format!("The file was saved, but its folder could not be opened: {error}"));
+    if origin.is_cancelled() || !allowed() {
+        return Err("The file read is no longer active.".into());
+    }
     Ok(SavedFileResult {
         path: path.to_string_lossy().into_owned(),
         displayed: warning.is_none(),
         warning,
         content_validation,
+        in_downloads: false,
     })
 }
 
@@ -13863,11 +16184,20 @@ async fn authenticate_mounted_store(
     passphrase: &[u8],
 ) -> Result<bool, catcoms_app::AppError> {
     let store_guard = state.store.lock().await;
-    let Some(store) = store_guard.as_ref() else {
-        return Ok(false);
-    };
-    store.verify_passphrase(passphrase)?;
-    Ok(true)
+    match store_guard.as_ref() {
+        None => Ok(false),
+        Some(MountedVault::Legacy(store)) => {
+            store.verify_passphrase(passphrase)?;
+            Ok(true)
+        }
+        // This route currently implements legacy restoration only. An actual
+        // mounted native owner must remain intact until its checked cold and
+        // authenticated re-entry paths exist. It is never permission to try an
+        // old opener against the same mount or restore its old flat registry.
+        Some(MountedVault::TextV2(_)) => Err(catcoms_app::AppError::Invalid(
+            "Chat V2 vault opening is not enabled yet.".into(),
+        )),
+    }
 }
 
 /// Resolve continuity debt from the locked UI generation before reopening native IPC.
@@ -13894,7 +16224,7 @@ async fn settle_ui_lock_continuity_before_unlock(
             Err(error) => Err(error),
             Ok(()) => {
                 let store = state.store.lock().await;
-                match store.as_ref() {
+                match store.as_ref().and_then(MountedVault::as_legacy) {
                     Some(store) => store
                         .save_ui_state(snapshot.json.as_bytes(), &mut OsCryptoRng)
                         .map_err(|error| error.to_string()),
@@ -13951,21 +16281,162 @@ async fn settle_ui_lock_continuity_before_unlock(
     Ok(())
 }
 
-/// Commit a successful authentication only if no newer explicit lock began while Argon2, disk
-/// reads, or actor reloads were in flight. The generation is checked on both sides of updating the
-/// flags because `lock_session_inner` deliberately invalidates commands before awaiting this
-/// commit mutex. A racing lock therefore either wins first or makes this transition roll itself
-/// back; a completed lock can never be undone by stale unlock work.
+/// Prepare retained actors one at a time outside native commit. Mounted lock deliberately keeps
+/// their network loops alive, but unlock must attach new owners rather than revive closed ones.
+async fn reattach_voice_actors(
+    state: &AppState,
+    expected_generation: u64,
+    ticket: &SessionTicket,
+) -> Result<(), String> {
+    let actors: Vec<_> = state
+        .servers
+        .lock()
+        .await
+        .legacy_iter()
+        .filter(|(_, entry)| {
+            entry
+                .voice
+                .as_ref()
+                .is_none_or(|owner| !owner.0.is_current_for(ticket))
+        })
+        .map(|(id, entry)| (*id, entry.instance, entry.actor.clone()))
+        .collect();
+    for (id, instance, actor) in actors {
+        let preparation = actor
+            .prepare_voice_actor(voice_runtime(state), ticket.clone())
+            .await;
+        let _commit = state.ui_session_commit.lock().await;
+        let mut servers = state.servers.lock().await;
+        if state.ui_session_generation.load(Ordering::SeqCst) != expected_generation
+            || !voice_runtime(state).is_current_ticket(ticket)
+        {
+            return Err("unlock was superseded by a newer lock request; try again".into());
+        }
+        let Some(entry) = servers
+            .legacy_mut(&id)
+            .filter(|entry| entry.instance == instance)
+        else {
+            // Leave/reload won while the actor reply was pending. Its abandoned candidate is
+            // dropped; it must never install itself onto a reused numeric server id.
+            continue;
+        };
+        if entry
+            .voice
+            .as_ref()
+            .is_some_and(|owner| owner.0.is_current_for(ticket))
+        {
+            continue;
+        }
+        match preparation.and_then(|registration| {
+            registration.register().map_err(|error| error.to_string())?;
+            Ok(registration)
+        }) {
+            Ok(registration) => entry.voice = Some(RegisteredVoiceActor(registration)),
+            Err(error) => {
+                // Voice capacity and a stopped actor cannot turn authentication into a vault-
+                // wide failure. This row remains closed; a later unlock retries the attachment.
+                entry.voice = None;
+                tracing::warn!(server = id, %error, "VOICE.ATTACHMENT.UNAVAILABLE");
+            }
+        }
+        // Drop both native guards before the next actor await. Already registered inactive
+        // actors consume no pending-preparation slot, so large restores do not hit the cap of 8.
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 async fn finalize_unlock_session(
     state: &AppState,
     expected_generation: u64,
     include_running_servers: bool,
 ) -> Result<Option<Vec<ReloadedServer>>, String> {
+    let ticket = voice_runtime(state).session_ticket();
+    finalize_unlock_session_with_voice(state, expected_generation, include_running_servers, &ticket)
+        .await
+}
+
+/// Commit a successful authentication only if no newer explicit lock began while Argon2, disk
+/// reads, or actor reloads were in flight. The generation is checked on both sides of updating the
+/// flags because `lock_session_inner` deliberately invalidates commands before awaiting this
+/// commit mutex. A racing lock therefore either wins first or makes this transition roll itself
+/// back; a completed lock can never be undone by stale unlock work.
+async fn finalize_unlock_session_with_voice(
+    state: &AppState,
+    expected_generation: u64,
+    include_running_servers: bool,
+    voice_ticket: &SessionTicket,
+) -> Result<Option<Vec<ReloadedServer>>, String> {
+    finalize_unlock_session_with_voice_checked(
+        state,
+        expected_generation,
+        include_running_servers,
+        voice_ticket,
+        || true,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Native selected3 supplies its actual original host/physical negatives. The
+/// legacy wrapper retains its existing contract. Neither callback grants UI
+/// authority: the secret and original generation must independently be valid.
+async fn finalize_unlock_session_with_voice_checked(
+    state: &AppState,
+    expected_generation: u64,
+    include_running_servers: bool,
+    voice_ticket: &SessionTicket,
+    mount_is_live: impl Fn() -> bool + Send + Sync,
+    native_target: Option<Arc<catcoms_app::store::NativeTextVaultAuthenticationCheck>>,
+    native_notice: Option<&mut Option<native_text::ui_state::snapshots::Notice>>,
+) -> Result<Option<Vec<ReloadedServer>>, String> {
+    state.native_text.preludes.wait_idle().await;
+    if !mount_is_live() {
+        return Err("The mounted vault has closed.".into());
+    }
+    // A lock may have published its SC barrier without yet starting the
+    // native-owned Root drain. Probe/start it here too, before authorization.
+    // Root's retirement bound is inclusive: preserve this NEW generation.
+    native_text::retirement::older_than(state, expected_generation).await?;
+    reattach_voice_actors(state, expected_generation, voice_ticket).await?;
+    // Allocate/choose canonical metadata before guards. Whole replaced payment
+    // is kept in this outer variable even if final publication is superseded.
+    let mut candidate_target = native_target
+        .as_ref()
+        .map(|target| state.native_text.ui_state.canonical_target(target));
+    let mut _retired_target = None;
+    let io = state.native_text.ui_state.lock_lane().await;
+    let _io = if let Some(target) = native_target.as_ref() {
+        let (io, result, notice) = native_text::ui_state::snapshots::flush(
+            state,
+            io,
+            native_text::ui_state::snapshots::Purpose::Authentication {
+                generation: expected_generation,
+                target,
+            },
+        )
+        .await;
+        if let Some(output) = native_notice {
+            *output = notice;
+        }
+        result?;
+        io
+    } else {
+        io
+    };
+    #[cfg(test)]
+    state.native_text.unlock_commit_wait.notify_one();
     let _commit = state.ui_session_commit.lock().await;
-    if state.ui_session_generation.load(Ordering::Acquire) != expected_generation {
+    if !state.native_text.preludes.is_idle_cached()
+        || !mount_is_live()
+        || state.ui_session_generation.load(Ordering::SeqCst) != expected_generation
+    {
         return Err("unlock was superseded by a newer lock request; try again".into());
     }
-    settle_ui_lock_continuity_before_unlock(state, expected_generation).await?;
+    if native_target.is_none() {
+        settle_ui_lock_continuity_before_unlock(state, expected_generation).await?;
+    }
     // A successful authenticated transition either retried the exact pending bytes or crossed the
     // explicit malformed-snapshot acknowledgement flow. The old close warning is now resolved and
     // must not leak into a later, newly authorized UI session.
@@ -13975,20 +16446,58 @@ async fn finalize_unlock_session(
     } else {
         None
     };
-    if state.ui_session_generation.load(Ordering::Acquire) != expected_generation {
+    if !state.native_text.preludes.is_idle_cached()
+        || !mount_is_live()
+        || state.ui_session_generation.load(Ordering::SeqCst) != expected_generation
+    {
         return Err("unlock was superseded by a newer lock request; try again".into());
     }
 
     let mut resumable = state.session_resumable.lock().await;
-    let reopening = !*resumable || state.session_lock_requested.load(Ordering::Acquire);
+    if let Some(target) = native_target.as_ref() {
+        let store = state.store.lock().await; // UI -> resumable -> short Store
+        if !store
+            .as_ref()
+            .and_then(MountedVault::as_text_v2)
+            .is_some_and(|vault| target.is_for_original_vault(vault))
+        {
+            return Err("The mounted vault changed.".into());
+        }
+    }
+    let reopening = !*resumable || ui_session_closed(state);
     *resumable = true;
-    state.session_lock_requested.store(false, Ordering::Release);
-    if state.ui_session_generation.load(Ordering::Acquire) != expected_generation {
+    let activation = voice_runtime(state).activate_session(voice_ticket);
+    if state.native_text.preludes.is_idle_cached()
+        && mount_is_live()
+        && activation.is_ok()
+        && state.ui_session_generation.load(Ordering::SeqCst) == expected_generation
+    {
+        if let Some(target) = candidate_target.take() {
+            _retired_target = state.native_text.ui_state.install_target(target);
+        }
+        state
+            .ui_authorized_generation
+            .store(expected_generation, Ordering::SeqCst);
+        state.session_lock_requested.store(false, Ordering::SeqCst);
+    }
+    if !state.native_text.preludes.is_idle_cached()
+        || !mount_is_live()
+        || activation.is_err()
+        || state.ui_session_generation.load(Ordering::SeqCst) != expected_generation
+        || state.session_lock_requested.load(Ordering::SeqCst)
+    {
         // A lock request may publish its generation without this mutex so new IPC fails promptly.
         // Restore the conservative state before releasing either transition boundary.
         *resumable = false;
-        state.session_lock_requested.store(true, Ordering::Release);
+        state.session_lock_requested.store(true, Ordering::SeqCst);
         return Err("unlock was superseded by a newer lock request; try again".into());
+    }
+    if let Some(session) = keep_session::current(state, expected_generation) {
+        for entry in state.servers.lock().await.legacy_values() {
+            entry
+                .actor
+                .set_keep_session(Some(entry.files.scope(session.clone())));
+        }
     }
     if reopening {
         // Reuse each running server's single discovery worker. A mounted unlock must not wait
@@ -14000,6 +16509,26 @@ async fn finalize_unlock_session(
     Ok(servers)
 }
 
+#[cfg(test)]
+#[path = "unlock_generation_tests.rs"]
+mod unlock_generation_tests;
+
+/// Parse the exact native lock-barrier generation without accepting alternate spellings or
+/// allocating proportional to attacker input. This is stale-work correlation, not a capability:
+/// passphrase authentication and all existing final commit checks still apply.
+fn parse_unlock_generation(value: &str) -> Result<u64, &'static str> {
+    if value.is_empty()
+        || value.len() > 20
+        || (value.len() > 1 && value.starts_with('0'))
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err("unlock requires a canonical native lock generation");
+    }
+    value
+        .parse()
+        .map_err(|_| "unlock requires a canonical native lock generation")
+}
+
 /// Unlock the on-disk store with `passphrase` and reload every persisted server. Called once
 /// at launch. A wrong passphrase fails (the vault won't open); a first-ever launch just
 /// creates the vault and returns no servers. Returns the reloaded servers for the rail.
@@ -14008,8 +16537,38 @@ async fn unlock(
     app: AppHandle,
     state: State<'_, AppState>,
     passphrase: String,
+    expected_ui_generation: String,
     trace: Option<String>,
 ) -> Result<Vec<ReloadedServer>, AppError> {
+    let native = &*state;
+    unlock_authentication(
+        native,
+        passphrase,
+        expected_ui_generation,
+        trace,
+        |generation, voice_ticket, op, passphrase| {
+            unlock_cold(app, native, passphrase, generation, voice_ticket, op)
+        },
+    )
+    .await
+}
+
+/// The actual RPC's shared authentication/admission path. A cold continuation is trusted native
+/// code, invoked only after the exact generation gate and real mounted-vault authentication have
+/// run. The SAME mount guard spans the entire continuation; neither tests nor callers receive a
+/// bare success flag or a replacement generation. Owned inputs avoid a second authorization seam.
+/// Tests can hold this production future completely unpolled without constructing a Wry window.
+async fn unlock_authentication<C, CF>(
+    state: &AppState,
+    passphrase: String,
+    expected_ui_generation: String,
+    trace: Option<String>,
+    cold: C,
+) -> Result<Vec<ReloadedServer>, AppError>
+where
+    C: FnOnce(u64, SessionTicket, Operation, String) -> CF,
+    CF: Future<Output = Result<Vec<ReloadedServer>, AppError>>,
+{
     // Unlock is the one operation whose failures a user meets before anything else works, and the
     // three of them are entirely different: the passphrase is wrong, the vault is unreadable, or it
     // opened and some servers did not come back. All three were one string.
@@ -14020,24 +16579,59 @@ async fn unlock(
         None,
         None,
     );
-    // Capture before the first await. Any lock command that starts after this unlock invalidates
-    // its generation, even if the unlock was queued behind another mount or expensive KDF work.
-    let unlock_generation = state.ui_session_generation.load(Ordering::Acquire);
+    // Bind to the generation returned by the caller's completed native lock barrier. Tauri
+    // schedules async command futures independently, so sampling current here could let an old,
+    // entirely unpolled unlock adopt a newer cancellation lock. Check the original value before
+    // ANY await/authentication/KDF and retain it through every existing finalization barrier.
+    let unlock_generation = parse_unlock_generation(&expected_ui_generation)
+        .map_err(|error| op.fail(codes::SESSION_LOCKED, error))?;
+    if state.ui_session_generation.load(Ordering::SeqCst) != unlock_generation {
+        return Err(op.fail(
+            codes::SESSION_LOCKED,
+            "unlock was superseded by a newer lock request; try again",
+        ));
+    }
     // This lock covers both the already-mounted authentication path and first reload. Without it,
     // two concurrent webview mounts can both observe `None` and start duplicate actors.
     let _mount = state.vault_mount.lock().await;
-    if authenticate_mounted_store(&state, passphrase.as_bytes())
+    // An older lock may have published G before replacing its voice session.
+    // Complete that prelude, recheck the ORIGINAL request, and only then take
+    // the original pre-auth ticket. Never refresh the ticket after verification.
+    state.native_text.preludes.wait_idle().await;
+    if state.ui_session_generation.load(Ordering::SeqCst) != unlock_generation {
+        return Err(op.fail(
+            codes::SESSION_LOCKED,
+            "unlock was superseded by a newer lock request; try again",
+        ));
+    }
+    let voice_ticket = voice_runtime(state).session_ticket();
+    if authenticate_mounted_store(state, passphrase.as_bytes())
         .await
         .map_err(|e| op.fail(codes::VAULT_LOCKED_OUT, e.to_string()))?
     {
-        let servers = finalize_unlock_session(&state, unlock_generation, true)
-            .await
-            .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?
-            .expect("the mounted-store path requests a running-server projection");
+        let servers =
+            finalize_unlock_session_with_voice(state, unlock_generation, true, &voice_ticket)
+                .await
+                .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?
+                .expect("the mounted-store path requests a running-server projection");
         op.succeeded("VAULT.UNLOCK.ALREADY_OPEN");
         return Ok(servers);
     }
 
+    cold(unlock_generation, voice_ticket, op, passphrase).await
+}
+
+/// Unchanged real first-mount work, reachable only under `unlock_authentication`'s original
+/// mount custody. Production always supplies the actual AppHandle; there is no missing-app,
+/// skip-reload or test-success fallback. All reload/finalization uses the SAME expected generation.
+async fn unlock_cold(
+    app: AppHandle,
+    state: &AppState,
+    passphrase: String,
+    unlock_generation: u64,
+    voice_ticket: SessionTicket,
+    op: Operation,
+) -> Result<Vec<ReloadedServer>, AppError> {
     let dir = app
         .path()
         .app_data_dir()
@@ -14085,7 +16679,7 @@ async fn unlock(
     // `state.store` to attach the on-disk sealing blob store; if it were still `None` here,
     // every reloaded server would silently keep an empty in-memory blob store and be unable to
     // read its own persisted blobs ("no peer has it" for files you uploaded before the restart).
-    *state.store.lock().await = Some(store);
+    *state.store.lock().await = Some((store).into());
     {
         let mut n = state.next_id.lock().await;
         if *n < max_id {
@@ -14100,15 +16694,17 @@ async fn unlock(
             failed += 1;
             continue;
         };
-        if let Err(e) = reload_one(&app, &state, bytes, record).await {
+        if let Err(e) =
+            reload_one(&app, state, bytes, record, unlock_generation, &voice_ticket).await
+        {
             tracing::error!(target: "catcoms_app", server = record.id, error = %e, "VAULT.SERVER.RESTORE_FAILED");
             failed += 1;
             continue;
         }
-        let actor = actor_of_unchecked(&state, record.id)
+        let actor = actor_of_unchecked(state, record.id)
             .await
             .map_err(|e| op.fail(codes::SERVER_UNAVAILABLE, e))?;
-        let reconnect_warning = member_reconnect::saved_warning(&state, record.id, &actor).await;
+        let reconnect_warning = member_reconnect::saved_warning(state, record.id, &actor).await;
         reloaded.push(ReloadedServer {
             server: record.id,
             name: record.display_name.clone(),
@@ -14119,7 +16715,7 @@ async fn unlock(
             reconnect_warning,
         });
     }
-    finalize_unlock_session(&state, unlock_generation, false)
+    finalize_unlock_session_with_voice(state, unlock_generation, false, &voice_ticket)
         .await
         .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
     // The summary that makes a partial unlock visible.
@@ -14143,7 +16739,17 @@ async fn unlock(
             restored = reloaded.len(),
             "VAULT.UNLOCK.COMPLETED"
         );
+        // Every registry server is running, so a namespace with a leave marker that none of
+        // them uses really was left: finish its cleanup. A partial unlock skips this, because a
+        // server that failed to restore might still own one of those namespaces.
+        let sweep = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let state = sweep.state::<AppState>();
+            cache_housekeeping::sweep_leaving(&state, Some(unlock_generation)).await;
+        });
     }
+    // Studio protection starts unknown on a vault with Studio data; make it known once.
+    cache_housekeeping::request_studio_scan(&app);
     Ok(reloaded)
 }
 
@@ -14168,7 +16774,7 @@ async fn resume_session_projection(
     // Lock invalidation deliberately happens before `lock_session_inner` waits for `_commit`, so
     // recheck after every actor await. If a lock began while channels were being projected, none
     // of the names/invites/channels may cross back into the stale webview.
-    if state.ui_session_generation.load(Ordering::Acquire) != generation
+    if state.ui_session_generation.load(Ordering::SeqCst) != generation
         || require_unlocked_session(state).await.is_err()
     {
         return None;
@@ -14190,26 +16796,41 @@ async fn resume_session(state: State<'_, AppState>) -> Result<Option<Vec<Reloade
 async fn lock_session(
     state: State<'_, AppState>,
     ui_state_json: Option<String>,
-) -> Result<LockSessionOutcome, String> {
+) -> Result<RegisteredLockSessionOutcome, String> {
     // Tauri requires async commands borrowing `State` to use a `Result` return. The outer error is
     // reserved for bridge/dispatch failure; application-level continuity failure stays inside the
     // resolved outcome so the webview knows native locking completed.
     Ok(lock_session_outcome_inner(&state, ui_state_json).await)
 }
 
-/// IPC-visible lock completion. A continuity error is data-loss evidence, not evidence that the
-/// security boundary remained open, so it must not be collapsed into a rejected command.
+/// IPC-visible completion of one ACTUAL registered lock, even if its continuity save failed.
+/// Decimal text preserves every u64 bit across JavaScript. It correlates a later authenticated
+/// unlock with this exact barrier; it grants no permission and is never inferred from UI state.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct RegisteredLockSessionOutcome {
+    continuity_error: Option<String>,
+    generation: String,
+}
+
+// Close policy may replay an earlier latched failure without registering a new lock. Keep that
+// internal report separate so it cannot manufacture a fresh unlock correlation token.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 struct LockSessionOutcome {
     continuity_error: Option<String>,
+    // Not discardable continuity. Native close reports this separately and
+    // must never destroy merely because the user acknowledged snapshot loss.
+    key_work_error: Option<String>,
 }
 
 async fn lock_session_outcome_inner(
     state: &AppState,
     ui_state_json: Option<String>,
-) -> LockSessionOutcome {
-    LockSessionOutcome {
-        continuity_error: lock_session_inner(state, ui_state_json).await.err(),
+) -> RegisteredLockSessionOutcome {
+    let (generation, snapshot, keys) =
+        lock_session_with_generation_inner(state, ui_state_json).await;
+    RegisteredLockSessionOutcome {
+        continuity_error: snapshot.err().or_else(|| keys.err()),
+        generation: generation.to_string(),
     }
 }
 
@@ -14218,6 +16839,10 @@ async fn lock_session_outcome_inner(
 #[derive(Debug, Serialize, PartialEq, Eq)]
 struct CloseVaultWindowOutcome {
     continuity_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    continuity_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    continuity_discardable: Option<bool>,
     history_error: Option<String>,
     deferred: bool,
     destroy_error: Option<String>,
@@ -14225,12 +16850,60 @@ struct CloseVaultWindowOutcome {
 
 /// Lock the UI session and decide whether the close may proceed. Kept separate from the actual
 /// Tauri window mutation so the security/durability policy is deterministic under unit tests.
+#[cfg(test)]
 async fn close_vault_window_plan_inner(
     state: &AppState,
     ui_state_json: Option<String>,
     discard_continuity_error: bool,
 ) -> (LockSessionOutcome, bool) {
+    close_vault_window_plan_token(
+        state,
+        ui_state_json,
+        discard_continuity_error,
+        None,
+        &mut None,
+    )
+    .await
+}
+async fn close_vault_window_plan_token(
+    state: &AppState,
+    ui_state_json: Option<String>,
+    discard_continuity_error: bool,
+    discard_revision: Option<String>,
+    receipt: &mut Option<(Option<String>, native_text::ui_state::snapshots::Notice)>,
+) -> (LockSessionOutcome, bool) {
     let _close = state.vault_window_close.lock().await;
+    // Native controller owns retry and exact outcome revision; do not latch a
+    // transient native failure in Legacy's irreversible close-warning slot.
+    if state.native_text.selected && state.vault_window_close_debt.lock().await.is_none() {
+        let capture = state
+            .native_text
+            .ui_state
+            .snapshots
+            .capture(state, ui_state_json.as_deref());
+        let token = if discard_continuity_error {
+            discard_revision
+        } else {
+            None
+        };
+        let (_, snapshot, keys) =
+            lock_session_with_capture(state, None, Some(capture), token.clone()).await;
+        let decision = state
+            .native_text
+            .ui_state
+            .snapshots
+            .close_decision(token.as_deref());
+        let outcome = LockSessionOutcome {
+            continuity_error: snapshot.err().or_else(|| decision.result.err()),
+            key_work_error: keys.err(),
+        };
+        if let Some(notice) = decision.notice {
+            *receipt = Some((decision.revision, notice));
+        }
+        let may_destroy = outcome.key_work_error.is_none()
+            && (outcome.continuity_error.is_none() || decision.acknowledged);
+        return (outcome, may_destroy);
+    }
     // Two close/lock requests can cross the bridge before the first response disables the WebView.
     // The general lock-completion slot may be replaced by a later Ctrl+L success, so close debt has
     // its own latch. Only a later close carrying the explicit loss acknowledgement may consume it.
@@ -14242,6 +16915,7 @@ async fn close_vault_window_plan_inner(
                 return (
                     LockSessionOutcome {
                         continuity_error: Some(error),
+                        key_work_error: None,
                     },
                     true,
                 );
@@ -14249,16 +16923,18 @@ async fn close_vault_window_plan_inner(
             return (
                 LockSessionOutcome {
                     continuity_error: Some(error),
+                    key_work_error: None,
                 },
                 false,
             );
         }
     }
     let had_local_snapshot = ui_state_json.is_some();
-    let (requested_generation, result) =
+    let (requested_generation, snapshot, keys) =
         lock_session_with_generation_inner(state, ui_state_json).await;
     let mut outcome = LockSessionOutcome {
-        continuity_error: result.err(),
+        continuity_error: snapshot.err(),
+        key_work_error: keys.err(),
     };
     // The commit mutex is shared by all lock callers, so an older ordinary Ctrl+L may consume and
     // validate the close's newer pending snapshot. In that interleaving this close itself sees no
@@ -14284,7 +16960,8 @@ async fn close_vault_window_plan_inner(
             *state.vault_window_close_debt.lock().await = Some(error.clone());
         }
     }
-    let may_destroy = outcome.continuity_error.is_none() || discard_continuity_error;
+    let may_destroy = outcome.key_work_error.is_none()
+        && (outcome.continuity_error.is_none() || discard_continuity_error);
     (outcome, may_destroy)
 }
 
@@ -14299,24 +16976,108 @@ async fn close_vault_window(
     state: State<'_, AppState>,
     ui_state_json: Option<String>,
     discard_continuity_error: bool,
+    discard_continuity_revision: Option<String>,
 ) -> Result<CloseVaultWindowOutcome, String> {
-    let (lock, may_destroy) =
-        close_vault_window_plan_inner(&state, ui_state_json, discard_continuity_error).await;
+    close_vault_window_with_capture(
+        &app,
+        &state,
+        ui_state_json,
+        discard_continuity_error,
+        discard_continuity_revision,
+        None,
+        &mut None,
+    )
+    .await
+}
+async fn close_vault_window_with_capture<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &AppState,
+    ui_state_json: Option<String>,
+    discard_continuity_error: bool,
+    discard_revision: Option<String>,
+    capture: Option<native_text::ui_state::snapshots::Capture>,
+    notice: &mut Option<native_text::ui_state::snapshots::Notice>,
+) -> Result<CloseVaultWindowOutcome, String> {
+    // A continuity-loss acknowledgement is never permission to bypass key
+    // drainage. This outer prelude blocks reauthentication through destroy;
+    // every close also publishes a fresh negative epoch before any await.
+    let (close_prelude, accepted) = register_vault_close_capture(state, capture).await?;
+    if state.native_text.selected {
+        close_prelude.wait_for_other_mutations().await;
+    }
+    let mut receipt = None;
+    let (mut lock, mut may_destroy) = close_vault_window_plan_token(
+        state,
+        ui_state_json,
+        discard_continuity_error,
+        discard_revision,
+        &mut receipt,
+    )
+    .await;
+    if !accepted {
+        lock.continuity_error =
+            Some("An older close request was ignored. Try closing again.".into());
+        may_destroy = false;
+        receipt = None;
+    }
+    let (close_revision, close_notice) =
+        receipt.map_or((None, None), |(revision, notice)| (revision, Some(notice)));
+    *notice = close_notice;
     if !may_destroy {
         return Ok(CloseVaultWindowOutcome {
             continuity_error: lock.continuity_error,
-            history_error: None,
+            continuity_revision: close_revision.clone(),
+            continuity_discardable: state
+                .native_text
+                .selected
+                .then_some(close_revision.is_some()),
+            history_error: lock.key_work_error,
             deferred: true,
             destroy_error: None,
         });
     }
 
     let _closing = state.vault_window_close.lock().await;
-    let history = match shutdown::freeze_servers(&state).await {
+    if let Err(error) = native_text::retirement::older_than(
+        state,
+        state.ui_session_generation.load(Ordering::SeqCst),
+    )
+    .await
+    {
+        return Ok(CloseVaultWindowOutcome {
+            continuity_error: lock.continuity_error,
+            continuity_revision: close_revision.clone(),
+            continuity_discardable: state
+                .native_text
+                .selected
+                .then_some(close_revision.is_some()),
+            history_error: Some(error),
+            deferred: true,
+            destroy_error: None,
+        });
+    }
+
+    // Native Sources count final preparations as physical work. Never hold the
+    // Legacy barrier's UI/table guards while waiting for that work to drain.
+    // The close prelude above has already made closure irreversible; native
+    // rows stay canonically installed (but fenced) if any stage needs a retry.
+    let history_result = if state.native_text.selected {
+        native_text::sources::close_server_rows(state, &SystemClock)
+            .await
+            .map(|()| None)
+    } else {
+        shutdown::freeze_servers(state).await.map(Some)
+    };
+    let history = match history_result {
         Ok(barrier) => barrier,
         Err(error) => {
             return Ok(CloseVaultWindowOutcome {
                 continuity_error: lock.continuity_error,
+                continuity_revision: close_revision.clone(),
+                continuity_discardable: state
+                    .native_text
+                    .selected
+                    .then_some(close_revision.is_some()),
                 history_error: Some(error),
                 deferred: true,
                 destroy_error: None,
@@ -14328,23 +17089,93 @@ async fn close_vault_window(
         None => Some("the main window no longer exists".to_string()),
     };
     if destroy_error.is_none() {
-        history.stop();
+        if let Some(history) = history {
+            history.stop();
+        }
     }
     Ok(CloseVaultWindowOutcome {
         continuity_error: lock.continuity_error,
+        continuity_revision: close_revision.clone(),
+        continuity_discardable: state
+            .native_text
+            .selected
+            .then_some(close_revision.is_some()),
         history_error: None,
         deferred: false,
         destroy_error,
     })
 }
 
+/// Register the unconditional close fence before consulting any previously
+/// acknowledged continuity debt. The returned native guard must outlive the
+/// final key drain and actual window destruction (or deferred-close response).
+#[cfg(test)]
+async fn register_vault_close(
+    state: &AppState,
+) -> Result<native_text::retirement::PreludeGuard, String> {
+    Ok(register_vault_close_capture(state, None).await?.0)
+}
+async fn register_vault_close_capture(
+    state: &AppState,
+    capture: Option<native_text::ui_state::snapshots::Capture>,
+) -> Result<(native_text::retirement::PreludeGuard, bool), String> {
+    let guard = state
+        .native_text
+        .preludes
+        .begin_close()
+        .map_err(str::to_string)?;
+    let generation = register_ui_lock_request(state);
+    let accepted = capture.is_none_or(|capture| {
+        state
+            .native_text
+            .ui_state
+            .snapshots
+            .register(state, capture, generation)
+    });
+    *state.session_resumable.lock().await = false;
+    Ok((guard, accepted))
+}
+
 /// Testable core of the explicit lock operation. Closing the command boundary is unconditional:
 /// malformed continuity state or a vault write failure is reported, but must never leave the
 /// sensitive webview session open as a side effect of that error.
+#[cfg(test)]
 async fn lock_session_inner(state: &AppState, ui_state_json: Option<String>) -> Result<(), String> {
-    lock_session_with_generation_inner(state, ui_state_json)
-        .await
-        .1
+    let (_, snapshot, keys) = lock_session_with_generation_inner(state, ui_state_json).await;
+    snapshot.and(keys)
+}
+
+/// Register the lock before calling any hook that may acquire a mutex. The separately committed
+/// authorized generation makes this one atomic increment close IPC immediately, even if this
+/// thread is descheduled before publishing the request flag or revoking actor/mapping owners.
+fn register_ui_lock_request(state: &AppState) -> u64 {
+    let generation = state
+        .ui_session_generation
+        .fetch_add(1, Ordering::SeqCst)
+        .wrapping_add(1);
+    state.session_lock_requested.store(true, Ordering::SeqCst);
+    keep_session::revoke(state);
+    state.admin_chat_ledger.retire();
+    generation
+}
+
+/// Early revocation also runs when bounded native ingress refuses scheduling.
+/// It grants no completion/drainage receipt and holds no persistence guard.
+fn revoke_ui_lock_owners(state: &AppState) {
+    state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .revoke_all();
+    let mappings = state
+        .media_mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .revoke_all();
+    clean_call_mappings(&state.media_mappings, mappings);
+    // Cancellation destroys authority and must not wait behind the persistence transaction. This
+    // also retires unclaimed registrations left by a reloaded/crashed webview.
+    cancel_all_inline_downloads(state);
 }
 
 /// Execute one lock request and return the exact generation it registered. Native window-close
@@ -14353,17 +17184,56 @@ async fn lock_session_inner(state: &AppState, ui_state_json: Option<String>) -> 
 async fn lock_session_with_generation_inner(
     state: &AppState,
     ui_state_json: Option<String>,
-) -> (u64, Result<(), String>) {
-    // Invalidate old work before awaiting anything. The commit mutex is acquired next so, once
+) -> (u64, Result<(), String>, Result<(), String>) {
+    let capture = if state.native_text.selected {
+        Some(
+            state
+                .native_text
+                .ui_state
+                .snapshots
+                .capture(state, ui_state_json.as_deref()),
+        )
+    } else {
+        None
+    };
+    let legacy = if state.native_text.selected {
+        None
+    } else {
+        ui_state_json
+    };
+    lock_session_with_capture(state, legacy, capture, None).await
+}
+async fn lock_session_with_capture(
+    state: &AppState,
+    ui_state_json: Option<String>,
+    capture: Option<native_text::ui_state::snapshots::Capture>,
+    discard_revision: Option<String>,
+) -> (u64, Result<(), String>, Result<(), String>) {
+    // Revoke old work before any await, then cross the separate event and command fences. Once
     // this function returns, an old join can neither emit its private reply nor register/persist.
-    state.session_lock_requested.store(true, Ordering::Release);
-    // Cancellation destroys authority and must not wait behind the persistence transaction. This
-    // also retires unclaimed registrations left by a reloaded/crashed webview.
-    cancel_all_inline_downloads(state);
-    let lock_generation = state
-        .ui_session_generation
-        .fetch_add(1, Ordering::AcqRel)
-        .wrapping_add(1);
+    // Atomic prelude registration precedes SC epoch publication; no later
+    // authenticated unlock can overtake an older snapshot/resumable mutation.
+    let prelude = state.native_text.preludes.begin();
+    let lock_generation = register_ui_lock_request(state);
+    let prelude = match prelude {
+        Ok(prelude) => prelude,
+        Err(error) => return (lock_generation, Ok(()), Err(error.into())),
+    };
+    let native_input_accepted = capture.is_none_or(|capture| {
+        state
+            .native_text
+            .ui_state
+            .snapshots
+            .register(state, capture, lock_generation)
+    });
+    #[cfg(test)]
+    {
+        let edge = state.native_text.lock_prelude_edge.lock().unwrap().clone();
+        if let Some(edge) = edge {
+            edge.wait_once().await;
+        }
+    }
+    revoke_ui_lock_owners(state);
     // Register before either session mutex await. A later close from a remounted webview carries no
     // JS snapshot, but it can still save this exact native transaction if it reaches commit first.
     if let Some(json) = ui_state_json {
@@ -14380,56 +17250,115 @@ async fn lock_session_with_generation_inner(
         }
     }
     *state.session_resumable.lock().await = false;
+    drop(prelude); // mutation quiescence, NOT proof that the snapshot was saved
+
+    // Native snapshot custody must precede BOTH publication fences. If this future disappears
+    // while waiting for an emission, a later snapshot-less close still owns the exact bytes.
+    // Detached owners were revoked before the first await above. Release this short guard
+    // before waiting for command publication so the actor's event sink can continue draining.
+    {
+        let _events = state.ui_event_commit.lock().await;
+    }
+    // Snapshot custody and the early resumable=false assignment precede this
+    // await. The owned drain outlives a lost waiter; no UI/Store writer is held
+    // while actual admitted Root key work finishes.
+    let key_result = native_text::retirement::older_than(state, lock_generation).await;
+    #[cfg(test)]
+    {
+        let edge = state.native_text.lock_commit_edge.lock().unwrap().clone();
+        if let Some(edge) = edge {
+            edge.wait_once().await;
+        }
+    }
+    let io = state.native_text.ui_state.lock_lane().await;
+    let (io, native_save, _) = if state.native_text.selected {
+        native_text::ui_state::snapshots::flush(
+            state,
+            io,
+            native_text::ui_state::snapshots::Purpose::Lock {
+                keys_drained: key_result.is_ok(),
+                discard_token: discard_revision.as_deref(),
+            },
+        )
+        .await
+    } else {
+        (io, Ok(()), None)
+    };
+    let _io = io;
     let _session_commit = state.ui_session_commit.lock().await;
+    // A correct same/newer-generation authentication may have acquired commit
+    // first after all lock preludes completed. Its finalizer already settled
+    // pending continuity. Do not clear that newly opened session's state.
+    let current = state.ui_session_generation.load(Ordering::SeqCst);
+    if current >= lock_generation
+        && state.ui_authorized_generation.load(Ordering::SeqCst) == current
+        && !state.session_lock_requested.load(Ordering::SeqCst)
+        && *state.session_resumable.lock().await
+    {
+        return (
+            lock_generation,
+            if native_input_accepted {
+                Ok(())
+            } else {
+                Err("An older lock request was ignored.".into())
+            },
+            key_result,
+        );
+    }
     // Close the registration/early-sweep race as a second line of defence. Registration itself
     // checks `session_lock_requested` while holding the cancellation table, but this post-commit
     // drain also retires any future registration path that was already inside the UI commit seam.
     cancel_all_inline_downloads(state);
-    for entry in state.servers.lock().await.values() {
+    for entry in state.servers.lock().await.legacy_values() {
         entry.actor.clear_studio_previews();
     }
     // Save the final draft/read snapshot and close IPC as one ordered native operation. Two
     // separate fire-and-forget commands could race, causing the save to arrive after the lock and
     // be correctly rejected by the new session gate.
-    let pending_snapshot = state.pending_ui_lock_snapshot.lock().await.take();
-    let completed_generation = pending_snapshot
-        .as_ref()
-        .map(|snapshot| snapshot.generation);
-    let (save_result, retry_snapshot) = match pending_snapshot {
-        Some(snapshot) => match validate_ui_state_json(&snapshot.json) {
-            Err(error) => (Err(error), None),
-            Ok(()) => {
-                let guard = state.store.lock().await;
-                let result = match guard.as_ref() {
-                    Some(store) => store
-                        .save_ui_state(snapshot.json.as_bytes(), &mut OsCryptoRng)
-                        .map_err(|error| error.to_string()),
-                    None => Err("unlock the vault before saving UI state".to_string()),
-                };
-                let retry = result.as_ref().err().map(|_| snapshot);
-                (result, retry)
-            }
-        },
-        None => (Ok(()), None),
-    };
-    if let Some(snapshot) = retry_snapshot {
-        // Disk failures can be transient. Retain exact bytes for the warning's second close or a
-        // remounted webview; malformed input is intentionally not retained and retried forever.
-        let mut pending = state.pending_ui_lock_snapshot.lock().await;
-        let replace = match pending.as_ref() {
-            Some(current) => current.generation <= snapshot.generation,
-            None => true,
+    let save_result = if state.native_text.selected {
+        native_save
+    } else {
+        let pending_snapshot = state.pending_ui_lock_snapshot.lock().await.take();
+        let completed_generation = pending_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.generation);
+        let (save_result, retry_snapshot) = match pending_snapshot {
+            Some(snapshot) => match validate_ui_state_json(&snapshot.json) {
+                Err(error) => (Err(error), None),
+                Ok(()) => {
+                    let guard = state.store.lock().await;
+                    let result = match guard.as_ref().and_then(MountedVault::as_legacy) {
+                        Some(store) => store
+                            .save_ui_state(snapshot.json.as_bytes(), &mut OsCryptoRng)
+                            .map_err(|error| error.to_string()),
+                        None => Err("unlock the vault before saving UI state".to_string()),
+                    };
+                    let retry = result.as_ref().err().map(|_| snapshot);
+                    (result, retry)
+                }
+            },
+            None => (Ok(()), None),
         };
-        if replace {
-            *pending = Some(snapshot);
+        if let Some(snapshot) = retry_snapshot {
+            // Disk failures can be transient. Retain exact bytes for the warning's second close or a
+            // remounted webview; malformed input is intentionally not retained and retried forever.
+            let mut pending = state.pending_ui_lock_snapshot.lock().await;
+            let replace = match pending.as_ref() {
+                Some(current) => current.generation <= snapshot.generation,
+                None => true,
+            };
+            if replace {
+                *pending = Some(snapshot);
+            }
         }
-    }
-    if let Some(generation) = completed_generation {
-        *state.last_ui_lock_completion.lock().await = Some(UiLockCompletion {
-            generation,
-            error: save_result.clone().err(),
-        });
-    }
+        if let Some(generation) = completed_generation {
+            *state.last_ui_lock_completion.lock().await = Some(UiLockCompletion {
+                generation,
+                error: save_result.clone().err(),
+            });
+        }
+        save_result
+    };
     // The media cache holds decrypted chunks of shared files. Locking must drop them along with
     // the rest of the session's plaintext, not leave a film resident until something evicts it.
     state.media_cache.lock().await.clear();
@@ -14441,12 +17370,20 @@ async fn lock_session_with_generation_inner(
     state.storage_health.lock().await.clear();
     // An upload in flight is session state too. Dropping the reservations frees their slots and
     // garbage-collects the chunks they had sealed but will now never publish.
-    let abandoned: Vec<PendingUpload> =
+    let abandoned: Vec<RegisteredUpload> =
         state.uploads.lock().await.drain().map(|(_, v)| v).collect();
     for upload in abandoned {
-        discard_pending_upload(state, upload).await;
+        discard_pending_upload(upload).await;
     }
-    (lock_generation, save_result)
+    (
+        lock_generation,
+        if native_input_accepted {
+            save_result
+        } else {
+            Err("An older lock request was ignored. Try again.".into())
+        },
+        key_result,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -14529,7 +17466,7 @@ async fn ceremony_origin(state: &AppState) -> Result<DeviceId, String> {
     let actor = {
         let servers = state.servers.lock().await;
         let (_, entry) = servers
-            .iter()
+            .legacy_iter()
             .min_by_key(|(id, _)| **id)
             .ok_or_else(|| "join or found a server before pairing a device".to_string())?;
         entry.actor.clone()
@@ -14578,7 +17515,7 @@ async fn pairing_read(state: State<'_, AppState>, blob: String) -> Result<Pairin
     let (servers, dm_count) = {
         let guard = state.servers.lock().await;
         let mut names: Vec<(u64, String, bool)> = guard
-            .iter()
+            .legacy_iter()
             .map(|(id, e)| (*id, e.name.clone(), e.is_dm))
             .collect();
         names.sort_by_key(|(id, _, _)| *id);
@@ -14621,7 +17558,7 @@ async fn pairing_decline(state: State<'_, AppState>) -> Result<(), String> {
 async fn persist_pairing_ledger(state: &AppState) {
     let snapshot = state.pairing_ledger.lock().await.snapshot();
     let guard = state.store.lock().await;
-    if let Some(store) = guard.as_ref() {
+    if let Some(store) = guard.as_ref().and_then(MountedVault::as_legacy) {
         let mut rng = OsCryptoRng;
         if let Err(e) = store.save_pairing_ledger(&snapshot, &mut rng) {
             tracing::error!(target: "catcoms_app", error = %e, "IDENTITY.PAIRING_LEDGER.SEAL_FAILED");
@@ -14671,7 +17608,7 @@ async fn pairing_mint(
     let mut servers: Vec<GrantSource> = {
         let guard = state.servers.lock().await;
         guard
-            .iter()
+            .legacy_iter()
             .map(|(id, e)| GrantSource {
                 id: *id,
                 name: e.name.clone(),
@@ -14863,6 +17800,8 @@ async fn join_one_grant(
     state: &AppState,
     grant: &PerServerGrant,
 ) -> Result<u64, String> {
+    let voice_ticket = voice_runtime(state).session_ticket();
+    let ui_session_generation = unlocked_ui_session_generation(state).await?;
     // The device identity the certificate names. Every granted server needs its own MLS provider
     // but the SAME signature key (one certified device id across the bundle), so each join takes
     // a duplicate and the ceremony secrets stay intact for a retry.
@@ -14974,10 +17913,30 @@ async fn join_one_grant(
     // becomes visible on its first reload, which goes through `reload_one` on a persisted
     // identity and a reserved sequence block like every other server. (Giving this path a
     // persisted identity is multi-device work, not discovery work.)
+    let registration = match actor
+        .prepare_voice_actor(voice_runtime(state), voice_ticket)
+        .await
+    {
+        Ok(registration) => Some(registration),
+        Err(error) => {
+            tracing::warn!(%error, "VOICE.ATTACHMENT.UNAVAILABLE");
+            None
+        }
+    };
+    let _commit = match require_ui_session_generation(state, ui_session_generation).await {
+        Ok(commit) => commit,
+        Err(error) => {
+            drop(events);
+            actor.shutdown().await;
+            let _ = task.await;
+            return Err(error);
+        }
+    };
     let server_id = register_server(
         app,
         state,
         actor,
+        registration,
         events,
         task,
         group_id,
@@ -14992,8 +17951,9 @@ async fn join_one_grant(
         false,
         false,
         0,
+        ui_session_generation,
     )
-    .await;
+    .await?;
     persist_server(state, server_id).await;
     persist_registry(state).await;
     Ok(server_id)
@@ -16476,12 +19436,22 @@ fn record_ui_log(level: &str, message: String, repeats: u32) -> bool {
 
 /// Build and run the Tauri application.
 pub fn run() {
-    tauri::Builder::default()
+    let state = native_text::initial_state();
+    let mut context = tauri::generate_context!();
+    // Tauri creates configured windows BEFORE calling user setup. Bind the paid socket and
+    // add only its exact numeric-loopback source before build/run, never in a late setup hook.
+    let voice_host = Arc::new(
+        voice_handoff::application::Host::prepare(&state, context.config_mut(), tauri::is_dev())
+            .unwrap_or_else(voice_handoff::application::Host::unavailable),
+    );
+    let exit_voice_host = voice_host.clone();
+    let app = tauri::Builder::default()
         // Update checking lives in Rust so the download and its minisign verification never
         // touch the webview: the frontend only asks "is there one?" and "install it".
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .manage(AppState::default())
+        .manage(state)
+        .manage(voice_host)
         // Shared media plays straight out of the vault instead of crossing the IPC bridge as a
         // base64 string. The handler answers Range requests, so a player starts on the first
         // chunk and a seek costs one chunk, and the bytes never become a JS string at all.
@@ -16493,14 +19463,22 @@ pub fn run() {
                 .get(http::header::RANGE)
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_string);
+            // Capture at synchronous request entry, before the spawned future can be delayed
+            // across lock/unlock. No async continuation may adopt a new session for this URI.
+            let expected_generation = handle
+                .state::<AppState>()
+                .ui_session_generation
+                .load(Ordering::SeqCst);
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<AppState>();
                 // Capture authorization before any actor/disk await, then hold its native commit
                 // boundary through the synchronous responder publication. A stale response is
                 // replaced by a bodyless denial rather than escaping after explicit lock.
-                let generation = unlocked_ui_session_generation(&state).await.ok();
-                let response = serve_media(&state, &path, range).await;
-                publish_media_response(&state, generation, response, |response| {
+                let (scope, response) =
+                    serve_media(&state, &path, range, expected_generation).await;
+                let generation = scope.as_ref().map(|(generation, _)| *generation);
+                let origin = scope.as_ref().map(|(_, origin)| origin);
+                publish_media_response(&state, generation, origin, response, |response| {
                     responder.respond(response);
                 })
                 .await;
@@ -16529,7 +19507,18 @@ pub fn run() {
                 init_error,
                 dir,
             });
+            if let Err(reason) = app
+                .state::<Arc<voice_handoff::application::Host>>()
+                .start_in_tauri_runtime()
+            {
+                // Fixed native metadata only. No owner, point, transcript or port is logged.
+                // Local handoff failure must not prevent chat/the rest of the app starting.
+                tracing::warn!(?reason, "VOICE.HANDOFF.UNAVAILABLE");
+            }
             spawn_network_monitor(&handle);
+            app.manage(voice_authority::CollectionTask::start(&voice_runtime(
+                &app.state::<AppState>(),
+            )));
             // The last line of `setup`, and the only proof that startup got all the way through.
             //
             // Everything before this point can fail in ways that leave a plausible-looking log: a
@@ -16541,198 +19530,249 @@ pub fn run() {
             tracing::info!(target: "catcoms_app", "STARTUP.SETUP.COMPLETE");
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            vault_exists,
-            resume_session,
-            lock_session,
-            close_vault_window,
-            unlock,
-            found_server,
-            preview_invite,
-            group_policy::group_communication_mode,
-            join_server,
-            apply_join_reply,
-            leave_server,
-            open_channel,
-            get_channels,
-            get_invite,
-            mint_invite_fresh,
-            check_invite_routes,
-            rename_server,
-            get_members,
-            set_profile,
-            get_profiles,
-            set_livery,
-            set_server_icon,
-            set_server_cursor,
-            set_server_banner,
-            get_livery,
-            set_shared_server_name,
-            get_file_size_limit,
-            set_file_size_limit,
-            set_member_badge,
-            get_badges,
-            get_devices,
-            begin_file_upload,
-            push_file_chunk,
-            finish_file_upload,
-            cancel_file_upload,
-            get_files,
-            get_storage_health,
-            repair_storage,
-            get_online_members,
-            get_member_routes,
-            manual_fallback_redial,
-            mint_member_recovery,
-            apply_member_recovery,
-            get_delivery,
-            dm_stats,
-            send_dm_invite,
-            get_dm_requests,
-            send_call_signal,
-            call_media_key,
-            dismiss_dm_request,
-            begin_inline_download,
-            cancel_inline_download,
-            download_file,
-            file_available,
-            get_kept_files,
-            keep_file,
-            forget_kept_file,
-            delete_file,
-            set_file_expiry,
-            get_file_usage,
-            get_wiki_pinned_cids,
-            creative_blobs::publish_pix,
-            studio_exports::publish_pixa,
-            studio_exports::export_studio_gif,
-            creative_blobs::request_blob_bounded,
-            studio::studio_list,
-            studio::studio_read,
-            studio::inspection::studio_overlay_read,
-            studio::lifecycle::studio_overlay_lifecycle,
-            studio::lifecycle::studio_overlay_archive_read,
-            studio::lifecycle::studio_overlay_archive_export,
-            studio::lifecycle::studio_overlay_export,
-            studio::lifecycle::studio_overlay_archive,
-            studio::lifecycle::studio_overlay_archive_release,
-            studio::copy::studio_overlay_copy_preview,
-            studio::copy::studio_overlay_copy_apply,
-            studio::lifecycle::studio_overlay_dispose,
-            studio::lifecycle::studio_unconfirmed_overlay_save_begin,
-            studio::lifecycle::studio_unconfirmed_overlay_save,
-            studio::lifecycle::studio_closing_overlay_save_begin,
-            studio::lifecycle::studio_closing_overlay_save,
-            studio::studio_create,
-            studio::studio_apply,
-            studio::studio_apply_index,
-            studio::recovery::studio_recovery_list,
-            studio::fault::studio_fault_read,
-            studio::fault::studio_fault_repair,
-            studio::recovery::studio_recovery_preview,
-            studio::recovery::studio_recovery_apply,
-            studio::recovery::studio_recovery_restore_pointer,
-            studio::recovery::studio_recovery_read,
-            studio::recovery::studio_recovery_export,
-            studio::recovery::studio_recovery_acknowledge,
-            post_status,
-            get_statuses,
-            edit_status,
-            delete_status,
-            toggle_status_reaction,
-            set_status_pin,
-            get_status_policy,
-            set_status_policy,
-            create_event,
-            delete_event,
-            get_events,
-            get_wiki_pages,
-            get_wiki_map,
-            get_wiki_page,
-            save_wiki_page,
-            get_wiki_meta,
-            set_wiki_format,
-            delete_wiki_page,
-            rename_wiki_page,
-            get_wiki_history,
-            get_wiki_pending,
-            get_wiki_review_days,
-            set_wiki_review_days,
-            approve_wiki_edit,
-            reject_wiki_edit,
-            restore_wiki_page,
-            get_roles,
-            get_moderation,
-            warn_message,
-            create_kick_case,
-            cast_kick_vote,
-            resolve_kick_case,
-            get_join_attempts,
-            get_connectivity,
-            get_call_transport,
-            map_call_port,
-            default_route_address,
-            unmap_call_port,
-            get_switchboard_status,
-            set_switchboard_offered,
-            get_ui_state,
-            save_ui_state,
-            create_backup,
-            change_vault_secret,
-            get_debug_logging,
-            set_debug_logging,
-            test_debug_logging,
-            get_console_log,
-            clear_console_log,
-            get_capture_config,
-            set_capture_mode,
-            set_section_capture,
-            reset_section_capture,
-            open_public_diagnostics_issue,
-            get_event_cursor,
-            get_task_health,
-            save_diagnostics_report,
-            validate_diagnostics_report,
-            log_ui,
-            log_ui_batch,
-            record_ui_events,
-            set_admin,
-            remove_member,
-            revoke_device,
-            send_message,
-            durable_chat::durable_send_context,
-            edit_message,
-            delete_message,
-            toggle_reaction,
-            set_pin,
-            set_channel_topic,
-            get_channel_topic,
-            jukebox_add,
-            jukebox_add_link,
-            jukebox_remove,
-            get_jukebox,
-            get_inbox,
-            get_messages,
-            get_message_tail,
-            get_messages_by_id,
-            get_message_page,
-            get_pinned_messages,
-            get_channel_heads,
-            pairing_begin,
-            pairing_read,
-            pairing_mint,
-            pairing_decline,
-            pairing_open,
-            pairing_join,
-            open_issue_url,
-            open_external_url,
-            save_and_open_space_guide,
-            save_space_layout,
-            save_jam_sheet,
-            save_group_file
-        ])
-        .run(tauri::generate_context!())
-        .expect("error while running the Mewtual desktop app");
+        .invoke_handler(native_text::with_commands(
+            admin_chat_ledger::with_commands(tauri::generate_handler![
+                vault_exists,
+                resume_session,
+                lock_session,
+                close_vault_window,
+                unlock,
+                found_server,
+                preview_invite,
+                group_policy::group_communication_mode,
+                join_server,
+                apply_join_reply,
+                leave_server,
+                open_channel,
+                get_channels,
+                get_invite,
+                mint_invite_fresh,
+                check_invite_routes,
+                rename_server,
+                get_members,
+                set_profile,
+                get_profiles,
+                set_livery,
+                set_server_icon,
+                set_server_cursor,
+                set_server_banner,
+                get_livery,
+                set_shared_server_name,
+                get_file_size_limit,
+                set_file_size_limit,
+                set_member_badge,
+                get_badges,
+                get_devices,
+                begin_file_upload,
+                push_file_chunk,
+                finish_file_upload,
+                cancel_file_upload,
+                get_files,
+                get_storage_health,
+                repair_storage,
+                cache_housekeeping::get_cache_status,
+                cache_housekeeping::set_cache_limit,
+                get_online_members,
+                get_member_routes,
+                manual_fallback_redial,
+                mint_member_recovery,
+                apply_member_recovery,
+                get_delivery,
+                dm_stats,
+                send_dm_invite,
+                get_dm_requests,
+                send_call_signal,
+                call_media_key,
+                dismiss_dm_request,
+                begin_inline_download,
+                cancel_inline_download,
+                download_file,
+                file_available,
+                get_kept_files,
+                keep_file,
+                request_kept_file,
+                set_kept_paused,
+                forget_kept_file,
+                retry_kept_file,
+                delete_file,
+                set_file_expiry,
+                get_file_usage,
+                get_wiki_pinned_cids,
+                creative_blobs::publish_pix,
+                studio_exports::publish_pixa,
+                studio_exports::export_studio_gif,
+                creative_blobs::request_blob_bounded,
+                studio::studio_list,
+                studio::studio_read,
+                studio::inspection::studio_overlay_read,
+                studio::lifecycle::studio_overlay_lifecycle,
+                studio::lifecycle::studio_overlay_archive_read,
+                studio::lifecycle::studio_overlay_archive_export,
+                studio::lifecycle::studio_overlay_export,
+                studio::lifecycle::studio_overlay_archive,
+                studio::lifecycle::studio_overlay_archive_release,
+                studio::copy::studio_overlay_copy_preview,
+                studio::copy::studio_overlay_copy_apply,
+                studio::lifecycle::studio_overlay_dispose,
+                studio::lifecycle::studio_unconfirmed_overlay_save_begin,
+                studio::lifecycle::studio_unconfirmed_overlay_save,
+                studio::lifecycle::studio_closing_overlay_save_begin,
+                studio::lifecycle::studio_closing_overlay_save,
+                studio::studio_create,
+                studio::studio_apply,
+                studio::studio_apply_index,
+                studio::recovery::studio_recovery_list,
+                studio::fault::studio_fault_read,
+                studio::fault::studio_fault_repair,
+                studio::recovery::studio_recovery_preview,
+                studio::recovery::studio_recovery_apply,
+                studio::recovery::studio_recovery_restore_pointer,
+                studio::recovery::studio_recovery_read,
+                studio::recovery::studio_recovery_export,
+                studio::recovery::studio_recovery_acknowledge,
+                post_status,
+                get_statuses,
+                edit_status,
+                delete_status,
+                toggle_status_reaction,
+                set_status_pin,
+                get_status_policy,
+                set_status_policy,
+                create_event,
+                delete_event,
+                get_events,
+                get_wiki_pages,
+                get_wiki_map,
+                get_wiki_page,
+                save_wiki_page,
+                get_wiki_meta,
+                set_wiki_format,
+                delete_wiki_page,
+                rename_wiki_page,
+                get_wiki_history,
+                get_wiki_pending,
+                get_wiki_review_days,
+                set_wiki_review_days,
+                approve_wiki_edit,
+                reject_wiki_edit,
+                restore_wiki_page,
+                get_roles,
+                get_moderation,
+                warn_message,
+                create_kick_case,
+                cast_kick_vote,
+                resolve_kick_case,
+                get_join_attempts,
+                get_connectivity,
+                get_call_transport,
+                map_call_port,
+                prepare_call_mapping_controller,
+                prepare_call_mapping_owner,
+                activate_call_mapping_owner,
+                end_call_mapping_owner,
+                prepare_voice_controller,
+                prepare_voice_owner,
+                activate_voice_owner,
+                end_voice_owner,
+                admit_voice_crypto,
+                settle_voice_crypto,
+                voice_join_key::admit_voice_join_key,
+                voice_join_key::publish_voice_join_key,
+                voice_join_key::settle_voice_join_key,
+                voice_handoff::commands::setup_voice_channel,
+                voice_handoff::commands::read_voice_channel_work,
+                voice_handoff::commands::settle_voice_channel_setup,
+                voice_handoff::commands::collect_voice_channel,
+                default_route_address,
+                unmap_call_port,
+                get_switchboard_status,
+                set_switchboard_offered,
+                get_ui_state,
+                save_ui_state,
+                create_backup,
+                change_vault_secret,
+                get_debug_logging,
+                set_debug_logging,
+                test_debug_logging,
+                get_console_log,
+                clear_console_log,
+                get_capture_config,
+                set_capture_mode,
+                set_section_capture,
+                reset_section_capture,
+                open_public_diagnostics_issue,
+                get_event_cursor,
+                get_task_health,
+                save_diagnostics_report,
+                validate_diagnostics_report,
+                log_ui,
+                log_ui_batch,
+                record_ui_events,
+                set_admin,
+                remove_member,
+                revoke_device,
+                send_message,
+                durable_chat::durable_send_context,
+                durable_chat::durable_mutation_context,
+                durable_chat::stop_durable_chat,
+                edit_message,
+                delete_message,
+                toggle_reaction,
+                set_pin,
+                set_channel_topic,
+                get_channel_topic,
+                jukebox_add,
+                jukebox_add_link,
+                jukebox_remove,
+                get_jukebox,
+                get_inbox,
+                get_messages,
+                get_message_tail,
+                get_messages_by_id,
+                get_message_page,
+                get_pinned_messages,
+                get_channel_heads,
+                pairing_begin,
+                pairing_read,
+                pairing_mint,
+                pairing_decline,
+                pairing_open,
+                pairing_join,
+                open_issue_url,
+                open_external_url,
+                save_and_open_space_guide,
+                save_space_layout,
+                save_jam_sheet,
+                save_group_file,
+                private_downloads::get_private_downloads,
+                private_downloads::set_private_download_paused,
+                private_downloads::retry_private_download,
+                private_downloads::cancel_private_download,
+                private_downloads::check_saved_download,
+                private_downloads::reveal_saved_download,
+                saved_files::get_saved_files,
+                saved_files::check_saved_files,
+                saved_files::reveal_saved_file,
+                saved_files::forget_saved_file,
+                saved_files::reset_saved_files,
+                saved_files::get_saved_files_limit,
+                saved_files::set_saved_files_limit
+            ]),
+        ))
+        .build(context)
+        .expect("error while building the Mewtual desktop app");
+    app.run(move |_, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            // App::run never returns, and restart also exits directly. The Exit callback runs
+            // before Tauri cleanup/restart. Stop and collect here while IO runtime and logging
+            // still exist. This status worker has no UI/actor dependency that could deadlock
+            // the final event callback; preserve that invariant when adding action transport.
+            match tauri::async_runtime::block_on(exit_voice_host.finish()) {
+                Ok(()) => tracing::info!(target: "catcoms_app", "VOICE.HANDOFF.STOPPED"),
+                Err(reason) => tracing::warn!(?reason, "VOICE.HANDOFF.STOP_FAILED"),
+            }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -16757,12 +19797,140 @@ mod tests {
                 checked: false,
             }],
             error: None,
+            transfers: vec![catcoms_storage::kept::KeptTransfer {
+                plan: catcoms_storage::kept::KeepPlan {
+                    cid: catcoms_storage::Cid::of(b"partial"),
+                    version: [8; 32],
+                    manifest: b"secret partial wrapped keys".to_vec(),
+                    chunks: vec![(catcoms_storage::Cid::of(b"partial ciphertext"), 30)],
+                },
+                listing: [9; 32],
+                transfer: [10; 32],
+                phase: catcoms_storage::kept::KeepPhase::Resumable,
+                verified_chunks: 0,
+                running: false,
+                user_paused: true,
+                blocked: false,
+                intent: u64::MAX,
+                exhausted: true,
+                grant: u64::MAX,
+                remaining: catcoms_storage::kept::KeepAllowance {
+                    requests: 0,
+                    pages: 0,
+                    bytes: 0,
+                    slices: 0,
+                },
+            }],
         });
         let json = serde_json::to_value(value).unwrap();
         assert_eq!(json["files"][0]["checked"], false);
         assert_eq!(json["files"][0].as_object().unwrap().len(), 3);
         assert!(json["files"][0].get("manifest").is_none());
         assert!(!json.to_string().contains("secret"));
+        assert_eq!(json["transfers"][0]["phase"], "paused");
+        assert_eq!(json["transfers"][0]["grant"], u64::MAX.to_string());
+        assert_eq!(json["transfers"][0].as_object().unwrap().len(), 12);
+        assert!(json["transfers"][0].get("listing").is_none());
+        assert!(json["transfers"][0].get("remaining").is_none());
+    }
+
+    #[test]
+    fn kept_retry_input_requires_closed_canonical_identities_and_lossless_grants() {
+        let transfer = "ab".repeat(32);
+        let request = "cd".repeat(16);
+        let accepted = kept_retry_request(&transfer, &u64::MAX.to_string(), &request).unwrap();
+        assert_eq!(accepted.expected_grant, u64::MAX);
+        assert_eq!(accepted.transfer, [0xab; 32]);
+        for grant in [
+            "0",
+            "01",
+            "+1",
+            " 1",
+            "1 ",
+            "1.0",
+            "18446744073709551616",
+            "",
+        ] {
+            assert!(
+                kept_retry_request(&transfer, grant, &request).is_err(),
+                "{grant}"
+            );
+        }
+        for identity in [
+            "AB".repeat(32),
+            "ab".repeat(33),
+            "ab".repeat(31),
+            "../".repeat(22),
+            "é".repeat(32),
+        ] {
+            assert!(kept_retry_request(&identity, "1", &request).is_err());
+        }
+        assert!(kept_retry_request(&transfer, "1", &"CD".repeat(16)).is_err());
+        assert!(kept_retry_request(&transfer, "1", &"cd".repeat(17)).is_err());
+    }
+
+    #[tokio::test]
+    async fn kept_mutation_rejects_replaced_actor_and_reply_after_lock_request() {
+        use catcoms_rt::{Hub, PeerId};
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+        let root = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::default());
+        *state.store.lock().await =
+            Some((ServerStore::open(root.path(), b"kept test", &mut OsCryptoRng).unwrap()).into());
+        *state.session_resumable.lock().await = true;
+        let server = Server::found(
+            Hub::new().join(PeerId::from_u64(72)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(72),
+            Box::new(ManualClock::new(1_000)),
+            "member",
+        )
+        .unwrap();
+        let group = server.group_id();
+        let device = server.device_id();
+        let (actor, mut events, task) = spawn(server);
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+        state
+            .servers
+            .lock()
+            .await
+            .install_legacy_fixture(7, snapshot_test_entry(2, actor.clone(), group, device));
+        let generation = unlocked_ui_session_generation(&state).await.unwrap();
+        let called = AtomicBool::new(false);
+        let error = commit_kept_command(&state, 7, 1, generation, async {
+            called.store(true, Ordering::Release);
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+        assert!(error.contains("server changed"));
+        assert!(
+            !called.load(Ordering::Acquire),
+            "a stale actor command was never polled"
+        );
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let (release, deferred) = tokio::sync::oneshot::channel();
+        let pending_state = state.clone();
+        let pending = tokio::spawn(async move {
+            commit_kept_command(&pending_state, 7, 2, generation, async {
+                entered.send(()).unwrap();
+                deferred.await.unwrap();
+                Ok("native receipt")
+            })
+            .await
+        });
+        waiting.await.unwrap();
+        register_ui_lock_request(&state);
+        release.send(()).unwrap();
+        assert!(pending
+            .await
+            .unwrap()
+            .unwrap_err()
+            .contains("session changed"));
+        actor.shutdown().await;
+        task.await.unwrap();
+        drain.await.unwrap();
     }
 
     #[test]
@@ -17199,7 +20367,7 @@ mod tests {
             catcoms_app::ServerStore::open(dir.path(), b"passphrase", &mut catcoms_rt::OsCryptoRng)
                 .expect("a fresh vault opens");
         *state.session_resumable.lock().await = true;
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         assert_eq!(actor_of(&state, 1).await.unwrap_err(), ActorLookup::NotOpen);
     }
 
@@ -18064,7 +21232,7 @@ mod tests {
             tokio::spawn(
                 async move { lock_session_with_generation_inner(&locking_state, None).await },
             );
-        while !state.session_lock_requested.load(Ordering::Acquire) {
+        while !state.session_lock_requested.load(Ordering::SeqCst) {
             tokio::task::yield_now().await;
         }
 
@@ -18072,8 +21240,9 @@ mod tests {
             .unwrap_err()
             .contains("locked"));
         drop(admitted_begin);
-        let (_generation, result) = locking.await.unwrap();
-        result.unwrap();
+        let (_generation, snapshot, keys) = locking.await.unwrap();
+        snapshot.unwrap();
+        keys.unwrap();
         assert!(state
             .inline_downloads
             .lock()
@@ -18125,12 +21294,19 @@ mod tests {
         /// Lock once this many chunks have actually been written. Reaches the phase after the
         /// loop, where there is no next iteration left to notice a lock.
         lock_after_writes: Option<usize>,
+        occupy_during_fetch: Option<PathBuf>,
+        /// `(staging, aside)`: during the first fetch another program moves our staging file to
+        /// `aside` and puts its own file at the staging name (PR51 H1/M1).
+        swap_staging_during_fetch: Option<(PathBuf, PathBuf)>,
         fetches: std::cell::Cell<usize>,
         locked: std::cell::Cell<bool>,
         /// `(chunks written, bytes written)` after each successful write. The observable record of
         /// how far the save actually got, which is what distinguishes "stopped before writing"
         /// from "wrote and then failed", since the failure path deletes the evidence on disk.
         progress: std::cell::RefCell<Vec<(usize, u64)>>,
+        /// What the owned liveness check reports to blocking workers: set to model a session
+        /// retired after the async check passed but before the queued worker started.
+        retired_before_worker: Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl ScriptedSave {
@@ -18139,9 +21315,12 @@ mod tests {
                 chunks,
                 lock_after_fetches: None,
                 lock_after_writes: None,
+                occupy_during_fetch: None,
+                swap_staging_during_fetch: None,
                 fetches: std::cell::Cell::new(0),
                 locked: std::cell::Cell::new(false),
                 progress: std::cell::RefCell::new(Vec::new()),
+                retired_before_worker: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }
         }
 
@@ -18189,6 +21368,15 @@ mod tests {
                 .cloned()
                 .ok_or_else(|| format!("no chunk {index}"))?;
             self.fetches.set(self.fetches.get() + 1);
+            if self.fetches.get() == 1 {
+                if let Some(path) = &self.occupy_during_fetch {
+                    std::fs::write(path, b"unrelated local file").unwrap();
+                }
+                if let Some((staging, aside)) = &self.swap_staging_during_fetch {
+                    std::fs::rename(staging, aside).unwrap();
+                    std::fs::write(staging, b"someone else's file").unwrap();
+                }
+            }
             // The lock lands while this fetch is outstanding, which is the whole point: it becomes
             // true only after the await the caller was suspended in.
             if Some(self.fetches.get()) == self.lock_after_fetches {
@@ -18205,9 +21393,23 @@ mod tests {
             }
         }
 
-        async fn publish_verified(&self, staging: &Path, final_path: &Path) -> Result<(), String> {
+        async fn publish_verified(
+            &self,
+            file: &mut private_downloads::OnPool<std::fs::File>,
+            staging: &Path,
+            final_path: &Path,
+        ) -> Result<(), String> {
             self.still_unlocked().await?;
-            publish_staged_download(staging, final_path)
+            publish_staged_on_pool(file, staging, final_path).await
+        }
+
+        fn liveness(&self) -> private_downloads::Liveness {
+            let retired = self.retired_before_worker.clone();
+            Arc::new(move || !retired.load(std::sync::atomic::Ordering::SeqCst))
+        }
+
+        fn custody(&self) -> Option<catcoms_rt::SharedRequestKeepalive> {
+            None
         }
 
         fn progress(&self, done: usize, bytes_done: u64, _network: u64, _provider: Option<String>) {
@@ -18231,11 +21433,12 @@ mod tests {
         let mut source = ScriptedSave::new(vec![b"first ".to_vec(), b"second".to_vec()]);
         let (total, size, target) = (source.total(), source.size(), source.address());
 
-        let path =
+        let (path, note) =
             stream_download_to_disk(dir.path(), "notes.txt", total, size, &target, &mut source)
                 .await
                 .unwrap();
 
+        assert!(note.is_empty(), "nothing was left behind: {note}");
         assert_eq!(path.file_name().unwrap(), "notes.txt");
         assert_eq!(std::fs::read(&path).unwrap(), b"first second");
         assert!(
@@ -18247,6 +21450,106 @@ mod tests {
             &[(0, 0), (1, 6), (2, 12)],
             "one update per chunk, plus the opening zero"
         );
+    }
+
+    /// Picker review M2: the fallback writer (one-click into Downloads, and Save as at a place that
+    /// cannot carry a journal) must keep its filesystem work off the async runtime. On a
+    /// single-threaded runtime the releasing task below can only run while staging is parked if
+    /// staging runs on the blocking pool; inline staging would starve it until the timeout.
+    #[test]
+    fn the_fallback_writer_stages_off_the_async_runtime() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let folder = dir.path().to_path_buf();
+            let mut source = ScriptedSave::new(vec![b"chunk".to_vec()]);
+            let (total, size, target) = (source.total(), source.size(), source.address());
+            let (parked, parked_seen) = tokio::sync::oneshot::channel::<()>();
+            let (release, released) = std::sync::mpsc::channel::<()>();
+            let releaser = tokio::spawn(async move {
+                if parked_seen.await.is_ok() {
+                    let _ = release.send(());
+                }
+            });
+            let saved = stream_download_staged(
+                move || {
+                    let _ = parked.send(());
+                    released
+                        .recv_timeout(std::time::Duration::from_secs(10))
+                        .map_err(|_| "staging blocked the async runtime".to_string())?;
+                    create_staged_download(&folder, "parked.bin")
+                },
+                total,
+                size,
+                &target,
+                &mut source,
+            )
+            .await;
+            let (path, _) = saved.expect("the runtime stayed free while staging was parked");
+            assert_eq!(std::fs::read(&path).unwrap(), b"chunk");
+            releaser.await.unwrap();
+        });
+    }
+
+    /// With file work on the blocking pool (picker review M2), a step can pass the async session
+    /// check and then wait for a pool thread while Lock lands. Such a step must do nothing when its
+    /// worker starts: no staging file at all, and no plaintext write into an existing one.
+    #[tokio::test]
+    async fn a_fallback_step_whose_worker_starts_after_retirement_does_nothing() {
+        // Retired before the staging worker starts: no `.part` is ever created.
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = ScriptedSave::new(vec![b"secret".to_vec()]);
+        source
+            .retired_before_worker
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let (total, size, target) = (source.total(), source.size(), source.address());
+        let folder = dir.path().to_path_buf();
+        let created = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let staged = created.clone();
+        assert!(stream_download_staged(
+            move || {
+                staged.store(true, std::sync::atomic::Ordering::SeqCst);
+                create_staged_download(&folder, "early.bin")
+            },
+            total,
+            size,
+            &target,
+            &mut source,
+        )
+        .await
+        .is_err());
+        assert!(
+            !created.load(std::sync::atomic::Ordering::SeqCst),
+            "no staging"
+        );
+        assert!(downloads_empty(dir.path()));
+
+        // Retired after staging, before the first write's worker starts: nothing is written and
+        // the staging name is removed.
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = ScriptedSave::new(vec![b"secret".to_vec()]);
+        let (total, size, target) = (source.total(), source.size(), source.address());
+        let folder = dir.path().to_path_buf();
+        let retire = source.retired_before_worker.clone();
+        assert!(stream_download_staged(
+            move || {
+                let staged = create_staged_download(&folder, "late.bin");
+                // The next worker (the first write) starts after Lock.
+                retire.store(true, std::sync::atomic::Ordering::SeqCst);
+                staged
+            },
+            total,
+            size,
+            &target,
+            &mut source,
+        )
+        .await
+        .is_err());
+        assert_eq!(source.written(), 0, "no plaintext write after retirement");
+        assert!(downloads_empty(dir.path()));
     }
 
     #[tokio::test]
@@ -18317,41 +21620,47 @@ mod tests {
         let downloads = tempfile::tempdir().unwrap();
         let state = AppState::default();
         let store = ServerStore::open(vault.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = true;
         let old_generation = unlocked_ui_session_generation(&state).await.unwrap();
         let (mut file, staging, final_path) =
             create_staged_download(downloads.path(), "verified.txt").unwrap();
         file.write_all(b"verified plaintext").unwrap();
         file.sync_all().unwrap();
-        drop(file);
 
         // This is the deterministic post-verification/pre-rename pause: lock completes before the
         // old worker tries to publish its already-synced plaintext staging file.
         lock_session_inner(&state, None).await.unwrap();
-        assert!(
-            publish_download_for_generation(&state, old_generation, &staging, &final_path,)
-                .await
-                .is_err()
-        );
+        assert!(publish_download_for_generation(
+            &state,
+            old_generation,
+            &file,
+            &staging,
+            &final_path
+        )
+        .await
+        .is_err());
         assert!(staging.exists());
-        assert_eq!(std::fs::metadata(&final_path).unwrap().len(), 0);
+        assert!(
+            !final_path.exists(),
+            "a retired save cannot create its final destination"
+        );
 
         assert!(authenticate_mounted_store(&state, b"correct horse")
             .await
             .unwrap());
-        let new_generation = state.ui_session_generation.load(Ordering::Acquire);
+        let new_generation = state.ui_session_generation.load(Ordering::SeqCst);
         finalize_unlock_session(&state, new_generation, true)
             .await
             .unwrap();
         assert_ne!(old_generation, new_generation);
         assert!(
-            publish_download_for_generation(&state, old_generation, &staging, &final_path,)
+            publish_download_for_generation(&state, old_generation, &file, &staging, &final_path)
                 .await
                 .is_err(),
             "unlocking again must not revive an export authorized by the older session"
         );
-        publish_download_for_generation(&state, new_generation, &staging, &final_path)
+        publish_download_for_generation(&state, new_generation, &file, &staging, &final_path)
             .await
             .unwrap();
         assert_eq!(std::fs::read(final_path).unwrap(), b"verified plaintext");
@@ -18375,6 +21684,170 @@ mod tests {
             downloads_empty(dir.path()),
             "unverified bytes are not left on disk"
         );
+    }
+
+    /// PR51 H1: the fallback writer's failure cleanup used to delete its staging name by path, so a
+    /// file another program put at that name during the transfer was deleted although Mewtual never
+    /// created it. Now the name is deleted only while it still holds our open file: the swapped-in
+    /// file survives byte-identical, and the error never tells the user to delete it.
+    #[tokio::test]
+    async fn a_failed_fallback_save_never_deletes_a_file_swapped_in_at_its_staging_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("x.bin.part");
+        let aside = dir.path().join("ours, moved by someone");
+        let mut source = ScriptedSave::new(vec![b"real bytes".to_vec()]);
+        source.swap_staging_during_fetch = Some((staging.clone(), aside.clone()));
+        let (total, size) = (source.total(), source.size());
+        let wrong = *Cid::of(b"a different file").as_bytes();
+
+        let err = stream_download_to_disk(dir.path(), "x.bin", total, size, &wrong, &mut source)
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("integrity"), "{err}");
+        assert!(
+            !err.contains("delete it yourself"),
+            "never asks the user to delete someone else's file: {err}"
+        );
+        assert_eq!(std::fs::read(&staging).unwrap(), b"someone else's file");
+        assert!(aside.exists(), "nothing that is not at our name is touched");
+        assert!(!dir.path().join("x.bin").exists());
+    }
+
+    /// PR51 H1: in a folder other accounts can modify, Unix never deletes automatically. A failed
+    /// save leaves its partly written file and says so, so the user can delete it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_fallback_save_in_a_shared_folder_leaves_its_partial_and_says_so() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        let mut source = ScriptedSave::new(vec![b"real bytes".to_vec()]);
+        let (total, size) = (source.total(), source.size());
+        let wrong = *Cid::of(b"a different file").as_bytes();
+
+        let err = stream_download_to_disk(dir.path(), "z.bin", total, size, &wrong, &mut source)
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("\"z.bin.part\" was left in place"), "{err}");
+        assert!(dir.path().join("z.bin.part").exists());
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// Review M-5: a save that succeeds in a folder other accounts can modify keeps its temporary
+    /// second name (nothing is deleted automatically there) and says so with the saved result.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_fallback_save_in_a_shared_folder_says_its_temporary_copy_stayed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        let mut source = ScriptedSave::new(vec![b"verified bytes".to_vec()]);
+        let (total, size, target) = (source.total(), source.size(), source.address());
+
+        let (path, note) =
+            stream_download_to_disk(dir.path(), "w.bin", total, size, &target, &mut source)
+                .await
+                .unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"verified bytes");
+        assert!(
+            note.contains("This folder may be changed by other accounts"),
+            "{note}"
+        );
+        assert!(note.contains("\"w.bin.part\""), "{note}");
+        assert!(dir.path().join("w.bin.part").exists());
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// Transfers review L6 (fixed in the fix-the-lows round): every platform's reveal form, built
+    /// on any host. Explorer gets the path quoted inside `/select,` so a comma cannot split it;
+    /// `xdg-open` gets the parent folder with a trailing `/`, never the file itself.
+    #[test]
+    fn reveal_commands_keep_the_path_whole_and_never_open_the_file() {
+        use std::ffi::OsString;
+        let windows = reveal_command(Path::new(r"C:\Users\me\Down,loads\a,b c.txt"), "windows")
+            .expect("a Windows path");
+        assert_eq!(windows.program, "explorer.exe");
+        assert!(windows.flags.is_empty());
+        assert_eq!(
+            windows.target,
+            OsString::from(r#"/select,"C:\Users\me\Down,loads\a,b c.txt""#),
+            "quoted inside the option, so Explorer's comma split cannot cut the path"
+        );
+        assert!(
+            reveal_command(Path::new(r#"C:\x\a"b.txt"#), "windows").is_err(),
+            "a quote cannot be escaped for Explorer, and no Windows name holds one"
+        );
+
+        let macos = reveal_command(Path::new("/Users/me/Downloads/a,b.txt"), "macos").unwrap();
+        assert_eq!((macos.program, macos.flags), ("open", &["-R"][..]));
+        assert_eq!(macos.target, OsString::from("/Users/me/Downloads/a,b.txt"));
+
+        for os in ["linux", "freebsd"] {
+            let unix = reveal_command(Path::new("/home/me/Downloads/run.desktop"), os).unwrap();
+            assert_eq!((unix.program, unix.flags), ("xdg-open", &[][..]));
+            assert_eq!(
+                unix.target,
+                OsString::from("/home/me/Downloads/"),
+                "{os}: the folder, with a trailing slash so a file swapped in there is refused"
+            );
+            assert_eq!(
+                reveal_command(Path::new("/run.desktop"), os)
+                    .unwrap()
+                    .target,
+                OsString::from("/"),
+                "{os}: the root keeps its single slash"
+            );
+            assert!(
+                reveal_command(Path::new("run.desktop"), os).is_err(),
+                "{os}: a path with no parent is refused; xdg-open would open the file itself"
+            );
+        }
+    }
+
+    /// PR51 M1: a staging name swapped during the transfer must never become the saved file. Linux
+    /// and Android first check, inside the pinned folder, that the staging name still holds our
+    /// open file (review of the Linux CI fix, MEDIUM 1(b), `74b9dfe4`: without a journal that is
+    /// what binds the folder), and Windows' pin finds the foreign object there: both refuse before
+    /// linking, with a message that names no path and does not ask the user to delete someone
+    /// else's file. macOS's post-link check finds the foreign object at the final name and fails
+    /// the save. In every case the swapped-in file is left exactly where it was, and our own file,
+    /// moved away by the other program, is never touched.
+    #[tokio::test]
+    async fn a_fallback_save_never_publishes_a_file_swapped_in_at_its_staging_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("y.bin.part");
+        let aside = dir.path().join("ours, moved by someone");
+        let mut source = ScriptedSave::new(vec![b"verified bytes".to_vec()]);
+        source.swap_staging_during_fetch = Some((staging.clone(), aside.clone()));
+        let (total, size, target) = (source.total(), source.size(), source.address());
+
+        let saved =
+            stream_download_to_disk(dir.path(), "y.bin", total, size, &target, &mut source).await;
+
+        let final_path = dir.path().join("y.bin");
+        assert_eq!(std::fs::read(&staging).unwrap(), b"someone else's file");
+        #[cfg(any(windows, target_os = "linux", target_os = "android"))]
+        {
+            assert_eq!(
+                saved.unwrap_err(),
+                "a different file appeared at the save's name",
+                "the whole message: no path, nothing to delete"
+            );
+            assert!(!final_path.exists(), "nothing was linked");
+            assert_eq!(
+                std::fs::read(&aside).unwrap(),
+                b"verified bytes",
+                "our moved file is left where it is"
+            );
+        }
+        #[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+        {
+            assert!(saved.is_err(), "never reported as saved");
+            assert_eq!(std::fs::read(&final_path).unwrap(), b"someone else's file");
+        }
     }
 
     #[tokio::test]
@@ -18407,84 +21880,29 @@ mod tests {
         assert!(downloads_empty(dir.path()));
     }
 
-    /// An `AppState` holding one pending upload under `key`, in the shape `finish` would see.
-    async fn state_with_upload(key: &UploadKey, up: PendingUpload) -> AppState {
-        let state = AppState::default();
-        state.uploads.lock().await.insert(key.clone(), up);
-        state
-    }
+    // Streamed upload session/lock tests live beside the actual admission and publication
+    // worker in upload_session/tests.rs. They use real native sessions rather than a supplied
+    // `locked` boolean, which cannot authorize a publication across an await.
 
     #[tokio::test]
-    async fn a_lock_before_the_index_post_ends_the_upload_instead_of_publishing_it() {
-        // The upload-side twin of the save race. Everything is sealed and complete, and the only
-        // step left is the group-visible one. A lock arriving here must end the transfer, not
-        // publish it a moment later; and it must take the upload with it rather than leaving a
-        // reservation nothing will ever close.
-        let key = (1u64, "tok".to_string());
-        let (complete, _) = stream(CHUNK_BYTES);
-        assert!(complete.is_complete(), "the upload was ready to publish");
-        let state = state_with_upload(&key, complete).await;
-
-        let err = take_publishable_upload(&state, &key, true)
-            .await
-            .unwrap_err();
-
-        assert!(err.contains("locked"), "{err}");
-        assert!(
-            state.uploads.lock().await.is_empty(),
-            "and the upload is gone, not left pending across the lock"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_complete_upload_publishes_and_an_incomplete_one_is_destroyed() {
-        let key = (1u64, "tok".to_string());
-        let (complete, _) = stream(CHUNK_BYTES * 2 + 3);
-        let state = state_with_upload(&key, complete).await;
-
-        let taken = take_publishable_upload(&state, &key, false).await.unwrap();
-        assert!(taken.is_complete());
-        assert!(state.uploads.lock().await.is_empty(), "taken, not copied");
-
-        // Removed twice is not publishable twice.
-        assert!(take_publishable_upload(&state, &key, false).await.is_err());
-
-        // A short upload is refused and destroyed rather than published under a whole-file address
-        // that was never sent.
-        let mut short = pending(CHUNK_BYTES as u64 * 2);
-        short
-            .admit_slice(0, &vec![0u8; UPLOAD_SLICE_BYTES])
-            .unwrap();
-        let state = state_with_upload(&key, short).await;
-        let err = take_publishable_upload(&state, &key, false)
-            .await
-            .unwrap_err();
-        assert!(err.contains("did not send every chunk"), "{err}");
-        assert!(state.uploads.lock().await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn locking_the_session_drains_every_upload_in_flight() {
-        // Uploads are session state. A lock must not leave one holding a slot (and its staged
-        // chunks) into whatever comes next.
-        let state = AppState::default();
-        for token in ["a", "b"] {
-            let (up, _) = stream(CHUNK_BYTES);
-            state
-                .uploads
-                .lock()
-                .await
-                .insert((1, token.to_string()), up);
-        }
-        *state.session_resumable.lock().await = true;
-
-        lock_session_inner(&state, None).await.unwrap();
-
-        assert!(state.uploads.lock().await.is_empty(), "drained by the lock");
-        assert!(
-            !*state.session_resumable.lock().await,
-            "and the session closed"
-        );
+    async fn already_retired_stream_never_creates_staging_or_reports_initial_progress() {
+        let directory = tempfile::tempdir().unwrap();
+        let data = b"file".to_vec();
+        let mut source = ScriptedSave::new(vec![data.clone()]);
+        source.locked.set(true);
+        assert!(stream_download_to_disk(
+            directory.path(),
+            "file.bin",
+            1,
+            data.len() as u64,
+            Cid::of(&data).as_bytes(),
+            &mut source
+        )
+        .await
+        .is_err());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        assert_eq!(source.fetches.get(), 0);
+        assert!(source.progress.borrow().is_empty());
     }
 
     #[tokio::test]
@@ -18494,7 +21912,7 @@ mod tests {
         let state = Arc::new(AppState::default());
         let dir = tempfile::tempdir().unwrap();
         let store = ServerStore::open(dir.path(), b"passphrase", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = true;
         let generation = unlocked_ui_session_generation(&state).await.unwrap();
 
@@ -18520,7 +21938,7 @@ mod tests {
             "stale join work must not enter the registration/persistence boundary"
         );
         assert_ne!(
-            state.ui_session_generation.load(Ordering::Acquire),
+            state.ui_session_generation.load(Ordering::SeqCst),
             generation
         );
     }
@@ -18537,10 +21955,9 @@ mod tests {
         assert_eq!(final_path.file_name().unwrap(), "notes.txt");
         assert_eq!(staging.file_name().unwrap(), "notes.txt.part");
         file.write_all(b"half a file").unwrap();
-        assert_eq!(
-            std::fs::metadata(&final_path).unwrap().len(),
-            0,
-            "the reserved name stays empty while bytes land in the staging file"
+        assert!(
+            !final_path.exists(),
+            "only staging exists before verified publication"
         );
 
         // A second save cannot take the reserved name, nor the staging file, while this one runs.
@@ -18548,27 +21965,118 @@ mod tests {
         assert_eq!(final2.file_name().unwrap(), "notes (1).txt");
         assert_ne!(staging2, staging);
 
+        publish_staged_download(&file, &staging, &final_path).unwrap();
+        // Publication is only the link (review L-1); settling afterwards consumes the staging name.
+        assert!(settle_published_staging(&file, &staging).is_empty());
         drop(file);
-        publish_staged_download(&staging, &final_path).unwrap();
         assert_eq!(std::fs::read(&final_path).unwrap(), b"half a file");
         assert!(!staging.exists(), "publishing consumes the staging file");
     }
 
     #[test]
     fn an_abandoned_download_leaves_neither_a_partial_nor_a_reservation() {
-        // What the failure path has to undo: both the staging file and the name it was holding.
+        // Only staging belongs to this operation; the final name has not been created.
         let dir = tempfile::tempdir().unwrap();
         let (mut file, staging, final_path) =
             create_staged_download(dir.path(), "cat.png").unwrap();
         file.write_all(b"partial").unwrap();
         drop(file);
         let _ = std::fs::remove_file(&staging);
-        let _ = std::fs::remove_file(&final_path);
         assert!(!staging.exists());
         assert!(!final_path.exists());
         // And the name is free again for a later, honest save.
         let (_f, _s, again) = create_staged_download(dir.path(), "cat.png").unwrap();
         assert_eq!(again, final_path);
+    }
+
+    #[tokio::test]
+    async fn download_destination_created_during_fetch_is_never_replaced_or_deleted() {
+        for cancelled in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let destination = dir.path().join("notes.txt");
+            let mut source = ScriptedSave::new(vec![b"verified download".to_vec()]);
+            source.occupy_during_fetch = Some(destination.clone());
+            if cancelled {
+                source.lock_after_fetches = Some(1);
+            }
+            let (total, size, target) = (source.total(), source.size(), source.address());
+            assert!(stream_download_to_disk(
+                dir.path(),
+                "notes.txt",
+                total,
+                size,
+                &target,
+                &mut source,
+            )
+            .await
+            .is_err());
+            assert_eq!(std::fs::read(destination).unwrap(), b"unrelated local file");
+            assert_eq!(
+                std::fs::read_dir(dir.path()).unwrap().count(),
+                1,
+                "only our staging file is cleaned on collision or cancellation"
+            );
+        }
+    }
+
+    #[test]
+    fn download_link_commit_survives_failed_staging_cleanup_and_unsupported_link_refuses() {
+        use catcoms_storage::kept::SessionRemoval;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut file, staging, destination) =
+            create_staged_download(dir.path(), "notes.txt").unwrap();
+        file.write_all(b"verified bytes").unwrap();
+        file.sync_all().unwrap();
+        let error = publish_staged_download_with(&staging, &destination, |_, _| {
+            Err(std::io::ErrorKind::Unsupported.into())
+        })
+        .unwrap_err();
+        assert!(!error.is_empty());
+        assert!(!destination.exists());
+        assert!(staging.exists());
+        publish_staged_download(&file, &staging, &destination).unwrap();
+        // Review M-5: settling after the commit never undoes it. A removal that failed on a name
+        // still holding our file says so ("delete it yourself"); in a folder other accounts can
+        // modify it says why.
+        let note = settle_published_staging_with(&file, &staging, |_, _| {
+            Err(std::io::ErrorKind::PermissionDenied.into())
+        });
+        assert_eq!(std::fs::read(&destination).unwrap(), b"verified bytes");
+        assert!(
+            staging.exists(),
+            "failed cleanup cannot undo committed output"
+        );
+        assert!(
+            note.contains(
+                "\"notes.txt.part\" of the saved file could not be removed; delete it yourself"
+            ),
+            "{note}"
+        );
+        let shared =
+            settle_published_staging_with(&file, &staging, |_, _| Ok(SessionRemoval::SharedFolder));
+        assert!(
+            shared.contains("This folder may be changed by other accounts"),
+            "{shared}"
+        );
+        // Review M-4: once the name holds somebody else's file, nothing tells the user to delete it.
+        std::fs::rename(&staging, dir.path().join("ours elsewhere")).unwrap();
+        std::fs::write(&staging, b"someone else's file").unwrap();
+        for removal in [
+            Err(std::io::ErrorKind::PermissionDenied),
+            Ok(SessionRemoval::SharedFolder),
+        ] {
+            let note = settle_published_staging_with(&file, &staging, |_, _| {
+                removal.map_err(std::io::Error::from)
+            });
+            assert!(note.is_empty(), "{note}");
+        }
+        assert_eq!(std::fs::read(&staging).unwrap(), b"someone else's file");
+        // The real settle removes our name when it still holds our file.
+        std::fs::remove_file(&staging).unwrap();
+        std::fs::rename(dir.path().join("ours elsewhere"), &staging).unwrap();
+        assert!(settle_published_staging(&file, &staging).is_empty());
+        assert!(!staging.exists());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"verified bytes");
     }
 
     #[test]
@@ -18760,7 +22268,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = true;
         let generation = unlocked_ui_session_generation(&state).await.unwrap();
         state.media_cache.lock().await.push(cached(1, "cid", 0));
@@ -18799,7 +22307,7 @@ mod tests {
             .body(b"must not escape".to_vec())
             .unwrap();
         let mut published = None;
-        publish_media_response(&state, Some(generation), plaintext, |response| {
+        publish_media_response(&state, Some(generation), None, plaintext, |response| {
             published = Some(response);
         })
         .await;
@@ -18815,7 +22323,7 @@ mod tests {
         assert!(stale_range.body().is_empty());
 
         let cid = Cid::of(b"locked media").to_hex();
-        let response = serve_media(&state, &format!("/1/{cid}"), None).await;
+        let (_, response) = serve_media(&state, &format!("/1/{cid}"), None, generation).await;
         assert_eq!(response.status(), http::StatusCode::FORBIDDEN);
         assert!(response.body().is_empty());
     }
@@ -19918,7 +23426,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = true;
         state.storage_health.lock().await.insert(
             7,
@@ -19947,6 +23455,8 @@ mod tests {
             .lock()
             .await
             .as_ref()
+            .unwrap()
+            .as_legacy()
             .unwrap()
             .load_ui_state()
             .unwrap();
@@ -20020,8 +23530,9 @@ mod tests {
     async fn ordinary_lock_completion_cannot_erase_native_close_debt() {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
-        *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.store.lock().await = Some(
+            (ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap()).into(),
+        );
         *state.session_resumable.lock().await = true;
 
         let (failed_close, may_destroy) =
@@ -20062,7 +23573,7 @@ mod tests {
         let ordinary = tokio::spawn(async move {
             lock_session_inner(&ordinary_state, Some("ordinary-invalid".into())).await
         });
-        while state.ui_session_generation.load(Ordering::Acquire) < 1
+        while state.ui_session_generation.load(Ordering::SeqCst) < 1
             || state
                 .pending_ui_lock_snapshot
                 .lock()
@@ -20078,7 +23589,7 @@ mod tests {
         let closing = tokio::spawn(async move {
             close_vault_window_plan_inner(&close_state, Some("close-invalid".into()), false).await
         });
-        while state.ui_session_generation.load(Ordering::Acquire) < 2
+        while state.ui_session_generation.load(Ordering::SeqCst) < 2
             || state
                 .pending_ui_lock_snapshot
                 .lock()
@@ -20108,15 +23619,16 @@ mod tests {
     async fn successful_reunlock_resolves_old_native_close_debt() {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
-        *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.store.lock().await = Some(
+            (ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap()).into(),
+        );
         *state.session_resumable.lock().await = true;
         let (failed, may_destroy) =
             close_vault_window_plan_inner(&state, Some("not json".into()), false).await;
         assert!(failed.continuity_error.is_some());
         assert!(!may_destroy);
 
-        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
         assert!(finalize_unlock_session(&state, generation, false)
             .await
             .is_err());
@@ -20130,21 +23642,49 @@ mod tests {
         assert!(state.vault_window_close_debt.lock().await.is_none());
     }
 
-    #[tokio::test]
-    async fn remounted_close_consumes_the_exact_native_pending_lock_snapshot() {
+    const BEFORE_CANCELLED_LOCK_UI_STATE: &str =
+        r#"{"version":1,"drafts":{"room":"saved draft"},"readMarks":{}}"#;
+
+    /// Cancel the real native lock at a held emission fence, leaving native-owned continuity.
+    /// The command fence is held too so this cannot pass by completing some other lock path.
+    async fn cancelled_lock_at_emission_fence(latest: &str) -> (tempfile::TempDir, AppState) {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        store
+            .save_ui_state(BEFORE_CANCELLED_LOCK_UI_STATE.as_bytes(), &mut OsCryptoRng)
+            .unwrap();
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = true;
-        let latest = r#"{"version":1,"drafts":{"room":"before remount"},"readMarks":{}}"#;
+        let events = state.ui_event_commit.lock().await;
+        let commands = state.ui_session_commit.lock().await;
+        let mut locking = Box::pin(lock_session_inner(&state, Some(latest.into())));
+        std::future::poll_fn(|cx| {
+            assert!(locking.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert_eq!(
+            state
+                .pending_ui_lock_snapshot
+                .lock()
+                .await
+                .as_ref()
+                .map(|s| s.json.as_str()),
+            Some(latest)
+        );
+        assert!(!*state.session_resumable.lock().await);
+        drop(locking); // Native future cancellation, without assuming WebView reload cancels IPC.
+        drop(commands);
+        drop(events);
+        (root, state)
+    }
 
-        // This is the native transaction left behind after the Ctrl+L webview was remounted. The
-        // new component has no JS snapshot and therefore calls close with `None`.
-        *state.pending_ui_lock_snapshot.lock().await = Some(PendingUiLockSnapshot {
-            generation: 1,
-            json: latest.into(),
-        });
+    #[tokio::test]
+    async fn remounted_close_consumes_the_exact_native_pending_lock_snapshot() {
+        let latest = r#"{"version":1,"drafts":{"room":"before remount"},"readMarks":{}}"#;
+        let (_root, state) = cancelled_lock_at_emission_fence(latest).await;
+        // A fresh component has no JS snapshot; the cancelled native invocation retained it.
         let (outcome, may_destroy) = close_vault_window_plan_inner(&state, None, false).await;
         assert!(outcome.continuity_error.is_none());
         assert!(may_destroy);
@@ -20155,12 +23695,42 @@ mod tests {
                 .await
                 .as_ref()
                 .unwrap()
+                .as_legacy()
+                .unwrap()
                 .load_ui_state()
                 .unwrap(),
             latest.as_bytes(),
             "snapshot-less remounted close must finish the exact pending native transaction",
         );
         assert!(state.pending_ui_lock_snapshot.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelled_lock_emission_wait_keeps_malformed_snapshot_from_authorizing_close() {
+        let (_root, state) = cancelled_lock_at_emission_fence("not valid UI state").await;
+        let (outcome, may_destroy) = close_vault_window_plan_inner(&state, None, false).await;
+        assert!(outcome.continuity_error.is_some());
+        assert!(!may_destroy);
+        assert_eq!(
+            state
+                .store
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .as_legacy()
+                .unwrap()
+                .load_ui_state()
+                .unwrap(),
+            BEFORE_CANCELLED_LOCK_UI_STATE.as_bytes(),
+            "refusing malformed continuity must preserve the previous saved draft",
+        );
+        let (retry, may_destroy) = close_vault_window_plan_inner(&state, None, false).await;
+        assert_eq!(retry.continuity_error, outcome.continuity_error);
+        assert!(
+            !may_destroy,
+            "a snapshot-less retry cannot erase the unacknowledged loss"
+        );
     }
 
     #[tokio::test]
@@ -20194,7 +23764,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = true;
         let generation = unlocked_ui_session_generation(&state).await.unwrap();
         let late_report =
@@ -20210,13 +23780,14 @@ mod tests {
         assert!(state.storage_health.lock().await.is_empty());
     }
 
-    fn snapshot_test_entry(
+    pub(super) fn snapshot_test_entry(
         instance: u64,
         actor: ServerActor,
         group_id: Vec<u8>,
         device_id: DeviceId,
     ) -> ServerEntry {
         ServerEntry {
+            files: keep_session::EntryOwner::new(),
             actor,
             instance,
             group_id,
@@ -20231,8 +23802,487 @@ mod tests {
             is_dm: false,
             switchboard: false,
             record_seq: 0,
+            voice: None,
             persist: PersistCounters::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn voice_authority_bridge_checks_room_actor_call_cas_and_lock_before_engine_admission() {
+        use catcoms_rt::{Hub, ManualClock};
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        *state.store.lock().await =
+            Some((ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap()).into());
+        *state.session_resumable.lock().await = true;
+        let server = Server::found(
+            Hub::new().join(PeerId::from_u64(71)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(71),
+            Box::new(ManualClock::new(1000)),
+            "member",
+        )
+        .unwrap();
+        let group = server.group_id();
+        let device = server.device_id();
+        let (actor, mut events, task) = spawn(server);
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+        state
+            .servers
+            .lock()
+            .await
+            .install_legacy_fixture(7, snapshot_test_entry(1, actor.clone(), group, device));
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
+        finalize_unlock_session(&state, generation, false)
+            .await
+            .unwrap();
+        let controller = prepare_voice_controller_inner(&state).await.unwrap();
+        let activated = activate_voice_owner_inner(&state, controller.clone())
+            .await
+            .unwrap();
+        assert!(activated.join.is_none());
+        assert!(
+            prepare_voice_owner_inner(&state, controller.clone(), 7, "001".into())
+                .await
+                .is_err()
+        );
+        assert!(
+            prepare_voice_owner_inner(&state, controller.clone(), 7, "999".into())
+                .await
+                .is_err()
+        );
+        let room = channel_id("general").to_string();
+        let stale = prepare_voice_owner_inner(&state, controller.clone(), 7, room.clone())
+            .await
+            .unwrap();
+        let candidate = prepare_voice_owner_inner(&state, controller.clone(), 7, room.clone())
+            .await
+            .unwrap();
+        let first = activate_voice_owner_inner(&state, candidate).await.unwrap();
+        assert_eq!(first.join.as_ref().unwrap().len(), 64);
+        assert_eq!(first.group.as_ref().unwrap().len(), 64);
+        let lease = state
+            .voice_authority
+            .lock()
+            .unwrap()
+            .owner(&first.owner)
+            .unwrap()
+            .lease;
+        assert!(activate_voice_owner_inner(&state, stale).await.is_err());
+        assert!(lease.is_live());
+        let charge = admit_voice_crypto_inner(&state, first.owner.clone(), "generate".into(), 128)
+            .await
+            .unwrap();
+        // Hold the real final commit boundary. The following actor query is ordered after the
+        // admission's eligibility query, so End occurs after that snapshot but before its charge.
+        let boundary = state.ui_session_commit.lock().await;
+        let (late_end, ()) = tokio::join!(biased;
+            admit_voice_crypto_inner(&state, first.owner.clone(), "generate".into(), 128),
+            async {
+                actor.member_count().await;
+                state.voice_authority.lock().unwrap().end(&first.owner);
+                drop(boundary);
+            }
+        );
+        assert!(late_end.is_err());
+        assert!(!lease.is_live());
+        let candidate = prepare_voice_owner_inner(&state, controller.clone(), 7, room.clone())
+            .await
+            .unwrap();
+        let second = activate_voice_owner_inner(&state, candidate).await.unwrap();
+        let current_lease = state
+            .voice_authority
+            .lock()
+            .unwrap()
+            .owner(&second.owner)
+            .unwrap()
+            .lease;
+        let candidate = prepare_voice_owner_inner(&state, controller, 7, room)
+            .await
+            .unwrap();
+        state.servers.lock().await.legacy_mut(&7).unwrap().instance = 2;
+        assert!(activate_voice_owner_inner(&state, candidate).await.is_err());
+        assert!(
+            admit_voice_crypto_inner(&state, second.owner.clone(), "generate".into(), 128)
+                .await
+                .is_err()
+        );
+        state.servers.lock().await.legacy_mut(&7).unwrap().instance = 1;
+        let (_download, download_cancelled) = claim_internal_inline_download(&state).unwrap();
+        let mapping_owner = {
+            let mut mappings = state.media_mappings.lock().unwrap();
+            let controller = mappings
+                .prepare(
+                    call_mappings::CandidateKind::Controller {
+                        generation: state.ui_session_generation.load(Ordering::SeqCst),
+                    },
+                    0,
+                )
+                .unwrap();
+            assert!(mappings.activate(&controller, 0).unwrap().is_empty());
+            let owner = mappings
+                .prepare(
+                    call_mappings::CandidateKind::Call {
+                        controller,
+                        binding: call_mappings::Binding {
+                            generation: state.ui_session_generation.load(Ordering::SeqCst),
+                            server: 7,
+                            instance: 1,
+                            group: vec![4; 16],
+                            room: channel_id("general").to_string(),
+                        },
+                    },
+                    0,
+                )
+                .unwrap();
+            assert!(mappings.activate(&owner, 0).unwrap().is_empty());
+            owner
+        };
+        let boundary = state.ui_session_commit.lock().await;
+        let event_boundary = state.ui_event_commit.lock().await;
+        let (late_lock, ()) = tokio::join!(biased;
+            admit_voice_crypto_inner(&state, second.owner.clone(), "generate".into(), 128),
+            async {
+                actor.member_count().await;
+                // Even a withheld event emission cannot postpone detached-owner revocation.
+                // These are the actual call lease, mapping owner and charged read cancellation.
+                let mut locking = Box::pin(lock_session_inner(&state, None));
+                std::future::poll_fn(|cx| {
+                    assert!(locking.as_mut().poll(cx).is_pending());
+                    std::task::Poll::Ready(())
+                }).await;
+                assert!(!current_lease.is_live());
+                assert!(*download_cancelled.borrow());
+                assert!(state.media_mappings.lock().unwrap().binding(&mapping_owner).is_none());
+                drop(event_boundary);
+                drop(boundary);
+                locking.await.unwrap();
+            }
+        );
+        assert!(late_lock.is_err());
+        assert!(!current_lease.is_live());
+        assert!(prepare_voice_controller_inner(&state).await.is_err());
+        assert!(
+            admit_voice_crypto_inner(&state, second.owner, "generate".into(), 128)
+                .await
+                .is_err()
+        );
+        assert!(
+            state.voice_authority.lock().unwrap().settle(&charge),
+            "lock retains the exact uncertain operation"
+        );
+        actor.shutdown().await;
+        task.await.unwrap();
+        drain.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn voice_mounted_unlock_reattaches_more_than_eight_actors_without_reviving_old_calls() {
+        use catcoms_rt::{Hub, ManualClock};
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+        let state = AppState::default();
+        let runtime = VoiceRuntime::new(Arc::new(ManualClock::new(1000)));
+        *state.voice_authority.lock().unwrap() =
+            voice_authority::Coordinator::with_runtime(runtime.clone());
+        let mut workers = Vec::new();
+        let mut actors = Vec::new();
+        for id in 1..=12 {
+            let server = Server::found(
+                Hub::new().join(PeerId::from_u64(id)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(id),
+                Box::new(ManualClock::new(1000)),
+                "member",
+            )
+            .unwrap();
+            let (group, device) = (server.group_id(), server.device_id());
+            let (actor, mut events, task) = spawn(server);
+            let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+            state
+                .servers
+                .lock()
+                .await
+                .install_legacy_fixture(id, snapshot_test_entry(id, actor.clone(), group, device));
+            actors.push(actor);
+            workers.push((task, drain));
+        }
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
+        finalize_unlock_session(&state, generation, false)
+            .await
+            .unwrap();
+        let mut old = Vec::new();
+        for actor in &actors {
+            old.push(actor.voice_call_grant(channel_id("general")).await.unwrap());
+        }
+        let counts = runtime.resources().counts();
+        finalize_unlock_session(&state, generation, false)
+            .await
+            .unwrap();
+        assert!(
+            old.iter().all(|grant| grant.lease().is_live()),
+            "idempotent unlock keeps exact registered owners"
+        );
+        assert_eq!(runtime.resources().counts(), counts);
+        lock_session_inner(&state, None).await.unwrap();
+        assert!(old.iter().all(|grant| !grant.lease().is_live()));
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
+        finalize_unlock_session(&state, generation, false)
+            .await
+            .unwrap();
+        let mut current = Vec::new();
+        for actor in &actors {
+            current.push(actor.voice_call_grant(channel_id("general")).await.unwrap());
+        }
+        assert!(current.iter().all(|grant| grant.lease().is_live()));
+        assert!(old.iter().all(|grant| !grant.lease().is_live()));
+        state.servers.lock().await.remove_legacy_fixture(&1);
+        assert!(
+            !current[0].lease().is_live(),
+            "native row removal revokes before actor shutdown"
+        );
+        assert!(current[1].lease().is_live());
+        state.servers.lock().await.clear_legacy_fixture();
+        for actor in &actors {
+            actor.shutdown().await;
+        }
+        for (task, drain) in workers {
+            task.await.unwrap();
+            drain.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn voice_reattachment_waiting_for_native_commit_cannot_win_after_lock() {
+        use catcoms_rt::{Hub, ManualClock};
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+        let state = AppState::default();
+        let server = Server::found(
+            Hub::new().join(PeerId::from_u64(75)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(75),
+            Box::new(ManualClock::new(1000)),
+            "member",
+        )
+        .unwrap();
+        let (group, device) = (server.group_id(), server.device_id());
+        let (actor, mut events, task) = spawn(server);
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+        state
+            .servers
+            .lock()
+            .await
+            .install_legacy_fixture(7, snapshot_test_entry(1, actor.clone(), group, device));
+        let runtime = voice_runtime(&state);
+        let old_ticket = runtime.session_ticket();
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
+        let boundary = state.ui_session_commit.lock().await;
+        let (result, ()) = tokio::join!(biased;
+            reattach_voice_actors(&state, generation, &old_ticket),
+            async {
+                actor.member_count().await;
+                let (locked, ()) = tokio::join!(biased;
+                    lock_session_inner(&state, None), async { drop(boundary); }
+                );
+                locked.unwrap();
+            }
+        );
+        assert!(result.is_err());
+        assert!(state
+            .servers
+            .lock()
+            .await
+            .legacy(&7)
+            .unwrap()
+            .voice
+            .is_none());
+        assert!(actor.voice_call_grant(channel_id("general")).await.is_err());
+        assert!(runtime.activate_session(&old_ticket).is_err());
+        state.servers.lock().await.clear_legacy_fixture();
+        actor.shutdown().await;
+        task.await.unwrap();
+        drain.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn voice_attachment_failure_does_not_block_healthy_servers_or_authenticated_unlock() {
+        use catcoms_rt::{Hub, ManualClock};
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+        let state = AppState::default();
+        let mut actors = Vec::new();
+        let mut workers = Vec::new();
+        for id in 1..=2 {
+            let server = Server::found(
+                Hub::new().join(PeerId::from_u64(id)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(id),
+                Box::new(ManualClock::new(1000)),
+                "member",
+            )
+            .unwrap();
+            let (group, device) = (server.group_id(), server.device_id());
+            let (actor, mut events, task) = spawn(server);
+            let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+            state
+                .servers
+                .lock()
+                .await
+                .install_legacy_fixture(id, snapshot_test_entry(id, actor.clone(), group, device));
+            actors.push(actor);
+            workers.push((task, drain));
+        }
+        actors[0].shutdown().await;
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
+        finalize_unlock_session(&state, generation, false)
+            .await
+            .unwrap();
+        assert!(*state.session_resumable.lock().await);
+        assert!(state
+            .servers
+            .lock()
+            .await
+            .legacy(&1)
+            .unwrap()
+            .voice
+            .is_none());
+        let grant = actors[1]
+            .voice_call_grant(channel_id("general"))
+            .await
+            .unwrap();
+        assert!(grant.lease().is_live());
+        lock_session_inner(&state, None).await.unwrap();
+        let runtime = voice_runtime(&state);
+        // Fill the declared process byte budget without fabricating any native admission.
+        let resources = runtime.resources();
+        let mut charges = Vec::new();
+        while let Ok(credit) = resources.charge(
+            [99; 32],
+            1024,
+            catcoms_sync::voice_v2::resources::ResourceKind::Retained,
+        ) {
+            charges.push(credit);
+        }
+        // One group has a stricter cap than the process; consume the remainder in other groups.
+        for group in 100..108 {
+            while let Ok(credit) = resources.charge(
+                [group; 32],
+                1024,
+                catcoms_sync::voice_v2::resources::ResourceKind::Retained,
+            ) {
+                charges.push(credit);
+            }
+        }
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
+        finalize_unlock_session(&state, generation, false)
+            .await
+            .unwrap();
+        assert!(*state.session_resumable.lock().await);
+        assert!(actors[1]
+            .voice_call_grant(channel_id("general"))
+            .await
+            .is_err());
+        drop(charges);
+        finalize_unlock_session(&state, generation, false)
+            .await
+            .unwrap();
+        assert!(actors[1]
+            .voice_call_grant(channel_id("general"))
+            .await
+            .unwrap()
+            .lease()
+            .is_live());
+        assert!(!grant.lease().is_live());
+        state.servers.lock().await.clear_legacy_fixture();
+        actors[1].shutdown().await;
+        for (task, drain) in workers {
+            task.await.unwrap();
+            drain.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn voice_old_unlock_cannot_erase_lock_registered_before_revocation_hooks() {
+        let state = AppState::default();
+        let old_generation = state.ui_session_generation.load(Ordering::SeqCst);
+        let runtime = voice_runtime(&state);
+        let old_ticket = runtime.session_ticket();
+        // Split the real synchronous entry seam at the point where a coordinator/mapping mutex
+        // could stall. The new generation is already published, even before any Runtime hook.
+        let new_generation = register_ui_lock_request(&state);
+        assert_ne!(old_generation, new_generation);
+        assert!(
+            finalize_unlock_session_with_voice(&state, old_generation, false, &old_ticket)
+                .await
+                .is_err()
+        );
+        assert!(ui_session_closed(&state));
+        assert!(!*state.session_resumable.lock().await);
+        assert!(require_unlocked_session(&state).await.is_err());
+        // Clearing only the separate flag cannot open the still-uncommitted generation.
+        state.session_lock_requested.store(false, Ordering::SeqCst);
+        assert!(ui_session_closed(&state));
+        assert!(require_unlocked_session(&state).await.is_err());
+        state.voice_authority.lock().unwrap().revoke_all();
+        assert!(runtime.activate_session(&old_ticket).is_err());
+    }
+
+    #[tokio::test]
+    async fn voice_restore_install_keeps_chat_when_optional_preparation_expired() {
+        use catcoms_rt::{Hub, ManualClock};
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+        let clock = Arc::new(ManualClock::new(1000));
+        let runtime = VoiceRuntime::new(clock.clone());
+        let ticket = runtime.session_ticket();
+        let server = Server::found(
+            Hub::new().join(PeerId::from_u64(76)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(76),
+            Box::new(ManualClock::new(1000)),
+            "member",
+        )
+        .unwrap();
+        let (actor, mut events, task) = spawn(server);
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+        let registration = actor
+            .prepare_voice_actor(runtime.clone(), ticket.clone())
+            .await
+            .unwrap();
+        clock.advance_ms(30_000);
+        assert!(runtime.is_current_ticket(&ticket));
+        assert!(install_reloaded_voice(Some(registration))
+            .unwrap()
+            .is_none());
+        runtime.activate_session(&ticket).unwrap();
+        let room = channel_id("general");
+        assert!(actor.voice_call_grant(room).await.is_err());
+        actor.open_channel(room).await;
+        actor
+            .send_message(room, "chat survives optional voice expiry")
+            .await;
+        assert!(actor
+            .messages(room)
+            .await
+            .iter()
+            .any(|message| message.text == "chat survives optional voice expiry"));
+        let first = actor
+            .prepare_voice_actor(runtime.clone(), ticket.clone())
+            .await
+            .unwrap();
+        let second = actor
+            .prepare_voice_actor(runtime.clone(), ticket.clone())
+            .await
+            .unwrap();
+        let current = install_reloaded_voice(Some(first)).unwrap().unwrap();
+        assert!(install_reloaded_voice(Some(second)).is_err());
+        assert!(current.0.is_current_for(&ticket));
+        actor.shutdown().await;
+        task.await.unwrap();
+        drain.await.unwrap();
     }
 
     #[tokio::test]
@@ -20243,8 +24293,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap());
-        state.session_lock_requested.store(true, Ordering::Release);
+            Some((ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap()).into());
+        state.session_lock_requested.store(true, Ordering::SeqCst);
         let channel = channel_id("general");
         let mut running = Vec::new();
         for id in 1..=2 {
@@ -20269,7 +24319,7 @@ mod tests {
                 .servers
                 .lock()
                 .await
-                .insert(id, snapshot_test_entry(id, actor.clone(), group, device));
+                .install_legacy_fixture(id, snapshot_test_entry(id, actor.clone(), group, device));
             running.push((actor, task, drain));
         }
         // First actor has frozen by the time the second actor cannot acquire its save lease.
@@ -20320,7 +24370,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState::default());
         *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap());
+            Some((ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap()).into());
         let server = Server::found(
             Hub::new().join(PeerId::from_u64(71)),
             MlsDevice::generate().unwrap(),
@@ -20343,7 +24393,7 @@ mod tests {
             .servers
             .lock()
             .await
-            .insert(1, snapshot_test_entry(71, actor.clone(), group, device));
+            .install_legacy_fixture(1, snapshot_test_entry(71, actor.clone(), group, device));
         let store = state.store.lock().await;
         let backup_state = state.clone();
         let backup_actor = actor.clone();
@@ -20365,7 +24415,7 @@ mod tests {
             .send_reply(channel, "after the backup captured history", "")
             .await
             .unwrap();
-        state.session_lock_requested.store(true, Ordering::Release);
+        state.session_lock_requested.store(true, Ordering::SeqCst);
         assert!(
             shutdown::freeze_servers(&state).await.is_err(),
             "close must observe the outstanding backup writer"
@@ -20380,6 +24430,8 @@ mod tests {
             .lock()
             .await
             .as_ref()
+            .unwrap()
+            .as_legacy()
             .unwrap()
             .load_server(1)
             .unwrap();
@@ -20397,7 +24449,13 @@ mod tests {
     async fn wait_for_clean_snapshot(state: &AppState, server: u64) {
         timeout(Duration::from_secs(5), async {
             loop {
-                let counters = state.servers.lock().await[&server].persist;
+                let counters = state
+                    .servers
+                    .lock()
+                    .await
+                    .legacy(&server)
+                    .expect("Legacy fixture row")
+                    .persist;
                 if counters.requested > 0 && counters.requested == counters.completed {
                     return;
                 }
@@ -20407,6 +24465,8 @@ mod tests {
         .await
         .expect("the background snapshot worker did not complete its dirty ticket");
     }
+
+    include!("member_discovery_tests.rs");
 
     #[tokio::test]
     async fn received_chat_is_saved_by_the_event_worker_while_the_ui_is_locked() {
@@ -20421,10 +24481,11 @@ mod tests {
         let channel = channel_id("general");
         let root = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState::default());
-        *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.store.lock().await = Some(
+            (ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap()).into(),
+        );
         // A mounted explicit UI lock permits sealed native persistence, but no frontend commands.
-        state.session_lock_requested.store(true, Ordering::Release);
+        state.session_lock_requested.store(true, Ordering::SeqCst);
         assert!(require_unlocked_session(&state).await.is_err());
 
         let hub = Hub::new();
@@ -20461,7 +24522,7 @@ mod tests {
         let group_id = receiver_server.group_id();
         let device_id = receiver_server.device_id();
         let (receiver, mut events, receiver_task) = spawn(receiver_server);
-        state.servers.lock().await.insert(
+        state.servers.lock().await.install_legacy_fixture(
             SERVER,
             snapshot_test_entry(INSTANCE, receiver.clone(), group_id, device_id),
         );
@@ -20480,7 +24541,14 @@ mod tests {
             }
         });
         wait_for_clean_snapshot(&state, SERVER).await;
-        let baseline = state.servers.lock().await[&SERVER].persist.completed;
+        let baseline = state
+            .servers
+            .lock()
+            .await
+            .legacy(&SERVER)
+            .expect("Legacy fixture row")
+            .persist
+            .completed;
         sender
             .send_reply(channel, "retained without a local send", "")
             .await
@@ -20492,6 +24560,8 @@ mod tests {
                     .lock()
                     .await
                     .as_ref()
+                    .unwrap()
+                    .as_legacy()
                     .unwrap()
                     .load_server(SERVER)
                     .unwrap();
@@ -20518,7 +24588,17 @@ mod tests {
         .await
         .expect("the received message did not reach the encrypted background snapshot");
         wait_for_clean_snapshot(&state, SERVER).await;
-        assert!(state.servers.lock().await[&SERVER].persist.completed > baseline);
+        assert!(
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&SERVER)
+                .expect("Legacy fixture row")
+                .persist
+                .completed
+                > baseline
+        );
         assert!(require_unlocked_session(&state).await.is_err());
 
         sender.shutdown().await;
@@ -20565,7 +24645,7 @@ mod tests {
         let group_id = server.group_id();
         let device_id = server.device_id();
         let (actor, events, task) = spawn(server);
-        state.servers.lock().await.insert(
+        state.servers.lock().await.install_legacy_fixture(
             1,
             snapshot_test_entry(10, actor.clone(), group_id.clone(), device_id),
         );
@@ -20579,7 +24659,17 @@ mod tests {
             !old.has_changed().unwrap(),
             "a burst retains a single latest notification"
         );
-        assert_eq!(state.servers.lock().await[&1].persist.requested, 1_000);
+        assert_eq!(
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&1)
+                .expect("Legacy fixture row")
+                .persist
+                .requested,
+            1_000
+        );
         note_event_for_persistence(
             &state,
             1,
@@ -20592,7 +24682,7 @@ mod tests {
             !old.has_changed().unwrap(),
             "presence and route churn must not snapshot history"
         );
-        state.servers.lock().await.insert(
+        state.servers.lock().await.install_legacy_fixture(
             1,
             snapshot_test_entry(11, actor.clone(), group_id, device_id),
         );
@@ -20602,7 +24692,13 @@ mod tests {
         note_event_for_persistence(&state, 1, 10, &AppEvent::Closed).await;
         assert!(!replacement.has_changed().unwrap());
         assert_eq!(
-            state.servers.lock().await[&1].persist,
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&1)
+                .expect("Legacy fixture row")
+                .persist,
             PersistCounters::default()
         );
         assert!(install_persistence_signal(&state, 1, 10).await.is_none());
@@ -20638,7 +24734,7 @@ mod tests {
         let device_id = server.device_id();
         let (actor, mut events, task) = spawn(server);
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
-        state.servers.lock().await.insert(
+        state.servers.lock().await.install_legacy_fixture(
             1,
             snapshot_test_entry(10, actor.clone(), group_id, device_id),
         );
@@ -20648,7 +24744,16 @@ mod tests {
             run_persistence_worker(&worker_state, 1, 10, wake).await;
         });
         timeout(Duration::from_secs(5), async {
-            while state.servers.lock().await[&1].persist.requested == 0 {
+            while state
+                .servers
+                .lock()
+                .await
+                .legacy(&1)
+                .expect("Legacy fixture row")
+                .persist
+                .requested
+                == 0
+            {
                 tokio::task::yield_now().await;
             }
         })
@@ -20659,19 +24764,32 @@ mod tests {
         let writing = persist_lock_for(&state, 1);
         let idle = writing.lock().await;
         assert_eq!(
-            state.servers.lock().await[&1].persist,
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&1)
+                .expect("Legacy fixture row")
+                .persist,
             PersistCounters {
                 requested: 1,
                 completed: 0
             }
         );
         drop(idle);
-        *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.store.lock().await = Some(
+            (ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap()).into(),
+        );
         note_event_for_persistence(&state, 1, 10, &AppEvent::SnapshotNeeded).await;
         wait_for_clean_snapshot(&state, 1).await;
         assert_eq!(
-            state.servers.lock().await[&1].persist,
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&1)
+                .expect("Legacy fixture row")
+                .persist,
             PersistCounters {
                 requested: 2,
                 completed: 2
@@ -20682,6 +24800,8 @@ mod tests {
             .lock()
             .await
             .as_ref()
+            .unwrap()
+            .as_legacy()
             .unwrap()
             .load_server(1)
             .unwrap();
@@ -20711,8 +24831,9 @@ mod tests {
         const INSTANCE: u64 = 40;
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
-        *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.store.lock().await = Some(
+            (ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap()).into(),
+        );
         *state.session_resumable.lock().await = true;
         let mut server = Server::found(
             Hub::new().join(PeerId::from_u64(91)),
@@ -20726,9 +24847,10 @@ mod tests {
         let group_id = server.group_id();
         let device_id = server.device_id();
         let (actor, events, task) = spawn(server);
-        state.servers.lock().await.insert(
+        state.servers.lock().await.install_legacy_fixture(
             SERVER,
             ServerEntry {
+                files: keep_session::EntryOwner::new(),
                 actor: actor.clone(),
                 instance: INSTANCE,
                 group_id,
@@ -20743,6 +24865,7 @@ mod tests {
                 is_dm: false,
                 switchboard: false,
                 record_seq: 0,
+                voice: None,
                 persist: PersistCounters::default(),
             },
         );
@@ -20774,7 +24897,13 @@ mod tests {
             Some(pending)
         );
         assert_eq!(
-            state.servers.lock().await[&SERVER].persist,
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&SERVER)
+                .expect("Legacy fixture row")
+                .persist,
             PersistCounters {
                 requested: 1,
                 completed: 0
@@ -20792,7 +24921,13 @@ mod tests {
             None
         );
         assert_eq!(
-            state.servers.lock().await[&SERVER].persist,
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&SERVER)
+                .expect("Legacy fixture row")
+                .persist,
             PersistCounters {
                 requested: 1,
                 completed: 1
@@ -20803,6 +24938,8 @@ mod tests {
             .lock()
             .await
             .as_ref()
+            .unwrap()
+            .as_legacy()
             .unwrap()
             .load_server(SERVER)
             .unwrap();
@@ -20834,7 +24971,13 @@ mod tests {
             }
         );
         assert_eq!(
-            state.servers.lock().await[&SERVER].persist,
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&SERVER)
+                .expect("Legacy fixture row")
+                .persist,
             PersistCounters {
                 requested: 2,
                 completed: 1
@@ -20856,7 +24999,13 @@ mod tests {
             }
         );
         assert_eq!(
-            state.servers.lock().await[&SERVER].persist,
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&SERVER)
+                .expect("Legacy fixture row")
+                .persist,
             PersistCounters {
                 requested: 3,
                 completed: 2
@@ -20880,8 +25029,9 @@ mod tests {
         const NEW: u64 = 41;
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
-        *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.store.lock().await = Some(
+            (ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap()).into(),
+        );
 
         // Two genuinely different groups, so what reached the disk is legible from its content.
         let build = |peer: u64, seed: u64| {
@@ -20912,6 +25062,7 @@ mod tests {
         let (new_actor, new_events, new_task) = spawn(replacement);
 
         let entry = |instance, actor: ServerActor| ServerEntry {
+            files: keep_session::EntryOwner::new(),
             actor,
             instance,
             group_id: replacement_group.clone(),
@@ -20926,6 +25077,7 @@ mod tests {
             is_dm: false,
             switchboard: false,
             record_seq: 0,
+            voice: None,
             persist: PersistCounters::default(),
         };
 
@@ -20934,30 +25086,36 @@ mod tests {
             .servers
             .lock()
             .await
-            .insert(SERVER, entry(OLD, old_actor.clone()));
+            .install_legacy_fixture(SERVER, entry(OLD, old_actor.clone()));
         // Several requests, so the stale ticket is a number the replacement's own counters will
         // not have reached. A departing writer holding ticket 1 is accidentally stopped by the
         // coalescing check; the hazard is the one whose ticket is still ahead.
         let stale_ticket = {
             let mut servers = state.servers.lock().await;
-            let entry = servers.get_mut(&SERVER).unwrap();
+            let entry = servers.legacy_mut(&SERVER).unwrap();
             entry.persist.request();
             entry.persist.request();
             entry.persist.request()
         };
         assert_eq!(stale_ticket, 3);
-        state.servers.lock().await.remove(&SERVER);
+        state.servers.lock().await.remove_legacy_fixture(&SERVER);
         state
             .servers
             .lock()
             .await
-            .insert(SERVER, entry(NEW, new_actor.clone()));
+            .install_legacy_fixture(SERVER, entry(NEW, new_actor.clone()));
 
         // The replacement persists a change of its own, and that is what belongs on disk.
         persist_server(&state, SERVER).await;
         let after_replacement = {
             let guard = state.store.lock().await;
-            guard.as_ref().unwrap().load_server(SERVER).unwrap()
+            guard
+                .as_ref()
+                .unwrap()
+                .as_legacy()
+                .unwrap()
+                .load_server(SERVER)
+                .unwrap()
         };
 
         // Now the departed writer resumes.
@@ -20974,7 +25132,13 @@ mod tests {
 
         let on_disk = {
             let guard = state.store.lock().await;
-            guard.as_ref().unwrap().load_server(SERVER).unwrap()
+            guard
+                .as_ref()
+                .unwrap()
+                .as_legacy()
+                .unwrap()
+                .load_server(SERVER)
+                .unwrap()
         };
         assert_eq!(
             on_disk.to_vec(),
@@ -20998,7 +25162,7 @@ mod tests {
                 .servers
                 .lock()
                 .await
-                .get(&SERVER)
+                .legacy(&SERVER)
                 .unwrap()
                 .persist
                 .completed,
@@ -21023,7 +25187,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = true;
         let generation = unlocked_ui_session_generation(&state).await.unwrap();
 
@@ -21039,6 +25203,7 @@ mod tests {
         let device_id = server.device_id();
         let (actor, events, task) = spawn(server);
         let entry = |instance| ServerEntry {
+            files: keep_session::EntryOwner::new(),
             actor: actor.clone(),
             instance,
             group_id: group_id.clone(),
@@ -21053,20 +25218,29 @@ mod tests {
             is_dm: false,
             switchboard: false,
             record_seq: 0,
+            voice: None,
             persist: PersistCounters::default(),
         };
         const SERVER: u64 = 12;
         const OLD: u64 = 40;
         const NEW: u64 = 41;
-        state.servers.lock().await.insert(SERVER, entry(OLD));
+        state
+            .servers
+            .lock()
+            .await
+            .install_legacy_fixture(SERVER, entry(OLD));
         let stale_report =
             build_storage_report(StorageHealth::default(), Vec::new(), &HashSet::new(), 123);
 
         // Model a scan paused after producing its report: leave removes its registry incarnation,
         // then a reload installs a new actor row under the same persisted id before it resumes.
-        state.servers.lock().await.remove(&SERVER);
+        state.servers.lock().await.remove_legacy_fixture(&SERVER);
         state.storage_health.lock().await.remove(&SERVER);
-        state.servers.lock().await.insert(SERVER, entry(NEW));
+        state
+            .servers
+            .lock()
+            .await
+            .install_legacy_fixture(SERVER, entry(NEW));
         assert!(storage_health_cache_publish(
             &state,
             SERVER,
@@ -21096,7 +25270,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = false;
         let mut recovery = state.network_changes.subscribe();
 
@@ -21117,7 +25291,7 @@ mod tests {
         assert!(authenticate_mounted_store(&state, b"correct horse")
             .await
             .unwrap());
-        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
         let running = finalize_unlock_session(&state, generation, true)
             .await
             .unwrap()
@@ -21147,9 +25321,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = false;
-        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
         let latest = r#"{"version":1,"drafts":{"room":"survives remount"},"readMarks":{}}"#;
 
         // A reloaded webview has no JavaScript coordinator or Promise. Native state is therefore
@@ -21174,6 +25348,8 @@ mod tests {
                 .await
                 .as_ref()
                 .unwrap()
+                .as_legacy()
+                .unwrap()
                 .load_ui_state()
                 .unwrap(),
             latest.as_bytes(),
@@ -21188,8 +25364,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         *state.session_resumable.lock().await = false;
-        state.session_lock_requested.store(true, Ordering::Release);
-        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        state.session_lock_requested.store(true, Ordering::SeqCst);
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
         let recovery = state.network_changes.subscribe();
         let latest = r#"{"version":1,"drafts":{"room":"retry me"},"readMarks":{}}"#;
         *state.pending_ui_lock_snapshot.lock().await = Some(PendingUiLockSnapshot {
@@ -21214,12 +25390,12 @@ mod tests {
             "a failed retry must retain the immutable bytes rather than accept older continuity",
         );
         assert!(!*state.session_resumable.lock().await);
-        assert!(state.session_lock_requested.load(Ordering::Acquire));
+        assert!(state.session_lock_requested.load(Ordering::SeqCst));
 
         // Model a transient persistence problem clearing. The next unlock retries the same native
         // transaction and only then reopens the IPC boundary.
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         finalize_unlock_session(&state, generation, false)
             .await
             .expect("the retained exact snapshot should be retryable");
@@ -21230,6 +25406,8 @@ mod tests {
                 .lock()
                 .await
                 .as_ref()
+                .unwrap()
+                .as_legacy()
                 .unwrap()
                 .load_ui_state()
                 .unwrap(),
@@ -21258,11 +25436,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = false;
         let recovery = state.network_changes.subscribe();
 
-        let stale_generation = state.ui_session_generation.load(Ordering::Acquire);
+        let stale_generation = state.ui_session_generation.load(Ordering::SeqCst);
         assert!(
             authenticate_mounted_store(&state, b"correct horse")
                 .await
@@ -21271,9 +25449,9 @@ mod tests {
         );
         let newer_generation = state
             .ui_session_generation
-            .fetch_add(1, Ordering::AcqRel)
+            .fetch_add(1, Ordering::SeqCst)
             .wrapping_add(1);
-        state.session_lock_requested.store(true, Ordering::Release);
+        state.session_lock_requested.store(true, Ordering::SeqCst);
         let newer_snapshot = r#"{"version":1,"drafts":{"room":"newer lock"},"readMarks":{}}"#;
         *state.pending_ui_lock_snapshot.lock().await = Some(PendingUiLockSnapshot {
             generation: newer_generation,
@@ -21298,7 +25476,7 @@ mod tests {
             require_unlocked_session(&state).await.unwrap_err(),
             "the vault is locked"
         );
-        assert!(state.session_lock_requested.load(Ordering::Acquire));
+        assert!(state.session_lock_requested.load(Ordering::SeqCst));
         assert!(!*state.session_resumable.lock().await);
         assert_eq!(
             state
@@ -21327,7 +25505,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState::default());
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = true;
 
         // This generation is exactly what production captures before `running_servers` begins its
@@ -21351,7 +25529,7 @@ mod tests {
 
         let lock_state = Arc::clone(&state);
         let locking = tokio::spawn(async move { lock_session_inner(&lock_state, None).await });
-        while !state.session_lock_requested.load(Ordering::Acquire) {
+        while !state.session_lock_requested.load(Ordering::SeqCst) {
             tokio::task::yield_now().await;
         }
         release_projection.notify_one();
@@ -21368,7 +25546,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState::default());
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
         *state.session_resumable.lock().await = true;
         let generation = unlocked_ui_session_generation(&state).await.unwrap();
 
@@ -21391,7 +25569,7 @@ mod tests {
         let lock_state = Arc::clone(&state);
         let locking =
             tokio::spawn(async move { lock_session_inner(&lock_state, Some(latest.into())).await });
-        while !state.session_lock_requested.load(Ordering::Acquire) {
+        while !state.session_lock_requested.load(Ordering::SeqCst) {
             tokio::task::yield_now().await;
         }
         drop(boundary);
@@ -21406,6 +25584,8 @@ mod tests {
             .lock()
             .await
             .as_ref()
+            .unwrap()
+            .as_legacy()
             .unwrap()
             .load_ui_state()
             .unwrap();
@@ -21505,7 +25685,7 @@ mod tests {
                 "reconnect consent is part of the sealed lifecycle"
             );
             let state = AppState::default();
-            *state.store.lock().await = Some(store);
+            *state.store.lock().await = Some((store).into());
             *state.next_id.lock().await = SERVER_ID;
             *state.session_resumable.lock().await = true;
             let restored = restore_server_actor(
@@ -21528,9 +25708,10 @@ mod tests {
             .await
             .unwrap();
             let actor = restored.actor.clone();
-            state.servers.lock().await.insert(
+            state.servers.lock().await.install_legacy_fixture(
                 SERVER_ID,
                 ServerEntry {
+                    files: keep_session::EntryOwner::new(),
                     actor: restored.actor,
                     instance: state.next_server_instance.fetch_add(1, Ordering::Relaxed),
                     group_id: restored.group_id,
@@ -21545,9 +25726,13 @@ mod tests {
                     is_dm: records[0].is_dm,
                     switchboard: network.switchboard,
                     record_seq: network.record_seq,
+                    voice: None,
                     persist: PersistCounters::default(),
                 },
             );
+            // This fixture has actually installed the row; finish the same pre-registration
+            // owner as production instead of dropping it and aborting the now-visible actor.
+            restored.chat_fence_commit.installed();
             (state, actor, restored.events, restored.task)
         }
 
@@ -21613,7 +25798,7 @@ mod tests {
         store
             .save_server_net(SERVER_ID, &network, &mut rng)
             .unwrap();
-        *state.store.lock().await = Some(store);
+        *state.store.lock().await = Some((store).into());
 
         let pending_peer = PeerId::from_u64(99);
         authorize_member_recovery_capture(&state, SERVER_ID, pending_peer, u64::MAX)
@@ -21623,6 +25808,8 @@ mod tests {
         let guard = state.store.lock().await;
         let sealed = guard
             .as_ref()
+            .unwrap()
+            .as_legacy()
             .unwrap()
             .load_server_net(SERVER_ID)
             .unwrap()
@@ -21707,7 +25894,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap());
+            Some((ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap()).into());
         *state.session_resumable.lock().await = true;
         let (owner, member, _, _) = admitted_reply_pair(Vec::new()).await;
         assert_eq!(member.my_role(), catcoms_app::Role::Member);
@@ -21722,22 +25909,31 @@ mod tests {
         let (actor, events, task) = spawn(member);
         let mut entry = snapshot_test_entry(1, actor.clone(), group, device);
         entry.invite = Some(stored.clone());
-        state.servers.lock().await.insert(1, entry);
+        state.servers.lock().await.install_legacy_fixture(1, entry);
 
         // Even a reusable token must disappear for a current ordinary member. Previously this
         // either exposed a retained code or tried to refresh it and raised a global error.
         assert_eq!(get_available_invite(&state, 1).await.unwrap(), None);
-        assert_eq!(state.servers.lock().await[&1].invite, Some(stored));
-        state.servers.lock().await.get_mut(&1).unwrap().invite = Some("stale code".into());
+        assert_eq!(
+            state
+                .servers
+                .lock()
+                .await
+                .legacy(&1)
+                .expect("Legacy fixture row")
+                .invite,
+            Some(stored)
+        );
+        state.servers.lock().await.legacy_mut(&1).unwrap().invite = Some("stale code".into());
         assert_eq!(get_available_invite(&state, 1).await.unwrap(), None);
         assert!(mint_and_store_invite(&state, 1)
             .await
             .unwrap_err()
             .contains("only the owner or an admin"));
-        state.servers.lock().await.get_mut(&1).unwrap().invite = None;
+        state.servers.lock().await.legacy_mut(&1).unwrap().invite = None;
         assert_eq!(get_available_invite(&state, 1).await.unwrap(), None);
         assert_eq!(get_available_invite(&state, 99).await.unwrap(), None);
-        state.session_lock_requested.store(true, Ordering::Release);
+        state.session_lock_requested.store(true, Ordering::SeqCst);
         assert_eq!(
             get_available_invite(&state, 1).await.unwrap_err(),
             "the vault is locked"
@@ -21755,7 +25951,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap());
+            Some((ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap()).into());
         *state.session_resumable.lock().await = true;
         let (owner, member, owner_peer, _) = admitted_reply_pair(Vec::new()).await;
         let owner_device = owner.device_id();
@@ -21771,7 +25967,11 @@ mod tests {
         let (member, member_events, member_task) = spawn(member);
         let mut owner_entry = snapshot_test_entry(1, owner.clone(), group.clone(), owner_device);
         owner_entry.invite = Some(owner_invite);
-        state.servers.lock().await.insert(1, owner_entry);
+        state
+            .servers
+            .lock()
+            .await
+            .install_legacy_fixture(1, owner_entry);
         assert!(get_available_invite(&state, 1).await.unwrap().is_some());
 
         owner.set_admin(member_device, true).await.unwrap();
@@ -21797,7 +25997,11 @@ mod tests {
         );
         let mut member_entry = snapshot_test_entry(2, member.clone(), group, member_device);
         member_entry.invite = Some(admin_invite.clone());
-        state.servers.lock().await.insert(2, member_entry);
+        state
+            .servers
+            .lock()
+            .await
+            .install_legacy_fixture(2, member_entry);
         assert!(get_available_invite(&state, 2).await.unwrap().is_some());
 
         for cached in [admin_invite, "stale code".into()] {
@@ -21813,7 +26017,7 @@ mod tests {
             })
             .await
             .unwrap();
-            state.servers.lock().await.get_mut(&2).unwrap().invite = Some(cached);
+            state.servers.lock().await.legacy_mut(&2).unwrap().invite = Some(cached);
 
             // Pause refresh at the mint mutex AFTER its permitted-role preflight. One poll
             // sends the role query; the actor query barrier ensures its reply is ready for the
@@ -21853,7 +26057,7 @@ mod tests {
 
         // Do not hide a genuine failure behind 'no invite': an unavailable actor has no current
         // role projection, while a permitted owner's malformed cache still self-heals by minting.
-        state.servers.lock().await.get_mut(&1).unwrap().invite = Some("stale code".into());
+        state.servers.lock().await.legacy_mut(&1).unwrap().invite = Some("stale code".into());
         assert!(get_available_invite(&state, 1).await.unwrap().is_some());
         owner.shutdown().await;
         owner_task.await.unwrap();
@@ -23135,8 +27339,9 @@ mod tests {
     async fn jam_sheet_export_cannot_publish_or_reveal_after_lock() {
         let root = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState::default());
-        *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.store.lock().await = Some(
+            (ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap()).into(),
+        );
         *state.session_resumable.lock().await = true;
         let generation = unlocked_ui_session_generation(&state).await.unwrap();
         let safe = format!(
@@ -23188,6 +27393,58 @@ mod tests {
         assert_eq!(numbered_download_name("README", 3), "README (3)");
     }
 
+    /// Picker re-review LOW 1b: a group-file save says when native asserts it is in Downloads;
+    /// every other save result keeps its exact earlier JSON.
+    #[test]
+    fn only_an_asserted_downloads_save_carries_the_in_downloads_flag() {
+        let result = |in_downloads| SavedFileResult {
+            path: "x".into(),
+            displayed: true,
+            warning: None,
+            content_validation: None,
+            in_downloads,
+        };
+        let plain = serde_json::to_value(result(false)).unwrap();
+        assert!(plain.get("inDownloads").is_none(), "{plain}");
+        let asserted = serde_json::to_value(result(true)).unwrap();
+        assert_eq!(asserted["inDownloads"], serde_json::Value::Bool(true));
+    }
+
+    /// Picker review L5: Windows ignores trailing spaces before the extension, so "CON .txt" still
+    /// names the console device. Storage refuses such a leaf; the sanitizer must prefix it too, or
+    /// a peer-chosen name makes one-click Download fail as "malformed data" instead of saving.
+    #[test]
+    fn a_device_name_with_trailing_spaces_is_prefixed_like_storage_requires() {
+        assert_eq!(safe_download_name("CON .txt"), "_CON .txt");
+        assert_eq!(safe_download_name("nul  .png"), "_nul  .png");
+        assert_eq!(safe_download_name("com1 .log"), "_com1 .log");
+        assert_eq!(safe_download_name("CONSOLE .txt"), "CONSOLE .txt");
+        // The sanitizer and storage's leaf rule agree: storage refuses the raw peer name and
+        // accepts the sanitized one.
+        let dir = tempfile::tempdir().unwrap();
+        for raw in [
+            "CON .txt",
+            "nul  .png",
+            "com1 .log",
+            // Picker review residual: superscript and zero ports and the console names.
+            "COM\u{00B9}.txt",
+            "lpt\u{00B2} .bin",
+            "com0.log",
+            "CONIN$",
+            "conout$.txt",
+        ] {
+            assert!(
+                catcoms_storage::kept::ChosenDestination::validate(&dir.path().join(raw)).is_err(),
+                "storage refuses {raw:?}"
+            );
+            let safe = safe_download_name(raw);
+            assert!(
+                catcoms_storage::kept::ChosenDestination::validate(&dir.path().join(&safe)).is_ok(),
+                "storage accepts {safe:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_download_reserves_its_name_before_a_byte_is_written() {
         // The streamed save opens the file first and fills it chunk by chunk, so the reservation
@@ -23229,7 +27486,14 @@ mod tests {
             r#"{"version":1,"drafts":{"1:2":"hello"},"readMarks":{"1:2":9}}"#
         )
         .is_ok());
-        assert!(validate_ui_state_json(r#"{"version":2,"drafts":{},"readMarks":{}}"#).is_err());
+        // Mutation/Stop continuity uses minimum v2. Expanded retained Send recovery needs
+        // critical sticky v3 because old v2 readers silently dropped those payloads. Only
+        // these known envelopes are readable; the next unknown successor still refuses.
+        assert!(validate_ui_state_json(r#"{"version":2,"drafts":{},"readMarks":{}}"#).is_ok());
+        assert!(validate_ui_state_json(r#"{"version":3,"drafts":{},"readMarks":{}}"#).is_ok());
+        assert!(validate_ui_state_json(r#"{"version":4,"drafts":{},"readMarks":{}}"#).is_ok());
+        assert!(validate_ui_state_json(r#"{"version":0,"drafts":{},"readMarks":{}}"#).is_err());
+        assert!(validate_ui_state_json(r#"{"version":5,"drafts":{},"readMarks":{}}"#).is_err());
         assert!(validate_ui_state_json(r#"{"version":1,"drafts":[],"readMarks":{}}"#).is_err());
         assert!(validate_ui_state_json("not json").is_err());
         assert!(validate_ui_state_json(&"x".repeat(MAX_UI_STATE_BYTES + 1)).is_err());

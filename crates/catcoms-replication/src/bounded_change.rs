@@ -81,6 +81,52 @@ fn charge(total: &mut u64, value: u64, limit: u64) -> Result<(), ReplError> {
 /// Scan a bounded kind-1 chunk. `max_actions` is seven for registry operations and the generic
 /// P1 ceiling for other domain operations/seeds; typed schemas still impose their narrower rules.
 pub(crate) fn check(bytes: &[u8], max_actions: u64) -> Result<(), ReplError> {
+    check_limits(
+        bytes,
+        max_actions,
+        MAX_CELLS,
+        MAX_PREDECESSORS,
+        MAX_EXPANDED_STRINGS,
+    )
+}
+
+/// A smaller view-only decode budget. Refusal affects an ephemeral observer, never admission of
+/// released legacy history. RLE cell/pred/string ceilings are checked before expanded Op cloning.
+pub(crate) fn check_projection(bytes: &[u8], max_actions: u64) -> Result<(), ReplError> {
+    check_limits(bytes, max_actions, 8192, 4096, 64 * 1024)
+}
+fn check_limits(
+    bytes: &[u8],
+    max_actions: u64,
+    max_cells: u64,
+    max_predecessors: u64,
+    max_strings: u64,
+) -> Result<(), ReplError> {
+    check_with_actors(
+        bytes,
+        max_actions,
+        max_cells,
+        max_predecessors,
+        max_strings,
+        false,
+    )
+}
+
+/// View-only historical decoding can inspect bounded old actor names without treating them as
+/// modern signing identities. Existing admission and authenticated projection callers retain
+/// the strict 32-byte rule above; this path never creates a signature/authority witness.
+pub(crate) fn check_legacy_inspection(bytes: &[u8]) -> Result<(), ReplError> {
+    check_with_actors(bytes, 512, 8192, 4096, 64 * 1024, true)
+}
+
+fn check_with_actors(
+    bytes: &[u8],
+    max_actions: u64,
+    max_cells: u64,
+    max_predecessors: u64,
+    max_strings: u64,
+    legacy_inspection: bool,
+) -> Result<(), ReplError> {
     if bytes.len() < 10 || bytes[..4] != [0x85, 0x6f, 0x4a, 0x83] || bytes[8] != 1 {
         return Err(ReplError::Malformed);
     }
@@ -95,7 +141,14 @@ pub(crate) fn check(bytes: &[u8], max_actions: u64) -> Result<(), ReplError> {
         return Err(ReplError::EpochBound);
     }
     header.take(deps.checked_mul(32).ok_or(ReplError::EpochBound)?)?;
-    if header.sized()?.len() != 32 {
+    let actor_supported = |length: usize| {
+        if legacy_inspection {
+            (1..=256).contains(&length)
+        } else {
+            length == 32
+        }
+    };
+    if !actor_supported(header.sized()?.len()) {
         return Err(ReplError::EpochAuthority);
     }
     header.unsigned()?; // sequence
@@ -103,11 +156,11 @@ pub(crate) fn check(bytes: &[u8], max_actions: u64) -> Result<(), ReplError> {
     header.signed()?; // advisory timestamp
     header.sized()?; // advisory message, checked against actual remaining input
     let actors = header.unsigned()?;
-    if actors > 20_001 {
+    if actors > if legacy_inspection { 4096 } else { 20_001 } {
         return Err(ReplError::EpochBound);
     }
     for _ in 0..actors {
-        if header.sized()?.len() != 32 {
+        if !actor_supported(header.sized()?.len()) {
             return Err(ReplError::EpochAuthority);
         }
     }
@@ -139,7 +192,7 @@ pub(crate) fn check(bytes: &[u8], max_actions: u64) -> Result<(), ReplError> {
         let mut column = Input::new(data);
         while !column.done() {
             if typ == 4 {
-                charge(&mut cells, column.unsigned()?, MAX_CELLS)?;
+                charge(&mut cells, column.unsigned()?, max_cells)?;
                 continue;
             }
             let run = column.signed()?;
@@ -148,7 +201,7 @@ pub(crate) fn check(bytes: &[u8], max_actions: u64) -> Result<(), ReplError> {
             } else {
                 run.checked_abs().ok_or(ReplError::EpochBound)? as u64
             };
-            charge(&mut cells, count, MAX_CELLS)?;
+            charge(&mut cells, count, max_cells)?;
             if spec == 0x42 {
                 charge(&mut actions, count, max_actions)?;
             }
@@ -162,11 +215,20 @@ pub(crate) fn check(bytes: &[u8], max_actions: u64) -> Result<(), ReplError> {
                 match typ {
                     0 | 1 | 2 | 6 => {
                         let value = column.unsigned()?;
+                        // Automerge's raw parser checks operation shapes but its public
+                        // ExpandedChange conversion assumes every actor reference exists.
+                        // Check all three reference families before calling that conversion.
+                        // Actor 0 is this change's author; the header lists `actors` others.
+                        // Keep this observer guard separate from existing admission policy.
+                        if legacy_inspection && matches!(spec, 0x01 | 0x11 | 0x71) && value > actors
+                        {
+                            return Err(ReplError::Malformed);
+                        }
                         if spec == 0x70 {
                             charge(
                                 &mut predecessors,
                                 value.checked_mul(repeats).ok_or(ReplError::EpochBound)?,
-                                MAX_PREDECESSORS,
+                                max_predecessors,
                             )?;
                         }
                         if typ == 6 {
@@ -189,7 +251,7 @@ pub(crate) fn check(bytes: &[u8], max_actions: u64) -> Result<(), ReplError> {
                             (text.len() as u64)
                                 .checked_mul(repeats)
                                 .ok_or(ReplError::EpochBound)?,
-                            MAX_EXPANDED_STRINGS,
+                            max_strings,
                         )?;
                     }
                     _ => return Err(ReplError::Malformed),
@@ -269,5 +331,26 @@ mod tests {
         ));
         // Unknown/compressed column specs fail before interpreting their contents.
         assert!(check(&raw(&[(0x4a, vec![1, 1])]), 7).is_err());
+    }
+
+    #[test]
+    fn view_projection_bounds_expansion_without_changing_existing_p1_preflight() {
+        let mut pred = vec![1];
+        unsigned(4097, &mut pred);
+        let predecessors = raw(&[(0x42, vec![1, 1]), (0x70, pred)]);
+        assert!(check(&predecessors, MAX_ACTIONS).is_ok());
+        assert!(matches!(
+            check_projection(&predecessors, 512),
+            Err(ReplError::EpochBound)
+        ));
+        let mut repeated = vec![0x80, 0x04]; // SLEB512 repetitions.
+        unsigned(129, &mut repeated);
+        repeated.extend(vec![b'x'; 129]);
+        let strings = raw(&[(0x15, repeated), (0x42, vec![1, 1])]);
+        assert!(check(&strings, MAX_ACTIONS).is_ok());
+        assert!(matches!(
+            check_projection(&strings, 512),
+            Err(ReplError::EpochBound)
+        ));
     }
 }

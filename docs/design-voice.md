@@ -98,8 +98,12 @@ right, but the port is the *mesh's* port, where no ICE agent is listening. `addI
 would simply add a candidate that always fails.
 
 What *does* transfer is the evidence, and `get_call_transport` now carries it: whether this
-node is directly reachable, the AutoNAT verdict, its public IPv4/IPv6 literals, and which
-members are offering to host.
+node advertises public mesh addresses, the separate AutoNAT verdict, its public IPv4/IPv6 literals, and which
+members offer mesh admission help. Those offers do not create a WebRTC media relay or authorize
+media forwarding. Public mesh addresses and successful mesh port mappings are troubleshooting
+context; call connectivity still requires ICE success on the WebView's own sockets. The call
+diagnostic now says “submitted” for local signalling submission, and labels these admission
+offers “Mesh helpers”. Physical TURN/audio acceptance remains separate.
 
 ### Pinning the WebRTC port range is not possible on WebView2
 

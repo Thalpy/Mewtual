@@ -516,16 +516,141 @@ The **Files** tab is a folder browser:
   keep their copy). You can also **right-click any embedded image/video/audio or file chip**
   in chat, announcements, or a wiki page and pick **Properties**.
 - Properties also shows **Circulates until**; every shared file gets a **30-day circulation
-  window** (the date it stops being offered around automatically; nothing is ever deleted
-  from anyone's device, and it stays fetchable while any member holds a copy). The uploader
-  or an owner/admin can toggle **Keep forever**. A file **embedded in a wiki page never
-  expires** (marked 📌 in the file list); and **Used in** lists exactly where the file
-  appears: the wiki pages (click to open) plus chat/announcement reference counts.
+  window**. Today this date is displayed only: nothing acts on it yet. The uploader or an
+  owner/admin can switch a listing to **Never expires**. A file **embedded in a wiki page never
+  expires** either (marked 📌 in the file list); and **Used in** lists exactly where the file
+  appears: the wiki pages (click to open) plus chat/announcement reference counts. Circulation
+  is about the server as a whole; it is not a promise that your device keeps the bytes (see
+  **Cache on this device** below).
 - Files are **end-to-end encrypted**: stored as ciphertext under a per-group key, sealed at
   rest, and only members can open them.
 
+### Cache on this device
+
+Files you open, play or save stay in an encrypted cache on this device, so they show again
+without fetching, and this device can send them to other members who ask. A download joins the
+cache only once it has been saved to your folder; one still in progress, or one you remove from
+Transfers, does not. Each server has its own
+**cache limit on this device**, set in **Server settings → Storage** (1 GiB to 1 TiB, or no limit;
+5 GiB unless you change it, or more if the cache was already bigger when you updated).
+
+- When the cache is over its limit, the files **shared longest ago leave first**; when you last
+  opened a file does not matter. Anyone who still has a file that left can send it again.
+- These always stay: files you **Keep**, files **you shared from this device** (signed uploads;
+  very old unsigned ones are not covered), files **Studio** work still uses, files opened, played
+  or transferring in the last ten minutes, and unfinished downloads.
+- **Never expires** and wiki embeds keep a file in circulation, but they do not stop your cache
+  from dropping it. Use **Keep** to hold a copy here. A checked Keep copy replaces the cache's
+  duplicate, so releasing that Keep copy removes the file from this device.
+- The status bar shows the open server's **cache** bar. Past 90% it turns amber and says how many
+  files are **leaving soon**: the files the next tenth of the limit would push out. Click it to
+  change the limit. Lowering the limit below what is cached asks first, then removes the oldest
+  files straight away.
+- Without a check that someone else still has a file, a small limit can drop the last copy any
+  member has. Your own uploads are never dropped, which covers the usual case.
+- **Leaving a server** removes its cached files, Keep copies and unfinished downloads from this
+  device after a confirmation that names them (or says it could not check), and reports the
+  space freed. Files saved to your folders are untouched, and anything Studio still uses stays.
+  If some files cannot be removed, Mewtual tries again after the next unlock; if the server's
+  files are in use again (you rejoined), they stay.
+
 **Custom emoji** live in the `emoji/` folder. Add one in **Server settings → Emoji & Stickers**:
 type a `code`, choose its display size and upload an image. Then anyone types `:code:` to use it.
+
+### Saving a file to your computer
+
+**Download** saves into your Downloads folder; **Save as** lets you pick the folder and name. While
+a file is being written it sits beside its final name as `<name>.mewtual-part` (or `<name>.part`),
+and only a fully verified file ever gets the real name. On most local drives an interrupted save
+(Lock, Pause, closing the app) can be **resumed** later from the Transfers list.
+
+In **Transfers**, each file you are downloading or saving has one row, grouped as **Needs you**
+(something stopped and waits for your choice), **In progress** and **Saved**. A row shows how much
+has arrived or been written, such as "3.1 MB / 12.4 MB" and "12 of 40 chunks", and a short
+sentence when it needs you (elsewhere that sentence is the tooltip of the small symbol before the
+name). Its controls sit on the name line: the main action as an icon (green play to resume, pause,
+retry or save, or a folder to **Show in folder** on a saved file), a **⋯** button with every other
+action (Save as, Save new copy, Save another copy, Keep), and a red **✕** to **Remove** (or
+**Clear** a saved row). Every icon has a tooltip and a name for screen readers, and the ⋯ menu
+works from the keyboard. **Remove** asks you to confirm first, because it deletes the progress and
+any partly saved file Mewtual created; on a row that is already being removed, ✕ simply tries
+again.
+
+Where it works:
+
+- **Resumable:** NTFS on Windows (ReFS also works but is not verified); ext4, xfs, btrfs, f2fs and
+  tmpfs on Linux when they record file creation times; local APFS or HFS+ drives on macOS (not
+  verified yet).
+- **Saved, but not resumable:** network folders (SMB shares, mapped drives, NFS) and other
+  filesystems Mewtual cannot identify. An interrupted save there starts again. On Linux and macOS
+  a network or FUSE folder that cannot make hard links fails only at the end of the save.
+- **Refused before anything is written:** FAT and exFAT drives (many USB sticks and SD cards),
+  because they cannot make the link Mewtual publishes a finished file with. On Linux, saving also
+  needs `/proc`, which every normal desktop has.
+- **Cloud folders** (OneDrive, Dropbox and similar) work, but the provider uploads the partly
+  saved file as it is written.
+
+Mewtual only ever deletes a partly saved file it can prove is its own. On Linux and macOS it
+deletes nothing automatically in a folder that other accounts on the computer can change, nor on a
+network or FUSE drive; it says so, and you can delete the leftover `.mewtual-part` or `.part` file
+yourself. A folder that gives your own per-user group write access (a umask of 002) still counts
+as yours on Linux when the system's account files show that nobody else is in that group and no
+access list gives anyone else write access; if that cannot be shown (for example accounts that
+come from a directory service, or Mewtual running in a container), and always on macOS, Mewtual
+treats the folder as shared.
+
+Once a file is saved, Mewtual drops its private encrypted copy and remembers where the file went
+on this device, for each server: the **Saved** group lists your finished saves, newest first, with
+the date and whether the file went to your Downloads folder or another folder. These rows survive
+restarts. When Transfers is open Mewtual checks each listed file, read-only, and says when it is no
+longer there or a different file now has its name. These rows use the same controls as the others:
+the folder icon (**Show in folder**) opens your file manager with the file selected after the same
+check; once the file is gone, the main icon is **Save again** instead, which saves a fresh copy
+(while the file is still shared); **⋯** offers **Save another copy**; and the red **✕** is
+**Clear**, which only forgets the row without asking (the file stays where it is). Files saved to a
+network folder, or by a save that could not be resumed there, are listed but cannot be checked.
+Files you have saved show a small **Saved** mark in chat, in the Files list and in the file details;
+the mark comes from this list and says what this device recorded, not whether the file is still
+there. Saving the same file twice makes two copies and two rows. Leaving a server forgets its list;
+the saved files stay where they are.
+
+**Remember saved files** (Server settings → Storage, on this device, for that server) sets how
+many saves the list keeps: 16 to 4096 files, 256 unless you change it. When the list is full, a
+new save makes Mewtual forget the oldest entry. Choosing a lower number forgets the oldest entries
+beyond it; Mewtual tells you how many before you confirm, and the files themselves stay where they
+are. A higher number keeps every entry. With very long folder paths the list may keep somewhat
+fewer entries than the number, since it also has a size limit.
+
+**Replace my older saved copy** (Settings → Chat & Media → Saved files, off by default, on this
+device for every server): when you save a file again, Mewtual replaces the copy it saved before,
+if it can prove that copy is its own and still unchanged (same file, same content, one name, not
+read-only, in the same folder as the new copy) and the new copy is still there. When you saved
+with one click from the chat or Transfers (straight into Downloads), the new copy then takes the
+old name; a name you typed in **Save as** is kept, and so is the name of a save that was
+interrupted and then resumed. If the older copy cannot be proven (it was changed, renamed, is
+read-only, has another name, sits in another folder, is a cloud placeholder, or on Linux and macOS
+it or its folder can be changed by other accounts), Mewtual keeps it, saves the new copy beside it
+as usual and says why. Replacing removes the old copy as a whole,
+including any tags or other properties another program added to it.
+
+A **Saved** row of the older kind, with its private copy still kept, appears only when the tidy-up
+after a save did not finish, for example when the temporary `.mewtual-part` name could not be
+removed yet, or the app was locked or closed at that moment. Such a row keeps its private copy until
+you clear it, and clearing it also forgets the copy from the list. When
+Transfers is open, Mewtual checks the file of each Saved row. If it is no longer there, or a
+different file now has its name, the row says so and offers **Save again**, which saves a new copy
+from that private copy under a free name. If the file could not be checked (the drive is unplugged,
+for example), the row still says Saved and adds that it could not check. **Show in folder** opens
+your file manager with the saved file selected (on Linux, its folder), after the same check.
+**Clear** on a Saved row checks the file once more first: it clears at once only when the file is
+still there, and otherwise asks you to confirm, because the private copy may then be the only one
+left. If Mewtual cannot finish removing a file it created for a save (the folder is unplugged,
+for example), its ⋯ menu offers **Keep the file** when every part of that file had been written,
+or **Keep partly saved file** when not; either leaves the file where it is and drops the row.
+
+If you choose **Save as** for a file and its save has not started yet, Mewtual remembers that
+place. The file's save item in the chat and file menus, the image viewer and the file pane then
+reads **Save to chosen place** instead of **Download** until that save begins.
 
 ### What loads by itself, and how big it may be
 
@@ -700,10 +825,14 @@ The two compact operations buttons above your profile provide local, evidence-ba
   visit per server runs once per app process and saves that point-in-time report; revisiting it or
   receiving a file event does not quietly rescan. It breaks the inventory down by media type,
   wiki-pinned content and largest files, clearly separating exact verified ciphertext bytes from
-  local/logical size estimates. **Repair from peers** is the explicit exception: it fetches missing
-  or corrupt chunks through the authenticated, content-address-checked member path and replaces the
-  cached report after verifying again. It cannot invent bytes when no reachable member holds them
-  or repair an invalid manifest. The same health summary is explicitly available in **Transfers**.
+  local/logical size estimates. Chunks of other members' files that this device never fetched, or
+  dropped under its cache limit, count as **not cached on this device**, which is normal; only
+  chunks missing from your own uploads count as damage. **Repair from peers** is the explicit
+  exception to "no fetching": it fetches corrupt chunks and chunks missing from your own uploads
+  through the authenticated, content-address-checked member path and replaces the cached report
+  after verifying again. It leaves merely uncached files alone (opening them fetches what they
+  need). It cannot invent bytes when no reachable member holds them or repair an invalid
+  manifest. The same health summary is explicitly available in **Transfers**.
 - **Connectivity** opens the **Connectivity assistant**, which explains what this device can
   actually observe: connected members, the current path evidence and existing network settings. It
   does not promise global reachability from a local observation. **Copy diagnostic** provides the

@@ -9,14 +9,88 @@ use openmls_rust_crypto::OpenMlsRustCrypto;
 use tls_codec::{Deserialize as _, Serialize as _};
 
 use crate::config::{capabilities, CIPHERSUITE};
-use crate::invite::MembershipCredential;
+use crate::invite::{InviteError, MembershipCredential};
 use crate::{proto, MlsError};
+
+pub(crate) mod key_package_identity;
+pub use key_package_identity::KeyPackageIdentity;
+mod founder_input;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod key_package_time;
+// Chat V2 ordinary member signing: exact full-key check plus explicit payload bound.
+#[cfg(feature = "test-support")]
+mod invite_fixture;
+mod ordinary_signer;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod text_add_package;
 
 /// Serialize a KeyPackage for transport (so a joiner can send it to an inviter).
 pub fn serialize_key_package(key_package: &KeyPackage) -> Result<Vec<u8>, MlsError> {
     MlsMessageOut::from(key_package.clone())
         .tls_serialize_detached()
         .map_err(proto)
+}
+
+/// Bound the canonical encoded size BEFORE cloning/serializing this already constructed SDK
+/// object. This does not meter the SDK's typed heap or admit a received KeyPackage.
+pub fn serialize_key_package_bounded(
+    key_package: &KeyPackage,
+    max_bytes: usize,
+) -> Result<Vec<u8>, MlsError> {
+    use tls_codec::Size;
+    // MLSMessage's version/wire-format prefix is four bytes; the KP contains its own version.
+    if key_package
+        .tls_serialized_len()
+        .checked_add(4)
+        .is_none_or(|length| length > max_bytes)
+    {
+        return Err(MlsError::Internal(
+            "KeyPackage encoding exceeds explicit budget",
+        ));
+    }
+    serialize_key_package(key_package)
+}
+
+/// The shortest time a joiner's KeyPackage must remain valid after it is admitted: 30 days.
+///
+/// openmls checks an added KeyPackage's lifetime against the wall clock on **every** member that
+/// processes the Add, not only on the committer, and that includes a member replaying the Add from
+/// the commit log long afterwards. There is no production switch to skip it. So a joiner that signs
+/// a KeyPackage valid now but expiring a minute later is admitted by the committer, and then every
+/// member that was offline, or catches up later, can never apply that commit and stays at the old
+/// epoch until it is re-invited. The joiner chooses the lifetime, so this is checked at admission.
+///
+/// The value trades two things. Honest KeyPackages carry openmls's default 84 days and are
+/// admitted within an hour of being minted, so the slack (about 54 days) is how far the joiner's
+/// clock may lag the committer's before an honest join is refused. The floor itself is how long a
+/// member may be offline and still replay an Add from a hostile joiner; for honest joiners it is
+/// about 84 days less however far the joiner's clock lagged, and never under 30. A member offline
+/// for longer still cannot replay that Add
+/// (`docs/design-mls-leaf-lifetime.md` section 6).
+///
+/// The `not_before` side is not floored. A `not_before` of "just now" makes members whose clocks
+/// lag refuse the Add until their clocks pass it, and they only retry on a later trigger (another
+/// commit, an op from a newer epoch, a reconnect), so in a quiet group that can take a while; but
+/// it is not permanent, and flooring it would refuse honest joiners whose clocks run fast.
+pub const MIN_ADMITTED_KEY_PACKAGE_LIFETIME_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+
+/// Refuse a KeyPackage lifetime that ends sooner than [`MIN_ADMITTED_KEY_PACKAGE_LIFETIME_MS`]
+/// after `now_ms`, or whose total range exceeds openmls's own cap (84 days and 1 hour,
+/// `Lifetime::has_acceptable_range`).
+///
+/// openmls 0.8 and 0.9 define that cap but do not enforce it, so a joiner can sign
+/// `not_after = u64::MAX`. RFC 9420 asks applications to enforce a maximum, and a later openmls
+/// that enforced it on processing would refuse the Add on every upgraded member: the same
+/// stranding as a short lifetime. Honest KeyPackages sit exactly at the cap and pass.
+fn check_admitted_lifetime(lifetime: &Lifetime, now_ms: u64) -> Result<(), InviteError> {
+    if !lifetime.has_acceptable_range() {
+        return Err(InviteError::KeyPackageLifetimeTooLong);
+    }
+    let not_after_ms = lifetime.not_after().saturating_mul(1000);
+    if not_after_ms < now_ms.saturating_add(MIN_ADMITTED_KEY_PACKAGE_LIFETIME_MS) {
+        return Err(InviteError::KeyPackageExpiresTooSoon);
+    }
+    Ok(())
 }
 
 /// The raw Ed25519 **leaf signature key** of a parsed KeyPackage.
@@ -37,9 +111,22 @@ pub struct MlsDevice {
     signer: SignatureKeyPair,
     credential: CredentialWithKey,
     device_id: DeviceId,
+    // LAST: provider, signer and credential drop before the SAME graph lease shared with group.
+    pub(crate) sdk_graph_lease: Option<crate::persist::OwnerSdkGraphLease>,
 }
 
 impl MlsDevice {
+    /// A completed initial load pays its graph, not a later mutative SDK operation. Refuse
+    /// BEFORE SDK/key-builder/duplication work; a storage-write refusal would be too late.
+    pub(crate) fn require_sdk_operation_admission(&self) -> Result<(), MlsError> {
+        if self.sdk_graph_lease.is_some() {
+            return Err(MlsError::Internal(
+                "closed SDK graph needs explicit operation admission",
+            ));
+        }
+        Ok(())
+    }
+
     /// Generate a fresh device identity.
     pub fn generate() -> Result<Self, MlsError> {
         let provider = OpenMlsRustCrypto::default();
@@ -56,6 +143,7 @@ impl MlsDevice {
             signer,
             credential,
             device_id,
+            sdk_graph_lease: None,
         })
     }
 
@@ -83,6 +171,7 @@ impl MlsDevice {
             signer,
             credential,
             device_id,
+            sdk_graph_lease: None,
         })
     }
 
@@ -105,6 +194,7 @@ impl MlsDevice {
     /// serializes a key to disk or to the wire (the design's hard "no device key is ever
     /// exported" rule is about crossing the process boundary, which this does not).
     pub fn duplicate(&self) -> Result<Self, MlsError> {
+        self.require_sdk_operation_admission()?;
         let provider = OpenMlsRustCrypto::default();
         {
             let src = self
@@ -127,6 +217,7 @@ impl MlsDevice {
     /// The private bundle is stored in this device's provider so it can later
     /// process the resulting Welcome.
     pub fn key_package(&self) -> Result<KeyPackage, MlsError> {
+        self.require_sdk_operation_admission()?;
         let bundle = KeyPackage::builder()
             .leaf_node_capabilities(capabilities())
             .build(
@@ -147,6 +238,7 @@ impl MlsDevice {
         group_id: &[u8],
         invite_nonce: [u8; 16],
     ) -> Result<KeyPackage, MlsError> {
+        self.require_sdk_operation_admission()?;
         let membership = MembershipCredential {
             device_id: self.device_id,
             group_id: group_id.to_vec(),
@@ -169,6 +261,23 @@ impl MlsDevice {
         self.signer.public().to_vec()
     }
 
+    /// Borrow for bounded private persistence preflight; no label clone precedes its budget.
+    pub(crate) fn public_key_ref(&self) -> &[u8] {
+        self.signer.public()
+    }
+
+    /// The MLS reference selected by a Welcome for this exact newly minted KeyPackage.
+    /// Callers retain it across every direct/pushed/helper completion of the same join attempt;
+    /// the signing-device key alone cannot distinguish an older init key in a restored provider.
+    pub fn key_package_reference(&self, package: &KeyPackage) -> Result<[u8; 32], MlsError> {
+        package
+            .hash_ref(self.provider.crypto())
+            .map_err(proto)?
+            .as_slice()
+            .try_into()
+            .map_err(|_| MlsError::Internal("unexpected KeyPackage reference length"))
+    }
+
     /// Sign arbitrary bytes with this device's MLS leaf key (e.g. inner-signing a
     /// replicated CRDT op so authorship survives transport re-encryption).
     pub fn sign(&self, payload: &[u8]) -> Result<[u8; 64], MlsError> {
@@ -177,6 +286,9 @@ impl MlsDevice {
 
     /// Parse and validate a KeyPackage received over the wire (from a joiner),
     /// using this device's crypto backend.
+    ///
+    /// For identifying a joiner only. Anything about to **admit** the KeyPackage must use
+    /// [`MlsDevice::parse_admitted_key_package`], which also applies the admission lifetime policy.
     pub fn parse_key_package(&self, bytes: &[u8]) -> Result<KeyPackage, MlsError> {
         let message = MlsMessageIn::tls_deserialize(&mut &bytes[..]).map_err(proto)?;
         match message.extract() {
@@ -185,6 +297,20 @@ impl MlsDevice {
                 .map_err(proto),
             _ => Err(MlsError::WrongMessageType),
         }
+    }
+
+    /// [`MlsDevice::parse_key_package`] plus the admission lifetime policy: the KeyPackage must
+    /// stay valid for at least [`MIN_ADMITTED_KEY_PACKAGE_LIFETIME_MS`] after `now_ms`, and its
+    /// total lifetime must not exceed openmls's cap. `now_ms` comes from the caller's `catcoms-rt`
+    /// `Clock`. Every path that adds a joiner to the group parses through this.
+    pub fn parse_admitted_key_package(
+        &self,
+        bytes: &[u8],
+        now_ms: u64,
+    ) -> Result<KeyPackage, MlsError> {
+        let key_package = self.parse_key_package(bytes)?;
+        check_admitted_lifetime(key_package.life_time(), now_ms)?;
+        Ok(key_package)
     }
 
     /// Sign raw bytes with this device's MLS leaf key (used for invite tokens).

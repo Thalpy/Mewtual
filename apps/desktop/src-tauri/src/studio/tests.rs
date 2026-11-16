@@ -332,9 +332,10 @@ pub(super) async fn install(
     device_id: DeviceId,
     instance: u64,
 ) {
-    state.servers.lock().await.insert(
+    state.servers.lock().await.install_legacy_fixture(
         7,
         ServerEntry {
+            files: keep_session::EntryOwner::new(),
             actor,
             instance,
             group_id,
@@ -349,6 +350,7 @@ pub(super) async fn install(
             is_dm: false,
             switchboard: false,
             record_seq: 0,
+            voice: None,
             persist: PersistCounters::default(),
         },
     );
@@ -363,7 +365,7 @@ async fn fixture() -> (
     let root = tempfile::tempdir().unwrap();
     let state = Arc::new(AppState::default());
     *state.store.lock().await =
-        Some(ServerStore::open(root.path(), b"studio-native", &mut rng()).unwrap());
+        Some((ServerStore::open(root.path(), b"studio-native", &mut rng()).unwrap()).into());
     *state.session_resumable.lock().await = true;
     let mut server = Server::found(
         Hub::new().join(PeerId::from_u64(1)),
@@ -573,18 +575,20 @@ async fn native_studio_save_restart_reopen_real_blob_and_complete_projection() {
     drain.await.unwrap();
     let (group_id, device_id) = {
         let entries = state.servers.lock().await;
-        let e = &entries[&7];
+        let e = entries.legacy(&7).expect("Legacy fixture row");
         (e.group_id.clone(), e.device_id)
     };
-    state.servers.lock().await.clear();
+    state.servers.lock().await.clear_legacy_fixture();
     drop(state.store.lock().await.take());
     *state.store.lock().await =
-        Some(ServerStore::open(root.path(), b"studio-native", &mut rng()).unwrap());
+        Some((ServerStore::open(root.path(), b"studio-native", &mut rng()).unwrap()).into());
     let snapshot = state
         .store
         .lock()
         .await
         .as_ref()
+        .unwrap()
+        .as_legacy()
         .unwrap()
         .load_server(7)
         .unwrap();
@@ -709,19 +713,19 @@ async fn native_studio_ready_refuses_every_busy_or_stale_fence_without_waiting()
         let ready = actor.studio_begin(create()).await.unwrap();
         // Each fence must reject independently, not inherit the stale generation
         // from the previous case and accidentally leave incarnation untested.
-        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
         if mode == 0 {
-            state.session_lock_requested.store(true, Ordering::Release);
+            state.session_lock_requested.store(true, Ordering::SeqCst);
         }
         if mode == 1 {
-            state.ui_session_generation.fetch_add(1, Ordering::AcqRel);
+            state.ui_session_generation.fetch_add(1, Ordering::SeqCst);
         }
         if mode == 2 {
-            state.servers.lock().await.get_mut(&7).unwrap().instance = 2;
+            state.servers.lock().await.legacy_mut(&7).unwrap().instance = 2;
         }
         assert!(authorize(&state, 7, 1, generation).is_err());
         drop(ready);
-        state.session_lock_requested.store(false, Ordering::Release);
+        state.session_lock_requested.store(false, Ordering::SeqCst);
         assert_eq!(actor.member_count().await, 1);
     }
     assert!(
@@ -730,6 +734,8 @@ async fn native_studio_ready_refuses_every_busy_or_stale_fence_without_waiting()
             .lock()
             .await
             .as_ref()
+            .unwrap()
+            .as_legacy()
             .unwrap()
             .load_server(7)
             .is_err(),
@@ -765,6 +771,8 @@ async fn native_studio_lease_retains_fences_and_cancelled_receiver_cannot_create
         .lock()
         .await
         .as_ref()
+        .unwrap()
+        .as_legacy()
         .unwrap()
         .load_server(7)
         .is_err());
@@ -967,6 +975,8 @@ async fn native_studio_cancelled_lease_releases_native_fences_without_a_save() {
         .await
         .as_ref()
         .unwrap()
+        .as_legacy()
+        .unwrap()
         .load_server(7)
         .is_err());
     actor.shutdown().await;
@@ -1036,7 +1046,7 @@ async fn native_studio_running_worker_retains_fences_after_invoke_or_actor_abort
         let root = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState::default());
         *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"studio-native", &mut rng()).unwrap());
+            Some((ServerStore::open(root.path(), b"studio-native", &mut rng()).unwrap()).into());
         *state.session_resumable.lock().await = true;
         let (entered, entry) = tokio::sync::oneshot::channel();
         let pause = Arc::new(Pause {
@@ -1073,8 +1083,8 @@ async fn native_studio_running_worker_retains_fences_after_invoke_or_actor_abort
         if abort_actor {
             task.abort();
         }
-        state.session_lock_requested.store(true, Ordering::Release);
-        state.ui_session_generation.fetch_add(1, Ordering::AcqRel);
+        state.session_lock_requested.store(true, Ordering::SeqCst);
+        state.ui_session_generation.fetch_add(1, Ordering::SeqCst);
         // Neither lock completion nor leave/reinstall nor another snapshot can pass its fence.
         assert!(state.store.try_lock().is_err());
         assert!(state.ui_session_commit.try_lock().is_err());
@@ -1087,6 +1097,8 @@ async fn native_studio_running_worker_retains_fences_after_invoke_or_actor_abort
             .lock()
             .await
             .as_ref()
+            .unwrap()
+            .as_legacy()
             .unwrap()
             .load_server(7)
             .unwrap();
@@ -1122,7 +1134,32 @@ async fn native_studio_running_worker_retains_fences_after_invoke_or_actor_abort
         let (actor, mut events, task) = spawn(server);
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
         install(&state, actor.clone(), group, device, 2).await;
-        state.session_lock_requested.store(false, Ordering::Release);
+        assert_eq!(
+            unlocked_ui_session_generation(&state).await.unwrap_err(),
+            "the vault is locked"
+        );
+        {
+            let _commit = state.ui_session_commit.lock().await;
+            state.session_lock_requested.store(false, Ordering::SeqCst);
+            assert!(
+                ui_session_closed(&state),
+                "clearing a lock request must not authorize the newer UI generation"
+            );
+            // Model the authenticated unlock commit against this already-open test vault.
+            // Production publishes this floor only after unlock succeeds; the old worker's
+            // captured generation remains obsolete even though its durable save survived.
+            let current = state.ui_session_generation.load(Ordering::SeqCst);
+            assert_ne!(current, generation);
+            state
+                .ui_authorized_generation
+                .store(current, Ordering::SeqCst);
+        }
+        assert_eq!(
+            require_ui_session_generation(&state, generation)
+                .await
+                .unwrap_err(),
+            "the UI session changed while the operation was in progress"
+        );
         let reopened = invoke_read(&state).await;
         assert_eq!(
             reopened["content"]["title"]["selected"]["value"],

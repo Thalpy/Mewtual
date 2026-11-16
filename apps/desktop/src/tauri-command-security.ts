@@ -14,6 +14,12 @@
  * ledger is written from whatever the extractor saw.
  */
 export const TAURI_COMMAND_GROUPS = {
+  privileged_chat_history: {
+    boundary: "Retained originals can contain deleted content. Main-window ACL, original native UI/registry scope and current Actor moderation authority gate bounded reads; legacy signatures do not prove group membership.",
+    // These two commands use the synchronous router so custody is captured before Tauri
+    // schedules an async task. The companion audit explicitly includes that router inventory.
+    commands: ["get_admin_chat_ledger", "get_admin_chat_ledger_detail"],
+  },
   local_session_and_vault: {
     boundary: "Local vault/session state; secrets and filesystem paths must remain native-side.",
     commands: [
@@ -25,6 +31,25 @@ export const TAURI_COMMAND_GROUPS = {
       // Inline-download cancellation is also deliberately available while locked. It returns no
       // existence bit and can only destroy a bounded operation registration / actor future.
       "cancel_inline_download",
+      // Exact ephemeral revocation/settlement only. These must work after lock or remount;
+      // they expose no existence bit and never authorize fresh engine/network work.
+      "end_call_mapping_owner", "end_voice_owner", "settle_voice_crypto",
+      // Selected-key cleanup can close one paid selection before a delayed admission and
+      // waits for actual publication drainage; it never returns engine/network authority.
+      "settle_voice_join_key",
+      // Exact original-channel cleanup must survive lock, End and lost setup/final replies.
+      // It accepts no drain flag, private bytes or replacement generation; setup still gates
+      // the unlocked session and native selected owner before RNG or channel admission.
+      "setup_voice_channel", "settle_voice_channel_setup", "collect_voice_channel",
+      // Read existing original-channel work metadata after End/lock so unseen Pending can
+      // be cleaned up. It cannot admit work, fetch payloads or assert actual drainage.
+      "read_voice_channel_work",
+      // CAS lifecycle and bounded engine admission, independent of optional router grants.
+      // Selected-key admission recovers its original permit until settlement; publication
+      // installs only that accepted owner's frozen public point through the actual actor.
+      "admit_voice_join_key", "publish_voice_join_key",
+      "prepare_voice_controller", "prepare_voice_owner", "activate_voice_owner", "admit_voice_crypto",
+      "prepare_call_mapping_controller", "prepare_call_mapping_owner", "activate_call_mapping_owner",
       "create_backup", "change_vault_secret", "get_debug_logging", "set_debug_logging",
       // Emits a marked record and re-reads the sink's health, so Settings can report what the
       // writer is doing rather than what the preference asked for. Gated like the pair above.
@@ -78,10 +103,20 @@ export const TAURI_COMMAND_GROUPS = {
     boundary: "Read projections from a registered per-server actor; never bypass MLS/CRDT validation.",
     commands: [
       "get_channels", "durable_send_context", "get_members", "get_profiles", "get_livery", "get_badges", "get_devices",
+      // Context/immutable target metadata only; native mutation admission rechecks authority.
+      "durable_mutation_context",
       // Exact actor's authenticated mode; fenced against lock and replacement, no authority write.
       "group_communication_mode",
-      "get_files", "get_storage_health", "get_online_members", "get_delivery", "dm_stats",
-      "get_dm_requests", "file_available", "get_kept_files", "get_file_usage", "get_wiki_pinned_cids", "get_statuses",
+      "get_files", "get_storage_health", "get_cache_status", "get_online_members", "get_delivery", "dm_stats",
+      "get_dm_requests", "file_available", "get_kept_files", "get_private_downloads",
+      // Read-only check of a Saved row's file: one of four words, never a path; bounded natively.
+      "check_saved_download",
+      // PR #56: this device's saved-files list as display data (entry IDs, CIDs, file names, when
+      // and whether Downloads; never a folder or identity), and its bounded read-only batch check.
+      "get_saved_files", "check_saved_files",
+      // The list's "Remember saved files" setting and how many entries it holds: numbers only.
+      "get_saved_files_limit",
+      "get_file_usage", "get_wiki_pinned_cids", "get_statuses",
       "get_events", "get_wiki_pages", "get_wiki_map", "get_wiki_page", "get_wiki_meta",
       "get_wiki_history", "get_wiki_pending", "get_wiki_review_days", "get_roles", "get_moderation",
       // The server's upload cap, off the file index document every member already reads. The
@@ -173,6 +208,8 @@ export const TAURI_COMMAND_GROUPS = {
       "begin_inline_download", "download_file",
       "send_call_signal", "dismiss_dm_request", "create_event",
       "save_wiki_page", "send_message", "edit_message", "delete_message", "toggle_reaction",
+      // Saves the exact original chat token's negative terminal; never accepts a new mutation.
+      "stop_durable_chat",
       // `jukebox_add_link` queues a video id rather than a content address. It has the same
       // authority as `jukebox_add` and reaches no network of its own: whether a listener ever
       // fetches what it names is that listener's decision, taken locally at play time.
@@ -260,7 +297,21 @@ export const TAURI_COMMAND_GROUPS = {
       "set_livery", "set_server_icon", "set_server_cursor", "set_server_banner", "set_member_badge",
       // Per-file local consent, reserved disk quota, full verification and native lock cancellation.
       // Forget only releases this device's separate copy; shared metadata grants no such authority.
-      "keep_file", "forget_kept_file",
+      "keep_file", "request_kept_file", "set_kept_paused", "forget_kept_file", "retry_kept_file",
+      // Private encrypted progress, independent of Keep; exact revision/grant CAS, no paths/keys.
+      "set_private_download_paused", "retry_private_download", "cancel_private_download",
+      // PR #56: this device's saved-files list. Forget drops one entry by its random ID (the file
+      // is never touched); reset writes an empty list only while native reads the record as
+      // damaged, never over a newer version's. Neither takes a path or reaches a file.
+      "forget_saved_file", "reset_saved_files",
+      // How many saved files the list remembers: clamped natively into 16 to 4096 whatever the
+      // page sends, sealed per device. Lowering forgets the oldest entries (never a file), and a
+      // preview (`apply: false`) changes nothing.
+      "set_saved_files_limit",
+      // This device's cache limit for one server: range-checked natively (1 GB to 1 TB or none),
+      // sealed before the actor applies it. Never replicated; pins still protect Keep, Studio,
+      // Downloads, own uploads and files in use whatever the page sends.
+      "set_cache_limit",
       "delete_file", "set_file_expiry", "delete_event", "set_wiki_format", "delete_wiki_page",
       "rename_wiki_page", "set_wiki_review_days", "approve_wiki_edit", "reject_wiki_edit",
       "restore_wiki_page", "warn_message", "create_kick_case", "cast_kick_vote",
@@ -328,8 +379,16 @@ export const TAURI_COMMAND_GROUPS = {
       // and launches it. Only the exact full publication envelope is returned for clipboard fallback
       // when the URL needs a bounded excerpt.
       // Writes a shared file to Downloads by streaming it from the actor: the name is sanitized
-      // native-side and the reserved path is the only thing that reaches the webview.
+      // native-side and the reserved path is the only thing that reaches the webview. Its
+      // `saveAs` flag makes native open the OS "Save as" dialog itself; no path, folder or name
+      // ever comes from the renderer (its signature is pinned by a test).
       "save_group_file",
+      // Show a Saved row's file in the system file manager, selected (never opened or run),
+      // after the same bounded read-only identity check as `check_saved_download`. It takes only
+      // the Download ID and revision; the path stays native and only fixed refusals come back.
+      "reveal_saved_download",
+      // PR #56: the same for a saved-files list entry, by its random entry ID only.
+      "reveal_saved_file",
     ],
   },
 } as const;

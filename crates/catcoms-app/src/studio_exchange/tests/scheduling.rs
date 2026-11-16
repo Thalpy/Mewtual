@@ -203,23 +203,32 @@ async fn retain_delivery(
 
 #[tokio::test]
 async fn studio_actor_owner_return_installs_both_classes_with_three_retained_previews() {
-    tokio::time::timeout(Duration::from_secs(90), owner_return(Pressure::Ready))
-        .await
-        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(90),
+        Box::pin(owner_return(Pressure::Ready)),
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
 async fn studio_actor_owner_return_installs_both_classes_with_cancelled_preview_parser() {
-    tokio::time::timeout(Duration::from_secs(90), owner_return(Pressure::Parser))
-        .await
-        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(90),
+        Box::pin(owner_return(Pressure::Parser)),
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
 async fn studio_actor_owner_return_installs_both_classes_with_cancelled_preview_transport() {
-    tokio::time::timeout(Duration::from_secs(90), owner_return(Pressure::Transport))
-        .await
-        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(90),
+        Box::pin(owner_return(Pressure::Transport)),
+    )
+    .await
+    .unwrap();
 }
 
 /// Deliberately drains production's global pools, so execute this diagnostic alone. It must not
@@ -233,9 +242,12 @@ async fn studio_actor_owner_return_survives_unrelated_process_pool_contention() 
     let _preview = preview.clone().try_acquire_many_owned(3).unwrap();
     assert_eq!(shared.available_permits(), 0);
     assert_eq!(preview.available_permits(), 0);
-    tokio::time::timeout(Duration::from_secs(90), owner_return(Pressure::Ready))
-        .await
-        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(90),
+        Box::pin(owner_return(Pressure::Ready)),
+    )
+    .await
+    .unwrap();
     assert_eq!(shared.available_permits(), 0);
     assert_eq!(preview.available_permits(), 0);
 }
@@ -248,9 +260,13 @@ enum Pressure {
 }
 
 async fn owner_return(pressure: Pressure) {
+    // The caller pins this complete three-peer pressure scenario before embedding it in
+    // timeout. Pin nested setup as well: those futures temporarily own whole Nodes/Stores,
+    // while production actors already hold their original nodes in spawned tasks. Keep all
+    // original peers, limits, timeout and current-task ordering; change residence only.
     let pools = PreparationPools::new();
     let ready_count = if pressure == Pressure::Ready { 3 } else { 2 };
-    let mut p = Pair::new().await;
+    let mut p = Box::pin(Pair::new()).await;
     let targets = [
         StudioTarget::Index { channel: channel() },
         target(),
@@ -269,7 +285,7 @@ async fn owner_return(pressure: Pressure) {
     let wire = Net::new(p.hub.join(PeerId::from_u64(3)));
     let invite = p.alice.mint_invite([44; 16], u64::MAX, vec![]).unwrap();
     let (joined, tick) = tokio::join!(
-        Node::join(
+        Box::pin(Node::join(
             wire.clone(),
             MlsDevice::generate().unwrap(),
             rng(),
@@ -277,7 +293,7 @@ async fn owner_return(pressure: Pressure) {
             "capacity-bound reader",
             owner_peer,
             &invite
-        ),
+        )),
         p.alice.sync_once()
     );
     tick.unwrap();
@@ -397,8 +413,8 @@ async fn owner_return(pressure: Pressure) {
     .unwrap();
     *wire.hidden_peer.lock().unwrap() = Some(owner_peer);
     assert_eq!(client.sync.studio_page_peers(), vec![provider_peer]);
-    let owner = Running::new(p.alice, p.a_store, &pools).await;
-    let client = Running::new(client, client_store, &pools).await;
+    let owner = Box::pin(Running::new(p.alice, p.a_store, &pools)).await;
+    let client = Box::pin(Running::new(client, client_store, &pools)).await;
     eprintln!("{pressure:?}: joined, authenticated, owner hidden");
     let mut deliveries = Vec::new();
     let mut seeds = Vec::new();

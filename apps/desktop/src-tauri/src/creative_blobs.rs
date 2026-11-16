@@ -63,7 +63,7 @@ pub(super) async fn finish_response<T>(
     let _commit = require_ui_session_generation(state, generation).await?;
     let servers = state.servers.lock().await;
     if servers
-        .get(&server)
+        .legacy(&server)
         .is_none_or(|entry| entry.instance != instance)
     {
         return Err("the server changed while the blob request was in progress".into());
@@ -137,8 +137,9 @@ mod tests {
         use rand_core::SeedableRng;
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
-        *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.store.lock().await = Some(
+            (ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap()).into(),
+        );
         // A regular file where the blob namespace directory belongs forces the real production
         // attachment helper down its best-effort memory fallback, without mocking that path.
         std::fs::write(root.path().join("blobs"), b"blocked").unwrap();
@@ -178,8 +179,9 @@ mod tests {
         use rand_core::SeedableRng;
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
-        *state.store.lock().await =
-            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.store.lock().await = Some(
+            (ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap()).into(),
+        );
         *state.session_resumable.lock().await = true;
         let generation = unlocked_ui_session_generation(&state).await.unwrap();
         let server = Server::found(
@@ -193,9 +195,10 @@ mod tests {
         let group_id = server.group_id();
         let device_id = server.device_id();
         let (actor, events, task) = spawn(server);
-        state.servers.lock().await.insert(
+        state.servers.lock().await.install_legacy_fixture(
             12,
             ServerEntry {
+                files: keep_session::EntryOwner::new(),
                 actor: actor.clone(),
                 instance: 40,
                 group_id,
@@ -210,6 +213,7 @@ mod tests {
                 is_dm: false,
                 switchboard: false,
                 record_seq: 0,
+                voice: None,
                 persist: PersistCounters::default(),
             },
         );
@@ -219,7 +223,7 @@ mod tests {
                 .unwrap(),
             42
         );
-        state.servers.lock().await.get_mut(&12).unwrap().instance = 41;
+        state.servers.lock().await.legacy_mut(&12).unwrap().instance = 41;
         assert!(finish_response(&state, 12, 40, generation, || panic!(
             "stale bytes converted"
         ))
@@ -231,14 +235,14 @@ mod tests {
                 .unwrap(),
             42
         );
-        state.session_lock_requested.store(true, Ordering::Release);
+        state.session_lock_requested.store(true, Ordering::SeqCst);
         assert!(finish_response(&state, 12, 41, generation, || panic!(
             "locked bytes converted"
         ))
         .await
         .is_err());
-        state.session_lock_requested.store(false, Ordering::Release);
-        state.ui_session_generation.fetch_add(1, Ordering::AcqRel);
+        state.session_lock_requested.store(false, Ordering::SeqCst);
+        state.ui_session_generation.fetch_add(1, Ordering::SeqCst);
         assert!(
             finish_response(&state, 12, 41, generation, || panic!("old session revived"))
                 .await

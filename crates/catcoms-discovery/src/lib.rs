@@ -834,9 +834,16 @@ pub struct DiscoveryPolicy {
     window_start_ms: Option<u64>,
     /// This window's length (base + RNG jitter), fixed when the window opens.
     window_len_ms: u64,
+    /// Process-local identity, distinct even when a zero-length window rolls at the same time.
+    window_owner: std::sync::Arc<()>,
     /// Endpoint attempts granted so far in the current window.
     spent: u32,
 }
+
+/// Opaque identity of a locally charged endpoint window. Detached pre-commit suppression may
+/// refund this window only; a late acknowledgement must never refill a newer window.
+#[derive(Clone, Debug)]
+pub struct EndpointBudgetWindow(std::sync::Arc<()>);
 
 impl DiscoveryPolicy {
     /// A policy with default bounds.
@@ -851,6 +858,7 @@ impl DiscoveryPolicy {
             best_seq: BTreeMap::new(),
             window_start_ms: None,
             window_len_ms: config.window_ms,
+            window_owner: std::sync::Arc::new(()),
             spent: 0,
         }
     }
@@ -859,6 +867,18 @@ impl DiscoveryPolicy {
     /// not advance the window.
     pub fn remaining_budget(&self) -> u32 {
         self.config.dial_budget.saturating_sub(self.spent)
+    }
+
+    /// Capture after planning and retain with the exact immutable submission job.
+    pub fn endpoint_budget_window(&self) -> EndpointBudgetWindow {
+        EndpointBudgetWindow(self.window_owner.clone())
+    }
+
+    /// Refund only confirmed pre-commit work in the original planning window.
+    pub fn refund_endpoint_budget_in(&mut self, window: EndpointBudgetWindow, endpoints: usize) {
+        if std::sync::Arc::ptr_eq(&window.0, &self.window_owner) {
+            self.refund_endpoint_budget(endpoints);
+        }
     }
 
     /// Forget the signed-sequence high-water for a member device whose record state was removed.
@@ -1003,6 +1023,7 @@ impl DiscoveryPolicy {
         };
         if expired {
             self.window_start_ms = Some(now);
+            self.window_owner = std::sync::Arc::new(());
             let jitter = if self.config.jitter_ms == 0 {
                 0
             } else {
@@ -1383,6 +1404,38 @@ mod tests {
         pol.refund_endpoint_budget(3);
         assert_eq!(pol.remaining_budget(), 3);
         assert_eq!(pol.plan(vec![candidate], 2, &clock, &mut r).len(), 1);
+    }
+
+    #[test]
+    fn late_refund_cannot_refill_a_same_instant_replacement_or_another_policy() {
+        let mut policy = DiscoveryPolicy::with_config(PolicyConfig {
+            window_ms: 0,
+            jitter_ms: 0,
+            dial_budget: 3,
+            ..PolicyConfig::default()
+        });
+        let mut other = DiscoveryPolicy::with_config(PolicyConfig {
+            window_ms: 0,
+            jitter_ms: 0,
+            dial_budget: 3,
+            ..PolicyConfig::default()
+        });
+        let clock = ManualClock::new(0);
+        let mut random = rng();
+        assert_eq!(policy.grant_budget(&clock, &mut random), 3);
+        policy.spent = 3;
+        let old = policy.endpoint_budget_window();
+        assert_eq!(policy.grant_budget(&clock, &mut random), 3);
+        policy.spent = 3;
+        policy.refund_endpoint_budget_in(old, 1);
+        assert_eq!(policy.remaining_budget(), 0);
+        let current = policy.endpoint_budget_window();
+        other.grant_budget(&clock, &mut random);
+        other.spent = 3;
+        other.refund_endpoint_budget_in(current.clone(), 1);
+        assert_eq!(other.remaining_budget(), 0);
+        policy.refund_endpoint_budget_in(current, 1);
+        assert_eq!(policy.remaining_budget(), 1);
     }
 
     #[test]

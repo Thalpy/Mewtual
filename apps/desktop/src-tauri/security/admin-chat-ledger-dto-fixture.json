@@ -1,0 +1,104 @@
+{
+  "page": {
+    "status": "page",
+    "availability": "incomplete",
+    "revision": "00112233445566778899aabbccddeeff",
+    "coverage": {
+      "source": "retained-local-inventory",
+      "typed": "not-active",
+      "legacy": "incomplete",
+      "ownerEvidence": "not-active",
+      "unattributedChanges": "unknown"
+    },
+    "rows": [
+      {
+        "kind": "legacy-change",
+        "rowId": "legacy:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "opHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "namespaceGroupId": "01",
+        "channel": "1",
+        "authorPublicKey": "0202020202020202020202020202020202020202020202020202020202020202",
+        "authorId": "0303030303030303030303030303030303030303030303030303030303030303",
+        "authorFingerprint": "03030303",
+        "claimedKeyByteCount": 32,
+        "keyShape": "ed25519",
+        "signedDocType": 1,
+        "signedDocId": "1",
+        "scope": "matching",
+        "signature": "valid",
+        "groupBinding": "not-signed",
+        "authority": "legacy-unproven",
+        "changeHash": null,
+        "graph": "unavailable",
+        "presentedMs": null,
+        "preview": null
+      }
+    ],
+    "knownRowCount": 1,
+    "nextCursor": null
+  },
+  "detail": {
+    "status": "detail",
+    "availability": "incomplete",
+    "revision": "00112233445566778899aabbccddeeff",
+    "row": {
+      "kind": "legacy-change",
+      "rowId": "legacy:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "opHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "namespaceGroupId": "01",
+      "channel": "1",
+      "authorPublicKey": "0202020202020202020202020202020202020202020202020202020202020202",
+      "authorId": "0303030303030303030303030303030303030303030303030303030303030303",
+      "authorFingerprint": "03030303",
+      "claimedKeyByteCount": 32,
+      "keyShape": "ed25519",
+      "signedDocType": 1,
+      "signedDocId": "1",
+      "scope": "matching",
+      "signature": "valid",
+      "groupBinding": "not-signed",
+      "authority": "legacy-unproven",
+      "changeHash": null,
+      "graph": "unavailable",
+      "presentedMs": null,
+      "preview": null
+    },
+    "original": {
+      "encoding": "hex",
+      "bytes": "0001",
+      "offset": 0,
+      "totalBytes": 2,
+      "nextOffset": null
+    },
+    "typedBody": null,
+    "legacyChange": {
+      "status": "decoded",
+      "actor": "0202020202020202020202020202020202020202020202020202020202020202",
+      "sequence": "18446744073709551615",
+      "startOp": "18446744073709551615",
+      "parents": [],
+      "mutations": [
+        {
+          "operationId": "18446744073709551615@0202020202020202020202020202020202020202020202020202020202020202",
+          "objectId": "_root",
+          "key": {
+            "kind": "map",
+            "value": "counter"
+          },
+          "operation": "set",
+          "insert": false,
+          "value": {
+            "kind": "uint",
+            "text": "18446744073709551615"
+          },
+          "predecessors": []
+        }
+      ],
+      "mutationsTruncated": false
+    },
+    "signatureHex": "04040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404",
+    "factIds": [],
+    "missingFactIds": [],
+    "evidenceTruncated": false
+  }
+}

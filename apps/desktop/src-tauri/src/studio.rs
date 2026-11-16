@@ -277,8 +277,8 @@ async fn invoke_with_context<V>(
     let (server, generation, instance) = (*server, *generation, *instance);
     let mut cancellation = context.cancellation.clone();
     if cancellation.is_cancelled()
-        || state.session_lock_requested.load(Ordering::Acquire)
-        || state.ui_session_generation.load(Ordering::Acquire) != generation
+        || state.session_lock_requested.load(Ordering::SeqCst)
+        || state.ui_session_generation.load(Ordering::SeqCst) != generation
     {
         return Err("Studio request belongs to a locked or changed UI session".into());
     }
@@ -332,7 +332,7 @@ async fn invoke_with_context<V>(
         let _commit = require_ui_session_generation(state, generation).await?;
         let servers = state.servers.lock().await;
         if servers
-            .get(&server)
+            .legacy(&server)
             .is_none_or(|entry| entry.instance != instance)
         {
             return Err("server changed during Studio operation".into());
@@ -354,8 +354,8 @@ async fn invoke_with_context<V>(
                 .as_ref()
                 .is_some_and(|delivery| !delivery.is_current())
             || cancellation.is_cancelled()
-            || state.session_lock_requested.load(Ordering::Acquire)
-            || state.ui_session_generation.load(Ordering::Acquire) != generation
+            || state.session_lock_requested.load(Ordering::SeqCst)
+            || state.ui_session_generation.load(Ordering::SeqCst) != generation
         {
             return Err("Studio response belongs to a locked or changed UI session".into());
         }
@@ -432,24 +432,21 @@ fn authorize(
     let resumable = state.session_resumable.try_lock().map_err(|_| busy())?;
     if !*resumable
         || store.is_none()
-        || state.session_lock_requested.load(Ordering::Acquire)
-        || state.ui_session_generation.load(Ordering::Acquire) != generation
+        || state.session_lock_requested.load(Ordering::SeqCst)
+        || state.ui_session_generation.load(Ordering::SeqCst) != generation
     {
         return Err("Studio request belongs to a locked or changed UI session".into());
     }
     drop(resumable);
     let servers = state.servers.clone().try_lock_owned().map_err(|_| busy())?;
     if servers
-        .get(&server)
+        .legacy(&server)
         .is_none_or(|entry| entry.instance != instance)
     {
         return Err("server changed before Studio commit".into());
     }
-    Ok(StudioVaultLease::new(
-        store,
-        server,
-        (persist, commit, servers),
-    ))
+    StudioVaultLease::new_mounted(store, server, (persist, commit, servers))
+        .map_err(|refused| refused.message().to_string())
 }
 
 /// One supervised receiver per installed actor, not one task per packet or open document.
@@ -493,7 +490,7 @@ async fn drive_receiver(
             .servers
             .lock()
             .await
-            .get(&server)
+            .legacy(&server)
             .is_none_or(|e| e.instance != instance)
         {
             break;
@@ -543,22 +540,33 @@ async fn receive_once(
 
 /// Retain exact UI/incarnation custody through synchronous emission, after source leases have
 /// dropped. Delayed old-actor events cannot invalidate a replacement server's Studio views.
+/// The bounded actor-event consumer must never await the long command commit mutex: an upload
+/// can own it while queued behind that very consumer. Lock instead crosses a short event fence.
 pub(crate) async fn forward_if_current(
     state: &AppState,
     server: u64,
     instance: u64,
     emit: impl FnOnce(),
 ) -> bool {
-    let Ok(generation) = unlocked_ui_session_generation(state).await else {
-        return false;
-    };
-    let Ok(_commit) = require_ui_session_generation(state, generation).await else {
-        return false;
-    };
-    let entries = state.servers.lock().await;
-    if entries.get(&server).is_none_or(|e| e.instance != instance) {
+    // Capture before ANY await so a delayed event cannot adopt a replacement UI authorization.
+    let generation = state.ui_session_generation.load(Ordering::SeqCst);
+    if require_unlocked_session(state).await.is_err() {
         return false;
     }
+    let entries = state.servers.lock().await;
+    let _event = state.ui_event_commit.lock().await;
+    if entries
+        .legacy(&server)
+        .is_none_or(|e| e.instance != instance)
+    {
+        return false;
+    }
+    if ui_session_closed(state) || state.ui_session_generation.load(Ordering::SeqCst) != generation
+    {
+        return false;
+    }
+    // Both final guards cover this synchronous emit. No callback or await may reacquire native
+    // state here. An admitted emit may finish after lock is requested, but never after it returns.
     emit();
     true
 }

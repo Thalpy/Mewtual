@@ -1,0 +1,26 @@
+[package]
+name = "mewtual-loopback-ipc-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Manual packaged-WebView feasibility harness. It is deliberately outside both application
+# workspaces and adds no production command, listener, CSP source or dependency edge.
+[workspace]
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
+[build-dependencies]
+tauri-build = "=2.6.3"
+
+[dependencies]
+tauri = "=2.11.3"
+serde = { version = "=1.0.228", features = ["derive"] }
+tokio = { version = "=1.52.3", features = ["rt-multi-thread", "net", "io-util", "sync", "macros", "time"] }
+catcoms-rt = { path = "../../../../crates/catcoms-rt" }
+aes-gcm = "=0.10.3"
+hkdf = "=0.12.4"
+hmac = "=0.12.1"
+sha2 = "=0.10.9"
+zeroize = "=1.9.0"

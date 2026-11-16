@@ -7,11 +7,17 @@ import {
   identityLabel,
   isCallIdentity,
   isPoliteTowards,
+  isVoiceInitiatorTowards,
+  isVoiceNonce,
+  isVoiceRoomId,
   onlineCallTargets,
   parseCallSignalSender,
+  parseVoiceOfferId,
   revokedCallPeers,
   rosterSelfIdentity,
+  sameVoiceOffer,
   sharedFingerprints,
+  voiceOfferKey,
 } from "./call-identity.ts";
 import { hangupTargets } from "./voice-signaling.ts";
 
@@ -83,6 +89,49 @@ test("politeness keeps the order an older fingerprint-comparing build would choo
   assert.equal(isPoliteTowards(OTHER, ME), "99887766" < "00112233");
   // A prefix collision is still decided, consistently and oppositely on each side.
   assert.notEqual(isPoliteTowards(VICTIM, TWIN), isPoliteTowards(TWIN, VICTIM));
+});
+
+test("V2 nonces and rooms accept exactly the canonical native spellings", () => {
+  assert.equal(isVoiceNonce("ab".repeat(32)), true);
+  assert.equal(isVoiceNonce("0".repeat(64)), false, "native never mints the all-zero nonce");
+  assert.equal(isVoiceNonce("AB".repeat(32)), false);
+  assert.equal(isVoiceNonce("ab".repeat(31)), false);
+  assert.equal(isVoiceNonce(7), false);
+  assert.equal(isVoiceRoomId("0"), true);
+  assert.equal(isVoiceRoomId("7"), true);
+  assert.equal(isVoiceRoomId(((1n << 128n) - 1n).toString()), true);
+  assert.equal(isVoiceRoomId((1n << 128n).toString()), false, "one above u128 is not a room");
+  assert.equal(isVoiceRoomId("07"), false, "a second spelling of 7 must not name another room");
+  assert.equal(isVoiceRoomId("-1"), false);
+  assert.equal(isVoiceRoomId("1e3"), false);
+  assert.equal(isVoiceRoomId(""), false);
+  assert.equal(isVoiceRoomId(7), false);
+});
+
+test("an OfferId names its exact issuer and native message, and nothing else equals it", () => {
+  const message = "cd".repeat(32);
+  const offer = parseVoiceOfferId({ issuer: VICTIM, message });
+  assert.deepEqual(offer, { issuer: VICTIM, message });
+  assert.ok(Object.isFrozen(offer));
+  assert.equal(parseVoiceOfferId({ issuer: VICTIM.slice(0, 8), message }), null, "a fingerprint never issues an offer");
+  assert.equal(parseVoiceOfferId({ issuer: VICTIM, message: "0".repeat(64) }), null);
+  assert.equal(parseVoiceOfferId(null), null);
+  assert.equal(parseVoiceOfferId("offer"), null);
+  // The twin shares four bytes with the victim; its offer with the same message is another offer.
+  const twin = parseVoiceOfferId({ issuer: TWIN, message });
+  assert.equal(sameVoiceOffer(offer, twin), false);
+  assert.notEqual(voiceOfferKey(offer!), voiceOfferKey(twin!));
+  assert.equal(sameVoiceOffer(offer, parseVoiceOfferId({ issuer: VICTIM, message })), true);
+  assert.equal(sameVoiceOffer(null, null), false, "absence never matches absence");
+});
+
+test("exactly one end of a V2 pair initiates, matching native confirmation order", () => {
+  assert.equal(isVoiceInitiatorTowards(ME, OTHER), true);
+  assert.equal(isVoiceInitiatorTowards(OTHER, ME), false);
+  // Prefix twins still resolve to opposite roles: the full identities decide, not fingerprints.
+  assert.notEqual(isVoiceInitiatorTowards(VICTIM, TWIN), isVoiceInitiatorTowards(TWIN, VICTIM));
+  assert.equal(isVoiceInitiatorTowards(ME, ME), false, "self is never a counterpart");
+  assert.equal(isVoiceInitiatorTowards("00112233", OTHER), false, "a fingerprint has no role");
 });
 
 test("a shared fingerprint is flagged in labels instead of silently reusing one name", () => {

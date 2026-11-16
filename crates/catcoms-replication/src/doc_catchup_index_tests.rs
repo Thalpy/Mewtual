@@ -60,30 +60,26 @@ fn incomparable_heads_do_not_certify_siblings_in_either_providers_log_order() {
     let seed = base
         .edit(&author, &group, &mut rng, |doc| doc.put(ROOT, "seed", true))
         .unwrap();
-    let mut left = EncryptedDoc::new(
-        DocType::Channel,
-        931,
-        &DeviceId::from_public_key_bytes(&[1; 32]),
-    );
-    let mut right = EncryptedDoc::new(
-        DocType::Channel,
-        931,
-        &DeviceId::from_public_key_bytes(&[2; 32]),
-    );
+    // The branches must be independently signed writers, not one signer impersonating two
+    // device actors. This preserves the same sibling DAG under the modern ingress contract.
+    let left_writer = MlsDevice::generate().unwrap();
+    let right_writer = MlsDevice::generate().unwrap();
+    let mut left = EncryptedDoc::new(DocType::Channel, 931, &left_writer.device_id());
+    let mut right = EncryptedDoc::new(DocType::Channel, 931, &right_writer.device_id());
     left.ingest(&seed, &group, &author).unwrap();
     right.ingest(&seed, &group, &author).unwrap();
     let mut left_ops = Vec::new();
     let mut right_ops = Vec::new();
     for count in 0..48 {
         left_ops.push(
-            left.edit(&author, &group, &mut rng, |doc| {
+            left.edit(&left_writer, &group, &mut rng, |doc| {
                 doc.put(ROOT, "left", count as u64)
             })
             .unwrap(),
         );
         right_ops.push(
             right
-                .edit(&author, &group, &mut rng, |doc| {
+                .edit(&right_writer, &group, &mut rng, |doc| {
                     doc.put(ROOT, "right", count as u64)
                 })
                 .unwrap(),

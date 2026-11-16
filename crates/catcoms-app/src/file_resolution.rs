@@ -52,6 +52,22 @@ pub(super) fn reusable_upload_entry(
         })
 }
 
+/// Stable identity of an already validated, nonempty, strictly ordered manifest set. Saved V4
+/// ownership uses this same function at resume; adding/removing candidates cannot preserve it.
+pub(super) fn manifest_set_version(versions: impl ExactSizeIterator<Item = [u8; 32]>) -> [u8; 32] {
+    let count = versions.len();
+    if count == 1 {
+        return versions.into_iter().next().expect("nonempty validated set");
+    }
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"mewtual-file-media-variants/v1");
+    hash.update(&(count as u64).to_be_bytes());
+    for version in versions {
+        hash.update(&version);
+    }
+    *hash.finalize().as_bytes()
+}
+
 /// Metadata-only, fail-closed resolution shared by uploads, downloads, previews and inventory.
 /// Legacy chunk layouts and differing MIME claims remain conflicts unless they agree exactly.
 pub(super) fn resolve(entries: &[FileEntry], cid: &Cid) -> Option<ResolvedFile> {
@@ -75,18 +91,8 @@ pub(super) fn resolve(entries: &[FileEntry], cid: &Cid) -> Option<ResolvedFile> 
         }
         variants.insert(version, (entry.clone(), manifest));
     }
-    let first = *variants.keys().next()?;
-    let version = if variants.len() == 1 {
-        first // Preserve the existing single-manifest cache identity.
-    } else {
-        let mut hash = blake3::Hasher::new();
-        hash.update(b"mewtual-file-media-variants/v1");
-        hash.update(&(variants.len() as u64).to_be_bytes());
-        for version in variants.keys() {
-            hash.update(version);
-        }
-        *hash.finalize().as_bytes()
-    };
+    variants.keys().next()?;
+    let version = manifest_set_version(variants.keys().copied());
     Some(ResolvedFile {
         variants: variants.into_values().collect(),
         version,

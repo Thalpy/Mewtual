@@ -15,8 +15,8 @@ test("the complete retry identity survives continuity hydration and legacy read-
 
 test("malformed scope and context cannot become resumable message intents", () => {
   for (const patch of [{ channel: "01" }, { channel: (1n << 128n).toString() },
-    { expectedContext: "" }, { server: -1 }, { token: "different" }, { text: "x".repeat(65537) }]) {
-    assert.deepEqual(sanitizePendingSends({ [intent.token]: { ...intent, ...patch } }), {});
+    { expectedContext: "" }, { server: -1 }, { token: "different" }]) {
+    assert.throws(() => sanitizePendingSends({ [intent.token]: { ...intent, ...patch } }), /sealed copy has been kept/);
   }
 });
 

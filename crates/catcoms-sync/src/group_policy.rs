@@ -81,6 +81,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// does not publish: native callers must save their sealed snapshot before advertising the
     /// decision with `publish_group_policy`, so a crash cannot forget an announced owner pin.
     pub fn initialize_group_policy(&mut self, mode: GroupMode) -> Result<(), SyncError> {
+        if self.owner_evidence_unbound() {
+            return Err(SyncError::ChatScopeUnavailable);
+        }
         if mode != GroupMode::PeerToPeer {
             return Err(PolicyError::Malformed.into());
         }
@@ -96,6 +99,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         self.group_policy = Some(GroupPolicy::issue(&self.group, &self.device, mode)?);
         self.group_policy_revision = self.group_policy_revision.wrapping_add(1);
+        self.reconcile_voice_actor();
         Ok(())
     }
 
@@ -107,6 +111,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         self.initialize_group_policy(GroupMode::PeerToPeer)?;
         self.group_policy_active = true;
+        self.reconcile_voice_actor();
         Ok(())
     }
 
@@ -140,6 +145,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// owner cannot attest policy under that future authority. Until an authenticated succession
     /// proof is carried by the protocol, refuse before committing/consuming the invitation.
     pub(super) fn policy_admission_ready(&self) -> Result<(), SyncError> {
+        if self.owner_evidence_unbound() {
+            return Err(SyncError::ChatScopeUnavailable);
+        }
         if self.group_policy.is_some() && !self.group_policy_active {
             return Err(PolicyError::PendingPersistence.into());
         }
@@ -152,6 +160,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Advertise an already persisted owner decision. Publication is queued through the normal
     /// bounded control path; receiving members independently check owner authority and pin equality.
     pub fn publish_group_policy(&mut self) -> Result<(), SyncError> {
+        if self.owner_evidence_unbound() {
+            return Err(SyncError::ChatScopeUnavailable);
+        }
         if !self.is_designated_committer() {
             return Err(PolicyError::Unauthorized.into());
         }
@@ -173,6 +184,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         self.group_policy_publish_ready = true;
         self.group_policy_active = true;
+        self.reconcile_voice_actor();
         Ok(())
     }
 
@@ -221,6 +233,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             }
             Err(error) => tracing::debug!(%error, "rejected group policy control message"),
         }
+        self.reconcile_voice_actor();
     }
 }
 
