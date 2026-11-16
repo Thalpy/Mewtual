@@ -49,6 +49,7 @@ def run() -> None:
         env = dict(os.environ, MEWTUAL_NATIVE2_FIXTURES=str(owned / "fixtures"),
                    CARGO_TARGET_DIR=os.environ.get("CARGO_TARGET_DIR", str(REPO / "target")))
         try:
+            BASE["clean_source"]("native2-clean-head-before", REPO, env, directory, results)
             BASE["ignored_head_case"]("native2-fixtures", PREFIX + "generate_native2_fixtures",
                                       directory, env, WRITTEN, ("18",), results)
             worktree = owned / "p"
@@ -71,6 +72,7 @@ def run() -> None:
                 shutil.copyfile(REPO / ".github/predecessor/native_index2_gate.rs", target)
                 if GIT("status", "--porcelain", "--untracked-files=all", cwd=worktree) != f"?? {TARGET}":
                     raise RuntimeError("predecessor changed beyond its single integration test")
+                BASE["clean_source"]("native2-clean-old", worktree, env, directory, results)
                 code, summaries, timed_out, markers = BASE["run_logged"](
                     "native2-predecessor", ["cargo", "test", "--locked", "-p", "catcoms-app", "--all-features",
                      "--test", "native_index2_gate", "--", "--nocapture", "--test-threads=1"],
@@ -83,7 +85,10 @@ def run() -> None:
                 if GIT("status", "--porcelain", "--untracked-files=all", cwd=worktree) != f"?? {TARGET}":
                     raise RuntimeError("predecessor source changed during its test")
             finally:
-                GIT("worktree", "remove", "--force", str(worktree))
+                BASE["retire_old_source"](
+                    lambda: GIT("worktree", "remove", "--force", str(worktree)),
+                    lambda: BASE["clean_source"]("native2-clean-head-after", REPO, env, directory, results),
+                    results, sys.exception())
             BASE["ignored_head_case"]("native2-round-trip", PREFIX + "verify_native2_predecessor_fixtures",
                                       directory, env, VERIFIED, ("18",), results)
         finally:

@@ -67,34 +67,13 @@ def self_test() -> None:
 
 
 def clean_app(label: str, worktree: Path, env: dict, directory: Path, results: list) -> None:
-    # One serialized queue, one package only. Never remove the target tree,
-    # which may contain worktrees. Prevent wrong-source shared-target reuse.
-    code, _, timed_out, _ = BASE["run_logged"](
-        label, ["cargo", "clean", "-p", "catcoms-app"], directory,
-        cwd=worktree, env=env)
-    results.append({"name": label, "exit": code, "timed_out": timed_out})
-    if code or timed_out:
-        raise RuntimeError("could not retire the previous source's App artifacts")
+    # Historical name retained for the index3/Native4 callers. Every local path
+    # dependency, including patched SDKs, must come from the selected source.
+    BASE["clean_source"](label, worktree, env, directory, results)
 
 
 def retire_old_source(remove, restore_head, results: list, primary: BaseException | None) -> None:
-    """Attempt BOTH cleanup steps, preserving a primary validation failure.
-
-    Called only after the old owned child returned. Failure to remove a worktree
-    must not leave its App artifacts available to subsequent head commands.
-    """
-    failures = []
-    for name, action in (("remove-predecessor", remove), ("restore-head-artifacts", restore_head)):
-        try:
-            action()
-        except Exception as error:
-            failures.append(error)
-            results.append({"name": name, "cleanup_error": repr(error)})
-    if failures:
-        if primary is not None:
-            for error in failures: primary.add_note(f"Additional predecessor cleanup failure: {error!r}")
-        else:
-            raise RuntimeError("predecessor cleanup failed; see results.json") from failures[0]
+    BASE["retire_old_source"](remove, restore_head, results, primary)
 
 
 def run() -> None:

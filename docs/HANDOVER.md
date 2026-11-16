@@ -1,5 +1,34 @@
 # Mewtual; Handover
 
+## 16 November: Chat CI source isolation and bounded test batches
+
+At `b7fd788c`, Linux's Native4 predecessor itself passed all six fixtures and
+three openers. Its current-head round trip then failed compilation because the
+shared Cargo target still held the predecessor's RT artifacts. Windows's
+350-test registry batch reached its 1800-second limit while cases continued
+passing; it did not report a failing assertion. Neither job is accepted as green.
+
+The correction retires only exact local path-package artifacts at every
+head/predecessor transition, including all workspace crates and local SDK
+patches. The active source's manifest set must exactly equal its source-less
+lockfile IDs. One absolute target and the existing serialized queue remain;
+registry dependencies and target-contained worktrees are preserved. Cleanup
+always attempts head restoration and keeps the original validation exception.
+
+The registry batch now has eight module partitions (2, 11, 67, 39, 49, 24, 87,
+71). Actual bounded `--list` name sets must be unique, pairwise disjoint and
+cover all 350 normal cases. The broad 354-name inventory and exact four ignored
+artifact producers remain checked, and every dedicated predecessor producer
+still runs. Each partition retains the original 1800-second bound and exact
+zero-ignored result checks; no test, assertion or per-test timeout changed.
+
+Pure Python rejection/self-checks passed locally for joined-source and all
+predecessor marker families. The real five pinned sources' package manifests
+and locks, and the hosted Windows 354-name inventory, were independently checked.
+The actual-diff adversarial review found no blocker/high/medium issue. Fresh
+cross-platform execution is pending. This changes CI execution only; Chat V2
+remains disabled and shared delivery/production joining remain unfinished.
+
 ## Studio backlog composition (16 November; complete CI pending)
 
 PR83 is composed with the consolidated Chat V2 prerequisite stack. The merge
