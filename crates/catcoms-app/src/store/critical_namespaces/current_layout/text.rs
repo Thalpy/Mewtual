@@ -12,9 +12,9 @@ pub(in crate::store) use create::{
     V2_TEXT_COMPLETED_WORKSPACE_ADMISSION_LAYOUT_BYTES,
 };
 
-pub(in crate::store) use crate::store::owner_evidence::canonical::text_lane::{
-    PreparedV2TextAcceptedQueryLease, V2TextAcceptedQueryLease,
-};
+#[cfg(test)]
+pub(in crate::store) use crate::store::owner_evidence::canonical::text_lane::PreparedV2TextAcceptedQueryLease;
+pub(in crate::store) use crate::store::owner_evidence::canonical::text_lane::V2TextAcceptedQueryLease;
 pub(in crate::store) use create::{
     AdmittedV2TextAcceptedCreateCommit, AdmittedV2TextAcceptedCreateStage,
     SavedAcceptedV2TextAdvanceGuard, SavedAcceptedV2TextFinalGuard,
@@ -63,9 +63,9 @@ use crate::store::chat_admission::v2_current::{
 use crate::store::owner_evidence::canonical::current_vacancy::text::{
     V2TextOwnerNamespace, V2_TEXT_OWNER_NAMESPACE_BYTES,
 };
-pub(in crate::store) use crate::store::owner_evidence::canonical::text_lane::{
-    PreparedV2TextQueryLease, V2TextQueryLease,
-};
+#[cfg(test)]
+pub(in crate::store) use crate::store::owner_evidence::canonical::text_lane::PreparedV2TextQueryLease;
+pub(in crate::store) use crate::store::owner_evidence::canonical::text_lane::V2TextQueryLease;
 use crate::store::owner_evidence::canonical::v2_registration::V2WriterObservation;
 use crate::store::persistence::v2_text::V2TextReadResources;
 use crate::store::persistence::{GenesisSourceDataRef, V2TextOwnerRef};

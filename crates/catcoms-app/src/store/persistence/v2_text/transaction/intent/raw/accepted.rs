@@ -595,7 +595,7 @@ mod retirement;
 #[cfg(all(test, windows))]
 pub(in crate::store) use retirement::V2TextRetirementTestCut;
 pub(in crate::store) use retirement::{
-    ReadyV2TextRetirementCompletion, SavedV2TextRetirementCompletion, SavedV2TextRetirementDeletion,
+    ReadyV2TextRetirementCompletion, SavedV2TextRetirementCompletion,
 };
 
 impl PreparedV2TextAcceptedCreate {

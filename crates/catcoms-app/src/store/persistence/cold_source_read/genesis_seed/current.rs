@@ -599,11 +599,13 @@ mod operational;
 pub(in crate::store) use operational::{
     OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
     PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
-    PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis, V2TextResidentParentData,
+    PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis,
 };
 mod text;
+pub(in crate::store) use operational::negative::V2TextSourceNegativeObserver;
+#[cfg(test)]
 pub(in crate::store) use operational::negative::{
-    PreparedV2TextSourceObserver, V2TextSourceNegativeObserver, V2_TEXT_SOURCE_OBSERVER_BYTES,
+    PreparedV2TextSourceObserver, V2_TEXT_SOURCE_OBSERVER_BYTES,
 };
 pub(in crate::store) use operational::owner::{V2TextOwnedCurrent, V2TextOwnerRef};
 #[cfg(all(test, windows))]

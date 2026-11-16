@@ -13,11 +13,14 @@ mod genesis_seed;
 pub(in crate::store) use genesis_seed::{
     OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
     PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
-    PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis, V2TextResidentParentData,
+    PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis,
+};
+#[cfg(test)]
+pub(in crate::store) use genesis_seed::{
+    PreparedV2TextSourceObserver, V2_TEXT_SOURCE_OBSERVER_BYTES,
 };
 pub(in crate::store) use genesis_seed::{
-    PreparedV2TextSourceObserver, V2TextOwnedCurrent, V2TextOwnerRef, V2TextSourceNegativeObserver,
-    V2_TEXT_SOURCE_OBSERVER_BYTES,
+    V2TextOwnedCurrent, V2TextOwnerRef, V2TextSourceNegativeObserver,
 };
 pub(in crate::store) mod v2_genesis_activation;
 pub(in crate::store) use genesis_seed::{GenesisCurrentOwnerRef, GenesisSourceDataRef};

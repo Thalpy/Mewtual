@@ -17,7 +17,7 @@ mod resident;
 pub(super) use resident::V2_TEXT_RESIDENT_DOMAIN_LAYOUT_BYTES;
 pub(in crate::store) use resident::{
     OriginalV2TextResidentObservation, PreparedV2NextUnsignedAppend,
-    PreparedV2TextResidentProjection, V2TextResidentParentData,
+    PreparedV2TextResidentProjection,
 };
 #[cfg(all(test, windows))]
 mod domain_tests;

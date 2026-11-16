@@ -25,11 +25,12 @@ pub use current::{
 pub(in crate::store) use current::{
     OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
     PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
-    PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis, V2TextResidentParentData,
+    PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis,
 };
+#[cfg(test)]
+pub(in crate::store) use current::{PreparedV2TextSourceObserver, V2_TEXT_SOURCE_OBSERVER_BYTES};
 pub(in crate::store) use current::{
-    PreparedV2TextSourceObserver, V2TextOwnedCurrent, V2TextOwnerRef, V2TextSourceNegativeObserver,
-    V2_TEXT_SOURCE_OBSERVER_BYTES,
+    V2TextOwnedCurrent, V2TextOwnerRef, V2TextSourceNegativeObserver,
 };
 #[cfg(test)]
 thread_local! { static SDK_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }

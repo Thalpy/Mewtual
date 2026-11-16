@@ -50,7 +50,7 @@ use zeroize::Zeroizing;
 mod accepted_source;
 mod completed;
 pub(in crate::store::persistence::v2_text) use completed::CompletedRetainStageSourceData;
-pub(in crate::store) use completed::NextRetainedAResidentSourceData;
+
 mod intent;
 mod ready_read;
 mod recovery;
@@ -706,7 +706,7 @@ pub(in crate::store) use intent::V2TextRetirementRootsClaim;
 #[cfg(all(test, windows))]
 pub(in crate::store) use intent::V2TextRetirementTestCut;
 pub(in crate::store) use intent::{
-    ReadyV2TextRetirementCompletion, SavedV2TextRetirementCompletion, SavedV2TextRetirementDeletion,
+    ReadyV2TextRetirementCompletion, SavedV2TextRetirementCompletion,
 };
 
 pub(in crate::store) use intent::CompletedV2TextRetirementSourceData;

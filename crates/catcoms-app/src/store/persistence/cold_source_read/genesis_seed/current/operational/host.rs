@@ -40,7 +40,7 @@ mod projection;
 pub(in crate::store) use create::{
     OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
     PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
-    PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis, V2TextResidentParentData,
+    PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis,
 };
 use create::{PendingCompletedCreate, PendingCreate};
 #[cfg(all(test, windows))]

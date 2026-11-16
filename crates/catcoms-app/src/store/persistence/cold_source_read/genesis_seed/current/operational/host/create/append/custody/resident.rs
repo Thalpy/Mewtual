@@ -15,7 +15,7 @@ use crate::store::persistence::v2_text::{
 use catcoms_replication::chat::cold_index::{DirectoryData, DirectoryTreeData, NodeRefData};
 use catcoms_replication::chat::cold_manifest::ArchiveHeadId;
 use catcoms_replication::chat::owner_header::{OwnerHeaderId, OwnerStateCommitment};
-pub(in crate::store) use next::{OriginalV2TextResidentObservation, V2TextResidentParentData};
+pub(in crate::store) use next::OriginalV2TextResidentObservation;
 pub(in crate::store) use next_unsigned::PreparedV2NextUnsignedAppend;
 
 /// Full bounded parent DATA, including the exact Actions state. A subsequent

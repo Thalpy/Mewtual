@@ -1,5 +1,29 @@
 # Mewtual; Handover
 
+## Chat V2 merge preparation follow-up (16 November)
+
+The separate native workspace check and all three targeted native startup /
+diagnostic cases pass, including maximum Offer/Answer over real TCP with A-C
+blocked. Net187, native-key36, App member/save/SDK36, owning-candidate3 and
+frontend3485 cases pass; frontend type/build and both static gates pass.
+Complete fresh suites remain pending, and Chat V2 remains disabled.
+
+The older founder-certified per-message reference pipeline has two private
+entry roots, both exercised by tests. Exact not-test dead-code expectations
+now identify those roots while preserving every body, field, invoice, format,
+cleanup path and test. They provide no Source/native authority or helper-use
+isolation. Active ordinary member/outbox/invite and governed Add code remains
+separate. Scoped design and actual-diff reviews are clear. Strict diagnostics
+fall from556 to121 unused-code reports; these remaining adapters still need
+individual classification. No whole-module warning exemption is added.
+
+The foundation's fresh full Linux run found four Sync fixture failures, so
+PR84 was not merged. All1830 App tests passed and the previous Studio overflow
+is cleared. The four failures reproduce locally; the exact already-reviewed
+Sync-only fixture correction from92f227438 is being backported in PR84.
+Production checks and SDK behavior are unchanged by that correction.
+
+
 ## Consolidated Chat V2 integration (16 November; validation in progress)
 
 Follow-up: all3485 frontend tests, Svelte type checking (zero errors/warnings)

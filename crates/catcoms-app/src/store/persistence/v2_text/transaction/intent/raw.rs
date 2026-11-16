@@ -653,7 +653,7 @@ pub(in crate::store) use accepted::V2TextRetirementRootsClaim;
 #[cfg(all(test, windows))]
 pub(in crate::store) use accepted::V2TextRetirementTestCut;
 pub(in crate::store) use accepted::{
-    ReadyV2TextRetirementCompletion, SavedV2TextRetirementCompletion, SavedV2TextRetirementDeletion,
+    ReadyV2TextRetirementCompletion, SavedV2TextRetirementCompletion,
 };
 
 pub(in crate::store) use accepted::CompletedV2TextRetirementSourceData;

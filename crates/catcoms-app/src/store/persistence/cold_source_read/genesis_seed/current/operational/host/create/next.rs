@@ -248,6 +248,19 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
     /// Prepare one original next packet through the distinct completed-WC role.
     /// This is pre-A only; selection, unsigned append, signing and publication need
     /// their actual subsequent owners. It cannot restart a first-only Clear path.
+    // This closed founder-certified message prototype is exercised by the owning
+    // tests; native ordinary sends enter the separate member/outbox path. Keep
+    // its formats, invoices, cleanup and reference implementation intact. The
+    // exact root expectation documents present reachability and must be removed
+    // for deliberate production use; it supplies no Source/native authorization
+    // and does not prevent another caller using an independently checked helper.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Private test-driven founder-certified message prototype; native ordinary sends use the member outbox."
+        )
+    )]
     pub(in crate::store) fn retry_prepare_completed_create_request(
         &mut self,
         layout: &V2CurrentLayoutStore,

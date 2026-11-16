@@ -75,9 +75,7 @@ impl PreparedV2TextAcceptedCreate {
 mod continuation;
 mod data;
 mod work;
-pub(in crate::store) use data::{
-    ReadyV2TextRetirementCompletion, SavedV2TextRetirementCompletion, SavedV2TextRetirementDeletion,
-};
+pub(in crate::store) use data::{ReadyV2TextRetirementCompletion, SavedV2TextRetirementCompletion};
 pub(super) use data::{
     RetirementWorkState, RETIREMENT_METADATA_LAYOUT_BYTES, RETIREMENT_WORK_LAYOUT_BYTES,
 };

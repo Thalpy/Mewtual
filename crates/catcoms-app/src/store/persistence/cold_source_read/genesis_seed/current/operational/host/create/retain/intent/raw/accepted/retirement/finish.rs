@@ -133,6 +133,19 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
     /// Complete the first original request and retain its SAME advanced verifier.
     /// False means real external readers still need to drain. Success is local
     /// completion; native publication and general next-request COW remain separate.
+    // This closed founder-certified message prototype is exercised by the owning
+    // tests; native ordinary sends enter the separate member/outbox path. Keep
+    // its formats, invoices, cleanup and reference implementation intact. The
+    // exact root expectation documents present reachability and must be removed
+    // for deliberate production use; it supplies no Source/native authorization
+    // and does not prevent another caller using an independently checked helper.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Private test-driven founder-certified message prototype; native ordinary sends use the member outbox."
+        )
+    )]
     pub(in crate::store) fn retry_finish_accepted_create_request(
         &mut self,
         layout: &V2CurrentLayoutStore,

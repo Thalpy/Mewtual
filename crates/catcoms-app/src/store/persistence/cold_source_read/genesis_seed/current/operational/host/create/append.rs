@@ -22,7 +22,7 @@ pub(super) const V2_TEXT_RESIDENT_DOMAIN_LAYOUT_BYTES: usize =
 pub(in crate::store) use custody::{
     OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
     PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
-    PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis, V2TextResidentParentData,
+    PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis,
 };
 #[cfg(all(test, windows))]
 thread_local! {

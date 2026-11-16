@@ -31,7 +31,7 @@ pub(super) const V2_TEXT_RESIDENT_DOMAIN_LAYOUT_BYTES: usize =
 pub(in crate::store) use append::{
     OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
     PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
-    PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis, V2TextResidentParentData,
+    PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis,
 };
 
 /// No Source/node/key/Store/session is cached here. Same original request/packet and
