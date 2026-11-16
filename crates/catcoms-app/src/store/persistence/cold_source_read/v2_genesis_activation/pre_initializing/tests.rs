@@ -1,8 +1,10 @@
 //! Genuine SourceSaved -> complete activation seed -> NO row -> full drain/new mount/
 //! NEW paid source+SDK. These tests never manufacture a receipt, watch, row or scope permit.
+#[cfg(not(target_os = "linux"))]
 use super::*;
 #[cfg(windows)]
 use crate::store::critical_namespaces::current_layout::cold_read::tests::ColdFixture;
+#[cfg(not(target_os = "linux"))]
 use crate::store::critical_namespaces::current_layout::cold_read::tests::{
     fixture_at_cut, ColdFixtureCut,
 };

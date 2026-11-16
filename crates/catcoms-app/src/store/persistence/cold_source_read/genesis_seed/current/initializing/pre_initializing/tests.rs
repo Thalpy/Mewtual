@@ -1,21 +1,28 @@
 //! Genuine complete-journal cut BEFORE reserveRow1, full warm drain/remount/new paid SDK,
 //! then actual birth, checked same-owner conversion and ordinary repair. No row, receipt,
 //! task watch or successor is constructed by a test.
+#[cfg(not(target_os = "linux"))]
 use super::*;
 #[cfg(windows)]
 use crate::store::critical_namespaces::current_layout::cold_read::tests::ColdFixture;
+#[cfg(not(target_os = "linux"))]
 use crate::store::critical_namespaces::current_layout::cold_read::tests::{
     fixture_at_cut, ColdFixtureCut,
 };
 #[cfg(windows)]
 use catcoms_rt::MemNetwork;
+#[cfg(not(target_os = "linux"))]
 use catcoms_rt::{Hub, ManualClock, PeerId};
+#[cfg(not(target_os = "linux"))]
 use rand_chacha::ChaCha20Rng;
+#[cfg(not(target_os = "linux"))]
 use rand_core::{CryptoRng, RngCore, SeedableRng};
 #[cfg(windows)]
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[cfg(not(target_os = "linux"))]
 struct NeverRng;
+#[cfg(not(target_os = "linux"))]
 impl RngCore for NeverRng {
     fn next_u32(&mut self) -> u32 {
         panic!("replay/refusal reached RNG")
@@ -30,6 +37,7 @@ impl RngCore for NeverRng {
         panic!("replay/refusal reached RNG")
     }
 }
+#[cfg(not(target_os = "linux"))]
 impl CryptoRng for NeverRng {}
 
 #[cfg(windows)]
