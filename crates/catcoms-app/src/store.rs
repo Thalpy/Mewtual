@@ -596,8 +596,6 @@ mod persistence {
     mod cold_source_read;
     #[cfg(target_os = "linux")]
     mod exact_inventory_linux;
-    #[cfg(test)]
-    pub(in crate::store) use cold_source_read::V2TextResidentParentData;
     pub(in crate::store) use cold_source_read::{
         OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
         PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,

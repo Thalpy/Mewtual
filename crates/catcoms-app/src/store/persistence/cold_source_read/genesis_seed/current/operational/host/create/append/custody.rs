@@ -287,10 +287,11 @@ impl PreparedV2UnsignedOriginalCustody {
             .pending
             .pool
             .clone();
-        let source = owner.borrow_current()?;
-        resources.require_bound_original_negative(store, source.source())?;
-        domain.validate_negative()?;
-        drop(source);
+        {
+            let source = owner.borrow_current()?;
+            resources.require_bound_original_negative(store, source.source())?;
+            domain.validate_negative()?;
+        }
         // Only infallible original moves follow. The SDK Weak observation never gets
         // replaced by encoded-byte equality, and its original identity is not renewed.
         let mut data = input.take().expect("same checked original unsigned slot");

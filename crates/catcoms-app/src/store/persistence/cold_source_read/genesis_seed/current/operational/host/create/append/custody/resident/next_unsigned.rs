@@ -140,7 +140,7 @@ impl PreparedV2NextUnsignedAppend {
             }
             Ok(())
         })?;
-        drop(source);
+        // The non-owning source view has no guard or End; its loan ends at the last use above.
         if next.is_none() {
             let original = resident.as_ref().ok_or_else(refused)?.observe_original();
             original.validate_negative()?;

@@ -2,6 +2,15 @@
 
 ## Consolidated Chat V2 integration (16 November; validation in progress)
 
+Follow-up: all3485 frontend tests, Svelte type checking (zero errors/warnings)
+and the production build pass. The current App binary compiles2691 tests and
+confirms350 normal registry cases plus the four unchanged artifact producers.
+Both static invariant gates pass. Complete Net187 and native-key36 cohorts pass.
+The exact-item ownership/layout expectations and non-owning-view cleanup have
+clear actual-diff re-review; focused App execution and fresh strict/full gates
+remain pending. The expectations preserve whole failure owners and existing
+paid inline layouts; they do not suppress dead-code warnings or enable V2.
+
 The backlog is consolidated from64 to9 open PRs. The dependent Chat histories
 are in PR89 and the parked voice histories in PR77; those are feature-branch
 merges, not completed main merges. Existing adversarial reviews remain accepted.

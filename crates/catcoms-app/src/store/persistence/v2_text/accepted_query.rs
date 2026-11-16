@@ -237,6 +237,10 @@ impl OriginalV2TextAcceptedQueryObservation {
 /// Physical complete-path DATA only. Present is an UNVERIFIED locator until canonical
 /// record/action/header evidence is checked; it must never become an implicit miss.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "This bounded Copy locator is inline in the paid query owner; Present must not allocate during admission or be confused with Absent."
+)]
 pub(in crate::store) enum V2TextAcceptedQueryResultData {
     Absent,
     Present(ActionClaimData),

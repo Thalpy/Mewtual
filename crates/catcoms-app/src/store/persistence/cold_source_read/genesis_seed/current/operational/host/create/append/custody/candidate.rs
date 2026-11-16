@@ -61,16 +61,17 @@ impl PreparedV2UnsignedOriginalCustody {
             .resources
             .require_same_original(saved.resources())?;
         self.original.validate_negative()?;
-        let source = owner.borrow_current()?;
-        self.data
-            .resources
-            .require_bound_original_negative(store, source.source())?;
-        let resources = self.data.resources.clone();
-        store.with_v2_text_current(&source, |admission| {
-            let guard = store.lock_v2_text_current_group(admission, &resources)?;
-            saved.validate_selected_under_current_guard(&guard)
-        })?;
-        drop(source);
+        {
+            let source = owner.borrow_current()?;
+            self.data
+                .resources
+                .require_bound_original_negative(store, source.source())?;
+            let resources = self.data.resources.clone();
+            store.with_v2_text_current(&source, |admission| {
+                let guard = store.lock_v2_text_current_group(admission, &resources)?;
+                saved.validate_selected_under_current_guard(&guard)
+            })?;
+        } // End the non-owning view before further SDK work.
 
         // A lost return or later failure may already own the exact candidate. Its
         // Some slot is never replaced or rederived, including after cancellation.

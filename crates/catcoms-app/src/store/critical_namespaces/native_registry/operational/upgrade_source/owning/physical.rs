@@ -502,6 +502,10 @@ impl SourceWork {
     /// Concrete original-founder route only. Inputs are already owned by the
     /// checked Root producer; its device cut must precede device generation.
     /// Failure returns those same inputs. No library-origin fallback exists.
+    #[expect(
+        clippy::result_large_err,
+        reason = "Native refusal must return the complete original founder inputs without allocating another failure owner."
+    )]
     pub(in crate::store::critical_namespaces::native_registry) fn prepare_native_founder<T, R>(
         &self,
         invocation: [u8; 32],

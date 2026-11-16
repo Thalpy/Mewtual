@@ -98,6 +98,10 @@ impl V2TextOwnerNamespace<'_, '_> {
     /// proof. Real IO Ends/work gates are zero under this same canonical writer.
     /// All fallible checks precede the first cancellation/removal; both unique
     /// owners and the actual removed registry Arc cache before any late error.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep the independently typed original, retain, plan, basis and affine output slots explicit at the retirement edge."
+    )]
     pub(in crate::store) fn retire_completed_text_create_lane_into(
         &mut self,
         caller: &mut Option<V2TextCreateLane>,

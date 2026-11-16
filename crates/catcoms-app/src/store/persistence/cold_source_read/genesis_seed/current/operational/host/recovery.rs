@@ -19,6 +19,10 @@ use crate::store::ServerStore;
 /// Exactly one independently paid recovery role at a time. The optional capture is
 /// ACTIVE custody (Files before its physical lease), never detached dormant source DATA.
 /// Every callback borrows these outer slots; none can drop owning Files under a writer.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "One inline affine recovery owner is prepaid by the explicit 8 KiB layout bound below; boxing would add an unaccounted allocation."
+)]
 pub(super) enum PromotionRecovery {
     Seed {
         role: PreparedV2TextPromotionSeedRepair,

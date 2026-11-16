@@ -100,6 +100,10 @@ impl PendingRetain {
         Ok(())
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep the original owner, predecessor, request and separate affine custody and lookup slots explicit during handoff."
+    )]
     pub(super) fn take_originals(
         &mut self,
         store: &ServerStore,

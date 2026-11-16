@@ -182,7 +182,7 @@ impl FirstUnsignedAppendData {
             let guard = store.lock_v2_text_current_group(admission, &resources)?;
             saved.validate_selected_under_current_guard(&guard)
         })?;
-        drop(source);
+        // The non-owning source view has no guard or End; its loan ends at the last use above.
         if current.prepared.is_none() {
             // No writer survives the SDK's complete mathematical derivation. The SAME
             // caller-owned slot retains partial/completed SDK output even on refusal.

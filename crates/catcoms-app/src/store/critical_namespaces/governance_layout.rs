@@ -589,6 +589,10 @@ impl PreparedV2GovernanceLayoutStore {
         self.complete = true;
         Ok(())
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "Refusal returns the same affine preparation without a new allocation or losing its original custody."
+    )]
     pub fn into_governance_layout_store(mut self) -> Result<V2GovernanceLayoutStore, Self> {
         if !self.complete
             || self.store.as_ref().is_none_or(|s| {

@@ -38,19 +38,15 @@ pub(in crate::store) use archive::TextArchiveData;
 pub(in crate::store) use artifacts::TextArtifactRoleData;
 pub(in crate::store) use capture::{PreparedV2TextParentCapture, SelectedV2TextHead};
 pub(in crate::store) use capture::{V2TextFounderAnchorData, V2_TEXT_FOUNDER_ANCHOR_LAYOUT_BYTES};
-#[cfg(test)]
-pub(in crate::store) use common::{TextContextIdData, TextGenesisParentIdData};
 pub(in crate::store) use common::{
     TextHeadIdData, TextRetirementPlanIdData, TextTransactionIdData,
 };
 pub(in crate::store) use context::TextContextData;
-#[cfg(test)]
-pub(in crate::store) use context::{TextContextSpecData, MAX_CONTEXT_PLAIN};
 pub(in crate::store) use head::{TextPendingData, TextRootData};
 #[cfg(test)]
 pub(in crate::store) use ordinary_data::{
     encode_unsigned_intent_data, TextUnsignedIntentBindingsData, TextUnsignedIntentFrameData,
-    V2TextRetainWorkspaceClaim, TEXT_TRANSACTION_METADATA_FEE,
+    TEXT_TRANSACTION_METADATA_FEE,
 };
 pub(in crate::store) use ordinary_data::{
     OriginalV2RetainObservation, PreparedV2RetainData, PreparedV2RetainOriginalCustody,
@@ -73,8 +69,6 @@ pub(in crate::store) use request::TextRequestDigestData;
 #[cfg(all(test, windows))]
 pub(in crate::store) use request::TextTokenKeyData;
 pub(in crate::store) use resources::V2TextReadResources;
-#[cfg(test)]
-pub(in crate::store) use transaction::SavedV2RetainedAction;
 #[cfg(all(test, windows))]
 pub(in crate::store) use transaction::V2TextRetainTestCut;
 pub(in crate::store) use transaction::V2_TEXT_RETAIN_ROOT_PHASE_BYTES;
@@ -102,9 +96,6 @@ pub(in crate::store) use transaction::{
     V2TextRetainRecoveryCaptureClaim, V2TextRetainStageFence, V2TextRetainWarmRecoveryClassData,
 };
 
-#[cfg(test)]
-pub(in crate::store) use transaction::RetainedAQuerySourceData;
-
 #[cfg(all(test, windows))]
 pub(in crate::store) use transaction::V2TextIntentTestCut;
 pub(in crate::store) use transaction::{
@@ -128,8 +119,6 @@ pub(in crate::store) use transaction::{
 
 pub(in crate::store) use transaction::V2TextRetirementRootsClaim;
 
-#[cfg(test)]
-pub(in crate::store) use transaction::SavedV2TextRetirementDeletion;
 #[cfg(all(test, windows))]
 pub(in crate::store) use transaction::V2TextRetirementTestCut;
 pub(in crate::store) use transaction::{
@@ -139,12 +128,8 @@ pub(in crate::store) use transaction::{
 pub(in crate::store) use transaction::CompletedV2TextRetirementSourceData;
 
 mod completed_workspace;
-#[cfg(test)]
-pub(in crate::store) use completed_workspace::CompletedV2TextParentData;
 pub(in crate::store) use completed_workspace::{
     CapturedV2TextCompletedWorkspace, OriginalV2TextCompletedWorkspaceObservation,
     PreparedV2TextCompletedWorkspaceCapture, ReadyV2TextCompletedWorkspace,
     V2TextCompletedWorkspaceCaptureClaim,
 };
-#[cfg(test)]
-pub(in crate::store) use transaction::NextRetainedAResidentSourceData;

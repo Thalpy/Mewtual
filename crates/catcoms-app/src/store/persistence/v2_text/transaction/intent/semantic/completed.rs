@@ -1,6 +1,10 @@
 //! Completed-mode I preserves only the owning nextA's exact observed old token
 //! retirement entries. All original intent/SDK/preimage/root/counter checks remain.
 use super::*;
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Each independently authenticated parent, archive, carry, original and retirement expectation must be checked together."
+)]
 pub(in crate::store::persistence::v2_text::transaction::intent) fn verify_completed_i_data(
     key: &[u8; 32],
     wal: &TextWorkWalFrameData<'_>,

@@ -863,7 +863,7 @@ impl V2MemberLane {
                 drop(guard);
                 Ok(())
             });
-            drop(owner_ref);
+            // The non-owning source view has no guard or End; its loan ends at the last use above.
             // Cache the completed original BEFORE reporting any late negative.
             pending.complete_cached();
             result?;
@@ -898,6 +898,10 @@ impl V2MemberLane {
 
     /// Byte-exact: the same token, the exact lent ActionId, the Plan's Admission AND the
     /// Plan's own cached raw64 signature. An ActionId alone does not cover the signature.
+    #[expect(
+        clippy::result_large_err,
+        reason = "A refused restore returns the same signed original and its payment instead of allocating or destroying it."
+    )]
     fn restore_signed(
         &mut self,
         token: [u8; 32],
@@ -1062,6 +1066,10 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
 
     /// Put back the SAME original after an outbox refusal (prepare/admit refused, or an
     /// uncertain run whose lookup proved absence). Anything else is returned whole.
+    #[expect(
+        clippy::result_large_err,
+        reason = "A refused restore must return the same whole signed original without an allocation at this recovery boundary."
+    )]
     pub(in crate::store) fn restore_member_signed_original(
         &mut self,
         token: [u8; 32],
