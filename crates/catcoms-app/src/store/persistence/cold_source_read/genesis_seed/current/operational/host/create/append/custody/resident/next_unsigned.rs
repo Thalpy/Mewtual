@@ -44,7 +44,7 @@ impl PreparedV2NextUnsignedAppend {
     /// taking/caching the SAME owner and before entering SDK derivation. A failed
     /// call retains whichever original owning phase has already been cached.
     #[cfg_attr(
-        not(test),
+        not(all(test, windows)),
         expect(
             dead_code,
             reason = "Test-driven completed-parent founder-message reference; no native ordinary-send consumer is installed."
@@ -227,7 +227,7 @@ impl PreparedV2NextUnsignedAppend {
     /// checks precede the take; cancellation does not discard completed bytes. This
     /// does not supply a fresh I/Save/sign/current role or renew an expired origin.
     #[cfg_attr(
-        not(test),
+        not(all(test, windows)),
         expect(
             dead_code,
             reason = "Test-driven completed-parent founder-message reference; no native ordinary-send consumer is installed."

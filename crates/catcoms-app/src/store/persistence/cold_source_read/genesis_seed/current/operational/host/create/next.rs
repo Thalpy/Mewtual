@@ -255,7 +255,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
     // for deliberate production use; it supplies no Source/native authorization
     // and does not prevent another caller using an independently checked helper.
     #[cfg_attr(
-        not(test),
+        not(all(test, windows)),
         expect(
             dead_code,
             reason = "Private test-driven founder-certified message prototype; native ordinary sends use the member outbox."

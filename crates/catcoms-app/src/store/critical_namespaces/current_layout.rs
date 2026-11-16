@@ -42,9 +42,9 @@ pub(in crate::store) use text::{
     V2_TEXT_RETAIN_RECOVERY_ADMISSION_LAYOUT_BYTES,
 };
 // Tests use this facade; production prepares the original lease in canonical::text_lane.
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(in crate::store) use text::PreparedV2TextAcceptedQueryLease;
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(in crate::store) use text::PreparedV2TextQueryLease;
 pub(in crate::store) use text::V2TextAcceptedQueryLease;
 pub(in crate::store) use text::{

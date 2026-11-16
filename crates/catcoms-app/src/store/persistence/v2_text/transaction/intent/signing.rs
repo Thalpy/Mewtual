@@ -33,7 +33,7 @@ impl PreparedV2TextUnsignedIntent {
             .observe_domain_cancel_after_sign_for_test(dispatches)
     }
     /// Existing negative DATA only. Test inspection cannot sign or refresh a source.
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     pub(in crate::store) fn existing_raw_signature_data(&self) -> Result<&[u8; 64], AppError> {
         self.unsigned.existing_raw_signature_data()
     }

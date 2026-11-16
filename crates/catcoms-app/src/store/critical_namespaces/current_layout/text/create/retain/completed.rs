@@ -9,7 +9,7 @@ use crate::store::critical_namespaces::current_layout::BoundV2TextCompletedCreat
 
 impl V2TextCurrentGroupGuard<'_, '_> {
     #[cfg_attr(
-        not(test),
+        not(all(test, windows)),
         expect(
             dead_code,
             reason = "Test-driven completed-parent founder-message reference; no native ordinary-send consumer is installed."
@@ -67,7 +67,7 @@ impl V2TextCurrentGroupGuard<'_, '_> {
     }
 
     #[cfg_attr(
-        not(test),
+        not(all(test, windows)),
         expect(
             dead_code,
             reason = "Test-driven completed-parent founder-message reference; no native ordinary-send consumer is installed."

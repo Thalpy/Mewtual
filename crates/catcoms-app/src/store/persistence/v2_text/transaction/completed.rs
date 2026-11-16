@@ -18,7 +18,7 @@ pub(super) struct CompletedRetainOrigin {
 impl PreparedV2TextRetainTransaction {
     #[allow(clippy::too_many_arguments)]
     #[cfg_attr(
-        not(test),
+        not(all(test, windows)),
         expect(
             dead_code,
             reason = "Test-driven completed-parent founder-message reference; no native ordinary-send consumer is installed."

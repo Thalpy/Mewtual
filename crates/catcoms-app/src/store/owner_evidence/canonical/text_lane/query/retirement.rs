@@ -318,7 +318,7 @@ impl V2TextRetirementRootsClosed {
     /// Blocking actual Condvar join for a native background worker, never AD/Root,
     /// a UI callback or an owner Drop. Scope cancellation cannot fake this drain.
     #[cfg_attr(
-        not(test),
+        not(all(test, windows)),
         expect(
             dead_code,
             reason = "Retained tested query-drain adapter; operational owning retirement uses the admitted path"

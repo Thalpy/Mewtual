@@ -11,7 +11,7 @@ pub(in crate::store) use create::{
     RetiredV2TextCreateLane, V2_TEXT_CREATE_RETIREMENT_LAYOUT_BYTES,
 };
 mod promotion;
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(in crate::store) use create::V2_TEXT_CREATE_LANE_BYTES;
 pub(in crate::store) use create::{
     OriginalV2TextCreateLaneObservation, PreparedV2TextCreateLane, V2TextCreateBinding,

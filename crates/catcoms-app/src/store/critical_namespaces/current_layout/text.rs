@@ -12,7 +12,7 @@ pub(in crate::store) use create::{
     V2_TEXT_COMPLETED_WORKSPACE_ADMISSION_LAYOUT_BYTES,
 };
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(in crate::store) use crate::store::owner_evidence::canonical::text_lane::PreparedV2TextAcceptedQueryLease;
 pub(in crate::store) use crate::store::owner_evidence::canonical::text_lane::V2TextAcceptedQueryLease;
 pub(in crate::store) use create::{
@@ -63,7 +63,7 @@ use crate::store::chat_admission::v2_current::{
 use crate::store::owner_evidence::canonical::current_vacancy::text::{
     V2TextOwnerNamespace, V2_TEXT_OWNER_NAMESPACE_BYTES,
 };
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(in crate::store) use crate::store::owner_evidence::canonical::text_lane::PreparedV2TextQueryLease;
 pub(in crate::store) use crate::store::owner_evidence::canonical::text_lane::V2TextQueryLease;
 use crate::store::owner_evidence::canonical::v2_registration::V2WriterObservation;

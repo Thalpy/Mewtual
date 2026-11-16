@@ -6,9 +6,11 @@ The separate native workspace check and all three targeted native startup /
 diagnostic cases pass, including maximum Offer/Answer over real TCP with A-C
 blocked. Net187, native-key36, App member/save/SDK36, owning-candidate3 and
 frontend3485 cases pass; frontend type/build and both static gates pass.
-The13 focused artifact/private-index cases also pass. The full Windows root
-all-target/all-feature strict Clippy check passes after the final test-lifetime
-cleanup. Fresh cross-platform complete suite verification remains pending.
+The33 final focused codec, raw-signature, real retirement/next-request and
+Native3 cold-open cases pass. The full Windows root all-target/all-feature
+strict Clippy check passes after the test-lifetime cleanup. Reference facades
+now match their actual Windows-only fixture consumers; primitive codec tests
+remain cross-platform. Fresh complete CI verification remains pending.
 
 The old founder-certified per-message entry roots, Index2 pending/strict Native3
 reference adapters, completed-parent constructors and branch-rewrite references
