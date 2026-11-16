@@ -27,7 +27,7 @@ pub(in crate::store) use current::{
     PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
     PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis,
 };
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(in crate::store) use current::{PreparedV2TextSourceObserver, V2_TEXT_SOURCE_OBSERVER_BYTES};
 pub(in crate::store) use current::{
     V2TextOwnedCurrent, V2TextOwnerRef, V2TextSourceNegativeObserver,

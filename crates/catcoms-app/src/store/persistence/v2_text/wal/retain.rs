@@ -55,7 +55,7 @@ impl TextWorkWalFrameData<'_> {
     /// exact lane/predecessor and same-scope/native admission. This method calls no RNG,
     /// clock, signer, exporter, FS or source callback and issues no durable/semantic effect.
     #[cfg_attr(
-        not(test),
+        not(all(test, windows)),
         expect(
             dead_code,
             reason = "Retained first-retain WAL validation reference; not a physical receipt"

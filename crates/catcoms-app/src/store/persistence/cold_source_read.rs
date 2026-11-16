@@ -15,7 +15,7 @@ pub(in crate::store) use genesis_seed::{
     PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
     PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis,
 };
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(in crate::store) use genesis_seed::{
     PreparedV2TextSourceObserver, V2_TEXT_SOURCE_OBSERVER_BYTES,
 };

@@ -628,7 +628,7 @@ mod persistence {
         UnexposedV2GenesisCurrent, V2MemberDependency, V2MemberSaveOutcome, V2MemberSaveRefusal,
         V2MemberSignRequest, V2TextHostPolicy,
     };
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     pub(super) use cold_source_read::{
         PreparedV2TextSourceObserver, V2_TEXT_SOURCE_OBSERVER_BYTES,
     };

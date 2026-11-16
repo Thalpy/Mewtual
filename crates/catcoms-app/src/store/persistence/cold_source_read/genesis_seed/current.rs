@@ -603,7 +603,7 @@ pub(in crate::store) use operational::{
 };
 mod text;
 pub(in crate::store) use operational::negative::V2TextSourceNegativeObserver;
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(in crate::store) use operational::negative::{
     PreparedV2TextSourceObserver, V2_TEXT_SOURCE_OBSERVER_BYTES,
 };

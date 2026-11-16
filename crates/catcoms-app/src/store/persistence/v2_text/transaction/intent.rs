@@ -531,7 +531,7 @@ pub(in crate::store) struct SavedV2UnsignedAppendIntent {
     parent: Arc<IntentParent>,
 }
 impl SavedV2UnsignedAppendIntent {
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     pub(in crate::store) fn resources(&self) -> &V2TextReadResources {
         &self.parent.resources
     }

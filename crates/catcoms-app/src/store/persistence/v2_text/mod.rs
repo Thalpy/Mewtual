@@ -43,7 +43,7 @@ pub(in crate::store) use common::{
 };
 pub(in crate::store) use context::TextContextData;
 pub(in crate::store) use head::{TextPendingData, TextRootData};
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(in crate::store) use ordinary_data::{
     encode_unsigned_intent_data, TextUnsignedIntentBindingsData, TextUnsignedIntentFrameData,
     TEXT_TRANSACTION_METADATA_FEE,

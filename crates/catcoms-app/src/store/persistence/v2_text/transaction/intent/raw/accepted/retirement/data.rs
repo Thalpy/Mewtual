@@ -211,7 +211,7 @@ impl PreparedV2TextAcceptedCreate {
         self.resources()
             .require_bound_original_negative(store, source)
     }
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     pub(in crate::store) fn saved_retirement_deletion(
         &self,
     ) -> Result<&Arc<SavedV2TextRetirementDeletion>, AppError> {
@@ -505,7 +505,7 @@ impl SavedV2TextRetirementCompletion {
         self.facts.plan_id
     }
     #[cfg_attr(
-        not(test),
+        not(all(test, windows)),
         expect(
             dead_code,
             reason = "Tested retirement accounting reference; not operational quota or new-source admission"

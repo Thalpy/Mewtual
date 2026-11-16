@@ -27,7 +27,7 @@ macro_rules! typed_predecessor_entrypoints {
             /// The only next-request conversion is this concrete borrowed variant.
             /// No parsed WC, caller flag or generic binding callback is accepted.
             #[cfg_attr(
-                not(test),
+                not(all(test, windows)),
                 expect(
                     dead_code,
                     reason = "Test-driven completed-parent founder-message reference; no native ordinary-send consumer is installed."

@@ -23,7 +23,7 @@ pub(super) struct CompletedAcceptedOrigin {
 
 impl PreparedV2TextAcceptedCreate {
     #[cfg_attr(
-        not(test),
+        not(all(test, windows)),
         expect(
             dead_code,
             reason = "Test-driven completed-parent founder-message reference; no native ordinary-send consumer is installed."
