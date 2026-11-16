@@ -1208,6 +1208,7 @@ impl<T, R> PreparedV2TextHost<T, R> {
         let _clear = Clear;
         run()
     }
+    #[cfg(windows)]
     pub(in crate::store) fn with_member_preseal_hook_for_test<Output>(
         hook: Box<dyn FnOnce()>,
         run: impl FnOnce() -> Output,
@@ -1226,6 +1227,7 @@ impl<T, R> PreparedV2TextHost<T, R> {
         run()
     }
 
+    #[cfg(windows)]
     pub(in crate::store) fn with_member_save_issue_lock_for_test<Output>(
         &self,
         run: impl FnOnce() -> Output,
@@ -1318,6 +1320,7 @@ impl<T, R> PreparedV2TextHost<T, R> {
     }
     /// Replace the member lane with none, keeping the whole original owner and the Store: the
     /// next save must adopt any retained original instead of signing again.
+    #[cfg(windows)]
     pub(in crate::store) fn drop_member_lane_for_test(&mut self) {
         drop(self.member.take());
     }
