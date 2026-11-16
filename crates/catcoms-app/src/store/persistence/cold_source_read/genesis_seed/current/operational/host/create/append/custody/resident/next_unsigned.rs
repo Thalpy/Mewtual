@@ -43,6 +43,13 @@ impl PreparedV2NextUnsignedAppend {
     /// next SavedA/completed accepted-miss proof. All writers are released before
     /// taking/caching the SAME owner and before entering SDK derivation. A failed
     /// call retains whichever original owning phase has already been cached.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Test-driven completed-parent founder-message reference; no native ordinary-send consumer is installed."
+        )
+    )]
     pub(in crate::store) fn prepare_after_saved_a_into<T: MeshTransport, R: CryptoRngCore>(
         store: &ServerStore,
         owner: &V2TextOwnedCurrent<T, R>,
@@ -219,6 +226,13 @@ impl PreparedV2NextUnsignedAppend {
     /// DATA-only owning handoff to the existing I consumer. All fallible original
     /// checks precede the take; cancellation does not discard completed bytes. This
     /// does not supply a fresh I/Save/sign/current role or renew an expired origin.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Test-driven completed-parent founder-message reference; no native ordinary-send consumer is installed."
+        )
+    )]
     pub(in crate::store) fn take_complete_into(
         retained: &PreparedV2TextRetainTransaction,
         input: &mut Option<Self>,

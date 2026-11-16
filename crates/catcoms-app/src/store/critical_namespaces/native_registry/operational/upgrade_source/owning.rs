@@ -26,8 +26,10 @@ pub(in crate::store::critical_namespaces) enum Edge {
     BeforePhysicalInstall,
 }
 #[cfg(test)]
+type EdgeHook = Option<(Edge, Box<dyn FnOnce()>)>;
+#[cfg(test)]
 thread_local! {
-    static EDGE: std::cell::RefCell<Option<(Edge, Box<dyn FnOnce()>)>> = const { std::cell::RefCell::new(None) };
+    static EDGE: std::cell::RefCell<EdgeHook> = const { std::cell::RefCell::new(None) };
 }
 #[cfg(test)]
 pub(in crate::store::critical_namespaces) fn at_edge(edge: Edge, hook: Box<dyn FnOnce()>) {
@@ -400,6 +402,13 @@ impl Store {
     /// Explicit strict3 cold open. Handler payment and original fixed-marker
     /// inspection precede Current/JOIN cleaners. First-torn cleanup that leaves
     /// index2 refuses this open; it cannot manufacture a version3 owner.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Strict Native3 reference opener retained for compatibility tests; governed startup uses its distinct checked opener."
+        )
+    )]
     pub(in crate::store::critical_namespaces::native_registry) fn open(
         dir: impl AsRef<std::path::Path>,
         passphrase: &[u8],
@@ -473,6 +482,13 @@ impl Store {
 
     /// Storage-only founder transitions on the SAME poisoned cell. Outgoing
     /// debt must retire outside guards before another physical phase can begin.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retained exclusive storage-reference adapter; live native creation and activation require the network-backed SourceWork path."
+        )
+    )]
     pub(in crate::store::critical_namespaces::native_registry) fn birth_founder_data(
         &mut self,
         request: &super::super::super::lifecycle::founder::Pending,
@@ -486,6 +502,13 @@ impl Store {
     > {
         self.physical.birth_founder_data(request, rng)
     }
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retained exclusive storage-reference adapter; live native creation and activation require the network-backed SourceWork path."
+        )
+    )]
     pub(in crate::store::critical_namespaces::native_registry) fn activate_founder_data(
         &mut self,
         request: &super::super::super::lifecycle::founder::Activate,
@@ -501,6 +524,13 @@ impl Store {
     }
     /// Private local metadata CAS. No native caller/SDK authority is implied.
     /// The returned finite debt must retire outside every enclosing guard.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Unwired storage-reference Rename or LegacyRefresh adapter; no native UI or invitation publication consumer exists."
+        )
+    )]
     pub(in crate::store::critical_namespaces::native_registry) fn rename_metadata_data(
         &mut self,
         request: &super::super::super::lifecycle::rename::Request,
@@ -516,6 +546,13 @@ impl Store {
     }
     /// Store already-minted Legacy invite DATA under the same metadata CAS.
     /// Native minting/current membership and command authorization are separate.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Unwired storage-reference Rename or LegacyRefresh adapter; no native UI or invitation publication consumer exists."
+        )
+    )]
     pub(in crate::store::critical_namespaces::native_registry) fn refresh_legacy_invite_data(
         &mut self,
         request: &super::super::super::lifecycle::refresh::Request,

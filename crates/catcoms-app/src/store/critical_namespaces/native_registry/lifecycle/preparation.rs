@@ -143,9 +143,27 @@ pub(in crate::store::critical_namespaces::native_registry) struct Output {
 /// treats structurally indeterminate input as unauthenticated debris.
 #[derive(Debug)]
 pub(in crate::store::critical_namespaces::native_registry) enum SeedReadError {
-    Indeterminate(AppError),
-    Unauthenticated(AppError),
-    Authenticated(AppError),
+    Indeterminate(
+        #[expect(
+            dead_code,
+            reason = "Retain the classified cause for Debug; cleanup uses only the variant"
+        )]
+        AppError,
+    ),
+    Unauthenticated(
+        #[expect(
+            dead_code,
+            reason = "Retain the classified cause for Debug; cleanup uses only the variant"
+        )]
+        AppError,
+    ),
+    Authenticated(
+        #[expect(
+            dead_code,
+            reason = "Retain the classified cause for Debug; cleanup uses only the variant"
+        )]
+        AppError,
+    ),
 }
 
 fn open(

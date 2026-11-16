@@ -79,40 +79,6 @@ fn birth_length(value: &Birth) -> usize {
     1 + 4 * 36 + if value.join_context.is_some() { 36 } else { 0 }
 }
 
-#[cfg(test)]
-mod native_birth_tests {
-    use super::*;
-    #[test]
-    fn native_birth_discriminant_preserves_all_existing_encodings_and_uses_four() {
-        for (kind, tag) in [
-            (BirthKind::Founder, 1),
-            (BirthKind::Joined, 2),
-            (BirthKind::LegacyJoin, 3),
-            (BirthKind::NativeFounder, 4),
-        ] {
-            let birth = Birth {
-                kind,
-                invocation: [1; 32],
-                request: [2; 32],
-                signer: [3; 32],
-                network: [4; 32],
-                join_context: if kind.is_founder() {
-                    None
-                } else {
-                    Some([5; 32])
-                },
-            };
-            let mut output = Encoder::with_capacity(256);
-            put_birth(&mut output, &birth).unwrap();
-            let raw = output.finish();
-            assert_eq!(raw[0], tag);
-            assert_eq!(raw.len(), if kind.is_founder() { 145 } else { 181 });
-            let mut input = Decoder::new(&raw);
-            assert!(read_birth(&mut input).unwrap() == birth);
-            input.finish().unwrap();
-        }
-    }
-}
 fn read_legacy_origin(input: &mut Decoder<'_>) -> Result<LegacyOrigin, AppError> {
     match input.get_u8().map_err(|_| refused())? {
         0 => Ok(LegacyOrigin::Imported),
@@ -197,6 +163,7 @@ impl Index {
     /// admission must preserve this capacity before any irreversible work.
     /// Ordinary IO/disk failure is separate; this prevents format exhaustion
     /// from stranding a previously admitted activation or retirement.
+    #[cfg(test)]
     pub(super) fn reserved_length_data(&self) -> Result<usize, AppError> {
         self.lengths_data().map(|(_, reserved)| reserved)
     }
@@ -514,5 +481,40 @@ impl Index {
             return Err(refused());
         }
         Ok(value)
+    }
+}
+
+#[cfg(test)]
+mod native_birth_tests {
+    use super::*;
+    #[test]
+    fn native_birth_discriminant_preserves_all_existing_encodings_and_uses_four() {
+        for (kind, tag) in [
+            (BirthKind::Founder, 1),
+            (BirthKind::Joined, 2),
+            (BirthKind::LegacyJoin, 3),
+            (BirthKind::NativeFounder, 4),
+        ] {
+            let birth = Birth {
+                kind,
+                invocation: [1; 32],
+                request: [2; 32],
+                signer: [3; 32],
+                network: [4; 32],
+                join_context: if kind.is_founder() {
+                    None
+                } else {
+                    Some([5; 32])
+                },
+            };
+            let mut output = Encoder::with_capacity(256);
+            put_birth(&mut output, &birth).unwrap();
+            let raw = output.finish();
+            assert_eq!(raw[0], tag);
+            assert_eq!(raw.len(), if kind.is_founder() { 145 } else { 181 });
+            let mut input = Decoder::new(&raw);
+            assert!(read_birth(&mut input).unwrap() == birth);
+            input.finish().unwrap();
+        }
     }
 }

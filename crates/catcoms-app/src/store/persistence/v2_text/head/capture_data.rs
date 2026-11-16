@@ -6,6 +6,13 @@ use super::*;
 pub(in crate::store) enum TextIndexCaptureRoleData {
     Directory = 1,
     Token = 2,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retained canonical publication capture role; operational publication is still unwired"
+        )
+    )]
     Publication = 3,
 }
 

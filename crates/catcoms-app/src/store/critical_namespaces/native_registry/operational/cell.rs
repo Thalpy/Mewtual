@@ -181,6 +181,13 @@ impl mount::NativeIndexPhysical {
     /// they cannot validate a supplied Pending network frame they no longer hold.
     /// The caller must perform this lookup before generating its device/net
     /// plan as well; this storage check cannot undo earlier caller effects.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retained Index2 Pending-only reference writer; live native creation uses the network-backed SourceWork path."
+        )
+    )]
     pub(super) fn prepare_pending_birth(
         &self,
         input: &PendingBirth,
@@ -292,6 +299,13 @@ impl mount::NativeIndexPhysical {
     /// Finish exactly the mount-retained transaction. Results/unwinds never
     /// remove uncertain debt. A closed facade may finish this admitted DATA,
     /// but its CLOSED interlock is never reopened by completion.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retained Index2 Pending-only reference writer; live native creation uses the network-backed SourceWork path."
+        )
+    )]
     pub(super) fn finish_pending_birth(
         &self,
         invocation: [u8; 32],

@@ -3,8 +3,13 @@
 use super::*;
 use crate::store::critical_namespaces::current_layout::SavedUnsignedV2TextSigningGuard;
 #[cfg(all(test, windows))]
+type SignObservation = Option<(
+    Arc<std::sync::atomic::AtomicUsize>,
+    Option<Box<dyn FnOnce() + Send>>,
+)>;
+#[cfg(all(test, windows))]
 thread_local! {
-    static SIGN_OBSERVATION: std::cell::RefCell<Option<(Arc<std::sync::atomic::AtomicUsize>, Option<Box<dyn FnOnce() + Send>>)>> = const { std::cell::RefCell::new(None) };
+    static SIGN_OBSERVATION: std::cell::RefCell<SignObservation> = const { std::cell::RefCell::new(None) };
 }
 
 impl PreparedV2UnsignedOriginalCustody {

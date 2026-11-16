@@ -45,6 +45,10 @@ impl V2AdvancedAppendBasis {
     ) -> Result<(), AppError> {
         self.accepted.require_same_original(original)
     }
+    #[expect(
+        dead_code,
+        reason = "Retained founder-reference original association; not an operational member-save entry"
+    )]
     pub(in crate::store) fn require_original_unsigned(
         &self,
         original: &OriginalV2UnsignedPlanObservation,

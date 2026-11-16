@@ -573,9 +573,6 @@ impl SavedV2RetainedAction {
     pub(in crate::store) fn resources(&self) -> &V2TextReadResources {
         &self.parent.resources
     }
-    pub(in crate::store) fn head_id_data(&self) -> TextHeadIdData {
-        self.head
-    }
     pub(in crate::store) fn validate_selected_under_current_guard(
         &self,
         guard: &V2TextCurrentGroupGuard<'_, '_>,

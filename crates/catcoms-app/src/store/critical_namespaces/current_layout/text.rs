@@ -243,9 +243,6 @@ impl<'guard, 'writer> V2TextCurrentGroupGuard<'guard, 'writer> {
     pub(in crate::store) fn scope_admission(&self) -> &V2TextCurrentAdmission<'writer> {
         self.owner.scope_admission()
     }
-    pub(in crate::store) fn task(&self) -> &PreparedV2GenesisGroupNamespace {
-        self.scope_admission().task()
-    }
     pub(in crate::store) fn archive_root(&self) -> &super::super::archive_bootstrap::MountedRoot {
         self.root
             .as_ref()

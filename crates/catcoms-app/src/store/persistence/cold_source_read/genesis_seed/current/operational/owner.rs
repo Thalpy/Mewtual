@@ -103,12 +103,6 @@ impl<T, R> V2TextOwnedCurrent<T, R> {
         }
     }
 
-    /// New host metadata invoice includes this FULL closed layout, with no overlap credit
-    /// from the independently retained old wrapper. This creates no allocation or payment.
-    pub(super) const fn retained_layout_bytes() -> usize {
-        std::mem::size_of::<Self>()
-    }
-
     /// Actual negative control for the genuine warm-origin regression. It exposes no
     /// writer/source/Runtime and cannot construct a positive observation or registration.
     #[cfg(all(test, windows))]

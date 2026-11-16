@@ -3,8 +3,14 @@
 //! This is a bounded DATA set, not Ready, an actual work/commit admission, saved selection,
 //! quiescence or deletion proof. A real transaction must retain its independent shared work
 //! and metadata payments through BOTH this set and any residual observations until drain.
-use super::control::{PreparedTextControlFrameData, TextControlKindData};
+// Generic assembly below is a test reference. Production keeps these exact role
+// tags/methods and the separate concrete WAL encoders/decoders and their quotas.
+#[cfg(test)]
+use super::control::PreparedTextControlFrameData;
+use super::control::TextControlKindData;
+#[cfg(test)]
 use catcoms_storage::private_chat_page::PreparedPrivateChatPage;
+#[cfg(test)]
 use catcoms_wire::Encoder;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -69,6 +75,7 @@ impl TextArtifactRoleData {
         }
     }
 }
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::store) enum TextArtifactOperationData {
     Retain,
@@ -76,6 +83,7 @@ pub(in crate::store) enum TextArtifactOperationData {
     RawSignature,
     Accept,
 }
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::store) enum TextArtifactRefusalData {
     Bound,
@@ -85,20 +93,24 @@ pub(in crate::store) enum TextArtifactRefusalData {
     Geometry,
 }
 
+#[cfg(test)]
 enum FrameData {
     Page(PreparedPrivateChatPage),
     Control(PreparedTextControlFrameData),
 }
+#[cfg(test)]
 pub(in crate::store) struct ImmutableTextArtifactData {
     role: TextArtifactRoleData,
     frame: FrameData,
 }
+#[cfg(test)]
 impl std::fmt::Debug for ImmutableTextArtifactData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ImmutableTextArtifactData")
             .finish_non_exhaustive()
     }
 }
+#[cfg(test)]
 impl ImmutableTextArtifactData {
     /// Move an already materialized original. Inner role/context/signature semantics are
     /// still the typed producer's responsibility; this layer does not decrypt or relabel it.
@@ -158,31 +170,32 @@ impl ImmutableTextArtifactData {
 /// No public constructor accepts a path, OS ID, writer generation, caller Saved flag or
 /// permission. Failed assembly returns ALL unique originals unchanged, without another
 /// crypto call, buffer clone, new fee or allocation of a large generic error.
+#[cfg(test)]
 pub(in crate::store) struct PreparedTextArtifactSetData {
     operation: TextArtifactOperationData,
     objects: Vec<ImmutableTextArtifactData>,
     raw_bytes: usize,
 }
+#[cfg(test)]
 pub(in crate::store) struct TextArtifactAssemblyRefusal {
     pub(in crate::store) reason: TextArtifactRefusalData,
     pub(in crate::store) objects: Vec<ImmutableTextArtifactData>,
 }
+#[cfg(test)]
 impl std::fmt::Debug for TextArtifactAssemblyRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TextArtifactAssemblyRefusal")
             .finish_non_exhaustive()
     }
 }
+#[cfg(test)]
 impl std::fmt::Debug for PreparedTextArtifactSetData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PreparedTextArtifactSetData")
             .finish_non_exhaustive()
     }
 }
-pub(in crate::store) const TEXT_ARTIFACT_METADATA_BYTES: usize =
-    std::mem::size_of::<PreparedTextArtifactSetData>()
-        + 70 * std::mem::size_of::<ImmutableTextArtifactData>()
-        + std::mem::size_of::<TextArtifactAssemblyRefusal>();
+#[cfg(test)]
 impl PreparedTextArtifactSetData {
     pub(in crate::store) fn assemble_data(
         operation: TextArtifactOperationData,
@@ -241,6 +254,7 @@ impl PreparedTextArtifactSetData {
         self.objects
     }
 }
+#[cfg(test)]
 fn check(
     operation: TextArtifactOperationData,
     objects: &[ImmutableTextArtifactData],

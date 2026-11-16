@@ -14,10 +14,13 @@ pub(super) const CANDIDATE_BRIDGE_METADATA_BYTES: usize =
         + 2 * std::mem::size_of::<catcoms_sync::owner_v2::V2AppendDataView<'static>>();
 
 #[cfg(all(test, windows))]
+type CandidateObservation = Option<(
+    Arc<[std::sync::atomic::AtomicUsize; 2]>,
+    Option<Box<dyn FnOnce() + Send>>,
+)>;
+#[cfg(all(test, windows))]
 thread_local! {
-    static CANDIDATE_OBSERVATION: std::cell::RefCell<Option<(
-        Arc<[std::sync::atomic::AtomicUsize; 2]>, Option<Box<dyn FnOnce() + Send>>
-    )>> = const { std::cell::RefCell::new(None) };
+    static CANDIDATE_OBSERVATION: std::cell::RefCell<CandidateObservation> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(all(test, windows))]

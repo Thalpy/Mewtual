@@ -266,6 +266,13 @@ impl AcceptedIndexPathData {
     /// Parent level is an actual retained descent node; outputs at the next level have
     /// already been independently sealed by the candidate owner. Asking for an extra page
     /// merely freezes its identity; actual I/O remains outside all global guards.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retained branch-geometry reference with no owning production consumer; authenticated descent and leaf rewriting remain active."
+        )
+    )]
     pub(in crate::store) fn boundary_page_data(
         &self,
         level: usize,
@@ -281,6 +288,13 @@ impl AcceptedIndexPathData {
             .map_err(|_| refused())?
             .map(|b| b.expected_page_data()))
     }
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retained branch-geometry reference with no owning production consumer; authenticated descent and leaf rewriting remain active."
+        )
+    )]
     pub(in crate::store) fn rewrite_branch_data(
         &self,
         level: usize,

@@ -89,6 +89,7 @@ impl std::fmt::Debug for TextControlIdData {
     }
 }
 impl TextControlIdData {
+    #[cfg(test)]
     pub(in crate::store) fn kind_data(self) -> TextControlKindData {
         self.kind
     }

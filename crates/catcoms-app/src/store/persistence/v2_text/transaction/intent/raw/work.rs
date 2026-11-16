@@ -421,7 +421,7 @@ impl PreparedV2TextRawSignature {
         }
         result?;
         let saved = SavedV2RawAppendSignature {
-            head: TextHeadIdData::from_bytes(
+            _head: TextHeadIdData::from_bytes(
                 *self
                     .candidate
                     .as_ref()
@@ -429,7 +429,7 @@ impl PreparedV2TextRawSignature {
                     .id_data()
                     .as_bytes(),
             ),
-            signature: TextRawSignatureIdData::from_bytes(
+            _signature: TextRawSignatureIdData::from_bytes(
                 *self
                     .signature
                     .as_ref()

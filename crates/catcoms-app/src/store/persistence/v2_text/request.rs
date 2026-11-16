@@ -14,11 +14,13 @@ use zeroize::Zeroizing;
 
 data_id!(
     TextRequestDigestData,
-    b"catcoms/private-chat-text-request/v1\0"
+    b"catcoms/private-chat-text-request/v1\0",
+    cfg(test)
 );
 data_id!(
     TextTokenKeyData,
-    b"catcoms/private-chat-text-token-key/v1\0"
+    b"catcoms/private-chat-text-token-key/v1\0",
+    cfg(test)
 );
 data_id!(
     TextRetainIdData,
@@ -26,7 +28,11 @@ data_id!(
 );
 data_id!(
     TextPublicationIdData,
-    b"catcoms/private-chat-text-publication-id/v1\0"
+    b"catcoms/private-chat-text-publication-id/v1\0",
+    expect(
+        dead_code,
+        reason = "Reserved raw DATA commitment constructor; production uses typed codecs"
+    )
 );
 pub(in crate::store) const MAX_TOKEN_VALUE_BYTES: usize = 336;
 pub(in crate::store) const MAX_PUBLICATION_VALUE_BYTES: usize = 181;
@@ -142,6 +148,13 @@ impl TokenValueData {
     pub(in crate::store) fn key_data(&self, context: TextContextIdData) -> TextTokenKeyData {
         TextTokenKeyData::from_request_data(context, self.token)
     }
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retained tested exact request-data comparison; no physical receipt or action authority"
+        )
+    )]
     pub(in crate::store) fn check_request_data(
         &self,
         context: TextContextIdData,

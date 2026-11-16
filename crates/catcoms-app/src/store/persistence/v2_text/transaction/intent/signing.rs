@@ -32,9 +32,8 @@ impl PreparedV2TextUnsignedIntent {
         self.unsigned
             .observe_domain_cancel_after_sign_for_test(dispatches)
     }
-    /// Existing negative DATA only, including raw output cached before a late SDK
-    /// failure. The original SDK observation is checked by the closed custody;
-    /// absence never falls back to signing, source refresh or Header materialization.
+    /// Existing negative DATA only. Test inspection cannot sign or refresh a source.
+    #[cfg(test)]
     pub(in crate::store) fn existing_raw_signature_data(&self) -> Result<&[u8; 64], AppError> {
         self.unsigned.existing_raw_signature_data()
     }

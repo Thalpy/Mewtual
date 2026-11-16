@@ -54,6 +54,13 @@ impl TextWorkWalFrameData<'_> {
     /// The snapshot is genuine historical DATA; the actual write still needs NEW Current,
     /// exact lane/predecessor and same-scope/native admission. This method calls no RNG,
     /// clock, signer, exporter, FS or source callback and issues no durable/semantic effect.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retained first-retain WAL validation reference; not a physical receipt"
+        )
+    )]
     pub(in crate::store) fn verify_first_retained_a_data(
         &self,
         key: &[u8; 32],

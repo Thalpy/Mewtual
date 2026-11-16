@@ -5,7 +5,7 @@
 //! envelope with its own paid key/source, validates every embedded control/context, and
 //! obtains the distinct actual Current/work/commit role. Unsupported/torn input is an error,
 //! never absence or scratch-disposal authority. All variable fields remain borrowed here.
-use super::artifacts::{TextArtifactOperationData, TextArtifactRoleData};
+use super::artifacts::TextArtifactRoleData;
 use super::common::*;
 use super::control::TextControlKindData;
 use super::retirement::{
@@ -21,9 +21,7 @@ pub(super) mod retain;
 
 const TAG: &[u8] = b"catcoms/private-chat-text-wal/v1\0";
 pub(in crate::store) const MAX_WORK_WAL_PLAIN: usize = 1_078_322;
-pub(in crate::store) const MAX_WORK_WAL_FRAME: usize = MAX_WORK_WAL_PLAIN + 40;
 pub(in crate::store) const WAL_PLAIN_ALLOCATION_CAP: usize = 2_097_152;
-pub(in crate::store) const MAX_WAL_FRAME: usize = WAL_PLAIN_ALLOCATION_CAP + 40;
 pub(in crate::store) const MAX_DELETION_WAL_PLAIN: usize = 6261;
 pub(in crate::store) const MAX_COMPLETION_WAL_PLAIN: usize = 2278;
 const MAX_DELETION_WAL_FRAME: usize = MAX_DELETION_WAL_PLAIN + 40;
@@ -59,14 +57,6 @@ impl TextWorkWalOperationData {
             3 => Ok(Self::RawSignature),
             4 => Ok(Self::Accept),
             _ => Err(refused()),
-        }
-    }
-    pub(in crate::store) fn artifact_operation_data(self) -> TextArtifactOperationData {
-        match self {
-            Self::Retain => TextArtifactOperationData::Retain,
-            Self::Unsigned => TextArtifactOperationData::Unsigned,
-            Self::RawSignature => TextArtifactOperationData::RawSignature,
-            Self::Accept => TextArtifactOperationData::Accept,
         }
     }
     fn count_cap(self) -> usize {

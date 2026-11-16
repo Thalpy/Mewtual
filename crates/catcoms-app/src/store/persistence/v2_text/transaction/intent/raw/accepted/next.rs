@@ -22,6 +22,13 @@ pub(super) struct CompletedAcceptedOrigin {
 }
 
 impl PreparedV2TextAcceptedCreate {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Test-driven completed-parent founder-message reference; no native ordinary-send consumer is installed."
+        )
+    )]
     pub(in crate::store) fn take_completed_into(
         store: &ServerStore,
         source: &GenesisSourceDataRef<'_>,
@@ -209,7 +216,7 @@ impl PreparedV2TextAcceptedCreate {
             header: candidate.header_data().clone(),
             image: Zeroizing::new(candidate.image_data().to_vec()),
             signature: Arc::clone(saved),
-            metadata: metadata.clone(),
+            _metadata: metadata.clone(),
         });
         signature
             .intent

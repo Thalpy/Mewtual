@@ -134,6 +134,10 @@ impl OriginalV2TextCompletedWorkspaceObservation {
         }
         Ok(())
     }
+    #[expect(
+        dead_code,
+        reason = "Retained completed-workspace original association reference"
+    )]
     pub(in crate::store) fn require_same_resident(
         &self,
         other: &OriginalV2TextResidentObservation,
@@ -323,9 +327,6 @@ impl PreparedV2TextCompletedWorkspaceCapture {
     }
     pub(in crate::store) fn resources(&self) -> &V2TextReadResources {
         &self.plan.base.resources
-    }
-    pub(in crate::store) fn work_resources(&self) -> &Arc<V2TextWorkResources> {
-        &self.plan.work
     }
     pub(in crate::store) fn observe_original(&self) -> OriginalV2RetainObservation {
         self.plan.base.original.clone()

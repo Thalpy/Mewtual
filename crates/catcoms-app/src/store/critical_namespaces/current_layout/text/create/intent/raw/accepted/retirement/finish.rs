@@ -22,7 +22,7 @@ pub(in crate::store) struct SavedCompletedV2TextFinishGuard<'cut, 'guard, 'write
     plan: TextRetirementPlanIdData,
     basis: V2AdvancedAppendBasis,
     completion: [u8; 32],
-    expectation: V2HostSelectionExpectation,
+    _expectation: V2HostSelectionExpectation,
 }
 
 /// Full fixed guard/owning-retirement layout is included explicitly in the NEW
@@ -133,7 +133,7 @@ impl<'guard, 'writer> V2TextCurrentGroupGuard<'guard, 'writer> {
             plan,
             basis,
             completion,
-            expectation,
+            _expectation: expectation,
         })
     }
 }
@@ -174,9 +174,6 @@ impl SavedCompletedV2TextFinishGuard<'_, '_, '_> {
             return Err(refused());
         }
         Ok(())
-    }
-    pub(in crate::store) fn expectation_data(&self) -> &V2HostSelectionExpectation {
-        &self.expectation
     }
     /// Fixed cached checks only. Called around Root's infallible owning cut; never
     /// performs account waits, opens/decodes, Core replay or SDK materialization.

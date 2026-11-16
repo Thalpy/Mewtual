@@ -17,6 +17,13 @@ pub(super) struct CompletedRetainOrigin {
 }
 impl PreparedV2TextRetainTransaction {
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Test-driven completed-parent founder-message reference; no native ordinary-send consumer is installed."
+        )
+    )]
     pub(in crate::store) fn take_from_completed_into(
         store: &ServerStore,
         source: &GenesisSourceDataRef<'_>,

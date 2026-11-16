@@ -26,7 +26,8 @@ const _: () =
     assert!(4 + CHUNK_TAG.len() + 2 + 3 * 36 + 4 + 2 + 2 + 4 == CIPHER_CHUNK_HEADER_BYTES);
 data_id!(
     TextCipherOriginalDigestData,
-    b"catcoms/private-chat-text-cipher-original/v1\0"
+    b"catcoms/private-chat-text-cipher-original/v1\0",
+    cfg(test)
 );
 
 #[derive(Clone, Copy, PartialEq, Eq)]

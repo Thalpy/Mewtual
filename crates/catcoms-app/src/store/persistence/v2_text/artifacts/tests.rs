@@ -93,6 +93,23 @@ fn page_control_kind_cap_and_empty_or_extra_geometry_refuse_without_adoption() {
             .unwrap_err();
     assert_eq!(refusal.reason, TextArtifactRefusalData::Geometry);
     assert_eq!(refusal.objects[0].frame_data().as_ptr(), ptr);
+    // A token-index page is only one part of an accepted bundle. Changing the
+    // declared operation must not turn that incomplete set into acceptance, or
+    // replace the caller's already encrypted original during refusal.
+    let capacity = refusal.objects.capacity();
+    let refused_accept = PreparedTextArtifactSetData::assemble_data(
+        TextArtifactOperationData::Accept,
+        refusal.objects,
+    )
+    .unwrap_err();
+    assert_eq!(refused_accept.reason, TextArtifactRefusalData::Geometry);
+    assert_eq!(refused_accept.objects.capacity(), capacity);
+    assert_eq!(refused_accept.objects.len(), 1);
+    assert_eq!(refused_accept.objects[0].frame_data().as_ptr(), ptr);
+    assert_eq!(
+        refused_accept.objects[0].role_data(),
+        TextArtifactRoleData::TokenIndex
+    );
     let empty =
         PreparedTextArtifactSetData::assemble_data(TextArtifactOperationData::RawSignature, vec![])
             .unwrap_err();

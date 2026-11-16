@@ -235,9 +235,6 @@ impl CompletedV2TextParentData {
     pub(in crate::store) fn original_resident(&self) -> &OriginalV2TextResidentObservation {
         &self.base.resident
     }
-    pub(in crate::store) fn resources(&self) -> &V2TextReadResources {
-        &self.base.resources
-    }
 }
 pub(super) fn retired_path(
     base: &Path,

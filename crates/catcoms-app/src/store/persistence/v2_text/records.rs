@@ -14,11 +14,16 @@ use zeroize::Zeroizing;
 
 data_id!(
     TextIntentIdData,
-    b"catcoms/private-chat-text-intent-id/v1\0"
+    b"catcoms/private-chat-text-intent-id/v1\0",
+    expect(
+        dead_code,
+        reason = "Reserved raw DATA commitment constructor; production uses typed codecs"
+    )
 );
 data_id!(
     TextRawSignatureIdData,
-    b"catcoms/private-chat-text-signature-id/v1\0"
+    b"catcoms/private-chat-text-signature-id/v1\0",
+    cfg(test)
 );
 const SIGNATURE_TAG: &[u8] = b"catcoms/private-chat-text-signature/v1\0";
 const PUBLICATION_TAG: &[u8] = b"catcoms/private-chat-text-publication/v1\0";
@@ -125,6 +130,13 @@ impl PublicationRecordData {
         e.put_u64(self.ordinal);
         finish(e, MAX_PUBLICATION_PLAIN)
     }
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retained tested publication DATA decoder; no operational publication consumer yet"
+        )
+    )]
     pub(in crate::store) fn decode_data(raw: &[u8]) -> Result<Self, AppError> {
         let mut d = input(raw, MAX_PUBLICATION_PLAIN, PUBLICATION_TAG)?;
         let result = Self {

@@ -29,7 +29,7 @@ pub(in crate::store) struct RetainedAQuerySourceData<'a> {
     archive_path: &'a Path,
     head_frame: &'a [u8],
     archive_frame: &'a [u8],
-    archive_native: SessionId,
+    _archive_native: SessionId,
     accepted_archive_frame: &'a [u8],
     accepted_archive: &'a TextArchiveData,
     head_id: TextHeadIdData,
@@ -80,7 +80,7 @@ impl PreparedV2TextRetainTransaction {
             archive_path: facts.archive_path,
             head_frame: &saved.selected,
             archive_frame: facts.archive,
-            archive_native: facts.archive_native,
+            _archive_native: facts.archive_native,
             accepted_archive_frame: &self.parent.archive_frame,
             accepted_archive: &self.parent.archive,
             head_id: saved.head,
@@ -106,9 +106,6 @@ impl<'a> RetainedAQuerySourceData<'a> {
     }
     pub(in crate::store::persistence::v2_text) fn current_archive_frame(&self) -> &'a [u8] {
         self.archive_frame
-    }
-    pub(in crate::store::persistence::v2_text) fn current_archive_native_data(&self) -> SessionId {
-        self.archive_native
     }
     /// The unchanged accepted Directory is anchored to H_G, not the new unaccepted
     /// retained-action manifest in H_A. Copy this only under the NEW query's own fee.

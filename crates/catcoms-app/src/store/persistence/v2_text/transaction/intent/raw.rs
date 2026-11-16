@@ -510,8 +510,8 @@ impl ReadyV2TextRawSignatureSelection {
 /// Historical selected S only. No WAL, SDK, live verifier/model/large-work owner,
 /// session or File escapes. Exact S/I plus HA/TA closure must reprove current selection.
 pub(in crate::store) struct SavedV2RawAppendSignature {
-    head: TextHeadIdData,
-    signature: TextRawSignatureIdData,
+    _head: TextHeadIdData,
+    _signature: TextRawSignatureIdData,
     selected: Zeroizing<Vec<u8>>,
     signature_frame: Zeroizing<Vec<u8>>,
     signature_path: PathBuf,
@@ -526,17 +526,8 @@ impl SavedV2RawAppendSignature {
     pub(in crate::store) fn resources(&self) -> &V2TextReadResources {
         &self.parent.base.resources
     }
-    pub(in crate::store) fn observe_original(&self) -> OriginalV2TextRawSignatureObservation {
-        self.original.clone()
-    }
-    pub(in crate::store) fn original_retain(&self) -> OriginalV2RetainObservation {
-        self.original.original.retained.original.clone()
-    }
     pub(in crate::store) fn original_unsigned(&self) -> OriginalV2UnsignedPlanObservation {
         self.original.original.original.clone()
-    }
-    pub(in crate::store) fn original_intent(&self) -> OriginalV2TextUnsignedIntentObservation {
-        self.original.original.clone()
     }
     pub(in crate::store) fn validate_selected_under_current_guard(
         &self,

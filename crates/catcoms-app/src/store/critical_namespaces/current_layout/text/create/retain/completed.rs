@@ -8,6 +8,13 @@ use super::*;
 use crate::store::critical_namespaces::current_layout::BoundV2TextCompletedCreatePredecessor;
 
 impl V2TextCurrentGroupGuard<'_, '_> {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Test-driven completed-parent founder-message reference; no native ordinary-send consumer is installed."
+        )
+    )]
     pub(in crate::store) fn admit_text_completed_retain_stage_into(
         &mut self,
         lane: &V2TextCreateLane,
@@ -59,6 +66,13 @@ impl V2TextCurrentGroupGuard<'_, '_> {
         Ok(())
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Test-driven completed-parent founder-message reference; no native ordinary-send consumer is installed."
+        )
+    )]
     pub(in crate::store) fn admit_text_completed_retain_commit_into(
         &mut self,
         lane: &V2TextCreateLane,

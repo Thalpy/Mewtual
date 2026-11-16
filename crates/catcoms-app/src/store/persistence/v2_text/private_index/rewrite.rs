@@ -148,6 +148,13 @@ impl PrivateIndexRewriteData {
     pub(in crate::store) fn nodes_data(&self) -> &[EncodedPrivateIndexNodeData] {
         &self.nodes
     }
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retained branch-geometry reference with no owning production consumer; authenticated descent and leaf rewriting remain active."
+        )
+    )]
     pub(in crate::store) fn into_nodes_data(self) -> Vec<EncodedPrivateIndexNodeData> {
         self.nodes
     }

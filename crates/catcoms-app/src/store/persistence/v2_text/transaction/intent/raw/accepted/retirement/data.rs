@@ -211,6 +211,7 @@ impl PreparedV2TextAcceptedCreate {
         self.resources()
             .require_bound_original_negative(store, source)
     }
+    #[cfg(test)]
     pub(in crate::store) fn saved_retirement_deletion(
         &self,
     ) -> Result<&Arc<SavedV2TextRetirementDeletion>, AppError> {
@@ -467,22 +468,12 @@ impl ReadyV2TextRetirementCompletion {
     }
 }
 macro_rules! saved_common {
-    ($ty:ty,$frame:ident,$absent_retired:expr) => {
+    ($ty:ty,$frame:ident,$absent_retired:expr $(,$validator_attribute:meta)*) => {
         impl $ty {
             pub(in crate::store) fn resources(&self) -> &V2TextReadResources {
                 self.facts.selected.resources()
             }
-            pub(in crate::store) fn observe_original(
-                &self,
-            ) -> OriginalV2TextAcceptedCreateObservation {
-                self.facts.original.clone()
-            }
-            pub(in crate::store) fn original_retain(&self) -> OriginalV2RetainObservation {
-                self.facts.selected.original_retain()
-            }
-            pub(in crate::store) fn retirement_plan_id_data(&self) -> TextRetirementPlanIdData {
-                self.facts.plan_id
-            }
+            $(#[$validator_attribute])*
             pub(in crate::store) fn validate_selected_under_current_guard(
                 &self,
                 guard: &V2TextCurrentGroupGuard<'_, '_>,
@@ -507,9 +498,19 @@ macro_rules! saved_common {
         }
     };
 }
-saved_common!(SavedV2TextRetirementDeletion, deletion, false);
+saved_common!(SavedV2TextRetirementDeletion, deletion, false, expect(dead_code, reason = "Retained WD physical validation reference; live completion uses its dedicated completion proof"));
 saved_common!(SavedV2TextRetirementCompletion, completion, true);
 impl SavedV2TextRetirementCompletion {
+    pub(in crate::store) fn retirement_plan_id_data(&self) -> TextRetirementPlanIdData {
+        self.facts.plan_id
+    }
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Tested retirement accounting reference; not operational quota or new-source admission"
+        )
+    )]
     pub(in crate::store) fn effective_baseline_data(&self) -> Result<RetiredTotalsData, AppError> {
         self.facts.metadata.validate_prepaid_account()?;
         let plan = RetirementPlanData::decode_data(&self.facts.plan)?;

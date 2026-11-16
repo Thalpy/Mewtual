@@ -517,7 +517,7 @@ impl ReadyV2TextUnsignedIntentSelection {
 /// Historical selected I, never signing permission. The Root opaque SDK observation
 /// and exact small preimage survive, without keeping SDK/model/large-work owners alive.
 pub(in crate::store) struct SavedV2UnsignedAppendIntent {
-    head: TextHeadIdData,
+    _head: TextHeadIdData,
     intent: TextIntentIdData,
     selected: Zeroizing<Vec<u8>>,
     intent_frame: Zeroizing<Vec<u8>>,
@@ -531,17 +531,9 @@ pub(in crate::store) struct SavedV2UnsignedAppendIntent {
     parent: Arc<IntentParent>,
 }
 impl SavedV2UnsignedAppendIntent {
+    #[cfg(test)]
     pub(in crate::store) fn resources(&self) -> &V2TextReadResources {
         &self.parent.resources
-    }
-    pub(in crate::store) fn observe_original(&self) -> OriginalV2TextUnsignedIntentObservation {
-        self.original.clone()
-    }
-    pub(in crate::store) fn original_retain(&self) -> OriginalV2RetainObservation {
-        self.original.retained.original.clone()
-    }
-    pub(in crate::store) fn original_unsigned(&self) -> OriginalV2UnsignedPlanObservation {
-        self.original.original.clone()
     }
     /// DATA association only. The exact SDK observer is required alongside complete
     /// signing/image/record/body equality; this is never a body-only key permission.

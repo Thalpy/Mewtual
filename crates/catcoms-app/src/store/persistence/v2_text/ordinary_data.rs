@@ -358,12 +358,14 @@ impl PreparedV2RetainData {
         }
         Ok(())
     }
+    #[cfg(test)]
     pub(in crate::store) fn context_data(&self) -> &TextContextData {
         &self.context
     }
     pub(in crate::store) fn token_data(&self) -> [u8; 32] {
         self.token
     }
+    #[cfg(test)]
     pub(in crate::store) fn request_data(&self) -> TextRequestDigestData {
         self.request
     }
@@ -389,9 +391,11 @@ impl PreparedV2RetainData {
     pub(in crate::store) fn transaction_data(&self) -> TextTransactionIdData {
         self.transaction
     }
+    #[cfg(test)]
     pub(in crate::store) fn parent_head_data(&self) -> TextHeadIdData {
         self.parent.head
     }
+    #[cfg(test)]
     pub(in crate::store) fn parent_archive_data(&self) -> ArchiveHeadId {
         self.parent.archive
     }

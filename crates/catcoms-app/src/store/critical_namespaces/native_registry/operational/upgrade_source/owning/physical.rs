@@ -741,11 +741,19 @@ impl MetadataWork {
     ) -> Result<(), AppError> {
         self.physical.verify_native_passphrase(secret)
     }
+    #[cfg(test)]
     pub(in crate::store::critical_namespaces::native_registry) fn row_count_data(
         &mut self,
     ) -> Result<usize, AppError> {
         self.physical.row_count_data()
     }
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Unwired storage-reference Rename or LegacyRefresh adapter; no native UI or invitation publication consumer exists."
+        )
+    )]
     pub(in crate::store::critical_namespaces::native_registry) fn refresh_legacy_invite_data(
         &mut self,
         request: &refresh::Request,
@@ -753,6 +761,13 @@ impl MetadataWork {
     ) -> Result<(rename::Metadata, Option<cell::CompletedDebt>), AppError> {
         self.physical.refresh_legacy_invite_data(request, rng)
     }
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Unwired storage-reference Rename or LegacyRefresh adapter; no native UI or invitation publication consumer exists."
+        )
+    )]
     pub(in crate::store::critical_namespaces::native_registry) fn rename_metadata_data(
         &mut self,
         request: &rename::Request,

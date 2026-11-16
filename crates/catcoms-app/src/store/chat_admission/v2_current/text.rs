@@ -96,6 +96,10 @@ impl<'writer> V2TextCurrentAdmission<'writer> {
             .require_original_negative(self.store(), self.writer_observation()?)
     }
 
+    #[expect(
+        dead_code,
+        reason = "Retained same-Runtime filename association reference; operational text callers use their typed guards"
+    )]
     pub(in crate::store) fn current_filename_association(
         &self,
     ) -> Result<CurrentFilenameAssociation<'_>, AppError> {

@@ -164,6 +164,7 @@ impl V2TextSourceNegativeObserver {
     }
     /// Arc coercion/clone only: Core retains the SAME already-paid immutable origin body.
     /// There is no second allocation, callback registration, source capture or renewal.
+    #[cfg(test)]
     pub(in crate::store) fn origin_negative(&self) -> Arc<dyn V2OriginNegative> {
         self.body.clone()
     }

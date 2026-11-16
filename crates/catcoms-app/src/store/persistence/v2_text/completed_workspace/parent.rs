@@ -34,14 +34,15 @@ impl CompletedV2TextParentData {
     pub(in crate::store) fn validate_prepaid_account(&self) -> Result<(), AppError> {
         self.metadata.validate()
     }
-    pub(in crate::store) fn original_head_data(&self) -> &TextHeadData {
-        &self.base.parsed
-    }
     pub(in crate::store) fn completion_native_data(&self) -> SessionId {
         self.completion_native
     }
     /// FULL actual old WC/O/H proof under the SAME Current, before final ID3. No
     /// account, decoder, path allocation or payload open follows the final seam.
+    #[expect(
+        dead_code,
+        reason = "Retained completed-parent pre-retain reference; future callers must retain its account and source checks"
+    )]
     pub(in crate::store) fn validate_before_retain_under_current_guard(
         &self,
         guard: &V2TextCurrentGroupGuard<'_, '_>,

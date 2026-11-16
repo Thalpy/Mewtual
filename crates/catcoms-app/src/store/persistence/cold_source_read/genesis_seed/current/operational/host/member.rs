@@ -1001,6 +1001,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
     /// or forgotten (or remains in the positive saved cache), negative-retirement capacity
     /// is exhausted, the selected O is no longer generation 1, or the source/lock
     /// closed. A completed original stays retrievable after lock (historical DATA).
+    #[cfg(test)]
     pub(in crate::store) fn retry_sign_member_request(
         &mut self,
         layout: &V2CurrentLayoutStore,

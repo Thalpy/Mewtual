@@ -71,9 +71,6 @@ impl V2TextResidentParentData<'_> {
     pub(in crate::store) fn directory_root_data(&self) -> NodeRefData {
         self.parent.directory_root
     }
-    pub(in crate::store) fn founder_data(&self) -> DirectoryData {
-        self.parent.founder
-    }
     pub(in crate::store) fn token_root_data(&self) -> Option<NodeRefData> {
         self.parent.token_root
     }
@@ -154,6 +151,10 @@ impl PreparedV2TextResidentProjection {
     /// Historical identity comparison only. Selected O/WC must differ after a
     /// later successful transaction even though the SAME original model remains.
     #[cfg(all(test, windows))]
+    #[expect(
+        dead_code,
+        reason = "Retained deterministic test probe; no current test case invokes this entry"
+    )]
     pub(in crate::store) fn require_same_model_original_for_test(
         &self,
         original: &OriginalV2TextResidentObservation,

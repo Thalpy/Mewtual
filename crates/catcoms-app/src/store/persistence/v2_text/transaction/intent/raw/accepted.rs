@@ -116,7 +116,8 @@ struct AcceptedParent {
     // this old I/S/TA closure after its exact WD plan has legitimately retired them.
     signature: Arc<SavedV2RawAppendSignature>,
     // LAST: every new B observer/fact owns this additional actual metadata debit.
-    metadata: AcceptedMetadataResources,
+    // Retain the actual metadata payment until this parent is drained.
+    _metadata: AcceptedMetadataResources,
 }
 #[derive(Clone)]
 pub(in crate::store) struct OriginalV2TextAcceptedCreateObservation {
@@ -335,7 +336,7 @@ impl PreparedV2TextAcceptedCreate {
             header: candidate.header_data().clone(),
             image: Zeroizing::new(candidate.image_data().to_vec()),
             signature: Arc::clone(saved),
-            metadata: metadata.clone(),
+            _metadata: metadata.clone(),
         });
         signature
             .intent
@@ -474,18 +475,6 @@ pub(in crate::store) struct SavedV2AcceptedCreate {
 impl SavedV2AcceptedCreate {
     pub(in crate::store) fn resources(&self) -> &V2TextReadResources {
         &self.facts.resources
-    }
-    pub(in crate::store) fn observe_original(&self) -> OriginalV2TextAcceptedCreateObservation {
-        self.original.clone()
-    }
-    pub(in crate::store) fn original_signature(&self) -> OriginalV2TextRawSignatureObservation {
-        self.original.signature.clone()
-    }
-    pub(in crate::store) fn original_intent(&self) -> OriginalV2TextUnsignedIntentObservation {
-        self.original.signature.original.clone()
-    }
-    pub(in crate::store) fn original_unsigned(&self) -> OriginalV2UnsignedPlanObservation {
-        self.original.signature.original.original.clone()
     }
     pub(in crate::store) fn original_retain(&self) -> OriginalV2RetainObservation {
         self.original.signature.original.retained.original.clone()

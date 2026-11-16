@@ -287,6 +287,10 @@ impl V2TextWorkResources {
             fee,
         })
     }
+    #[expect(
+        dead_code,
+        reason = "Retained reference resource association; do not replace it with value-only comparisons"
+    )]
     pub(in crate::store) fn require_same_read_resources(
         &self,
         read: &V2TextReadResources,

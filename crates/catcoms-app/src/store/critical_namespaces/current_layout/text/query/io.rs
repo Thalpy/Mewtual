@@ -16,6 +16,13 @@ impl V2TextCurrentGroupGuard<'_, '_> {
     /// key and physical OS-session cleanup must have ended. This is NOT a write permit:
     /// future typed stage/commit admission must install its writer-active gate in the SAME
     /// canonical edge before unlocking, then clear it only after actual writer cleanup.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retained guard-level quiescence reference; live admission checks its held owner directly"
+        )
+    )]
     pub(in crate::store) fn require_text_control_io_quiescent(&self) -> Result<(), AppError> {
         self.owner.require_text_control_io_quiescent()
     }

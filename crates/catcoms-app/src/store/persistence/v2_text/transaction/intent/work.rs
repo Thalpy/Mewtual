@@ -412,7 +412,7 @@ impl PreparedV2TextUnsignedIntent {
         }
         result?;
         let saved = SavedV2UnsignedAppendIntent {
-            head: TextHeadIdData::from_bytes(
+            _head: TextHeadIdData::from_bytes(
                 *self
                     .candidate
                     .as_ref()

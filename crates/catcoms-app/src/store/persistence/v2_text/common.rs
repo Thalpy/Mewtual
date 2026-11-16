@@ -56,7 +56,7 @@ pub(super) fn finish(e: Encoder, maximum: usize) -> Result<Zeroizing<Vec<u8>>, A
 }
 
 macro_rules! data_id {
-    ($name:ident, $domain:literal) => {
+    ($name:ident, $domain:literal $(, $hash_attribute:meta)*) => {
         /// Immutable commitment DATA. This label proves neither source custody nor a save.
         #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub(in crate::store) struct $name([u8; 32]);
@@ -67,6 +67,8 @@ macro_rules! data_id {
             pub(in crate::store) const fn as_bytes(&self) -> &[u8; 32] {
                 &self.0
             }
+            // Per-ID metadata applies only to this raw DATA hash constructor.
+            $(#[$hash_attribute])*
             pub(in crate::store) fn of_data(raw: &[u8]) -> Self {
                 let mut hash = blake3::Hasher::new();
                 hash.update($domain);
@@ -94,7 +96,8 @@ data_id!(
 data_id!(TextHeadIdData, b"catcoms/private-chat-text-head-id/v1\0");
 data_id!(
     TextTransactionIdData,
-    b"catcoms/private-chat-text-transaction/v1\0"
+    b"catcoms/private-chat-text-transaction/v1\0",
+    cfg(test)
 );
 data_id!(
     TextRetirementPlanIdData,

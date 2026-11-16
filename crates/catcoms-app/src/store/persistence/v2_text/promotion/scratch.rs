@@ -116,6 +116,10 @@ impl PreparedV2TextPromotionScratch {
         source.validate_under_current_guard(guard)
     }
     #[cfg(all(test, windows))]
+    #[expect(
+        dead_code,
+        reason = "Retained deterministic test probe; no current test case invokes this entry"
+    )]
     pub(in crate::store) fn set_after_capture_files_for_test(
         &mut self,
         hook: Box<dyn FnOnce() + Send>,

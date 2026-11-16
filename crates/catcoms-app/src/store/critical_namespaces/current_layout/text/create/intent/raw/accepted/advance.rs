@@ -22,7 +22,7 @@ pub(in crate::store) struct SavedAcceptedV2TextFinalGuard<'cut, 'guard, 'writer>
     original: OriginalV2TextAcceptedCreateObservation,
     unsigned: OriginalV2UnsignedPlanObservation,
     retain: OriginalV2RetainObservation,
-    expectation: V2HostSelectionExpectation,
+    _expectation: V2HostSelectionExpectation,
 }
 
 /// Both guarded cuts are separately included in B's NEW2MiB metadata debit. Actual
@@ -34,7 +34,7 @@ pub(in crate::store) const V2_TEXT_ACCEPTED_ADVANCE_GUARD_LAYOUT_BYTES: usize = 
     + 4 * 64;
 
 macro_rules! accepted_cut {
-    ($method:ident, $guard:ident, $validate:ident) => {
+    ($method:ident, $guard:ident, $validate:ident, $expectation_field:ident) => {
         impl<'guard, 'writer> V2TextCurrentGroupGuard<'guard, 'writer> {
             /// `prepared` has deliberately NO `'cut` lifetime. Clone the genuine
             /// SavedB Arc outside Current first; Root can then mutate only its SAME
@@ -73,7 +73,7 @@ macro_rules! accepted_cut {
                     original,
                     unsigned,
                     retain,
-                    expectation,
+                    $expectation_field: expectation,
                 })
             }
         }
@@ -82,12 +82,14 @@ macro_rules! accepted_cut {
 accepted_cut!(
     admit_accepted_advance,
     SavedAcceptedV2TextAdvanceGuard,
-    validate_advance_under_current_guard
+    validate_advance_under_current_guard,
+    expectation
 );
 accepted_cut!(
     admit_accepted_final,
     SavedAcceptedV2TextFinalGuard,
-    validate_final_under_current_guard
+    validate_final_under_current_guard,
+    _expectation
 );
 
 macro_rules! cut_association {
@@ -112,9 +114,6 @@ macro_rules! cut_association {
             ) -> Result<(), AppError> {
                 self.retain.require_same_original(original)
             }
-            pub(in crate::store) fn expectation_data(&self) -> &V2HostSelectionExpectation {
-                &self.expectation
-            }
             /// No account/codec/FS/model/SDK work follows the actual final B proof.
             pub(in crate::store) fn validate_negative(&self) -> Result<(), AppError> {
                 self.unsigned.validate_negative()?;
@@ -135,3 +134,10 @@ macro_rules! cut_association {
 }
 cut_association!(SavedAcceptedV2TextAdvanceGuard);
 cut_association!(SavedAcceptedV2TextFinalGuard);
+
+// Only advance exposes this cached DATA; final retains its capture through the cut.
+impl SavedAcceptedV2TextAdvanceGuard<'_, '_, '_> {
+    pub(in crate::store) fn expectation_data(&self) -> &V2HostSelectionExpectation {
+        &self.expectation
+    }
+}

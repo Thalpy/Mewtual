@@ -202,6 +202,17 @@ fn root_and_child_occupancy_leaf_split_and_packed_replacement_are_exact() {
             right.packed_leaf_row(i - 15).unwrap()
         );
     }
+    // The eventual sealing owner takes the same node vector and the same
+    // plaintext allocations, rather than cloning either encoded child.
+    let backing = split.nodes_data().as_ptr();
+    let plaintexts = [
+        split.nodes_data()[0].plain_data().as_ptr(),
+        split.nodes_data()[1].plain_data().as_ptr(),
+    ];
+    let owned = split.into_nodes_data();
+    assert_eq!(owned.as_ptr(), backing);
+    assert_eq!(owned[0].plain_data().as_ptr(), plaintexts[0]);
+    assert_eq!(owned[1].plain_data().as_ptr(), plaintexts[1]);
     let mut replacement = publication(10);
     let PrivateIndexValueData::Publication(ref mut value) = replacement.value else {
         unreachable!()

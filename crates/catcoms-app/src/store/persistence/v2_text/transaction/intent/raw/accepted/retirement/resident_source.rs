@@ -7,7 +7,8 @@ use super::*;
 use crate::store::persistence::v2_text::retirement::RetiredTotalsData;
 
 pub(in crate::store) struct CompletedV2TextRetirementSourceData<'a> {
-    saved: &'a Arc<SavedV2TextRetirementCompletion>,
+    // Retain the original receipt loan even though consumers read only its facts.
+    _saved: &'a Arc<SavedV2TextRetirementCompletion>,
     facts: &'a RetirementFacts,
 }
 impl PreparedV2TextAcceptedCreate {
@@ -37,13 +38,13 @@ impl PreparedV2TextAcceptedCreate {
         // No codec, allocations, key, IO or weak upgrade. These parsed head/founder
         // values were derived from the exact original encrypted O_B/Directory under
         // their distinct B payment; fresh WC closure remains the consumer's duty.
-        Ok(CompletedV2TextRetirementSourceData { saved, facts })
+        Ok(CompletedV2TextRetirementSourceData {
+            _saved: saved,
+            facts,
+        })
     }
 }
 impl CompletedV2TextRetirementSourceData<'_> {
-    pub(in crate::store) fn saved_wc_data(&self) -> &Arc<SavedV2TextRetirementCompletion> {
-        self.saved
-    }
     pub(in crate::store) fn original_data(&self) -> &OriginalV2TextAcceptedCreateObservation {
         &self.facts.original
     }
@@ -85,6 +86,9 @@ impl RetirementWorkState {
         if !Arc::ptr_eq(facts, &saved.facts) {
             return Err(refused());
         }
-        Ok(CompletedV2TextRetirementSourceData { saved, facts })
+        Ok(CompletedV2TextRetirementSourceData {
+            _saved: saved,
+            facts,
+        })
     }
 }

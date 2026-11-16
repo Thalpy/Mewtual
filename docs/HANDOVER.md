@@ -6,22 +6,33 @@ The separate native workspace check and all three targeted native startup /
 diagnostic cases pass, including maximum Offer/Answer over real TCP with A-C
 blocked. Net187, native-key36, App member/save/SDK36, owning-candidate3 and
 frontend3485 cases pass; frontend type/build and both static gates pass.
-Complete fresh suites remain pending, and Chat V2 remains disabled.
+The13 focused artifact/private-index cases also pass. The full Windows root
+all-target/all-feature strict Clippy check passes after the final test-lifetime
+cleanup. Fresh cross-platform complete suite verification remains pending.
 
-The older founder-certified per-message reference pipeline has two private
-entry roots, both exercised by tests. Exact not-test dead-code expectations
-now identify those roots while preserving every body, field, invoice, format,
-cleanup path and test. They provide no Source/native authority or helper-use
-isolation. Active ordinary member/outbox/invite and governed Add code remains
-separate. Scoped design and actual-diff reviews are clear. Strict diagnostics
-fall from556 to121 unused-code reports; these remaining adapters still need
-individual classification. No whole-module warning exemption is added.
+The old founder-certified per-message entry roots, Index2 pending/strict Native3
+reference adapters, completed-parent constructors and branch-rewrite references
+remain explicitly unwired. Exact item-level lint expectations retain their
+bodies, fields, invoices, formats and cleanup paths. The generic artifact-set
+assembly and pure test observations are test-only; concrete production WAL
+encoders/decoders, role tags, resource checks and quotas remain compiled.
+Unused pure accessors are removed, while receipt/payment fields retain the same
+types, values and order. The artifact rejection and private-index consumption
+regressions additionally check preservation of the original backing allocations.
+Scoped design and actual-diff reviews found no remaining blocker/high/medium.
+No whole-module warning exemption, API widening or activation is introduced.
 
-The foundation's fresh full Linux run found four Sync fixture failures, so
-PR84 was not merged. All1830 App tests passed and the previous Studio overflow
-is cleared. The four failures reproduce locally; the exact already-reviewed
-Sync-only fixture correction from92f227438 is being backported in PR84.
-Production checks and SDK behavior are unchanged by that correction.
+PR84's four fresh Sync failures were fixture defects: unstable provider-map
+serialization order and precomputed Welcomes for a different KeyPackage.
+The exact reviewed Sync-only correction from92f227438 is backported at5e328d06;
+all1454 affected Sync tests and strict root lint pass locally, and the fresh
+complete Linux root job passes. Its remaining required CI gates still control
+the main merge. Production checks and SDK behavior are unchanged by that fix.
+
+Chat V2 remains disabled and incomplete. Covering invite issuance, production
+joining, shared message delivery/history, cold authoring and multi-member
+end-to-end acceptance still require implementation. Merging prerequisites does
+not establish those outcomes or physical audio/network acceptance.
 
 
 ## Consolidated Chat V2 integration (16 November; validation in progress)

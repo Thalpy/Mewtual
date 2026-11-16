@@ -833,9 +833,6 @@ impl SavedV2TextPromotion {
         files.require_names(&self.facts)?;
         guard.validate_source_only()
     }
-    pub(in crate::store) fn head_id_data(&self) -> TextHeadIdData {
-        self.head
-    }
 }
 
 /// Temporary paid originals, kept through the final source/ID3 proof. All path allocation,

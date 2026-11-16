@@ -190,12 +190,6 @@ impl PreparedV2TextWorkspaceCapture {
     pub(in crate::store) fn resources(&self) -> &V2TextReadResources {
         &self.plan.resources
     }
-    pub(in crate::store) fn work_resources(&self) -> &Arc<V2TextWorkResources> {
-        &self.plan.work
-    }
-    pub(in crate::store) fn metadata_resources(&self) -> &V2TextTransactionMetadataResources {
-        &self.plan.metadata
-    }
     pub(in crate::store) fn observe_original(&self) -> OriginalV2RetainObservation {
         self.plan.original.clone()
     }
@@ -309,6 +303,10 @@ impl PreparedV2TextWorkspaceCapture {
         self.after_capture = Some(hook);
     }
     #[cfg(all(test, windows))]
+    #[expect(
+        dead_code,
+        reason = "Retained deterministic test probe; no current test case invokes this entry"
+    )]
     pub(in crate::store) fn set_after_run_source_for_test(
         &mut self,
         hook: Box<dyn FnOnce() + Send>,

@@ -41,7 +41,4 @@ impl NextRetainedAResidentSourceData<'_> {
     pub(in crate::store) fn saved_data(&self) -> &Arc<SavedV2RetainedAction> {
         self.saved
     }
-    pub(in crate::store) fn resources(&self) -> &V2TextReadResources {
-        self.saved.resources()
-    }
 }

@@ -158,6 +158,13 @@ impl PrivateIndexPathData {
         let old = self.nodes.last().ok_or(PrivateIndexError::Dependency)?;
         rewrite_private_leaf_data(&old.node(self.context), replacement, old.placement)
     }
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retained branch-geometry reference with no owning production consumer; authenticated descent and leaf rewriting remain active."
+        )
+    )]
     pub(in crate::store) fn boundary_page_data(
         &self,
         level: usize,
@@ -175,6 +182,13 @@ impl PrivateIndexPathData {
     /// Exactly one extra boundary child may be opened at a splitting level. Authentication
     /// and real descriptor checks are mandatory; neither next-lower minus one nor a caller
     /// summary can invent that unchanged child's maximum. Drop scratch before next level.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retained branch-geometry reference with no owning production consumer; authenticated descent and leaf rewriting remain active."
+        )
+    )]
     pub(in crate::store) fn rewrite_branch_data(
         &self,
         level: usize,
