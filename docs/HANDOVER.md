@@ -1,20 +1,32 @@
 # Mewtual; Handover
 
-## Studio backlog composition (16 November; validation in progress)
+## Studio backlog composition (16 November; complete CI pending)
 
-PR83 is being composed with the consolidated Chat V2 prerequisite stack. The
-merge preserves Studio's sealed local departure and the later native-mode,
-route, close, unlock/video-retirement and continuity-revision fences together.
-The foundation Server constructors and genuine join fixtures remain intact;
-Studio snapshot caching adds its field and initializes it in each constructor.
+PR83 is composed with the consolidated Chat V2 prerequisite stack. The merge
+preserves Studio's sealed local departure and the later native-mode, route,
+close, unlock/video-retirement and continuity-revision fences together.
+Foundation Server constructors and genuine join fixtures remain intact.
+Studio snapshot state is initialized in every constructor, including the legacy
+fixture, and preserved with the same original across a refused founder handoff.
 
-All3507 frontend tests pass, including three new combined stale-route/close
-regressions through real App handlers with mocked I/O. The88 focused cases,
-root/native formatting and baseline-relative whitespace checks also pass.
+All 3,507 frontend tests pass against the locked Vite 6.4.6 and DOMPurify 3.4.17
+installation. Svelte checking reports zero errors/warnings; the production build,
+standard browser flows and Studio attachment/playback/loop/post/deck flow pass.
+The latter uses the real localhost Svelte fixture at 900 ? 640; Art and Music
+screenshots were inspected. These are mocked native boundaries, not physical
+network/audio acceptance.
+
+After clearing only the App package's shared artifacts and confirming a fresh
+compile, all 18 exact Studio/backend cases pass. Three new native capacity cases,
+root and native all-target/all-feature strict Clippy, the separate default native
+compile check, root/native formatting and both static invariant gates also pass.
+An earlier cached test executable and the interrupted broad epoch-stress run are
+not counted as current-source evidence. Complete fresh backend/native CI remains
+required before merging; the named slow catch-up cost case stays deferred to
+final Chat V2 acceptance.
+
 Scoped design and resolved-diff review found no remaining blocker/high/medium.
-Root/native focused checks, strict/static checks, production build and complete
-fresh CI remain pending. This is not native authorization or disk-durability
-acceptance. The original reviewed feature scope is retained below.
+The original reviewed feature scope is retained below. Chat V2 remains disabled.
 
 ## Studio save, departure and performance pass (2026-10-30, PR #83, branch `lab-performance-pass`)
 

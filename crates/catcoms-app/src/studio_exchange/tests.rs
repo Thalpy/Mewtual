@@ -253,6 +253,7 @@ impl Pair {
                     admin_chat_ledger: Default::default(),
                     delivery_snapshot_revision: 0,
                     devices_sig: None,
+                    studio_saved_snapshot: None,
                     cache: Default::default(),
                 }
             } else {
