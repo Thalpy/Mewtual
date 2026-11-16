@@ -22,7 +22,9 @@ pub(super) fn worker_retirement_fixture(family: usize, number: u64) -> WorkerRet
     f.accepted
         .prepare_retirement_data(store, owner.source())
         .unwrap();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let mut prepared = Some(prepare_close(&f, &basis));
     let mut closed = None;
     close(&f, &basis, &mut prepared, &mut closed).unwrap();
@@ -503,7 +505,9 @@ fn actual_admitted_retirement_finishes_after_stop_but_stop_between_phases_keeps_
             owner.warm_scope().unwrap().revocation().revoke();
             t.f.accepted.run_retirement_completion(marker).unwrap();
             assert!(store.with_v2_text_current(&owner, |_| Ok(())).is_err());
-            drop(owner);
+            {
+                let _ended_view = owner;
+            };
             assert!(t.f.accepted.saved_retirement_completion().is_ok());
         } else {
             let marker = deletion_admission(&t).unwrap();
@@ -512,7 +516,9 @@ fn actual_admitted_retirement_finishes_after_stop_but_stop_between_phases_keeps_
             owner.warm_scope().unwrap().revocation().revoke();
             t.f.accepted.run_retirement_deletion(marker).unwrap();
             assert!(store.with_v2_text_current(&owner, |_| Ok(())).is_err());
-            drop(owner);
+            {
+                let _ended_view = owner;
+            };
             assert!(t.f.accepted.ready_retirement_completion().is_ok());
             assert!(t.f.accepted.saved_retirement_completion().is_err());
             assert_eq!(std::fs::read(wal(&t)).unwrap(), wd[..]);

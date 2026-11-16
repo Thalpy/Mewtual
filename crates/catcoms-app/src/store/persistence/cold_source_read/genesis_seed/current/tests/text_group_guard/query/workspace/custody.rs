@@ -13,7 +13,9 @@ fn actual_workspace_read_rejects_another_vault_without_detaching_its_source_or_l
     let mut admitted_a = read_workspace(&first, &lane_a, &mut prepared_a, &query_a);
     let owner = first.owner.borrow_current().unwrap();
     let head_a = owner.source().source().capture.target.join("head.bin");
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
 
     let second = super::super::super::promotion::promoted_text_fixture(0, 0x7f961);
     let selected_b = selected_capture(&second);

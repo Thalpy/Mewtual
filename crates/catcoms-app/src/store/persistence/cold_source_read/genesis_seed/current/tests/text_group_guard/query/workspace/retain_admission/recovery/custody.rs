@@ -112,7 +112,9 @@ fn actual_scope_stop_after_recovery_read_or_repair_or_scratch_admission_preserve
             let repair = repair_admission(&f, &recovery);
             let owner = f.original.owner.borrow_current().unwrap();
             owner.warm_scope().unwrap().revocation().revoke();
-            drop(owner);
+            {
+                let _ended_view = owner;
+            };
             recovery.run_repair(repair).unwrap();
             assert!(recovery.has_completed_repair_data());
             assert!(recovery.install_into(&mut f.transaction).unwrap());
@@ -122,7 +124,9 @@ fn actual_scope_stop_after_recovery_read_or_repair_or_scratch_admission_preserve
             let scratch = scratch_admission(&f, &recovery);
             let owner = f.original.owner.borrow_current().unwrap();
             owner.warm_scope().unwrap().revocation().revoke();
-            drop(owner);
+            {
+                let _ended_view = owner;
+            };
             recovery.run_scratch(scratch).unwrap();
             assert!(recovery.has_completed_scratch_data());
             assert!(recovery.install_into(&mut f.transaction).unwrap());

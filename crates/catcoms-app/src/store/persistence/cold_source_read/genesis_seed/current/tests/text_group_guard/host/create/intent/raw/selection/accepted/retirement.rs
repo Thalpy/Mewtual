@@ -13,7 +13,9 @@ fn actual_three_family_host_closes_and_detaches_original_roots_without_repeating
         let original = text_fixture(family, 0x80300 + family as u64);
         let owner = original.owner.borrow_current().unwrap();
         let target = owner.source().source().capture.target.to_path_buf();
-        drop(owner);
+        {
+            let _ended_view = owner;
+        };
         let mut host = PreparedV2TextHost::from_read(
             PreparedV2TextRead::from_original_owner(original.owner),
             host_policy(),
@@ -97,7 +99,9 @@ fn actual_host_late_scope_stop_after_root_close_releases_own_readers_and_preserv
     let owner = original.owner.borrow_current().unwrap();
     let target = owner.source().source().capture.target.to_path_buf();
     let revoke = owner.warm_scope().unwrap().revocation();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let mut host = PreparedV2TextHost::from_read(
         PreparedV2TextRead::from_original_owner(original.owner),
         host_policy(),

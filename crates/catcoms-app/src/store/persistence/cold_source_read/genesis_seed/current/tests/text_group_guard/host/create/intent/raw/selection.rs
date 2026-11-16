@@ -38,7 +38,9 @@ fn actual_three_family_host_selects_durable_s_once_and_retries_preserve_original
             .clone();
         let owner = original.owner.borrow_current().unwrap();
         let target = owner.source().source().capture.target.to_path_buf();
-        drop(owner);
+        {
+            let _ended_view = owner;
+        };
         let mut host = PreparedV2TextHost::from_read(
             PreparedV2TextRead::from_original_owner(original.owner),
             host_policy(),

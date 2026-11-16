@@ -40,7 +40,9 @@ fn actual_b_missing_candidate_preserves_whole_s_then_real_candidate_allows_trans
         .unwrap();
     assert_eq!(std::fs::read(target.join("head.bin")).unwrap(), before_head);
     assert_eq!(std::fs::read(target.join("text.wal")).unwrap(), before_wal);
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     input
         .as_mut()
         .unwrap()

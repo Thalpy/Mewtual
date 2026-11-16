@@ -50,7 +50,9 @@ fn retry_stage(f: &mut IntentFixture) -> Result<(), AppError> {
             &mut admitted,
         )
     });
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     drop(lease);
     if let Some(admitted) = admitted {
         f.intent.run_stage(admitted)
@@ -248,7 +250,9 @@ fn actual_prefix_continuation_admitted_before_stop_finishes_and_releases_all_nat
         let stage = stage_i(&f);
         let owner = f.original.owner.borrow_current().unwrap();
         owner.warm_scope().unwrap().revocation().revoke();
-        drop(owner);
+        {
+            let _ended_view = owner;
+        };
         f.intent.run_stage(stage).unwrap();
         assert!(f.intent.has_ready_data() && !f.intent.has_saved_data());
         assert_eq!(std::fs::read(dir.join("head.bin")).unwrap(), a);

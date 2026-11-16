@@ -10,8 +10,8 @@ fn validate_saved(f: &RetainFixture) -> Result<(), AppError> {
     let saved = f.transaction.saved_retained_action()?;
     let resources = saved.resources().clone();
     store.with_v2_text_current(&owner, |a| {
-        let mut guard = store.lock_v2_text_current_group(a, &resources)?;
-        saved.validate_selected_under_current_guard(&mut guard)
+        let guard = store.lock_v2_text_current_group(a, &resources)?;
+        saved.validate_selected_under_current_guard(&guard)
     })
 }
 
@@ -33,7 +33,9 @@ fn actual_a_ready_and_saved_survive_lost_returns_without_another_nonce_or_head_r
     f.transaction
         .prepare_candidates(store, owner.source(), &mut NeverRng)
         .unwrap();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let stage = stage_admission(&f);
     f.transaction.run_stage(stage).unwrap();
     assert_eq!(std::fs::read(target.join("head.bin")).unwrap(), old_head);
@@ -51,7 +53,9 @@ fn actual_a_ready_and_saved_survive_lost_returns_without_another_nonce_or_head_r
     f.transaction
         .prepare_candidates(store, owner.source(), &mut NeverRng)
         .unwrap();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     // Recover from the actual cached terminal result, not another Stage/Commit permit.
     validate_saved(&f).unwrap();
     assert_eq!(std::fs::read(target.join("head.bin")).unwrap(), selected);

@@ -81,7 +81,9 @@ fn actual_ready_a_holds_wal_before_source_id3_and_rejects_replacement_without_ad
     );
     restore_control(&wal, &moved);
     drop(lease);
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let commit = commit_admission(&f);
     f.transaction.run_commit(commit).unwrap();
     assert!(f.transaction.saved_retained_action().is_ok());
@@ -129,7 +131,9 @@ fn actual_ready_i_holds_wi_before_source_id3_and_rejects_replacement_without_adm
     );
     restore_control(&wal, &moved);
     drop(lease);
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let commit = commit_i(&f);
     f.intent.run_commit(commit).unwrap();
     validate_saved_i(&f).unwrap();

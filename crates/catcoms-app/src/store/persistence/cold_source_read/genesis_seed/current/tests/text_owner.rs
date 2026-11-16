@@ -69,7 +69,9 @@ fn actual_text_owner_requires_settlement_and_origin_does_not_retain_original_rea
     drop(preparation);
     // Drop actual source/node while the Core-facing original observer still lives. The
     // SPECIFIC source invoice must drain; aggregation of unrelated refunds cannot pass.
-    drop(loan);
+    {
+        let _ended_view = loan;
+    };
     drop(owned);
     assert!(read_dropped.load(Ordering::SeqCst));
     assert!(!core_negative.is_live());
@@ -91,7 +93,9 @@ fn actual_scope_writer_or_task_revocation_closes_original_text_origin_while_node
             .unwrap();
         let store = f.layout.checked_store().unwrap();
         let loan = current.text_owner_ref().unwrap();
-        drop(loan);
+        {
+            let _ended_view = loan;
+        };
         let owned = V2TextOwnedCurrent::from_warm(current);
         let loan = owned.borrow_current().unwrap();
         let preparation = PreparedV2TextSourceObserver::prepare(store, &loan).unwrap();

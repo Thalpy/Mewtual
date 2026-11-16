@@ -89,13 +89,17 @@ fn actual_token_query_caches_same_affine_reader_before_lost_return_and_final_use
     let owner = original.owner.borrow_current().unwrap();
     assert!(PreparedV2TextQueryLease::prepare(store, owner.source(), &query).is_err());
     assert!(PreparedV2TextTokenQueryCapture::prepare(store, owner.source(), &query).is_err());
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let admitted = admit_query(&original, &mut query, &mut reader, &mut capture);
     assert_eq!(text_query_registry_counts_for_test(store), (1, 1));
     let owner = original.owner.borrow_current().unwrap();
     assert!(PreparedV2TextQueryLease::prepare(store, owner.source(), &query).is_err());
     assert!(PreparedV2TextTokenQueryCapture::prepare(store, owner.source(), &query).is_err());
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     query.fail_after_completed_for_test();
     assert!(query.run(admitted).is_err());
     assert!(query.has_completed_data());
@@ -105,7 +109,9 @@ fn actual_token_query_caches_same_affine_reader_before_lost_return_and_final_use
     let owner = original.owner.borrow_current().unwrap();
     assert!(PreparedV2TextQueryLease::prepare(store, owner.source(), &query).is_err());
     assert!(PreparedV2TextTokenQueryCapture::prepare(store, owner.source(), &query).is_err());
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     assert_eq!(text_query_registry_counts_for_test(store), (1, 1));
     drop(reader);
     assert_eq!(text_query_registry_counts_for_test(store), (1, 1));
@@ -128,7 +134,9 @@ fn actual_token_query_caches_same_affine_reader_before_lost_return_and_final_use
     let mut reader = PreparedV2TextQueryLease::prepare(store, owner.source(), &query).unwrap();
     let mut capture =
         Some(PreparedV2TextTokenQueryCapture::prepare(store, owner.source(), &query).unwrap());
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let admitted = admit_query(&original, &mut query, &mut reader, &mut capture);
     query.run(admitted).unwrap();
     validate_query(&original, &query);
@@ -165,7 +173,9 @@ fn actual_late_query_capture_refusal_keeps_files_and_os_lease_in_one_outside_bun
         .share_mode(0)
         .open(&head_path)
         .is_err());
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     drop(resources);
     drop(selected);
     let TextFixture {
@@ -247,7 +257,9 @@ fn actual_query_rechecks_selected_parent_before_pin_or_retained_source_files_ope
         "broken selection is never a miss"
     );
     std::fs::write(path, actual).unwrap();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let admitted = admit_query(&original, &mut query, &mut reader, &mut capture);
     query.run(admitted).unwrap();
     validate_query(&original, &query);
@@ -384,7 +396,9 @@ fn actual_open_query_files_keep_vault_busy_until_source_and_worker_cleanup_drain
     let admitted = admit_query(&original, &mut query, &mut reader, &mut capture);
     let owner = original.owner.borrow_current().unwrap();
     let head = owner.source().source().capture.target.join("head.bin");
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let (started_tx, started_rx) = sync_channel(0);
     let (release_tx, release_rx) = sync_channel(0);
     query.set_after_run_source_for_test(Box::new(move || {

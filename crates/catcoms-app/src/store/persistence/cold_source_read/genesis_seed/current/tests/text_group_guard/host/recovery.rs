@@ -16,7 +16,9 @@ fn actual_three_family_host_recovers_partial_or_complete_promotion_without_resea
         let source = std::fs::read(target.join("source.bin")).unwrap();
         let head = std::fs::read(target.join("head.bin")).unwrap();
         let scope = std::fs::read(store.dir.join("chat-admissions.bin")).unwrap();
-        drop(owner);
+        {
+            let _ended_view = owner;
+        };
         let entries = sdk_entries();
         let mut host = PreparedV2TextHost::from_read(
             PreparedV2TextRead::from_original_owner(original.owner),
@@ -58,7 +60,9 @@ fn actual_host_preserves_wrong_child_instead_of_falling_back_to_scratch() {
     let owner = original.owner.borrow_current().unwrap();
     let target = owner.source().source().capture.target.to_path_buf();
     let head = std::fs::read(target.join("head.bin")).unwrap();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let entries = sdk_entries();
     let mut host = PreparedV2TextHost::from_read(
         PreparedV2TextRead::from_original_owner(original.owner),

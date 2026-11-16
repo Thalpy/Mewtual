@@ -72,7 +72,9 @@ fn retry(t: &mut NextCreateFixture) -> Result<(), AppError> {
             &mut admitted,
         )
     });
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     if let Some(marker) = admitted {
         t.transaction.as_mut().unwrap().run_stage(marker)?;
         admission
@@ -98,7 +100,9 @@ fn actual_zero_partial_and_complete_next_wa_stage_retry_same_original_then_selec
             .unwrap()
             .prepare_candidates(store, owner.source(), &mut NeverRng)
             .unwrap();
-        drop(owner);
+        {
+            let _ended_view = owner;
+        };
         retry(&mut t).unwrap();
         assert!(!path.exists());
         let target = t

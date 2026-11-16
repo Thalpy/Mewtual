@@ -26,7 +26,9 @@ fn byte_different_initial_selector_cannot_replace_the_seed_bound_clear_predecess
     assert_ne!(changed, old);
     std::fs::write(&head_path, &changed).unwrap();
     assert!(!target.join("text.wal").exists());
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     drop(selected);
 
     let selected = selected_capture(&original);
@@ -100,7 +102,9 @@ fn corrupt_wrong_context_and_future_seed_controls_are_preserved_without_ready() 
             _ => unreachable!(),
         };
         std::fs::write(&path, &hostile).unwrap();
-        drop(owner);
+        {
+            let _ended_view = owner;
+        };
         let admitted = read_workspace(&original, &lane, &mut prepared, &query);
         assert!(prepared.run_read(admitted).is_err());
         assert!(!prepared.has_ready_data());

@@ -1794,8 +1794,7 @@ fn lifecycle3_strict_cold_open_never_adopts_equal_replacement_after_inspection()
             if replaced.load(Ordering::Acquire) {
                 assert!(opened.is_err());
             } else {
-                assert!(cfg!(windows));
-                assert!(opened.is_ok());
+                assert!(cfg!(windows) && opened.is_ok());
             }
             drop(opened);
             assert_eq!(pool.charged_for_test(), 0);

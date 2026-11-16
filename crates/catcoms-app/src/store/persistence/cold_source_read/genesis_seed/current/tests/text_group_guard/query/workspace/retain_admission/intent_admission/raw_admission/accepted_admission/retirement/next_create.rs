@@ -117,7 +117,9 @@ pub(super) fn next_create_fixture(family: usize, number: u64) -> NextCreateFixtu
         &resident,
     )
     .unwrap();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     NextCreateFixture {
         transaction: None,
         predecessor: None,
@@ -165,7 +167,9 @@ pub(super) fn prepare_completed_predecessor(t: &mut NextCreateFixture) {
         )
         .unwrap(),
     );
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let mut admitted = None;
     read_completed(t, &mut capture, &mut admitted).unwrap();
     assert!(capture.is_none());
@@ -279,7 +283,9 @@ pub(super) fn prepare_next_a(t: &mut NextCreateFixture, number: u64) {
             &mut ChaCha20Rng::seed_from_u64(number + 2),
         )
         .unwrap();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     // Actual next-A has its own exact completed predecessor. No large read-plan
     // alias or obsolete-WC source remains necessary for continuation after WA.
     drop(t.workspace.take());
@@ -370,7 +376,9 @@ fn actual_completed_wc_role_keeps_clear_strict_and_retains_bound_after_lost_retu
         t.query.as_ref().unwrap(),
     )
     .unwrap();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let clear_read = read_workspace(&t.original, &t.lane, &mut clear, t.query.as_ref().unwrap());
     assert!(clear.run_read(clear_read).is_err());
     assert!(!clear.has_ready_data());
@@ -396,7 +404,9 @@ fn actual_completed_wc_role_keeps_clear_strict_and_retains_bound_after_lost_retu
         )
         .unwrap(),
     );
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let mut admitted = None;
     read_completed(&mut t, &mut capture, &mut admitted).unwrap();
     t.workspace.as_mut().unwrap().fail_after_ready_for_test();
@@ -439,7 +449,9 @@ fn actual_completed_parent_late_capture_stop_retains_files_lease_and_real_end_un
         )
         .unwrap(),
     );
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let mut admitted = None;
     assert!(read_completed(&mut t, &mut capture, &mut admitted).is_err());
     assert!(admitted.is_none() && capture.as_ref().unwrap().has_source_for_test());
@@ -491,7 +503,9 @@ fn actual_next_a_lost_wa_rename_continues_from_same_wa_without_requiring_obsolet
         .unwrap()
         .prepare_candidates(store, owner.source(), &mut NeverRng)
         .unwrap();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let stage = next_stage(&t);
     t.transaction.as_mut().unwrap().run_stage(stage).unwrap();
     assert_eq!(std::fs::read(target.join("text.wal")).unwrap(), wa);

@@ -41,7 +41,9 @@ fn actual_three_family_host_selects_original_unsigned_i_and_preserves_it_across_
         let target = owner.source().source().capture.target.to_path_buf();
         let source = std::fs::read(target.join("source.bin")).unwrap();
         let admissions = std::fs::read(store.dir.join("chat-admissions.bin")).unwrap();
-        drop(owner);
+        {
+            let _ended_view = owner;
+        };
         let mut host = PreparedV2TextHost::from_read(
             PreparedV2TextRead::from_original_owner(original.owner),
             host_policy(),

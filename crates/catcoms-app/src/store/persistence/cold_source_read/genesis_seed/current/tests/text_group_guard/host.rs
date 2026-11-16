@@ -46,7 +46,9 @@ fn actual_three_family_host_empty_promotion_preserves_original_scope_source_and_
             })
             .unwrap();
         drop(preparation);
-        drop(owner);
+        {
+            let _ended_view = owner;
+        };
         let entries = sdk_entries();
         let mut host = PreparedV2TextHost::from_read(
             PreparedV2TextRead::from_original_owner(original.owner),
@@ -216,7 +218,9 @@ fn actual_host_cancel_before_first_promotion_cannot_create_or_rewrite_any_contro
     let target = owner.source().source().capture.target.to_path_buf();
     let head = std::fs::read(target.join("head.bin")).unwrap();
     let scope = std::fs::read(store.dir.join("chat-admissions.bin")).unwrap();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let entries = sdk_entries();
     let mut host = PreparedV2TextHost::from_read(
         PreparedV2TextRead::from_original_owner(original.owner),

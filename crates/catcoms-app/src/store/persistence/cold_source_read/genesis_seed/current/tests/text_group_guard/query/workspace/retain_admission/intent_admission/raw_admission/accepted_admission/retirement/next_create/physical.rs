@@ -13,7 +13,9 @@ fn read_ready(t: &mut NextCreateFixture) {
         )
         .unwrap(),
     );
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let mut admitted = None;
     read_completed(t, &mut capture, &mut admitted).unwrap();
     assert!(capture.is_none());
@@ -84,7 +86,9 @@ fn actual_completed_predecessor_rechecks_same_wal_bytes_after_final_source_befor
             .unwrap(),
     );
     std::fs::write(&wal, &original).unwrap();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     bind_completed(&mut t, false).unwrap();
     assert!(t.predecessor.is_some());
 }
@@ -179,7 +183,9 @@ fn actual_completed_parent_metadata_shortfall_preserves_original_inputs_then_sam
         .unwrap(),
     );
     assert_eq!(pool.charged_for_test(), before + required);
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     read_ready(&mut t);
     bind_completed(&mut t, false).unwrap();
     assert!(t.predecessor.is_some());

@@ -51,7 +51,9 @@ fn accepted_fixture(family: usize, number: u64) -> AcceptedFixture {
             &mut ChaCha20Rng::seed_from_u64(number + 5),
         )
         .unwrap();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     AcceptedFixture {
         accepted,
         lane,
@@ -204,7 +206,9 @@ fn actual_b_lost_outcomes_and_uncertain_renames_reuse_original_frames_with_never
             f.accepted
                 .prepare_candidates(store, owner.source(), &mut NeverRng)
                 .unwrap();
-            drop(owner);
+            {
+                let _ended_view = owner;
+            };
             let stage = stage_b(&f);
             f.accepted.run_stage(stage).unwrap();
             assert_eq!(std::fs::read(target.join("text.wal")).unwrap(), wal);

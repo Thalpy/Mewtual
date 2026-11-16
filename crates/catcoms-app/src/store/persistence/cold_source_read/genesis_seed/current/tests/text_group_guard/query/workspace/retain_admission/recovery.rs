@@ -309,13 +309,17 @@ fn actual_recovery_whole_plan_and_shared_capture_effect_claims_remain_affine() {
         PreparedV2TextRetainRecoveryCapture::prepare(store, owner.source(), &recovery).is_err()
     );
     drop(capture);
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let read = read_admission(&f, &mut recovery);
     let owner = f.original.owner.borrow_current().unwrap();
     assert!(
         PreparedV2TextRetainRecoveryCapture::prepare(store, owner.source(), &recovery).is_err()
     );
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     recovery.run_read(read).unwrap();
     let owner = f.original.owner.borrow_current().unwrap();
     let lease = PreparedV2TextRetainRepairLease::prepare(
@@ -334,13 +338,17 @@ fn actual_recovery_whole_plan_and_shared_capture_effect_claims_remain_affine() {
         PreparedV2TextRetainRecoveryCapture::prepare(store, owner.source(), &recovery).is_err()
     );
     drop(lease);
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let repair = repair_admission(&f, &recovery);
     let owner = f.original.owner.borrow_current().unwrap();
     assert!(
         PreparedV2TextRetainRecoveryCapture::prepare(store, owner.source(), &recovery).is_err()
     );
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     recovery.run_repair(repair).unwrap();
     let capture = {
         let owner = f.original.owner.borrow_current().unwrap();
@@ -415,7 +423,9 @@ fn actual_late_recovery_capture_refusal_keeps_files_lease_and_writer_end_until_o
         .share_mode(0)
         .open(&head)
         .is_err());
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     drop(resources);
     let RetainFixture {
         transaction,

@@ -40,7 +40,9 @@ fn actual_other_vault_guard_refuses_ready_a_i_s_and_saved_s_before_original_payl
     let owner = foreign.owner.borrow_current().unwrap();
     let paid = PreparedV2TextParentCapture::prepare(store, owner.source()).unwrap();
     let foreign_resources = paid.resources().clone();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     {
         let mut f = retain_fixture(0, 0x7fee0);
         let stage = stage_admission(&f);

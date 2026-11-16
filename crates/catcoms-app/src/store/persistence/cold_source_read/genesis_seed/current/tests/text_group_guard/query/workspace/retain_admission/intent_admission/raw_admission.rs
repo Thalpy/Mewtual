@@ -48,7 +48,9 @@ fn raw_fixture(family: usize, number: u64) -> RawFixture {
             &mut ChaCha20Rng::seed_from_u64(number + 4),
         )
         .unwrap();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     RawFixture {
         signature,
         lane,
@@ -161,7 +163,9 @@ fn actual_three_family_s_stage_keeps_i_selected_until_fresh_commit_selects_origi
             })
             .is_err());
         assert!(read.selected_data().is_none());
-        drop(owner);
+        {
+            let _ended_view = owner;
+        };
         f.signature.run_stage(stage).unwrap();
         assert_eq!(std::fs::read(target.join("head.bin")).unwrap(), selected_i);
         assert_ne!(std::fs::read(target.join("text.wal")).unwrap(), wal_i);
@@ -204,7 +208,9 @@ fn actual_s_constructor_refuses_absent_raw_and_preserves_the_same_whole_unsigned
         .unwrap()
         .existing_raw_signature_data()
         .is_err());
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let mut restored = IntentFixture {
         intent: input.take().unwrap(),
         lane,
@@ -246,7 +252,9 @@ fn actual_s_lost_results_and_uncertain_renames_reuse_exact_original_candidates_w
             f.signature
                 .prepare_candidates(store, owner.source(), &mut NeverRng)
                 .unwrap();
-            drop(owner);
+            {
+                let _ended_view = owner;
+            };
             let stage = stage_s(&f);
             f.signature.run_stage(stage).unwrap();
             assert_eq!(std::fs::read(target.join("text.wal")).unwrap(), wal);

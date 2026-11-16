@@ -224,7 +224,9 @@ fn actual_three_family_promotion_stages_before_fresh_commit_and_then_reads_selec
             .unwrap();
         drop(selected);
         drop(resources);
-        drop(owner);
+        {
+            let _ended_view = owner;
+        };
         let mut lane = Some(f.lane);
         finish_promotion_lane(&f.original, &f.prepared, &mut lane);
     }
@@ -325,7 +327,9 @@ fn actual_promotion_admission_retains_same_physical_session_after_original_store
         })
         .unwrap();
     assert!(lease.is_none());
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let PromotionFixture {
         prepared,
         lane,
@@ -496,7 +500,9 @@ fn actual_open_stage_file_and_failed_worker_hold_session_until_all_file_cleanup_
             guard.admit_text_promotion_stage_into(&f.lane, &f.prepared, &mut lease, &mut admitted)
         })
         .unwrap();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     drop(resources);
     let (started_tx, started_rx) = sync_channel(0);
     let (release_tx, release_rx) = sync_channel(0);

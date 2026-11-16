@@ -37,7 +37,9 @@ fn inputs(number: u64) -> Inputs {
         .unwrap();
     reader.drain_unused_outside_writers();
     query.run(admitted.take().unwrap()).unwrap();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let unsigned = PreparedV2UnsignedOriginalCustody::prepare_for_test(
         store,
         &f.original.owner,

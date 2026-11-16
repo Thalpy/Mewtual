@@ -251,7 +251,9 @@ fn actual_post_unlink_barrier_retry_requires_cached_unlink_and_install_is_idempo
     drop(capture);
     drop(resources);
     drop(fresh);
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let admitted = admit_scratch(&f, &mut scratch);
     scratch.run(admitted).unwrap();
     scratch.install_cleanup_into(&mut f.prepared).unwrap();
@@ -275,7 +277,9 @@ fn actual_repair_lost_ready_return_survives_and_install_does_not_repeat_io() {
     let mut repair =
         PreparedV2TextPromotionSeedRepair::prepare(store, owner.source(), &f.prepared).unwrap();
     repair.fail_after_ready_for_test();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let admitted = admit_repair(&f, &mut repair);
     assert!(repair.run(admitted).is_err());
     assert!(f.prepared.ready_selection().is_err());
@@ -299,7 +303,9 @@ fn actual_scope_cancellation_after_repair_and_scratch_admission_keeps_finite_res
         let revocation = owner.warm_scope().unwrap().revocation();
         let mut repair =
             PreparedV2TextPromotionSeedRepair::prepare(store, owner.source(), &f.prepared).unwrap();
-        drop(owner);
+        {
+            let _ended_view = owner;
+        };
         let admitted = admit_repair(&f, &mut repair);
         revocation.revoke();
         repair.run(admitted).unwrap();
@@ -322,7 +328,9 @@ fn actual_scope_cancellation_after_repair_and_scratch_admission_keeps_finite_res
         let revocation = owner.warm_scope().unwrap().revocation();
         let mut scratch =
             PreparedV2TextPromotionScratch::prepare(store, owner.source(), &f.prepared).unwrap();
-        drop(owner);
+        {
+            let _ended_view = owner;
+        };
         let admitted = admit_scratch(&f, &mut scratch);
         revocation.revoke();
         scratch.run(admitted).unwrap();

@@ -98,7 +98,9 @@ fn actual_complete_main_repairs_closed_partial_child_without_resealing_or_select
     drop(capture);
     drop(resources);
     drop(repair);
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     commit_ready(&mut f);
     let mut lane = Some(f.lane);
     finish_promotion_lane(&f.original, &f.prepared, &mut lane);
@@ -145,7 +147,9 @@ fn actual_late_seed_capture_error_keeps_files_and_os_lease_coupled_until_outside
             .is_err(),
         "the actual captured MAIN File remains held after the late proof failure"
     );
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     drop(resources);
     let PromotionFixture {
         prepared,
@@ -226,7 +230,9 @@ fn actual_partial_pre_main_scratch_cleanup_reuses_original_seed_bytes_with_fresh
     drop(capture);
     drop(resources);
     drop(scratch);
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     stage_and_commit(&mut f);
     let complete_seed = std::fs::read(target.join("text.seed")).unwrap();
     assert!(

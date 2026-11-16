@@ -218,7 +218,9 @@ fn second_b(
             &mut ChaCha20Rng::seed_from_u64(number + 3),
         )
         .unwrap();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     select_i(t, &mut intent);
     sign_i(t, &mut intent);
     let owner = t.original.owner.borrow_current().unwrap();
@@ -234,7 +236,9 @@ fn second_b(
             &mut ChaCha20Rng::seed_from_u64(number + 4),
         )
         .unwrap();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     select_s(t, &mut signature);
     let candidate_counts = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
     let observation = signature.observe_candidate_work_for_test(candidate_counts.clone(), false);
@@ -265,7 +269,9 @@ fn second_b(
             &mut ChaCha20Rng::seed_from_u64(number + 5),
         )
         .unwrap();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     select_b(t, &mut accepted);
     accepted
 }
@@ -410,7 +416,9 @@ fn actual_three_family_second_create_reuses_same_verifier_and_one_new_sdk_fee_wi
                                 })
                                 .unwrap();
                         }
-                        drop(owner);
+                        {
+                            let _ended_view = owner;
+                        };
                         drop(resources);
                         drop(saved);
                         let selected = selected_capture(&t.original);
@@ -533,7 +541,9 @@ fn actual_next_unsigned_refuses_foreign_resident_and_damaged_saved_a_before_taki
         .unwrap();
     let owner = a.original.owner.borrow_current().unwrap();
     owner.warm_scope().unwrap().revocation().revoke();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     assert!(prepare_unsigned(&mut a, &query, &mut next).is_err());
     assert!(a.resident.is_none() && next.is_some());
     assert_eq!(
@@ -614,7 +624,9 @@ fn actual_domain_stop_after_next_owner_cache_preserves_same_model_and_new_sdk_pa
                     let store = t.original.layout.checked_store().unwrap();
                     let owner = t.original.owner.borrow_current().unwrap();
                     store.with_v2_text_current(&owner, |_| Ok(())).unwrap(); // real native Current stays live
-                    drop(owner);
+                    {
+                        let _ended_view = owner;
+                    };
                     for _ in 0..3 {
                         assert!(prepare_unsigned(&mut t, &query, &mut next).is_err());
                     }

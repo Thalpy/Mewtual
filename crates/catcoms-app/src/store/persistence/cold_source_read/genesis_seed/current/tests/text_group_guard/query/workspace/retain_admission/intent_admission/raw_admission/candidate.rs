@@ -77,7 +77,9 @@ fn actual_three_family_candidate_requires_selected_s_and_retries_one_original_wi
         if family == 0 {
             let owner = f.original.owner.borrow_current().unwrap();
             owner.warm_scope().unwrap().revocation().revoke();
-            drop(owner);
+            {
+                let _ended_view = owner;
+            };
             assert!(f
                 .signature
                 .materialize_candidate_after_saved_s(store, &f.original.owner)

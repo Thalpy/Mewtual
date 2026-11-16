@@ -12,7 +12,9 @@ fn actual_three_family_host_retains_the_same_packet_and_never_resigns_after_sele
         let target = owner.source().source().capture.target.to_path_buf();
         let source = std::fs::read(target.join("source.bin")).unwrap();
         let admission = std::fs::read(store.dir.join("chat-admissions.bin")).unwrap();
-        drop(owner);
+        {
+            let _ended_view = owner;
+        };
         let mut host = PreparedV2TextHost::from_read(
             PreparedV2TextRead::from_original_owner(original.owner),
             host_policy(),
@@ -75,7 +77,9 @@ fn actual_host_preserves_a_foreign_wal_before_first_retain_admission() {
     let original = text_fixture(0, 0x7f370);
     let owner = original.owner.borrow_current().unwrap();
     let target = owner.source().source().capture.target.to_path_buf();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let mut host = PreparedV2TextHost::from_read(
         PreparedV2TextRead::from_original_owner(original.owner),
         host_policy(),

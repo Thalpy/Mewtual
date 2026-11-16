@@ -206,12 +206,16 @@ fn actual_accepted_query_claims_and_lost_result_preserve_finite_data_across_scop
     let owner = f.original.owner.borrow_current().unwrap();
     assert!(PreparedV2TextAcceptedQueryLease::prepare(store, owner.source(), &query).is_err());
     assert!(PreparedV2TextAcceptedQueryCapture::prepare(store, owner.source(), &query).is_err());
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let admitted = admit_accepted(&f, &mut query, &mut reader, &mut capture);
     let owner = f.original.owner.borrow_current().unwrap();
     assert!(PreparedV2TextAcceptedQueryLease::prepare(store, owner.source(), &query).is_err());
     assert!(PreparedV2TextAcceptedQueryCapture::prepare(store, owner.source(), &query).is_err());
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     query.fail_after_completed_for_test();
     assert!(query.run(admitted).is_err());
     assert!(query.has_completed_data());
@@ -230,7 +234,9 @@ fn actual_accepted_query_claims_and_lost_result_preserve_finite_data_across_scop
     // The original preparer remains alive after real result completion. Its second
     // private claim alias must not duplicate the actual registered affine reader.
     reader.drain_unused_outside_writers();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let (mut stopped, mut stopped_reader, mut stopped_capture) = prepare_accepted(&f);
     let admitted = admit_accepted(&f, &mut stopped, &mut stopped_reader, &mut stopped_capture);
     let owner = f.original.owner.borrow_current().unwrap();
@@ -282,7 +288,9 @@ fn actual_accepted_late_capture_error_keeps_files_native_lease_and_finite_io_cou
         .share_mode(0)
         .open(&head)
         .is_err());
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     drop(resources);
     let RetainFixture {
         transaction,

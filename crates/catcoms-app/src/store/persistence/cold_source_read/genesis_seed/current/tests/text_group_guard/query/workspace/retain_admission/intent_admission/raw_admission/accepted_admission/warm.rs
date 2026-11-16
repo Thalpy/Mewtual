@@ -67,7 +67,9 @@ fn retry_stage(f: &mut AcceptedFixture) -> Result<(), AppError> {
             &mut admitted,
         )
     });
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     drop(lease);
     if let Some(stage) = admitted {
         run_without_key(f, stage)?;
@@ -317,7 +319,9 @@ fn actual_b_prefix_admitted_before_scope_stop_finishes_then_releases_real_files_
     let stage = stage_b(&f);
     let owner = f.original.owner.borrow_current().unwrap();
     owner.warm_scope().unwrap().revocation().revoke();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     run_without_key(&mut f, stage).unwrap();
     assert!(f.accepted.has_ready_data() && !f.accepted.has_saved_data());
     assert_eq!(std::fs::read(&archive).unwrap(), *expected);

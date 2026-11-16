@@ -54,7 +54,9 @@ fn intent_fixture(family: usize, number: u64) -> IntentFixture {
             .unwrap();
         reader.drain_unused_outside_writers();
         query.run(admitted.take().unwrap()).unwrap();
-        drop(owner);
+        {
+            let _ended_view = owner;
+        };
         let unsigned = PreparedV2UnsignedOriginalCustody::prepare_for_test(
             store,
             &f.original.owner,
@@ -96,7 +98,9 @@ fn intent_fixture(family: usize, number: u64) -> IntentFixture {
             &mut ChaCha20Rng::seed_from_u64(number + 3),
         )
         .unwrap();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     IntentFixture {
         intent,
         lane,
@@ -197,7 +201,9 @@ fn actual_three_family_i_stage_keeps_a_selected_then_fresh_commit_selects_only_u
             })
             .is_err());
         assert!(read.selected_data().is_none());
-        drop(owner);
+        {
+            let _ended_view = owner;
+        };
         f.intent.run_stage(admitted).unwrap();
         assert_eq!(std::fs::read(dir.join("head.bin")).unwrap(), a);
         assert_ne!(std::fs::read(dir.join("text.wal")).unwrap(), wal_a);
@@ -229,7 +235,9 @@ fn actual_i_ready_and_saved_survive_lost_returns_and_retries_use_no_new_nonce() 
     f.intent
         .prepare_candidates(store, owner.source(), &mut NeverRng)
         .unwrap();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let stage = stage_i(&f);
     f.intent.run_stage(stage).unwrap();
     assert_eq!(std::fs::read(dir.join("text.wal")).unwrap(), wal);

@@ -163,7 +163,9 @@ fn actual_unsigned_handoff_rejects_another_genuine_sdk_plan_and_preserves_owning
     let head = std::fs::read(target.join("head.bin")).unwrap();
     let wal = std::fs::read(target.join("text.wal")).unwrap();
     let charged = pool.charged_for_test();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     // The narrow Root fixture adapter derives TWO real SDK plans for this SAME A,
     // swaps only inside the otherwise private owning family, checks actual constructor
     // refusal/input preservation, then restores the SAME original and succeeds. It

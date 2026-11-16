@@ -130,7 +130,9 @@ fn actual_workspace_clear_lost_return_binds_only_one_original_without_sdk_or_hea
         .is_err(),
         "one WHOLE paid workspace, including idle Ready tails"
     );
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let admitted = read_workspace(&original, &lane, &mut prepared, &query);
     assert!(lane.workspace_active_for_test());
     prepared.fail_after_ready_for_test();
@@ -305,7 +307,9 @@ fn actual_failed_workspace_capture_couples_files_os_lease_and_actual_lane_end() 
         .share_mode(0)
         .open(&head)
         .is_err());
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     drop(resources);
     drop(selected);
     let TextFixture {

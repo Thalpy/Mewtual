@@ -49,7 +49,9 @@ fn actual_unsigned_plan_intent_is_strict_bounded_data_and_not_a_selected_signing
         source.state,
     )
     .unwrap();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let mut append = None;
     f.owner
         .prepare_append_data_for_test(store, &model, data.action_data().unwrap(), &mut append)

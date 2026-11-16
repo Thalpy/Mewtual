@@ -121,7 +121,9 @@ fn retain_fixture_with_selected(
             &mut ChaCha20Rng::seed_from_u64(number + 2),
         )
         .unwrap();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let fixture = RetainFixture {
         transaction,
         lane,
@@ -192,7 +194,9 @@ fn actual_three_family_a_stage_preserves_o_and_fresh_commit_installs_only_pendin
         let accepted = old.head_data().directory;
         let publications = old.head_data().publications;
         assert!(old.head_data().pending.transaction_data().is_none());
-        drop(owner);
+        {
+            let _ended_view = owner;
+        };
         let admitted = stage_admission(&f);
         f.transaction.run_stage(admitted).unwrap();
         assert_eq!(std::fs::read(target.join("head.bin")).unwrap(), head);
@@ -298,7 +302,9 @@ fn actual_query_io_blocks_a_then_its_cleanup_allows_stage_while_logical_reader_s
         })
         .is_err());
     assert!(blocked.selected_data().is_none());
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     f.transaction.run_stage(admitted.take().unwrap()).unwrap();
     validate_query(&f.original, &query);
     let commit = commit_admission(&f);
@@ -315,7 +321,9 @@ fn actual_scope_stop_after_a_stage_admission_finishes_only_that_stage() {
     let head = owner.source().source().capture.target.join("head.bin");
     let before = std::fs::read(&head).unwrap();
     owner.warm_scope().unwrap().revocation().revoke();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     f.transaction.run_stage(admitted).unwrap();
     assert!(f.transaction.ready_selection().is_ok());
     assert!(f.transaction.saved_retained_action().is_err());
@@ -339,7 +347,9 @@ fn actual_scope_stop_after_a_commit_admission_cannot_erase_its_exact_saved_pendi
     let head = owner.source().source().capture.target.join("head.bin");
     let before = std::fs::read(&head).unwrap();
     owner.warm_scope().unwrap().revocation().revoke();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     f.transaction.run_commit(commit).unwrap();
     assert!(f.transaction.saved_retained_action().is_ok());
     assert_ne!(std::fs::read(head).unwrap(), before);
@@ -361,7 +371,9 @@ fn actual_open_a_wal_file_keeps_store_busy_until_files_lease_and_writer_end_all_
         .capture
         .target
         .join("text.wal.stage.v1");
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let (started_tx, started_rx) = sync_channel(0);
     let (release_tx, release_rx) = sync_channel(0);
     f.transaction.set_work_pause_for_test(
@@ -441,7 +453,9 @@ fn actual_admitted_a_commit_compares_full_original_wal_before_selecting_o() {
     // Deliberately change the SAME file after the real fresh admission. The exact
     // length/native identity can stay equal; the finite worker must compare full bytes.
     std::fs::write(&wal, &changed).unwrap();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     assert!(f.transaction.run_commit(commit).is_err());
     assert!(f.transaction.saved_retained_action().is_err());
     assert_eq!(std::fs::read(target.join("head.bin")).unwrap(), head);
@@ -490,7 +504,9 @@ fn actual_writer_gate_clear_interleaving_cannot_skip_a_new_query_before_next_com
         .open(wal)
         .unwrap();
     drop(wal_file);
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     // Gate has cleared only AFTER actual WAL/helper/File cleanup. A readonly capture
     // may start, but the original control cap remains active during this deterministic
     // interleaving. Its actual finite IO must be observed by the next write admission.
@@ -542,7 +558,9 @@ fn actual_writer_gate_clear_interleaving_cannot_skip_a_new_query_before_next_com
             )
         })
         .unwrap();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     transaction.run_commit(commit.take().unwrap()).unwrap();
     assert!(transaction.saved_retained_action().is_ok());
 }

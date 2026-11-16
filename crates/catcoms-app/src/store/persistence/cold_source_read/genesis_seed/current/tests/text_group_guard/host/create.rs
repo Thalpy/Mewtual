@@ -15,7 +15,9 @@ fn actual_three_family_host_prepares_one_request_and_retries_exact_data_without_
         let target = owner.source().source().capture.target.to_path_buf();
         let rows = std::fs::read(store.dir.join("chat-admissions.bin")).unwrap();
         let source = std::fs::read(target.join("source.bin")).unwrap();
-        drop(owner);
+        {
+            let _ended_view = owner;
+        };
         let mut host = PreparedV2TextHost::from_read(
             PreparedV2TextRead::from_original_owner(original.owner),
             host_policy(),
@@ -75,7 +77,9 @@ fn actual_host_never_prepares_a_new_packet_when_an_unselected_wal_is_present() {
     let original = text_fixture(0, 0x7f320);
     let owner = original.owner.borrow_current().unwrap();
     let target = owner.source().source().capture.target.to_path_buf();
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     let mut host = PreparedV2TextHost::from_read(
         PreparedV2TextRead::from_original_owner(original.owner),
         host_policy(),

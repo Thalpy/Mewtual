@@ -10,7 +10,9 @@ fn actual_three_family_host_selects_wc_after_private_deletion_and_retries_preser
         let original = text_fixture(family, 0x80380 + family as u64);
         let owner = original.owner.borrow_current().unwrap();
         let target = owner.source().source().capture.target.to_path_buf();
-        drop(owner);
+        {
+            let _ended_view = owner;
+        };
         let mut host = PreparedV2TextHost::from_read(
             PreparedV2TextRead::from_original_owner(original.owner),
             host_policy(),

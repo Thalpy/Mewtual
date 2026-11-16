@@ -69,7 +69,9 @@ fn retry_stage(f: &mut RawFixture) -> Result<(), AppError> {
             &mut admitted,
         )
     });
-    drop(owner);
+    {
+        let _ended_view = owner;
+    };
     drop(lease);
     if let Some(admitted) = admitted {
         run_without_key(f, admitted)
@@ -282,7 +284,9 @@ fn actual_s_prefix_admitted_before_stop_finishes_and_releases_all_native_custody
         .unwrap();
         assert_eq!(dispatches.load(Ordering::SeqCst), 0);
         assert!(store.with_v2_text_current(&owner, |_| Ok(())).is_err());
-        drop(owner);
+        {
+            let _ended_view = owner;
+        };
         assert!(f.signature.has_ready_data() && !f.signature.has_saved_data());
         assert_eq!(std::fs::read(dir.join("head.bin")).unwrap(), selected_i);
         assert_idle(&f);
