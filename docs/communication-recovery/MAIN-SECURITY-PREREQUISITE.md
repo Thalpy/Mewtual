@@ -62,3 +62,13 @@ The lifecycle-mutation job receives90 outer minutes instead of60. All68
 mutations, the three-way assignment, restored controls, source-preservation
 guard and individual command deadlines remain unchanged. The previous shard1
 run detected23 mutations but completed only12 restored controls before timeout.
+
+## Foundation validation follow-up
+
+The combined audit and strict checks passed, but both full Root jobs aborted
+in the same Studio page fixture on the default test stack. The reviewed heap
+fixture correction from the later stack is backported without changing its
+assertions or limits. All six affected page tests pass before optimization.
+The later stack's exact reviewed six-package development/test crypto profiles
+are reused to shorten the next full validation; release settings and crypto
+parameters remain unchanged. Fresh complete validation is still required.

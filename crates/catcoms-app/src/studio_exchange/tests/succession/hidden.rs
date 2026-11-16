@@ -201,7 +201,14 @@ async fn discover_and_install(
 
 #[tokio::test]
 async fn studio_discovery_rewinds_hidden_old_tenure_history_into_recovery_never_adopting_it() {
-    let mut p = Pair::new_legacy().await;
+    // This scenario retains several whole peers across successive owner tenures. Keep its
+    // complete future on the heap, as production actor ownership does, rather than embedding
+    // every phase's graph in the registered test's default-stack poll frame.
+    Box::pin(run_hidden_tenure_recovery()).await;
+}
+
+async fn run_hidden_tenure_recovery() {
+    let mut p = Box::pin(Pair::new_legacy()).await;
     let target = target();
     let logical = target.document(&p.alice.group_id()).unwrap();
 
@@ -209,7 +216,7 @@ async fn studio_discovery_rewinds_hidden_old_tenure_history_into_recovery_never_
     p.bob.subscribe_control().await.unwrap();
     let invite = p.alice.mint_invite([46; 16], u64::MAX, vec![]).unwrap();
     let (joined, tick) = tokio::join!(
-        Node::join(
+        Box::pin(Node::join(
             Net::new(p.hub.join(PeerId::from_u64(4))),
             MlsDevice::generate().unwrap(),
             rng(),
@@ -217,7 +224,7 @@ async fn studio_discovery_rewinds_hidden_old_tenure_history_into_recovery_never_
             "C, which holds A's whole history",
             p.alice.local_peer(),
             &invite
-        ),
+        )),
         p.alice.sync_once()
     );
     tick.unwrap();

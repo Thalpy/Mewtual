@@ -55,7 +55,7 @@ jobs:
         # acceptance. With no positive filter, every other workspace test still
         # executes. This intermediate gate is not final unfiltered acceptance.
         run: >-
-          cargo test --all --all-features --
+          cargo test --all --all-features --no-fail-fast --
           --skip cold_provider_transfers_only_one_missing_change_after_ten_thousand_operations
       # WMI accepts independent broad windows/windows-core ranges. A valid lock resolution
       # can mix their incompatible COM interfaces while all Linux builds still pass. Check

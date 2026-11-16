@@ -210,107 +210,115 @@ async fn studio_provisional_tail_remains_volatile_and_cannot_change_ordinary_rea
 
 #[tokio::test]
 async fn studio_provisional_tail_rechecks_mount_server_channel_watch_across_detached_work() {
-    use automerge::transaction::Transactable;
     for stage in ["seed", "completed", "preparation", "ready"] {
         for change in ["mount", "server", "channel", "watch"] {
-            let mut p = pages::proven_pair().await;
-            p.alice.open_channel_index().await.unwrap();
-            p.bob.open_channel_index().await.unwrap();
-            let channel = p
-                .alice
-                .create_channel("provisional-tail-test")
-                .await
+            Box::pin(recheck_detached_tail_case(stage, change)).await;
+        }
+    }
+}
+
+/// Keep one complete original Pair and its mutually exclusive staged results in a heap
+/// future. Embedding the whole matrix case and its setup futures in the test's poll frame
+/// overflows the default stack. Cases remain sequential, with the same mutation timing and
+/// final absence checks; no task, source reconstruction or larger stack is introduced.
+async fn recheck_detached_tail_case(stage: &str, change: &str) {
+    use automerge::transaction::Transactable;
+    let mut p = Box::pin(pages::proven_pair()).await;
+    p.alice.open_channel_index().await.unwrap();
+    p.bob.open_channel_index().await.unwrap();
+    let channel = p
+        .alice
+        .create_channel("provisional-tail-test")
+        .await
+        .unwrap()
+        .id;
+    p.bob.create_channel("provisional-tail-test").await.unwrap();
+    let target = StudioTarget::Flipnote {
+        channel: channel.to_be_bytes(),
+        object: [7; 16],
+    };
+    p.watch = p
+        .bob
+        .watch_studio_epoch(&p.b_store, SERVER, target)
+        .unwrap();
+    let (seed, op, _) = Box::pin(ready(&mut p)).await;
+    let (seed, completed, preparation, ready) = if stage == "seed" {
+        (Some(seed), None, None, None)
+    } else {
+        let pending = p
+            .bob
+            .prepare_provisional_studio_tail(&p.b_store, SERVER, seed)
+            .unwrap();
+        let completed = Box::pin(tail_response(&mut p, pending, op)).await;
+        if stage == "completed" {
+            (None, Some(completed), None, None)
+        } else {
+            let prep = p
+                .bob
+                .complete_provisional_studio_tail(&p.b_store, SERVER, completed)
                 .unwrap()
-                .id;
-            p.bob.create_channel("provisional-tail-test").await.unwrap();
-            let target = StudioTarget::Flipnote {
-                channel: channel.to_be_bytes(),
-                object: [7; 16],
-            };
+                .unwrap();
+            if stage == "preparation" {
+                (None, None, Some(prep), None)
+            } else {
+                (None, None, None, Some(prep.prepare().unwrap()))
+            }
+        }
+    };
+    match change {
+        "mount" => {
+            drop(p.b_store);
+            p.b_store = open(p.b_root.path());
+        }
+        "watch" => {
+            p.bob.unwatch_studio_epoch(&p.watch).unwrap();
             p.watch = p
                 .bob
                 .watch_studio_epoch(&p.b_store, SERVER, target)
                 .unwrap();
-            let (seed, op, _) = ready(&mut p).await;
-            let (seed, completed, preparation, ready) = if stage == "seed" {
-                (Some(seed), None, None, None)
-            } else {
-                let pending = p
-                    .bob
-                    .prepare_provisional_studio_tail(&p.b_store, SERVER, seed)
-                    .unwrap();
-                let completed = tail_response(&mut p, pending, op).await;
-                if stage == "completed" {
-                    (None, Some(completed), None, None)
-                } else {
-                    let prep = p
-                        .bob
-                        .complete_provisional_studio_tail(&p.b_store, SERVER, completed)
-                        .unwrap()
-                        .unwrap();
-                    if stage == "preparation" {
-                        (None, None, Some(prep), None)
-                    } else {
-                        (None, None, None, Some(prep.prepare().unwrap()))
-                    }
-                }
-            };
-            match change {
-                "mount" => {
-                    drop(p.b_store);
-                    p.b_store = open(p.b_root.path());
-                }
-                "watch" => {
-                    p.bob.unwatch_studio_epoch(&p.watch).unwrap();
-                    p.watch = p
-                        .bob
-                        .watch_studio_epoch(&p.b_store, SERVER, target)
-                        .unwrap();
-                }
-                "channel" => {
-                    p.bob
-                        .sync
-                        .post(
-                            catcoms_wire::DocType::ChannelIndex,
-                            crate::CHANNEL_INDEX_DOC,
-                            |d| d.delete(automerge::ROOT, format!("{channel:032x}")),
-                        )
-                        .await
-                        .unwrap();
-                }
-                _ => {}
-            }
-            let server = if change == "server" {
-                SERVER + 1
-            } else {
-                SERVER
-            };
-            if let Some(seed) = seed {
-                assert!(
-                    p.bob
-                        .prepare_provisional_studio_tail(&p.b_store, server, seed)
-                        .is_err(),
-                    "{stage}/{change}"
-                );
-            }
-            if let Some(completed) = completed {
-                assert!(
-                    p.bob
-                        .complete_provisional_studio_tail(&p.b_store, server, completed)
-                        .is_err(),
-                    "{stage}/{change}"
-                );
-            }
-            let ready = preparation.map(|p| p.prepare().unwrap()).or(ready);
-            if let Some(ready) = ready {
-                assert!(p
-                    .bob
-                    .with_provisional_studio_seed(&p.b_store, server, &ready, |_| panic!(
-                        "stale {stage}/{change}"
-                    ))
-                    .is_err());
-            }
-            assert_absent(&mut p, target);
         }
+        "channel" => {
+            p.bob
+                .sync
+                .post(
+                    catcoms_wire::DocType::ChannelIndex,
+                    crate::CHANNEL_INDEX_DOC,
+                    |d| d.delete(automerge::ROOT, format!("{channel:032x}")),
+                )
+                .await
+                .unwrap();
+        }
+        _ => {}
     }
+    let server = if change == "server" {
+        SERVER + 1
+    } else {
+        SERVER
+    };
+    if let Some(seed) = seed {
+        assert!(
+            p.bob
+                .prepare_provisional_studio_tail(&p.b_store, server, seed)
+                .is_err(),
+            "{stage}/{change}"
+        );
+    }
+    if let Some(completed) = completed {
+        assert!(
+            p.bob
+                .complete_provisional_studio_tail(&p.b_store, server, completed)
+                .is_err(),
+            "{stage}/{change}"
+        );
+    }
+    let ready = preparation.map(|p| p.prepare().unwrap()).or(ready);
+    if let Some(ready) = ready {
+        assert!(p
+            .bob
+            .with_provisional_studio_seed(&p.b_store, server, &ready, |_| panic!(
+                "stale {stage}/{change}"
+            ))
+            .is_err());
+    }
+    assert_absent(&mut p, target);
 }
