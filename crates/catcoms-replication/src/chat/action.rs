@@ -120,6 +120,29 @@ impl SignedAction {
         action.signature = key.sign(&action.semantic_bytes());
         Ok(action)
     }
+    /// Sign canonical action bytes using existing private key custody, such as MlsDevice.
+    /// The callback receives only the unsigned frame and must sign with `signer`; a returned
+    /// signature is checked before this value escapes. This creates no historical authority,
+    /// admission or publication permission, and preserves the existing action/v1 grammar.
+    /// Invalid input is rejected before invoking the signing callback.
+    pub fn sign_using(
+        spec: ActionSpec,
+        signer: [u8; 32],
+        sign: impl FnOnce(&[u8]) -> Result<[u8; 64], ChatError>,
+    ) -> Result<Self, ChatError> {
+        let mut action = Self {
+            spec,
+            signer,
+            signature: [0; 64],
+        };
+        action.validate()?;
+        let semantic = action.semantic_bytes();
+        action.signature = sign(&semantic)?;
+        if !verify_with_public_bytes(&action.signer, &semantic, &action.signature) {
+            return Err(ChatError::Signature);
+        }
+        Ok(action)
+    }
     pub fn spec(&self) -> &ActionSpec {
         &self.spec
     }

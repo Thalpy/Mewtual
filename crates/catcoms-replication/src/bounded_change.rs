@@ -102,6 +102,31 @@ fn check_limits(
     max_predecessors: u64,
     max_strings: u64,
 ) -> Result<(), ReplError> {
+    check_with_actors(
+        bytes,
+        max_actions,
+        max_cells,
+        max_predecessors,
+        max_strings,
+        false,
+    )
+}
+
+/// View-only historical decoding can inspect bounded old actor names without treating them as
+/// modern signing identities. Existing admission and authenticated projection callers retain
+/// the strict 32-byte rule above; this path never creates a signature/authority witness.
+pub(crate) fn check_legacy_inspection(bytes: &[u8]) -> Result<(), ReplError> {
+    check_with_actors(bytes, 512, 8192, 4096, 64 * 1024, true)
+}
+
+fn check_with_actors(
+    bytes: &[u8],
+    max_actions: u64,
+    max_cells: u64,
+    max_predecessors: u64,
+    max_strings: u64,
+    legacy_inspection: bool,
+) -> Result<(), ReplError> {
     if bytes.len() < 10 || bytes[..4] != [0x85, 0x6f, 0x4a, 0x83] || bytes[8] != 1 {
         return Err(ReplError::Malformed);
     }
@@ -116,7 +141,14 @@ fn check_limits(
         return Err(ReplError::EpochBound);
     }
     header.take(deps.checked_mul(32).ok_or(ReplError::EpochBound)?)?;
-    if header.sized()?.len() != 32 {
+    let actor_supported = |length: usize| {
+        if legacy_inspection {
+            (1..=256).contains(&length)
+        } else {
+            length == 32
+        }
+    };
+    if !actor_supported(header.sized()?.len()) {
         return Err(ReplError::EpochAuthority);
     }
     header.unsigned()?; // sequence
@@ -124,11 +156,11 @@ fn check_limits(
     header.signed()?; // advisory timestamp
     header.sized()?; // advisory message, checked against actual remaining input
     let actors = header.unsigned()?;
-    if actors > 20_001 {
+    if actors > if legacy_inspection { 4096 } else { 20_001 } {
         return Err(ReplError::EpochBound);
     }
     for _ in 0..actors {
-        if header.sized()?.len() != 32 {
+        if !actor_supported(header.sized()?.len()) {
             return Err(ReplError::EpochAuthority);
         }
     }
@@ -183,6 +215,15 @@ fn check_limits(
                 match typ {
                     0 | 1 | 2 | 6 => {
                         let value = column.unsigned()?;
+                        // Automerge's raw parser checks operation shapes but its public
+                        // ExpandedChange conversion assumes every actor reference exists.
+                        // Check all three reference families before calling that conversion.
+                        // Actor 0 is this change's author; the header lists `actors` others.
+                        // Keep this observer guard separate from existing admission policy.
+                        if legacy_inspection && matches!(spec, 0x01 | 0x11 | 0x71) && value > actors
+                        {
+                            return Err(ReplError::Malformed);
+                        }
                         if spec == 0x70 {
                             charge(
                                 &mut predecessors,

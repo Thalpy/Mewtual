@@ -154,11 +154,18 @@ struct Returned {
 }
 
 /// A owns, B succeeds it through the actor and a restart, then A's same key is admitted again.
-async fn a_returns_at_the_witness() -> Returned {
+fn a_returns_at_the_witness() -> impl std::future::Future<Output = Returned> {
+    // The prefix owns several complete peers before returning two of them. Keep setup on
+    // the heap, and keep Returned's original field transfers inside each boxed case below;
+    // embedding either layer by value multiplies default-stack test frames.
+    Box::pin(build_returned_witness())
+}
+
+async fn build_returned_witness() -> Returned {
     // --- Tenure 0. A owns: it closes epoch 0 and installs epoch 1 under R0, signed by A's key. B,
     // a member while A is provably owner, adopts that checkpoint, and holds A's eligible history in
     // epoch 1, enough to reach the production rotation threshold.
-    let mut p = Pair::new_legacy().await;
+    let mut p = Box::pin(Pair::new_legacy()).await;
     let target = target();
 
     // --- C joins while A owns its first tenure, so it never saw any tenure begin (N-T2). It stays
@@ -168,7 +175,7 @@ async fn a_returns_at_the_witness() -> Returned {
     p.bob.subscribe_control().await.unwrap();
     let invite = p.alice.mint_invite([44; 16], u64::MAX, vec![]).unwrap();
     let (joined, tick) = tokio::join!(
-        Node::join(
+        Box::pin(Node::join(
             Net::new(p.hub.join(PeerId::from_u64(4))),
             MlsDevice::generate().unwrap(),
             rng(),
@@ -176,7 +183,7 @@ async fn a_returns_at_the_witness() -> Returned {
             "C, a newcomer during A's first tenure",
             p.alice.local_peer(),
             &invite
-        ),
+        )),
         p.alice.sync_once()
     );
     tick.unwrap();
@@ -338,7 +345,7 @@ async fn a_returns_at_the_witness() -> Returned {
     witness.subscribe_control().await.unwrap();
     let invite = witness.mint_invite([45; 16], u64::MAX, vec![]).unwrap();
     let (joined, tick) = tokio::join!(
-        Node::join(
+        Box::pin(Node::join(
             Net::new(hub.join(PeerId::from_u64(3))),
             a_key,
             rng(),
@@ -346,7 +353,7 @@ async fn a_returns_at_the_witness() -> Returned {
             "A, returning with its own key",
             witness.local_peer(),
             &invite
-        ),
+        )),
         witness.sync_once()
     );
     tick.unwrap();
@@ -407,6 +414,10 @@ async fn a_returns_at_the_witness() -> Returned {
 #[tokio::test]
 async fn studio_actor_a_to_b_to_a_progresses_under_new_tenure_and_refuses_the_returning_keys_old_one(
 ) {
+    Box::pin(run_a_to_b_to_a_case()).await;
+}
+
+async fn run_a_to_b_to_a_case() {
     let Returned {
         mut witness,
         mut newcomer,
@@ -530,6 +541,10 @@ async fn studio_actor_a_to_b_to_a_progresses_under_new_tenure_and_refuses_the_re
 #[tokio::test]
 async fn studio_actor_b_to_a_to_b_issues_the_returning_keys_receipt_under_its_new_tenure_and_the_newcomer_learns_it_by_observation(
 ) {
+    Box::pin(run_b_to_a_to_b_case()).await;
+}
+
+async fn run_b_to_a_to_b_case() {
     let Returned {
         mut witness,
         mut newcomer,

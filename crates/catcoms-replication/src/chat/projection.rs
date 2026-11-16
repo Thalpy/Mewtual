@@ -28,6 +28,9 @@ impl Work {
     }
 }
 impl ChatLedger {
+    /// SEMANTIC/AUDIT-ONLY history projection. This is NOT active-v2 UI admission: Valid,
+    /// restored historical witnesses and Delete approval cannot open the guarded projection.
+    /// Use `guarded_projection` and its original publication lease for the future active view.
     /// Complete projection or explicit work refusal; never a partial view presented as
     /// complete. Missing authority/dependencies yield None. The caller owns this scan's
     /// explicit work/storage allowance; no network hot-path boundedness is claimed here.
@@ -48,8 +51,9 @@ impl ChatLedger {
         let mut work = Work(budget);
         let mut edits = BTreeSet::new();
         let mut deleted_by = Vec::new();
-        for (id, entry) in &self.entries {
+        for id in self.message_action_ids(create) {
             work.spend()?;
+            let entry = &self.entries[&id];
             if entry.state != ActionState::Valid
                 || entry.action.spec().body.create() != Some(create)
             {
@@ -57,18 +61,25 @@ impl ChatLedger {
             }
             match entry.action.spec().body {
                 Body::Edit { .. } => {
-                    edits.insert(*id);
+                    edits.insert(id);
                 }
-                Body::Delete { .. } => deleted_by.push(*id),
+                Body::Delete { .. } => deleted_by.push(id),
                 _ => {}
             }
         }
         let mut superseded = BTreeSet::new();
+        // The selected root set is fixed. Expand each ancestor once across ALL roots:
+        // resetting visited for each edit makes a simple edit chain quadratic. Do not seed
+        // it with roots: an edit becomes superseded only when reached through a real edge.
+        let mut visited = BTreeSet::new();
         for edit in &edits {
             // Iterative bounded traversal. A Join carries knowledge but is not itself an
             // edit: only a later authorized Edit supersedes its ancestral edit alternatives.
-            let mut stack = self.entries[edit].action.spec().parents.clone();
-            let mut visited = BTreeSet::new();
+            let mut stack = Vec::new();
+            for parent in &self.entries[edit].action.spec().parents {
+                work.spend()?;
+                stack.push(*parent);
+            }
             while let Some(parent) = stack.pop() {
                 work.spend()?;
                 if !visited.insert(parent) {
@@ -84,7 +95,10 @@ impl ChatLedger {
                 // that edge would charge every old reply against an unrelated local
                 // edit and eventually make otherwise small projections fail.
                 if !matches!(ancestor.spec().body, Body::Create { .. }) {
-                    stack.extend(ancestor.spec().parents.iter().copied());
+                    for next in &ancestor.spec().parents {
+                        work.spend()?;
+                        stack.push(*next);
+                    }
                 }
             }
         }
@@ -117,6 +131,8 @@ impl ChatLedger {
             deleted_by,
         }))
     }
+    /// SEMANTIC/AUDIT-ONLY heads, including held current effects. The guarded head API has a
+    /// distinct original-view lease and must not be substituted with this historical scan.
     /// ALL valid per-message causal heads. More than MAX_PARENTS is legal: compose bounded
     /// Join actions over these heads. Do not silently truncate this set to fit a new edit.
     pub fn causal_heads(
@@ -127,12 +143,13 @@ impl ChatLedger {
         let mut work = Work(budget);
         let mut heads = BTreeSet::new();
         let mut parents = BTreeSet::new();
-        for (id, entry) in &self.entries {
+        for id in self.message_action_ids(create) {
             work.spend()?;
+            let entry = &self.entries[&id];
             if entry.state == ActionState::Valid
-                && (*id == create || entry.action.spec().body.create() == Some(create))
+                && (id == create || entry.action.spec().body.create() == Some(create))
             {
-                heads.insert(*id);
+                heads.insert(id);
                 for parent in &entry.action.spec().parents {
                     work.spend()?;
                     parents.insert(*parent);

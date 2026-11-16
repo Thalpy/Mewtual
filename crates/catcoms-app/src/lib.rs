@@ -30,7 +30,9 @@ pub use catcoms_crypto::DeviceId;
 use catcoms_crypto::verify_with_public_bytes;
 pub use catcoms_crypto::{DeviceCertificate, DeviceRevocation};
 pub use catcoms_mls::GroupMode;
-use catcoms_mls::{InviteToken, MlsDevice, MlsError, ServerGroup};
+#[cfg(test)]
+use catcoms_mls::ServerGroup;
+use catcoms_mls::{InviteToken, MlsDevice, MlsError};
 use catcoms_rt::{
     Clock, CryptoRngCore, DiscoveredPeer, MeshTransport, PeerId, RequestCancellation,
 };
@@ -53,6 +55,7 @@ use catcoms_wire::DocType;
 use thiserror::Error;
 
 mod actor;
+pub mod admin_chat_ledger;
 pub mod cache_housekeeping;
 pub mod cache_plan;
 pub mod creative;
@@ -3665,6 +3668,8 @@ pub struct Server<T: MeshTransport, R: CryptoRngCore> {
     /// across a call that could re-enter it. Derived state; never persisted; a `RefCell` (not a
     /// lock) because a `Server` is owned by exactly one actor task.
     messages_cache: std::cell::RefCell<HashMap<u128, MaterializedChannel>>,
+    /// Privileged original-history cache; ephemeral and never part of ordinary message DTOs.
+    admin_chat_ledger: admin_chat_ledger::AdminLedgerCache,
     /// Total order of delivery snapshots issued by this actor session. Queries and emitted events
     /// share it, so a delayed IPC query can never overwrite a newer event in the webview.
     delivery_snapshot_revision: u64,
@@ -3731,8 +3736,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         display_name: impl Into<String>,
     ) -> Result<Self, AppError> {
         let device_id = device.device_id();
-        let group = ServerGroup::create(&device)?;
-        let mut sync = ChannelSync::new(transport, group, device, rng, clock);
+        let mut sync = ChannelSync::found(transport, device, rng, clock)?;
         sync.initialize_new_group_policy()?;
         Ok(Self {
             sync,
@@ -3740,6 +3744,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             device_id,
             own_message_changes: HashMap::new(),
             messages_cache: std::cell::RefCell::new(HashMap::new()),
+            admin_chat_ledger: Default::default(),
             delivery_snapshot_revision: 0,
             devices_sig: None,
             cache: Default::default(),
@@ -3803,10 +3808,43 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             device_id,
             own_message_changes: HashMap::new(),
             messages_cache: std::cell::RefCell::new(HashMap::new()),
+            admin_chat_ledger: Default::default(),
             delivery_snapshot_revision: 0,
             devices_sig: None,
             cache: Default::default(),
         })
+    }
+
+    /// Fixed private managed-client consumer of the actual completed handshake and SAME owned
+    /// transport/event prefix. There is no raw group/proof constructor or await here. The Store's later
+    /// original admission/canonical/Current barriers remain necessary before any exposure.
+    pub(crate) fn from_completed_direct(
+        transport: T,
+        completed: catcoms_sync::CompletedDirectJoin,
+        connection_handoff: PreOwnerConnectionHandoff,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+        display_name: impl Into<String>,
+        contact: (PeerId, DeviceId),
+    ) -> Self {
+        let (inviter, inviter_device) = contact;
+        let (device, group, routing) = completed.into_parts();
+        let device_id = device.device_id();
+        let mut sync = ChannelSync::new_joined(transport, group, device, rng, clock, routing);
+        sync.adopt_pre_owner_connections(connection_handoff);
+        sync.note_candidate_peer(inviter);
+        sync.note_member_finalization_candidate(inviter, inviter_device);
+        Self {
+            sync,
+            display_name: display_name.into(),
+            device_id,
+            own_message_changes: HashMap::new(),
+            messages_cache: std::cell::RefCell::new(HashMap::new()),
+            admin_chat_ledger: Default::default(),
+            delivery_snapshot_revision: 0,
+            devices_sig: None,
+            cache: Default::default(),
+        }
     }
 
     /// Join through a reachable existing member when the inviter could not accept a direct dial.
@@ -3851,6 +3889,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             device_id,
             own_message_changes: HashMap::new(),
             messages_cache: std::cell::RefCell::new(HashMap::new()),
+            admin_chat_ledger: Default::default(),
             delivery_snapshot_revision: 0,
             devices_sig: None,
             cache: Default::default(),
@@ -3935,6 +3974,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 device_id,
                 own_message_changes: HashMap::new(),
                 messages_cache: std::cell::RefCell::new(HashMap::new()),
+                admin_chat_ledger: Default::default(),
                 delivery_snapshot_revision: 0,
                 devices_sig: None,
                 cache: Default::default(),
@@ -3990,6 +4030,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 device_id,
                 own_message_changes: HashMap::new(),
                 messages_cache: std::cell::RefCell::new(HashMap::new()),
+                admin_chat_ledger: Default::default(),
                 delivery_snapshot_revision: 0,
                 devices_sig: None,
                 cache: Default::default(),
@@ -4084,6 +4125,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             device_id,
             own_message_changes: HashMap::new(),
             messages_cache: std::cell::RefCell::new(HashMap::new()),
+            admin_chat_ledger: Default::default(),
             delivery_snapshot_revision: 0,
             devices_sig: None,
             cache: Default::default(),
@@ -4097,6 +4139,23 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(self.sync.snapshot()?)
     }
 
+    /// Private canonical initialization only. The caller owns the actual original creation,
+    /// configured buffer reservation and staged Active scope; Sync preflights the closed field
+    /// grammar and provider map before allocating. This is secret data, not a save receipt or
+    /// a way to publish an arbitrary restored Server. Legacy snapshot framing is unchanged.
+    pub(crate) fn snapshot_owner_initialization(
+        &mut self,
+        max_snapshot_bytes: usize,
+        max_mls_bytes: usize,
+        max_mls_backing_bytes: usize,
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, AppError> {
+        Ok(self.sync.snapshot_owner_initialization(
+            max_snapshot_bytes,
+            max_mls_bytes,
+            max_mls_backing_bytes,
+        )?)
+    }
+
     /// Reconstruct a server from a [`Server::snapshot`] blob plus a **fresh** transport (the
     /// caller re-dials peers, Phase 9g). The display name comes from the registry; the device
     /// id is re-derived from the restored MLS device.
@@ -4108,17 +4167,90 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         display_name: impl Into<String>,
     ) -> Result<Self, AppError> {
         let sync = ChannelSync::restore(snapshot, transport, rng, clock)?;
+        Ok(Self::from_restored_sync(sync, display_name))
+    }
+
+    /// Actual opaque canonical checkpoint restore only. Borrowed outer/metadata preflight
+    /// precedes common-decoder clones; nested provider-map admission precedes its allocation
+    /// and SDK load inside the bounded MLS decoder.
+    /// This confers no Current/head/pin or fresh-admission authority; the original factory
+    /// consumer must still cross its exact saved/current/head handoff. Typed SDK heap and
+    /// active-server resource admission are separately required before production activation.
+    pub(crate) fn restore_owner_initialization(
+        snapshot: &[u8],
+        transport: T,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+        display_name: impl Into<String>,
+        limits: catcoms_sync::OwnerInitializationRestoreLimits,
+    ) -> Result<Self, AppError> {
+        let sync =
+            ChannelSync::restore_owner_initialization(snapshot, transport, rng, clock, limits)?;
+        Ok(Self::from_restored_sync(sync, display_name))
+    }
+
+    /// The strict first-Add body, selected ONLY by the original authenticated v5 canonical v2
+    /// source. Complete borrowed framing precedes clones/SDK, then actual pin/Current/head
+    /// validation still gates any runtime. No generic legacy decode is an operation fallback.
+    pub(crate) fn restore_owner_operation_checkpoint(
+        snapshot: &[u8],
+        transport: T,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+        display_name: impl Into<String>,
+        limits: catcoms_sync::OwnerInitializationRestoreLimits,
+    ) -> Result<Self, AppError> {
+        let sync = ChannelSync::restore_owner_operation_checkpoint(
+            snapshot, transport, rng, clock, limits,
+        )?;
+        Ok(Self::from_restored_sync(sync, display_name))
+    }
+
+    /// Actual private original-source caller supplies this non-Clone host graph reservation.
+    /// SDK row/type admission precedes SIGNER; original pin/head/Current still gate take_ready.
+    pub(crate) fn restore_owner_initialization_with_sdk(
+        snapshot: &[u8],
+        transport: T,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+        display_name: impl Into<String>,
+        limits: catcoms_sync::OwnerInitializationRestoreLimits,
+        admission: catcoms_mls::persist::OwnerSdkRestoreAdmission,
+    ) -> Result<Self, AppError> {
+        let sync = ChannelSync::restore_owner_initialization_with_sdk(
+            snapshot, transport, rng, clock, limits, admission,
+        )?;
+        Ok(Self::from_restored_sync(sync, display_name))
+    }
+    /// The matching first-Add closed grammar, with independent parent graph admission later.
+    pub(crate) fn restore_owner_operation_checkpoint_with_sdk(
+        snapshot: &[u8],
+        transport: T,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+        display_name: impl Into<String>,
+        limits: catcoms_sync::OwnerInitializationRestoreLimits,
+        admission: catcoms_mls::persist::OwnerSdkRestoreAdmission,
+    ) -> Result<Self, AppError> {
+        let sync = ChannelSync::restore_owner_operation_checkpoint_with_sdk(
+            snapshot, transport, rng, clock, limits, admission,
+        )?;
+        Ok(Self::from_restored_sync(sync, display_name))
+    }
+
+    fn from_restored_sync(sync: ChannelSync<T, R>, display_name: impl Into<String>) -> Self {
         let device_id = sync.device_id();
-        Ok(Self {
+        Self {
             sync,
             display_name: display_name.into(),
             device_id,
             own_message_changes: HashMap::new(),
             messages_cache: std::cell::RefCell::new(HashMap::new()),
+            admin_chat_ledger: Default::default(),
             delivery_snapshot_revision: 0,
             devices_sig: None,
             cache: Default::default(),
-        })
+        }
     }
 
     /// This server's MLS group id (stable across restarts); keys its on-disk blob directory.

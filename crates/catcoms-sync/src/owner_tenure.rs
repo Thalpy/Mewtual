@@ -472,7 +472,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         work: impl FnOnce(&mut Self) -> O,
     ) -> O {
         let before = Position::of(&self.group);
-        let outcome = work(self);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(self)));
+        // A callback may unwind after actually applying a removal. Revoke already queued chat
+        // observers from the actual resulting own leaf before any independent driver progresses.
+        self.observe_chat_scope_membership();
         self.owner_tenure.applied(before, &self.group);
         // A completed removal permanently revokes the exact grant, including cascades.
         // A successor owner must explicitly re-grant; published predecessor state is not authority.
@@ -482,7 +485,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.admin_roster
             .retain(|id| self.group.contains_device(id));
         self.reconcile_voice_actor();
-        outcome
+        match outcome {
+            Ok(outcome) => outcome,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
     }
 
     /// The classified tenure state. Local evidence only, never a publication permit or a remote

@@ -39,7 +39,14 @@ struct Owed {
 }
 
 impl Owed {
-    async fn new(decide: bool) -> Self {
+    /// Allocate the actual constructor future before its caller can retain it. Returning
+    /// the same fixture in a Box also keeps both complete Servers off every enclosing
+    /// test future across awaits; neither the actors nor their ownership change.
+    fn new(decide: bool) -> std::pin::Pin<Box<impl std::future::Future<Output = Box<Self>>>> {
+        Box::pin(Self::new_inner(decide))
+    }
+
+    async fn new_inner(decide: bool) -> Box<Self> {
         let hub = Hub::new();
         let clock = ManualClock::new(1_000);
         let alice_peer = PeerId::from_u64(1);
@@ -148,7 +155,7 @@ impl Owed {
         let faulted_source = only_source(root.path());
         let mut pair = [chosen.clone(), rival];
         pair.sort_by_key(Receipt::hash);
-        let mut owed = Self {
+        let mut owed = Box::new(Self {
             alice,
             _bob: bob,
             clock,
@@ -160,8 +167,9 @@ impl Owed {
             chosen_seed,
             faulted_source,
             repair: None,
-        };
+        });
         if decide {
+            let owed = owed.as_mut();
             let snapshot = owed.snapshot();
             let request = owed.request();
             let mut b = CatchupRuntime::budget(&mut owed.alice, &mut owed.store, SERVER).unwrap();
@@ -1489,6 +1497,26 @@ async fn a_held_target_never_delays_another_targets_resume() {
 /// ends.
 #[tokio::test]
 async fn an_unrelated_actor_progresses_while_a_repair_rebuild_is_paused() {
+    unrelated_actor_repair_scenario().await;
+}
+
+#[test]
+fn repair_fixtures_keep_retained_servers_off_the_caller_stack() {
+    let setup = Owed::new(true);
+    let setup_bytes = std::mem::size_of_val(&setup);
+    assert!(
+        setup_bytes <= 256,
+        "repair fixture constructor retains {setup_bytes} bytes on its caller stack"
+    );
+    let scenario = unrelated_actor_repair_scenario();
+    let scenario_bytes = std::mem::size_of_val(&scenario);
+    assert!(
+        scenario_bytes <= 64 * 1024,
+        "two-fixture repair scenario retains {scenario_bytes} bytes on its caller stack"
+    );
+}
+
+async fn unrelated_actor_repair_scenario() {
     let mut a = Owed::new(true).await;
     let mut b = Owed::new(true).await;
     let pool = Arc::new(tokio::sync::Semaphore::new(4));

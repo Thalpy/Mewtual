@@ -30,6 +30,7 @@ serde_json = "1"
 test-counters = []
 
 [dev-dependencies]
+automerge = { version = "0.10", features = ["history-recovery-test-counters"] }
 rand_chacha = "0.3"
 rand_core = "0.6"
 

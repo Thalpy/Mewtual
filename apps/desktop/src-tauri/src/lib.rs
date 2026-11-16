@@ -59,6 +59,7 @@ use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::timeout;
 use zeroize::Zeroizing;
 
+mod admin_chat_ledger;
 mod admission_storage;
 mod cache_housekeeping;
 mod call_mappings;
@@ -429,6 +430,8 @@ impl Drop for InlineDownloadLeaseInner {
 #[derive(Default)]
 struct AppState {
     keep_session: StdMutex<Option<(u64, watch::Sender<bool>)>>,
+    /// Privileged admin read scopes are native-issued and globally bounded across all actors.
+    admin_chat_ledger: admin_chat_ledger::Registry,
     servers: Arc<Mutex<HashMap<u64, ServerEntry>>>,
     /// Monotonic process-local source for [`ServerEntry::instance`]. Wrapping would require more
     /// actor installations than the process can perform in its lifetime; zero has no special
@@ -16764,6 +16767,7 @@ fn register_ui_lock_request(state: &AppState) -> u64 {
         .wrapping_add(1);
     state.session_lock_requested.store(true, Ordering::Release);
     keep_session::revoke(state);
+    state.admin_chat_ledger.retire();
     generation
 }
 
@@ -19027,7 +19031,7 @@ pub fn run() {
             tracing::info!(target: "catcoms_app", "STARTUP.SETUP.COMPLETE");
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(admin_chat_ledger::with_commands(tauri::generate_handler![
             vault_exists,
             resume_session,
             lock_session,
@@ -19253,7 +19257,7 @@ pub fn run() {
             saved_files::reset_saved_files,
             saved_files::get_saved_files_limit,
             saved_files::set_saved_files_limit
-        ])
+        ]))
         .build(context)
         .expect("error while building the Mewtual desktop app");
     app.run(move |_, event| {

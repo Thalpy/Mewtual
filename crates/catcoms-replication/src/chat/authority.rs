@@ -30,9 +30,12 @@ impl Rights {
 
 /// An externally verified HISTORICAL decision, not present-time membership/role authority.
 ///
-/// There is intentionally NO production constructor, Deserialize implementation, wire
-/// decoder, current-peer attestation adapter or "verified" boolean. Future native issuance,
-/// root continuity and governance-conflict policy require their own reviewed boundary.
+/// The v1 owner-fact verifier requires an explicitly expected root and exact signed chain;
+/// the V2 founder verifier restricts issuance to one exact supported Create under its
+/// independently HOST-selected complete genesis. No Deserialize implementation, wire decoder,
+/// current-peer attestation adapter or "verified" boolean exists. Active mounted-root issuance,
+/// root continuity and governance conflicts remain separately gated. This semantic witness never
+/// establishes projection admission or historical acceptance of an exact late action.
 /// A snapshot restores only signed evidence and must be supplied matching witnesses again.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedAuthorityBasis {
@@ -44,6 +47,36 @@ pub struct VerifiedAuthorityBasis {
     // Selected parent/target bases proved included in this exact basis. This is NOT a
     // decoded full context DAG and cannot decide succession/conflicting-root policy.
     pub(super) covered: BTreeSet<BasisId>,
+    // Historical v1 bases are reusable grants. The first V2 host instead certifies
+    // one exact Create; cloning that witness must not enable unsupported effects.
+    pub(super) constraint: SemanticConstraint,
+}
+
+/// Closed provenance/shape restriction, separate from the permission bitset. Only
+/// the actual verifier for a version may construct its corresponding variant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum SemanticConstraint {
+    LegacyReusable,
+    V2FounderCreate {
+        action: ActionId,
+        profile: owner_facts::OwnerFactId,
+        admission: owner_facts::OwnerFactId,
+        tenure: owner_header::OwnerTenureId,
+    },
+}
+impl SemanticConstraint {
+    fn matches(&self, action: &SignedAction) -> bool {
+        match self {
+            Self::LegacyReusable => true,
+            Self::V2FounderCreate {
+                action: expected, ..
+            } => {
+                action.id() == *expected
+                    && action.spec().parents.is_empty()
+                    && matches!(action.spec().body, Body::Create { reply_to: None, .. })
+            }
+        }
+    }
 }
 impl VerifiedAuthorityBasis {
     pub fn realm(&self) -> RealmId {
@@ -66,6 +99,7 @@ impl VerifiedAuthorityBasis {
             && self.basis == action.spec().basis
             && self.grant == action.spec().grant
             && &self.subject == action.signer()
+            && self.constraint.matches(action)
     }
     pub(super) fn covers(&self, basis: BasisId) -> bool {
         basis == self.basis || self.covered.contains(&basis)
@@ -76,6 +110,7 @@ impl VerifiedAuthorityBasis {
             || self.grant != other.grant
             || self.subject != other.subject
             || self.rights != other.rights
+            || self.constraint != other.constraint
         {
             return Err(ChatError::AuthorityConflict);
         }
@@ -222,6 +257,7 @@ pub(super) fn verified_fixture(
         subject,
         rights,
         covered,
+        constraint: SemanticConstraint::LegacyReusable,
     })
 }
 #[cfg(test)]

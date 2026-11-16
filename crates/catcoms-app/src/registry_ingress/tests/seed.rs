@@ -13,7 +13,7 @@ use automerge::{
 use catcoms_replication::{CheckpointSeed, CloseRecord, EpochPhase, SealedOp, SignedOp};
 
 struct SeedFixture {
-    p: Pair,
+    p: Box<Pair>,
     key: PointerKey,
     document: LogicalDocument,
     receipt: Receipt,
@@ -491,34 +491,62 @@ async fn registry_seed_server_fetches_rotated_vault_checkpoint_without_installin
     p.alice.unwatch_registry_seed(&seed_watch).unwrap();
 }
 
-async fn rediscover(p: &mut Pair, bucket: u8) -> ServerRegistrySeedFetch {
-    p.clock.advance_ms(1000);
-    let watch = p.alice.watch_registry_head(&p.alice_store, SERVER, bucket);
-    let permit = p
-        .alice
-        .prepare_owner_head_snapshot(&p.alice_store, SERVER)
-        .unwrap();
-    let (answer, ()) = tokio::join!(
-        p.bob
-            .discover_registry_seed(&p.bob_store, SERVER, p.alice.local_peer(), bucket),
-        async {
-            p.alice.sync_once().await.unwrap();
-            p.alice
-                .serve_registry_head_step(
-                    &mut p.alice_store,
-                    &watch,
-                    Some(&permit),
-                    &mut p.alice_budget,
-                )
-                .unwrap()
-                .unwrap();
+fn rediscover(
+    p: &mut Pair,
+    bucket: u8,
+) -> impl std::future::Future<Output = ServerRegistrySeedFetch> + '_ {
+    // The two-peer joined discovery owns large Server futures. Allocate that future
+    // before returning it so callers retain only its pointer beside their own Pair.
+    // Boxing inside an async function would still embed its unpolled input state.
+    Box::pin(async move {
+        p.clock.advance_ms(1000);
+        let watch = p.alice.watch_registry_head(&p.alice_store, SERVER, bucket);
+        let permit = p
+            .alice
+            .prepare_owner_head_snapshot(&p.alice_store, SERVER)
+            .unwrap();
+        let (answer, ()) = tokio::join!(
+            p.bob
+                .discover_registry_seed(&p.bob_store, SERVER, p.alice.local_peer(), bucket),
+            async {
+                p.alice.sync_once().await.unwrap();
+                p.alice
+                    .serve_registry_head_step(
+                        &mut p.alice_store,
+                        &watch,
+                        Some(&permit),
+                        &mut p.alice_budget,
+                    )
+                    .unwrap()
+                    .unwrap();
+            }
+        );
+        p.alice.unwatch_registry_head(&watch).unwrap();
+        match answer.unwrap().unwrap() {
+            ServerRegistrySeedDiscovery::Selected(pass) => pass,
+            _ => panic!("fresh owner proof required"),
         }
-    );
-    p.alice.unwatch_registry_head(&watch).unwrap();
-    match answer.unwrap().unwrap() {
-        ServerRegistrySeedDiscovery::Selected(pass) => pass,
-        _ => panic!("fresh owner proof required"),
+    })
+}
+
+#[test]
+fn registry_seed_discovery_has_bounded_inline_storage() {
+    fn inline_bytes<'a, F: std::future::Future>(_: impl FnOnce(&'a mut Pair, u8) -> F) -> usize {
+        std::mem::size_of::<F>()
     }
+    assert!(
+        inline_bytes(rediscover) <= 256,
+        "joined discovery must stay heap-owned beside the original two-peer fixture"
+    );
+    let construction = Pair::new();
+    let fixture = fetched_fixture_mode(false, true);
+    eprintln!(
+        "registry fixture layout: Pair={} bytes, SeedFixture={} bytes",
+        std::mem::size_of::<Pair>(),
+        std::mem::size_of::<SeedFixture>(),
+    );
+    assert!(std::mem::size_of_val(&construction) <= 256);
+    assert!(std::mem::size_of_val(&fixture) <= 256);
 }
 async fn refetch(
     p: &mut Pair,

@@ -37,6 +37,14 @@ const HOSTILE = [
   "<object data=x></object>",
   "<embed src=x>",
   "<svg><script>alert(1)</script></svg>",
+  // Keep namespace/raw-text/shadow content behind the SAME production renderer
+  // boundary after the DOMPurify security update. These strings must remain
+  // inert after parsing the returned HTML, not only before its first sanitize.
+  '<svg><a><animate attributeName="href" values="javascript:alert(1)"/></a></svg>',
+  '<svg xmlns="http://www.w3.org/2000/svg"><a href="https://example.test/"><set attributeName="href" to="javascript:alert(1)"/></a></svg>',
+  '<template shadowrootmode="open"><p onclick="alert(1)">shadow</p><script>alert(1)</script></template>',
+  '<noscript><p title="</noscript><img src=x onerror=alert(1)>">text</p>',
+  '<math><annotation-xml encoding="text/html"><svg><foreignObject><img src=x onerror=alert(1)></foreignObject></svg></annotation-xml></math>',
   "<math><mtext><script>alert(1)</script></mtext></math>",
   "<form action=x><button>go</button></form>",
   "<style>body{display:none}</style>",

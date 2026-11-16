@@ -81,6 +81,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// does not publish: native callers must save their sealed snapshot before advertising the
     /// decision with `publish_group_policy`, so a crash cannot forget an announced owner pin.
     pub fn initialize_group_policy(&mut self, mode: GroupMode) -> Result<(), SyncError> {
+        if self.owner_evidence_unbound() {
+            return Err(SyncError::ChatScopeUnavailable);
+        }
         if mode != GroupMode::PeerToPeer {
             return Err(PolicyError::Malformed.into());
         }
@@ -142,6 +145,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// owner cannot attest policy under that future authority. Until an authenticated succession
     /// proof is carried by the protocol, refuse before committing/consuming the invitation.
     pub(super) fn policy_admission_ready(&self) -> Result<(), SyncError> {
+        if self.owner_evidence_unbound() {
+            return Err(SyncError::ChatScopeUnavailable);
+        }
         if self.group_policy.is_some() && !self.group_policy_active {
             return Err(PolicyError::PendingPersistence.into());
         }
@@ -154,6 +160,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Advertise an already persisted owner decision. Publication is queued through the normal
     /// bounded control path; receiving members independently check owner authority and pin equality.
     pub fn publish_group_policy(&mut self) -> Result<(), SyncError> {
+        if self.owner_evidence_unbound() {
+            return Err(SyncError::ChatScopeUnavailable);
+        }
         if !self.is_designated_committer() {
             return Err(PolicyError::Unauthorized.into());
         }

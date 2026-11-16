@@ -4,6 +4,7 @@ import { pageOfList, type PageRequest, type UnreadProbe } from "./message-paging
 import { visualStudioFixtureResponse } from "./visual-studio-fixture.ts";
 import { createVisualFileUploads } from "./visual-file-uploads.ts";
 import { VISUAL_SAVED_FILES, visualTransfersResponse } from "./visual-transfers-fixture.ts";
+import { visualChatLedgerResponse } from "./visual-chat-ledger-fixture.ts";
 
 export const VISUAL_FIXTURE_NOW = Date.UTC(2026, 7, 20, 12, 0, 0);
 
@@ -500,6 +501,9 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
       return [];
     case "get_moderation":
       return { events: [], votes: [] };
+    case "get_admin_chat_ledger":
+    case "get_admin_chat_ledger_detail":
+      return visualChatLedgerResponse(command, payload as Record<string, unknown>);
     case "get_connectivity":
       return clone({
         action: "found",

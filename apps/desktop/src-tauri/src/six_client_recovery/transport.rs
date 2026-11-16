@@ -519,6 +519,9 @@ impl MeshTransport for Transport {
     fn supports_connection_leases(&self) -> bool {
         self.inner.supports_connection_leases()
     }
+    fn supports_connected_cancellable_requests(&self) -> bool {
+        self.inner.supports_connected_cancellable_requests()
+    }
     async fn subscribe(&self, topic: Topic) -> Result<(), TransportError> {
         self.inner.subscribe(topic).await
     }

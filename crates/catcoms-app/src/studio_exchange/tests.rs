@@ -250,6 +250,7 @@ impl Pair {
                     device_id,
                     own_message_changes: Default::default(),
                     messages_cache: Default::default(),
+                    admin_chat_ledger: Default::default(),
                     delivery_snapshot_revision: 0,
                     devices_sig: None,
                     cache: Default::default(),
