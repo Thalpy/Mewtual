@@ -65,6 +65,7 @@ def run() -> None:
         env = dict(os.environ, MEWTUAL_NAMESPACE7_FIXTURES=str(owned / "fixtures"),
                    CARGO_TARGET_DIR=os.environ.get("CARGO_TARGET_DIR", str(REPO / "target")))
         try:
+            BASE["clean_source"]("native7-clean-head-before", REPO, env, directory, results)
             BASE["ignored_head_case"]("native7-fixtures", PREFIX + "generate_native7_fixtures", directory,
                                       env, WRITTEN, ("16",), results)
             worktree = owned / "p"
@@ -88,6 +89,7 @@ def run() -> None:
                     raise RuntimeError("predecessor differs beyond its one test harness")
                 command = ["cargo", "test", "--locked", "-p", "catcoms-app", "--all-features",
                            "--test", "namespace7_gate", "--", "--nocapture", "--test-threads=1"]
+                BASE["clean_source"]("native7-clean-old", worktree, env, directory, results)
                 code, summaries, timed_out, markers = BASE["run_logged"](
                     "native7-predecessor", command, directory, cwd=worktree, env=env,
                     limit=BASE["PREDECESSOR_TIMEOUT_SECONDS"], markers=(CHECKED, KEPT))
@@ -101,9 +103,10 @@ def run() -> None:
                 if git("status", "--porcelain", "--untracked-files=all", cwd=worktree) != f"?? {TARGET}":
                     raise RuntimeError("predecessor source changed during its gate")
             finally:
-                # Exact path within our live temporary directory, after the owned test
-                # process has completed/stopped. Never remove another checkout.
-                git("worktree", "remove", "--force", str(worktree))
+                BASE["retire_old_source"](
+                    lambda: git("worktree", "remove", "--force", str(worktree)),
+                    lambda: BASE["clean_source"]("native7-clean-head-after", REPO, env, directory, results),
+                    results, sys.exception())
             BASE["ignored_head_case"]("native7-round-trip", PREFIX + "verify_native7_predecessor_claim_recovery", directory,
                                       env, VERIFIED, ("1",), results)
         finally:

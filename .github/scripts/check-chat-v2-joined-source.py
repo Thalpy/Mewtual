@@ -67,6 +67,45 @@ FIXTURE_TESTS = tuple(FIXTURE_PREFIX + suffix for suffix in (
 INVENTORY_MATCHES = tuple(re.compile(r"^(.*" + re.escape(name) + r".*): test$")
                           for name in FIXTURE_TESTS)
 INVENTORY_COUNT = re.compile(r"^(\d+) tests, (\d+) benchmarks$")
+INVENTORY_NAME = re.compile(r"^([A-Za-z0-9_:]{1,512}): test$")
+REGISTRY_PREFIX = "store::critical_namespaces::native_registry::"
+# The Windows lane continuously passed cases but exceeded the single350-case
+# batch deadline. Keep that same1800s bound for each smaller module partition;
+# actual --list sets below prove no omission, overlap or selector broadening.
+REGISTRY_PARTITIONS = (
+    ("capability", "capability::", (), 2),
+    ("data", "data::", (), 11),
+    ("lifecycle", "lifecycle::", (), 67),
+    ("preparation", "preparation::", (), 39),
+    ("operational-cell", "operational::cell::", (), 49),
+    ("operational-facade", "operational::facade::", (), 24),
+    ("operational-sources", "operational::sources::", (), 87),
+    ("operational-rest", "operational::", (
+        "operational::cell::", "operational::facade::", "operational::sources::"), 71),
+)
+
+
+def listed_names(found: list, counts: list, expected: int) -> frozenset[str]:
+    names = [item[0] for item in found]
+    if (len(names) != expected or len(set(names)) != expected
+            or counts != [(str(expected), "0")]
+            or any(not name.startswith(REGISTRY_PREFIX) for name in names)):
+        raise RuntimeError("native registry test names/counts changed")
+    return frozenset(names)
+
+
+def validate_partitions(normal: frozenset[str], partitions: list) -> None:
+    if len(partitions) != len(REGISTRY_PARTITIONS):
+        raise RuntimeError("native registry partition omitted or duplicated")
+    seen: set[str] = set()
+    for (label, names), (expected_label, selector, skipped, expected) in zip(partitions, REGISTRY_PARTITIONS):
+        selected = frozenset(name for name in normal if REGISTRY_PREFIX + selector in name
+                             and not any(REGISTRY_PREFIX + skip in name for skip in skipped))
+        if (label != expected_label or len(names) != expected or names != selected or seen.intersection(names)):
+            raise RuntimeError("native registry partition overlaps or its selector drifted")
+        seen.update(names)
+    if seen != normal or len(seen) != 350:
+        raise RuntimeError("native registry partitions do not cover all350 normal tests")
 
 
 def validate_inventory(matches: list, counts: list, expected: int) -> None:
@@ -103,18 +142,77 @@ def inventory_self_test() -> None:
         pass
     else:
         raise AssertionError("actual skip-prefix twin was hidden by the bounded matcher")
+    partitions = []
+    for label, selector, _, count in REGISTRY_PARTITIONS:
+        prefix = REGISTRY_PREFIX + selector + ("remaining::" if label == "operational-rest" else "")
+        partitions.append((label, frozenset(prefix + f"case_{i}" for i in range(count))))
+    normal = frozenset().union(*(names for _, names in partitions))
+    validate_partitions(normal, partitions)
+    for changed in (
+        partitions[:-1],
+        [partitions[0], *partitions],
+        [(partitions[0][0], partitions[1][1]), *partitions[1:]],
+        [*partitions[:-1], (partitions[-1][0], frozenset())],
+        [("changed-selector", partitions[0][1]), *partitions[1:]],
+    ):
+        try:
+            validate_partitions(normal, changed)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("omitted, overlapping or changed native partition accepted")
+    try:
+        listed_names([("same",), ("same",)], [("2", "0")], 2)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("duplicate inventory names accepted")
 
 
-def check_normal_inventory(guard: dict, directory: Path, command: list[str], expected: int) -> None:
+def check_normal_inventory(guard: dict, directory: Path, command: list[str], expected: int) -> frozenset[str]:
+    inventories = []
     for label, extra, total in (("all", [], expected + len(FIXTURE_TESTS)),
                                 ("ignored", ["--ignored"], len(FIXTURE_TESTS))):
         code, _, timed_out, found = guard["run_logged"](
             "native-registry-inventory-" + label, command + ["--", "--list", *extra],
-            directory, limit=30 * 60, markers=(*INVENTORY_MATCHES, INVENTORY_COUNT),
+            directory, limit=30 * 60, markers=(INVENTORY_NAME, *INVENTORY_MATCHES, INVENTORY_COUNT),
+            marker_limits=(total + 1, *(2 for _ in INVENTORY_MATCHES), 2),
         )
         if code or timed_out:
             raise RuntimeError("native registry inventory could not be established")
-        validate_inventory(found[:-1], found[-1], total)
+        validate_inventory(found[1:-1], found[-1], total)
+        inventories.append(listed_names(found[0], found[-1], total))
+    all_names, ignored = inventories
+    if ignored != frozenset(FIXTURE_TESTS) or not ignored.issubset(all_names):
+        raise RuntimeError("native registry ignored inventory is not the exact artifact producers")
+    return all_names - ignored
+
+
+def execute_registry_partitions(guard: dict, directory: Path, command: list[str], expected: int) -> None:
+    normal = check_normal_inventory(guard, directory, command, expected)
+    partitions, commands = [], []
+    for label, selector, skipped, count in REGISTRY_PARTITIONS:
+        skips = (*FIXTURE_TESTS, *(REGISTRY_PREFIX + skip for skip in skipped))
+        part = [*command[:-1], REGISTRY_PREFIX + selector, "--",
+                *(arg for skip in skips for arg in ("--skip", skip))]
+        code, _, timed_out, found = guard["run_logged"](
+            "native-registry-" + label + "-inventory", [*part, "--list"], directory,
+            limit=30 * 60, markers=(INVENTORY_NAME, INVENTORY_COUNT), marker_limits=(count + 1, 2))
+        if code or timed_out:
+            raise RuntimeError("native registry partition inventory could not be established")
+        partitions.append((label, listed_names(found[0], found[1], count)))
+        commands.append((label, part, count))
+    validate_partitions(normal, partitions)
+    # Write the actual evidence, not a hand-maintained acceptance manifest.
+    import json
+    (directory / "registry-partitions.json").write_text(
+        json.dumps({label: sorted(names) for label, names in partitions}, indent=2) + "\n", encoding="utf-8")
+    for label, part, count in commands:
+        code, summaries, timed_out, _ = guard["run_logged"](
+            "native-registry-" + label, part, directory, limit=30 * 60)
+        if timed_out:
+            raise RuntimeError(f"native-registry-{label}: owned cohort exceeded its deadline")
+        guard["validate"]("".join(summaries), code, count)
 
 
 def fresh_founder_cohort(cohorts: tuple) -> list:
@@ -177,8 +275,8 @@ def main() -> None:
             "cargo", "test", "--locked", "-p", crate, "--all-features", "--lib", selector,
         ]
         if name == "native-registry-physical":
-            check_normal_inventory(guard, directory, command, expected)
-            command += ["--", *(value for name in FIXTURE_TESTS for value in ("--skip", name))]
+            execute_registry_partitions(guard, directory, command, expected)
+            continue
         code, summaries, timed_out, _ = guard["run_logged"](
             name, command, directory, limit=30 * 60,
         )

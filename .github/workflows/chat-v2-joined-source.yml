@@ -5,6 +5,7 @@ on:
     # Explicit integration-PR lane while inherited lint debt blocks ordinary CI's tests.
     # Full/strict gates remain required; this is not all-source coverage after merge.
     paths:
+      - '.github/scripts/check-chat-v2-member-save.py'
       - '.github/scripts/check-chat-v2-native-index2.py'
       - '.github/predecessor/native_index2_gate.rs'
       - '.github/scripts/check-chat-v2-native-index3.py'
