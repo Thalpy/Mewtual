@@ -84,6 +84,28 @@ Read-only review has no blocker/high/medium. The specific CI expiry explanation
 remains a hypothesis, with bounded diagnostic and deterministic-control limits
 recorded in [the fixture contract](communication-recovery/NATIVE-CONSUMER-STARTUP-FIXTURE.md).
 
+## Foundation Sync fixture follow-up (16 November; focused and strict pass)
+
+Fresh9d4deded Linux Root CI exposed four Sync fixture failures, while all1830
+App cases passed and the Studio default-stack overflow was cleared. The four
+failures reproduce in isolation (zero pass/four fail). The existing reviewed
+92f227438 correction is now backported only to the two Sync test files, with
+three redundant mutable fixture bindings removed for strict lint.
+
+Cold provider reconstruction changes unordered row iteration, so the fixture
+compares every key/value row, signer, group and complete non-MLS suffix across
+restore. It retains exact SAME-restored-node byte equality around refused
+controls and avoids printing secret snapshot contents. The staged join fixtures
+now admit the actual transmitted KeyPackage; the wrong-contact case delivers
+the same valid signed response attacker-first, then through the approved helper.
+No SDK, production join/authority check, timeout, profile or format changes.
+
+The four regressions pass, the complete affected Sync crate passes1454/0 with
+zero ignored cases (79.13s), and strict all-target/all-feature Root Clippy passes
+(2m24s). Fresh complete CI remains required on the new candidate. The failed9d
+Root run is not a pass; main remains unmerged and Chat V2 remains disabled.
+
+
 ## Foundation merge follow-up (16 November; focused checks pass)
 
 Both complete Root jobs stopped with the same default-stack overflow in
