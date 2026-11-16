@@ -26,7 +26,7 @@ const COPY_CHUNK_UNITS = 256;
  * copy frame. Numeric arguments end before join, and all copy scratch ends before SDK IO.
  * The fixed4KiB pool still separately pays its post-SDK completion/refund tail. */
 export function voiceAudioCaptureInventory(): Readonly<{ copy: number; join: number; sdk: number }> {
-  const fixed = 1024; // Capsule/current/payment/master refs and small synchronous wrappers.
+  const fixed = 1536; // Capsule/current/payment/master refs, detached token and small wrappers.
   const pieces = Math.ceil(MAX_DEVICE_UNITS / COPY_CHUNK_UNITS) * (COPY_CHUNK_UNITS * 2 + 32);
   const index = 128, owned = MAX_DEVICE_UNITS * 2 + 32;
   return Object.freeze({
@@ -52,10 +52,18 @@ function ownedDevice(value: string): string {
 
 /** Must capture only the prepaid broker/group ledger, never an old native owner,
  * Call, negotiation, Phase, or UI component. It returns the SAME capsule payment. */
+export type VoiceAudioCapturePayment = Readonly<{
+  release(): void;
+  /** Observe the SAME void finalizer task, including pool.returned. No task is stored
+   * in the payment; its one reaction retains only independently paid ledger metadata. */
+  trackTask(task: Promise<void>): void;
+  /** Proven synchronous refusal before any SDK/finalizer task was constructed. */
+  noTaskEntered(): void;
+}>;
 export type VoiceAudioCaptureBudget = Readonly<{
   /** Atomic synchronous ledger admission: return its one-shot payment, or throw
    * without charging. No UI/native/negotiation object may hide in this adapter. */
-  reserve(): Readonly<{ release(): void }>;
+  reserve(): VoiceAudioCapturePayment;
 }>;
 /** Trusted broker supplies the actual independently paid adopted media status and
  * shared clock. This is not a renderer boolean, callback, or historical Ready. */
@@ -64,7 +72,7 @@ type Devices = Pick<MediaDevices, "getUserMedia">;
 type Capsule = {
   target: VoiceAudioCaptureSession | null;
   current: VoiceAudioCaptureCurrent;
-  payment: Readonly<{ release(): void }> | null;
+  payment: VoiceAudioCapturePayment | null;
   stream: MediaStream | null;
   task: Promise<void> | null;
   settled: boolean; stopping: boolean;
@@ -176,9 +184,17 @@ export class VoiceAudioCapturePool {
       } catch {
         // Proven local refusal BEFORE constructing any SDK promise/registration. There
         // is no ambiguous handoff here. Return only this exact original capsule payment.
-        capsule.target = null; capsule.settled = true; this.retry(); return false;
+        capsule.target = null; capsule.settled = true;
+        payment.noTaskEntered(); this.retry(); return false;
       }
       capsule.task = finishCapture(this, capsule, startCapture(this, capsule, devices, constraints));
+      try { payment.trackTask(capsule.task); } // Publish/observe BEFORE deferred SDK entry.
+      catch {
+        // A broken trusted accounting adapter cannot leave positive SDK admission
+        // running after request reported refusal. Keep actual finalizer/debt custody;
+        // a missing observer is never proof that no task was constructed.
+        capsule.target = null; return false;
+      }
       return true;
     } finally { this.#reserving = false; }
   }

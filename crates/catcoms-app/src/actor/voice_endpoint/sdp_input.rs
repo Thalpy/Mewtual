@@ -36,6 +36,12 @@ pub(super) struct InvocationState<P> {
     payment: P,
 }
 impl<P> InvocationState<P> {
+    pub(super) fn payment(&self) -> &P {
+        &self.payment
+    }
+    pub(super) fn is_retired(&self) -> bool {
+        self.retired.load(Ordering::Acquire)
+    }
     pub(super) fn new(payment: P) -> Self {
         Self {
             retired: AtomicBool::new(false),

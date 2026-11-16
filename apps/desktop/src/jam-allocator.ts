@@ -1,4 +1,4 @@
-import { JAM_HELD_PER_PEER, JAM_REMOTE_HOLD_MAX_MS, JAM_VOICES_GLOBAL, TAKE_MAX_DURATION_MS } from "./jam-contract.ts";
+import { JAM_DOCUMENT_HELD_MAX, JAM_HELD_PER_PEER, JAM_REMOTE_HOLD_MAX_MS, JAM_VOICES_GLOBAL, TAKE_MAX_DURATION_MS } from "./jam-contract.ts";
 
 export type JamVoicePhase = "held" | "tail";
 export type JamVoiceEndReason = "stolen" | "source-reset" | "engine-dispose";
@@ -13,6 +13,9 @@ export type JamVoiceRequest = Readonly<{
   startedAtMs: number;
   /** Receiver-computed remaining archival hold; omitted keeps the live 30-second watchdog. */
   holdMs?: number;
+  /** This owner's held-note cap: JAM_HELD_PER_PEER unless the engine minted the Studio's document
+   * playback, which may hold up to JAM_DOCUMENT_HELD_MAX. Never taken from take content. */
+  heldCap?: number;
   /** Must synchronously disconnect every node owned by the voice. */
   teardown: (reason: JamVoiceEndReason) => void;
 }>;
@@ -52,7 +55,9 @@ export class JamVoiceAllocator {
     if (request.phase !== "held" && request.phase !== "tail") throw new TypeError("invalid voice phase");
     const holdMs = request.holdMs ?? JAM_REMOTE_HOLD_MAX_MS;
     if (!Number.isFinite(holdMs) || holdMs < 0 || holdMs > TAKE_MAX_DURATION_MS) throw new TypeError("invalid bounded voice hold");
-    if (request.phase === "held" && this.countOwner(owner, "held") >= JAM_HELD_PER_PEER) {
+    const heldCap = request.heldCap ?? JAM_HELD_PER_PEER;
+    if (!Number.isInteger(heldCap) || heldCap < JAM_HELD_PER_PEER || heldCap > JAM_DOCUMENT_HELD_MAX) throw new TypeError("invalid held-note cap");
+    if (request.phase === "held" && this.countOwner(owner, "held") >= heldCap) {
       return { ok: false, reason: "source-held" };
     }
 

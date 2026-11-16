@@ -6,22 +6,27 @@ import test from "node:test";
 import { jamPatchId } from "./jam-patch.ts";
 import { canonicalJson, SCORE_MAX_CELLS, SCORE_MAX_PATCHES, SCORE_MAX_STEPS, SCORE_ROWS, type ScoreCell, type ScoreOp } from "./studio-contract.ts";
 import { exportScoreTake } from "./studio-export.ts";
+import { validateDraftOperation } from "./studio-draft.ts";
 
 const vectors = JSON.parse(readFileSync(new URL("../../../crates/catcoms-replication/tests/fixtures/studio-score-ops-v1.json", import.meta.url), "utf8")) as {
   version: number; patch_id: string; cases: { name: string; body: string }[];
 };
 const read = (name: string): ScoreOp => JSON.parse(vectors.cases.find((row) => row.name === name)!.body);
 
+// Declared contract change 2026-10-20 (docs/design-score-layers.md section 9): five layered-note
+// vectors (`set_note`, `clear_note`) joined the original 18, and every body is also one the
+// renderer's own draft validator accepts, so a retained draft holding it survives a restart.
 test("score Rust vectors match frontend canonical operation bytes and every operation family", () => {
   assert.equal(vectors.version, 1);
-  assert.equal(vectors.cases.length, 16);
+  assert.equal(vectors.cases.length, 23);
   const families = new Set<string>();
   for (const row of vectors.cases) {
     const op: ScoreOp = JSON.parse(row.body);
     assert.equal(canonicalJson(op), row.body, row.name);
+    validateDraftOperation(op, "score");
     families.add(op.op);
   }
-  assert.deepEqual([...families].sort(), ["clear_cell", "remove_patch", "set_cell", "set_header", "set_patch"]);
+  assert.deepEqual([...families].sort(), ["clear_cell", "clear_note", "remove_patch", "set_cell", "set_header", "set_note", "set_patch"]);
   assert.deepEqual([SCORE_MAX_STEPS, SCORE_ROWS, SCORE_MAX_CELLS, SCORE_MAX_PATCHES], [256, 25, 4096, 64]);
 });
 
@@ -37,4 +42,20 @@ test("score vectors preserve optional authored length while sharing export cells
   assert.deepEqual(await exportScoreTake(score(legacy.value), ctx), await exportScoreTake(score(explicit.value), ctx));
   const take = await exportScoreTake(score(held.value), ctx);
   assert.equal(take.events[1].ms, 95999, "the typed cell carries the author's full hold into the existing take format");
+});
+
+test("score vectors carry an authored volume into the take's note-on and leave legacy notes without one", async () => {
+  const quiet = read("note_volume"), full = read("note_volume_hold"), legacy = read("note_legacy"), patch = read("set_patch");
+  assert.ok(quiet.op === "set_cell" && full.op === "set_cell" && legacy.op === "set_cell" && patch.op === "set_patch");
+  assert.ok(quiet.value.k === "n" && full.value.k === "n" && legacy.value.k === "n");
+  assert.equal(quiet.value.vol, 1); assert.equal(full.value.vol, 100); assert.equal(full.value.len, 4);
+  assert.equal(Object.hasOwn(legacy.value, "vol"), false);
+  const ctx = { group: "stable-group-id", exporter: "1".repeat(64) };
+  const score = (cell: ScoreCell) => ({ id: "2".repeat(32), bpm: 120, bpb: 4, steps: 256, patches: { [patch.patch]: patch.descriptor }, cells: { "8:12": cell } });
+  const on = (take: { events: readonly Record<string, unknown>[] }) => take.events.find((e) => e.on === 1)!;
+  assert.equal(on(await exportScoreTake(score(quiet.value), ctx)).v, 1, "the level rides the note-on as `v`");
+  assert.equal(on(await exportScoreTake(score(full.value), ctx)).v, 100, "an explicit full level is kept, not dropped");
+  assert.equal("v" in on(await exportScoreTake(score(legacy.value), ctx)), false, "a note without a level exports exactly as before");
+  await assert.rejects(exportScoreTake(score({ ...quiet.value, vol: 0 }), ctx), /volume/);
+  await assert.rejects(exportScoreTake(score({ ...quiet.value, vol: 101 }), ctx), /volume/);
 });

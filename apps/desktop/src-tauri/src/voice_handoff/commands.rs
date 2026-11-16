@@ -10,9 +10,75 @@ use serde::Serialize;
 use std::io::Write;
 use std::sync::Arc;
 use tauri::State;
+mod physical_history;
+pub(crate) fn no_physical_intent_reply_layout_bytes() -> usize {
+    physical_history::no_intent_reply_layout_bytes()
+}
+pub(crate) fn physical_receipt_reply_layout_bytes() -> usize {
+    physical_history::bound_reply_layout_bytes()
+}
+#[cfg(test)]
+pub(crate) async fn fixture_physical_observation(
+    state: &AppState,
+    owner: &str,
+    executor: [u8; 32],
+) -> Result<physical_history::PhysicalReply, String> {
+    physical_history::observe_inner(state, owner, executor).await
+}
+
+/// Exact paid physical history only. Missing/forgotten parents remain NoProof;
+/// this fixed negative command neither creates intent nor starts work.
+#[tauri::command]
+pub(crate) async fn observe_admitted_voice_channel(
+    state: State<'_, AppState>,
+    owner: String,
+    executor: String,
+) -> Result<physical_history::PhysicalReply, String> {
+    let id = identity(&owner, &executor)?;
+    physical_history::observe_inner(&state, &owner, id).await
+}
+
+/// Explicit final-forget/waiver for an ALREADY observed exact physical receipt.
+/// It proves neither browser observation nor receipt delivery. Native may collect
+/// only after its independent original Root/key/task gates have actually returned.
+#[tauri::command]
+pub(crate) async fn acknowledge_admitted_voice_channel(
+    state: State<'_, AppState>,
+    owner: String,
+    executor: String,
+    receipt: String,
+) -> Result<(), String> {
+    let id = identity(&owner, &executor)?;
+    if receipt.len() != 64
+        || !receipt
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+    {
+        return Err(REFUSED.into());
+    }
+    let receipt = hex::decode(receipt)
+        .map_err(|_| REFUSED)?
+        .try_into()
+        .map_err(|_| REFUSED)?;
+    physical_history::acknowledge_inner(&state, &owner, id, receipt).await?;
+    crate::voice_admitted_call::collect_retired(&state);
+    Ok(())
+}
 
 const REFUSED: &str = "voice channel unavailable";
 pub(super) const PUBLIC_REPLY_BYTES: usize = 2304;
+/// Actual bounded setup projection/serialization overlap, paid before a Row is
+/// admitted. The fixed hex buffer is a real native stack owner, not just its
+/// used prefix; framework copies after IpcResponse handoff remain out of scope.
+pub(super) fn bootstrap_reply_layout_bytes() -> usize {
+    std::mem::size_of::<SetupReply>()
+        + std::mem::size_of::<Vec<u8>>()
+        + PUBLIC_REPLY_BYTES
+        + 2048
+        + 128
+        + 64
+        + 256
+}
 
 #[derive(Serialize)]
 #[serde(
@@ -53,6 +119,12 @@ impl SetupReply {
         port: u16,
         projection: MetadataProjection,
     ) -> Result<Self, String> {
+        if owner.capacity() > 128 || executor.capacity() > 64 {
+            return Err(REFUSED.into());
+        }
+        projection
+            .require_reply_memory(bootstrap_reply_layout_bytes())
+            .map_err(|_| REFUSED.to_string())?;
         let metadata = match status {
             Status::Ready(output) => Metadata::Ready {
                 owner,
@@ -97,6 +169,7 @@ struct JsonBuffer {
     bytes: Vec<u8>,
 }
 
+mod admitted;
 mod work;
 pub(super) use work::{read_inner as read_work_inner, WorkReply};
 impl Write for JsonBuffer {
@@ -145,6 +218,11 @@ pub(super) async fn setup_inner(
     rng: &mut impl CryptoRngCore,
 ) -> Result<SetupReply, String> {
     let id = identity(&owner, &executor)?;
+    // The SAME input buffers transfer into paid reply metadata. Bound actual
+    // capacity, not only visible length, before admitting a physical Row.
+    if owner.capacity() > 128 || executor.capacity() > 64 {
+        return Err(REFUSED.into());
+    }
     // A bound port alone is not readiness. Refuse before native admission/RNG when startup
     // failed, has not run, or the actual service has exited. Never start a replacement here.
     let port = host.port().map_err(|_| REFUSED.to_string())?;
@@ -167,6 +245,35 @@ pub(crate) async fn setup_voice_channel(
 ) -> Result<SetupReply, String> {
     crate::require_unlocked_session(&state).await?;
     setup_inner(&state, &host, owner, executor, &mut OsCryptoRng).await
+}
+
+/// Inert admitted physical bootstrap. This fixed entry cannot enable a worker,
+/// ACK, Existing pilot, Ready or RTC; its transcript has its own profile/domain.
+#[tauri::command]
+pub(crate) async fn setup_admitted_voice_channel(
+    state: State<'_, AppState>,
+    host: State<'_, Arc<Host>>,
+    owner: String,
+    executor: String,
+) -> Result<SetupReply, String> {
+    crate::require_unlocked_session(&state).await?;
+    admitted::setup_admitted_inner(&state, &host, owner, executor, &mut OsCryptoRng).await
+}
+#[tauri::command]
+pub(crate) async fn settle_admitted_voice_channel_setup(
+    state: State<'_, AppState>,
+    owner: String,
+    executor: String,
+) -> Result<(), String> {
+    admitted::settle_admitted_inner(&state, owner, executor).await
+}
+#[tauri::command]
+pub(crate) async fn collect_admitted_voice_channel(
+    state: State<'_, AppState>,
+    owner: String,
+    executor: String,
+) -> Result<(), String> {
+    admitted::collect_admitted_inner(&state, owner, executor).await
 }
 
 /// Public historical metadata only, on the main-window ACL. Exact old channel provenance

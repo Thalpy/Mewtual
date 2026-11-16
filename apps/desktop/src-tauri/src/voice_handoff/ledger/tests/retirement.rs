@@ -37,10 +37,14 @@ fn compacted_final_history_retains_original_proof_until_actual_root_input_drops(
     let pressure = pool
         .charge(
             group,
-            catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.counts().0,
+            catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.group_counts(group).unwrap().0,
             ResourceKind::Retained,
         )
         .unwrap();
+    assert_eq!(
+        pool.group_counts(group).unwrap().0,
+        catcoms_sync::voice_v2::resources::GROUP_BYTES
+    );
     let full = pool.counts();
     assert!(ledger.compact(id).unwrap());
     assert!(

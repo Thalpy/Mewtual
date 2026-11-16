@@ -31,9 +31,26 @@ enum Frame {
     Call { method: Method, args: Metadata },
     Done { value: Value },
     Failed { reason: String },
+    Progress { phase: ProgressPhase },
     Blocked,
 }
-#[derive(Debug, Deserialize, Clone, Copy)]
+/// Closed metadata vocabulary only: never pipe keys, IDs, SDP or input bodies.
+#[derive(Deserialize, Clone, Copy, Debug)]
+#[serde(rename_all = "kebab-case")]
+enum ProgressPhase {
+    Step,
+    Rpc,
+    RpcReturn,
+    Http,
+    HttpReturn,
+    Transition,
+    Rtc,
+    Media,
+    ObserverClose,
+    Pump,
+    Idle,
+}
+#[derive(Deserialize, Clone, Copy, Debug)]
 #[serde(rename_all = "camelCase")]
 enum Method {
     AdmitKey,
@@ -45,6 +62,89 @@ enum Method {
     ReadWork,
     ObserveTerminal,
     ObserveSdpRound,
+}
+
+/// One fixed snapshot survives cancellation of the pipe future. A timeout must
+/// report the last actual wait, not lose it with the canceled future. This is
+/// test-harness evidence, never protocol progress or permission to retry work.
+#[derive(Debug)]
+struct StepTrace {
+    step: String,
+    started_mono: u64,
+    phase: &'static str,
+    frames: usize,
+    callbacks: usize,
+    method: Option<Method>,
+    reply_returned: bool,
+    blocked_ack: bool,
+    node: Option<ProgressPhase>,
+}
+impl StepTrace {
+    fn new(step: &Value, started_mono: u64) -> Self {
+        Self {
+            started_mono,
+            // The source is our closed scenario, but cap/sanitize even that input.
+            step: step["name"]
+                .as_str()
+                .unwrap_or("unknown")
+                .chars()
+                .take(40)
+                .map(|c| {
+                    if c.is_ascii_lowercase() || c == '-' {
+                        c
+                    } else {
+                        '?'
+                    }
+                })
+                .collect(),
+            phase: "step-write",
+            frames: 0,
+            callbacks: 0,
+            method: None,
+            reply_returned: false,
+            blocked_ack: false,
+            node: None,
+        }
+    }
+}
+
+fn original_step_diagnostic(
+    state: &AppState,
+    selected: Option<&SelectedHandoffOwner>,
+    expected: Option<ledger::RowId>,
+    discovered: Option<PairSelector>,
+) -> Option<String> {
+    selected.map(|selected| {
+        // Sample the sanctioned fixture Clock before any ledger/native snapshot.
+        // Compare this and StepTrace's start with the immutable deadline: a
+        // deadline already past at step entry differs from expiry during a stall.
+        // Neither observation establishes the stall's cause or renews authority.
+        let observed_mono = crate::voice_runtime(state).clock().monotonic_ms();
+        // Every path here is a primitive try-lock snapshot. In particular, do
+        // not call ordinary terminal/SDP getters while diagnosing their stall.
+        let expected = expected.or_else(|| {
+            discovered.and_then(|selector| {
+                state
+                    .voice_handoff
+                    .fixture_discovered_parent(selected, selector)
+            })
+        });
+        let (selector, ledger) = state
+            .voice_handoff
+            .fixture_sdp_diagnostic(selected, expected);
+        let native = selector.or(discovered).map(|selector| {
+            state
+                .voice_channels
+                .fixture_native_diagnostic(selected, selector)
+        });
+        let session = state
+            .voice_channels
+            .fixture_sdp_session_diagnostic(selected);
+        let confirmation = state
+            .voice_handoff
+            .fixture_confirmation_diagnostic(selected, expected);
+        format!("observed monotonic ms={observed_mono}; {ledger}; {confirmation}; {native:?}; independent {session}")
+    })
 }
 #[derive(Deserialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -80,9 +180,9 @@ struct Callbacks {
     refuse_collect: bool,
     // Rust-only observation scope, derived from actual native discovery, never Node input.
     expected_parent: Option<ledger::RowId>,
-    // Actual discovery observation, used ONLY for failure diagnostics. Automatic
-    // consumers still choose their own work; this never scopes terminal success.
-    diagnostic_pair: Option<PairSelector>,
+    // Actual test-observed member discovery, diagnostic only. Never browser
+    // selection, callback authority, parent construction or terminal success.
+    diagnostic_selector: Option<PairSelector>,
     pause_setup: bool,
     discovery_hold: Option<super::super::channel::NativeHold>,
     // Negative test-owned cadence barrier; dropping always resumes the actual Host.
@@ -100,7 +200,7 @@ impl Default for Callbacks {
             refuse_publish: true,
             refuse_collect: true,
             expected_parent: None,
-            diagnostic_pair: None,
+            diagnostic_selector: None,
             pause_setup: false,
             discovery_hold: None,
             deferred_maintenance: None,
@@ -370,7 +470,7 @@ impl Endpoint {
     }
 
     pub(crate) fn observe_discovered_pair(&mut self, selector: PairSelector) {
-        self.callbacks.diagnostic_pair = Some(selector);
+        self.callbacks.diagnostic_selector = Some(selector);
     }
 
     async fn step(&mut self, value: Value) -> Value {
@@ -423,9 +523,13 @@ impl Endpoint {
             self.callbacks.expected_parent
         ));
     }
+    pub(crate) fn diagnostic_peer(&mut self, selector: PairSelector) {
+        self.callbacks.diagnostic_selector = Some(selector);
+    }
     /// Scope only the independent test oracle; the normal browser work pump still chooses
     /// its own metadata. The expected full RowId comes from actual native discovery.
     pub(crate) async fn automatic_pair(&mut self, selector: PairSelector) -> ledger::ResolvedRow {
+        self.diagnostic_peer(selector);
         let parent = self.wait_native_derivation(selector).await;
         self.callbacks.expected_parent = Some(parent.id());
         self.automatic_confirmation().await;
@@ -437,6 +541,12 @@ impl Endpoint {
     }
 
     pub(crate) async fn discover_after_local_refusal(&mut self) {
+        self.discovery_refusal_cycle(false).await;
+    }
+    pub(crate) async fn discover_after_attachment_refusal(&mut self) {
+        self.discovery_refusal_cycle(true).await;
+    }
+    async fn discovery_refusal_cycle(&mut self, force_attachment: bool) {
         let selected = self.selected();
         let route = (1..=64)
             .find_map(|slot| {
@@ -452,6 +562,7 @@ impl Endpoint {
             &context::Context::new(&self.state),
             &route,
             clock.as_ref(),
+            force_attachment,
         )
         .await;
         // Resume the original, previously unpolled maintenance turn only AFTER the real
@@ -892,6 +1003,23 @@ impl Endpoint {
         assert_eq!(parent.sdk_test_released(), Some(false));
         {
             let selected = self.selected();
+            // Both genuine SDP children now exist under this same parent. They
+            // must not masquerade as extra confirmation actions in a failure log.
+            let clock = crate::voice_runtime(&self.state).clock();
+            let mut confirmation = String::new();
+            for _ in 0..20 {
+                confirmation = self
+                    .state
+                    .voice_handoff
+                    .fixture_confirmation_diagnostic(&selected, Some(parent.id()));
+                if confirmation != "ledger index contended" {
+                    break;
+                }
+                // Read-only test observation: brief contention must not invent
+                // a wrong row count or change the original protocol outcome.
+                clock.sleep(std::time::Duration::from_millis(20)).await;
+            }
+            assert!(confirmation.contains("pending=[4,"), "{confirmation}");
             let route = (1..=64)
                 .find_map(|slot| {
                     self.state
@@ -1222,7 +1350,7 @@ impl Endpoint {
             }
         };
         assert!(receipt.admitted && !receipt.current && !receipt.closed && !receipt.released);
-        // Drop the successful observation. Exact repetition recovers completed tombstone,
+        // After a successful observation, exact repetition recovers completed tombstone,
         // without requiring any of its erased rows or pretending Session collection.
         // Even a completed tombstone read uses nonblocking Index/entry checks.
         // Force that exact local refusal, then recover ONLY this same target
@@ -1231,16 +1359,42 @@ impl Endpoint {
             target.retire_history_with_state_locked_for_test(),
             Err(VoiceError::Capacity)
         ));
-        let recovered = loop {
-            match target.retire_history() {
-                Ok(receipt) => break receipt,
-                Err(VoiceError::Capacity) if clock.monotonic_ms() < limit => {
-                    clock.sleep(std::time::Duration::from_millis(5)).await
+        // Completion does not make the shared Index uncontended. Force a real refusal
+        // after success, then release its guard BEFORE any sanctioned Clock wait. The
+        // same retained target must recover within the original collection deadline;
+        // a Capacity snapshot must never manufacture a second retirement or a receipt.
+        let refuse_once = || {
+            let held = ledger.fixture_try_hold_index()?;
+            let refused = target.retire_history();
+            drop(held);
+            assert!(matches!(refused, Err(VoiceError::Capacity)));
+            Ok::<(), VoiceError>(())
+        };
+        for observation in 0..32 {
+            match refuse_once() {
+                Ok(()) => break,
+                Err(VoiceError::Capacity) if observation < 31 && clock.monotonic_ms() < limit => {
+                    clock.sleep(std::time::Duration::from_millis(5)).await;
                 }
-                Err(error) => panic!("same completed history observation failed: {error:?}"),
+                Err(error) => panic!("original completed-history barrier refused: {error:?}"),
+            }
+        }
+        let mut observations = 0;
+        let recovered = loop {
+            observations += 1;
+            match target.retire_history() {
+                Ok(recovered) => break recovered,
+                Err(VoiceError::Capacity) if observations < 32 && clock.monotonic_ms() < limit => {
+                    clock.sleep(std::time::Duration::from_millis(5)).await;
+                }
+                Err(error) => panic!("original completed history did not recover: {error:?}"),
             }
         };
         assert_eq!(receipt.proof, recovered.proof);
+        assert!(
+            recovered.admitted && !recovered.current && !recovered.closed && !recovered.released
+        );
+        assert_eq!(receipt.retire_in, recovered.retire_in);
         assert!(ledger
             .lookup_original(&selected, ledger::Purpose::Derive(selector))
             .is_none());
@@ -1470,18 +1624,6 @@ async fn drive_streams(
     diagnostic_scope: Option<&SelectedHandoffOwner>,
     step: Value,
 ) -> (Value, Option<[u8; 32]>) {
-    let step_name = step["name"]
-        .as_str()
-        .filter(|name| {
-            name.len() <= 32
-                && name
-                    .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte == b'-')
-        })
-        .unwrap_or("unknown")
-        .to_owned();
-    // Fixed metadata only. No payload, identity, key, SDP or result is retained here.
-    let observed = std::sync::Mutex::new((0usize, None::<Method>));
     // This bounds a broken subprocess/harness, never a protocol deadline. Cancelling this
     // waiter drops its original pipe/process owners; admitted native work keeps its own
     // custody. No timeout creates a replacement key, action, Phase or channel.
@@ -1493,6 +1635,8 @@ async fn drive_streams(
     } else {
         30
     };
+    let mut trace = StepTrace::new(&step, crate::voice_runtime(state).clock().monotonic_ms());
+    let expected = callbacks.expected_parent;
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(bound),
         drive_streams_inner(
@@ -1504,38 +1648,20 @@ async fn drive_streams(
             callbacks,
             diagnostic_scope,
             step,
-            &observed,
+            &mut trace,
         ),
     )
     .await;
     match result {
-        Ok(done) => done,
+        Ok(value) => value,
         Err(_) => {
-            // Read only the original scope's bounded diagnostic observers. No Actor
-            // await, replacement lookup, retry or protocol deadline change on timeout.
-            let detail = diagnostic_scope.map(|selected| {
-                let (selector, ledger) = state
-                    .voice_handoff
-                    .fixture_sdp_diagnostic(selected, callbacks.expected_parent);
-                let native = selector.map(|selector| {
-                    state
-                        .voice_channels
-                        .fixture_native_diagnostic(selected, selector)
-                });
-                let session = state
-                    .voice_channels
-                    .fixture_sdp_session_diagnostic(selected);
-                let confirmation = callbacks.diagnostic_pair.map(|pair| {
-                    state
-                        .voice_handoff
-                        .fixture_derivation_diagnostic(selected, pair)
-                });
-                format!(
-                    "{ledger}; {native:?}; independent {session}; confirmation={confirmation:?}"
-                )
-            });
-            let observed = *observed.lock().unwrap_or_else(|error| error.into_inner());
-            panic!("native/WebCrypto control timeout: step={step_name}, observed={observed:?}; original-scope diagnostics={detail:?}");
+            let detail = original_step_diagnostic(
+                state,
+                diagnostic_scope,
+                expected,
+                callbacks.diagnostic_selector,
+            );
+            panic!("native/WebCrypto control step exceeded its harness bound: {trace:?}; original-scope diagnostics={detail:?}");
         }
     }
 }
@@ -1549,7 +1675,7 @@ async fn drive_streams_inner(
     callbacks: &mut Callbacks,
     diagnostic_scope: Option<&SelectedHandoffOwner>,
     step: Value,
-    observed: &std::sync::Mutex<(usize, Option<Method>)>,
+    trace: &mut StepTrace,
 ) -> (Value, Option<[u8; 32]>) {
     let automatic = step["name"] == "pump";
     let coordinator = step["name"] == "coordinator";
@@ -1570,7 +1696,13 @@ async fn drive_streams_inner(
     } else {
         32
     };
-    for count in 0..callbacks_bound {
+    // Node samples its single latest diagnostic phase at most once/100ms. Give
+    // that observer a separate allowance for the SAME unchanged30/60s bound;
+    // fast authenticated Capacity loops cannot consume callbacks through logs.
+    // A diagnostic flood still exhausts this finite loop without renewing time.
+    let progress_bound = if coordinator { 600 } else { 300 };
+    for _ in 0..callbacks_bound + progress_bound + 4 {
+        trace.phase = "frame-header";
         let length = output
             .read_u32()
             .await
@@ -1580,31 +1712,37 @@ async fn drive_streams_inner(
             "endpoint exceeded fixed control frame"
         );
         let mut bytes = [0; FRAME_BYTES];
+        trace.phase = "frame-body";
         output.read_exact(&mut bytes[..length]).await.unwrap();
-        observed.lock().unwrap_or_else(|error| error.into_inner()).0 = count + 1;
+        trace.frames += 1;
         match serde_json::from_slice::<Frame>(&bytes[..length]).expect("closed metadata protocol") {
             Frame::Done { value } => return (value, published_executor),
             Frame::Failed { reason } => {
-                let detail = diagnostic_scope.map(|selected| {
-                    let (selector, ledger) = state
-                        .voice_handoff
-                        .fixture_sdp_diagnostic(selected, callbacks.expected_parent);
-                    let native = selector.map(|selector| {
-                        state
-                            .voice_channels
-                            .fixture_native_diagnostic(selected, selector)
-                    });
-                    let session = state
-                        .voice_channels
-                        .fixture_sdp_session_diagnostic(selected);
-                    let confirmation = callbacks.diagnostic_pair.map(|pair| state.voice_handoff.fixture_derivation_diagnostic(selected, pair));
-                    format!("{ledger}; {native:?}; independent {session}; confirmation={confirmation:?}")
-                });
-                panic!("actual native/WebCrypto step failed: {reason}; original-scope diagnostics={detail:?}")
+                let detail = original_step_diagnostic(
+                    state,
+                    diagnostic_scope,
+                    callbacks.expected_parent,
+                    callbacks.diagnostic_selector,
+                );
+                panic!("actual native/WebCrypto step failed: {reason}; {trace:?}; original-scope diagnostics={detail:?}")
             }
-            Frame::Blocked => panic!("unexpected blocked-step acknowledgement"),
+            Frame::Progress { phase } => trace.node = Some(phase),
+            Frame::Blocked => {
+                assert_eq!(
+                    trace.step, "wedge",
+                    "unexpected blocked-step acknowledgement"
+                );
+                trace.blocked_ack = true;
+            }
             Frame::Call { method, args } => {
-                observed.lock().unwrap_or_else(|error| error.into_inner()).1 = Some(method);
+                trace.callbacks += 1;
+                assert!(
+                    trace.callbacks <= callbacks_bound,
+                    "endpoint exceeded its bounded callback count"
+                );
+                trace.method = Some(method);
+                trace.phase = "native-callback";
+                trace.reply_returned = false;
                 let stop_pump = automatic
                     && matches!(method, Method::ObserveTerminal)
                     && hex::decode(&args.executor)
@@ -1682,6 +1820,7 @@ async fn drive_streams_inner(
                             .expect("original cadence hold"),
                     );
                 }
+                trace.reply_returned = true;
                 if matches!(method, Method::Setup) && reply.is_ok() && callbacks.pause_setup {
                     // Setup has installed the actual Session, but Node cannot ACK it until
                     // this reply returns. Reserve its existing sole factory position here;
@@ -1724,6 +1863,7 @@ async fn drive_streams_inner(
                     // the SAME retained broker decide recovery; never panic or dump input.
                     Err(()) => json!({"tag":"reply", "ok":false}),
                 };
+                trace.phase = "reply-write";
                 write(input, envelope).await;
                 drop(reply);
             }
@@ -2079,32 +2219,25 @@ async fn wedged_node_step_is_bounded_and_actual_child_stderr_and_service_are_col
     };
     let selected = endpoint.selected();
     let port = endpoint.port;
-    let wedged = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        catch_fixture(async {
-            write(
-                endpoint.input.as_mut().unwrap(),
-                json!({"tag":"step", "name":"wedge"}),
-            )
-            .await;
-            let output = endpoint.output.as_mut().unwrap();
-            let length = output.read_u32().await.unwrap() as usize;
-            assert!((1..=FRAME_BYTES).contains(&length));
-            let mut bytes = [0; FRAME_BYTES];
-            output.read_exact(&mut bytes[..length]).await.unwrap();
-            assert!(matches!(
-                serde_json::from_slice::<Frame>(&bytes[..length]).unwrap(),
-                Frame::Blocked
-            ));
-            // The child acknowledges its blocked state before this timer starts. It never
-            // completes the step; this bounds external fixture IO, not protocol time.
-            tokio::time::timeout(std::time::Duration::from_millis(100), output.read_u32()).await
-        }),
-    )
-    .await;
+    // Exercise the SAME production harness wrapper/report as an actual failed
+    // scenario, including its unchanged30s observer bound. The positive Blocked
+    // frame must have arrived; EOF or a slow child before ACK is not success.
+    let wedged = catch_fixture(endpoint.step(json!({"tag":"step", "name":"wedge"}))).await;
+    let reported = wedged
+        .err()
+        .and_then(|failure| failure.downcast::<String>().ok())
+        .map(|message| *message)
+        .unwrap_or_default();
     let success = endpoint.collect().await;
-    assert!(matches!(wedged, Ok(Ok(Err(_)))) && !success,
-        "only the acknowledged wedged step's timeout is success; EOF/read errors or pre-ACK timeout are failures");
+    assert!(
+        reported.contains("exceeded its harness bound")
+            && reported.contains("step: \"wedge\"")
+            && reported.contains("phase: \"frame-header\"")
+            && reported.contains("blocked_ack: true")
+            && reported.contains("original-scope diagnostics=Some")
+            && !success,
+        "only the acknowledged wedge's original wrapper timeout/report is success: {reported}"
+    );
     assert!(
         endpoint.child.try_wait().unwrap().is_some(),
         "the actual child was reaped"
@@ -2127,6 +2260,30 @@ async fn wedged_node_step_is_bounded_and_actual_child_stderr_and_service_are_col
     );
     drop((selected, endpoint));
     fixture.close().await;
+}
+
+#[test]
+fn diagnostic_progress_rejects_payloads_unknown_phases_and_unknown_metadata() {
+    assert!(matches!(
+        serde_json::from_value::<Frame>(json!({"tag":"progress", "phase":"rtc"})),
+        Ok(Frame::Progress {
+            phase: ProgressPhase::Rtc
+        })
+    ));
+    for frame in [
+        json!({"tag":"progress", "phase":"secret-key"}),
+        json!({"tag":"progress", "phase":"http", "body":"must not enter diagnostics"}),
+        json!({"tag":"progress", "phase":["rtc"]}),
+    ] {
+        assert!(serde_json::from_value::<Frame>(frame).is_err());
+    }
+    let trace = StepTrace::new(&json!({"name":"🔑".repeat(500)}), 123);
+    assert_eq!(trace.started_mono, 123);
+    assert_eq!(
+        trace.step,
+        "?".repeat(40),
+        "fixed diagnostic string and closed ASCII"
+    );
 }
 
 #[tokio::test]

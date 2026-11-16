@@ -475,3 +475,28 @@ test("an invalid opening recipe disables the footer rather than playing somethin
     assert.equal(h.button("use in moon cat").disabled, false, "a shelf tile is the way out");
   } finally { await h.done(); }
 });
+
+test("the preview length is what a played key is held for, follows the tempo, and the envelope marks the key-up", async () => {
+  const held: number[] = [];
+  const h = harness({ bpm: 90, onaudition: (_p: JamPatch, _n: number, ms: number) => { held.push(ms); } });
+  try {
+    const keyUp = () => Number(h.target.querySelector("[data-sf-keyup]")!.getAttribute("data-sf-keyup"));
+    const chip = (kind: string) => h.target.querySelector<HTMLButtonElement>(`[data-sf-preview="${kind}"]`)!;
+    assert.equal(chip("short").getAttribute("aria-pressed"), "true", "a quick tap by default");
+    press(h.target.querySelector('[aria-label="Play C4"]')!);
+    assert.deepEqual(held, [400]);
+    const shortKeyUp = keyUp();
+    chip("beat").click(); flushSync();
+    assert.equal(h.target.querySelector("[data-sf-preview-ms]")!.getAttribute("data-sf-preview-ms"), "667", "one beat at 90 bpm");
+    press(h.target.querySelector('[aria-label="Play C4"]')!);
+    assert.deepEqual(held, [400, 667]);
+    assert.ok(keyUp() > shortKeyUp, "a longer hold lets the key go further along the envelope's time axis");
+    chip("bar").click(); flushSync();
+    press(h.target.querySelector('[aria-label="Play C4"]')!);
+    assert.equal(held[2], 2667, "four beats");
+    chip("long").click(); flushSync();
+    press(h.target.querySelector('[aria-label="Play C4"]')!);
+    assert.equal(held[3], 2000);
+    assert.ok(keyUp() > 0 && keyUp() < 100, "the key-up sits inside the graph, before the release ends");
+  } finally { await h.done(); }
+});

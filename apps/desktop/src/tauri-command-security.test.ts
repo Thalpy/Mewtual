@@ -292,8 +292,13 @@ function invokedCommands(source: string): string[] {
  * so the guarantee this file exists for is unchanged, and the check below still sees those
  * literals. Widening this list is a security decision: an indirect invoke is a command name that
  * cannot be audited by reading the frontend.
+ *
+ * `studio-busy.ts` is the Studio session's storage-busy repeat (`busyRetrying`). It wraps a whole
+ * `StudioIpc` and forwards each call's own command and arguments unchanged, a bounded number of
+ * times. It never picks a command itself. Every Studio call site still names its command as a
+ * literal in `studio-native.ts` (`ipc.invoke("studio_apply", …)`), which this scan still reads.
  */
-const INVOKE_WRAPPERS = ["diagnostics.ts"];
+const INVOKE_WRAPPERS = ["diagnostics.ts", "studio-busy.ts"];
 
 test("native command extraction handles stacked attributes and intervening Rust trivia", () => {
   const source = String.raw`
@@ -574,9 +579,18 @@ test("every non-bootstrap native command visibly crosses the unlocked-session ga
     "cancel_inline_download",
     // Exact native revocation/settlement survives UI lock. No fresh work or existence bit.
     "end_call_mapping_owner", "unmap_call_port", "end_voice_owner", "settle_voice_crypto", "settle_voice_join_key",
+    // These commands first recover only an already-retained original terminal
+    // result. Their fresh branches independently cross UI admission; ACK and
+    // settlement create no key/Root/SDK work or replacement authority. Actual
+    // native regressions cover both lock orderings and retained +/- results.
+    "activate_admitted_voice_owner", "publish_admitted_voice_join_key",
+    "acknowledge_admitted_voice_activation", "acknowledge_admitted_voice_key_publication",
+    "settle_admitted_voice_join_key",
     // Original-owner channel closure/collection remain callable after lock/End. Native admits
     // no fresh effect and reports success only for actually drained, permanently closed setup.
     "settle_voice_channel_setup", "collect_voice_channel",
+    "settle_admitted_voice_channel_setup", "collect_admitted_voice_channel",
+    "observe_admitted_voice_channel", "acknowledge_admitted_voice_channel",
     // Own original-channel public work history is needed to recover unseen Pending after
     // End/lock. Native verifies the retained owner/executor and admits no new effect/data.
     "read_voice_channel_work",

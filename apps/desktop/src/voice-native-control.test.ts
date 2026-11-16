@@ -1,6 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { NativeControlFrames } from "../scripts/voice-native-control.ts";
+import { NativeControlFrames, NativeControlProgress } from "../scripts/voice-native-control.ts";
+
+test("fast Capacity attempt phases coalesce without consuming the original control allowance", () => {
+  const progress = new NativeControlProgress();
+  //200 attempts exceed the old85-attempt diagnostic failure, with no change to
+  //the attempt/result/deadline. Only the latest phase survives each sample turn.
+  for (let attempt = 0; attempt < 200; attempt++) {
+    progress.update("http"); progress.update("http-return"); progress.update("idle");
+  }
+  assert.equal(progress.sample(), "idle");
+  assert.equal(progress.sample(), null);
+  progress.update("rtc");
+  assert.equal(progress.sample(), "rtc", "a stalled awaited phase remains observable");
+  progress.reset();
+  assert.equal(progress.sample(), null, "a new step cannot inherit old diagnostic progress");
+});
 const encode = (value: unknown) => {
   const body = Buffer.from(JSON.stringify(value)), head = Buffer.alloc(4); head.writeUInt32BE(body.length);
   return Buffer.concat([head, body]);

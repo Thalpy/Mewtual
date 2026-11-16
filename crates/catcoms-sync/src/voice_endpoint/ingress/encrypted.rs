@@ -136,6 +136,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 .admit_voice_endpoint_public(ticket, envelope, context, room)
                 .map(EndpointReceipt::Public);
         }
+        // These are the old endpoint writers. New admitted ingress is intentionally
+        // absent; observation/helper relay is allowed through its separate paths.
+        if self.has_admitted_voice_activation() {
+            return Err(VoiceError::Unauthorized);
+        }
         let clock = self.voice_v2_clock();
         let members: HashSet<_> = self.group.member_device_ids().into_iter().collect();
         let voice = self

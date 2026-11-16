@@ -8,6 +8,8 @@
 // projection (studio-store.ts); when Studio save/load lands, the same operations go out through
 // `EncryptedDoc::edit_domain_gated` and the projection is replaced by the materialized document.
 
+import { JAM_NOTE_VOLUME_MAX, JAM_NOTE_VOLUME_MIN } from "./jam-contract.ts";
+
 // --- Document tags (catcoms-wire DocType; stable, append-only) --------------------------------
 export const DOC_TYPE_STUDIO_INDEX = 15;
 export const DOC_TYPE_STUDIO_OBJECT = 16;
@@ -171,11 +173,48 @@ export const SCORE_MAX_CELLS = 4096;
 export const SCORE_MAX_PATCHES = 64;
 
 /** Authored sixteenth-step length; absence preserves the original one-step draft bytes. */
-export type ScoreCell = { k: "n"; p: string; len?: number } | { k: "d"; pad: number };
-/** Body schema mirrored by Rust ScoreOp. Backend admission and causal validation remain required. */
+/**
+ * A note's optional `vol` is its authored level, 1..100 percent of the recipe's own level; absent
+ * means full level and is never rewritten to 100 (like an absent `len` is never rewritten to 1).
+ * Additive `jam-score:v1` field: a build before it refuses a body or checkpoint carrying it.
+ */
+export type ScoreCell = { k: "n"; p: string; len?: number; vol?: number } | { k: "d"; pad: number };
+export const SCORE_VOLUME_MIN = JAM_NOTE_VOLUME_MIN;
+export const SCORE_VOLUME_MAX = JAM_NOTE_VOLUME_MAX;
+/**
+ * A note's layer: the sound it plays (its recipe id, 64 hex), or `"d"` for the one drum kit layer.
+ * A cell holds one note per layer (docs/design-score-layers.md). The layer is always derived from
+ * the note's value; it is never chosen separately from it.
+ */
+export type ScoreLayer = "d" | string;
+export const SCORE_DRUM_LAYER = "d";
+export function layerOf(value: ScoreCell): ScoreLayer { return value.k === "d" ? SCORE_DRUM_LAYER : value.p; }
+
+/**
+ * Where a note lives. A legacy note (`set_cell`, key `c/S:R`) is `"S:R"`; a layered note
+ * (`set_note`, key `n/S:R/L`) is `"S:R/L"`. The two never collide, and the renderer uses these
+ * strings everywhere a note is addressed (selection, attention, undo).
+ */
+export function noteKey(step: number, row: number, layer: ScoreLayer | null): string {
+  return layer === null ? `${step}:${row}` : `${step}:${row}/${layer}`;
+}
+/** The inverse of `noteKey`; null for anything that is not a canonical note key. */
+export function parseNoteKey(key: string): { step: number; row: number; layer: ScoreLayer | null } | null {
+  const match = /^(0|[1-9][0-9]{0,2}):(0|[1-9][0-9]?)(?:\/(d|[0-9a-f]{64}))?$/.exec(key);
+  if (!match) return null;
+  const step = Number(match[1]), row = Number(match[2]);
+  if (step >= SCORE_MAX_STEPS || row >= SCORE_ROWS) return null;
+  return { step, row, layer: match[3] ?? null };
+}
+
+/** Body schema mirrored by Rust ScoreOp. Backend admission and causal validation remain required.
+ * `set_note`/`clear_note` are the layered notes (docs/design-score-layers.md): a build without
+ * them rejects such a body, so every member editing together must run a build that has them. */
 export type ScoreOp =
   | { op: "set_cell"; step: number; row: number; value: ScoreCell }
   | { op: "clear_cell"; step: number; row: number }
+  | { op: "set_note"; step: number; row: number; value: ScoreCell }
+  | { op: "clear_note"; step: number; row: number; layer: ScoreLayer }
   | { op: "set_patch"; patch: string; descriptor: unknown }
   | { op: "remove_patch"; patch: string }
   | { op: "set_header"; field: "title"; value: string }

@@ -259,6 +259,7 @@ async fn gate7_reopened_native_composition_exports_and_other_peer_reads_actual_p
                 value: ScoreCell::Note {
                     patch,
                     len: Some(2),
+                    volume: None,
                 },
             },
         ),

@@ -1,20 +1,30 @@
 // Pure Gate 6 conversion. The result goes through the same validator as the jukebox's saved
 // takes; this module owns neither playback nor publication nor permission to edit Studio state.
-import { PATCH_OSC_WAVES, TAKE_ID_MAX_BYTES, type JamPatch, type JamTake, type JamTakeEvent } from "./jam-contract.ts";
+import { PATCH_OSC_WAVES, TAKE_ID_MAX_BYTES, TAKE_MAX_LANES, type JamPatch, type JamTake, type JamTakeEvent } from "./jam-contract.ts";
 import { jamPatchId, validateJamPatch } from "./jam-patch.ts";
 import { validateJamTake } from "./jam-recorder.ts";
-import { FLIPNOTE_MAX_PATCHES, hex, SCORE_MAX_STEPS, SCORE_ROWS, SCORE_MAX_CELLS, type ScoreCell } from "./studio-contract.ts";
+import { canonicalJson, FLIPNOTE_MAX_PATCHES, hex, SCORE_MAX_STEPS, SCORE_ROWS, SCORE_MAX_CELLS, SCORE_VOLUME_MAX, SCORE_VOLUME_MIN, type ScoreCell } from "./studio-contract.ts";
 export { SCORE_MAX_STEPS, SCORE_ROWS, SCORE_MAX_CELLS } from "./studio-contract.ts";
 
-/** A resolved export view. Conflicts, overflow and native authority must be handled by its caller. */
+/** One note to play: a voice from score-voices.ts `play`. */
+export type ScoreExportNote = Readonly<{ step: number; row: number; value: ScoreCell }>;
+
+/**
+ * A resolved export view: what plays has already been decided (score-voices.ts skips and clips),
+ * and native authority stays with the caller. Exactly one of `notes` and `cells`:
+ * - `notes`: the voices, any number per cell; overlapping holds are fine (each takes its own lane);
+ * - `cells`: the older one-note-per-cell record keyed `"S:R"`, still accepted for callers and
+ *   vectors written before layers.
+ * Note length is sixteenth steps; an omitted len preserves the original one-step draft input.
+ */
 export type ScoreExportInput = Readonly<{
   id: string;
   bpm: number;
   bpb: number;
   steps: number;
   patches: Readonly<Record<string, JamPatch>>;
-  /** Note length is sixteenth steps; omitted len preserves the original one-step draft input. */
-  cells: Readonly<Record<string, ScoreCell>>;
+  notes?: readonly ScoreExportNote[];
+  cells?: Readonly<Record<string, ScoreCell>>;
 }>;
 
 export type StudioExportContext = Readonly<{
@@ -29,9 +39,9 @@ export type StudioPatchUnion = Readonly<{ ids: string[]; patches: JamPatch[] }>;
  * A resolved Score take plus its authored grid end. jam-take:v1 ends at its last event, so
  * trailing rests and empty bars exist only here: Studio playback keeps them, a shared take does not.
  */
-export type ScorePlayback = Readonly<{ take: JamTake; gridMs: number }>;
+export type ScorePlayback = Readonly<{ take: JamTake; gridMs: number; skipped?: number }>;
 type PatchTable = Map<string, JamPatch>;
-type Cell = { step: number; row: number; value: { k: "n"; p: string; len: number } | { k: "d"; pad: number } };
+type Cell = { step: number; row: number; bytes: string; value: { k: "n"; p: string; len: number; vol?: number } | { k: "d"; pad: number } };
 type ScoreSnapshot = { id: string; bpm: number; bpb: number; steps: number; patches: PatchTable; cells: Cell[] };
 const encoder = new TextEncoder();
 
@@ -112,41 +122,62 @@ export async function studioPatchUnion(scorePatches: unknown, sfxPatches: unknow
 
 function snapshotScore(input: unknown): ScoreSnapshot {
   const source = record(input);
-  exact(source, ["id", "bpm", "bpb", "steps", "patches", "cells"]);
+  const legacy = Object.hasOwn(source, "cells");
+  exact(source, ["id", "bpm", "bpb", "steps", "patches", legacy ? "cells" : "notes"]);
   const object = id(source.id, 32);
   if (!integer(source.bpm, 40, 240) || !integer(source.bpb, 1, 8) || !integer(source.steps, 1, SCORE_MAX_STEPS)) {
     fail("score header bounds");
   }
   const patches = snapshotPatches(source.patches);
-  const values = record(source.cells), keys = Object.keys(values);
-  if (keys.length > SCORE_MAX_CELLS) fail("too many score cells");
-  const cells: Cell[] = [];
-  for (const key of keys) {
-    if (!/^(0|[1-9][0-9]*):(0|[1-9][0-9]*)$/.test(key)) fail("invalid cell address");
-    const [step, row] = key.split(":").map(Number);
+  // Both shapes become one list of (step, row, value). The legacy record's keys are its addresses.
+  const raw: { step: unknown; row: unknown; value: unknown }[] = [];
+  if (legacy) {
+    const values = record(source.cells);
+    for (const key of Object.keys(values)) {
+      if (!/^(0|[1-9][0-9]*):(0|[1-9][0-9]*)$/.test(key)) fail("invalid cell address");
+      const [step, row] = key.split(":").map(Number);
+      raw.push({ step, row, value: values[key] });
+    }
+  } else {
+    if (!Array.isArray(source.notes) || Object.getPrototypeOf(source.notes) !== Array.prototype) fail("score notes are not a plain list");
+    for (const entry of source.notes as unknown[]) {
+      const note = record(entry);
+      exact(note, ["step", "row", "value"]);
+      raw.push({ step: note.step, row: note.row, value: note.value });
+    }
+  }
+  if (raw.length > SCORE_MAX_CELLS) fail("too many score notes");
+  const cells: Cell[] = [], seen = new Set<string>();
+  for (const { step, row, value: input } of raw) {
     if (!integer(step, 0, source.steps - 1) || !integer(row, 0, SCORE_ROWS - 1)) fail("cell outside score");
-    const value = record(values[key]);
+    const value = record(input);
+    let cell: Cell["value"];
     if (value.k === "n") {
-      exact(value, Object.hasOwn(value, "len") ? ["k", "p", "len"] : ["k", "p"]);
+      exact(value, ["k", "p", ...(Object.hasOwn(value, "len") ? ["len"] : []), ...(Object.hasOwn(value, "vol") ? ["vol"] : [])]);
       const patch = id(value.p, 64);
       const len = Object.hasOwn(value, "len") ? value.len : 1;
       if (!integer(len, 1, source.steps - step)) fail("note length outside score");
       if (!patches.has(patch)) fail("cell patch missing");
-      cells.push({ step, row, value: { k: "n", p: patch, len } });
+      // The authored level is carried, never defaulted in: an absent `vol` stays absent so the
+      // take event for a legacy note is byte-identical to what it was before levels existed.
+      const vol = Object.hasOwn(value, "vol") ? value.vol : undefined;
+      if (vol !== undefined && !integer(vol, SCORE_VOLUME_MIN, SCORE_VOLUME_MAX)) fail("note volume outside 1..100");
+      cell = { k: "n", p: patch, len, ...(vol === undefined ? {} : { vol }) };
     } else if (value.k === "d") {
       exact(value, ["k", "pad"]);
       if (!integer(value.pad, 0, 9)) fail("invalid drum pad");
-      cells.push({ step, row, value: { k: "d", pad: value.pad } });
+      cell = { k: "d", pad: value.pad };
     } else fail("invalid cell kind");
+    // Callers pass distinct voices (score-voices.ts collapses identical notes); a repeat here is a
+    // caller bug, not a second note to play.
+    const bytes = canonicalJson(cell), identity = `${step}:${row}:${bytes}`;
+    if (seen.has(identity)) fail("duplicate score note");
+    seen.add(identity);
+    cells.push({ step, row, bytes, value: cell });
   }
-  cells.sort((a, b) => a.step - b.step || a.row - b.row);
-  const ends = new Map<number, number>();
-  for (const { step, row, value } of cells) if (value.k === "n") {
-    // The existing take engine has one held voice per lane/pitch. A resolved export cannot
-    // silently truncate or merge overlapping authored notes; let its caller present the conflict.
-    if ((ends.get(row) ?? 0) > step) fail("overlapping score notes");
-    ends.set(row, step + value.len);
-  }
+  // Canonical voice order (score-voices.ts): step, row, then the value's canonical bytes. For a
+  // score with one note per cell this is the (step, row) order every earlier export used.
+  cells.sort((a, b) => a.step - b.step || a.row - b.row || (a.bytes < b.bytes ? -1 : a.bytes > b.bytes ? 1 : 0));
   return { id: object, bpm: source.bpm, bpb: source.bpb, steps: source.steps, patches, cells };
 }
 
@@ -177,29 +208,54 @@ function checkedTake(take: JamTake): JamTake {
   return checked.take;
 }
 
-async function scoreTake(score: ScoreSnapshot, ctx: StudioExportContext, union: StudioPatchUnion): Promise<JamTake> {
+/** The nonce of voice lane `k >= 1`; lane 0 keeps `laneNonce("catcoms-score-lane:v1", id)`. */
+async function voiceLaneNonce(object: string, k: number): Promise<string> {
+  const index = new Uint8Array(4);
+  new DataView(index.buffer).setUint32(0, k, false);
+  const value = (await framedHash("catcoms-score-voice:v1", rawId(object), index)).slice(0, 16);
+  return value === "0000000000000000" ? "0000000000000001" : value;
+}
+
+async function scoreTake(score: ScoreSnapshot, ctx: StudioExportContext, union: StudioPatchUnion): Promise<{ take: JamTake; skipped: number }> {
   const indices = new Map(union.ids.map((key, index) => [key, index]));
-  const pending: Array<{ ms: number; order: number; row: number; event: JamTakeEvent }> = [];
-  for (const { step, row, value } of score.cells) {
+  const pending: Array<{ ms: number; lane: number; order: number; row: number; index: number; event: JamTakeEvent }> = [];
+  // The engine holds one note per (lane, pitch). Each note takes the lowest lane where its pitch is
+  // free when it starts, so overlapping holds of one pitch (two sounds, or two lengths) all sound.
+  // A note may follow another on the same lane directly: its note-off is one millisecond before
+  // the next step. Drums hold nothing and stay on lane 0. A score with no same-pitch overlap uses
+  // lane 0 only and exports exactly as before.
+  const laneEnds: Map<number, number>[] = [new Map()];
+  let skipped = 0;
+  score.cells.forEach(({ step, row, value }, index) => {
     const ms = scoreStepMs(step, score.bpm);
     if (value.k === "d") {
-      pending.push({ ms, order: 1, row, event: { ms, lane: 0, n: value.pad, d: 1, q: 0 } });
-    } else {
-      // `p` selects the full recipe in the existing engine. Its required legacy fallback follows
-      // the first oscillator, making the byte representation deterministic for every recipe.
-      const w = PATCH_OSC_WAVES[score.patches.get(value.p)!.o[0].w];
-      pending.push({ ms, order: 1, row, event: { ms, lane: 0, n: row + 60, on: 1, w, p: indices.get(value.p)!, q: 0 } });
-      const off = scoreStepMs(step + value.len, score.bpm) - 1;
-      pending.push({ ms: off, order: 0, row, event: { ms: off, lane: 0, n: row + 60, on: 0, q: 0 } });
+      pending.push({ ms, lane: 0, order: 1, row, index, event: { ms, lane: 0, n: value.pad, d: 1, q: 0 } });
+      return;
     }
-  }
-  pending.sort((a, b) => a.ms - b.ms || a.order - b.order || a.row - b.row);
-  return checkedTake({
-    v: 1, group: ctx.group, call: await framedHash("catcoms-score-export:v1", rawId(score.id)),
-    met: { bpm: score.bpm, bpb: score.bpb }, parts: [ctx.exporter],
-    lanes: [{ src: 0, sn: await laneNonce("catcoms-score-lane:v1", score.id) }],
-    patches: union.patches, events: pending.map(({ event }, q) => ({ ...event, q })),
+    const pitch = row + 60;
+    let lane = laneEnds.findIndex((ends) => (ends.get(pitch) ?? 0) <= step);
+    if (lane < 0) {
+      if (laneEnds.length >= TAKE_MAX_LANES) { skipped++; return; } // more same-pitch holds than lanes
+      lane = laneEnds.push(new Map()) - 1;
+    }
+    laneEnds[lane].set(pitch, step + value.len);
+    // `p` selects the full recipe in the existing engine. Its required legacy fallback follows
+    // the first oscillator, making the byte representation deterministic for every recipe.
+    const w = PATCH_OSC_WAVES[score.patches.get(value.p)!.o[0].w];
+    pending.push({ ms, lane, order: 1, row, index, event: { ms, lane, n: pitch, on: 1, w, p: indices.get(value.p)!, q: 0, ...(value.vol === undefined ? {} : { v: value.vol }) } });
+    const off = scoreStepMs(step + value.len, score.bpm) - 1;
+    pending.push({ ms: off, lane, order: 0, row, index, event: { ms: off, lane, n: pitch, on: 0, q: 0 } });
   });
+  // Sorted by (ms, lane, ...) before `q` is assigned, so the events are in the (ms, lane, q) order
+  // both validators require (native's PIXA check compares against exactly that order).
+  pending.sort((a, b) => a.ms - b.ms || a.lane - b.lane || a.order - b.order || a.row - b.row || a.index - b.index);
+  const lanes = [{ src: 0, sn: await laneNonce("catcoms-score-lane:v1", score.id) }];
+  for (let k = 1; k < laneEnds.length; k++) lanes.push({ src: 0, sn: await voiceLaneNonce(score.id, k) });
+  return { skipped, take: checkedTake({
+    v: 1, group: ctx.group, call: await framedHash("catcoms-score-export:v1", rawId(score.id)),
+    met: { bpm: score.bpm, bpb: score.bpb }, parts: [ctx.exporter], lanes,
+    patches: union.patches, events: pending.map(({ event }, q) => ({ ...event, q })),
+  }) };
 }
 
 /** Export a resolved score through the jukebox's validator. No calls, timers or audio are started. */
@@ -211,7 +267,8 @@ export async function exportScoreTake(input: unknown, inputContext: StudioExport
 export async function exportScorePlayback(input: unknown, inputContext: StudioExportContext): Promise<ScorePlayback> {
   const score = snapshotScore(input), ctx = context(inputContext);
   await verifyPatches(score.patches);
-  return { take: await scoreTake(score, ctx, mergePatches(score.patches, new Map())), gridMs: scoreStepMs(score.steps, score.bpm) };
+  const { take, skipped } = await scoreTake(score, ctx, mergePatches(score.patches, new Map()));
+  return { take, gridMs: scoreStepMs(score.steps, score.bpm), ...(skipped ? { skipped } : {}) };
 }
 
 /** Package a linked score or derive the exact no-score take; epoch is lossless all the way to H(). */
@@ -226,7 +283,7 @@ export async function exportFlipnoteTake(input: Readonly<{
   const union = mergePatches(score?.patches ?? new Map(), sfx);
   if (score) await verifyPatches(score.patches);
   await verifyPatches(sfx);
-  if (score) return { take: await scoreTake(score, ctx, union), patchIds: union.ids };
+  if (score) return { take: (await scoreTake(score, ctx, union)).take, patchIds: union.ids };
   const epochBytes = new Uint8Array(8);
   new DataView(epochBytes.buffer).setBigUint64(0, epoch, false);
   return { patchIds: union.ids, take: checkedTake({

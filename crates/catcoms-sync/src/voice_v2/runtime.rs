@@ -23,6 +23,21 @@ const CHILDREN: usize = 64;
 // authentication transcripts are dropped before decode; the small ACK fits the fixed allowance.
 const VERIFICATION_BUFFERS: usize = 5;
 const VERIFICATION_OVERHEAD: usize = 4096;
+mod admitted_control;
+mod group_owner;
+#[cfg(test)]
+pub(in crate::voice_v2) use group_owner::before_return_for_test;
+use group_owner::{FundingOwner, GroupOwner, GroupRetirement};
+pub use group_owner::{HelperOwner, SourceOwner};
+#[cfg(test)]
+pub(crate) fn admitted_control_group_inventory_for_test() -> (usize, usize, usize, usize) {
+    (
+        std::mem::size_of::<Group>(),
+        std::mem::size_of::<super::helper::HelperLedger>(),
+        std::mem::size_of::<super::source::SourceLedger>(),
+        std::mem::size_of::<([u8; 32], GroupOwner)>(),
+    )
+}
 mod local;
 mod ready_source;
 pub(in crate::voice_v2) use local::EpochObservation;
@@ -132,10 +147,16 @@ struct GroupState {
 struct Group {
     hash: [u8; 32],
     state: Mutex<GroupState>,
-    _credit: Credit,
-    helper: Arc<super::helper::HelperLedger>,
-    source: Arc<super::source::SourceLedger>,
+    helper: HelperOwner,
+    source: SourceOwner,
     verification: Arc<Mutex<super::limits::Bucket>>,
+    control: Mutex<Option<super::admitted_control::ControlLedger>>,
+}
+impl Drop for Group {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        before_return_for_test(self as *const Self as usize);
+    }
 }
 struct Policy {
     pin: Option<[u8; 32]>,
@@ -144,6 +165,51 @@ struct Policy {
     live: CallLease,
     children: Vec<CallLease>,
     observation: Arc<AtomicBool>,
+    // Only the synchronous view transition owns this flag. It prevents admitted
+    // issuance between bounded revocation snapshots, not a second call winner.
+    admitted_transition: bool,
+}
+struct DeferredWake {
+    lease: CallLease,
+}
+impl Drop for DeferredWake {
+    fn drop(&mut self) {
+        // Array drop glue continues with later entries if one arbitrary waker panics.
+        // No Group/Policy guard remains when this entry runs.
+        self.lease.notify_revoked();
+    }
+}
+struct DeferredAdmittedWakes {
+    // Empty private wrappers, not Option<CallLease> (which can lose the Arc niche)
+    // and not64 freshly allocated live default leases.
+    entries: [DeferredWake; CHILDREN],
+    len: usize,
+}
+impl DeferredAdmittedWakes {
+    fn new() -> Self {
+        Self {
+            entries: std::array::from_fn(|_| DeferredWake {
+                lease: CallLease::empty(),
+            }),
+            len: 0,
+        }
+    }
+    fn push(&mut self, child: &CallLease) {
+        if self.entries[..self.len]
+            .iter()
+            .any(|entry| entry.lease.is_same(child))
+        {
+            return;
+        }
+        // Admitted issuance is blocked for the entire transition. At most the64
+        // original children can occur across epoch/error/later-policy snapshots.
+        assert!(self.len < CHILDREN, "bounded original admitted children");
+        self.entries[self.len].lease = child.clone();
+        self.len += 1;
+    }
+}
+pub const fn admitted_epoch_wake_bytes() -> usize {
+    std::mem::size_of::<DeferredAdmittedWakes>()
 }
 impl Policy {
     fn revoke(&mut self) {
@@ -152,6 +218,30 @@ impl Policy {
         for child in &self.children {
             child.revoke();
         }
+        self.children.clear();
+    }
+    fn revoke_for_view(&mut self, wakes: &mut DeferredAdmittedWakes) {
+        self.admitted_transition = true;
+        // Preserve the original negative ordering: no inherited Existing waker
+        // may observe this policy as current. Close EVERY admitted gate before
+        // the first arbitrary callout, including an earlier Existing child that
+        // panics and prevents the later iteration from running.
+        self.observation.store(false, Ordering::Release);
+        self.live.invalidate();
+        for child in &self.children {
+            if child.is_admitted() {
+                child.invalidate();
+                wakes.push(child);
+            }
+        }
+        self.live.notify_revoked(); // inherited Existing policy notification
+        for child in &self.children {
+            if !child.is_admitted() {
+                child.revoke(); // inherited Existing notification behavior
+            }
+        }
+        // Each admitted alias has a deferred copy, so no last admitted destructor
+        // or watch wake can run under this Policy/outer Group guard.
         self.children.clear();
     }
 }
@@ -187,7 +277,7 @@ impl ActorGate {
 }
 struct State {
     session: Arc<Session>,
-    groups: BTreeMap<[u8; 32], Arc<Group>>,
+    groups: BTreeMap<[u8; 32], GroupOwner>,
     actors: Vec<Weak<ActorGate>>,
 }
 /// Native must share this exact instance with every product actor and the browser-credit owner.
@@ -204,12 +294,23 @@ impl Drop for Runtime {
         // Detached work may own gates/resources without owning this process registry. Dropping
         // the registry closes those gates; constructing another registry cannot leave old effects
         // live alongside a fresh budget. Actual lower holders still keep their old credits.
-        let state = self.state.get_mut().unwrap_or_else(|e| e.into_inner());
-        state.session.observation.store(false, Ordering::Release);
-        state.session.live.revoke();
-        for actor in state.actors.iter().filter_map(Weak::upgrade) {
-            actor.revoke();
-        }
+        let groups = {
+            let state = self.state.get_mut().unwrap_or_else(|e| e.into_inner());
+            // Install before the first arbitrary watch waker. Unwind must not
+            // fall back to BTreeMap value-before-node destruction.
+            let groups = GroupRetirement::take(&mut state.groups);
+            state.session.observation.store(false, Ordering::Release);
+            state.session.live.revoke();
+            for actor in state.actors.iter().filter_map(Weak::upgrade) {
+                actor.revoke();
+            }
+            // Ordinary BTreeMap::drop may destroy values before node backing. Pop
+            // structurally first, retaining the last original payer until even the
+            // final empty root node/map has returned. Group/ledger bodies and all
+            // funding aliases are destroyed outside the process registry guard.
+            groups
+        };
+        drop(groups);
     }
 }
 
@@ -254,6 +355,14 @@ impl Runtime {
         for group in groups {
             group.source.collect_expired();
             group.helper.collect_expired();
+            let control = group
+                .control
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if let Some(control) = control {
+                control.collect_expired();
+            }
             group
                 .state
                 .lock()
@@ -330,34 +439,44 @@ impl Runtime {
             if state.groups.len() >= GROUPS {
                 return Err(VoiceError::Capacity);
             }
-            let credit = self.resources.charge(hash, 1024, ResourceKind::Retained)?;
+            let funding = FundingOwner::reserve(&self.resources, hash)?;
             state.groups.insert(
                 hash,
-                Arc::new(Group {
-                    hash,
-                    _credit: credit,
-                    verification: self.verification.clone(),
-                    helper: super::helper::HelperLedger::new(
+                GroupOwner::new(
+                    Group {
                         hash,
-                        self.clock.clone(),
-                        self.resources.clone(),
-                    ),
-                    source: super::source::SourceLedger::new(
-                        hash,
-                        self.clock.clone(),
-                        self.resources.clone(),
-                    ),
-                    state: Mutex::new(GroupState {
-                        revision: 0,
-                        epoch: None,
-                        members: BTreeMap::new(),
-                        active: Weak::new(),
-                        limits: OriginLimits::new(hash, self.resources.clone()),
-                    }),
-                }),
+                        verification: self.verification.clone(),
+                        control: Mutex::new(None),
+                        helper: HelperOwner::new(
+                            super::helper::HelperLedger::new(
+                                hash,
+                                self.clock.clone(),
+                                self.resources.clone(),
+                            ),
+                            funding.clone(),
+                        ),
+                        source: SourceOwner::new(
+                            super::source::SourceLedger::new(
+                                hash,
+                                self.clock.clone(),
+                                self.resources.clone(),
+                            ),
+                            funding.clone(),
+                        ),
+                        state: Mutex::new(GroupState {
+                            revision: 0,
+                            epoch: None,
+                            members: BTreeMap::new(),
+                            active: Weak::new(),
+                            limits: OriginLimits::new(hash, self.resources.clone()),
+                        }),
+                    },
+                    funding,
+                ),
             );
         }
         let group = state.groups[&hash].clone();
+        debug_assert!(group.is_same(&state.groups[&hash]));
         let revision = group
             .state
             .lock()
@@ -383,6 +502,7 @@ impl Runtime {
                 live: CallLease::default(),
                 children: Vec::new(),
                 observation: Arc::new(AtomicBool::new(true)),
+                admitted_transition: false,
             }),
             _credit: credit,
         });
@@ -408,7 +528,7 @@ impl Runtime {
 
 /// Unique actor-owned handle. Dropping the real actor irrevocably retires its detached effects.
 pub struct ActorOwner {
-    group: Arc<Group>,
+    group: GroupOwner,
     gate: Arc<ActorGate>,
     revision: u64,
     clock: Arc<EffectiveClock>,
@@ -419,7 +539,7 @@ pub struct ActorOwner {
 #[derive(Clone)]
 pub struct ActorRegistration {
     gate: Arc<ActorGate>,
-    group: Arc<Group>,
+    group: GroupOwner,
     expected_revision: u64,
     clock: Arc<EffectiveClock>,
     _preparation: Arc<PreparationGuard>,
@@ -548,19 +668,51 @@ redacted_debug!(View);
 impl ActorOwner {
     #[cfg(test)]
     pub(crate) fn lock_probe_for_test(&self) -> Arc<dyn Fn() -> bool + Send + Sync> {
-        let group = Arc::downgrade(&self.group);
+        let group = self.group.probe();
         let actor = Arc::downgrade(&self.gate);
         Arc::new(move || {
-            let Some(group) = group.upgrade() else {
-                return false;
-            };
             let Some(actor) = actor.upgrade() else {
                 return false;
             };
-            let group_free = group.state.try_lock().is_ok();
-            let policy_free = actor.policy.try_lock().is_ok();
+            // A callback may be running during unwind from an inherited waker.
+            // Poisoned means the lock was acquired, not that a guard still holds it.
+            let group_free = group
+                .inspect(|group| {
+                    !matches!(
+                        group.state.try_lock(),
+                        Err(std::sync::TryLockError::WouldBlock)
+                    )
+                })
+                .unwrap_or(false);
+            let policy_free = !matches!(
+                actor.policy.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            );
             group_free && policy_free
         })
+    }
+    #[cfg(test)]
+    pub(in crate::voice_v2) fn negative_view_probe_for_test(
+        &self,
+    ) -> Arc<dyn Fn() -> bool + Send + Sync> {
+        let actor = self.gate.live.clone();
+        let observation = self.gate.observation.clone();
+        let policy = self.gate.policy.lock().unwrap_or_else(|e| e.into_inner());
+        let policy_live = policy.live.clone();
+        let policy_observation = policy.observation.clone();
+        Arc::new(move || {
+            !actor.is_live()
+                && !observation.live.load(Ordering::Acquire)
+                && !policy_live.is_live()
+                && !policy_observation.load(Ordering::Acquire)
+        })
+    }
+    #[cfg(test)]
+    pub(in crate::voice_v2) fn supersede_revision_for_test(&self) {
+        // Exercise the actual stored-revision check without fabricating a new
+        // ActorOwner or accidentally closing the old gate through installation.
+        let mut group = self.group.state.lock().unwrap_or_else(|e| e.into_inner());
+        group.revision = group.revision.checked_add(1).unwrap();
     }
     #[cfg(test)]
     pub(crate) fn with_held_policy_for_test<T>(&self, check: impl FnOnce() -> T) -> T {
@@ -603,8 +755,19 @@ impl ActorOwner {
     pub(crate) fn sync_view_retiring(
         &mut self,
         view: View,
-        mut retire: impl FnMut(DeviceId),
+        retire: impl FnMut(DeviceId),
     ) -> Result<(), VoiceError> {
+        self.sync_view_retiring_inner(view, retire, || {})
+    }
+    fn sync_view_retiring_inner(
+        &mut self,
+        view: View,
+        mut retire: impl FnMut(DeviceId),
+        before_epoch_publish: impl FnOnce(),
+    ) -> Result<(), VoiceError> {
+        // FIRST local, before any Group/Policy guard: normal return, refusal and
+        // unwind all release those guards before per-entry notification/destruction.
+        let mut admitted_wakes = DeferredAdmittedWakes::new();
         if !self.gate.live.is_live()
             || !self.gate.session.authorized()
             || !self.gate.registered.load(Ordering::Acquire)
@@ -612,7 +775,7 @@ impl ActorOwner {
             return Err(VoiceError::Unauthorized);
         }
         if view.members.len() > MEMBERS || !view.members.contains(&self.gate.local) {
-            self.gate.revoke();
+            self.revoke_for_view(&mut admitted_wakes);
             return Err(VoiceError::Unauthorized);
         }
         let mut state = self.group.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -623,12 +786,12 @@ impl ActorOwner {
             // A not-yet-active restored candidate may catch up. An activated actor reporting a
             // contradictory current view must close its existing authority immediately.
             if self.gate.activated.load(Ordering::Acquire) {
-                self.gate.revoke();
+                self.revoke_for_view(&mut admitted_wakes);
             }
             return Err(VoiceError::Freshness);
         }
         if state.revision != self.gate.installed_revision.load(Ordering::Acquire) {
-            self.gate.revoke();
+            self.revoke_for_view(&mut admitted_wakes);
             return Err(VoiceError::Unauthorized);
         }
         self.revision = state.revision;
@@ -636,10 +799,34 @@ impl ActorOwner {
         // Publish before fallible roster changes. An old transfer window must stop retaining
         // live capacity even when an unrelated add keeps both endpoints in the new epoch.
         // Older views are rejected above, so an old observation can never become current again.
-        self.gate
-            .observation
-            .epoch
-            .store(view.epoch, Ordering::Release);
+        // Admitted calls bind their original epoch before key delegation. Revoke their
+        // ORIGINAL child even if membership/policy otherwise stays the same. Its existing
+        // watch also wakes a native activation waiting on a parked Actor command; a UI
+        // lock must never wait behind an inert, already-revoked activation indefinitely.
+        // Existing calls retain their established epoch-transition behavior.
+        {
+            // Child issuance uses THIS same Policy mutex and checks the captured
+            // funding epoch while holding it. Keep closure and epoch publication
+            // together: a child cannot slip between the revocation snapshot and
+            // publication of the new epoch and escape with old admission backing.
+            let mut policy = self.gate.policy.lock().unwrap_or_else(|e| e.into_inner());
+            policy.admitted_transition = true;
+            if state.epoch.is_some_and(|epoch| epoch != view.epoch) {
+                for child in &policy.children {
+                    if child.is_admitted() {
+                        child.invalidate();
+                        admitted_wakes.push(child);
+                    }
+                }
+            }
+            // Production is an empty static closure. The deterministic test seam
+            // parks precisely between original-gate closure and epoch publication.
+            before_epoch_publish();
+            self.gate
+                .observation
+                .epoch
+                .store(view.epoch, Ordering::Release);
+        }
         // Revocation precedes fallible allocation. If new membership cannot be represented, no
         // removed device remains admitted. A later re-add always gets a different Member owner.
         state.members.retain(|id, member| {
@@ -660,7 +847,7 @@ impl ActorOwner {
                     {
                         Ok(credit) => credit,
                         Err(error) => {
-                            self.gate.revoke();
+                            self.revoke_for_view(&mut admitted_wakes);
                             return Err(error);
                         }
                     };
@@ -680,14 +867,27 @@ impl ActorOwner {
             || policy.indirect != view.indirect
             || !policy.live.is_live()
         {
-            policy.revoke();
+            policy.revoke_for_view(&mut admitted_wakes);
             policy.pin = view.policy;
             policy.eligible = view.eligible;
             policy.indirect = view.indirect;
             policy.live = CallLease::default();
             policy.observation = Arc::new(AtomicBool::new(true));
         }
+        policy.admitted_transition = false;
         Ok(())
+    }
+    fn revoke_for_view(&self, wakes: &mut DeferredAdmittedWakes) {
+        // ActorGate::revoke has always fenced the Actor before Policy callbacks.
+        // Keep that ordering while deferring the new admitted-child wakes.
+        self.gate.observation.live.store(false, Ordering::Release);
+        self.gate.live.invalidate();
+        self.gate
+            .policy
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .revoke_for_view(wakes);
+        self.gate.live.notify_revoked(); // inherited Existing actor-lifetime notification
     }
     fn current(&self) -> Result<(), VoiceError> {
         if self.gate.authorized() {
@@ -696,11 +896,11 @@ impl ActorOwner {
             Err(VoiceError::Unauthorized)
         }
     }
-    pub fn helper(&self) -> Result<Arc<super::helper::HelperLedger>, VoiceError> {
+    pub fn helper(&self) -> Result<HelperOwner, VoiceError> {
         self.current()?;
         Ok(self.group.helper.clone())
     }
-    pub fn source(&self) -> Result<Arc<super::source::SourceLedger>, VoiceError> {
+    pub fn source(&self) -> Result<SourceOwner, VoiceError> {
         self.current()?;
         Ok(self.group.source.clone())
     }
@@ -1006,23 +1206,112 @@ impl ActorOwner {
         action(&mut state.limits, &native, disposition).map(|result| (disposition, result))
     }
     pub fn child_lease(&self) -> Result<CallLease, VoiceError> {
+        self.child_lease_profile(None)
+    }
+    /// Actual dead issuer aliases are destroyed after releasing Policy. An admitted
+    /// child's plain payer follows its wrapper through final watch/body deallocation.
+    pub(crate) fn collect_closed_children(&self) {
+        for _ in 0..CHILDREN {
+            let removed = {
+                let mut policy = self.gate.policy.lock().unwrap_or_else(|e| e.into_inner());
+                policy
+                    .children
+                    .iter()
+                    .position(|child| !child.is_live())
+                    .map(|index| policy.children.swap_remove(index))
+            };
+            match removed {
+                Some(child) => drop(child),
+                None => break,
+            }
+        }
+    }
+    pub(crate) fn forget_closed_child(&self, original: &CallLease) {
+        if original.is_live() {
+            return;
+        }
+        let removed = {
+            let mut policy = self.gate.policy.lock().unwrap_or_else(|e| e.into_inner());
+            policy
+                .children
+                .iter()
+                .position(|child| child.is_same(original))
+                .map(|index| policy.children.swap_remove(index))
+        };
+        drop(removed);
+    }
+    pub(crate) fn admitted_child_lease(
+        &self,
+        funding: Arc<super::call_activation::Funding>,
+    ) -> Result<CallLease, VoiceError> {
+        if !funding.matches(&self.resources, self.group.hash) {
+            return Err(VoiceError::Scope);
+        }
+        self.child_lease_profile(Some(funding))
+    }
+    fn child_lease_profile(
+        &self,
+        funding: Option<Arc<super::call_activation::Funding>>,
+    ) -> Result<CallLease, VoiceError> {
         self.current()?;
-        let mut policy = self.gate.policy.lock().unwrap_or_else(|e| e.into_inner());
+        self.collect_closed_children();
+        Self::issue_child_at_gate(&self.gate, funding)
+    }
+    fn issue_child_at_gate(
+        gate: &ActorGate,
+        funding: Option<Arc<super::call_activation::Funding>>,
+    ) -> Result<CallLease, VoiceError> {
+        if !gate.authorized() {
+            return Err(VoiceError::Unauthorized);
+        }
+        let mut policy = gate.policy.lock().unwrap_or_else(|e| e.into_inner());
         if !policy.eligible || !policy.live.is_live() {
             return Err(VoiceError::Unauthorized);
         }
-        policy.children.retain(CallLease::is_live);
+        if funding.as_ref().is_some_and(|funding| {
+            gate.observation.epoch.load(Ordering::Acquire) != funding.epoch()
+        }) {
+            return Err(VoiceError::Freshness);
+        }
+        if funding.is_some() && policy.admitted_transition {
+            return Err(VoiceError::Capacity);
+        }
         if policy.children.len() >= CHILDREN {
             return Err(VoiceError::Capacity);
         }
-        let lease = CallLease::default();
+        let lease = funding.map_or_else(CallLease::default, CallLease::admitted);
         policy.children.push(lease.clone());
         // Revocation uses this same policy lock, so no child is installed after an observed lock.
-        if !self.gate.authorized() {
+        if !gate.authorized() {
             lease.revoke();
             return Err(VoiceError::Unauthorized);
         }
         Ok(lease)
+    }
+    #[cfg(test)]
+    pub(in crate::voice_v2) fn admitted_issuer_for_test(
+        &self,
+    ) -> impl FnOnce(Arc<super::call_activation::Funding>) -> Result<CallLease, VoiceError>
+           + Send
+           + 'static {
+        // Genuine original issuer, never a fabricated ActorOwner or public capability.
+        let gate = self.gate.clone();
+        let resources = self.resources.clone();
+        let group = self.group.hash;
+        move |funding| {
+            if !funding.matches(&resources, group) {
+                return Err(VoiceError::Scope);
+            }
+            Self::issue_child_at_gate(&gate, Some(funding))
+        }
+    }
+    #[cfg(test)]
+    pub(in crate::voice_v2) fn sync_view_with_epoch_hook(
+        &mut self,
+        view: View,
+        hook: impl FnOnce(),
+    ) -> Result<(), VoiceError> {
+        self.sync_view_retiring_inner(view, |_| {}, hook)
     }
     pub fn watch_lease(&self) -> Result<WatchLease, VoiceError> {
         self.child_lease().map(WatchLease::new)

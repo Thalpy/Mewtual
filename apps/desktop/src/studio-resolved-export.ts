@@ -1,7 +1,8 @@
 // Conversion from typed native views, not fixture roots. Publication and authority remain separate.
-import { exportScorePlayback, exportScoreTake, type ScoreExportInput } from "./studio-export.ts";
+import { exportScorePlayback, exportScoreTake, type ScoreExportInput, type ScorePlayback } from "./studio-export.ts";
 import { exportFlipnotePixa } from "./pixa.ts";
-import { flipnoteModel, scoreModel, StudioNativeError, type FlipnoteView, type ScoreView } from "./studio-native.ts";
+import { flipnoteModel, scoreModel, StudioNativeError, type FlipnoteView, type ScoreModel, type ScoreView } from "./studio-native.ts";
+import { admittedSounds } from "./score-voices.ts";
 import { FLIPNOTE_FRAME_BYTES_PROMISE, FLIPNOTE_MAX_FRAMES, PIX_MAX_BYTES } from "./studio-contract.ts";
 
 /** Synchronous preflight before any fetch/hash: never let a permissive display model omit data. */
@@ -20,13 +21,16 @@ export function preflightFlipnoteMedia(view: FlipnoteView): void {
   if (sum !== content.declaredFrameBytes) throw new StudioNativeError("animation aggregate declaration does not match its exact frames");
 }
 
+/** A Score's resolved input: what it plays (score-voices.ts) and the sounds it may use. Merging is
+ * additive and nothing refuses a score: concurrent notes, overlaps and conflicts all play, and a
+ * voice that cannot play (past the end, over the cap, its sound gone) is skipped, not fatal. */
+export function scoreExportInput(object: string, model: ScoreModel): ScoreExportInput {
+  const admitted = admittedSounds(Object.keys(model.patches));
+  const patches = Object.fromEntries(Object.entries(model.patches).filter(([id]) => admitted.has(id)));
+  return { id: object, bpm: model.bpm, bpb: model.bpb, steps: model.steps, notes: model.voices.play, patches };
+}
 function scoreInput(object: string, view: ScoreView): ScoreExportInput {
-  const model = scoreModel(view.content);
-  if (!model.ready || Object.values(model.cellSlots).some((slot) => !slot.removed && slot.register.conflicts.length > 0) ||
-    Object.values(model.patchSlots).some((slot) => !slot.removed && slot.register.conflicts.length > 0)) {
-    throw new StudioNativeError("resolve score conflicts, missing recipes, overlap or overflow before playback/export");
-  }
-  return { id: object, bpm: model.bpm, bpb: model.bpb, steps: model.steps, cells: model.cells, patches: model.patches };
+  return scoreExportInput(object, scoreModel(view.content));
 }
 function group(view: FlipnoteView | ScoreView): string {
   if (!view.group) throw new StudioNativeError("reopen this document to obtain its stable native group before playback/export");
@@ -38,9 +42,17 @@ export async function scoreTakeFromNative(object: string, view: ScoreView, expor
   return exportScoreTake(scoreInput(object, view), { group: group(view), exporter });
 }
 
+/** A playback's `skipped` counts every note that does not sound: the voices score-voices.ts skipped
+ * (past the end, over the cap, sound gone) plus the holds the exporter had no lane for. */
+export function withVoiceSkips(playback: ScorePlayback, model: ScoreModel): ScorePlayback {
+  const skipped = (playback.skipped ?? 0) + model.voices.skipped;
+  return skipped ? { ...playback, skipped } : playback;
+}
+
 /** Studio playback of the same resolved score, carrying its authored grid end for looping. */
-export async function scorePlaybackFromNative(object: string, view: ScoreView, exporter: string) {
-  return exportScorePlayback(scoreInput(object, view), { group: group(view), exporter });
+export async function scorePlaybackFromNative(object: string, view: ScoreView, exporter: string): Promise<ScorePlayback> {
+  const model = scoreModel(view.content);
+  return withVoiceSkips(await exportScorePlayback(scoreExportInput(object, model), { group: group(view), exporter }), model);
 }
 
 /**

@@ -91,3 +91,11 @@ test("snapshot text budget charges property names before downstream key sorting 
   repeated.events = Array.from({ length: 20_000 }, (_, q) => ({ ms: 0, lane: 0, n: 60, on: 1, w: "sine", q, ["x".repeat(32)]: 0 }));
   assert.throws(() => planJamArchivalPlayback(repeated), /archival input text exceeds its bound/);
 });
+
+test("an authored note level reaches the plan as a 0..1 multiplier and a plain note carries none", () => {
+  const input = take();
+  input.events[0] = { ...input.events[0], v: 25 } as typeof input.events[0];
+  const plan = planJamArchivalPlayback(input);
+  assert.equal(plan.events[0].kind, "on"); assert.equal(plan.events[0].level, 0.25);
+  assert.equal("level" in planJamArchivalPlayback(take()).events[0], false);
+});
