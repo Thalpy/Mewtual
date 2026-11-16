@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import tomllib
 
 
 REPO = Path(__file__).resolve().parents[2]
@@ -128,7 +129,8 @@ def self_test() -> None:
         except RuntimeError:
             continue
         raise AssertionError("a missing, changed or repeated count was accepted")
-    print("Exact-count guard self-checks passed; Cargo was not invoked.")
+    source_retirement_self_test()
+    print("Exact-count/source-retirement guard self-checks passed; Cargo was not invoked.")
 
 
 def stop_owned_cohort(
@@ -161,13 +163,20 @@ def run_logged(
     env: dict[str, str] | None = None,
     limit: int = COHORT_TIMEOUT_SECONDS,
     markers: tuple[re.Pattern[str], ...] = (),
+    marker_limits: tuple[int, ...] | None = None,
 ) -> tuple[int, list[str], bool, list[list[tuple[str, ...]]]]:
     """Stream one owned subprocess to its artifact log under a deadline.
 
-    Returns the exit code, at most two test summaries, whether the deadline fired, and for
-    each marker pattern at most two matches. Two of either already fails the exact-one
-    guards, so build logs are never buffered.
+    Returns the exit code, at most two test summaries, whether the deadline fired,
+    and bounded marker matches. Ordinary markers retain at most two: a duplicate
+    already fails the exact-one guards. Explicit test-name inventories may request
+    a larger fixed cap (including one overflow sentinel), with per-pattern and
+    aggregate limits checked before spawning. Build logs are never buffered.
     """
+    limits = marker_limits if marker_limits is not None else (2,) * len(markers)
+    if (len(limits) != len(markers) or any(type(n) is not int or not 1 <= n <= 400 for n in limits)
+            or sum(limits) > 1024):
+        raise RuntimeError("invalid bounded marker inventory")
     print(f"\n{name}: {' '.join(command)}", flush=True)
     summaries: list[str] = []
     found: list[list[tuple[str, ...]]] = [[] for _ in markers]
@@ -193,7 +202,7 @@ def run_logged(
                         summaries.append(line)
                     for index, pattern in enumerate(markers):
                         match = pattern.search(plain)
-                        if match is not None and len(found[index]) < 2:
+                        if match is not None and len(found[index]) < limits[index]:
                             found[index].append(match.groups())
                 code = process.wait()
             finally:
@@ -206,6 +215,152 @@ def git(*arguments: str, cwd: Path = REPO) -> str:
     return subprocess.run(
         ["git", *arguments], cwd=cwd, check=True, capture_output=True, text=True,
     ).stdout.strip()
+
+
+def local_source_packages(worktree: Path) -> tuple[str, ...]:
+    """Exact bounded path-package IDs, including local patches, for this source.
+
+    Cargo can retain a newer-mtime artifact from another checkout with the same
+    name/version. Cleaning only App leaves RT/SDK metadata from the other source
+    and can even turn a predecessor test into a mixed-source binary. Registry
+    artifacts remain reusable; no target tree is recursively removed.
+    """
+    root = worktree.resolve()
+    manifest = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
+    members = manifest["workspace"]["members"]
+    patches = [entry["path"] for table in manifest.get("patch", {}).values()
+               for entry in table.values() if "path" in entry]
+    paths = [*members, *patches]
+    if not 1 <= len(members) <= 32 or len(patches) > 8 or len(set(paths)) != len(paths):
+        raise RuntimeError("unexpected local source package inventory")
+    ids = set()
+    for relative in paths:
+        if not isinstance(relative, str) or any(c in relative for c in "*?["):
+            raise RuntimeError("local package path is not exact")
+        source = (root / relative).resolve()
+        if not source.is_relative_to(root):
+            raise RuntimeError("local package escaped its source worktree")
+        package = tomllib.loads((source / "Cargo.toml").read_text(encoding="utf-8"))["package"]
+        name, version = package["name"], package["version"]
+        if (not isinstance(name, str) or not isinstance(version, str)
+                or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", name)
+                or not re.fullmatch(r"[0-9][A-Za-z0-9.+-]{0,127}", version)
+                or (name, version) in ids):
+            raise RuntimeError("invalid or duplicate local package identity")
+        ids.add((name, version))
+    lock = tomllib.loads((root / "Cargo.lock").read_text(encoding="utf-8"))
+    locked = {(p["name"], p["version"]) for p in lock["package"] if "source" not in p}
+    if locked != ids:
+        raise RuntimeError("source-less lock packages differ from workspace/local patch manifests")
+    return tuple(f"{name}@{version}" for name, version in sorted(ids))
+
+
+def source_clean_command(worktree: Path, env: dict) -> list[str]:
+    """Build a package-only command; never permit Cargo's unscoped target clean."""
+    target = Path(env.get("CARGO_TARGET_DIR", str(REPO / "target")))
+    if not target.is_absolute():
+        raise RuntimeError("source transitions require one absolute Cargo target")
+    packages = local_source_packages(worktree)
+    return ["cargo", "clean", "--target-dir", str(target),
+            *(arg for package in packages for arg in ("-p", package))]
+
+
+def clean_source(label: str, worktree: Path, env: dict, directory: Path, results: list) -> None:
+    """Retire this source's path artifacts in the ONE serialized absolute target."""
+    command = source_clean_command(worktree, env)
+    code, _, timed_out, _ = run_logged(label, command, directory, cwd=worktree, env=env)
+    results.append({"name": label, "packages": command[5::2], "exit": code, "timed_out": timed_out})
+    if code or timed_out:
+        raise RuntimeError("could not retire the previous source's local artifacts")
+
+
+def retire_old_source(remove, restore_head, results: list, primary: BaseException | None) -> None:
+    """Always attempt both cleanup steps without replacing a validation failure."""
+    failures = []
+    for name, action in (("remove-predecessor", remove), ("restore-head-artifacts", restore_head)):
+        try:
+            action()
+        except Exception as error:
+            failures.append(error)
+            results.append({"name": name, "cleanup_error": repr(error)})
+    if failures:
+        if primary is not None:
+            for error in failures:
+                primary.add_note(f"Additional predecessor cleanup failure: {error!r}")
+        else:
+            raise RuntimeError("predecessor cleanup failed; see results.json") from failures[0]
+
+
+def source_retirement_self_test() -> None:
+    """Synthetic manifests/process output only: this must never invoke Cargo."""
+    with tempfile.TemporaryDirectory(prefix="source-guard-") as temporary:
+        root = Path(temporary).resolve()
+        manifest = '[workspace]\nmembers = ["crates/a"]\n[patch.crates-io]\np = { path = "vendor/p" }\n'
+        (root / "Cargo.toml").write_text(manifest, encoding="utf-8")
+        for folder, name in (("crates/a", "a"), ("vendor/p", "p")):
+            path = root / folder
+            path.mkdir(parents=True)
+            (path / "Cargo.toml").write_text(f'[package]\nname = "{name}"\nversion = "1.2.3"\n', encoding="utf-8")
+        lock = '[[package]]\nname = "a"\nversion = "1.2.3"\n[[package]]\nname = "p"\nversion = "1.2.3"\n'
+        (root / "Cargo.lock").write_text(lock, encoding="utf-8")
+        target = str(root / "shared-target")
+        assert source_clean_command(root, {"CARGO_TARGET_DIR": target}) == [
+            "cargo", "clean", "--target-dir", target, "-p", "a@1.2.3", "-p", "p@1.2.3"]
+        for changed in (lock.replace('name = "p"', 'name = "unexpected"'),
+                        lock + '[[package]]\nname = "extra"\nversion = "1.0.0"\n'):
+            (root / "Cargo.lock").write_text(changed, encoding="utf-8")
+            try:
+                local_source_packages(root)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("incomplete local-source retirement accepted")
+        (root / "Cargo.lock").write_text(lock, encoding="utf-8")
+        for changed in (manifest.replace('vendor/p', '../../outside'), manifest.replace('crates/a', 'crates/*')):
+            (root / "Cargo.toml").write_text(changed, encoding="utf-8")
+            try:
+                local_source_packages(root)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("nonlocal or nonexact package path accepted")
+        (root / "Cargo.toml").write_text(manifest, encoding="utf-8")
+        try:
+            source_clean_command(root, {"CARGO_TARGET_DIR": "relative-target"})
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("relative source-transition target accepted")
+        # A larger explicit inventory stays bounded; ordinary count markers keep
+        # their original two-match cap. Extra names are retained as rejection evidence.
+        command = [sys.executable, "-c", "for i in range(8): print('name' + str(i))"]
+        pattern = re.compile(r"^(name\d+)$")
+        for cap in (2, 5):
+            code, _, timed_out, found = run_logged("bounded-names-" + str(cap), command, root,
+                markers=(pattern,), marker_limits=(cap,))
+            assert not code and not timed_out and len(found[0]) == cap
+    # Restore is attempted even when removal fails, and a primary validation
+    # exception remains the exception observed by CI.
+    for remove_fails, restore_fails in ((False, False), (True, False), (False, True), (True, True)):
+        for primary in (None, ValueError("original validation")):
+            calls, results = [], []
+            def action(name, fails):
+                calls.append(name)
+                if fails:
+                    raise OSError(name)
+            caught = None
+            try:
+                try:
+                    if primary is not None:
+                        raise primary
+                finally:
+                    retire_old_source(lambda: action("remove", remove_fails),
+                        lambda: action("restore", restore_fails), results, sys.exception())
+            except Exception as error:
+                caught = error
+            assert calls == ["remove", "restore"]
+            assert (caught is primary) if primary is not None else ((caught is not None) == (remove_fails or restore_fails))
+            assert len(results) == int(remove_fails) + int(restore_fails)
 
 
 def ignored_head_case(
@@ -234,7 +389,9 @@ def predecessor_gate(directory: Path, results: list[dict]) -> None:
     fixtures = directory / "namespace5-fixtures"
     if fixtures.exists():
         shutil.rmtree(fixtures)
-    env = dict(os.environ, MEWTUAL_NAMESPACE5_FIXTURES=str(fixtures))
+    env = dict(os.environ, MEWTUAL_NAMESPACE5_FIXTURES=str(fixtures),
+               CARGO_TARGET_DIR=os.environ.get("CARGO_TARGET_DIR", str(REPO / "target")))
+    clean_source("namespace5-clean-head-before", REPO, env, directory, results)
     ignored_head_case(
         "predecessor-fixtures", GENERATOR, directory, env, WRITTEN,
         (str(PREDECESSOR_FIXTURES),), results,
@@ -257,11 +414,12 @@ def predecessor_gate(directory: Path, results: list[dict]) -> None:
         status = git("status", "--porcelain", "--untracked-files=all", cwd=worktree)
         if status != f"?? {HARNESS_TARGET}":
             raise RuntimeError(f"predecessor tree differs beyond the harness: {status!r}")
-        gate_env = dict(env, CARGO_TARGET_DIR=str(REPO / "target"))
+        gate_env = env
         command = [
             "cargo", "test", "--locked", "-p", "catcoms-app", "--all-features",
             "--test", "namespace5_gate", "--", "--nocapture", "--test-threads=1",
         ]
+        clean_source("namespace5-clean-old", worktree, gate_env, directory, results)
         code, summaries, timed_out, found = run_logged(
             "predecessor-gate", command, directory, cwd=worktree, env=gate_env,
             limit=PREDECESSOR_TIMEOUT_SECONDS, markers=(CHECKED, KEPT),
@@ -280,9 +438,10 @@ def predecessor_gate(directory: Path, results: list[dict]) -> None:
         result["openers"] = PREDECESSOR_OPENERS
         result["round_trip"] = ROUND_TRIP
     finally:
-        subprocess.run(
-            ["git", "worktree", "remove", "--force", str(worktree)], cwd=REPO, check=False,
-        )
+        retire_old_source(
+            lambda: git("worktree", "remove", "--force", str(worktree)),
+            lambda: clean_source("namespace5-clean-head-after", REPO, env, directory, results),
+            results, sys.exception())
 
     ignored_head_case(
         "predecessor-round-trip", VERIFIER, directory, env, VERIFIED,
