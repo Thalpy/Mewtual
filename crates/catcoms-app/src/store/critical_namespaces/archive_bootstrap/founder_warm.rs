@@ -150,8 +150,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Drop for PreparedFreshV2TextFounder<T, 
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
-    /// Preserve the actual NativeRequired whole Host while preparing only an
-    /// unsigned original. No library fallback, key or Saved receipt is issued.
+    /// Prepare the unsigned original through the actual NativeRequired Host.
     pub(in crate::store) fn prepare_native_invite_intent_data(
         &mut self,
         layout: &V2CurrentLayoutStore,
@@ -168,6 +167,41 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
             .as_mut()
             .ok_or_else(refused)?
             .prepare_native_invite_intent_data(layout, request, routing_plan, keys, rng)
+    }
+
+    pub(in crate::store) fn save_native_invite_data(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        request: catcoms_sync::owner_v2::V2FounderInviteRequestData,
+        routing_plan: &[u8],
+        keys: &mut super::founder::NativeFounderKeys,
+        rng: &mut impl CryptoRngCore,
+        negative: &catcoms_rt::RequestCancellation,
+    ) -> Result<crate::store::NativeTextSavedInvite, AppError> {
+        if !self.is_ready_data() {
+            return Err(refused());
+        }
+        self.host
+            .as_mut()
+            .ok_or_else(refused)?
+            .save_native_invite_data(layout, request, routing_plan, keys, rng, negative)
+    }
+
+    pub(in crate::store) fn inspect_native_invite_data(
+        &self,
+        layout: &V2CurrentLayoutStore,
+        request: catcoms_sync::owner_v2::V2FounderInviteRequestData,
+        routing_plan: &[u8],
+        keys: &super::founder::NativeFounderKeys,
+        negative: &catcoms_rt::RequestCancellation,
+    ) -> Result<crate::store::NativeTextInviteRecovery, AppError> {
+        if !self.is_ready_data() {
+            return Err(refused());
+        }
+        self.host
+            .as_ref()
+            .ok_or_else(refused)?
+            .inspect_native_invite_data(layout, request, routing_plan, keys, negative)
     }
     /// Additional driver/Box/refusal storage only. Existing creator, source,
     /// source-read, restored SDK and Current fees remain independently live.

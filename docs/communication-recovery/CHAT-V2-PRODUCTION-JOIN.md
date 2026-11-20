@@ -38,6 +38,9 @@ The proposed small signed **invite binding** contains:
 Policy/routing bodies travel with the pasteable invite but are separately capped
 and must match these commitments before use. They contain route descriptions,
 not an embedded Legacy invite. No connection hint is permission to scan/dial.
+The [initial invitation packet](CHAT-V2-INVITE-ISSUER.md#invitation-packet)
+implements the bounded binary envelope for the warm founder. This profile
+carries a TCP reservation with zero certified contacts.
 The initial accepted out-of-band invite is the trust decision; signature
 verification or a downloaded self-signed Profile alone is not one. A nonfounder
 inviter carries the already pinned genesis anchor. An existing same-group pin

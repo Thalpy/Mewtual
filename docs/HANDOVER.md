@@ -1,6 +1,33 @@
 # Mewtual; Handover
 
-## 20 November: first durable unsigned invitation intent (hosted validation pending)
+## 20 November: read-only invitation journal recovery (hosted validation pending)
+
+The native job can authenticate the original invitation journal independently
+of its warm signing slot. It distinguishes an unsigned intent, a held key
+attempt, and a verified recovered signature. Torn and foreign records are
+preserved. The reader returns status only. Restart mounting still needs the
+cold operational owner. Chat V2 remains off.
+[Recovery contract](communication-recovery/CHAT-V2-INVITE-ISSUER.md#read-only-journal-recovery).
+
+## 20 November: warm founder invitation packet (hosted validation pending)
+
+The warm native save returns the signed invitation with its exact policy and
+routing reservation in a verified binary packet. The current profile records
+zero contact addresses. Chat V2 remains off. The desktop command, certified
+contacts, cold recovery and production Add/join are open.
+[Invitation packet contract](communication-recovery/CHAT-V2-INVITE-ISSUER.md#invitation-packet).
+
+## 20 November: warm native invitation signing (hosted validation pending)
+
+The native job now covers a durable KeyAttempt before key entry, then covers
+the returned signature before exposing a local `NativeTextSavedInvite` receipt.
+The same warm runtime completes only its own partial writes and refuses
+unowned signing state. Chat V2 remains off. Cold recovery, certified contacts,
+desktop publication and Add/join are still open. Three hosted regressions were
+added and local tests were deferred.
+[Issuer contract](communication-recovery/CHAT-V2-INVITE-ISSUER.md).
+
+## 20 November: first durable unsigned invitation intent (previous checkpoint)
 
 The actual native RuntimeLoan now covers its unsigned invitation in the isolated
 `text.pages/invite.intent.v1` family. Exact durable token/settings/route lookup

@@ -1,11 +1,12 @@
 //! Real whole native runtime, held Current4 and the same member verifier. No
-//! Signed/SavedInvite, native caller authentication or actual join is claimed.
+//! The native harness covers unsigned and signed local storage and retry.
 use super::super::super::tests::selected_governed;
 use super::*;
 use crate::store::critical_namespaces::{
     current_layout::set_after_original_source_hook_for_test, governance_layout::GOVERNANCE_MARKER,
     ARCHIVE_BOOTSTRAP_ROOT,
 };
+use crate::store::NativeTextInviteRecovery;
 
 fn find_named(root: &std::path::Path, name: &str) -> Vec<std::path::PathBuf> {
     fn visit(root: &std::path::Path, name: &str, depth: u8, result: &mut Vec<std::path::PathBuf>) {
@@ -28,6 +29,251 @@ fn only_named(root: &std::path::Path, name: &str) -> std::path::PathBuf {
     let mut paths = find_named(root, name);
     assert_eq!(paths.len(), 1);
     paths.pop().unwrap()
+}
+
+#[tokio::test]
+async fn native_runtime_invite_recovery_reports_exact_original_and_holds_missing_raw() {
+    type Host = crate::store::PreparedV2TextHost<MeshService, ChaCha20Rng>;
+    use NativeTextInviteRecovery as Recovery;
+    let directory = tempfile::tempdir().unwrap();
+    let (vault, budget) = selected_governed(directory.path());
+    let (owner, row) = active(&vault, &budget, 0xe70e);
+    let (_sender, receiver) = tokio::sync::watch::channel(false);
+    let source = RequestCancellation::new(receiver, None);
+    let token = [55; 32];
+    let inspect = |token, lifetime| {
+        prepare(&owner, &row, &vault, &budget).inspect_invite(token, lifetime, &source)
+    };
+    assert!(inspect(token, 60_000).is_err());
+    assert!(find_named(directory.path(), "invite.intent.v1").is_empty());
+    prepare(&owner, &row, &vault, &budget)
+        .prepare_invite_intent(token, 60_000, &source)
+        .unwrap();
+    assert_eq!(inspect(token, 60_000), Ok(Recovery::IntentOnly));
+    assert!(inspect([56; 32], 60_000).is_err());
+    assert!(inspect(token, 60_001).is_err());
+
+    let intent = only_named(directory.path(), "invite.intent.v1");
+    let attempt = intent.with_file_name("invite.attempt.v1");
+    let raw = intent.with_file_name("invite.raw.v1");
+    let (sender, receiver) = tokio::sync::watch::channel(false);
+    let cancelled = RequestCancellation::new(receiver, None);
+    Host::after_invite_key_for_test(Box::new(move || {
+        sender.send_replace(true);
+    }));
+    assert_eq!(
+        prepare(&owner, &row, &vault, &budget).save_invite(token, 60_000, &cancelled),
+        Err(V2MemberSaveRefusal::Cancelled)
+    );
+    let attempt_frame = std::fs::read(&attempt).unwrap();
+    assert_eq!(inspect(token, 60_000), Ok(Recovery::KeyAttemptHeld));
+    assert!(!raw.exists());
+    assert_eq!(std::fs::read(&attempt).unwrap(), attempt_frame);
+
+    let saved = prepare(&owner, &row, &vault, &budget)
+        .save_invite(token, 60_000, &source)
+        .unwrap();
+    let signed = Recovery::SignatureRecovered {
+        binding_id: saved.binding_id(),
+        expires_at_ms: saved.expires_at_ms(),
+    };
+    assert_eq!(inspect(token, 60_000), Ok(signed));
+    let attempt_parked = attempt.with_extension("held");
+    let raw_frame = std::fs::read(&raw).unwrap();
+    std::fs::rename(&attempt, &attempt_parked).unwrap();
+    assert!(
+        inspect(token, 60_000).is_err(),
+        "Raw cannot outlive its attempted parent"
+    );
+    assert_eq!(std::fs::read(&raw).unwrap(), raw_frame);
+    std::fs::rename(&attempt_parked, &attempt).unwrap();
+    assert_eq!(inspect(token, 60_000), Ok(signed));
+
+    let raw_parked = raw.with_extension("held");
+    std::fs::rename(&raw, &raw_parked).unwrap();
+    assert_eq!(inspect(token, 60_000), Ok(Recovery::KeyAttemptHeld));
+    assert!(prepare(&owner, &row, &vault, &budget)
+        .save_invite(token, 60_000, &source)
+        .is_err());
+    assert!(!raw.exists());
+    assert_eq!(std::fs::read(raw_parked).unwrap(), raw_frame);
+}
+
+#[tokio::test]
+async fn native_runtime_invite_recovery_rechecks_file_identity_after_authentication() {
+    type Host = crate::store::PreparedV2TextHost<MeshService, ChaCha20Rng>;
+    let directory = tempfile::tempdir().unwrap();
+    let (vault, budget) = selected_governed(directory.path());
+    let (owner, row) = active(&vault, &budget, 0xe70f);
+    let (_sender, receiver) = tokio::sync::watch::channel(false);
+    let negative = RequestCancellation::new(receiver, None);
+    let token = [57; 32];
+    prepare(&owner, &row, &vault, &budget)
+        .save_invite(token, 60_000, &negative)
+        .unwrap();
+    let raw = only_named(directory.path(), "invite.raw.v1");
+    let raw_frame = std::fs::read(&raw).unwrap();
+    let held = raw.with_extension("held");
+    let held_for_hook = held.clone();
+    let path = raw.clone();
+    let copy = raw_frame.clone();
+    Host::after_invite_read_for_test(Box::new(move || {
+        std::fs::rename(&path, &held_for_hook).unwrap();
+        std::fs::write(path, copy).unwrap();
+    }));
+    assert!(prepare(&owner, &row, &vault, &budget)
+        .inspect_invite(token, 60_000, &negative)
+        .is_err());
+    assert_eq!(std::fs::read(&raw).unwrap(), raw_frame);
+    assert_eq!(std::fs::read(&held).unwrap(), raw_frame);
+    std::fs::remove_file(&raw).unwrap();
+    std::fs::rename(held, &raw).unwrap();
+
+    // This replacement has a valid tag under the same domain, context and
+    // intent. It still cannot satisfy Raw's phase and parent grammar.
+    let attempt = raw.with_file_name("invite.attempt.v1");
+    let wrong_phase = std::fs::read(attempt).unwrap();
+    std::fs::write(&raw, &wrong_phase).unwrap();
+    assert!(prepare(&owner, &row, &vault, &budget)
+        .inspect_invite(token, 60_000, &negative)
+        .is_err());
+    assert_eq!(std::fs::read(&raw).unwrap(), wrong_phase);
+
+    // A present torn record is a refusal, not evidence that Raw is absent.
+    std::fs::write(&raw, &raw_frame[..128]).unwrap();
+    assert!(prepare(&owner, &row, &vault, &budget)
+        .inspect_invite(token, 60_000, &negative)
+        .is_err());
+    assert_eq!(std::fs::read(raw).unwrap(), &raw_frame[..128]);
+}
+
+#[tokio::test]
+async fn native_runtime_invite_signing_requires_covered_attempt_and_replays_only_covered_raw() {
+    type Host = crate::store::PreparedV2TextHost<MeshService, ChaCha20Rng>;
+    let directory = tempfile::tempdir().unwrap();
+    let (vault, budget) = selected_governed(directory.path());
+    let (owner, row) = active(&vault, &budget, 0xe70b);
+    let (_sender, receiver) = tokio::sync::watch::channel(false);
+    let session = RequestCancellation::new(receiver, None);
+    let token = [52; 32];
+    let (_, expires) = prepare(&owner, &row, &vault, &budget)
+        .prepare_invite_intent(token, 60_000, &session)
+        .unwrap();
+    let intent = only_named(directory.path(), "invite.intent.v1");
+    let attempt = intent.with_file_name("invite.attempt.v1");
+    let raw = intent.with_file_name("invite.raw.v1");
+    let original = std::fs::read(&intent).unwrap();
+
+    // Leave the attempt torn. The key hook must survive this first failure.
+    Host::fail_partial_invite_write_for_test();
+    let key_entries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_entries = key_entries.clone();
+    Host::after_invite_key_for_test(Box::new(move || {
+        observed_entries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Host::fail_partial_invite_write_for_test();
+    }));
+    let save = || prepare(&owner, &row, &vault, &budget).save_invite(token, 60_000, &session);
+    assert!(save().is_err());
+    assert_eq!(key_entries.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let partial_attempt = std::fs::read(&attempt).unwrap();
+    assert_eq!(partial_attempt.len(), 128);
+    assert!(!raw.exists());
+
+    // The key returns once; the first Raw write loses its result after a prefix.
+    assert!(save().is_err());
+    assert_eq!(key_entries.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let covered_attempt = std::fs::read(&attempt).unwrap();
+    assert!(covered_attempt.starts_with(&partial_attempt));
+    assert!(covered_attempt.len() > partial_attempt.len());
+    let partial_raw = std::fs::read(&raw).unwrap();
+    assert_eq!(partial_raw.len(), 128);
+
+    let saved = save().unwrap();
+    assert_ne!(saved.binding_id(), [0; 32]);
+    assert_eq!(saved.expires_at_ms(), expires);
+    let packet =
+        crate::store::NativeTextInvitePacketData::decode(saved.packet_bytes_data()).unwrap();
+    assert_eq!(packet.binding().id_data(), saved.binding_id());
+    assert_eq!(packet.binding().spec_data().expires_at_ms, expires);
+    assert_eq!(save(), Ok(saved));
+    assert_eq!(std::fs::read(&intent).unwrap(), original);
+    assert_eq!(std::fs::read(&attempt).unwrap(), covered_attempt);
+    let covered_raw = std::fs::read(&raw).unwrap();
+    assert!(covered_raw.starts_with(&partial_raw));
+    assert!(covered_raw.len() > partial_raw.len());
+    std::fs::write(&raw, &partial_raw).unwrap();
+    assert!(
+        save().is_err(),
+        "a covered Raw cannot be repaired as an in-flight prefix"
+    );
+    assert_eq!(std::fs::read(&raw).unwrap(), partial_raw);
+}
+
+#[tokio::test]
+async fn native_runtime_invite_signing_refuses_preexisting_attempt_or_orphan_raw() {
+    for (name, other) in [
+        ("invite.attempt.v1", "invite.raw.v1"),
+        ("invite.raw.v1", "invite.attempt.v1"),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let (vault, budget) = selected_governed(directory.path());
+        let (owner, row) = active(&vault, &budget, 0xe70c);
+        let (_sender, receiver) = tokio::sync::watch::channel(false);
+        let session = RequestCancellation::new(receiver, None);
+        let token = [53; 32];
+        prepare(&owner, &row, &vault, &budget)
+            .prepare_invite_intent(token, 60_000, &session)
+            .unwrap();
+        let intent = only_named(directory.path(), "invite.intent.v1");
+        let path = intent.with_file_name(name);
+        std::fs::write(&path, b"unknown previous signing state").unwrap();
+        let save = || prepare(&owner, &row, &vault, &budget).save_invite(token, 60_000, &session);
+        assert!(save().is_err());
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"unknown previous signing state"
+        );
+        assert!(!intent.with_file_name(other).exists());
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            save().is_err(),
+            "observed unknown state must survive removal"
+        );
+        assert!(!path.exists());
+        assert!(!intent.with_file_name(other).exists());
+    }
+}
+
+#[tokio::test]
+async fn native_runtime_invite_signing_late_cancel_keeps_the_exact_saved_result() {
+    let directory = tempfile::tempdir().unwrap();
+    let (vault, budget) = selected_governed(directory.path());
+    let (owner, row) = active(&vault, &budget, 0xe70d);
+    let (sender, receiver) = tokio::sync::watch::channel(false);
+    let session = RequestCancellation::new(receiver, None);
+    super::super::super::invite::AFTER_COVER.with(|slot| {
+        assert!(slot.borrow().is_none());
+        *slot.borrow_mut() = Some(Box::new(move || {
+            sender.send_replace(true);
+        }));
+    });
+    let token = [54; 32];
+    assert_eq!(
+        prepare(&owner, &row, &vault, &budget).save_invite(token, 60_000, &session),
+        Err(V2MemberSaveRefusal::Cancelled)
+    );
+    let path = only_named(directory.path(), "invite.raw.v1");
+    let covered = std::fs::read(&path).unwrap();
+    let (_sender, receiver) = tokio::sync::watch::channel(false);
+    let fresh = RequestCancellation::new(receiver, None);
+    assert!(prepare(&owner, &row, &vault, &budget)
+        .save_invite(token, 60_001, &fresh)
+        .is_err());
+    let saved = prepare(&owner, &row, &vault, &budget)
+        .save_invite(token, 60_000, &fresh)
+        .unwrap();
+    assert_ne!(saved.binding_id(), [0; 32]);
+    assert_eq!(std::fs::read(path).unwrap(), covered);
 }
 
 #[tokio::test]

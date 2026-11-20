@@ -52,6 +52,7 @@ mod chat_fences;
 mod critical_namespaces;
 mod governance_open;
 mod mounted;
+mod native_text_invite;
 pub use critical_namespaces::{
     ActivatedCheckpointJoin, ArchiveBootstrapCatalogPolicy, ArchiveFounderBegin,
     ArchiveFounderCreation, ArchiveFounderExisting, ArchiveFounderInputs, ArchiveFounderPlanning,
@@ -88,6 +89,10 @@ pub use critical_namespaces::{
 };
 pub(crate) use mounted::LegacyStoreCustody;
 pub use mounted::{MountedLeaseRefusal, MountedLeaseRefusalKind, MountedVault};
+pub use native_text_invite::{
+    NativeTextInvitePacketData, NativeTextInviteRecovery, NativeTextSavedInvite,
+    MAX_NATIVE_TEXT_INVITE_PACKET_BYTES,
+};
 mod owner_evidence;
 pub use chat_admission::{
     ChatAdmissionBinding, ChatAdmissionCapture, ChatAdmissionFinish, ChatAdmissionKey,

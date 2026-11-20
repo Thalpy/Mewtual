@@ -602,6 +602,48 @@ impl SourceWork {
             rng,
         )
     }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn save_native_invite<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
+        &self,
+        driver: &mut crate::store::PreparedFreshV2TextFounder<T, R>,
+        request: catcoms_sync::owner_v2::V2FounderInviteRequestData,
+        routing_plan: &[u8],
+        keys: &mut crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounderKeys,
+        rng: &mut impl CryptoRngCore,
+        negative: &catcoms_rt::RequestCancellation,
+    ) -> Result<crate::store::NativeTextSavedInvite, AppError> {
+        driver.save_native_invite_data(
+            self.physical.current()?,
+            request,
+            routing_plan,
+            keys,
+            rng,
+            negative,
+        )
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn inspect_native_invite<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
+        &self,
+        driver: &crate::store::PreparedFreshV2TextFounder<T, R>,
+        request: catcoms_sync::owner_v2::V2FounderInviteRequestData,
+        routing_plan: &[u8],
+        keys: &crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounderKeys,
+        negative: &catcoms_rt::RequestCancellation,
+    ) -> Result<crate::store::NativeTextInviteRecovery, AppError> {
+        driver.inspect_native_invite_data(
+            self.physical.current()?,
+            request,
+            routing_plan,
+            keys,
+            negative,
+        )
+    }
     /// Bounded history setup/recovery through the exact retained NativeRequired
     /// Host. No raw Current/Store getter or library-origin fallback escapes.
     pub(in crate::store::critical_namespaces::native_registry) fn prepare_native_member_history<

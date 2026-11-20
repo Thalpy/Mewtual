@@ -157,16 +157,24 @@ fn wal(t: &WorkerRetirementFixture) -> std::path::PathBuf {
 }
 
 #[test]
-fn unsigned_invite_survives_predecessor_save_and_physical_retirement() {
+fn invite_journal_survives_predecessor_save_and_physical_retirement() {
     let mut f = accepted_fixture(0, 0x82290);
-    let path = b_target(&f).join("text.pages").join("invite.intent.v1");
+    let pages = b_target(&f).join("text.pages");
     // The predecessor must preserve this separate family's opaque bytes, not
     // parse or adopt them. Actual invitation AEAD/native binding is exercised
     // by the native_runtime_invite_* tests on both OSes.
-    let original = b"opaque separately covered invitation intent; preserve exactly";
-    std::fs::write(&path, original).unwrap();
+    let original = [
+        ("invite.intent.v1", b"opaque intent".as_slice()),
+        ("invite.attempt.v1", b"opaque signing attempt".as_slice()),
+        ("invite.raw.v1", b"opaque raw signature record".as_slice()),
+    ];
+    for (name, bytes) in original {
+        std::fs::write(pages.join(name), bytes).unwrap();
+    }
     select_and_finalize(&mut f);
-    assert_eq!(std::fs::read(&path).unwrap(), original);
+    for (name, bytes) in original {
+        assert_eq!(std::fs::read(pages.join(name)).unwrap(), bytes);
+    }
     let basis = f.accepted.accepted_final_basis_data().unwrap().clone();
     {
         let store = f.original.layout.checked_store().unwrap();
@@ -201,7 +209,9 @@ fn unsigned_invite_survives_predecessor_save_and_physical_retirement() {
     let marker = completion_admission(&t).unwrap();
     run_completion(&mut t, marker).unwrap();
     validate_wc(&t).unwrap();
-    assert_eq!(std::fs::read(path).unwrap(), original);
+    for (name, bytes) in original {
+        assert_eq!(std::fs::read(pages.join(name)).unwrap(), bytes);
+    }
     idle(&t);
 }
 

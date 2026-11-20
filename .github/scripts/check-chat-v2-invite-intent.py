@@ -6,10 +6,11 @@ import sys
 COHORTS = {
     "bindings": ("catcoms-replication", "chat::join_bindings::tests::", 15),
     "journal": ("catcoms-app", "unsigned_invite_journal_", 4),
-    "native": ("catcoms-app", "native_runtime_invite_", 9),
+    "native": ("catcoms-app", "native_runtime_invite_", 14),
+    "packet": ("catcoms-app", "native_invite_packet_", 3),
     "predecessor": (
         "catcoms-app",
-        "unsigned_invite_survives_predecessor_save_and_physical_retirement",
+        "invite_journal_survives_predecessor_save_and_physical_retirement",
         1,
     ),
 }
@@ -17,7 +18,7 @@ COHORTS = {
 
 def main() -> None:
     if len(sys.argv) != 2 or sys.argv[1] not in COHORTS:
-        raise SystemExit("choose bindings, journal, native or predecessor")
+        raise SystemExit("choose bindings, journal, native, packet or predecessor")
     name = sys.argv[1]
     package, selector, expected = COHORTS[name]
     guard = runpy.run_path(str(Path(__file__).with_name("check-chat-v2-member-save.py")))

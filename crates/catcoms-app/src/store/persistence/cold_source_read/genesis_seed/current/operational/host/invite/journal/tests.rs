@@ -23,15 +23,15 @@ fn plain() -> Vec<u8> {
             .unwrap(),
     };
     let mut e = Encoder::new();
-    e.put_bytes(TAG);
+    e.put_bytes(TAG).unwrap();
     e.put_u16(1);
     e.put_u32(OBJECTS);
     e.put_u32(BYTES);
-    e.put_bytes(&[11; 32]);
-    e.put_bytes(&[12; 32]);
+    e.put_bytes(&[11; 32]).unwrap();
+    e.put_bytes(&[12; 32]).unwrap();
     e.put_u64(60_000);
-    e.put_bytes(route);
-    e.put_bytes(&spec.signing_bytes_data().unwrap());
+    e.put_bytes(route).unwrap();
+    e.put_bytes(&spec.signing_bytes_data().unwrap()).unwrap();
     e.finish()
 }
 
@@ -71,52 +71,49 @@ fn unsigned_invite_journal_refuses_missing_future_torn_quota_context_and_trailin
     assert!(decode(&vec![0; MAX_PLAIN + 1], [11; 32]).is_err());
 }
 
-fn writer(directory: &Path, frame: Vec<u8>) -> InviteIntentJournal {
+fn writer(directory: &Path, frame: Vec<u8>) -> (Pages, JournalFile) {
     let pages = directory.join("text.pages");
     fs::create_dir(&pages).unwrap();
     let file = crate::store::persistence::open_archive_directory(&pages).unwrap();
     let id = session_id(&file).unwrap();
-    InviteIntentJournal {
-        path: Some(pages.join(NAME)),
-        pages: Some((pages, file, id)),
+    let object = JournalFile {
         frame: Some(Zeroizing::new(frame)),
-        ..InviteIntentJournal::default()
-    }
+        ..JournalFile::default()
+    };
+    ((pages, file, id), object)
 }
 
 #[test]
 fn unsigned_invite_journal_finishes_only_its_own_exact_prefix_and_retains_the_same_native_file() {
     let directory = tempfile::tempdir().unwrap();
     let expected = vec![42; 512];
-    let mut journal = writer(directory.path(), expected.clone());
+    let (pages, mut journal) = writer(directory.path(), expected.clone());
     fail_partial_write_for_test();
-    assert!(journal.write_same().is_err());
-    let path = journal.path.as_ref().unwrap().clone();
+    assert!(journal.write_same(&pages, NAME).is_err());
+    let path = pages.0.join(NAME);
     assert_eq!(fs::read(&path).unwrap(), expected[..128]);
     let id = journal.file.as_ref().unwrap().1;
-    journal.write_same().unwrap();
-    journal.sync().unwrap();
+    journal.cover(&pages, NAME).unwrap();
     assert_eq!(fs::read(&path).unwrap(), expected);
     assert_eq!(journal.file.as_ref().unwrap().1, id);
     fs::write(&path, b"foreign/torn bytes").unwrap();
-    assert!(journal.write_same().is_err());
+    assert!(journal.write_same(&pages, NAME).is_err());
     assert_eq!(fs::read(&path).unwrap(), b"foreign/torn bytes");
 }
 
 #[test]
 fn unsigned_invite_journal_never_recreates_a_missing_spent_file() {
     let directory = tempfile::tempdir().unwrap();
-    let mut journal = writer(directory.path(), vec![42; 512]);
-    journal.write_same().unwrap();
-    journal.sync().unwrap();
-    let path = journal.path.as_ref().unwrap().clone();
+    let (pages, mut journal) = writer(directory.path(), vec![42; 512]);
+    journal.cover(&pages, NAME).unwrap();
+    let path = pages.0.join(NAME);
     fs::rename(&path, path.with_extension("held")).unwrap();
-    assert!(journal.write_same().is_err());
-    assert!(journal.require_exact().is_err());
+    assert!(journal.write_same(&pages, NAME).is_err());
+    assert!(journal.require_exact(&pages, NAME).is_err());
     assert!(!path.exists());
     fs::write(&path, vec![42; 512]).unwrap();
     assert!(
-        journal.write_same().is_err(),
+        journal.write_same(&pages, NAME).is_err(),
         "equal ciphertext in a replacement file is not the held original"
     );
 }

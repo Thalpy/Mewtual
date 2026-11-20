@@ -133,6 +133,30 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurr
             OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
         }
     }
+
+    pub(super) fn preflight_invite_signing(
+        &self,
+        store: &ServerStore,
+        original: &catcoms_sync::owner_v2::PreparedV2FounderInviteData,
+    ) -> Result<(), AppError> {
+        match &self.core {
+            OwnedCurrent::Warm(current) => current.preflight_text_invite_signing(store, original),
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
+    pub(super) fn sign_invite(
+        &self,
+        store: &ServerStore,
+        original: &mut catcoms_sync::owner_v2::PreparedV2FounderInviteData,
+        cut: &mut catcoms_rt::NativeChatPreparedKeyCut,
+        ends: &mut catcoms_rt::NativeChatKeyEnds,
+    ) -> Result<(), AppError> {
+        match &self.core {
+            OwnedCurrent::Warm(current) => current.sign_text_invite(store, original, cut, ends),
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
     /// Root already admitted the exact selected request and separately paid producer
     /// buffers. Family helpers end their SourceRef borrow before the mutable RNG call.
     pub(super) fn prepare_create_data(

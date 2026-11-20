@@ -1,14 +1,25 @@
-//! Original native invite-intent preparation and isolated durable coverage.
-//! No key, SavedInvite, Add admission or invite publication is reachable here.
+//! Original native invitation preparation, signing and isolated durable coverage.
 use super::*;
 use crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounderKeys;
 use crate::store::critical_namespaces::read_pool::CatalogReadReservation;
+use crate::store::native_text_invite::PreparedNativeTextInvitePacket;
+use crate::store::persistence::v2_text::PreparedV2TextParentCapture;
+use crate::store::{NativeTextInviteRecovery, NativeTextSavedInvite};
+use catcoms_rt::{NativeChatKeyEnds, RequestCancellation};
 use catcoms_sync::owner_v2::{
     PreparedV2FounderInviteData, V2FounderInviteRequestData, FOUNDER_INVITE_DATA_BYTES,
     MAX_FOUNDER_INVITE_LIFETIME_MS,
 };
 mod journal;
-use journal::InviteIntentJournal;
+use journal::{InviteIntentJournal, InviteRecoveryRead, InviteSigningJournal};
+
+#[cfg(test)]
+std::thread_local! {
+    static AFTER_INVITE_KEY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+    static AFTER_INVITE_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 pub(super) struct PendingInvite {
     request: V2FounderInviteRequestData,
@@ -16,12 +27,15 @@ pub(super) struct PendingInvite {
     // plan later from a digest and potentially changed transport state.
     routing_plan: Vec<u8>,
     original: Option<PreparedV2FounderInviteData>,
+    // Signing file handles drain before the intent journal's physical lease.
+    signing: InviteSigningJournal,
     journal: InviteIntentJournal,
     // Last: the retained spec/preimage and all refusal overlap remain paid.
     fee: CatalogReadReservation,
 }
 const INVITE_BYTES: usize = FOUNDER_INVITE_DATA_BYTES
     + journal::JOURNAL_BYTES
+    + journal::SIGNING_JOURNAL_BYTES
     + 4 * std::mem::size_of::<PendingInvite>()
     + 4096;
 
@@ -29,6 +43,14 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
     #[cfg(test)]
     pub(in crate::store) fn fail_partial_invite_write_for_test() {
         journal::fail_partial_write_for_test();
+    }
+    #[cfg(test)]
+    pub(in crate::store) fn after_invite_key_for_test(hook: Box<dyn FnOnce()>) {
+        AFTER_INVITE_KEY.with(|slot| assert!(slot.replace(Some(hook)).is_none()));
+    }
+    #[cfg(test)]
+    pub(in crate::store) fn after_invite_read_for_test(hook: Box<dyn FnOnce()>) {
+        AFTER_INVITE_READ.with(|slot| assert!(slot.replace(Some(hook)).is_none()));
     }
     /// Private owning native call-through. The route commitment is produced by
     /// the actual Runtime's transport reservation, never supplied by the UI.
@@ -93,6 +115,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
                 request,
                 routing_plan: routing_plan.to_vec(),
                 original: None,
+                signing: InviteSigningJournal::default(),
                 journal: InviteIntentJournal::default(),
                 fee,
             }));
@@ -145,5 +168,142 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             })?;
         keys.preflight(&self.origin)?;
         Ok(result)
+    }
+
+    /// The exact-request lookup and signature coverage share one RuntimeLoan.
+    pub(in crate::store) fn save_native_invite_data(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        request: V2FounderInviteRequestData,
+        routing_plan: &[u8],
+        keys: &mut NativeFounderKeys,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+        negative: &RequestCancellation,
+    ) -> Result<NativeTextSavedInvite, AppError> {
+        self.prepare_native_invite_intent_data(layout, request, routing_plan, keys, rng)?;
+        self.cover_native_invite_signature(layout, keys, rng, negative)
+    }
+
+    /// Independently inspect the files using the real current owner. This
+    /// does not initialize the Host's member lane, intent or signing state.
+    pub(in crate::store) fn inspect_native_invite_data(
+        &self,
+        layout: &V2CurrentLayoutStore,
+        request: V2FounderInviteRequestData,
+        routing_plan: &[u8],
+        keys: &NativeFounderKeys,
+        negative: &RequestCancellation,
+    ) -> Result<NativeTextInviteRecovery, AppError> {
+        let require_live = || {
+            if negative.is_cancelled() {
+                return Err(refused());
+            }
+            keys.preflight(&self.origin)
+        };
+        require_live()?;
+        let store = layout.checked_store()?;
+        let owner = self.owner.borrow_current()?;
+        let mut read = InviteRecoveryRead::prepare(store)?;
+        let mut capture = PreparedV2TextParentCapture::prepare(store, owner.source())?;
+        let resources = capture.resources().clone();
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            guard.require_governed_native_invite_parent()?;
+            capture.capture(&guard)?;
+            let selected = capture.selected_data().ok_or_else(refused)?;
+            selected.genesis_member_anchor_data(&guard)?;
+            require_live()?;
+            read.capture(&guard)
+        })?;
+        let status = read.authenticate(request, routing_plan, owner.source().data())?;
+        #[cfg(test)]
+        if let Some(hook) = AFTER_INVITE_READ.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            guard.require_governed_native_invite_parent()?;
+            let selected = capture.selected_data().ok_or_else(refused)?;
+            selected.genesis_member_anchor_data(&guard)?;
+            guard.require_governed_native_invite_parent()?;
+            read.require_current(&guard)?;
+            require_live()
+        })?;
+        require_live()?;
+        Ok(status)
+    }
+
+    fn cover_native_invite_signature(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        keys: &mut NativeFounderKeys,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+        negative: &RequestCancellation,
+    ) -> Result<NativeTextSavedInvite, AppError> {
+        let origin = &self.origin;
+        let owned = &self.owner;
+        let require_live = |keys: &NativeFounderKeys| {
+            if negative.is_cancelled() {
+                return Err(refused());
+            }
+            keys.preflight(origin)
+        };
+        require_live(keys)?;
+        let store = layout.checked_store()?;
+        let p = self.invite.as_mut().ok_or_else(refused)?;
+        let pool = &store
+            .archive_bootstrap_policy
+            .as_ref()
+            .ok_or_else(refused)?
+            .pending
+            .pool;
+        p.fee.validate(pool, INVITE_BYTES)?;
+        let original = p.original.as_mut().ok_or_else(refused)?;
+        let owner = owned.borrow_current()?;
+        let member = self.member.as_mut().ok_or_else(refused)?;
+        if original.raw_signature_data().is_err() {
+            owned.preflight_invite_signing(store, original)?;
+            p.signing.prepare_attempt(&p.journal, store, rng)?;
+            member.with_invite_parent(store, &owner, |guard| {
+                require_live(keys)?;
+                p.signing.cover_attempt(&mut p.journal, guard)
+            })?;
+            // The marker's covering IO and its late Current checks must
+            // complete before the key cut. Drain a partial End outside the
+            // writers and before another RuntimeLoan can retry this original.
+            let mut ends = NativeChatKeyEnds::new();
+            member.with_invite_parent(store, &owner, |guard| {
+                p.signing.require_attempt(&mut p.journal, guard)?;
+                require_live(keys)?;
+                owned.sign_invite(store, original, keys.invite_cut(), &mut ends)
+            })?;
+            drop(ends);
+            #[cfg(test)]
+            if let Some(hook) = AFTER_INVITE_KEY.with(|slot| slot.borrow_mut().take()) {
+                hook();
+            }
+        }
+        original.materialize_data().map_err(AppError::from)?;
+        let signed = original.signed_data().map_err(AppError::from)?;
+        p.signing.prepare_raw(
+            &p.journal,
+            store,
+            original.raw_signature_data().map_err(AppError::from)?,
+            rng,
+        )?;
+        // Pay and assemble outside writers. A packet assembly refusal must
+        // still let this pass cover the exact raw already returned by Sync.
+        let result = original
+            .policy_bytes_data()
+            .map_err(AppError::from)
+            .and_then(|policy| {
+                PreparedNativeTextInvitePacket::prepare(pool, signed, policy, &p.routing_plan)
+            });
+        member.with_invite_parent(store, &owner, |guard| {
+            require_live(keys)?;
+            p.signing.cover_raw(&mut p.journal, guard)
+        })?;
+        require_live(keys)?;
+        result.map(PreparedNativeTextInvitePacket::into_saved)
     }
 }

@@ -52,6 +52,7 @@ pub(in crate::store) struct NativeFounderKeys {
     profile: NativeChatPreparedKeyCut,
     header: NativeChatPreparedKeyCut,
     member: NativeChatPreparedKeyCut,
+    invite: NativeChatPreparedKeyCut,
     warm_sdk: NativeChatWarmSdkReopenCut,
     warm_ends: NativeChatSdkRestoreEnds,
     // LAST: primitive End accounting outlives each prepared metadata pin. The
@@ -79,6 +80,9 @@ impl NativeFounderKeys {
                 .map_err(|_| refused())?,
             member: source
                 .prepare_cut(command, Purpose::MemberAction)
+                .map_err(|_| refused())?,
+            invite: source
+                .prepare_cut(command, Purpose::JoinInvite)
                 .map_err(|_| refused())?,
             warm_sdk: source
                 .prepare_warm_sdk_reopen(command)
@@ -144,6 +148,10 @@ impl NativeFounderKeys {
         &mut NativeChatKeyEnds,
     ) {
         (&self.original, &mut self.member, &mut self.ends)
+    }
+
+    pub(in crate::store) fn invite_cut(&mut self) -> &mut NativeChatPreparedKeyCut {
+        &mut self.invite
     }
 
     /// Separate from fresh SDK creation. The concrete warm caller additionally

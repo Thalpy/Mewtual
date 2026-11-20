@@ -1,6 +1,38 @@
 # Chat, files and voice implementation evidence
 
-## Durable unsigned invitation intent (20 November; execution pending)
+## Invitation journal recovery reader (20 November, execution pending)
+
+The original native job can inspect the fixed journal without a signing-slot
+loan or a new member verifier. It verifies attempt and signature lineage and
+checks the original files again after authentication. The hosted native
+cohort now has 14 cases, including held or missing Raw, torn and wrong-phase
+records, and equal-byte replacement after authentication. The recovery
+regressions use the actual mounted native job. Cold operational mount and
+restart are still unverified. No local tests ran.
+[Recovery contract](CHAT-V2-INVITE-ISSUER.md#read-only-journal-recovery).
+
+## Warm founder invitation packet (20 November, execution pending)
+
+The warm native save returns a verified packet with the original binding,
+policy and routing reservation. The packet has zero certified contacts.
+Three hosted packet regressions cover framing, same-ID signature substitution,
+bound bodies and coherently signed foreign policy and transport data. The
+warm native retry fixture also compares exact packet bytes across retries.
+No local tests ran. [Packet contract](CHAT-V2-INVITE-ISSUER.md#invitation-packet).
+
+## Warm invitation signing (20 November, execution pending)
+
+The original warm native job covers its immutable KeyAttempt before entering
+the dedicated invitation key. It verifies and covers the same returned
+signature before returning a local receipt. The two signing records have a
+separate quota and bind the exact original intent. The focused hosted workflow
+now expects 12 native invitation cases, including the new attempt/Raw partial
+write, foreign-state refusal and late-cancellation regressions. The Windows
+retirement fixture covers preservation of all three journal files. The new
+cases await execution. Chat V2 remains off.
+[Issuer contract and remaining work](CHAT-V2-INVITE-ISSUER.md).
+
+## Durable unsigned invitation intent (20 November, previous checkpoint)
 
 The native invitation preparation now covers one immutable unsigned intent in
 its separate `text.pages/invite.intent.v1` family. The exact token/settings/plan

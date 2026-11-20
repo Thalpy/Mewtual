@@ -25,6 +25,32 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> UnexposedV2Gene
             .map_err(|_| crate::store::critical_namespaces::refused())?;
         result
     }
+
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn preflight_text_invite_signing(
+        &self,
+        store: &crate::store::ServerStore,
+        original: &catcoms_sync::owner_v2::PreparedV2FounderInviteData,
+    ) -> Result<(), crate::AppError> {
+        self.require_text_original_data(store)
+            .map_err(|_| crate::store::critical_namespaces::refused())?;
+        self.node
+            .preflight_invite_signing_data(original)
+            .map_err(crate::AppError::from)
+    }
+
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn sign_text_invite(
+        &self,
+        store: &crate::store::ServerStore,
+        original: &mut catcoms_sync::owner_v2::PreparedV2FounderInviteData,
+        cut: &mut catcoms_rt::NativeChatPreparedKeyCut,
+        ends: &mut catcoms_rt::NativeChatKeyEnds,
+    ) -> Result<(), crate::AppError> {
+        self.require_text_original_data(store)
+            .map_err(|_| crate::store::critical_namespaces::refused())?;
+        self.node
+            .sign_invite_native_data(original, cut, ends)
+            .map_err(crate::AppError::from)
+    }
 }
 
 macro_rules! node_call_throughs {

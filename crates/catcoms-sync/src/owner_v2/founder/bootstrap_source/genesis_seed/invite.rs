@@ -69,6 +69,7 @@ pub struct PreparedV2FounderInviteData {
     expires_at_ms: Option<u64>,
     nonce: Option<[u8; 16]>,
     spec: Option<InviteBindingSpecData>,
+    policy_bytes: Option<Vec<u8>>,
     bytes: Option<Vec<u8>>,
     key: Key,
     attempts: u64,
@@ -85,7 +86,7 @@ impl std::fmt::Debug for PreparedV2FounderInviteData {
 /// payment, immutable journal quotas, SDK memory and native metadata custody.
 /// Reserve before the plan/spec/preimage allocations; retain through output.
 pub const FOUNDER_INVITE_DATA_BYTES: usize = 4 * std::mem::size_of::<PreparedV2FounderInviteData>()
-    + 8 * MAX_JOIN_BINDING_BYTES
+    + 12 * MAX_JOIN_BINDING_BYTES
     + 4 * MAX_GROUP_ID_BYTES
     + 16 * 1024;
 
@@ -102,6 +103,11 @@ impl PreparedV2FounderInviteData {
             self.spec.as_ref().ok_or_else(unavailable)?,
             self.bytes.as_deref().ok_or_else(unavailable)?,
         ))
+    }
+
+    /// The exact original policy envelope committed by the invitation.
+    pub fn policy_bytes_data(&self) -> Result<&[u8], SyncError> {
+        self.policy_bytes.as_deref().ok_or_else(unavailable)
     }
 
     /// Retained signature for the original covering journal, not a Saved proof.
@@ -275,6 +281,7 @@ impl<T: MeshTransport, R: CryptoRngCore> UnboundV2GenesisNode<T, R> {
                 expires_at_ms: None,
                 nonce: None,
                 spec: None,
+                policy_bytes: None,
                 bytes: None,
                 key: Key::Unstarted,
                 attempts: 0,
@@ -309,7 +316,11 @@ impl<T: MeshTransport, R: CryptoRngCore> UnboundV2GenesisNode<T, R> {
         if p.spec.is_none() {
             let s = &self.seed.body;
             let g = &s.genesis;
-            p.spec = Some(InviteBindingSpecData {
+            let policy_bytes = s.metadata.policy.as_ref().ok_or_else(unavailable)?.encode();
+            if policy_bytes.is_empty() || policy_bytes.capacity() > MAX_JOIN_BINDING_BYTES {
+                return Err(unavailable());
+            }
+            let spec = InviteBindingSpecData {
                 anchor: GenesisAnchorBindingData {
                     group: g.profile.spec().group.clone(),
                     founder: g.profile.spec().founder,
@@ -323,10 +334,12 @@ impl<T: MeshTransport, R: CryptoRngCore> UnboundV2GenesisNode<T, R> {
                 nonce: p.nonce.ok_or_else(unavailable)?,
                 expires_at_ms: p.expires_at_ms.ok_or_else(unavailable)?,
                 policy: JoinPayloadKindData::Policy
-                    .commitment_data(&s.metadata.policy.as_ref().ok_or_else(unavailable)?.encode())
+                    .commitment_data(&policy_bytes)
                     .map_err(|_| unavailable())?,
                 public_routing_plan: request.public_routing_plan,
-            });
+            };
+            p.policy_bytes = Some(policy_bytes);
+            p.spec = Some(spec);
         }
         p.bytes = Some(
             p.spec

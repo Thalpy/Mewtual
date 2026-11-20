@@ -85,26 +85,12 @@ impl Reservation {
         {
             return Err(refused());
         }
-        let mut plan = Encoder::with_capacity(1024);
-        plan.put_bytes(b"mewtual/chat/native-invite-routing-plan/v2\0")
-            .map_err(|_| refused())?;
-        plan.put_u16(2);
-        for bytes in [
+        crate::store::native_text_invite::encode_reservation(
             binding.group_data(),
-            public.public_key_data().as_slice(),
-            public.peer_id_data().as_bytes(),
-            public.commitment_data().as_slice(),
-        ] {
-            plan.put_bytes(bytes).map_err(|_| refused())?;
-        }
-        plan.put_u16(1); // TCP reservation; this is not a verified dial address
-        plan.put_u16(self.port);
-        plan.put_u32(0); // no certified public contact addresses
-        let plan = plan.finish();
-        if plan.len() > 1024 || plan.capacity() > 1024 {
-            return Err(refused());
-        }
-        Ok(plan)
+            public,
+            self.port,
+        )
+        .map_err(|_| refused())
     }
     /// Negative-only observation of this original preparation. No transport,
     /// constructor or passive physical custody is exposed to cleanup.

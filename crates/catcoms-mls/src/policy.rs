@@ -107,6 +107,11 @@ impl GroupPolicy {
     pub fn issuer(&self) -> DeviceId {
         DeviceId::from_public_key_bytes(&self.issuer_public_key)
     }
+
+    /// Exact public key of the endorsement. This is historical envelope data.
+    pub fn issuer_public_key(&self) -> &[u8] {
+        &self.issuer_public_key
+    }
     /// Envelope freshness only; this is not an independently observed owner-tenure proof.
     pub fn issued_epoch(&self) -> u64 {
         self.issued_epoch

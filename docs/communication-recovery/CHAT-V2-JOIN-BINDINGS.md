@@ -39,6 +39,8 @@ input first. This bound does not supply network, SDK or physical-memory payment.
 The separate body-check helpers compare actual bytes to signed commitments;
 they parse/decrypt no package, policy, route or Welcome. Expiry is an
 admission-time observation; an exact completed Welcome may arrive after expiry.
+The App's [initial founder packet](CHAT-V2-INVITE-ISSUER.md#invitation-packet)
+uses these checks and separately parses the bound policy and reservation.
 
 The first11 focused cases passed with real signatures. Review found a masked
 cross-root negative test; its new table coherently re-signs invite/request/

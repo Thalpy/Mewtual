@@ -1,4 +1,4 @@
-name: Chat V2 invitation intent
+name: Chat V2 invitation journal
 
 on:
   pull_request:
@@ -6,7 +6,17 @@ on:
       - '.github/workflows/chat-v2-invite-intent.yml'
       - '.github/scripts/check-chat-v2-invite-intent.py'
       - '.github/scripts/check-chat-v2-member-save.py'
+      - 'crates/catcoms-app/src/store/native_text_invite.rs'
+      - 'crates/catcoms-app/src/store/native_text_invite/**'
+      - 'crates/catcoms-net/src/seeded_identity.rs'
+      - 'crates/catcoms-mls/src/policy.rs'
       - 'crates/catcoms-app/src/store/critical_namespaces/archive_bootstrap/founder_warm.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/archive_bootstrap/founder_native.rs'
+      - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/owner.rs'
+      - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/text.rs'
+      - 'crates/catcoms-sync/src/owner_v2/founder/bootstrap_source/genesis_seed/invite/**'
+      - 'crates/catcoms-sync/src/owner_v2/founder/bootstrap_source/genesis_seed/invite.rs'
+      - 'crates/catcoms-rt/src/native_chat_key.rs'
       - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/upgrade_source/owning/physical.rs'
       - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/invite/**'
       - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/invite.rs'
@@ -53,8 +63,10 @@ jobs:
         run: python .github/scripts/check-chat-v2-invite-intent.py bindings
       - name: Check invitation journal format and physical-prefix controls
         run: python .github/scripts/check-chat-v2-invite-intent.py journal
-      - name: Check actual native invitation ownership and durable retries
+      - name: Check native invitation ownership, signing and durable retries
         run: python .github/scripts/check-chat-v2-invite-intent.py native
+      - name: Check invitation packet framing and bound bodies
+        run: python .github/scripts/check-chat-v2-invite-intent.py packet
       - name: Check actual predecessor save and physical retirement preservation
         if: runner.os == 'Windows'
         run: python .github/scripts/check-chat-v2-invite-intent.py predecessor
