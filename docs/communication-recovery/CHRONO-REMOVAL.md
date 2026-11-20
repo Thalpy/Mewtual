@@ -10,12 +10,18 @@ the process ID, and sink health still stores epoch milliseconds. No protocol
 clock, admission deadline, logging filter, file limit or public DTO changes.
 
 The exact existing Netwatch 0.19.3 package is vendored with its locked crate
-checksum verified. Both workspaces select that source. Its sole source change
+checksum verified. Both workspaces select that source. Its dependency change
 is in the normalized/original manifests: disable the Windows WMI dependency's
 default features. The real route query reads a single `Name` string and uses no
-optional WMI date representation. All Rust sources remain byte-identical to
-the published crate; upstream license texts come from its recorded commit.
+optional WMI date representation. Upstream license texts come from its recorded commit.
 See `vendor/netwatch/MEWTUAL-PATCH.md`.
+
+The first fresh strict build exposed five upstream NoQ UDP deprecations that
+registry dependency warning caps had hidden. The Netwatch patch now scopes an
+explicit deprecation expectation to each existing call, preserving the locked
+upstream error/MTU policy. The replacement API changes which errors escape, so
+this repair does not migrate transport behavior. No global lint setting or
+test assertion changes; every other Rust source matches the published crate.
 
 The root lock no longer contains Chrono. The native lock retains Serde With's
 optional Chrono package rows; Tauri requests Serde With's default features,
@@ -23,6 +29,10 @@ which do not enable its optional Chrono conversions. A shared cargo-deny ban
 rejects Chrono in either active dependency graph, including future feature
 reintroductions. Hosted audits must confirm the resolved feature graphs; the
 presence of inactive lockfile rows is not itself a passing audit result.
+Both hosted audits passed on #76 at `5a7df5ee` (CI run 44715599441), confirming
+the repair's active root/native graphs. Its subsequent strict build failed on
+the upstream deprecations above. Fresh complete strict/runtime validation is
+still required for the annotated source.
 
 Both lockfiles preserve unrelated package versions and dependency selections.
 Jiff's packages and portable-atomic-util are the new dependency family. Existing

@@ -1,5 +1,28 @@
 # Mewtual; Handover
 
+## 20 November: CI runner backlog and current strict-build repair
+
+After refreshing CLI access, 20 active runs at superseded #89/#83/#76 commits
+were cancelled. Current PR runs and unrelated/main runs were preserved. Current
+#76 root/native supply-chain audits pass; #89 inspection also passes. Those
+results do not establish complete acceptance or cover this subsequent change.
+
+The first current strict build failed on five deprecated NoQ UDP calls inside
+the newly vendored Netwatch. Five local deprecation expectations
+retain upstream's error/MTU semantics instead of silently adopting a different
+send policy. All other warnings remain enforced; see the vendor patch note.
+
+Nine inherited PR workflows now cancel superseded runs within the same workflow
+and PR. Main and manual runs do not cancel a running predecessor. The full CI
+job runs the exact automatic-repair/real-peer-receipt regression before the
+complete workspace suite, with immediate assertion output. An older Windows
+run reported that test failed before cancellation, without its buffered panic
+details; this is unresolved until hosted diagnostics identify the assertion.
+The full suite still executes after a focused failure and still fails the job.
+
+No build or test ran locally. Source comparison, YAML parsing, formatting and
+whitespace checks are the local checks. Chat V2 remains disabled and incomplete.
+
 ## 16 November: Chat CI source isolation and bounded test batches
 
 At `b7fd788c`, Linux's Native4 predecessor itself passed all six fixtures and
