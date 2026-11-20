@@ -10,7 +10,7 @@ catcoms-diagnostics = { path = "../catcoms-diagnostics" }
 catcoms-rt = { path = "../catcoms-rt" }
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-chrono = "0.4"
+jiff = "1.0.1"
 
 [dev-dependencies]
 tempfile = "3"
