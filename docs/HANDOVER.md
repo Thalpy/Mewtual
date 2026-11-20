@@ -1,5 +1,24 @@
 # Mewtual; Handover
 
+## 20 November: receipt regression host joins before actor shutdown
+
+The completed Windows Root job at `f80c3e9c` finally captures the automatic-repair
+failure: all real repair, signed peer receipt, exact message and saved-original
+assertions pass, then the fixture's host panics at line 417 on `server stopped`.
+Its join at line 460 reports that panic. The host was still consuming buffered
+`SnapshotNeeded` events while the test shut down its actor. The App library has
+2,658 passes, this single failure and 32 existing ignores in that job.
+
+The fixture now explicitly stops and joins its repair host after every original
+assertion and before either actor shuts down. An in-flight repair finishes while
+the actor is live; unexpected repair errors and host panics still fail the test.
+Every original delivery/durability assertion, ten-second bound and production
+path remains intact. No production implementation, resource cap or V2 switch
+changes. The original unchanged-source diagnostic passes its exact case and
+early cohort on both OSes, so those narrower passes did not establish teardown
+safety in the complete run. Hosted validation is required for this correction;
+local checks are limited to source comparison, formatting and whitespace.
+
 ## 20 November: native runtime pass and exact generation lint correction
 
 Hosted #76 Linux CI at `40e63bcc` passes all 1,274 native library cases, the
