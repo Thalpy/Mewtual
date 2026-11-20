@@ -397,12 +397,13 @@ async fn admitted_scenario(f: &IpcFixture) -> Result<(), String> {
         }),
         "lock outcome changed its actual JSON shape",
     )?;
+    let expected_generation = f
+        .state()
+        .ui_session_generation
+        .load(Ordering::SeqCst)
+        .to_string();
     require(
-        locked["generation"]
-            == f.state()
-                .ui_session_generation
-                .load(Ordering::SeqCst)
-                .to_string(),
+        locked["generation"].as_str() == Some(expected_generation.as_str()),
         "lock reply did not retain its actual registered generation",
     )?;
     require(

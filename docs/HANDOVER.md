@@ -1,5 +1,19 @@
 # Mewtual; Handover
 
+## 20 November: native runtime pass and exact generation lint correction
+
+Hosted #76 Linux CI at `40e63bcc` passes all 1,274 native library cases, the
+six ACL/parser tests and the additional native test, with zero failed/ignored.
+This includes both corrected native custody/IPC fixtures. The subsequent strict
+Clippy step fails only on `cmp_owned` in the exact IPC generation assertion.
+
+The fixture now binds the expected decimal string, then compares borrowed JSON
+and expected strings. It still rejects a numeric generation and requires the
+exact registered value; the two-field shape and continuity checks remain.
+No production code, capacity, timeout or lint policy changes. Local verification
+uses formatting and whitespace checks only; fresh hosted strict validation is
+required. Root and other hosted checks remain pending; this is not acceptance.
+
 ## 20 November: CI runner backlog and current strict-build repair
 
 After refreshing CLI access, 20 active runs at superseded #89/#83/#76 commits
