@@ -1,5 +1,36 @@
 # Chat, files and voice implementation evidence
 
+## Current completion checkpoint (20 November 2026)
+
+The integration backlog is merged on `main` through `0685a6b6`, including
+#73's deliberately positive three-peer reproduction. No PR remained open at
+that checkpoint. See [the merged inventory](PR-BACKLOG-INTEGRATION.md) and
+[the completion overview and remaining work](CHAT-FILES-VOICE-PLAN.md).
+Chat V2 is incomplete; native text and voice activation remain disabled.
+
+The warm native App can create groups and save/read its own local originals
+behind the disabled mode. Invitation issuance, production covered Add/join,
+shared delivery/projection and cold operational recovery are not a completed
+multi-member path. The required next vertical is A admitting B/C, A stopping,
+and B/C exchanging the same signed original and recovering edited/deleted
+history after restart. Local-save UI acceptance does not establish this.
+
+#73's original three-peer result failed in 60.67 seconds. Its exact peer and
+cleanup assertions are preserved in the composition, together with main's
+later diagnostics. Current combined-source validation is pending in
+[main CI](https://github.com/Thalpy/Mewtual/actions/runs/44744721743), which
+was queued at this checkpoint. Earlier #76 results predate this reproduction.
+No local build/test ran: composition checks cover formatting, syntax, source
+preservation and whitespace only. The named 10,000-operation catch-up cost
+case remains deferred until final acceptance.
+
+The remaining sections are historical, source-pinned evidence. Their old
+branch names, draft/merge holds and future-tense implementation notes are not
+the current completion state. Preserve the failures and their actual scope;
+neither merging nor cancelling a run turns it into a pass. Real audio,
+automatic multi-peer recovery, member relay and physical multi-device
+acceptance remain open. Follow [the physical checklist](TWO-COMPUTER-ACCEPTANCE.md).
+
 ## Exact individual-media request fence (29 October; inactive)
 
 Integrated runtime `359a2eb0` adds an exact peer/driver/registry fence before positive
