@@ -243,6 +243,7 @@ async fn protected_source_and_signed_ack_keep_original_capacity_under_full_ordin
         "End never refunds actual retained transport work"
     );
     drop(late_lower);
+    root.prune_voice_routes();
     runtime.collect_expired();
     assert_eq!(
         clock.monotonic_ms(),

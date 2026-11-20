@@ -391,6 +391,8 @@ async fn protected_root_hello_returns_signed_admission_and_exact_lost_ack_withou
         matches!(input.as_input(), CryptoInput::DecryptConfirmation(packet) if packet.object_hash() == object.hash() && packet.header.kind == EncryptedKind::ConfirmHello)
     );
     drop(answer);
+    // The route registry owns the verification payer until its real pruning pass.
+    f.receiver.prune_voice_routes();
     let retained = f.runtime.resources().counts();
     let receipt = admit(&mut f, object.clone()).unwrap();
     assert!(receipt.authorized());
@@ -570,6 +572,7 @@ async fn protected_root_queued_ack_epoch_change_revokes_before_driver_send_and_f
     );
     action.settle_engine();
     drop(response);
+    f.receiver.prune_voice_routes();
     assert_eq!(
         f.runtime.resources().counts().1,
         reserved_work,

@@ -1,5 +1,32 @@
 # Mewtual; Handover
 
+## 20 November: hosted merge validation and composed voice fixtures
+
+PR84 is on main at `434232e2`; PR89, Studio PR83 and Score/voice PR76 remain
+the ordered integration candidates. No tests run on the resuming machine.
+PR89's failed/cancelled hosted jobs were retried; its Windows retry exposed the
+same cached observer source with a missing ownership marker previously seen
+on Studio. Both candidates now use fresh marked temporary observer source
+outside Cargo's cached target. Source verification, locks and selectors remain.
+
+This Score/voice candidate incorporates the Studio correction. Five inherited
+Sync fixtures now execute the actual route-registry pruning pass after dropping
+their last response/Lower owners and before testing returned capacity. The
+strong registry custody intentionally prevents an earlier refund. Original
+identity, revocation, capacity, attempt and clock assertions are retained.
+The real Tauri IPC fixture checks both current lock-response fields and its
+exact registered generation. The delayed Closed-reply fixture accounts for the
+original 10KiB Row and the separate 2KiB Session allocation retained by its paid
+weak witness; its no-early-refund check remains intact.
+
+The integration workflow executes those five Root and two native regressions
+before the complete suites on both OSes. A focused failure does not suppress
+the complete suite. Static formatting and whitespace checks pass; hosted
+execution is still required. No production path, resource cap, deadline or
+activation switch changes in these fixture corrections. Fresh Studio audit
+also reports the new Chrono maintenance advisory RUSTSEC-2026-0543; it is
+unresolved and no exemption is introduced.
+
 ## 16 November: Chat CI source isolation and bounded test batches
 
 At `b7fd788c`, Linux's Native4 predecessor itself passed all six fixtures and

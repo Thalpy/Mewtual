@@ -225,10 +225,13 @@ async fn ready_and_closed_share_one_guard_and_delayed_closed_body_remains_paid_a
     assert_eq!(resources.counts(), retained);
     drop(closed);
     collect_inner(&f.state, &owner, EXECUTOR).await.unwrap();
-    // The complete retired Session allocation raised this original Row's
-    // prepaid contribution from8KiB to10KiB. Delayed serialization must retain
-    // that WHOLE contribution, then return it exactly once after the last reply.
-    assert_eq!(resources.counts().0, retained.0 - 10 * 1024);
+    // The detached Row returns its whole10KiB contribution and the2KiB Session
+    // allocation payer retained by its last paid weak witness. Neither may return
+    // before the delayed reply and actual collection release that original Row.
+    assert_eq!(
+        resources.counts().0,
+        retained.0 - 10 * 1024 - crate::voice_handoff::channel::BOOTSTRAP_BYTES
+    );
     drop(selected);
     host.finish().await.unwrap();
     f.close().await;

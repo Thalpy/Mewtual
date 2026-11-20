@@ -391,10 +391,19 @@ async fn admitted_scenario(f: &IpcFixture) -> Result<(), String> {
         .resolved("lock_session", json!({ "uiStateJson": null }))
         .await?;
     require(
-        locked
-            .as_object()
-            .is_some_and(|object| object.len() == 1 && object.contains_key("continuity_error")),
+        locked.as_object().is_some_and(|object| {
+            object.keys().map(String::as_str).collect::<BTreeSet<_>>()
+                == BTreeSet::from(["continuity_error", "generation"])
+        }),
         "lock outcome changed its actual JSON shape",
+    )?;
+    require(
+        locked["generation"]
+            == f.state()
+                .ui_session_generation
+                .load(Ordering::SeqCst)
+                .to_string(),
+        "lock reply did not retain its actual registered generation",
     )?;
     require(
         locked["continuity_error"].is_null(),
