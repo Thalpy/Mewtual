@@ -18,6 +18,25 @@ fn public(seed: u8) -> [u8; 32] {
 fn commitment(kind: JoinPayloadKindData, bytes: &[u8]) -> [u8; 32] {
     kind.commitment_data(bytes).unwrap()
 }
+
+#[test]
+fn unsigned_invite_preimage_decoder_is_exact_bounded_data() {
+    let fixture = Fixture::new();
+    let bytes = fixture.invite.spec_data().signing_bytes_data().unwrap();
+    let decoded = InviteBindingSpecData::decode_signing_bytes_data(&bytes).unwrap();
+    assert_eq!(decoded.signing_bytes_data().unwrap(), bytes);
+    for length in 0..bytes.len() {
+        assert!(InviteBindingSpecData::decode_signing_bytes_data(&bytes[..length]).is_err());
+    }
+    let mut extra = bytes.clone();
+    extra.push(0);
+    assert!(InviteBindingSpecData::decode_signing_bytes_data(&extra).is_err());
+    assert!(InviteBindingSpecData::decode_signing_bytes_data(&fixture.invite.encode()).is_err());
+    assert!(
+        InviteBindingSpecData::decode_signing_bytes_data(&vec![0; MAX_JOIN_BINDING_BYTES + 1])
+            .is_err()
+    );
+}
 fn invite(spec: InviteBindingSpecData) -> SignedInviteBindingData {
     SignedInviteBindingData::sign_using(spec, |bytes| Ok(key(2).sign(bytes))).unwrap()
 }

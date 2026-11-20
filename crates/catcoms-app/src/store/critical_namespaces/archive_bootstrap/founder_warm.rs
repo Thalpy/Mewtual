@@ -158,6 +158,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
         request: catcoms_sync::owner_v2::V2FounderInviteRequestData,
         routing_plan: &[u8],
         keys: &mut super::founder::NativeFounderKeys,
+        rng: &mut impl CryptoRngCore,
     ) -> Result<([u8; 32], u64), AppError> {
         keys.preflight(&self.origin)?;
         if !self.is_ready_data() {
@@ -166,7 +167,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
         self.host
             .as_mut()
             .ok_or_else(refused)?
-            .prepare_native_invite_intent_data(layout, request, routing_plan, keys)
+            .prepare_native_invite_intent_data(layout, request, routing_plan, keys, rng)
     }
     /// Additional driver/Box/refusal storage only. Existing creator, source,
     /// source-read, restored SDK and Current fees remain independently live.

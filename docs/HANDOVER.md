@@ -1,5 +1,23 @@
 # Mewtual; Handover
 
+## 20 November: first durable unsigned invitation intent (hosted validation pending)
+
+The actual native RuntimeLoan now covers its unsigned invitation in the isolated
+`text.pages/invite.intent.v1` family. Exact durable token/settings/route lookup
+precedes a new invite draw. A separate authenticated one-object/8KiB quota and
+named memory invoice do not change Head1 accounting. The unique warm owner
+retains exact presealed bytes and actual file identity through partial writes;
+missing/corrupt/unknown state refuses rather than resetting usage. No cold or
+library writer/adopter is introduced. File/directory barriers precede unsigned
+success, while native/Current4 and selected-parent checks still fence publication.
+
+This is the first barrier only: durable KeyAttempt/raw coverage, SavedInvite,
+native invitation publication and actual Add/join remain unfinished. V2 stays
+OFF. New codec, native retry/cancellation and predecessor-retirement regressions
+are queued through the focused hosted workflow. No local build or test ran;
+installed formatting and the static Store raw-fs gate are the local evidence.
+See [the issuer contract](communication-recovery/CHAT-V2-INVITE-ISSUER.md).
+
 ## 20 November: all remaining PRs merged; completion status reconciled
 
 Main `0685a6b6` includes foundation #84, Chat #89, Studio #83, Score/voice #76,

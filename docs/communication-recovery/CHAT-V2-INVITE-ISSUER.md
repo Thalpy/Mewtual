@@ -1,8 +1,47 @@
 # Original text V2 invite preparation
 
-Status: unsigned production preparation and a separately reviewed Sync key
-tail. Chat V2 is OFF. There is no covering invitation journal, SavedInvite
-issuer, native invitation command, advertised contact or working V2 join yet.
+Status (20 November 2026): unsigned production preparation now has an initial
+immutable intent journal, under hosted validation. The separate Sync key tail
+is still unwired. Chat V2 is OFF. Durable KeyAttempt/raw-signature coverage,
+SavedInvite issuance, a native invitation command, advertised contacts and
+working V2 join remain unfinished.
+
+## Initial durable intent profile
+
+The real `NativeTextMemberJob::prepare_invite_intent` now looks up its exact
+token/settings/public plan before asking the retained node for a new unsigned
+original. The new closed `text.pages/invite.intent.v1` family stores that
+original preimage and plan under a separate AEAD key domain. Its context is
+derived from the actual original source encoding, genesis frame, scope nonce
+and held pin. Current4, the selected G1/member parent and native command are
+checked around IO; no caller path, context digest or signing callback enters.
+
+This initial profile reserves **one object and 8 KiB per context**, separately
+from Head1 counters. Its authenticated format fixes both limits. It never
+replaces, evicts or deletes the object, and refuses another token/settings.
+The original native-only warm Host owns the affine initialization opportunity;
+there is no cold/library adopting constructor. Missing after creation,
+malformed/unknown/torn quota or format and replacement directories/files are
+errors. A cold recovery consumer must require the existing journal and cannot
+interpret absence as an empty quota or recreate that initialization opportunity.
+Wider history/retention needs a separately versioned producer.
+
+The Host pays a named independent memory invoice before allocating the journal.
+Its actual pages/file handles drain before the retained vault physical-work
+lease. All reads/writes stay inside the same synchronous RuntimeLoan, so no
+detached writer or global text-lane registration is introduced. AEAD candidate
+preparation and its RNG run outside Current/Root writers. The candidate is
+cached before create/write; the same warm owner can complete only its own
+exact partial prefix. Unknown create entry is held. File and directory barriers
+and exact identity/byte checks precede covered unsigned success.
+
+Returned hash/expiry remain DATA, not SavedInvite or permission to sign/Add.
+No production key edge is wired in this increment. The new regression set
+covers strict codec/quota parsing, warm partial writes, changed retries,
+missing/corrupt/unknown state, late cancellation, ordinary-member coexistence
+and actual predecessor save/physical-retirement preservation of opaque sibling
+bytes. Existing Current4/refusal tests remain. Formatting and the static Store
+raw-fs gate pass locally; compilation and runtime results await hosted CI.
 
 ## Actual owning path
 
@@ -62,12 +101,12 @@ remains terminal. Raw64 is cached before late checks. Materialization uses
 only the retained raw, so cancellation, lock or a lost return cannot re-sign.
 Historical getters/materialization remain DATA after revocation.
 
-## Remaining covering producer
+## Remaining signing and publication producer
 
-The paired journal must be a separate closed family inside the held
-`text.pages` directory, with independent persistent count/byte quotas and its
-own memory invoice. It must preserve ordinary Head1 inventories/accounting
-and pass a real predecessor save/retirement preservation test.
+The initial unsigned journal above establishes only the first barrier. The
+paired signing producer must preserve its separate family, independent quotas
+and memory invoice, and ordinary Head1 inventories/accounting. The immutable
+v1 intent cannot be silently reinterpreted as a key attempt or signed result.
 
 For the current private producer it can use an isolated affine IO/access gate
 inside the SAME synchronous RuntimeLoan. Native collection, Entry and Host
@@ -85,8 +124,8 @@ failures, and construct opaque SavedInvite only after real covering barriers.
 Cold KeyAttempt without Raw is held, never permission to sign again. Missing,
 unknown, malformed or torn quota/selector evidence must not become empty
 usage. Safe reclamation/paged retention is needed before claiming indefinite
-invite history. This journal and its actual physical/IO admission are not
-implemented in this branch.
+invite history. The signing journal's later key-attempt/raw stages and their
+actual physical/IO admission are not implemented by the initial unsigned profile.
 
 Add must independently recheck current inviter/policy/public plan, expiry,
 nonce use and exact signed JoinRequest/KeyPackage. Saved issuance cannot stand
@@ -94,7 +133,7 @@ in for present admission. Joined pin/source custody, governing archive,
 multi-member installation, shared transport/projection, restart authoring and
 multi-peer acceptance remain open.
 
-## Verification
+## Historical verification before durable intent coverage
 
 The11 focused Sync cases,14 Core join-binding cases and36 native-counter cases
 pass. They cover exact original fields/draws, changed retries, wrong

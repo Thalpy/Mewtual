@@ -588,6 +588,7 @@ impl SourceWork {
         request: catcoms_sync::owner_v2::V2FounderInviteRequestData,
         routing_plan: &[u8],
         keys: &mut crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounderKeys,
+        rng: &mut impl CryptoRngCore,
     ) -> Result<([u8; 32], u64), AppError>
     where
         T: catcoms_rt::MeshTransport,
@@ -598,6 +599,7 @@ impl SourceWork {
             request,
             routing_plan,
             keys,
+            rng,
         )
     }
     /// Bounded history setup/recovery through the exact retained NativeRequired

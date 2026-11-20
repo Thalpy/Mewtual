@@ -83,8 +83,8 @@ pub struct PreparedV2TextHost<T, R> {
     // The ordinary-member lane owns its OWN member-role domain, verifier, request and fees.
     // Drops before `owner`; Drop below cancels its domain first. Exclusive with founder Create.
     member: Option<Box<member::V2MemberLane>>,
-    // Unsigned original only. No invite key may run until its separately
-    // authenticated journal intent is covered by the future paired writer.
+    // Unsigned original and its isolated immutable journal only. No invite key
+    // may run until durable KeyAttempt/raw coverage and final admission exist.
     invite: Option<Box<invite::PendingInvite>>,
     resident: Option<PreparedV2TextResidentProjection>,
     capture: Option<PreparedV2TextPromotionCapture>,

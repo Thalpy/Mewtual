@@ -1,8 +1,13 @@
-//! Unsigned original invite preparation on the actual retained native runtime.
-//! No signed invite, journal coverage, Saved receipt or network publication.
+//! Covered unsigned invite preparation on the actual retained native runtime.
+//! No signed invite, SavedInvite receipt or network publication.
 use super::*;
 use crate::store::V2MemberSaveRefusal;
 use catcoms_rt::RequestCancellation;
+
+#[cfg(test)]
+std::thread_local! {
+    pub(super) static AFTER_COVER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
 
 impl<T: MeshTransport, R: CryptoRngCore> member::NativeTextMemberJob<T, R> {
     /// Prepare one founder invite's unsigned original through this same-row
@@ -11,8 +16,9 @@ impl<T: MeshTransport, R: CryptoRngCore> member::NativeTextMemberJob<T, R> {
     /// policy, anchor, native observation, clock, nonce or signing callback.
     ///
     /// Returns (preimage hash, expiry) as historical DATA. It is deliberately
-    /// NOT an invite or a save acknowledgement. The future covering journal
-    /// must retain and save this Host's exact original before key admission.
+    /// NOT an invite or a SavedInvite acknowledgement. The isolated first
+    /// journal profile covers this exact unsigned original; durable KeyAttempt,
+    /// signature coverage and final publication admission are still required.
     pub fn prepare_invite_intent(
         mut self,
         token: [u8; 32],
@@ -50,11 +56,18 @@ impl<T: MeshTransport, R: CryptoRngCore> member::NativeTextMemberJob<T, R> {
                 },
                 &route,
                 &mut inner.keys,
+                body.rng.as_mut().ok_or(Error::Unavailable)?,
             )
             .map_err(|_| Error::Failed);
         // The original Host retains every draw before reporting a late error.
         // RuntimeLoan restoration precedes destruction of the outer key pins.
         inner.loan.recorded = true;
+        #[cfg(test)]
+        if result.is_ok() {
+            if let Some(hook) = AFTER_COVER.with(|slot| slot.borrow_mut().take()) {
+                hook();
+            }
+        }
         if negative.is_cancelled() {
             return Err(Error::Cancelled);
         }

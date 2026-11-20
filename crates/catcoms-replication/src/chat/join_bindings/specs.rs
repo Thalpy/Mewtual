@@ -22,6 +22,11 @@ impl InviteBindingSpecData {
         self.validate()?;
         Ok(self.semantic_bytes())
     }
+    /// Parse the exact bounded unsigned preimage retained by a private journal.
+    /// This returns untrusted DATA, never a signature, saved receipt or admission.
+    pub fn decode_signing_bytes_data(bytes: &[u8]) -> Result<Self, ChatError> {
+        Self::decode_semantic(bytes)
+    }
     pub(super) fn validate(&self) -> Result<(), ChatError> {
         self.anchor.validate()?;
         if self.nonce == [0; 16] {
