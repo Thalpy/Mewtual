@@ -344,6 +344,12 @@ impl UdpSocket {
             };
             let (socket, state) = guard.try_get_connected()?;
 
+            // Keep Netwatch 0.19.3's published UDP error policy. NoQ's replacement surfaces
+            // non-WouldBlock errors (including MTU probes); that is a separate transport change.
+            #[expect(
+                deprecated,
+                reason = "Preserve upstream UDP error policy; see MEWTUAL-PATCH.md"
+            )]
             let res = socket.try_io(Interest::WRITABLE, || state.send(socket.into(), transmit));
 
             match res {
@@ -374,6 +380,10 @@ impl UdpSocket {
                     return Poll::Pending;
                 }
                 Poll::Ready(Ok(())) => {
+                    #[expect(
+                        deprecated,
+                        reason = "Preserve upstream UDP error policy; see MEWTUAL-PATCH.md"
+                    )]
                     let res =
                         socket.try_io(Interest::WRITABLE, || state.send(socket.into(), transmit));
                     if let Err(err) = res {
@@ -983,6 +993,10 @@ impl UdpSender {
             result?;
 
             let (socket, state) = guard.try_get_connected()?;
+            #[expect(
+                deprecated,
+                reason = "Preserve upstream UDP error policy; see MEWTUAL-PATCH.md"
+            )]
             let result = socket.try_io(Interest::WRITABLE, || state.send(socket.into(), transmit));
 
             match result {
@@ -998,6 +1012,10 @@ impl UdpSender {
     }
 
     /// Best effort sending
+    #[expect(
+        deprecated,
+        reason = "Preserve upstream UDP error policy; see MEWTUAL-PATCH.md"
+    )]
     pub fn try_send(&self, transmit: &noq_udp::Transmit) -> io::Result<()> {
         self.socket.maybe_rebind()?;
 
@@ -1040,6 +1058,10 @@ impl Future for SendFutNoq<'_, '_> {
                     return Poll::Pending;
                 }
                 Poll::Ready(Ok(())) => {
+                    #[expect(
+                        deprecated,
+                        reason = "Preserve upstream UDP error policy; see MEWTUAL-PATCH.md"
+                    )]
                     let res = socket.try_io(Interest::WRITABLE, || {
                         state.send(socket.into(), self.transmit)
                     });

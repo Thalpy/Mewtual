@@ -9,6 +9,10 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     name: build & test (${{ matrix.os }})
@@ -50,7 +54,15 @@ jobs:
           archive_current_declaration_with_missing_root_is_never_recreated_from_its_seed
           archive_replacement_after_target_notfound_is_rejected_before_old_issuance
           archive_target_notfound_requires_the_same_held_root_and_marker_objects
+      - name: Automatic repair and authenticated peer receipt
+        id: repair_receipt
+        run: >-
+          cargo test --locked -p catcoms-app --all-features --lib
+          durable_chat::repair_effects_tests::automatic_repair_tracks_send_before_real_peer_receipt_without_frontend_retry
+          -- --exact --nocapture --test-threads=1
       - name: Test
+        # Collect the full workspace result even if the focused receipt regression fails.
+        if: ${{ !cancelled() && (success() || steps.repair_receipt.outcome == 'failure') }}
         # The user deferred only this known slow cost case until final Chat V2
         # acceptance. With no positive filter, every other workspace test still
         # executes. This intermediate gate is not final unfiltered acceptance.
