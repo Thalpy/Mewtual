@@ -129,7 +129,7 @@ test("G7-UI: actual repair controls require a selected observed receipt and neve
 
 const pix = pixBytes(1);
 
-test("G7-UI: Closing FPS controls save locally and retain their exact request on retry", async () => {
+test("G7-UI: Closing FPS controls save locally and continue a busy visit with their exact request", async () => {
   const ipc = fakeIpc(); let visits = 0;
   ipc.on("studio_list", () => ordinaryView(indexContent()));
   ipc.on("studio_read", () => ordinaryView(flipnoteContent({ frames: [] }), { phase: "closing" }));
@@ -142,10 +142,11 @@ test("G7-UI: Closing FPS controls save locally and retain their exact request on
     state.studio.selected = OBJ; flushSync(); await settled(350);
     const fps = m.target.querySelector<HTMLInputElement>('label.st-chip input[type="number"]');
     assert.ok(fps && !fps.disabled); fps.value = "17"; fps.dispatchEvent(new Event("change", { bubbles: true })); await settled();
-    assert.equal(m.count("studio_closing_overlay_save"), 1); assert.match(m.text(), /local save not written/);
-    const first = ipc.calls.find(c => c.cmd === "studio_closing_overlay_save")!.args;
-    m.click("button.st-btn", "retry same request"); await settled();
-    assert.deepEqual(ipc.calls.filter(c => c.cmd === "studio_closing_overlay_save")[1].args, first);
+    // Contract change: Busy is native's "repeat the identical request"; the session continues it
+    // itself, so the member never sees a failed save or has to press Retry.
+    assert.equal(m.count("studio_closing_overlay_save"), 2); assert.doesNotMatch(m.text(), /local save not written|save uncertain/);
+    const [first, second] = ipc.calls.filter(c => c.cmd === "studio_closing_overlay_save");
+    assert.deepEqual(second.args, first.args);
     assert.equal(m.count("studio_closing_overlay_save_begin"), 1); assert.equal(m.count("studio_apply"), 0); assert.equal(m.count("studio_unconfirmed_overlay_save"), 0);
     m.click("button.st-itab", "history"); await settled(); assert.match(m.text(), /Updating shared history/);
   } finally { m.done(); }
@@ -351,7 +352,7 @@ test("UI-003: a sidebar row rendered while a create is in flight changes when th
   }
 });
 
-test("UI-003: a pending frame's thumbnail rendered while its publish is in flight changes when the save goes uncertain", async () => {
+test("UI-003: a pending frame's thumbnail rendered while its publish is in flight changes when the save fails", async () => {
   const ipc = fakeIpc();
   const publish = deferred<unknown>();
   ipc.on("studio_list", () => ordinaryView(indexContent({ objects: { [OBJ]: indexEntry({ title: "moon cat" }) } })));
@@ -372,13 +373,14 @@ test("UI-003: a pending frame's thumbnail rendered while its publish is in fligh
     assert.ok(pendingThumb(), "the pending thumbnail is on screen while the publish is held");
     assert.equal(pendingThumb()?.querySelector(".ix")?.textContent, "…");
     assert.equal(pendingThumb()?.querySelector(".fr.pending.uncertain"), null);
-    // A failure after dispatch (a pre-dispatch "busy" refusal is a definite no-write, resent).
+    // The pixel publication fails. It stores bytes and writes no document, so the frame edit itself
+    // was never sent: not written, and still re-authorable (contract change, review of 13792739).
     publish.reject(new Error("Studio transaction expired, cancelled or server stopped"));
     await settled();
-    assert.equal(pendingThumb()?.querySelector(".ix")?.textContent, "?", "the same thumbnail now says the save is uncertain");
+    assert.equal(pendingThumb()?.querySelector(".ix")?.textContent, "?", "the same thumbnail now says the save failed");
     assert.ok(pendingThumb()?.querySelector(".fr.pending.uncertain"));
-    assert.match(m.text(), /save uncertain/);
-    assert.match(m.text(), /Studio transaction expired/);
+    assert.match(m.text(), /local save not written/);
+    assert.match(m.text(), /Studio transaction expired, cancelled or server stopped; nothing of this edit was sent/);
   } finally {
     m.done();
   }
@@ -434,13 +436,10 @@ test("UI-004: an awaiting-tenure edit is visibly local-only and its retained dra
     fps.dispatchEvent(new Event("change", { bubbles: true }));
     await settled(500);
     assert.equal(m.count("studio_unconfirmed_overlay_save_begin"), 1);
-    assert.equal(m.count("studio_unconfirmed_overlay_save"), 1);
-    assert.match(m.text(), /local save not written/);
-    assert.doesNotMatch(m.text(), /save uncertain/);
-    assert.match(m.text(), /backend confirmed that this attempt wrote nothing/);
-    m.click("button.st-btn", "retry same request");
-    await settled(500);
+    // Contract change: the busy visit is continued with the same request by the session, so the
+    // edit lands as a local-only draft without a failure card or a Retry.
     assert.equal(m.count("studio_unconfirmed_overlay_save"), 2);
+    assert.doesNotMatch(m.text(), /local save not written|save uncertain/);
     assert.match(m.text(), /local-only draft/);
     m.click("button.st-itab", "history");
     await settled();
@@ -509,10 +508,7 @@ test("UI-005: a local-only Index draft exposes export, archive, release and disp
     await settled(400);
     assert.match(m.text(), /local-only index draft/);
     state.ensureStudio(ME).setEntryExpiry(OBJ, { kind: "never" });
-    await settled(300);
-    assert.match(m.text(), /index save not written/);
-    assert.match(m.text(), /backend confirmed that this attempt wrote nothing/);
-    m.click("retry exact index save");
+    // Contract change: the busy visit is continued automatically with the same request.
     await settled(400);
     assert.equal(m.count("studio_unconfirmed_overlay_save"), 2);
     assert.doesNotMatch(m.text(), /index save not written/);

@@ -1,5 +1,9 @@
-// Orderly lock/close continuity only. This is not a write-ahead log: a hard crash between native
-// commit and the next snapshot can still lose a receipt. Restored work never replays automatically.
+// Lock/close continuity, plus the checkpoint App writes shortly after the retained work changes
+// (App.svelte `scheduleStudioCheckpoint`, driven by StudioSession.onWorkChange). This is still not a
+// write-ahead log: a hard crash inside a checkpoint window can lose the newest edit, and a crash
+// between native commit and the next checkpoint brings the landed record back. Its exact retry is
+// then acknowledged, except for a frame or local-draft edit whose retry identity was minted after
+// that checkpoint, which goes out again as a new edit. Restored work never replays automatically.
 import { canonicalJson, PIX_MAX_BYTES } from "./studio-contract.ts";
 import { decodePix } from "./pix.ts";
 import { validateJamPatch } from "./jam-patch.ts";

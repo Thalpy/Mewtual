@@ -403,6 +403,7 @@ fn measure(case: &str, build: impl FnOnce(&mut Source), clock: &dyn Clock, max_p
         admin_chat_ledger: Default::default(),
         delivery_snapshot_revision: 0,
         devices_sig: None,
+        studio_saved_snapshot: None,
         cache: Default::default(),
     };
     let mut provider = server

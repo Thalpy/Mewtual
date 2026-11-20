@@ -109,6 +109,9 @@ test("publication during Closing queues only a local reference and preserves cus
       : {v: 1, kind: "closingOverlaySave", channel: args.channel, object: args.object, state: "refused", reason: "receiptChanged", retry: "newTicket"});
     h.ipc.on("studio_closing_overlay_save", args => ({v: 1, kind: "closingOverlaySave", channel: args.channel, object: args.object, state: "pending", retry: "sameRequest"}));
     const result = await h.session.publishFlipnotePixa(object); await h.sync();
+    // A pending Closing Save is continued with the identical request; drive it past its budget so
+    // the outcome below is the one a member would finally see.
+    for (let i = 0; i < 12 && h.session.saves[0]?.status === "inflight"; i++) await h.sync();
     assert.equal(result.publication.cid, id64(5)); assert.equal(result.referenceSaveId, h.session.saves[0].id);
     assert.equal(result.warning, null, "a queued reference is distinct from an acknowledged Save");
     const save = h.session.saves[0]; assert.equal(save.kind, "overlayApply");
@@ -118,7 +121,11 @@ test("publication during Closing queues only a local reference and preserves cus
     assert.equal(save.op.cid, result.publication.cid); assert.equal(save.op.bytes, result.publication.bytes);
     assert.equal(save.status, closeAvailable ? "uncertain" : "blocked"); assert.equal(save.mayHaveCommitted, closeAvailable);
     assert.equal(h.calls("studio_closing_overlay_save_begin").length, 1);
-    assert.equal(h.calls("studio_closing_overlay_save").length, closeAvailable ? 1 : 0);
+    const visits = h.calls("studio_closing_overlay_save");
+    if (closeAvailable) {
+      assert.ok(visits.length > 1, "the pending visit was continued");
+      for (const visit of visits) assert.deepEqual(visit.args, visits[0].args, "every continuation is the exact request");
+    } else assert.equal(visits.length, 0);
     assert.equal(h.calls("studio_apply").length, 0); assert.equal(h.calls("studio_unconfirmed_overlay_save").length, 0);
   }
 });
