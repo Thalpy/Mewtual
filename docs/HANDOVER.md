@@ -1,5 +1,14 @@
 # Mewtual; Handover
 
+## 20 November: retained join request and private Welcome candidate
+
+Sync retains one signed V2 request and its original MLS private bundle. It
+can verify a Welcome against that request and the pinned replay through its
+own Add, then finish the exact package on a private provider and verify the
+sealed routing transfer. The candidate cannot run or install itself. Chat V2
+remains off and these changes await hosted execution.
+[Protocol contract](communication-recovery/CHAT-V2-PRODUCTION-JOIN.md#retained-join-request-and-private-welcome-candidate).
+
 ## 20 November: read-only invitation journal recovery (hosted validation pending)
 
 The native job can authenticate the original invitation journal independently

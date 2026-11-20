@@ -279,6 +279,7 @@ pub struct V2FrozenAdmission {
 /// wall-clock, transport epoch, membership boolean or owner private key enters issuance.
 pub struct V2GeneralPrefixVerifier {
     math: ReplayMath,
+    genesis_anchor: [u8; 32],
     admissions: Vec<V2AuthenticatedAdmission>,
     known: V2KnownGoverningParent,
     identity: Arc<()>,
@@ -343,6 +344,16 @@ impl V2GeneralPrefixVerifier {
         }
         let math =
             v2_founder::verified_genesis_math(&expectation.0, profile, founder, header, image)?;
+        let genesis_anchor = crate::chat::join_bindings::GenesisAnchorBindingData {
+            group: profile.spec().group.clone(),
+            founder: profile.spec().founder,
+            profile: *profile.id().as_bytes(),
+            admission: *founder.admission_id().as_bytes(),
+            tenure: *profile.tenure().as_bytes(),
+            header: *header.id().as_bytes(),
+            state: *header.spec().state.as_bytes(),
+        }
+        .commitment_data()?;
         let identity = Arc::new(());
         let mut admissions = Vec::with_capacity(MAX_ADMISSIONS);
         admissions.push(Self::new_admission(founder, &identity, &origin));
@@ -358,6 +369,7 @@ impl V2GeneralPrefixVerifier {
         }
         Ok(Self {
             math,
+            genesis_anchor,
             admissions,
             known,
             identity,
@@ -400,6 +412,15 @@ impl V2GeneralPrefixVerifier {
     /// Public mathematical planning DATA only. There is no adopting or mutable getter.
     pub fn replay_data(&self) -> &ReplayMath {
         &self.math
+    }
+    /// Compare an independently accepted genesis with this live replay.
+    /// A matching digest grants no storage, source or membership authority.
+    pub fn require_join_genesis_data(&self, anchor: [u8; 32]) -> Result<(), ChatError> {
+        self.live()?;
+        if self.genesis_anchor != anchor {
+            return Err(ChatError::Scope);
+        }
+        Ok(())
     }
     pub fn admission(
         &self,

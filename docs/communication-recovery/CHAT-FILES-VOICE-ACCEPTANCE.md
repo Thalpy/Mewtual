@@ -1,5 +1,24 @@
 # Chat, files and voice implementation evidence
 
+## Retained V2 request and private Welcome candidate (20 November)
+
+Four hosted regression cases are prepared for exact packet and provider
+retention, changed representations and the real MLS Add/Welcome round trip
+against a verified Core prefix. The round trip uses test Host selection.
+The native founder also checks that the incoming signed Invite matches its
+actual journal. Its hosted regression refuses a missing Raw record and an
+altered package. Native admission, durable pin and Add coverage, transport and installation
+remain open. No local tests ran.
+[Protocol contract](CHAT-V2-PRODUCTION-JOIN.md#retained-join-request-and-private-welcome-candidate).
+
+PR #142's focused invitation lane passed on both platforms at its original
+head. The broader PR lane stopped on ignored unsigned encoder results and a
+stale registry fixture inventory. The branch handles those encoder results
+and recounts the affected source partition using the hosted inventory plus
+the six new native invitation cases. The new changes need their own CI.
+[Focused invitation run](https://github.com/Thalpy/Mewtual/actions/runs/44758557685)
+and [broader joined-source run](https://github.com/Thalpy/Mewtual/actions/runs/44758557503).
+
 ## Invitation journal recovery reader (20 November, execution pending)
 
 The original native job can inspect the fixed journal without a signing-slot

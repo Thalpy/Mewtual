@@ -203,6 +203,23 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
             .ok_or_else(refused)?
             .inspect_native_invite_data(layout, request, routing_plan, keys, negative)
     }
+
+    pub(in crate::store) fn require_received_invite(
+        &self,
+        layout: &V2CurrentLayoutStore,
+        incoming: &catcoms_replication::chat::join_bindings::SignedInviteBindingData,
+        routing_plan: &[u8],
+        keys: &super::founder::NativeFounderKeys,
+        negative: &catcoms_rt::RequestCancellation,
+    ) -> Result<(), AppError> {
+        if !self.is_ready_data() {
+            return Err(refused());
+        }
+        self.host
+            .as_ref()
+            .ok_or_else(refused)?
+            .require_received_invite(layout, incoming, routing_plan, keys, negative)
+    }
     /// Additional driver/Box/refusal storage only. Existing creator, source,
     /// source-read, restored SDK and Current fees remain independently live.
     fn invoice() -> Result<usize, AppError> {

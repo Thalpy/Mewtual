@@ -32,6 +32,56 @@ fn only_named(root: &std::path::Path, name: &str) -> std::path::PathBuf {
 }
 
 #[tokio::test]
+async fn native_runtime_invite_join_request_requires_the_actual_signed_journal() {
+    use catcoms_sync::{DirectJoinLimits, PreparedV2JoinRequest};
+    let directory = tempfile::tempdir().unwrap();
+    let (vault, budget) = selected_governed(directory.path());
+    let (owner, row) = active(&vault, &budget, 0xe710);
+    let (_sender, receiver) = tokio::sync::watch::channel(false);
+    let negative = RequestCancellation::new(receiver, None);
+    let saved = prepare(&owner, &row, &vault, &budget)
+        .save_invite([58; 32], 60_000, &negative)
+        .unwrap();
+    let invite =
+        crate::store::NativeTextInvitePacketData::decode(saved.packet_bytes_data()).unwrap();
+    let request = PreparedV2JoinRequest::prepare(
+        catcoms_mls::MlsDevice::generate().unwrap(),
+        &invite.binding().spec_data().anchor,
+        invite.binding(),
+        [59; 32],
+        saved.expires_at_ms() - 1,
+        DirectJoinLimits::new(512 * 1024, 512 * 1024, 64 * 1024).unwrap(),
+    )
+    .unwrap();
+    let bytes = request.request_bytes_data();
+    let raw = only_named(directory.path(), "invite.raw.v1");
+    let parked = raw.with_extension("held");
+    let original = std::fs::read(&raw).unwrap();
+    let check =
+        || prepare(&owner, &row, &vault, &budget).check_received_join_request(bytes, &negative);
+    let checked = check().unwrap();
+    assert_eq!(
+        checked.founder_add_data().invite.id_data(),
+        saved.binding_id()
+    );
+    assert_eq!(
+        checked.founder_add_data().request.spec_data().request_token,
+        [59; 32]
+    );
+    std::fs::rename(&raw, &parked).unwrap();
+    assert!(check().is_err());
+    assert!(!raw.exists());
+    std::fs::rename(&parked, &raw).unwrap();
+    let mut changed = bytes.to_vec();
+    *changed.last_mut().unwrap() ^= 1;
+    assert!(prepare(&owner, &row, &vault, &budget)
+        .check_received_join_request(&changed, &negative)
+        .is_err());
+    assert!(check().is_ok());
+    assert_eq!(std::fs::read(raw).unwrap(), original);
+}
+
+#[tokio::test]
 async fn native_runtime_invite_recovery_reports_exact_original_and_holds_missing_raw() {
     type Host = crate::store::PreparedV2TextHost<MeshService, ChaCha20Rng>;
     use NativeTextInviteRecovery as Recovery;

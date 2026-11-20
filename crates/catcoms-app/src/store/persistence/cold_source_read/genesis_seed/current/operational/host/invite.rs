@@ -5,10 +5,11 @@ use crate::store::critical_namespaces::read_pool::CatalogReadReservation;
 use crate::store::native_text_invite::PreparedNativeTextInvitePacket;
 use crate::store::persistence::v2_text::PreparedV2TextParentCapture;
 use crate::store::{NativeTextInviteRecovery, NativeTextSavedInvite};
+use catcoms_replication::chat::join_bindings::SignedInviteBindingData;
 use catcoms_rt::{NativeChatKeyEnds, RequestCancellation};
 use catcoms_sync::owner_v2::{
-    PreparedV2FounderInviteData, V2FounderInviteRequestData, FOUNDER_INVITE_DATA_BYTES,
-    MAX_FOUNDER_INVITE_LIFETIME_MS,
+    PreparedV2FounderInviteData, V2FounderInviteRequestData, V2GenesisSeedData,
+    FOUNDER_INVITE_DATA_BYTES, MAX_FOUNDER_INVITE_LIFETIME_MS,
 };
 mod journal;
 use journal::{InviteIntentJournal, InviteRecoveryRead, InviteSigningJournal};
@@ -194,6 +195,33 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         keys: &NativeFounderKeys,
         negative: &RequestCancellation,
     ) -> Result<NativeTextInviteRecovery, AppError> {
+        self.read_native_invite(layout, keys, negative, |read, genesis| {
+            read.authenticate(request, routing_plan, genesis)
+        })
+    }
+
+    /// Match the exact received invitation to the actual persisted signed
+    /// original. This is a negative gate before a separate Add transaction.
+    pub(in crate::store) fn require_received_invite(
+        &self,
+        layout: &V2CurrentLayoutStore,
+        incoming: &SignedInviteBindingData,
+        routing_plan: &[u8],
+        keys: &NativeFounderKeys,
+        negative: &RequestCancellation,
+    ) -> Result<(), AppError> {
+        self.read_native_invite(layout, keys, negative, |read, genesis| {
+            read.require_received_invite(incoming, routing_plan, genesis)
+        })
+    }
+
+    fn read_native_invite<U>(
+        &self,
+        layout: &V2CurrentLayoutStore,
+        keys: &NativeFounderKeys,
+        negative: &RequestCancellation,
+        inspect: impl FnOnce(&InviteRecoveryRead<'_>, V2GenesisSeedData<'_>) -> Result<U, AppError>,
+    ) -> Result<U, AppError> {
         let require_live = || {
             if negative.is_cancelled() {
                 return Err(refused());
@@ -215,7 +243,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             require_live()?;
             read.capture(&guard)
         })?;
-        let status = read.authenticate(request, routing_plan, owner.source().data())?;
+        let status = inspect(&read, owner.source().data())?;
         #[cfg(test)]
         if let Some(hook) = AFTER_INVITE_READ.with(|slot| slot.borrow_mut().take()) {
             hook();

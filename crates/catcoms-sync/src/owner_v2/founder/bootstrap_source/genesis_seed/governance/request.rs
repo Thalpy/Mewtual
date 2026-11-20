@@ -27,7 +27,6 @@ impl std::fmt::Debug for V2FounderAddRequestData<'_> {
 /// Bound BEFORE hashing/copying. The SDK independently applies its own TLS,
 /// credential, reference, group/nonce and actual admission-time lifetime checks.
 pub const MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES: usize = 32 * 1024;
-const ROUTING_DOMAIN: &[u8] = b"mewtual/chat/join-routing-plain/v2\0";
 
 pub(super) struct FrozenAddRequest {
     invite: Vec<u8>,
@@ -111,7 +110,7 @@ impl FrozenAddRequest {
         // Preallocate the full supported cap INSIDE Zeroizing before the first
         // secret copy, so an early return/unwind also clears the partial frame.
         let mut plain = Zeroizing::new(Vec::with_capacity(MAX_TEXT_ADD_ROUTING_PLAIN_BYTES));
-        field(&mut plain, ROUTING_DOMAIN)?;
+        field(&mut plain, crate::owner_v2::V2_JOIN_ROUTING_DOMAIN)?;
         plain.extend_from_slice(&2u16.to_be_bytes());
         field(&mut plain, &expected.group)?;
         field(&mut plain, &spec.anchor)?;

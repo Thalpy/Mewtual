@@ -169,7 +169,7 @@ impl ServerGroup {
     /// [`ServerGroup::add_member`]).
     pub fn join(device: &MlsDevice, welcome_bytes: &[u8]) -> Result<Self, MlsError> {
         device.require_sdk_operation_admission()?;
-        Self::join_inner(device, welcome_bytes, None)
+        Self::join_inner(device, welcome_bytes, None, false)
     }
 
     /// Join only if MLS actually selects this live attempt's exact KeyPackage reference.
@@ -182,15 +182,35 @@ impl ServerGroup {
         expected: &[u8; 32],
     ) -> Result<Self, MlsError> {
         device.require_sdk_operation_admission()?;
-        Self::join_inner(device, welcome_bytes, Some(expected))
+        Self::join_inner(device, welcome_bytes, Some(expected), false)
+    }
+
+    /// V2 admits one complete TLS frame and insists on the exact original
+    /// prejoin KeyPackage reference. The caller verifies the signed response
+    /// and governing prefix before entering this SDK boundary.
+    pub fn join_for_v2_key_package(
+        device: &MlsDevice,
+        welcome_bytes: &[u8],
+        expected: &[u8; 32],
+    ) -> Result<Self, MlsError> {
+        if welcome_bytes.is_empty() || welcome_bytes.len() > 512 * 1024 {
+            return Err(MlsError::Protocol("V2 Welcome exceeds frame bounds".into()));
+        }
+        device.require_sdk_operation_admission()?;
+        Self::join_inner(device, welcome_bytes, Some(expected), true)
     }
 
     fn join_inner(
         device: &MlsDevice,
         welcome_bytes: &[u8],
         expected: Option<&[u8; 32]>,
+        exact_frame: bool,
     ) -> Result<Self, MlsError> {
-        let msg_in = MlsMessageIn::tls_deserialize(&mut &welcome_bytes[..]).map_err(proto)?;
+        let mut remaining = welcome_bytes;
+        let msg_in = MlsMessageIn::tls_deserialize(&mut remaining).map_err(proto)?;
+        if exact_frame && !remaining.is_empty() {
+            return Err(MlsError::Protocol("V2 Welcome has trailing bytes".into()));
+        }
         let welcome = match msg_in.extract() {
             MlsMessageBodyIn::Welcome(w) => w,
             _ => return Err(MlsError::WrongMessageType),

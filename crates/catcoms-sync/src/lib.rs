@@ -88,6 +88,11 @@ pub use prepared_direct_join::{
     ReturnedOriginalJoinBinding, ReturnedOriginalJoinContinuation, ReturnedOriginalJoinSubmission,
     SealedDirectJoinSource, SealedOriginalJoinInput,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use prepared_direct_join::{
+    CompletedV2JoinCandidate, PreparedV2JoinRequest, V2JoinRequestPacketData, V2JoinResponseData,
+    V2JoinResponsePacketData, MAX_V2_JOIN_REQUEST_PACKET_BYTES, MAX_V2_JOIN_RESPONSE_PACKET_BYTES,
+};
 pub mod local_chat_scope;
 pub mod owner_evidence;
 mod owner_tenure;

@@ -2,6 +2,7 @@
 use super::*;
 use crate::store::{NativeTextInviteRecovery, NativeTextSavedInvite, V2MemberSaveRefusal};
 use catcoms_rt::RequestCancellation;
+use catcoms_sync::V2JoinRequestPacketData;
 
 enum InviteResult {
     Prepared(([u8; 32], u64)),
@@ -65,6 +66,48 @@ impl<T: MeshTransport, R: CryptoRngCore> member::NativeTextMemberJob<T, R> {
             InviteResult::Recovered(result) => Ok(result),
             _ => Err(V2MemberSaveRefusal::Failed),
         }
+    }
+
+    /// Authenticates both request signatures and exact package bytes, then
+    /// matches the invitation to the original signed journal on this row.
+    /// This reads only. Clock, actual SDK admission, durable nonce ownership
+    /// and covered Add execution belong to the separate owning transaction.
+    pub fn check_received_join_request<'wire>(
+        mut self,
+        bytes: &'wire [u8],
+        negative: &RequestCancellation,
+    ) -> Result<V2JoinRequestPacketData<'wire>, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Error;
+        if negative.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        self.inner
+            .require_current()
+            .map_err(|_| Error::Unavailable)?;
+        let packet = V2JoinRequestPacketData::decode(bytes).map_err(|_| Error::Failed)?;
+        let inner = &mut self.inner;
+        let body = inner.loan.body.as_ref().ok_or(Error::Unavailable)?;
+        let driver = body.driver.as_ref().ok_or(Error::Unavailable)?;
+        let route = body
+            .network
+            .as_ref()
+            .ok_or(Error::Unavailable)?
+            .invite_routing_plan_data(driver.binding_data().ok_or(Error::Unavailable)?)
+            .map_err(|_| Error::Unavailable)?;
+        let result = body.work.require_received_invite(
+            driver,
+            packet.founder_add_data().invite,
+            &route,
+            &inner.keys,
+            negative,
+        );
+        inner.loan.recorded = true;
+        if negative.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        inner.require_current().map_err(|_| Error::Unavailable)?;
+        result.map_err(|_| Error::Failed)?;
+        Ok(packet)
     }
 
     fn run_invite(

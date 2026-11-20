@@ -86,13 +86,46 @@ impl<'a> InviteRecoveryRead<'a> {
         route: &[u8],
         genesis: V2GenesisSeedData<'_>,
     ) -> Result<NativeTextInviteRecovery, AppError> {
+        let (intent, signed) = self.recover(routing_plan, genesis)?;
+        intent.result(request, routing_plan)?;
+        Ok(match signed {
+            Some(signed) => NativeTextInviteRecovery::SignatureRecovered {
+                binding_id: signed.id_data(),
+                expires_at_ms: intent.expires_at_ms,
+            },
+            None if self.attempt.is_some() => NativeTextInviteRecovery::KeyAttemptHeld,
+            None => NativeTextInviteRecovery::IntentOnly,
+        })
+    }
+
+    pub(in super::super) fn require_received_invite(
+        &self,
+        incoming: &SignedInviteBindingData,
+        route: &[u8],
+        genesis: V2GenesisSeedData<'_>,
+    ) -> Result<(), AppError> {
+        let (_, signed) = self.recover(route, genesis)?;
+        let signed = signed.ok_or_else(refused)?;
+        if incoming.encode() != signed.encode() {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
+    fn recover(
+        &self,
+        route: &[u8],
+        genesis: V2GenesisSeedData<'_>,
+    ) -> Result<(Intent, Option<SignedInviteBindingData>), AppError> {
         let context = self.context.ok_or_else(refused)?;
         let intent_frame = self.intent.as_ref().ok_or_else(refused)?;
         let key = InviteIntentJournal::key(self.store)?;
         let sealed = crate::store::unframe(&intent_frame.frame)?;
         let plain = Zeroizing::new(unseal(&key, &sealed)?);
         let intent = decode(&plain, context)?;
-        intent.result(request, route)?;
+        if intent.route != route {
+            return Err(refused());
+        }
         let spec = InviteBindingSpecData::decode_signing_bytes_data(&intent.preimage)
             .map_err(|_| refused())?;
         let expected = genesis.context.spec_data();
@@ -112,12 +145,12 @@ impl<'a> InviteRecoveryRead<'a> {
             return if self.raw.is_some() {
                 Err(refused())
             } else {
-                Ok(NativeTextInviteRecovery::IntentOnly)
+                Ok((intent, None))
             };
         };
         let _ = open_stage(self.store, &attempt.frame, context, first, None)?;
         let Some(raw) = self.raw.as_ref() else {
-            return Ok(NativeTextInviteRecovery::KeyAttemptHeld);
+            return Ok((intent, None));
         };
         let signature = open_stage(
             self.store,
@@ -135,10 +168,7 @@ impl<'a> InviteRecoveryRead<'a> {
             Ok(signature)
         })
         .map_err(|_| refused())?;
-        Ok(NativeTextInviteRecovery::SignatureRecovered {
-            binding_id: signed.id_data(),
-            expires_at_ms: intent.expires_at_ms,
-        })
+        Ok((intent, Some(signed)))
     }
 }
 

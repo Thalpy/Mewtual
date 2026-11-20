@@ -12,6 +12,7 @@ import re
 import sys
 
 REPO = Path(__file__).resolve().parents[2]
+REGISTRY_NORMAL_COUNT = 360
 COHORTS = (
     ("core-read-accessors", "catcoms-replication", "v2_general::tests::read_accessors", 3),
     ("joined-facts", "catcoms-sync", "owner_v2::joined_source::tests", 4),
@@ -39,9 +40,9 @@ COHORTS = (
     # Includes original physical custody and actual private native founder/SDK
     # production. Synthetic UI captures still prove no checked Tauri caller,
     # installed backend, joined source or operational cold SDK restore.
-    # Compiled inventory354 includes the
-    # same four explicit compatibility fixture producers, never normal tests.
-    ("native-registry-physical", "catcoms-app", "critical_namespaces::native_registry::", 350),
+    # The compiled inventory also includes four explicit compatibility
+    # fixture producers, which are never counted as normal tests.
+    ("native-registry-physical", "catcoms-app", "critical_namespaces::native_registry::", REGISTRY_NORMAL_COUNT),
     ("current-cached-mount", "catcoms-app", "current_cached_mount_check_never_constructs_a_revocation_observer", 1),
     ("native-registry-directory", "catcoms-app", "native_registry_directory_capture", 1),
     ("native-registry-join-refusal", "catcoms-app", "native_registry_preparation_refuses_real", 1),
@@ -69,7 +70,7 @@ INVENTORY_MATCHES = tuple(re.compile(r"^(.*" + re.escape(name) + r".*): test$")
 INVENTORY_COUNT = re.compile(r"^(\d+) tests, (\d+) benchmarks$")
 INVENTORY_NAME = re.compile(r"^([A-Za-z0-9_:]{1,512}): test$")
 REGISTRY_PREFIX = "store::critical_namespaces::native_registry::"
-# The Windows lane continuously passed cases but exceeded the single350-case
+# The Windows lane continuously passed cases but exceeded the original batch
 # batch deadline. Keep that same1800s bound for each smaller module partition;
 # actual --list sets below prove no omission, overlap or selector broadening.
 REGISTRY_PARTITIONS = (
@@ -79,7 +80,7 @@ REGISTRY_PARTITIONS = (
     ("preparation", "preparation::", (), 39),
     ("operational-cell", "operational::cell::", (), 49),
     ("operational-facade", "operational::facade::", (), 24),
-    ("operational-sources", "operational::sources::", (), 87),
+    ("operational-sources", "operational::sources::", (), 97),
     ("operational-rest", "operational::", (
         "operational::cell::", "operational::facade::", "operational::sources::"), 71),
 )
@@ -104,8 +105,8 @@ def validate_partitions(normal: frozenset[str], partitions: list) -> None:
         if (label != expected_label or len(names) != expected or names != selected or seen.intersection(names)):
             raise RuntimeError("native registry partition overlaps or its selector drifted")
         seen.update(names)
-    if seen != normal or len(seen) != 350:
-        raise RuntimeError("native registry partitions do not cover all350 normal tests")
+    if seen != normal or len(seen) != REGISTRY_NORMAL_COUNT:
+        raise RuntimeError("native registry partitions do not cover the complete normal inventory")
 
 
 def validate_inventory(matches: list, counts: list, expected: int) -> None:

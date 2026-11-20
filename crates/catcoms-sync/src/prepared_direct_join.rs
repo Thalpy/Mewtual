@@ -11,6 +11,8 @@ const MAX_KEY_PACKAGE_BYTES: usize = 32 * 1024;
 
 mod network_exchange;
 mod sealed_source;
+#[cfg(not(target_arch = "wasm32"))]
+mod v2;
 pub use network_exchange::{
     BoundOriginalJoinNetwork, OriginalJoinArmData, OriginalJoinNetworkContext,
     OriginalJoinNetworkStatus, OriginalJoinNetworkSubmission, OriginalJoinSavedArm,
@@ -18,6 +20,11 @@ pub use network_exchange::{
     ReturnedOriginalJoinContinuation, ReturnedOriginalJoinSubmission, SealedOriginalJoinInput,
 };
 pub use sealed_source::{RecoveredDirectJoinSource, SealedDirectJoinSource};
+#[cfg(not(target_arch = "wasm32"))]
+pub use v2::{
+    CompletedV2JoinCandidate, PreparedV2JoinRequest, V2JoinRequestPacketData, V2JoinResponseData,
+    V2JoinResponsePacketData, MAX_V2_JOIN_REQUEST_PACKET_BYTES, MAX_V2_JOIN_RESPONSE_PACKET_BYTES,
+};
 
 /// Exact inert request labels for a local sealed-journal binding. No field can admit a device,
 /// reopen an admission or finish a join; the original actual source and mounted capture remain

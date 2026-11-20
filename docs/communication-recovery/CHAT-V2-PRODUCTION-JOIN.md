@@ -98,6 +98,43 @@ constructors/decoders expose no Source, Current, native credential or trusted-pi
 constructor. The existing Legacy bytes remain unchanged. Do not register or
 activate the V2 transport until the actual owning join vertical exists.
 
+## Retained join request and private Welcome candidate
+
+Sync now builds a JoinRequest from an explicitly accepted founder anchor and
+one actual MLS KeyPackage. The request contains the exact wire digest,
+OpenMLS reference and typed credential digest. The private provider snapshot
+and original packet remain together for exact retry. The API leaves the
+selected contact, mounted accepted pin and durable pending join to the host.
+
+The wire frames use distinct length-prefixed
+`mewtual/chat/join-request-packet/v2\0` and
+`mewtual/chat/join-response-packet/v2\0` tags followed by u16 version 2.
+The request carries the signed Invite, signed JoinRequest and exact
+KeyPackage. The response carries the signed Welcome binding, the MLS Welcome
+and the sealed routing transfer. Each field is length prefixed, separately
+bounded and decoded with exact end of input. Signed binding verification
+precedes use of request identifiers or payloads.
+
+On the native founder, `check_received_join_request` verifies both request
+signatures and the package wire commitment. It compares the complete
+incoming Invite with the linked, verified signature recovered from the
+original mounted journal. It does not accept a caller-supplied journal token.
+The original Current and file checks bracket authentication. This read gate
+does not spend the nonce. SDK admission, lifetime checks and the durable Add
+transaction still own that decision.
+
+The joiner checks the complete verified genesis anchor and the current
+replay tip at its own Add. It validates the signed response and both
+payloads before spending its one SDK attempt on a private provider restore.
+The Welcome must select the original package and produce the same group,
+subject, credential and epoch. The strict V2 routing decoder then compares
+the original commitments, actual Add parent and epochs, exact policy and
+fixed L0 slot. It verifies the policy against the actual joined MLS owner.
+Exact completed retries reuse the private candidate after fresh prefix
+checks. The candidate exposes public facts and has no Legacy conversion.
+Durable Add selection, response release and the joined native owner remain
+required for production.
+
 ## Namespace6 and original pin custody
 
 The prerequisite combined governance/native constructor now has a separate

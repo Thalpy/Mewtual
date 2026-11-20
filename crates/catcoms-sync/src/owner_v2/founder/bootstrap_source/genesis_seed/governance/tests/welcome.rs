@@ -3,6 +3,112 @@
 use super::*;
 
 #[test]
+fn v2_join_request_and_welcome_complete_with_actual_add() {
+    use crate::{
+        DirectJoinLimits, PreparedV2JoinRequest, V2JoinRequestPacketData, V2JoinResponseData,
+        V2JoinResponsePacketData,
+    };
+    // MLS itself places a lifetime on the live KeyPackage. Use the same
+    // current clock for the founder fixture, then keep it fixed through Add.
+    let now = catcoms_rt::Clock::now_ms(&catcoms_rt::SystemClock);
+    let (original, _reservation, _opened, _old_fee) =
+        prepared_node_with_clock(0xeb10, Box::new(ManualClock::new(now)));
+    let mut node = original.prepare_governance_data().unwrap();
+    let native = Native::new();
+    let mut fixture = Request::new(&node, 75);
+    fixture.change_invite(&node, |spec| spec.expires_at_ms = now + 60_000);
+    let mut prepared = PreparedV2JoinRequest::prepare(
+        MlsDevice::generate().unwrap(),
+        &fixture.invite.spec_data().anchor,
+        &fixture.invite,
+        [76; 32],
+        now,
+        DirectJoinLimits::new(RAW, RAW, 256 * 1024).unwrap(),
+    )
+    .unwrap();
+    let wire = prepared.request_bytes_data().to_vec();
+    let packet = V2JoinRequestPacketData::decode(&wire).unwrap();
+    let request = packet.founder_add_data();
+    let count = Arc::new(AtomicUsize::new(0));
+    let d = node.genesis_data();
+    let mut g = governance(d.profile, d.admission, d.header, d.state);
+    begin(&mut node, &native, &count, request);
+    node.execute_add_data_native(request).unwrap();
+    node.prepare_admission_data(g.verifier.replay_data())
+        .unwrap();
+    node.sign_admission_native().unwrap();
+    node.materialize_admission_data().unwrap();
+    node.prepare_welcome_data().unwrap();
+    node.sign_welcome_native().unwrap();
+    node.materialize_welcome_data().unwrap();
+    let completed = node.completed_add_data().unwrap();
+    let response = V2JoinResponseData {
+        binding: node.signed_welcome_data().unwrap(),
+        welcome: completed.welcome_data(),
+        sealed_routing: completed.sealed_routing_transfer_data().unwrap(),
+    };
+    let response_wire = response.encode_packet_data().unwrap();
+    assert!(V2JoinResponsePacketData::decode(&response_wire[..response_wire.len() - 1]).is_err());
+    let response_packet = V2JoinResponsePacketData::decode(&response_wire).unwrap();
+    let response = response_packet.response_data();
+    assert!(prepared.finish_welcome(response, &g.verifier).is_err());
+
+    // Only the genuine resulting Add advances the fixture's verified prefix.
+    let header = node.signed_admission_data().unwrap();
+    let (admission, output) = node.unsigned_admission_data().unwrap();
+    let mut candidate = Some(
+        g.verifier
+            .derive_successor(
+                header,
+                ReplayBody::Admission(admission),
+                output.image_data(),
+            )
+            .unwrap(),
+    );
+    let selection = V2HostSelectionExpectation::from_trusted_host(header.id(), header.spec().state);
+    drop(
+        g.verifier
+            .advance_host_selected(&selection, &mut candidate)
+            .unwrap(),
+    );
+    let mut other_routing = response.sealed_routing.to_vec();
+    *other_routing.last_mut().unwrap() ^= 1;
+    assert!(prepared
+        .finish_welcome(
+            V2JoinResponseData {
+                sealed_routing: &other_routing,
+                ..response
+            },
+            &g.verifier,
+        )
+        .is_err());
+    let joined = prepared.finish_welcome(response, &g.verifier).unwrap();
+    let facts = joined.facts_data();
+    assert_eq!(
+        facts.key_package_data(),
+        &request.request.spec_data().key_package_reference
+    );
+    assert_eq!(
+        facts.credential_data(),
+        &request.request.spec_data().credential
+    );
+    assert_eq!(facts.join_epoch_data(), 1);
+    assert_eq!(
+        facts.admission_state_data(),
+        completed.after_authenticator_data()
+    );
+    assert_eq!(
+        joined.policy_data().mode(),
+        catcoms_mls::GroupMode::PeerToPeer
+    );
+    let original = joined as *const _;
+    let retry = prepared.finish_welcome(response, &g.verifier).unwrap();
+    assert_eq!(original, retry as *const _);
+    prepared.validate_retained_package_data().unwrap();
+    assert_eq!(prepared.request_bytes_data(), &wire[..]);
+}
+
+#[test]
 fn welcome_is_derived_only_from_same_request_actual_outputs_and_signed_add() {
     let (original, _reservation, _opened, _old_fee) = prepared_node(0xeb01);
     let mut node = original.prepare_governance_data().unwrap();

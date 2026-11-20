@@ -48,3 +48,5 @@ pub use joined_fence::{
 pub(crate) use joined_source::JoinFactsSlot;
 pub use joined_source::V2JoinFacts;
 pub use member::{V2MemberDraftInputs, V2MemberSignRefusal};
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const V2_JOIN_ROUTING_DOMAIN: &[u8] = b"mewtual/chat/join-routing-plain/v2\0";

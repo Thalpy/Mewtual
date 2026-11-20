@@ -644,6 +644,26 @@ impl SourceWork {
             negative,
         )
     }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn require_received_invite<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
+        &self,
+        driver: &crate::store::PreparedFreshV2TextFounder<T, R>,
+        incoming: &catcoms_replication::chat::join_bindings::SignedInviteBindingData,
+        routing_plan: &[u8],
+        keys: &crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounderKeys,
+        negative: &catcoms_rt::RequestCancellation,
+    ) -> Result<(), AppError> {
+        driver.require_received_invite(
+            self.physical.current()?,
+            incoming,
+            routing_plan,
+            keys,
+            negative,
+        )
+    }
     /// Bounded history setup/recovery through the exact retained NativeRequired
     /// Host. No raw Current/Store getter or library-origin fallback escapes.
     pub(in crate::store::critical_namespaces::native_registry) fn prepare_native_member_history<
