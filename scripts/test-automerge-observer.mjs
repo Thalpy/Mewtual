@@ -2,8 +2,9 @@
 // observer units in an isolated source copy, without adding all upstream dev dependencies to the
 // shipping lockfiles or running the whole upstream test suite. Works in nested worktrees too.
 import {
-  cpSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, readdirSync, rmSync, writeFileSync,
+  cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
@@ -12,22 +13,24 @@ import { spawnSync } from "node:child_process";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const source = join(root, "vendor", "automerge");
 const target = join(root, "target");
-const copy = join(target, "automerge-observer-unit-source");
 const marker = ".mewtual-observer-unit-source";
 const ownership = "Mewtual isolated Automerge observer unit source v1\n";
 if (existsSync(join(source, marker))) throw new Error("Observer source uses the reserved test ownership marker");
 mkdirSync(target, { recursive: true });
-if (existsSync(copy)) {
-  // Delete ONLY our exact marked source directory. Resolve containment and reject links before
-  // recursive cleanup on Windows as well as Unix; never touch the Cargo artifact directory.
-  if (lstatSync(copy).isSymbolicLink() || dirname(realpathSync(copy)) !== realpathSync(target)
+// Cargo caches can restore a source directory without its ownership marker. Allocate fresh
+// source outside the cached target; retain the shared target only for compiled artifacts.
+const scratch = realpathSync(tmpdir());
+const copy = mkdtempSync(join(scratch, "mewtual-automerge-observer-"));
+process.on("exit", () => {
+  // Delete ONLY this invocation's exact marked source directory. Resolve containment and
+  // reject links on Windows as well as Unix; never touch the Cargo artifact directory.
+  if (lstatSync(copy).isSymbolicLink() || dirname(realpathSync(copy)) !== scratch
     || readFileSync(join(copy, marker), "utf8") !== ownership) {
-    throw new Error("Refusing to replace an unowned observer test source directory");
+    throw new Error("Refusing to remove an unowned observer test source directory");
   }
   rmSync(copy, { recursive: true });
-}
-mkdirSync(copy, { recursive: true });
-// Register ownership before copying so an interrupted first build can be retried safely.
+});
+// Register ownership before copying; synchronous exit cleanup also runs after a Cargo failure.
 writeFileSync(join(copy, marker), ownership);
 cpSync(source, copy, {
   recursive: true,
