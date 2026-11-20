@@ -1,5 +1,5 @@
-//! Original native invite-intent preparation. No key, journal write, Saved
-//! receipt, Add admission or invite publication is reachable from this phase.
+//! Original native invite-intent preparation and isolated durable coverage.
+//! No key, SavedInvite, Add admission or invite publication is reachable here.
 use super::*;
 use crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounderKeys;
 use crate::store::critical_namespaces::read_pool::CatalogReadReservation;
@@ -7,6 +7,8 @@ use catcoms_sync::owner_v2::{
     PreparedV2FounderInviteData, V2FounderInviteRequestData, FOUNDER_INVITE_DATA_BYTES,
     MAX_FOUNDER_INVITE_LIFETIME_MS,
 };
+mod journal;
+use journal::InviteIntentJournal;
 
 pub(super) struct PendingInvite {
     request: V2FounderInviteRequestData,
@@ -14,13 +16,20 @@ pub(super) struct PendingInvite {
     // plan later from a digest and potentially changed transport state.
     routing_plan: Vec<u8>,
     original: Option<PreparedV2FounderInviteData>,
+    journal: InviteIntentJournal,
     // Last: the retained spec/preimage and all refusal overlap remain paid.
     fee: CatalogReadReservation,
 }
-const INVITE_BYTES: usize =
-    FOUNDER_INVITE_DATA_BYTES + 4 * std::mem::size_of::<PendingInvite>() + 4096;
+const INVITE_BYTES: usize = FOUNDER_INVITE_DATA_BYTES
+    + journal::JOURNAL_BYTES
+    + 4 * std::mem::size_of::<PendingInvite>()
+    + 4096;
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextHost<T, R> {
+    #[cfg(test)]
+    pub(in crate::store) fn fail_partial_invite_write_for_test() {
+        journal::fail_partial_write_for_test();
+    }
     /// Private owning native call-through. The route commitment is produced by
     /// the actual Runtime's transport reservation, never supplied by the UI.
     /// Returned hash/expiry are unsigned historical DATA, not a Saved invite.
@@ -30,6 +39,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         request: V2FounderInviteRequestData,
         routing_plan: &[u8],
         keys: &mut NativeFounderKeys,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
     ) -> Result<([u8; 32], u64), AppError> {
         keys.preflight(&self.origin)?;
         if routing_plan.is_empty() || routing_plan.len() > 1024 {
@@ -83,6 +93,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
                 request,
                 routing_plan: routing_plan.to_vec(),
                 original: None,
+                journal: InviteIntentJournal::default(),
                 fee,
             }));
         }
@@ -94,22 +105,45 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             .pending
             .pool;
         p.fee.validate(pool, INVITE_BYTES)?;
+        // Mandatory exact durable lookup precedes ANY new Clock/RNG draw.
+        // A saved unsigned intent is DATA only: it never adopts a cold signer.
+        let hit = {
+            let owner = self.owner.borrow_current()?;
+            self.member
+                .as_mut()
+                .ok_or_else(refused)?
+                .with_invite_parent(store, &owner, |guard| {
+                    keys.preflight(&self.origin)?;
+                    p.journal.lookup(guard, request, routing_plan)
+                })?
+        };
+        if let Some(result) = hit {
+            keys.preflight(&self.origin)?;
+            return Ok(result);
+        }
         // This is outside every Current/Core writer. A late refusal leaves the
         // SAME original in this host before the RuntimeLoan is restored.
         self.owner
             .prepare_invite_data(store, request, &keys.original, &mut p.original)?;
-        let owner = self.owner.borrow_current()?;
-        self.member
-            .as_mut()
-            .ok_or_else(refused)?
-            .require_invite_parent(store, &owner)?;
-        keys.preflight(&self.origin)?;
-        let (spec, bytes) = p
-            .original
+        let PendingInvite {
+            original, journal, ..
+        } = p.as_mut();
+        let (_, bytes) = original
             .as_ref()
             .ok_or_else(refused)?
             .unsigned_data()
             .map_err(AppError::from)?;
-        Ok((*blake3::hash(bytes).as_bytes(), spec.expires_at_ms))
+        journal.prepare_data(store, request, routing_plan, bytes, rng)?;
+        let owner = self.owner.borrow_current()?;
+        let result = self
+            .member
+            .as_mut()
+            .ok_or_else(refused)?
+            .with_invite_parent(store, &owner, |guard| {
+                keys.preflight(&self.origin)?;
+                journal.cover(guard, request, routing_plan, bytes)
+            })?;
+        keys.preflight(&self.origin)?;
+        Ok(result)
     }
 }

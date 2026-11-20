@@ -1,0 +1,70 @@
+name: Chat V2 invitation intent
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/chat-v2-invite-intent.yml'
+      - '.github/scripts/check-chat-v2-invite-intent.py'
+      - '.github/scripts/check-chat-v2-member-save.py'
+      - 'crates/catcoms-app/src/store/critical_namespaces/archive_bootstrap/founder_warm.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/upgrade_source/owning/physical.rs'
+      - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/invite/**'
+      - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/invite.rs'
+      - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/member.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/invite.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/member/tests/invite.rs'
+      - 'crates/catcoms-replication/src/chat/join_bindings/**'
+      - 'crates/catcoms-replication/src/chat/join_bindings.rs'
+      - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/tests/text_group_guard/query/workspace/retain_admission/intent_admission/raw_admission/accepted_admission/retirement/worker.rs'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chat-v2-invite-intent-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_BUILD_JOBS: 1
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  invitation:
+    name: Invitation intent (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record actual source
+        run: git rev-parse HEAD
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check original join binding codecs
+        run: python .github/scripts/check-chat-v2-invite-intent.py bindings
+      - name: Check invitation journal format and physical-prefix controls
+        run: python .github/scripts/check-chat-v2-invite-intent.py journal
+      - name: Check actual native invitation ownership and durable retries
+        run: python .github/scripts/check-chat-v2-invite-intent.py native
+      - name: Check actual predecessor save and physical retirement preservation
+        if: runner.os == 'Windows'
+        run: python .github/scripts/check-chat-v2-invite-intent.py predecessor
+      - name: Check storage mutation boundaries
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash scripts/check-store-raw-fs.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chat-v2-invite-intent-${{ matrix.os }}
+          path: logs/chat-v2-invite-intent/
+          if-no-files-found: error

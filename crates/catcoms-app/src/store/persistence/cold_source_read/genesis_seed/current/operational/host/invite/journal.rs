@@ -1,0 +1,418 @@
+//! One immutable, covered unsigned intent inside the original text.pages.
+//!
+//! This initial closed profile has ONE persistent object/8KiB quota. It never
+//! replaces, retires or deletes it. A torn/unknown object blocks further work;
+//! only the same warm owner may finish its own exact partially written frame.
+//! There is no key-attempt state, signature, SavedInvite or cold signer adopter.
+use super::*;
+use catcoms_crypto::{seal, unseal};
+use catcoms_replication::chat::join_bindings::InviteBindingSpecData;
+use catcoms_storage::kept::{session_at, session_id, SessionAt, SessionId};
+use catcoms_storage::VaultPhysicalWorkLease;
+use catcoms_wire::{Decoder, Encoder};
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use zeroize::Zeroizing;
+
+const NAME: &str = "invite.intent.v1";
+const TAG: &[u8] = b"mewtual/private-chat/invite-intent/v1\0";
+const KEY_DOMAIN: &str = "mewtual/private-chat/invite-intent-key/v1";
+const CONTEXT_DOMAIN: &[u8] = b"mewtual/private-chat/invite-context/v1\0";
+const OBJECTS: u32 = 1;
+const BYTES: u32 = 8192;
+const MAX_PLAIN: usize = 4096;
+const MAX_FRAME: usize = MAX_PLAIN + 40;
+const MAX_PATH: usize = 32 * 1024 + 256;
+
+#[cfg(test)]
+std::thread_local! {
+    static FAIL_PARTIAL_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+#[cfg(test)]
+pub(super) fn fail_partial_write_for_test() {
+    FAIL_PARTIAL_WRITE.with(|fault| fault.set(true));
+}
+
+pub(super) const JOURNAL_BYTES: usize = 8 * MAX_FRAME + 4 * MAX_PATH + 16 * 1024;
+
+struct Intent {
+    request: V2FounderInviteRequestData,
+    route: Vec<u8>,
+    preimage: Vec<u8>,
+    expires_at_ms: u64,
+}
+impl Intent {
+    fn result(
+        &self,
+        request: V2FounderInviteRequestData,
+        route: &[u8],
+    ) -> Result<([u8; 32], u64), AppError> {
+        if self.request != request || self.route != route {
+            return Err(refused());
+        }
+        Ok((*blake3::hash(&self.preimage).as_bytes(), self.expires_at_ms))
+    }
+}
+
+/// Private affine IO owner inside the SAME synchronous RuntimeLoan. Its sole
+/// constructor is used by the native original's Host, never a cold/library
+/// adopter. Native Source retirement waits for the loan. Actual Current4 and
+/// the selected G1/member parent are proved around each use by the caller.
+/// Files drain before the original vault's physical-work lease.
+#[derive(Default)]
+pub(super) struct InviteIntentJournal {
+    pages: Option<(PathBuf, File, SessionId)>,
+    path: Option<PathBuf>,
+    context: Option<[u8; 32]>,
+    file: Option<(File, SessionId)>,
+    frame: Option<Zeroizing<Vec<u8>>>,
+    intent: Option<Intent>,
+    observed_absent: bool,
+    observed_present: bool,
+    create_entered: bool,
+    loaded: bool,
+    covered: bool,
+    _lease: Option<VaultPhysicalWorkLease>,
+}
+
+fn io(error: impl std::fmt::Display) -> AppError {
+    AppError::Io(error.to_string())
+}
+fn regular(metadata: &fs::Metadata) -> bool {
+    let plain = metadata.file_type().is_file() && !metadata.file_type().is_symlink();
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        plain && metadata.file_attributes() & 0x400 == 0
+    }
+    #[cfg(not(windows))]
+    plain
+}
+fn named(path: &Path, file: &File, id: SessionId) -> Result<(), AppError> {
+    if !regular(&file.metadata().map_err(io)?)
+        || session_id(file).map_err(io)? != id
+        || !matches!(session_at(path, id), SessionAt::Ours)
+    {
+        return Err(refused());
+    }
+    Ok(())
+}
+fn field<'a>(d: &mut Decoder<'a>, cap: usize) -> Result<&'a [u8], AppError> {
+    let value = d.get_bytes().map_err(|_| refused())?;
+    if value.len() > cap {
+        return Err(refused());
+    }
+    Ok(value)
+}
+fn decode(plain: &[u8], context: [u8; 32]) -> Result<Intent, AppError> {
+    if plain.len() > MAX_PLAIN {
+        return Err(refused());
+    }
+    let mut d = Decoder::new(plain);
+    if field(&mut d, TAG.len())? != TAG
+        || d.get_u16().map_err(|_| refused())? != 1
+        || d.get_u32().map_err(|_| refused())? != OBJECTS
+        || d.get_u32().map_err(|_| refused())? != BYTES
+        || field(&mut d, 32)? != context
+    {
+        return Err(refused());
+    }
+    let token: [u8; 32] = field(&mut d, 32)?.try_into().map_err(|_| refused())?;
+    let lifetime_ms = d.get_u64().map_err(|_| refused())?;
+    let route = field(&mut d, 1024)?;
+    let preimage = field(&mut d, 1024)?;
+    d.finish().map_err(|_| refused())?;
+    let spec = InviteBindingSpecData::decode_signing_bytes_data(preimage).map_err(|_| refused())?;
+    if token == [0; 32]
+        || lifetime_ms == 0
+        || lifetime_ms > MAX_FOUNDER_INVITE_LIFETIME_MS
+        || route.is_empty()
+        || spec.expires_at_ms < lifetime_ms
+        || spec.signing_bytes_data().map_err(|_| refused())? != preimage
+    {
+        return Err(refused());
+    }
+    let public_routing_plan =
+        catcoms_replication::chat::join_bindings::JoinPayloadKindData::RoutingPlan
+            .commitment_data(route)
+            .map_err(|_| refused())?;
+    if public_routing_plan != spec.public_routing_plan {
+        return Err(refused());
+    }
+    Ok(Intent {
+        request: V2FounderInviteRequestData {
+            token,
+            lifetime_ms,
+            public_routing_plan,
+        },
+        route: route.to_vec(),
+        preimage: preimage.to_vec(),
+        expires_at_ms: spec.expires_at_ms,
+    })
+}
+
+impl InviteIntentJournal {
+    fn bind(
+        &mut self,
+        guard: &crate::store::critical_namespaces::current_layout::V2TextCurrentGroupGuard<'_, '_>,
+    ) -> Result<(), AppError> {
+        let (expected, genesis, nonce) = guard.original_genesis_context_data()?;
+        let encoded =
+            crate::store::critical_namespaces::archive_bootstrap::founder_codec::encode_context(
+                &expected.context,
+            )?;
+        let mut h = blake3::Hasher::new();
+        h.update(CONTEXT_DOMAIN);
+        h.update(&(encoded.len() as u64).to_be_bytes());
+        h.update(&encoded);
+        h.update(blake3::hash(genesis).as_bytes());
+        h.update(&nonce);
+        h.update(blake3::hash(guard.original_pin_data().2).as_bytes());
+        let context = *h.finalize().as_bytes();
+        if self.context.is_some_and(|original| original != context) {
+            return Err(refused());
+        }
+        if self.pages.is_none() {
+            let (target, _, _) = guard.target_directory_data();
+            if target.as_os_str().len() + 1 + "text.pages".len() + 1 + NAME.len() > MAX_PATH {
+                return Err(refused());
+            }
+            let pages = target.join("text.pages");
+            let lease = guard.store()._session.retain_for_physical_work();
+            let file = crate::store::persistence::open_archive_directory(&pages)?;
+            let id = session_id(&file).map_err(io)?;
+            crate::store::persistence::v2_genesis_activation::require_directory_name(
+                &pages, &file, id,
+            )?;
+            self.path = Some(pages.join(NAME));
+            self.pages = Some((pages, file, id));
+            self.context = Some(context);
+            self._lease = Some(lease);
+        }
+        self.require_pages()
+    }
+    fn require_pages(&self) -> Result<(), AppError> {
+        let (path, file, id) = self.pages.as_ref().ok_or_else(refused)?;
+        crate::store::persistence::v2_genesis_activation::require_directory_name(path, file, *id)
+    }
+    fn key(store: &crate::store::ServerStore) -> Result<Zeroizing<[u8; 32]>, AppError> {
+        let key = Zeroizing::new(store.keys.db_key()?);
+        Ok(Zeroizing::new(blake3::derive_key(KEY_DOMAIN, key.as_ref())))
+    }
+    /// Exact token lookup BEFORE the retained node's Clock/RNG. Missing after
+    /// creation, malformed quota/format, foreign MAC/context and torn files are
+    /// errors, never empty usage. Absence can initialize only this unique warm
+    /// original, before it has entered its one create; no cold adopter exists.
+    pub(super) fn lookup(
+        &mut self,
+        guard: &crate::store::critical_namespaces::current_layout::V2TextCurrentGroupGuard<'_, '_>,
+        request: V2FounderInviteRequestData,
+        route: &[u8],
+    ) -> Result<Option<([u8; 32], u64)>, AppError> {
+        self.bind(guard)?;
+        if self.intent.is_some() {
+            self.intent.as_ref().unwrap().result(request, route)?;
+            if !self.covered && !self.loaded {
+                return Ok(None);
+            }
+            self.sync()?;
+            self.covered = true;
+            return self
+                .intent
+                .as_ref()
+                .unwrap()
+                .result(request, route)
+                .map(Some);
+        }
+        if self.observed_absent {
+            return Ok(None);
+        }
+        let path = self.path.as_ref().ok_or_else(refused)?;
+        match fs::symlink_metadata(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !self.observed_present => {
+                self.observed_absent = true;
+                self.require_pages()?;
+                return Ok(None);
+            }
+            Ok(metadata) => {
+                self.observed_present = true;
+                if !regular(&metadata) || metadata.len() <= 40 || metadata.len() > MAX_FRAME as u64
+                {
+                    return Err(refused());
+                }
+            }
+            Err(e) => {
+                self.observed_present = true;
+                return Err(io(e));
+            }
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(io)?;
+        let id = session_id(&file).map_err(io)?;
+        named(path, &file, id)?;
+        let mut file = file;
+        let frame = read(&mut file)?;
+        named(path, &file, id)?;
+        let key = Self::key(guard.store())?;
+        let plain = Zeroizing::new(unseal(&key, &crate::store::unframe(&frame)?)?);
+        let intent = decode(&plain, self.context.ok_or_else(refused)?)?;
+        intent.result(request, route)?;
+        self.file = Some((file, id));
+        self.frame = Some(frame);
+        self.intent = Some(intent);
+        self.loaded = true;
+        self.sync()?;
+        self.covered = true;
+        Ok(Some(self.intent.as_ref().unwrap().result(request, route)?))
+    }
+    /// Seal/cache the original OUTSIDE Current/Root writers. No IO, SDK or key
+    /// signing occurs here. A failed physical write never causes another seal.
+    pub(super) fn prepare_data(
+        &mut self,
+        store: &crate::store::ServerStore,
+        request: V2FounderInviteRequestData,
+        route: &[u8],
+        preimage: &[u8],
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+    ) -> Result<(), AppError> {
+        if self.intent.is_none() {
+            if !self.observed_absent || route.len() > 1024 || preimage.len() > 1024 {
+                return Err(refused());
+            }
+            let mut e = Encoder::with_capacity(MAX_PLAIN);
+            e.put_bytes(TAG);
+            e.put_u16(1);
+            e.put_u32(OBJECTS);
+            e.put_u32(BYTES);
+            e.put_bytes(&self.context.ok_or_else(refused)?);
+            e.put_bytes(&request.token);
+            e.put_u64(request.lifetime_ms);
+            e.put_bytes(route);
+            e.put_bytes(preimage);
+            let plain = Zeroizing::new(e.finish());
+            let intent = decode(&plain, self.context.ok_or_else(refused)?)?;
+            intent.result(request, route)?;
+            let key = Self::key(store)?;
+            let sealed = seal(&key, &plain, rng)?;
+            self.frame = Some(Zeroizing::new(crate::store::frame(&sealed)));
+            self.intent = Some(intent);
+        }
+        let intent = self.intent.as_ref().ok_or_else(refused)?;
+        intent.result(request, route)?;
+        if intent.preimage != preimage {
+            return Err(refused());
+        }
+        Ok(())
+    }
+    /// Persist only the SAME presealed unsigned original under fresh actual
+    /// Current4/physical/native checks. No RNG or signing callback can enter.
+    pub(super) fn cover(
+        &mut self,
+        guard: &crate::store::critical_namespaces::current_layout::V2TextCurrentGroupGuard<'_, '_>,
+        request: V2FounderInviteRequestData,
+        route: &[u8],
+        preimage: &[u8],
+    ) -> Result<([u8; 32], u64), AppError> {
+        self.bind(guard)?;
+        let intent = self.intent.as_ref().ok_or_else(refused)?;
+        let result = intent.result(request, route)?;
+        if intent.preimage != preimage {
+            return Err(refused());
+        }
+        self.write_same()?;
+        self.sync()?;
+        self.covered = true;
+        Ok(result)
+    }
+    fn write_same(&mut self) -> Result<(), AppError> {
+        self.require_pages()?;
+        let path = self.path.as_ref().ok_or_else(refused)?;
+        if self.file.is_none() {
+            if self.create_entered {
+                return Err(refused());
+            }
+            self.create_entered = true;
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .map_err(io)?;
+            let id = session_id(&file).map_err(io)?;
+            self.file = Some((file, id));
+        }
+        let (file, id) = self.file.as_mut().ok_or_else(refused)?;
+        named(path, file, *id)?;
+        let frame = self.frame.as_ref().ok_or_else(refused)?;
+        let present = read(file)?;
+        if present.len() > frame.len() || frame[..present.len()] != present[..] {
+            return Err(refused());
+        }
+        file.seek(SeekFrom::End(0)).map_err(io)?;
+        #[cfg(test)]
+        if FAIL_PARTIAL_WRITE.with(|fault| fault.replace(false)) {
+            let end = (present.len() + 128).min(frame.len());
+            file.write_all(&frame[present.len()..end]).map_err(io)?;
+            return Err(refused());
+        }
+        file.write_all(&frame[present.len()..]).map_err(io)?;
+        named(path, file, *id)?;
+        self.require_pages()
+    }
+    fn require_exact(&mut self) -> Result<(), AppError> {
+        self.require_pages()?;
+        let path = self.path.as_ref().ok_or_else(refused)?;
+        let (file, id) = self.file.as_mut().ok_or_else(refused)?;
+        named(path, file, *id)?;
+        if read(file)?.as_slice() != self.frame.as_deref().ok_or_else(refused)?.as_slice() {
+            return Err(refused());
+        }
+        named(path, file, *id)?;
+        self.require_pages()
+    }
+    fn sync(&mut self) -> Result<(), AppError> {
+        self.require_exact()?;
+        self.file
+            .as_ref()
+            .ok_or_else(refused)?
+            .0
+            .sync_all()
+            .map_err(io)?;
+        let (pages, _, _) = self.pages.as_ref().ok_or_else(refused)?;
+        crate::store::persistence::sync_directory(pages).map_err(io)?;
+        self.require_exact()
+    }
+}
+
+/// A single capped buffer and EOF probe. Empty is permitted only so the SAME
+/// warm writer can finish its own prefix; lookup rejects it before this read.
+fn read(file: &mut File) -> Result<Zeroizing<Vec<u8>>, AppError> {
+    let metadata = file.metadata().map_err(io)?;
+    if !regular(&metadata) || metadata.len() > MAX_FRAME as u64 {
+        return Err(refused());
+    }
+    let length = metadata.len() as usize;
+    file.seek(SeekFrom::Start(0)).map_err(io)?;
+    let mut bytes = Zeroizing::new(vec![0; length + 1]);
+    let mut used = 0;
+    while used < bytes.len() {
+        match file.read(&mut bytes[used..]) {
+            Ok(0) => break,
+            Ok(n) => used += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(io(e)),
+        }
+    }
+    if used != length {
+        return Err(refused());
+    }
+    bytes.truncate(used);
+    Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests;

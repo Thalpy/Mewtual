@@ -396,6 +396,19 @@ impl V2MemberLane {
         store: &ServerStore,
         owner: &V2TextOwnerRef<'_>,
     ) -> Result<(), AppError> {
+        self.with_invite_parent(store, owner, |_| Ok(()))
+    }
+    /// The isolated invitation journal stays under the same actual Current4
+    /// and selected G1 proof. It mutates no Head/O/H/WAL/index object and never
+    /// escapes this synchronous original RuntimeLoan as detached work.
+    pub(super) fn with_invite_parent<U>(
+        &mut self,
+        store: &ServerStore,
+        owner: &V2TextOwnerRef<'_>,
+        work: impl FnOnce(
+            &crate::store::critical_namespaces::current_layout::V2TextCurrentGroupGuard<'_, '_>,
+        ) -> Result<U, AppError>,
+    ) -> Result<U, AppError> {
         self.validate_accounts(store)?;
         self.retry_verifier(store, owner)?;
         let verifier = self.verifier.as_ref().ok_or_else(refused)?;
@@ -414,7 +427,12 @@ impl V2MemberLane {
             let guard = store.lock_v2_text_current_group(current, &resources)?;
             self.domain.require_current_source(current)?;
             selected.validate_under_current_guard(&guard)?;
-            guard.require_governed_native_invite_parent()
+            guard.require_governed_native_invite_parent()?;
+            let result = work(&guard)?;
+            selected.validate_under_current_guard(&guard)?;
+            guard.require_governed_native_invite_parent()?;
+            self.domain.require_current_source(current)?;
+            Ok(result)
         })
     }
     fn prepare(

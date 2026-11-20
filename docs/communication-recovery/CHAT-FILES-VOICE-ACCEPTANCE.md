@@ -1,5 +1,22 @@
 # Chat, files and voice implementation evidence
 
+## Durable unsigned invitation intent (20 November; execution pending)
+
+The native invitation preparation now covers one immutable unsigned intent in
+its separate `text.pages/invite.intent.v1` family. The exact token/settings/plan
+lookup precedes a new invite draw; the same warm owner retains presealed bytes
+and actual file identity through a partial write. The authenticated profile is
+limited to one object/8KiB and cannot replace, delete or reset unknown usage.
+Current4, selected-parent and native checks fence covered results. No signing,
+SavedInvite, cold operational adoption, Add/join or activation is added.
+
+Installed Rust formatting and the static Store raw-fs gate pass. The focused
+hosted lane requires exact nonignored counts: 15 Core binding cases, four
+journal controls, nine actual native invite cases on both OSes, and one actual
+predecessor save/physical-retirement preservation case on Windows. These are
+required executions, not recorded passes. No local build or test ran.
+See [the owning contract and remaining stages](CHAT-V2-INVITE-ISSUER.md).
+
 ## Current completion checkpoint (20 November 2026)
 
 The integration backlog is merged on `main` through `0685a6b6`, including

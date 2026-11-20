@@ -157,6 +157,55 @@ fn wal(t: &WorkerRetirementFixture) -> std::path::PathBuf {
 }
 
 #[test]
+fn unsigned_invite_survives_predecessor_save_and_physical_retirement() {
+    let mut f = accepted_fixture(0, 0x82290);
+    let path = b_target(&f).join("text.pages").join("invite.intent.v1");
+    // The predecessor must preserve this separate family's opaque bytes, not
+    // parse or adopt them. Actual invitation AEAD/native binding is exercised
+    // by the native_runtime_invite_* tests on both OSes.
+    let original = b"opaque separately covered invitation intent; preserve exactly";
+    std::fs::write(&path, original).unwrap();
+    select_and_finalize(&mut f);
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    let basis = f.accepted.accepted_final_basis_data().unwrap().clone();
+    {
+        let store = f.original.layout.checked_store().unwrap();
+        let owner = f.original.owner.borrow_current().unwrap();
+        f.accepted
+            .prepare_retirement_data(store, owner.source())
+            .unwrap();
+    }
+    let mut prepared = Some(prepare_close(&f, &basis));
+    let mut closed = None;
+    close(&f, &basis, &mut prepared, &mut closed).unwrap();
+    f.accepted
+        .drain_original_query_readers_outside_writers()
+        .unwrap();
+    let mut drained = None;
+    assert!(V2TextRetirementRootsClosed::poll_drained_into(&mut closed, &mut drained).unwrap());
+    let mut drained = drained.unwrap();
+    let mut removed = None;
+    detach(&f, &basis, &mut drained, &mut removed).unwrap();
+    assert!(removed.is_some());
+    drop(removed);
+    let mut t = WorkerRetirementFixture { f, basis, drained };
+    let retired =
+        t.f.accepted
+            .original_retired_paths_for_test()
+            .unwrap()
+            .to_vec();
+    assert_eq!(retired.len(), 4);
+    let marker = deletion_admission(&t).unwrap();
+    run_deletion(&mut t, marker).unwrap();
+    assert!(retired.iter().all(|path| !path.exists()));
+    let marker = completion_admission(&t).unwrap();
+    run_completion(&mut t, marker).unwrap();
+    validate_wc(&t).unwrap();
+    assert_eq!(std::fs::read(path).unwrap(), original);
+    idle(&t);
+}
+
+#[test]
 fn actual_wd_precedes_any_unlink_and_fresh_wc_alone_records_completed_quota_credit() {
     let mut t = worker_retirement_fixture(0, 0x82200);
     let old = t.f.accepted.original_retired_paths_for_test().unwrap();

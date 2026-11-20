@@ -394,6 +394,14 @@ declare -A allowed=(
   ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|remove_listed|match fs::remove_file(path) {']=1
   # create_namespace: one new `mo-<context>` directory under the separately held parent.
   ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|create_namespace|fs::create_dir(path).map_err(io)']=1
+  # Invitation intent: the unique native RuntimeLoan owns this isolated fixed
+  # text.pages family and physical lease. Open existing only for verification/
+  # flush; create_new once, append only its own exact prefix, never replace or
+  # delete. Head/O/H/WAL/index inventories are untouched. Quota is one 8KiB object.
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/invite/journal.rs|lookup|let file = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/invite/journal.rs|write_same|let file = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/invite/journal.rs|write_same|.create_new(true)']=1
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/invite/journal.rs|sync|.sync_all()']=1
   ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/settlement.rs|settle|files.directory.1.sync_all().map_err(io)?;']=1
 )
 
