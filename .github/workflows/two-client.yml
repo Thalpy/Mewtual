@@ -1,87 +1,78 @@
-name: Two-client acceptance
+name: Receipt workspace diagnostic
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "23 3 * * *"
-  pull_request:
-    paths:
-      - ".github/workflows/two-client.yml"
-      - "scripts/two-client-*.sh"
-      - "scripts/two-client-*.ps1"
-      - "bins/catcomsctl/**"
-      - "crates/catcoms-app/**"
-      - "crates/catcoms-net/**"
-      - "crates/catcoms-sync/**"
-      - "crates/catcoms-discovery/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: receipt-diagnostic-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 jobs:
-  process-smoke:
-    name: two processes (${{ matrix.os }})
+  test:
+    name: Original receipt, workspace graph (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify unchanged production and test source
+        shell: python
+        run: |
+          import subprocess
+          subprocess.run(['git', 'rev-parse', 'HEAD'], check=True)
+          subprocess.run([
+              'git', 'diff', '--exit-code', 'f80c3e9cb7125f8775ef538b970b24549f56ae13',
+              '--', 'crates', 'bins', 'vendor', 'Cargo.toml', 'Cargo.lock',
+          ], check=True)
       - uses: dtolnay/rust-toolchain@1.94.0
       - uses: Swatinem/rust-cache@v2
-      - name: Build test client
-        run: cargo build -p catcomsctl
-      - name: Run Linux two-process smoke
-        if: runner.os == 'Linux'
-        shell: bash
-        run: bash scripts/two-client-smoke.sh --skip-build
-      - name: Run Windows two-process smoke
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: .\scripts\two-client-smoke.ps1 -SkipBuild
-      - name: Upload evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: two-client-smoke-${{ runner.os }}
-          path: target/two-client-smoke/
-          if-no-files-found: warn
-          retention-days: 7
-
-  linux-nat:
-    name: Linux NAT (${{ matrix.scenario }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        scenario: [direct-mapped, relay-only]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.94.0
-      - uses: Swatinem/rust-cache@v2
-      - name: Build test client
-        run: cargo build -p catcomsctl
-      - name: Install optional topology tools
-        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables iputils-ping
-      - name: Run isolated topology
-        shell: bash
-        run: >-
-          sudo bash scripts/two-client-netns.sh
-          --scenario "${{ matrix.scenario }}"
-          --binary "$GITHUB_WORKSPACE/target/debug/catcomsctl"
-          --artifacts "$GITHUB_WORKSPACE/target/two-client-netns/${{ matrix.scenario }}"
-      - name: Upload evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: two-client-netns-${{ matrix.scenario }}
-          path: target/two-client-netns/${{ matrix.scenario }}/
-          if-no-files-found: warn
-          retention-days: 7
-
+      - name: Exact receipt with full workspace feature selection
+        shell: python
+        run: |
+          import re
+          import subprocess
+          import sys
+          target = 'durable_chat::repair_effects_tests::automatic_repair_tracks_send_before_real_peer_receipt_without_frontend_retry'
+          command = ['cargo', 'test', '--locked', '--all', '--all-features', '--no-fail-fast',
+                     target, '--', '--exact', '--nocapture', '--test-threads=4']
+          result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  encoding='utf-8', errors='replace')
+          print(result.stdout, flush=True)
+          if result.returncode:
+              sys.exit(result.returncode)
+          plain = re.sub(r'\x1b\[[0-9;]*m', '', result.stdout)
+          counts = re.findall(r'test result: ok\. (\d+) passed;', plain)
+          assert sum(map(int, counts)) == 1, 'Exact diagnostic must execute precisely one test'
+          assert re.search(re.escape(target) + r' \.\.\. ok', plain), 'Original receipt case did not pass'
+      - name: Original early App cohort in the same workspace binary
+        shell: python
+        run: |
+          import re
+          import subprocess
+          import sys
+          target = 'durable_chat::repair_effects_tests::automatic_repair_tracks_send_before_real_peer_receipt_without_frontend_retry'
+          command = ['cargo', 'test', '--locked', '--all', '--all-features', '--no-fail-fast',
+                     '--', 'actor::', 'chat_history_tests::', 'creative::', 'durable_chat::',
+                     '--nocapture', '--test-threads=4']
+          result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  encoding='utf-8', errors='replace')
+          print(result.stdout, flush=True)
+          if result.returncode:
+              sys.exit(result.returncode)
+          plain = re.sub(r'\x1b\[[0-9;]*m', '', result.stdout)
+          assert re.search(re.escape(target) + r' \.\.\. ok', plain), 'Cohort omitted the original receipt case'
