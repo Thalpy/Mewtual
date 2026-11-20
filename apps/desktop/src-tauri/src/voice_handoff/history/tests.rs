@@ -3,7 +3,7 @@
 use super::*;
 use crate::voice_activation_tests::Fixture;
 use crate::voice_authority::SelectedHandoffOwner;
-use crate::voice_handoff::bootstrap::{ensure, SetupOutput, Status as SetupStatus};
+use crate::voice_handoff::bootstrap::{ensure, SetupOutputRef, Status as SetupStatus};
 use crate::voice_handoff::factory::tests::{channel_route, selection};
 use crate::voice_handoff::ledger::{Begin, PendingStatus};
 use catcoms_sync::voice_v2::presence::PairSelector;
@@ -16,7 +16,7 @@ struct Case {
     native: Fixture,
     context: Context,
     route: Route,
-    public: Arc<SetupOutput>,
+    public: SetupOutputRef,
     selected: Arc<SelectedHandoffOwner>,
     selector: PairSelector,
 }
@@ -268,13 +268,18 @@ async fn lost_begin_reply_recovers_same_original_pending_under_full_group_pressu
     let case = Case::new().await;
     let original = case.pending();
     let pool = case.selected.resources();
+    let group = case.selected.binding().scope.group;
     let pressure = pool
         .charge(
-            case.selected.binding().scope.group,
-            catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.counts().0,
+            group,
+            catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.group_counts(group).unwrap().0,
             ResourceKind::Retained,
         )
         .unwrap();
+    assert_eq!(
+        pool.group_counts(group).unwrap().0,
+        catcoms_sync::voice_v2::resources::GROUP_BYTES
+    );
     let full = pool.counts();
     for sequence in [1, 2] {
         let response = case.query(sequence);

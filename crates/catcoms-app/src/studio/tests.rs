@@ -6,6 +6,7 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+mod batch;
 mod sound_recovery;
 
 fn rng() -> ChaCha20Rng {

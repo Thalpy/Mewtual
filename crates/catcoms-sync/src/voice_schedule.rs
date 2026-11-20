@@ -68,6 +68,9 @@ pub enum VoiceRouting {
 pub(super) enum VoiceFlight {
     Source(CompletedVoiceSource),
     Forward(CompletedVoiceForward),
+    // Indirection is paid by this original Lower. Existing completion/backlog
+    // inline layouts do not grow with the independent new-family job.
+    Control(Box<voice_transport::CompletedAdmittedControl>),
 }
 
 /// The class owed the next opportunity at the shared per-group forwarding slots. Source flights
@@ -88,6 +91,8 @@ pub(super) struct VoiceSchedule {
     /// therefore alternate per freed slot; when one class has no eligible work the other still
     /// uses every slot (work-conserving), and the idle class keeps its claim.
     owed: FlightClass,
+    control_source_owed: bool,
+    control_helper_owed: bool,
     pub(super) jobs: FuturesUnordered<BoxFuture<'static, VoiceFlight>>,
     retries: VecDeque<VoiceFlight>,
     /// Upper cancellation for every flight. Dropping it (with this owner) cancels too; lower
@@ -107,6 +112,8 @@ impl Default for VoiceSchedule {
         Self {
             routing: VoiceRouting::default(),
             owed: FlightClass::default(),
+            control_source_owed: false,
+            control_helper_owed: false,
             jobs: FuturesUnordered::new(),
             retries: VecDeque::new(),
             cancel: tokio::sync::watch::channel(false).0,
@@ -187,6 +194,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return false;
         };
         voice.endpoints.needs_schedule()
+            || actor
+                .control_if_present()
+                .is_some_and(|ledger| !ledger.is_empty())
             || actor.source().is_ok_and(|ledger| !ledger.is_empty())
             || (self.voice_schedule.routing == VoiceRouting::Forwarding
                 && actor.helper().is_ok_and(|ledger| !ledger.is_empty()))
@@ -220,6 +230,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if let Err(error) = self.pump_voice_endpoint() {
             tracing::trace!(%error, "voice endpoint pump refused");
         }
+        if let Err(error) = self.pump_admitted_support_queries() {
+            tracing::trace!(%error, "admitted support pump refused");
+        }
         if self.voice_schedule.routing != VoiceRouting::Forwarding {
             // Direct service has no helper class competing for the shared slots.
             self.start_voice_flights(FlightClass::Source);
@@ -242,6 +255,57 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Prepare and start one class's flights (each preparation is bounded to four). Returns how
     /// many were started. Preparation reserves attempts and shared capacity synchronously.
     fn start_voice_flights(&mut self, class: FlightClass) -> usize
+    where
+        T: 'static,
+    {
+        let control_owed = match class {
+            FlightClass::Source => self.voice_schedule.control_source_owed,
+            FlightClass::Helper => self.voice_schedule.control_helper_owed,
+        };
+        let mut control_started = 0;
+        if control_owed {
+            control_started = self.start_admitted_control_flights(class);
+        }
+        let old_started = self.start_existing_voice_flights(class);
+        if !control_owed {
+            control_started = self.start_admitted_control_flights(class);
+        }
+        let owed_started = if control_owed {
+            control_started
+        } else {
+            old_started
+        };
+        if owed_started > 0 {
+            match class {
+                FlightClass::Source => self.voice_schedule.control_source_owed = !control_owed,
+                FlightClass::Helper => self.voice_schedule.control_helper_owed = !control_owed,
+            }
+        }
+        old_started + control_started
+    }
+    fn start_admitted_control_flights(&mut self, class: FlightClass) -> usize
+    where
+        T: 'static,
+    {
+        let pending = match self.prepare_admitted_controls(matches!(class, FlightClass::Helper)) {
+            Ok(pending) => pending,
+            Err(error) => {
+                tracing::trace!(%error, "admitted control preparation refused");
+                return 0;
+            }
+        };
+        let count = pending.len();
+        for flight in pending {
+            #[cfg(test)]
+            self.voice_schedule.hops.push(flight.peer());
+            let signal = self.voice_schedule.cancel.subscribe();
+            self.voice_schedule.jobs.push(
+                async move { VoiceFlight::Control(Box::new(flight.execute(signal).await)) }.boxed(),
+            );
+        }
+        count
+    }
+    fn start_existing_voice_flights(&mut self, class: FlightClass) -> usize
     where
         T: 'static,
     {
@@ -300,6 +364,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 }
                 Err(failure) => Self::retryable(failure).map(VoiceFlight::Forward),
             },
+            VoiceFlight::Control(completed) => self
+                .complete_admitted_control(*completed)
+                .err()
+                .map(|completed| VoiceFlight::Control(Box::new(completed))),
         };
         if let Some(flight) = retry {
             if self.voice_schedule.retries.len() < RETRY_BACKLOG

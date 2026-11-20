@@ -6,9 +6,10 @@ import { legacyJamPatch } from "./jam-patch.ts";
 import { FLIPNOTE_H, FLIPNOTE_W, type PixPaletteEntry, type ScoreCell } from "./studio-contract.ts";
 import { DEFAULT_PALETTE } from "./studio-store.ts";
 import {
-  bytesToBase64, parseFlipnoteView, parseIndexView, parseScoreView,
+  bytesToBase64, parseFlipnoteView, parseIndexView, parseScoreView, scoreVoiceSlots,
   type FlipnoteContent, type IndexContent, type IndexSource, type Register, type ScoreContent, type ScoreSlot,
 } from "./studio-native.ts";
+import { admittedSounds, scoreVoices } from "./score-voices.ts";
 
 export const VISUAL_STUDIO_CHANNEL = "1";
 export const VISUAL_STUDIO_GROUP = "deadbeef";
@@ -57,6 +58,21 @@ function scoreContent(conflicted = false): ScoreContent {
     // Native readiness skips effectively removed slots, even when their raw setter conflicts
     // with a live clear. Keep that evidence below without inventing an effective-cell issue.
     content.readiness.cells["255:24"] = { count: false, extent: true, recipe: false, overlap: false, conflict: false };
+    // Layered notes (docs/design-score-layers.md): two members placed different notes in one cell
+    // of the same sound at once, so both play and the slot is flagged; and a hit in the drum layer
+    // whose register a clear won while a concurrent add kept it (add wins: it still plays).
+    const rook = { opId: id64(80), author: "b".repeat(64), nonce: id32(80) };
+    content.layers = {
+      [`20:9/${VISUAL_STUDIO_PATCH}`]: { cleared: false, register: reg<ScoreCell | null>({ k: "n", p: VISUAL_STUDIO_PATCH, len: 2 }, 81, [{ value: { k: "n", p: VISUAL_STUDIO_PATCH, len: 4 }, source: rook }]) },
+      "26:24/d": { cleared: false, register: reg<ScoreCell | null>(null, 82, [{ value: { k: "d", pad: 4 }, source: source(83) }]) },
+    };
+    content.readiness.layers = {};
+    // Readiness is what native computes: the shared voice rules, sparse, split by collection.
+    const slots = scoreVoiceSlots(content.cells, content.layers);
+    const admitted = admittedSounds(Object.keys(content.patches));
+    for (const [key, issues] of Object.entries(scoreVoices(slots, 32, admitted).issues)) {
+      if (key.includes("/")) content.readiness.layers[key] = issues; else if (!content.readiness.cells[key]) content.readiness.cells[key] = issues;
+    }
   }
   return content;
 }

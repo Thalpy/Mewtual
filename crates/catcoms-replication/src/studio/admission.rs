@@ -274,14 +274,30 @@ impl StudioTarget {
                 let op = ScoreOp::decode_domain(p.document(), domain)?;
                 // Local growth refuses cap overflow; concurrent valid remote growth is retained
                 // by ingest and flagged by readiness. Existing slots/removals remain editable.
+                // The note cap counts BOTH families together (docs/design-score-layers.md
+                // section 2): active legacy cells (removal wins) plus live layer slots (add wins,
+                // so "live" is `!cleared()`, never the removal-wins `value()`).
+                let occupied = || {
+                    p.cells.values().filter(|s| s.value().is_some()).count()
+                        + p.layers.values().filter(|s| !s.cleared()).count()
+                };
                 match op {
                     ScoreOp::SetCell { step, row, .. }
                         if p.cells
                             .get(&(step, row))
                             .and_then(ScoreSlot::value)
                             .is_none()
-                            && p.cells.values().filter(|s| s.value().is_some()).count()
-                                >= SCORE_MAX_CELLS =>
+                            && occupied() >= SCORE_MAX_CELLS =>
+                    {
+                        return Err(ReplError::EpochBound)
+                    }
+                    // A new (absent or cleared) layer slot is growth; replacing a live layered
+                    // note in place is not, so editing stays possible at the cap.
+                    ScoreOp::SetNote { step, row, value }
+                        if p.layers
+                            .get(&(step, row, value.layer()))
+                            .is_none_or(ScoreLayerSlot::cleared)
+                            && occupied() >= SCORE_MAX_CELLS =>
                     {
                         return Err(ReplError::EpochBound)
                     }

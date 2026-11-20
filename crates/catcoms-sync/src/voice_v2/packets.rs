@@ -31,6 +31,24 @@ pub(super) struct PacketSlots {
     incoming: Arc<slots::Slots>,
     outgoing: Arc<slots::Slots>,
 }
+/// Inert table allocation, not a role or agreement certificate. An admitted
+/// preparation reserves both possible roles until the actual Root commits its
+/// peer and round. Existing callers retain their original directional layout.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PacketLayout {
+    Neutral,
+    Low,
+    High,
+}
+impl PacketLayout {
+    pub(super) fn for_role(local_is_low: bool) -> Self {
+        if local_is_low {
+            Self::Low
+        } else {
+            Self::High
+        }
+    }
+}
 /// Capacity only, owned by the confirmation workflow rather than permanent action history.
 /// Each of three candidate lanes needs two Hello/Finish rows and one Proof row. Direction is
 /// selected from the actual native pair role, never from a received descriptor. This does not
@@ -111,15 +129,31 @@ impl PacketSlots {
         &self,
         local_is_low: bool,
     ) -> Result<ConfirmationCapacity, VoiceError> {
+        self.reserve_confirmation_layout(PacketLayout::for_role(local_is_low))
+    }
+    pub(super) fn reserve_confirmation_layout(
+        &self,
+        layout: PacketLayout,
+    ) -> Result<ConfirmationCapacity, VoiceError> {
         // If the second reservation refuses, dropping the first returns its unused claims.
         // Neither table, sequence nor replay window has been published at this point.
         Ok(ConfirmationCapacity {
-            incoming: self.incoming.reserve(if local_is_low { 3 } else { 6 })?,
-            outgoing: self.outgoing.reserve(if local_is_low { 6 } else { 3 })?,
+            incoming: self
+                .incoming
+                .reserve(if layout == PacketLayout::Low { 3 } else { 6 })?,
+            outgoing: self
+                .outgoing
+                .reserve(if layout == PacketLayout::High { 3 } else { 6 })?,
         })
     }
 }
 impl ConfirmationCapacity {
+    /// Both immutable table identities belong to the CURRENT consuming LocalJoin.
+    /// A same-group replacement has fresh tables; labels cannot adopt its old capacity.
+    pub(super) fn uses_pools(&self, tables: &PacketSlots) -> bool {
+        self.incoming.uses_pool(&tables.incoming) && self.outgoing.uses_pool(&tables.outgoing)
+    }
+
     pub(super) fn subreserve_sdp(&self) -> Result<SdpPacketCapacity, VoiceError> {
         let incoming = self.incoming.subreserve(1)?;
         let outgoing = self.outgoing.subreserve(1)?;
@@ -912,6 +946,11 @@ impl PacketLedger {
         lease: CallLease,
         resources: Arc<Resources>,
     ) -> Result<Self, VoiceError> {
+        // This constructor implements the existing profile only. An admitted-issued
+        // lease must not consume its one allocator claim through an older lower API.
+        if lease.is_admitted() {
+            return Err(VoiceError::Unauthorized);
+        }
         lease.claim_packet_ledger()?;
         Ok(Self {
             scope: context.scope,

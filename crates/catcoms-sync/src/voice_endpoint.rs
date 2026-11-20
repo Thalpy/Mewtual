@@ -9,6 +9,11 @@ use voice_v2::resources::{Credit, ResourceKind};
 use voice_v2::{CallGrant, CallLease, JoinKey, Scope, VoiceError, WatchLease};
 
 const WATCHES: usize = 8;
+mod admission;
+mod admitted_admission;
+mod admitted_control;
+mod admitted_presence;
+mod call_activation;
 mod confirmation;
 mod derivation;
 mod ingress;
@@ -63,6 +68,7 @@ struct Participant {
     join: LocalJoin,
 }
 pub(super) struct EndpointOwners {
+    activation: Option<voice_v2::call_activation::RootResidence>,
     serial: u64,
     observers: BTreeMap<u64, Observer>,
     participant: Option<Participant>,
@@ -72,6 +78,7 @@ pub(super) struct EndpointOwners {
 impl Default for EndpointOwners {
     fn default() -> Self {
         Self {
+            activation: None,
             serial: 0,
             observers: BTreeMap::new(),
             participant: None,
@@ -81,6 +88,20 @@ impl Default for EndpointOwners {
     }
 }
 impl EndpointOwners {
+    #[cfg(test)]
+    pub(crate) fn is_unjoined_for_test(&self) -> bool {
+        self.activation.is_none() && self.participant.is_none() && self.observers.is_empty()
+    }
+    #[cfg(test)]
+    pub(crate) fn admitted_presence_for_test(
+        &mut self,
+    ) -> Option<&mut voice_v2::admitted_presence::AdmittedPresence> {
+        self.activation
+            .as_mut()?
+            .presence
+            .as_mut()
+            .map(|presence| presence.get_mut())
+    }
     #[cfg(test)]
     pub(crate) fn participant_join_for_test(&self) -> Option<&LocalJoin> {
         self.participant
@@ -102,6 +123,13 @@ impl EndpointOwners {
         }
         if let Some(participant) = &mut self.participant {
             participant.join.collect_expired(clock);
+        }
+        if let Some(presence) = self
+            .activation
+            .as_mut()
+            .and_then(|held| held.presence.as_mut())
+        {
+            changed |= presence.get_mut().collect_expired(clock);
         }
         if changed {
             self.changed();
@@ -147,6 +175,12 @@ impl EndpointOwners {
         // Read liveness, not presence in the map: a revoked owner awaiting prune needs no wake.
         self.participant.as_ref().is_some_and(|participant| {
             participant.grant.strong_count() > 0 && participant.lease.is_live()
+        }) || self.activation.as_ref().is_some_and(|held| {
+            held.original().is_active()
+                && held
+                    .presence
+                    .as_ref()
+                    .is_some_and(|presence| presence.get().is_live())
         }) || self
             .observers
             .values()
@@ -158,6 +192,13 @@ impl EndpointOwners {
         }
         if let Some(participant) = &mut self.participant {
             participant.join.retire_member(member);
+        }
+        if let Some(presence) = self
+            .activation
+            .as_mut()
+            .and_then(|held| held.presence.as_mut())
+        {
+            presence.get_mut().retire_member(member);
         }
         self.changed();
     }
@@ -182,15 +223,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// stale/mixed-version traffic out of the native legacy queue before any renderer sees it.
     /// Presence-only observers and unjoined member helpers do not select an endpoint protocol.
     pub(crate) fn has_live_v2_participant(&self) -> bool {
-        self.voice_runtime.as_ref().is_some_and(|voice| {
-            voice
-                .endpoints
-                .participant
-                .as_ref()
-                .is_some_and(|participant| {
-                    participant.grant.strong_count() > 0 && participant.lease.is_live()
-                })
-        })
+        self.has_admitted_voice_activation()
+            || self.voice_runtime.as_ref().is_some_and(|voice| {
+                voice
+                    .endpoints
+                    .participant
+                    .as_ref()
+                    .is_some_and(|participant| {
+                        participant.grant.strong_count() > 0 && participant.lease.is_live()
+                    })
+            })
     }
 
     /// Trusted native factory. Parent is the actual controller for an explicit observer, or the

@@ -22,7 +22,9 @@ test("media stays Control-only in both directions without enlarging either body 
     assert.equal(encodeVoiceIpcHeader(header)[6], 28);
     assert.throws(() => encodeVoiceIpcHeader({ ...header, length: 273 }));
     for (const kind of [1, 2] as VoiceIpcBodyKind[]) assert.throws(() => encodeVoiceIpcHeader({ ...header, kind }));
-    assert.throws(() => encodeVoiceIpcHeader({ ...header, operation: 29 as VoiceIpcOperation }));
+    //29/30 now belong to the distinct Session mode/capacity grammar. The next
+    // unknown operation must still fail closed; media's own class/caps stay fixed.
+    assert.throws(() => encodeVoiceIpcHeader({ ...header, operation: 31 as VoiceIpcOperation }));
   }
 });
 function reply(flags = 9, remaining = 123): Uint8Array<ArrayBuffer> {

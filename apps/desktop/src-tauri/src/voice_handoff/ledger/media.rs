@@ -691,7 +691,7 @@ impl ResolvedRow {
         admission: &super::super::transition::Admission<'_>,
         request: &Begin<'_>,
         physical: &super::super::channel::PhysicalHold,
-        session: &Arc<super::super::channel::Session>,
+        session: &super::super::channel::SessionRef,
         identity: &Identity,
         prepared: &mut Prepared,
         wall: u64,

@@ -177,14 +177,25 @@ impl Directory {
     /// Attach participant/watch revocation to both the current actor/policy AND exact room. The
     /// caller still binds controller, consent and join identity. Room presence alone grants none.
     pub fn call_lease(&self, actor: &ActorOwner, scope: Scope) -> Result<CallLease, VoiceError> {
+        self.call_lease_profile(actor, scope, None)
+    }
+    fn call_lease_profile(
+        &self,
+        actor: &ActorOwner,
+        scope: Scope,
+        funding: Option<Arc<super::call_activation::Funding>>,
+    ) -> Result<CallLease, VoiceError> {
         if actor.group_hash() != self.group {
             return Err(VoiceError::Scope);
         }
         let authority = self.authority(scope)?;
-        let child = actor.child_lease()?;
+        self.collect_closed_children(scope);
+        let child = match funding {
+            Some(funding) => actor.admitted_child_lease(funding)?,
+            None => actor.child_lease()?,
+        };
         let room = &self.rooms[&scope.room];
         let mut children = room.children.lock().unwrap_or_else(|e| e.into_inner());
-        children.retain(CallLease::is_live);
         if children.len() >= ROOM_CHILDREN {
             child.revoke();
             return Err(VoiceError::Capacity);
@@ -195,6 +206,54 @@ impl Directory {
         }
         children.push(child.clone());
         Ok(child)
+    }
+    pub(crate) fn collect_closed_children(&self, scope: Scope) {
+        if scope.group != self.group {
+            return;
+        }
+        let Some(room) = self.rooms.get(&scope.room) else {
+            return;
+        };
+        Self::collect_room_closed_children(room);
+    }
+    /// Bounded by the admitted directory/room caps. A canceled preparation in a
+    /// different room must not require new capacity before its old payer can return.
+    /// Extract one real alias at a time and destroy it AFTER the Room lock returns.
+    pub(crate) fn collect_all_closed_children(&self) {
+        for room in self.rooms.values() {
+            Self::collect_room_closed_children(room);
+        }
+    }
+    fn collect_room_closed_children(room: &Room) {
+        for _ in 0..ROOM_CHILDREN {
+            let removed = {
+                let mut children = room.children.lock().unwrap_or_else(|e| e.into_inner());
+                children
+                    .iter()
+                    .position(|child| !child.is_live())
+                    .map(|index| children.swap_remove(index))
+            };
+            match removed {
+                Some(child) => drop(child),
+                None => break,
+            }
+        }
+    }
+    pub(crate) fn forget_closed_child(&self, scope: Scope, original: &CallLease) {
+        if scope.group != self.group || original.is_live() {
+            return;
+        }
+        let Some(room) = self.rooms.get(&scope.room) else {
+            return;
+        };
+        let removed = {
+            let mut children = room.children.lock().unwrap_or_else(|e| e.into_inner());
+            children
+                .iter()
+                .position(|child| child.is_same(original))
+                .map(|index| children.swap_remove(index))
+        };
+        drop(removed);
     }
     pub fn watch_lease(&self, actor: &ActorOwner, scope: Scope) -> Result<WatchLease, VoiceError> {
         self.call_lease(actor, scope).map(WatchLease::new)
@@ -235,6 +294,29 @@ impl Directory {
         actor: &ActorOwner,
         scope: Scope,
     ) -> Result<super::CallGrant, VoiceError> {
+        self.call_grant_profile(actor, scope, None)
+    }
+    pub(crate) fn admitted_call_grant(
+        &self,
+        actor: &ActorOwner,
+        scope: Scope,
+        funding: Arc<super::call_activation::Funding>,
+    ) -> Result<super::CallGrant, VoiceError> {
+        if !funding.matches(&self.resources, self.group) {
+            return Err(VoiceError::Scope);
+        }
+        self.call_grant_profile(actor, scope, Some(funding))
+    }
+    fn call_grant_profile(
+        &self,
+        actor: &ActorOwner,
+        scope: Scope,
+        funding: Option<Arc<super::call_activation::Funding>>,
+    ) -> Result<super::CallGrant, VoiceError> {
+        // Prune actual dead aliases before charging a successor, so a full pool
+        // cannot strand the old admitted payer behind a new allocation request.
+        actor.collect_closed_children();
+        self.collect_closed_children(scope);
         let credit = self
             .resources
             .charge(self.group, 256, ResourceKind::Retained)?;
@@ -243,7 +325,7 @@ impl Directory {
             .get(&scope.room)
             .ok_or(VoiceError::Unauthorized)?
             .clone();
-        let lease = self.call_lease(actor, scope)?;
+        let lease = self.call_lease_profile(actor, scope, funding)?;
         Ok(super::CallGrant::from_lease(lease, scope).with_custody(room, credit))
     }
 }

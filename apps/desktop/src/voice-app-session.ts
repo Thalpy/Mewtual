@@ -4,7 +4,7 @@
  */
 import type { VoiceCryptoOwner, VoiceIpcChannel, VoiceIpcClock, VoiceSelectedKeyHandle, VoiceJoinKeyHandle } from "./voice-crypto.ts";
 import { VoiceHandleCell } from "./voice-handle-cell.ts";
-import { VoiceSessionLifecycle, type VoiceSessionLifecycleObserver } from "./voice-session-lifecycle.ts";
+import { VoiceSessionLifecycle } from "./voice-session-lifecycle.ts";
 
 // Complete conservative application-owned metadata inventory: controller/context1280,
 // call/cell/handle1024, two candidate IDs/activation metadata1024, overlapping native
@@ -45,7 +45,9 @@ export type VoiceAppSessionContext = Readonly<{
   owner(token: string, group: string, current: () => boolean): VoiceCryptoOwner;
   select(owner: VoiceCryptoOwner): VoiceSelectedKeyHandle;
   channel(owner: VoiceCryptoOwner, key: VoiceJoinKeyHandle): VoiceIpcChannel;
-  observe(owner: VoiceCryptoOwner, channel: VoiceIpcChannel, key: VoiceJoinKeyHandle): VoiceSessionLifecycleObserver;
+  /** Install the selected mode's local coordinator. A capacity-only coordinator
+   * cannot turn bootstrap `ready` into signed Ready, SDP or media permission. */
+  observe(owner: VoiceCryptoOwner, channel: VoiceIpcChannel, key: VoiceJoinKeyHandle): void;
   retire(owner: VoiceCryptoOwner): Promise<void>;
   resume(): void;
 }>;

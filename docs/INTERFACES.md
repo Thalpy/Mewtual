@@ -1,5 +1,13 @@
 # Mewtual; Interfaces & Hooks Schema
 
+16 November Score/voice integration candidate: this branch combines the reviewed
+Score and voice admission history with the newer Chat/security and Studio save
+baseline. The entries below retain each branch's evidence; they do not establish
+fresh combined acceptance. Both V2 switches remain disabled. Combined focused and
+full CI checks are pending, and physical two-computer audio/network acceptance
+remains open.
+
+
 `SeededProtocolRng` bridges the upstream AutoNAT rand-core0.10 seed/fork API.
 The ordinary application RNG seam remains unchanged; child forks advance the
 parent and do not clone state. Security runners use their own bounded exact-test
@@ -1267,6 +1275,368 @@ stopped and saved before Actor spawn. Malformed fence state refuses admission/re
 post-rename fence is rewritten before any durable Stop acknowledgement. The low-level
 `Server::edit_message/delete_message` APIs remain non-durable compatibility APIs.
 
+## Admitted operation31 draft (29 October; uncompiled)
+
+The admitted physical profile has separate version12 SetupAck/Register/Observe/
+Cancel Control and fixed10/59-byte request/response codecs. SetupAck is g0 only;
+all other kinds are nonzero. It never routes through old Status/operations1–30.
+The separate Slot retains affine Root/native capacity, not role/Ready/SDK-return
+authority. Native guards/tests/review remain pending; the trusted driver sender
+is not connected. [Exact grammar and custody](communication-recovery/VOICE-ADMITTED-SLOT.md).
+
+## Distinct admitted native ledger claim (29 October; inactive)
+
+`reserve_admitted_parent` reserves one actual32-slot ledger position/serial for
+the original admitted published key, physical Session identity and generation.
+The affine claim has no Existing lookup, Row or effect API. Future Slot attachment
+must separately recheck NativeActive/UI/current selection; future consumption
+must move the SAME stamp/payments. [Exact scope](communication-recovery/VOICE-ADMITTED-NATIVE-PARENT.md).
+
+## Admitted protocol support (29 October; focused draft, OFF)
+
+Root has distinct endpoint and direct-helper ensure/refresh/observe APIs. Only the
+actual selected NativeActive original/Presence may create a query; endpoint evidence
+comes from its original Watcher. Opaque refresh identity closes q1 before q2 source
+publication. Observed feature bits are historical observations, never Availability,
+consent or reservation. Twelve focused cases pass. Opaque HelperOwner/SourceOwner
+aliases now retain the SAME outside Group payer; they dereference the ledger body,
+never its Arc. Actual body/header destruction precedes payment return. The complete
+Group graph prepays4KiB, including empty-ledger and counter-backing custody, even
+while OFF. Focused ownership checks pass; strict lint/full integration remain pending.
+[Exact API ownership and pending gates](communication-recovery/VOICE-CONTROL-QUERY-SUPPORT.md).
+
+## Voice route ownership (29 October; focused passes)
+
+First fallible Root voice attachment prepays4KiB for the shared64-row route registry
+before publishing VoiceRuntime; subsequent attachment reuses it. No wire or public
+Source API changes. Route rows retain the original Lower/verification sponsor until
+actual route destruction, then release it outside guards. The plain registry fee
+survives Vec deallocation. Prepared/driver owners keep the SAME payer after authority
+even after Root retirement; public rt signatures and wire bytes are unchanged. Quiet
+housekeeping releases idle process-wide Crypto custody. Crypto/Forward/route caps stay unchanged; see
+[the exact scope and pending validation](communication-recovery/VOICE-ROUTE-REGISTRY-CUSTODY.md).
+## Inert admitted neutral preparation (29 October; inactive)
+
+`ChannelSync::prepare_admitted_voice_admission_step` accepts the actual original
+admitted grant/activation, optional exact admitted observer, generation and original
+RPC payment. It takes no peer/role. `AdmittedAdmissionPrepared::into_parts` returns
+the affine registration independently of a later neutral-capacity refusal; native
+must retain it for exact retry. `None` requests a new registration and does not
+recover a lost native reply. These types cannot become an Existing HIGH preclaim.
+No public consume, role binding, Availability, Ready or RTC permission is supplied.
+See [the exact contract and remaining consumers](communication-recovery/VOICE-NEUTRAL-ADMISSION.md).
+
+## Admitted native key commands (29 October; inactive call path)
+
+The main webview has seven distinct commands: `prepare_admitted_voice_owner`,
+`activate_admitted_voice_owner`, `acknowledge_admitted_voice_activation`,
+`admit_admitted_voice_join_key`, `publish_admitted_voice_join_key`,
+`acknowledge_admitted_voice_key_publication` and `settle_admitted_voice_join_key`.
+They select only the issuer-sealed admitted profile. Existing command names cannot
+adopt these owners, keys or grants. Admission freezes one executor/permit/join and
+publication validates and freezes the original uncompressed P-256 public point.
+
+Publication returns a closed JSON union tagged `kind`: `accepted`, `rejected`,
+`closed` or `not-started`. Every variant identifies the original owner, executor,
+permit and join; accepted additionally carries `keyRef`. Known Root refusal is
+distinct from work that closed without a known outcome. A missing record proves
+nothing. Historical accepted output does not grant present-time admission or RTC
+permission. Explicit result acknowledgement precedes SDK settlement in the browser,
+so a lost acknowledgement reply can recover the original retained cell.
+
+Broker ABI52's `selectAdmittedJoinKey` uses a distinct opaque key handle and the
+exact branded `voiceAdmittedJoinKeyNative` adapter, sharing the existing bounded
+provider queue and ledger. The brand prevents accidental mixing, not hostile code
+in the same JavaScript realm. No private key crosses IPC. These commands and the
+browser adapter do not implement the operational agreement/KDF/Ready/RTC path.
+See [native custody](communication-recovery/VOICE-ADMITTED-KEY.md) and
+[browser custody](communication-recovery/VOICE-ADMITTED-BROWSER-KEY.md).
+
+## Admitted key presence (29 October; draft, inactive)
+
+Trusted Root `start_admitted_voice_presence(grant, original, join, point)` accepts
+only the exact current selected NativeActive original and canonical native tuple.
+Exact retries return an opaque historical AdmittedPresenceReceipt; changed tuples
+refuse. Its `matches` authenticates original/Weak grant/tuple identity without granting
+present-time permission. Native supplies prior on-curve validation and rechecks its
+current Handle before a positive reply. Shared discovery adds no wire profile claim,
+renderer signer or old packet authority. Full operational round consumption remains
+open; see [the scoped contract](communication-recovery/VOICE-ADMITTED-PRESENCE.md).
+
+## Trusted call activation (29 October; inactive call path)
+
+`ServerActor::prepare_admitted_voice_call` returns one original inert Root pair and its
+paid exact-Actor control. Selection/clear publish canonical outcomes through original Work
+and real retirement, not an invoke waiter's lifetime. The distinct native commands
+above now connect this adapter. Existing key/endpoint APIs cannot consume its admitted
+grant. These APIs supply no operation31, agreement, Ready or SDP/RTC permission.
+
+Native result recovery reuses one canonical Cell. Explicit ACK and actual Root/argument/
+execution return are separate requirements for Forget. Recovery requires equality with
+the exact current checked serial on one shared return stamp; future/stale values and
+overflow refuse. `Closed` and Stop ACK mean terminal effects are fenced, not physical
+task/permit return. See [the activation contract](communication-recovery/VOICE-CALL-ACTIVATION.md)
+and [mailbox contract](communication-recovery/ACTOR-MAILBOX-RETIREMENT.md).
+
+## Normal Actor stop versus command return (29 October; focused checks pass)
+
+`ServerActor::stop_and_wait` acknowledges terminal first-effects closure. `AppEvent::Closed`
+also does not certify mailbox, callback or task return. Normal Actor task completion joins
+the SAME closed mailbox's outstanding pre-close permits and drops late commands through
+their existing negative destructors, even while ordinary handles remain alive. No command
+is applied during this final drain. No API/wire/payment limit changes. Abort/panic cleanup
+does not gain that join guarantee; see [the custody note](communication-recovery/ACTOR-MAILBOX-RETIREMENT.md).
+
+## Exact media request closure (29 October; inactive)
+
+Positive native media requests carry a private exact-peer/driver snapshot into the
+existing physical framing checks. It is not renderer/native wire input or new authority.
+Individual Close fences queued or encrypting requests before first fetch, while original
+Close/Release/history recovery and indexed siblings retain their existing routes.
+Retained broker ABI51 refuses ABI50 and earlier without publishing a second pool or
+waking incompatible work; original cleanup remains callable. Public method signatures,
+native command/wire formats, deadlines and caps are unchanged. See
+[the scoped contract and tests](communication-recovery/VOICE-MEDIA-PEER-FENCE.md).
+
+## Admitted wire codec draft (29 October; no public interface)
+
+The private `voice_v2::admitted_wire` leaf implements borrowed signature/syntax views
+for proposed tags7/8/9, fixed A503/R and transcript/KDF input bytes. It adds no production
+signer, envelope/Source adapter, IPC operation or native admission proof. Existing enums,
+tags1-6, SDP profile1 and their canonical encoders are unchanged. New profile2 is accepted
+only inside this inactive separate grammar. See [the codec note](communication-recovery/VOICE-ADMITTED-WIRE-CODEC.md)
+for exact draft Terminal allocations, limits and unimplemented operational contracts.
+
+## Local V2 budget and native parent claim (28 October; inactive)
+
+`voiceBrowserBudget(groupKiB)` accepts safe integer KiB values from 256 through 1024.
+The default is 512 KiB/group; the aggregate stays 2 MiB and an individual generic job
+stays at most 256 KiB. Copy caller fields once into the original immutable ledger policy
+before work allocation. `windowVoiceCryptoBroker` ABI51 refuses older brokers or a changed
+requested policy without replacing the original ledger. Original cleanup remains callable.
+No settings UI/persistence or live resizing is provided. Peer/server metadata is not a
+source for this local policy. `nativeConfiguredAdmissionAppCalls` selects admission mode
+before channel construction and preclaims after the original29/30 pre-ACK probe; its
+App `ready` still asserts bootstrap only.
+
+`Ledger::reserve_parent` is native-only and returns an affine inert claim bound to exact
+Ledger, selected allocation, physical Session and generation. It holds a checked serial,
+one of the same32 ledger positions, Row2,304 bytes and the original PreparedPhase2KiB.
+It supplies no selector, Action or consumption API. Every allocator excludes its stamp;
+actual owners/payments return before reuse. Current native Reserved requires this claim
+and original Root capacity. Version11 bytes are unchanged, so an older version11 Reserved
+reply cannot establish support for future operational native-row consumption.
+
+`ReservationRefusal` is fixed historical diagnostic data from the deciding Resources
+mutex: requested bytes, original group/process counts/limits and cap/table/invalid flags.
+It contains no group identifier or owner and is never serialized to peers/renderer.
+The observing SDP preparation preserves all existing admission and ownership checks.
+Native harness records it only after unlocking, keyed to original parent and physical
+request; absent/contended observations confer no result. It grants no admission/refund.
+
+## Local native capacity Control (28 October; implementation draft, V2 inactive)
+
+Physical operation30/version11 is distinct from mode-only operation29. Its exact10-byte
+request is version11, kind0/Register or1/Observe or2/Cancel, then a nonzero big-endian u64
+capacity generation. Header admission requires Control class, the SAME physical Session
+logical ID and26 ciphertext bytes before counters or RowId parsing. The encrypted body
+uses only version11; no mode/legacy decoder fallback exists.
+
+The59-byte response is version11, state, echoed requested generation, canonical generation,
+cancellation floor (three big-endian u64s), incarnation-present0/1 and32 public Root-RNG
+incarnation bytes. Absent bytes are zero; present all-zero randomness is valid. States are
+0/Unstarted,1/Preparing,2/Waiting,3/Reserved,4/Closing,5/Returned,6/Closed,7/Uncertain,
+8/Superseded. This is a capacity observation, not Ready, peer orientation, a native ledger
+position, bilateral agreement or RTC permission. Mode29 continues to use ordinal1;
+capacity30 uses its independently advancing generation.
+
+All30 requests require an existing admission-mode pin. Register additionally requires an
+uncanceled pin and completed setup ACK. Observe creates no work and never selects a mode.
+Cancel/Observe remain available before ACK, after canceled pin and after End. Register's
+local capacity refusal projects retained state; it does not manufacture a return receipt.
+Skipped/future/wrapped ordinals refuse before floor mutation; a previously staged immediate
+successor remains observable when whole-session close wins before Pending installation.
+
+Reserved refers only to requested==canonical, current matching original capacity and no
+reclamation. Returned requires the requested generation's actual owned work/output/capacity
+return plus its cancellation fence. Superseded requires requested<canonical and floor>=requested;
+canonical advancement already certified that old return. Closed requires terminal fencing
+AND Slot collection. Closing/Uncertain, Unstarted and Waiting are not return certificates.
+None of these certificates proves browser SDK/IO drainage or task/Actor payer refund.
+
+Browser codecs bind the echoed request and full-width ordinals, reject changed present
+incarnations, and allow omitted destroyed identities only on negative snapshots. The retained
+owner must preserve its remembered identity across omission. Intrinsic fixed views and32-byte
+numeric copying prevent caller properties/subarray/species from substituting unauthenticated
+or unbounded input. Shared Rust/TypeScript vectors are included in the container context.
+`VoiceCryptoBroker.nativeAdmissionChannel` fixes mode before constructor publication and
+completes/recover mode29 before ACK9 in the same serialized turn. Remounts coalesce only
+the exact selected key/native adapter/transport/mode; a retained pilot cannot be upgraded
+or vice versa. `preclaimNativeNegotiation` installs its paired kind/ordinal before any
+subscription callout on this mode. `nativeNegotiationCapacity` exposes only the current
+authenticated capacity snapshot. Public retirement detaches immediately; its private
+negative driver retains the original128KiB and twelve rows until native Returned,
+Superseded or Closed AND actual physical/driver/cell/unsubscribe return. Closing/Uncertain
+never refund. The SAME separately paid8KiB Session coordinator keeps the remembered
+incarnation across omitted negative identities and increments only after actual return.
+Unstarted retries Register at the same ordinal; no observation buys a new native task.
+Mode29 End cancellation always uses ordinal1 before capacity30 cancellation. Fresh Register
+rechecks original owner/claim/ordinal before first fetch and after every SDK await. Only
+negative operations retain post-retirement routing. Pilot conversion/work/lifecycle refuse
+this mode. Retained broker ABI49 uses the unchanged window symbol. Signed Ready, native
+ledger/SDP/RTC integration and production activation remain open.
+
+Before ACK the admission constructor also requires a pure30/Observe1 probe with exact
+Unstarted/request1/canonical0/floor0/absent-incarnation. Mode29 support alone does not
+establish capacity30 support. Lost/unsupported/malformed probes cannot ACK or charge
+a128KiB/twelve-row preclaim; the original channel remains recoverable/closable. Probe
+success is capability metadata, never capacity, Work, Ready or future availability.
+ABI49 refuses retained pre-probe48 producers without replacing their original cleanup.
+
+The admission coordinator pays separate one-shot cadence/IO-deadline custody. Unknown
+schedule results retain their original callback; failed cancellation retains its original
+handle. Only IO terminal finally publishes its cancellation retry guard, so availability
+cannot disarm a live5s deadline. A separate fault observer promptly fences positive work
+and aborts the captured original controller; notification does not join timer or fetch
+cancellation. Frame return joins both. Inline/invalid cadence waits for explicit availability
+instead of certifying elapsed time. Clock faults permit one immediate negative recovery
+transition, then no automatic polling until availability/End. Pre-ACK faults close the
+original channel even when no browser preclaim exists.
+
+## Native admission custody draft (28 October; V2 inactive)
+
+The bootstrap Row now retains a canonical generation, cancellation floor, exact Actor Work,
+one original affine outcome and the same Root registration across capacity retries. This
+API is exposed by the fixed Control adapter above. One persistent8KiB task owns the
+physical Session's actual native position. Repeated Register observations coalesce; local
+Busy retains the same candidate and host nudges do not requeue an accepted invocation.
+Per-generation Returned certifies that generation's work/capacity return, not task refund.
+
+Final attachment rechecks actual mounted/unlocked state, selected owner, original server
+instance and exact Session/generation under UI -> Coordinator -> Row. Ordinary Cancel
+preserves the registration for the next canonical generation. Whole-mode/End closure is
+terminal. End fences first effects before collection and preserves authenticated Control
+while original work remains. Unexpected task destruction retains its same position/funding;
+negative recovery and shutdown drain original owners outside native guards before release.
+
+Operation29/version10 remains mode-only. The operation30/version11 adapter is described above;
+native ledger reservation and signed Ready remain open. Existing
+Row metadata was8KiB at this draft; the29 October complete retired-Session
+inventory correction now prepays10KiB. Control12KiB and all group/process limits
+remain unchanged. V2 stays OFF.
+
+## Local admission mode selection (28 October; V2 inactive)
+
+Physical Control operation29/version10 uses the exact Session as its header logical ID,
+with10 plaintext bytes: version10, mode0/Register or1/Observe or2/Cancel, then big-endian
+u64 ordinal. Canonical native admission currently accepts only ordinal1. The18-byte reply
+is version10, state0/unselected or1/pinned or2/canceled or3/closed, selected ordinal and
+cancellation floor as big-endian u64s. It proves neither Root registration nor capacity,
+native ledger availability, peer orientation, signed Ready or protocol effect.
+
+First Register OR Cancel selects admission only before original setup ACK. Selection and
+ACK serialize under the same native Row.state. A first post-ACK selection refuses without
+mutation; exact existing selection survives retry/ACK/cancellation. Observe never selects.
+Pilot producers require ACK completed and admission unselected at final publication.
+The capacity-only browser constructor above selects this mode; production activation
+remains off. This local operation number is not a P2P wire kind.
+
+## Actor admission invocation draft (28 October; not native IPC)
+
+`AdmissionRpcPermit` reserves a fixed4KiB from the canonical selected group/pool.
+Root checks exact pool/scope before minting. `prepare_voice_admission_step` returns an
+affine registration independently of HIGH capacity failure; an existing observer never
+requests a replacement registration. Neither output is native permission.
+
+`ServerActor::try_queue_voice_admission` is nonblocking. Publisher `accepted(work)` must
+install exact custody before enqueue. `completed(result, work)` stages the same original
+outcome synchronously outside Root Group/Policy guards. `refused(error, Some(work))`
+marks never-entered queued/prepared destruction; None marks pre-enqueue refusal. Actual
+retirement follows that callback. `VoiceAdmissionWork` gives exact identity and callback
+retirement observations only. The native Publisher's Drop after Root entry must preserve
+uncertainty; it cannot report absence or remint. Native must separately validate the
+concrete Publisher inventory, canonical Session/generation and final UI fence. The
+canonical native capacity adapter and its wire grammar remain unimplemented; mode-only
+operation29 above supplies neither capacity nor live readiness.
+
+## Root admission preparation (28 October; draft leaf, not live IPC)
+
+`ChannelSync::prepare_voice_admission_session(grant)` mints an opaque affine
+`RootAdmissionSession` for the actual current participant. Native canonical Pending
+must coalesce that call and retain the same owner across lost replies; calling it
+again intentionally creates a different registration. `observer()` retains the
+same paid core. Scope/local identity, join/key, leases, epoch and concrete pool
+identity come from the Root, never a renderer. Owner Drop closes registration.
+
+`reserve_voice_high_preclaim(grant, observer, generation)` reserves HIGH layout
+only after reborrowing current LocalJoin pools and rechecking the original registration.
+The result has no action/effect/consume API. `cancel_through(g)` is a negative-only
+monotone fence; native must validate its canonical expected ordinal first. Zero refuses,
+MAX exhausts registration, and stale cancellation cannot clear a later generation.
+Neither cancellation nor a false current observation proves actual capacity return.
+
+No Actor/IPC command, signed availability, native ledger row, bilateral round or
+production call is implemented by these APIs. HIGH capacity does not establish the
+future requester's DeviceId orientation. The separate3KiB payment covers a measured2,168B
+Windows graph including complete watch allocations. All86 focused admission tests
+and strict Root Clippy pass; complete suites remain pending. Existing wire grammars
+and Broker46 remain unchanged on this Root-only leaf.
+## Browser preclaim contract (28 October; Broker47, V2 inactive)
+
+`preclaimNativeNegotiation(owner, channel, key)` returns an opaque inert capacity
+handle with only pure state inspection and negative retirement. It coalesces the
+original allocation; no deadline, timer or native availability follows. Existing
+128KiB/twelve-row/group intake capacity is paid before publication/subscription.
+`nativeDerivationFromPreclaim` accepts only that broker's exact original handle and
+selected key/channel/negotiation. It transfers the same envelope into the ordinary
+authenticated Input path; it cannot manufacture a native Action or bypass its checks.
+Validation refusal leaves an unstarted claim reusable. Successful conversion starts
+one original15s window and returns its actual Intake handle; subsequent retries retain
+that Intake. The old preclaim handle becomes detached and cannot close its replacement.
+End joins actual conversion/callback dispatch before refunding. Native canonical
+Session/ordinal registration and signed bilateral admission remain separate requirements.
+The retained broker ABI is47 on the same window symbol; older ownership requires reload.
+
+## Compact local media encoding (28 October; App V2 inactive)
+
+`VoiceMediaEncoding` stores a private canonical226-byte original request and an
+independently materialized parent row. Its methods preserve Control28/version9 bytes
+and return fresh226/82-byte bodies; disposal invalidates only that private template.
+The media driver creates it after publication, repeats End's close fence, then clears
+full-original ownership before RPC. Its timer forwarder has a separate lexical scope.
+This is local storage/encoding only: fresh authenticated Current, exact PC adoption,
+actual cleanup joins and the unchanged8KiB media payment remain required. The640-byte
+component inventory grants no extra capacity or audio partition.
+
+## Detached capture payment (28 October; inactive composition)
+
+The internal capture budget returns `release`, one-shot `trackTask(actualFinalizer)` and
+`noTaskEntered`. The helper tracks its original void finalizer immediately after publication,
+before deferred SDK entry. Neither absence of a task nor timeout permits no-task completion
+after construction. The payment has no broker/Call/native-owner/channel/SDK backedge and
+stores no Promise. Fixed-group custody joins both actual finalizer return and capsule release.
+The same4KiB process pool can conservatively bind one active and one orphan group, sharing
+same-group references; its8KiB capsule remains charged to the immutable original group.
+All ordinary broker work and detached payments use the same ledger and unchanged limits.
+This internal contract adds no IPC/wire authority and is not yet an App audio factory.
+
+## Inert V2 capacity contract (28 October; candidate, inactive)
+
+The opaque affine `ChainCapacity` has no Clone, serialization, budget accessor or renderer
+command. Internal reserve takes exact Resources/action/packet pools, group and role, and
+creates capacity only. Internal consume requires the caller's CURRENT pools again, a live
+native Binding and matching group/role. A replacement LocalJoin has fresh packet/action
+pools; equal labels cannot adopt the previous join's prepayment. Validation compares owners
+without borrowing/refunding positions. Successful consume charges no new ordinary bytes and
+moves the original Binding deadline unchanged. Failed validation or abandonment returns the
+original owners; it grants no browser, engine, packet or RTC authority.
+
+The same private group claim must accompany Workflow, independent preparation/transfer and
+Exchange. Fixed history and retirement observations do not retain it. Exact registry stamps
+never cross IPC or the wire. Metadata remains funded through the final publisher and Box
+deallocation. The existing Ready4KiB fee stays held while genuine old work owns the claim.
+No wire/persistence/profile or IPC change is made. Native preclaim registration, bilateral
+Request/Grant/Commit and activation are not provided by this API; App V2 remains OFF.
 
 ## Owned microphone device setting (27 October; inactive)
 
@@ -3952,6 +4322,170 @@ These handles are not serialized or supplied by the webview. The trusted Rust `C
 adapter adds custody only; it is not a membership authorization factory. Production IPC obtains
 grants from the actual product actor. Voice attachment failures leave that row unavailable for
 V2 and retry on a later unlock, while ordinary authenticated vault/chat access continues.
+## Score layers and additive merging (2026-10-20)
+
+Owner decisions: one note per sound per cell; concurrent edits merge by adding and nothing blocks
+playback; every sound (and the drum kit) can be shown, ghosted or hidden in the composer. The full
+contract is `docs/design-score-layers.md`; this is the interface summary.
+
+- Wire: two new Score operations, `{"op":"set_note","row","step","value"}` and
+  `{"layer":"d"|<64 hex>,"op":"clear_note","row","step"}`, stored at `n/{step}:{row}/{layer}`
+  (`MAX_KEY_BYTES` 73). A note's layer is its sound id; every drum is in layer `d`. Older builds
+  refuse them as malformed and pause Studio sync for that server: everyone editing together must
+  update first. New builds author only these for notes; `clear_cell` still removes a legacy note.
+- Merge: legacy `c/` cells and sounds keep removal wins and a live legacy cell plays only its
+  selected value. Layer slots are add wins: every distinct live value plays, a concurrent clear
+  removes only what its author saw. A slot's shown value is the selected one when live, else the
+  live alternative with the lowest source op id (`layerShownValue`).
+- What plays (`score-voices.ts`, mirrored by Rust readiness and pinned by
+  `studio-score-readiness-v1.json`): candidates, clipped to the grid (`len` written only above 1),
+  identical voices collapsed across slots, canonical order, then skips (after the 4096th, a sound not
+  among the first 64, a start at or past the end). Readiness flags are diagnostics only: `conflict`
+  means distinct values, `overlap` only within one row and one sound, computed by an O(n) sweep.
+  Nothing refuses Play, download, share or post. `ScorePlayback.skipped` counts what does not sound.
+- Bridge DTO: a score with layer slots adds `layers: {"S:R/L": {cleared, register}}` and
+  `readiness.layers`; a score without them keeps the exact earlier shape. The renderer refuses a
+  view whose `readiness.layers[key].conflict` disagrees with that slot's distinct live values
+  (absent counts as false), since the composer's several-versions guard reads that flag.
+- Exporter input: `notes: {step,row,value}[]` (or the older `cells` record). Overlapping holds of
+  one pitch each take the lowest free lane (lane `k >= 1` nonce from `catcoms-score-voice:v1`);
+  a clean score exports byte-identically.
+- Studio playback of a document may hold 48 notes at once (`JAM_DOCUMENT_HELD_MAX`); jukebox decks
+  and received takes keep 16 per performer. Under the 64-voice ceiling that leaves 16 held voices
+  for all live performers together while a document plays locally. Attacks refused for want of a
+  voice (`source-held`, `room-held`) are counted once each per start
+  (`StudioPlaybackController.refused`); `StudioAudioState.refused` is the larger of the pass under
+  way and the one before it (0 when nothing plays), and `ScoreEditor`'s `refused` prop shows it as
+  "N not played" (`data-score-refused`) while the score plays.
+- A Flipnote's linked Score resolves the same additive way: its PIXA carries what the score plays
+  instead of refusing on the score's readiness (declared change; the Flipnote's own frames and
+  sound still refuse on conflicts).
+- Recovery: `RecoveryChoice` gains `{kind:"scoreNote",step,row,layer,value}`; native restores the
+  version's shown value with `set_note` (or `clear_note`).
+- Composer: the grid edits one shown note per cell (the chosen sound's first) and
+  `scoreSurfaceOps` turns each gesture into layered ops, writes before clears and each note's new
+  place before its old key is overwritten, so a refusal part way never deletes a note. `onop`
+  carries a gesture id (`scoreGestureId`); `applyScoreOp(object, op, gesture)` links the records
+  (session-private, never persisted), and discarding a refused write removes the gesture's later
+  records in that lane, writes and clears alike. After a restore the links are gone, so discarding
+  a restored note write instead holds the restored note edits behind it as `blocked` cards for the
+  member. Phrase moves emit their sets against the direction of travel. Editing a legacy note
+  moves it into its layer (`set_note`, then
+  `clear_cell`); undo restores a legacy cell where it was (`set_cell`). Visibility is per viewer,
+  never written, and hiding does not mute. Only a shown sound takes new notes; a ghosted sound is
+  outlines that other sounds can be written over. Every write, undo, redo and review action
+  included, reaches only shown sounds. A layered slot with several different live values is not
+  moved, resized, rewritten, undone or redone over (`scoreOpSeveralValues`, read from readiness
+  `conflict`); choosing a version in the review list (which exempts only that key) or erasing it on
+  the grid is how it changes. A hold past the end is not edited until it is shortened (one Shorten
+  press brings it to the end) or the score is lengthened; an undo or redo that would write a hold
+  past the current end is refused before it is queued (native refuses it too) and waits for a
+  longer score. A legacy `set_cell` counts as reaching both the sound it writes and the sound the
+  cell holds now.
+
+## Score additions re-saved after an epoch move (2026-10-20)
+
+Owner decision. A queued Score addition (`set_cell`, `set_note`, `set_patch`) whose document history moved
+under it is saved again on its own: "Shared history changed" at admission, or native's
+"epoch studio: edit belongs to a retired epoch". It is saved into the current epoch as a fresh edit
+with a new nonce, in its lane position, with its label, and no card. This is an exception to the
+`NEEDS_DECISION` rule below for these Score records only (`scheduleAutoReauthor`).
+
+- It applies only to an ordinary Score Apply proven not written (`canReauthor`) while the
+  document's current route is ordinary.
+- After the native refusal it re-reads the document first.
+- One job per document collects every record refused in the same turn (a refused batch), shares
+  that one read, re-saves them in lane order and pumps once, so they leave as one batch again.
+- It is bounded to `AUTO_REAUTHOR_MAX` (3) per edit chain. After that the record is the member's,
+  with "Save as a new edit".
+- While it is pending, `resaving(id)` is true: `saveTally()` counts the record as retrying,
+  `needsDecision` is false, and the banner offers no buttons.
+- Clears (`clear_cell`, `clear_note`), header changes and sound removals keep their card.
+  Re-authored on a newer history, they could remove or override a collaborator's addition unseen.
+  A legacy note moved into its layer is a `set_note` (re-saved) and a `clear_cell` (kept): until
+  the member decides, the note plays from both places.
+- Flipnote and Index records keep their card.
+- A reset, lock or scope change drops pending jobs.
+
+## Studio automatic retries and saved departure (28 October integration)
+
+Automatic exact retries from the19 October proposal are retained. Departure keeps the
+accepted definite-Save barrier described below; it does not close the editor on uncertainty.
+Retries add no wire or persistence format. Batched IPC also needs its native ACL grant:
+`studio_apply_batch` is now in `security/command-policy.json` (account-write, main),
+`capabilities/main.json` and the reviewed ledger. Before that, Tauri refused every batch with
+"studio_apply_batch not allowed. Command not found".
+
+- **Automatic exact resend.** A Save that failed (`uncertain` or `blocked`) is resent by
+  `StudioSession` itself after 1, 2, 4, 8, 15, 30 and 60 s (`AUTO_RETRY_MS`), through the same
+  `retry(id)` the member's "Retry now" uses: the same nonce, epoch and body, in lane order. It runs in
+  production only (`autosaveMs > 0`). It covers Create, document and Index Applies, and
+  ordinary-route frames. Some failures stay with the member: restored work until something sends it,
+  the local-draft and recovery routes, and refusals no resend can change (`NEEDS_DECISION`).
+  Restored work is sent by an explicit Save or retry, or by the Save barrier before leaving its
+  document/Studio, changing channel or posting to chat. An external channel-prop change alone
+  never sends restored held work. Once explicitly released it is resent like any other save. The
+  refusals that need a decision are "Shared history changed", "The server for these saved edits
+  changed", "edit belongs to a retired epoch", "object already exists", "already occurs in the
+  index", "Studio requires current membership", "local device is not a current member" and
+  "unknown Studio channel". `retry(id)` refuses those too, because an exact resend after a changed
+  history would skip admission and could then never be saved as a new edit. A new no-write class,
+  `NATIVE_REFUSED_BEFORE_WRITE`, covers two refusals that native makes ahead of its intent barrier,
+  so they settle known not written and can be saved as a new edit. One is exactly
+  "epoch studio: edit belongs to a retired epoch". The other is a batch whose first item met that
+  refusal. Any other wording, a later batch item, or a record already uncertain stays uncertain.
+  studio-native-no-write.test.ts pins the texts and the ordering to the Rust sources. `needsDecision(id)` and `canRetry(id)` tell surfaces whether to offer
+  Retry; "Save as a new edit" becomes the primary action when Retry is not offered. After the last
+  pause the record stays failed and is shown as the member's. `autoRetryAt(id)` (a `now()` timestamp or null) and `saveTally()`
+  (`{left, retrying, stuck}`) are display only. A reset, lock or scope change cancels every pending
+  resend. Exact resend is safe because native answers an operation it already holds as saved
+  (`validate_local_edit`'s held check), and a request refused before dispatch never ran.
+- **Batches.** A record that was already sent once (`attempts !== 0` or `mayHaveCommitted`) never
+  rides a batch, as head or member. A batch refused as a whole therefore resolves item by item.
+- **Leaving a document** (`navigate`) stages the drawing and awaits definite Saves for its
+  document lane, including edits made while waiting. Refusal keeps the original editor. After
+  that lane drains, its shared Index halves may be released without awaiting their independent
+  receipts. Original navigation ownership is checked again before opening the next document.
+- **Leaving the Studio.** `studioHasPending()` stages the drawing and includes every retained
+  record, including inflight and uncertain work. App's exit host awaits `studioSave`; failed Save
+  vetoes departure. Posting to chat also awaits Save and rechecks its original scope afterward.
+  The explicit `sendBeforeLeaving()`/`sendStudio()` utility still releases records without
+  waiting, but the App departure/post paths do not use it. `trackStudioSaves()` displays remaining
+  background work as a toast with a progress bar that ends "Studio edits saved", or warns
+  when an edit needs the member. A lock, a reset, or a queue emptied by the member's own discards
+  (`saveTally().discarded`) ends it silently, so an emptied queue is never claimed as saved. Any
+  change of view away from the Studio can track remaining saves. Window close also awaits every
+  receipt (`saveBeforeLeaving`) and refuses at the first failure.
+- **Changing channel under queued work.** `setStudioScope` no longer changes scope while the session
+  `retainsWork`. It returns false without releasing held work. `studioScopeWaiting(server, channel)` drives a
+  `data-scope-wait` panel in both surfaces: the sidebar hides the old channel's list and its "new"
+  buttons, and the editor shows the count left and names the edits that will not save on their own,
+  with Retry (only where it can move them) and Discard. It has no bulk "save as a new edit": edits
+  the document changed under are reviewed in their own channel, never re-saved unseen. The surfaces re-ask on every change, and the switch happens when the last record lands.
+  Held queued work is labelled as waiting and has an explicit Save action; that action uses the
+  original request identities and never retries/reauthors a blocked request. One operation-owned
+  token bounds Save waiters. Source generation/scope, displayed destination and panel lifetime
+  fence late clicks/notices. A new actual scope advances the ordinary navigation generation;
+  an old App route cannot become current again when the switch lands. Window close (`closing`)
+  also defers the switch.
+- **A restored snapshot for another channel** (`pendingRestoredScope`) refuses every new edit until
+  its channel opens. The editor shows a card that says so, with `discardRestoredDraft()` behind a
+  confirmation, for a channel that can no longer be opened.
+- **Playback is never refused by save status.** `prepareScorePlayback(object)` defaults to playback;
+  `prepareScoreTake` (download, share, chat) passes `playback: false`. `prepareFlipnotePixa(object,
+  {playback})` defaults to false; Play passes true. Playback of a flipnote whose linked Score still
+  has queued edits builds the take from that Score's working projection. Exports still refuse while a
+  save of the document has failed ("This document has an edit that did not save…") or the linked
+  Score is still saving.
+- **Words.** `studio-save-words.ts` decides what a person reads: `saveProblemText(error, uncertain)`,
+  `saveHeadline(label, {retrying, uncertain, others})` ("Not confirmed yet: score recipe, 5 more
+  waiting", "Not saved: fps"), `retryText`, and `saveToast(tally, total, discardedSince)`. The exact
+  native text stays on the record and in the banner's tooltip. Buttons: "Retry now", "Reload and
+  retry", "Save as a new edit" (rendered only when allowed), "Discard" / "Really discard?". The
+  awaited-Save rejections are "A Studio edit is not saved yet (or not confirmed yet). The Studio is
+  trying again on its own.", "A Studio edit is not confirmed. Retry or discard it in the Studio."
+  and "A Studio edit was not saved. Retry or discard it in the Studio.". A stuck edit's words claim
+  neither saved nor failed ("needs you").
 
 ## Optional desktop invite refresh (2026-10-18)
 
@@ -3965,6 +4499,9 @@ Explicit `mint_invite_fresh` remains owner/admin gated, and join-time authorizat
 Roles on non-owner devices still have the existing published-roster freshness limitations.
 
 ## Studio departure scope, restored-work reach and App exit routes (2026-10-18)
+
+(The28 October integration preserves this departure barrier. Bounded automatic retries and
+the independent Index lane continue as described above; they do not authorize an early switch.)
 
 `StudioSession.navigate(action)` (sidebar and Music) saves only the document being left: records
 in that document's lane must reach a definite receipt or the open is vetoed. With no document open
@@ -4002,11 +4539,18 @@ no lease and so does not execute.)
 `nativeNoWrite` classifies exactly these. A queued Save, or the plain document or Index read
 (`refreshDoc`, `refreshIndex`), refused this way is resent automatically, the same request after
 250, 500 and 1000 ms, without counting the visit unless an earlier attempt was already uncertain
-(see below). The overlay, recovery, fault and blob reads are
-not resent; a refusal there shows as their ordinary read error until the next refresh. The
+(see below). Beneath that layer, every native call the Studio session makes first repeats a
+storage-busy refusal itself, with the identical request, five times after 40, 80, 160, 320 and
+640 ms (`busyRetrying`, `studio-busy.ts`). The other two texts are not repeated there. The overlay,
+recovery, fault and blob reads get only that storage-busy repeat and are not resent by the session.
+A refusal that outlasts it shows as their ordinary read error until the next refresh. The
 backoffs total 1.75 s, but "Studio actor busy" itself arrives only after its 5 s rendezvous, so a
 Save refused that way four times takes about 22 s and a departure's 10 s timeout reports it as
-still saving. Only when the resends are used up does the Save settle. It settles as not written
+still saving. A Save that stays storage-busy makes 4 × 6 calls of its request over about 6.7 s. Only
+when the resends are used up does the Save settle. A batched Score Save (`studio_apply_batch`)
+refused this way is resent whole: its members wait queued and uncounted behind the head, and
+settle with it only when the resends are used up. Each item keeps its nonce and body across the
+resends, but a resent batch can also carry edits queued while it waited. It settles as not written
 only when no earlier attempt of it was uncertain. It then stays uncounted, so the member's retry is
 admitted afresh against the current history, and reauthor is available subject to the record
 kind's usual restrictions. A record whose earlier attempt was uncertain (it failed after dispatch,
@@ -5365,6 +5909,7 @@ nonce and complete request across retries; do not generate another operation on 
 | `studio_create` | `object`, `nonce`, `title`, `createdAtMs` | Saved Flipnote view. Creates its title then puts the Index entry with actual full author and unrecorded expiry. |
 | `studio_apply` | `object`, `epochId`, `nonce`, `body` | Updated Flipnote view. `body` is the canonical JSON **string**, not an Automerge change or object. |
 | `studio_apply_index` | `epochId`, `nonce`, `body` | Updated Index view using canonical IndexOp JSON string. |
+| `studio_apply_batch` | `object`, `epochId`, `objectKind:"score"`, `operations:[{nonce, body}, …]` | Updated Score view after ONE transaction for 1..64 Score operations (256 KiB of bodies in all, distinct nonces). Each item is its own signed operation, so an exact retry reseals accepted items. Not atomic: a refused item names itself ("item k of n") and the items before it are saved. Score targets only. |
 
 Create's `createdAtMs` must be a nonnegative JS-safe integer. Both complete operation envelopes
 must fit the existing 64 KiB limit, not just their title/body alone. Create currently targets
@@ -8520,12 +9065,16 @@ The four `on`/`ask` combinations:
 `studioPatchUnion`. Inputs are resolved export views, not native admission capabilities.
 Score input is `{id,bpm,bpb,steps,patches,cells}`: object id is 32 lowercase hex, headers use
 the creative design ranges, cell keys are canonical `step:row`, and values are exactly
-`{k:"n",p:<patch id>,len?:<sixteenth steps>}` or `{k:"d",pad:0..9}`. Note length is 1 through
-the remaining score steps; absent `len` preserves the original one-step draft. Same-row note
-overlap refuses rather than silently shortening authored holds. Patch keys must equal the existing
-jam recipe hashes. Up to 4096 cells and 64 recipes are accepted. Cells beyond the requested score length
-refuse; the connected native projection consumer refuses unresolved overflow/conflicts before
-exporting, without silently dropping frames or notes.
+`{k:"n",p:<patch id>,len?:<sixteenth steps>,vol?:1..100}` or `{k:"d",pad:0..9}`. Note length is 1 through
+the remaining score steps; absent `len` preserves the original one-step draft. `vol` is the note's
+authored level in percent of its recipe; absent means full level and is kept absent (the exported
+take's note-on carries it as `v`). Superseded 2026-10-20 (see "Score layers and additive merging"
+at the top): input may instead be `notes: {step,row,value}[]`, overlapping holds play on their own
+lanes instead of refusing, and the connected consumer no longer refuses on readiness; it exports
+what `score-voices.ts` plays and counts the rest as skipped. Patch keys must equal the existing
+jam recipe hashes. Up to 4096 notes and 64 recipes are accepted. Notes beyond the requested score
+length refuse at this leaf (callers clip or skip them first). Flipnote frames still refuse on
+unresolved overflow/conflicts.
 
 Context carries `{group,exporter}`. `group` must come from the stable backend group identifier,
 not a local numeric server alias; the helper can enforce only scalar-text/UTF-8 size bounds.
@@ -8583,7 +9132,8 @@ Optional authored title/BPM/BPB/step registers preserve complete winner/alternat
 values default to empty/120/4/16 without invented provenance. Cell/recipe slots retain a raw
 register of optional values; any live removal makes effective presence false. Clear and remove
 on absent slots record intent. Later Sets supersede exact observed same-property predecessors,
-not unseen removals. Readiness flags conflicts, overlap, missing recipes, extent and cap overflow.
+not unseen removals. Readiness flags conflicts, overlap, missing recipes, extent and cap overflow
+(diagnostics only since 2026-10-20; layered notes are add wins, see the top section).
 Score snapshots use explicit payload prefix2, and score restart units require trailing family2
 even when pristine. Existing Index/art bytes are unchanged. See `GATE6-STATE-DESIGN.md`.
 The native diagnostic shape `kind:"score"` uses optional header registers and cell/patch maps

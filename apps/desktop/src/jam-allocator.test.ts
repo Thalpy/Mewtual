@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { JAM_HELD_PER_PEER, JAM_REMOTE_HOLD_MAX_MS, JAM_VOICES_GLOBAL } from "./jam-contract.ts";
+import { JAM_DOCUMENT_HELD_MAX, JAM_HELD_PER_PEER, JAM_REMOTE_HOLD_MAX_MS, JAM_VOICES_GLOBAL } from "./jam-contract.ts";
 import { JamVoiceAllocator, type JamVoiceEndReason } from "./jam-allocator.ts";
 
 function add(
@@ -33,6 +33,27 @@ test("archival reconnect lanes share one performer's held-note limit", () => {
     { ok: false, reason: "source-held" },
   );
   assert.equal(add(allocator, "bob:one", "take-lane-bob", "held", 100, ended, "bob").ok, true);
+});
+
+// A layered score plays several sounds' chords at once. The Studio's own document playback may hold
+// up to JAM_DOCUMENT_HELD_MAX, which still leaves a live performer its full 16 under the ceiling.
+test("a document playback may hold up to 48 notes and a live performer still gets its 16", () => {
+  const allocator = new JamVoiceAllocator();
+  const ended: [string, JamVoiceEndReason][] = [];
+  const doc = (id: string) => allocator.allocate({ id, source: `doc-${id}`, owner: "doc", phase: "held", startedAtMs: 0, heldCap: JAM_DOCUMENT_HELD_MAX, teardown: () => {} });
+  for (let index = 0; index < JAM_DOCUMENT_HELD_MAX; index += 1) assert.equal(doc(`n${index}`).ok, true, `note ${index}`);
+  assert.deepEqual(doc("over"), { ok: false, reason: "source-held" });
+  for (let index = 0; index < JAM_HELD_PER_PEER; index += 1) {
+    assert.equal(add(allocator, `live:${index}`, "live", "held", 1, ended, "live").ok, true, "the live performer keeps its full allowance");
+  }
+  assert.equal(JAM_DOCUMENT_HELD_MAX + JAM_HELD_PER_PEER, JAM_VOICES_GLOBAL);
+});
+
+test("a held-note cap outside 16..48 is a programming error", () => {
+  const allocator = new JamVoiceAllocator();
+  for (const heldCap of [0, JAM_HELD_PER_PEER - 1, JAM_DOCUMENT_HELD_MAX + 1, 1.5, Number.NaN]) {
+    assert.throws(() => allocator.allocate({ id: `x${heldCap}`, source: "s", phase: "held", startedAtMs: 0, heldCap, teardown: () => {} }), /held-note cap/);
+  }
 });
 
 test("a source cannot hold more than the musical polyphony limit", () => {

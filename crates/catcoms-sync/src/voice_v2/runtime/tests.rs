@@ -821,7 +821,7 @@ fn endpoint_origin_loan_rechecks_session_actor_and_actual_driver_before_publicat
 /// reentry without blocking the test on the very defect it is meant to demonstrate.
 struct OriginClockProbe {
     inner: ManualClock,
-    owners: Mutex<Option<(Weak<Group>, Weak<ActorGate>)>>,
+    owners: Mutex<Option<(super::group_owner::GroupProbe, Weak<ActorGate>)>>,
     outside: AtomicBool,
     samples: AtomicU64,
 }
@@ -829,10 +829,13 @@ redacted_debug!(OriginClockProbe);
 impl OriginClockProbe {
     fn observe(&self) {
         if let Some((group, actor)) = self.owners.lock().unwrap().as_ref() {
-            let group = group.upgrade().unwrap();
             let actor = actor.upgrade().unwrap();
             self.outside.fetch_and(
-                group.state.try_lock().is_ok() && actor.policy.try_lock().is_ok(),
+                group
+                    .inspect(|group| {
+                        group.state.try_lock().is_ok() && actor.policy.try_lock().is_ok()
+                    })
+                    .unwrap(),
                 Ordering::AcqRel,
             );
             self.samples.fetch_add(1, Ordering::Relaxed);
@@ -905,8 +908,7 @@ fn endpoint_origin_samples_time_without_holding_group_or_policy() {
     let runtime = Runtime::new(clock.clone());
     let actor = active(&runtime, 1);
     let (context, envelope, ticket) = endpoint_origin_input(&actor);
-    *clock.owners.lock().unwrap() =
-        Some((Arc::downgrade(&actor.group), Arc::downgrade(&actor.gate)));
+    *clock.owners.lock().unwrap() = Some((actor.group.probe(), Arc::downgrade(&actor.gate)));
     actor
         .with_endpoint_origin(&ticket, &envelope, &context, |_, _, origin| {
             origin.publish(|| ())
@@ -929,8 +931,7 @@ fn voice_transport_verification_samples_before_native_guards_and_refuses_busy_vi
     });
     let runtime = Runtime::new(clock.clone());
     let actor = active(&runtime, 1);
-    *clock.owners.lock().unwrap() =
-        Some((Arc::downgrade(&actor.group), Arc::downgrade(&actor.gate)));
+    *clock.owners.lock().unwrap() = Some((actor.group.probe(), Arc::downgrade(&actor.gate)));
     let before = runtime.resources().counts();
     {
         let _group = actor.group.state.lock().unwrap();

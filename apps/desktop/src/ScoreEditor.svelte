@@ -1,215 +1,1917 @@
 <script lang="ts">
-  import { onDestroy } from "svelte";
-  import type { JamPatch } from "./jam-contract.ts";
-  import { JAM_MET_BPM_MIN, JAM_MET_BPM_MAX, JAM_MET_BPB_MIN, JAM_MET_BPB_MAX } from "./jam-contract.ts";
-  import { SCORE_MAX_STEPS, SCORE_MAX_PATCHES, SCORE_ROWS, type ScoreOp } from "./studio-contract.ts";
+  // The Studio's score composer: a chromatic step grid (C4..C6 at sixteenths), a recipe rack,
+  // the tempo/meter/length transport and an attention list for everything the backend flagged.
+  //
+  // Division of labour: this component renders the native ScoreModel and emits typed ScoreOps
+  // through `onop`; it never keeps an optimistic copy of the document. Placement guards come
+  // from score-editor.ts and native admission stays the authority. Everything local (first
+  // visible step, tool, chosen recipe, hold, snap, scale view, selection, an in-progress drag)
+  // is view state and is dropped with the component, which the host keys by object.
+  //
+  // Reading the grid: a filled block is a note onset in its recipe's colour; the block runs on
+  // for the note's authored hold (a continuation never sounds on its own). A diamond with two
+  // letters is a pad hit. Hatching means "kept but silent": over the 4096-cell cap or past the
+  // authored length. A hollow block names a recipe the score no longer holds. A gold corner is a
+  // retained concurrent value; a red edge an overlapping hold. None of these are hidden or
+  // resolved here: the attention list on the score tab lets a person choose.
+  //
+  // Gestures: click places (snapped to the placement unit, for the remembered length) or selects;
+  // dragging right from an empty cell sets a length; dragging a note's body moves it to another
+  // step or pitch; dragging the handle at a note's end resizes it; right-click, the erase tool,
+  // Delete and the selected panel clear. A drag belongs to the pointer that began it and is
+  // cancelled, with nothing written, by Escape, pointercancel, a lost editing context or a cell
+  // that changed under it before release. Every gesture is undoable (Ctrl+Z / Ctrl+Shift+Z): the
+  // composer keeps the inverse operations of the gestures it sent, for this document, while it is
+  // mounted; they replay the previous values as ordinary edits, so a concurrent change by someone
+  // else since the gesture is overwritten by the undo exactly as it would be by a hand edit.
+  //
+  // The selection (one cell, or a phrase) is the one piece of view state the host may keep for
+  // the document: it arrives through `selection` and every change leaves through `onselection`,
+  // so a document switched away from and back to opens on the same note.
+  //
+  // Playback does not lock the grid. The host plays a loop from the document as it was when the
+  // pass began and takes the edits made meanwhile into the next pass; `nextPass` says edits are
+  // waiting for it. While the document plays, a placed or moved note is not auditioned on its
+  // own (the loop will play it), only an explicit listen is.
+  import { onDestroy, tick, untrack, type Snippet } from "svelte";
+  import { JAM_MET_BPM_MIN, JAM_MET_BPM_MAX, JAM_MET_BPB_MIN, JAM_MET_BPB_MAX, type JamPatch } from "./jam-contract.ts";
+  import { SCORE_DRUM_LAYER, SCORE_MAX_CELLS, SCORE_MAX_STEPS, SCORE_MAX_PATCHES, SCORE_ROWS, SCORE_VOLUME_MAX, SCORE_VOLUME_MIN, canonicalJson, parseNoteKey, type ScoreCell, type ScoreOp } from "./studio-contract.ts";
   import type { ScoreModel } from "./studio-native.ts";
+  import { groupShelves, instrumentName, libraryKey, rackLabel, samePatch, waveGlyph, type LibraryItem } from "./studio-sound-ui.ts";
+  import { validScoreKey, type ScoreSelection } from "./score-selection.ts";
   import {
-    SCORE_PAGE_STEPS, SCORE_DIAGNOSTIC_PAGE, SCORE_ALTERNATIVE_PAGE, scoreCellOperation,
-    scoreHeaderOperation, scorePitch, scorePage, scoreCellLabel, scoreContinuations,
-    scoreDiagnostics, scoreDiagnosticOperation,
+    PAD_CODES, PAD_NAMES, SCORE_ALTERNATIVE_PAGE, SCORE_DEFAULT_HOLD, SCORE_DEFAULT_INTERVAL, SCORE_DIAGNOSTIC_PAGE, SCORE_INTERVALS, SCORE_ISSUE_LABELS, SCORE_PAGE_STEPS,
+    SCORE_ROOTS, SCORE_ROW_BASE_NOTE, SCORE_SCALE_KINDS, SCORE_SNAPS, SCORE_STEPS_PER_BEAT, SCORE_WIDE_CARD_PX, SCORE_WIDE_PAGE_STEPS,
+    scoreApplyLocal, scoreAttention, scoreBarBeat, scoreCellOperation, scoreClearSelection, scoreDiagnosticOperation, scoreDuplicateSelection, scoreDurationMs,
+    scoreHeaderOperation, scoreHolds, scoreInverse, scoreLastSoundingStep, scoreMoveOperations, scoreMoveSelection, scoreNotesAt, scoreOccupiedSteps, scoreOnsetAt,
+    scoreOnsetsIn, scoreOverlappingNotes, scorePadForRow,
+    scorePatchOrder, scorePatchUsage, scorePitch, scorePlayheadStep, scoreRepeatBar, scoreReplay, scoreRowIsBlack, scoreScaleRows, scoreSlotDiagnostic, scoreSnapStart,
+    scoreTapTempo, scoreTimeLabel, scoreExtent, scoreFreeRun,
+    SCORE_VISIBILITY_NEXT, scoreGestureId, scoreGhostCells, scoreHeaderOthers, scoreIssuesAt, scoreLayerOf, scoreOpLayers, scoreOpSeveralValues, scoreSurface, scoreSurfaceOps, scoreVisibilityOf,
+    type ScoreDiagnostic, type ScoreGhostCell, type ScoreHold, type ScoreScaleKind, type ScoreSurface, type ScoreVisibility,
   } from "./score-editor.ts";
 
-  let { model, readonlyReason, loading, error, patchLibrary, onop, onaddpatch,
-    onplay, onstop, playing = false, onnotice } = $props<{
-    model: ScoreModel | null; readonlyReason: string; loading: boolean; error: string;
+  type Props = {
+    model: ScoreModel | null;
+    /** Non-empty disables every write; shown once as a banner. */
+    readonlyReason: string;
+    loading: boolean;
+    error: string;
+    /** Names for recipes; the saved descriptor stays the playback source. */
     patchLibrary: readonly { name: string; patch: JamPatch }[];
-    onop: (op: ScoreOp) => void; onaddpatch: (patch: JamPatch) => Promise<string>;
-    onplay?: () => void; onstop?: () => void; playing?: boolean;
+    /** Recipes a person can add, by shelf (presets, this device, the share). */
+    library?: readonly LibraryItem[];
+    /** Author label ("you" for self) and dot colour for retained values. */
+    who?: (identity: string) => string;
+    tint?: (identity: string) => string;
+    /** Queues one typed operation; `false` means the host refused it (nothing was queued).
+     *  `gesture` is shared by every operation of one gesture (`scoreGestureId`), so the host can
+     *  drop a gesture's unsent clears when its write is discarded. */
+    onop: (op: ScoreOp, gesture: number) => boolean | void;
+    /** How many operations the host can still queue; a gesture longer than that is refused whole
+     *  before anything is sent. Absent means unbounded. */
+    onroom?: () => number;
+    /** The selection to open on, as a previous mount of this document left it. */
+    selection?: ScoreSelection | null;
+    /** Every change of the selection, for the host to keep across document switches. */
+    onselection?: (selection: ScoreSelection) => void;
+    /** Adds a recipe to the document; resolves its id once queued. */
+    onaddpatch: (patch: JamPatch) => Promise<string>;
+    /** Starts document playback, optionally from a millisecond offset into the score. */
+    onplay?: (offsetMs?: number) => void;
+    onstop?: () => void;
+    playing?: boolean;
+    /** Edits made during this loop pass are waiting for the next one. */
+    nextPass?: boolean;
+    /** Notes of this playback pass that did not sound: more held at once than playback has voices
+     *  for (StudioAudioState.refused). 0 when nothing is playing. */
+    refused?: number;
+    /** Milliseconds into document playback, or null when nothing is playing. */
+    positionMs?: number | null;
+    loop?: boolean;
+    onloop?: (loop: boolean) => void;
+    /** Play one note through the host, which gates Deafen; absent hides auditioning. The level is
+     *  the note's authored volume (1..100), so a placed or adjusted note sounds as it will play. */
+    onaudition?: (patch: JamPatch, note: number, durationMs: number, volume?: number) => void;
+    /** Play one pad hit through the host, so a placed or chosen drum is heard like a note. */
+    onauditionpad?: (pad: number) => void;
+    /** Open the sound designer, seeded with the chosen sound if any. */
+    onnew?: (startFrom: JamPatch | null) => void;
+    onexport?: () => void;
+    onshare?: () => void;
+    /** Attach the score's take to a chat message; absent hides the button. */
+    onpost?: () => void;
+    mediaBusy?: boolean;
+    /** The host's history rail, rendered under the inspector's history tab. */
+    history?: Snippet;
     onnotice: (text: string, kind: "info" | "success" | "error") => void;
-  }>();
+  };
+  // `docModel` is the document as the host projects it. Everything the grid touches reads `model`
+  // below instead: the same document with its cells replaced by the layer surface (one shown note
+  // per cell, see score-editor.ts), so the gesture code keeps its one-note-per-cell rules and every
+  // write is translated into layered operations at the one place writes leave (`sendAll`).
+  let {
+    model: docModel, readonlyReason, loading, error, patchLibrary, library = [], who = (id: string) => id.slice(0, 8), tint = () => "var(--muted)",
+    onop, onroom, selection = null, onselection, onaddpatch, onplay, onstop, playing = false, nextPass = false, refused = 0, positionMs = null, loop = false, onloop, onaudition, onauditionpad, onnew, onexport, onshare, onpost,
+    mediaBusy = false, history, onnotice,
+  }: Props = $props();
 
-  // Selection/drafts are local view state, never an optimistic replacement for native content.
-  let page = $state(0), mode = $state<"note" | "drum">("note"), patch = $state(""), hold = $state(1), pad = $state(0);
-  let library = $state(""), adding = $state(false), slotPage = $state(0), inspected = $state(""), alternativePage = $state(0);
+  // --- view state --------------------------------------------------------------------------------
+  // The first visible step is the stable view coordinate; the page index is derived from it and
+  // the current width, so a resize that changes the page width keeps the same bars on screen.
+  let start = $state(0);
+  let tab = $state<"sounds" | "score" | "history">("sounds");
+  let tool = $state<"place" | "erase" | "audition">("place");
+  const TOOL_NAMES: Record<typeof tool, string> = { place: "place", erase: "erase", audition: "listen" };
+  // Comfortable rows by default; compact trades legibility for a taller overview.
+  let dense = $state(false);
+  // Undo and redo for this mounted document: each entry is one gesture's operations and the
+  // operations that put the previous values back. Bounded; dropped with the component.
+  type Gesture = { label: string; forward: ScoreOp[]; inverse: ScoreOp[] };
+  const HISTORY_MAX = 64;
+  let undoStack = $state<Gesture[]>([]);
+  let redoStack = $state<Gesture[]>([]);
+  let mode = $state<"note" | "drum">("note");
+  let patch = $state(""); // chosen recipe id; "" means the first active one
+  let hold = $state(SCORE_DEFAULT_HOLD); // the last deliberately chosen length
+  let volume = $state(SCORE_VOLUME_MAX); // the last deliberately chosen level, for new notes
+  let snap = $state(SCORE_DEFAULT_HOLD); // placement unit in steps
+  let pad = $state(0);
+  let scaleKind = $state<ScoreScaleKind>("chromatic");
+  let scaleLast = $state<ScoreScaleKind>("major"); // the kind the toggle returns to
+  let scaleRoot = $state(0);
+  // The selection opens as the host remembered it for this document (keys it cannot have written
+  // are dropped, not trusted); from then on every change is reported back. Read once, on purpose:
+  // the memory is where this mount starts, not a value to follow.
+  const remembered = untrack(() => selection);
+  const opening = remembered && remembered.selected !== null && validScoreKey(remembered.selected) ? remembered.selected : null;
+  let selected = $state<string | null>(opening); // a "step:row" key, live cell or not
+  // A phrase: several onsets handled as one (moved, nudged, duplicated, cleared together). Built
+  // by Shift+click, a Shift+drag marquee or Ctrl+A; a plain click or Escape returns to one note.
+  let picked = $state<Set<string>>(new Set((remembered?.picked ?? []).filter(validScoreKey)));
+  $effect(() => { const snapshot: ScoreSelection = { selected, picked: [...picked] }; untrack(() => onselection?.(snapshot)); });
+  if (opening) start = Math.floor(Number(opening.split(":")[0]) / SCORE_PAGE_STEPS) * SCORE_PAGE_STEPS;
+  // The interval a transposition moves by (the phrase panel's chooser, Alt+PageUp/PageDown).
+  let interval = $state(SCORE_DEFAULT_INTERVAL);
+  // Horizontal zoom: steps per page. Null follows the card's width (16, or 32 when it is wide).
+  const ZOOM_LEVELS: readonly number[] = [8, 16, 32, 64];
+  let zoom = $state<number | null>(null);
+  let hover = $state<string | null>(null);
+  let expanded = $state(""); // attention item whose alternatives are open
+  let attentionPage = $state(0), altPage = $state(0);
+  let adding = $state(""); // library key whose add is in flight
+  let armedRemove = $state("");
+  let taps = $state<number[]>([]);
+  let tapTimer: ReturnType<typeof setTimeout> | null = null;
+  let cardWidth = $state(0);
+  let cardEl = $state<HTMLElement | null>(null);
+  let rootEl = $state<HTMLElement | null>(null);
+  // An in-progress gesture, owned by the pointer that began it. `place` carries what was true at
+  // pointer down (the recipe, the empty start) so release can refuse a cell that changed meanwhile.
+  type Drag =
+    // `origin` is the pressed cell and `min` the previewed end: pointer jitter inside the pressed
+    // cell is not a length, and the gesture never writes a note shorter than the preview showed.
+    | { kind: "place"; pointerId: number; row: number; start: number; end: number; min: number; origin: number; patch: string; moved: boolean }
+    | { kind: "resize"; pointerId: number; onset: string; row: number; from: number; end: number; original: number; patch: string }
+    // A note (or pad hit) carried by its body: `offset` is how far into the note the press was, so
+    // the note keeps its position under the pointer; `to` is the candidate onset and `fits`
+    // whether that destination is free of every other note along the hold. `keys` is every onset
+    // carried (the picked phrase when the pressed note is part of it, else just this one) and
+    // `delta` the offset the phrase has been carried by.
+    // `bound` is every carried note as pointer-down saw it: its cell, the document note behind that
+    // cell and its value. The grid keeps notes by cell, so a remote edit during the drag could
+    // otherwise put another note (another sound's, or a changed value) under a carried cell.
+    | { kind: "move"; pointerId: number; onset: string; cell: ScoreCell; len: number; offset: number; to: { step: number; row: number }; fits: boolean; reason: string; moved: boolean; keys: string[]; bound: { cell: string; key: string; bytes: string }[]; delta: { step: number; row: number } }
+    // Shift+drag: a rectangle whose onsets become the phrase on release.
+    | { kind: "marquee"; pointerId: number; from: { step: number; row: number }; to: { step: number; row: number }; moved: boolean };
+  let drag = $state<Drag | null>(null);
+  // A press whose gesture was cancelled (Escape, pointercancel, blur) still completes with a
+  // pointerup and a click; that click must not place anything, so the press stays remembered
+  // until its release or the next press.
+  let cancelledPress = $state<number | null>(null);
+  // The page width follows the card's width. Measured with a ResizeObserver where one exists;
+  // without one (the unit-test DOM) the card reads as zero wide and pages 16 steps.
+  $effect(() => {
+    const el = cardEl;
+    if (!el) return;
+    cardWidth = el.clientWidth;
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => { cardWidth = el.clientWidth; });
+    observer.observe(el);
+    return () => observer.disconnect();
+  });
+  // A gesture that wrote must swallow the click the browser fires after it; the flag is cleared
+  // on a timer because that click never arrives when the pointer was released elsewhere.
+  let dragged = false;
   let alive = true;
-  onDestroy(() => { alive = false; });
-  const blocked = $derived(loading || !model || !!readonlyReason);
-  const pages = $derived(Math.ceil((model?.steps ?? 16) / SCORE_PAGE_STEPS));
-  const currentPage = $derived(Math.min(page, pages - 1));
-  const columns = $derived(model ? scorePage(model.steps, currentPage) : []);
-  const continuations = $derived(model ? scoreContinuations(model, currentPage) : new Set<string>());
-  const patches = $derived(Object.keys(model?.patches ?? {}).sort());
-  // Once explicitly chosen, an unavailable recipe must not silently fall back to another sound.
-  // This also holds note entry while a newly queued recipe awaits its native readback.
-  const selectedPatch = $derived(patch ? patches.includes(patch) ? patch : "" : patches[0] ?? "");
-  const diagnostics = $derived(model ? scoreDiagnostics(model) : []);
-  const diagnosticPages = $derived(Math.max(1, Math.ceil(diagnostics.length / SCORE_DIAGNOSTIC_PAGE)));
-  const currentSlotPage = $derived(Math.min(slotPage, diagnosticPages - 1));
-  const visibleSlots = $derived(diagnostics.slice(currentSlotPage * SCORE_DIAGNOSTIC_PAGE, (currentSlotPage + 1) * SCORE_DIAGNOSTIC_PAGE));
-  const inspection = $derived(diagnostics.find(item => item.id === inspected) ?? null);
-  const alternativePages = $derived(Math.max(1, Math.ceil((inspection?.alternatives.length ?? 0) / SCORE_ALTERNATIVE_PAGE)));
-  const currentAlternativePage = $derived(Math.min(alternativePage, alternativePages - 1));
-  const alternatives = $derived(inspection?.alternatives.slice(currentAlternativePage * SCORE_ALTERNATIVE_PAGE, (currentAlternativePage + 1) * SCORE_ALTERNATIVE_PAGE) ?? []);
+  onDestroy(() => { alive = false; if (tapTimer) clearTimeout(tapTimer); });
 
-  function send(make: () => ScoreOp) {
-    if (blocked) return;
-    try { onop(make()); } catch (cause) { onnotice(cause instanceof Error ? cause.message : String(cause), "error"); }
+  // Each sound's visibility (and the drum kit's, under "d"), for this viewer and this mount only:
+  // never written to the document, and hiding a sound does not mute it.
+  let visibility = $state<Record<string, ScoreVisibility>>({});
+
+  // --- derived views -----------------------------------------------------------------------------
+  // The rack order comes from the document, not the surface: the chosen sound decides the surface.
+  const order = $derived(docModel ? scorePatchOrder(docModel) : []);
+  // Once explicitly chosen, an unavailable recipe must not silently fall back to another sound.
+  // This also holds note entry while a newly queued recipe is not yet in the projection the
+  // host shows (the working projection under autosave, the native readback otherwise).
+  const selectedPatch = $derived(patch ? (order.includes(patch) ? patch : "") : order[0] ?? "");
+  /** The layer new notes go into, and the one a cell shows first. */
+  const chosenLayer = $derived(mode === "drum" ? SCORE_DRUM_LAYER : selectedPatch || null);
+  /** Placement needs the chosen layer shown: ghosted and hidden sounds take no new notes. */
+  const placeable = $derived(chosenLayer !== null && scoreVisibilityOf(visibility, chosenLayer) === "show");
+  // `sent` counts gestures queued. The host replaces the model for every queued edit, so the
+  // surface follows the prop; re-deriving after a send as well keeps it current for a host that
+  // folds edits into the same object (the unit-test harness does).
+  let sent = $state(0);
+  const view = $derived.by<ScoreSurface | null>(() => { void sent; return docModel ? scoreSurface(docModel, visibility, chosenLayer) : null; });
+  const model = $derived(view?.model ?? null);
+  // A re-read of a score already on screen (the echo of an own Save, a remote edit) must not take
+  // the grid away: the working projection keeps every queued edit, and a later readback corrects
+  // anything the author got ahead of. Only the first read, with nothing to show, blocks input.
+  const blocked = $derived((loading && !model) || !model || !!readonlyReason);
+  const size = $derived(zoom ?? (cardWidth >= SCORE_WIDE_CARD_PX ? SCORE_WIDE_PAGE_STEPS : SCORE_PAGE_STEPS));
+  /** The picked onsets that still exist, as a phrase: two or more act together; one is the ordinary selection. */
+  const group = $derived(model ? [...picked].filter((key) => model!.cells[key]) : []);
+  const groupSet = $derived(new Set(group));
+  const phrase = $derived(group.length > 1);
+  // Usage, the overview and trim count every voice, shown or not: a hidden sound still plays, and so
+  // does a concurrent longer value behind the shown one. The voices are exact for queued edits too
+  // (the working projection computes them). They are clipped to the end, so the grid's extent also
+  // reads the raw shown notes, whose tails past the end stay visible and hatched.
+  const allNotes = $derived.by(() => {
+    void sent;
+    if (!docModel) return null;
+    const cells: Record<string, ScoreCell> = {};
+    docModel.voices.all.forEach((voice, i) => { cells[`${voice.step}:${voice.row}#${i}`] = voice.value; });
+    return { steps: docModel.steps, cells };
+  });
+  const extent = $derived(allNotes && docModel ? Math.max(scoreExtent(allNotes), scoreExtent({ steps: docModel.steps, cells: docModel.notes })) : SCORE_PAGE_STEPS);
+  const noteCount = $derived(docModel ? Object.keys(docModel.notes).length : 0);
+  /** Each header's alternatives with a DIFFERENT value: what the "another value by" chips name.
+   *  Two members setting the same tempo agreed; readiness does not call that a conflict either. */
+  const differing = $derived({
+    title: scoreHeaderOthers(docModel?.headers.title), bpm: scoreHeaderOthers(docModel?.headers.bpm),
+    bpb: scoreHeaderOthers(docModel?.headers.bpb), steps: scoreHeaderOthers(docModel?.headers.steps),
+  });
+  const hitCount = $derived(docModel ? Object.values(docModel.notes).filter((cell) => cell.k === "d").length : 0);
+  const pages = $derived(Math.max(1, Math.ceil(extent / size)));
+  const currentPage = $derived(Math.min(Math.floor(Math.max(0, start) / size), pages - 1));
+  const columns = $derived(Array.from({ length: Math.max(0, Math.min(size, extent - currentPage * size)) }, (_, i) => currentPage * size + i));
+  const rows = Array.from({ length: SCORE_ROWS }, (_, i) => SCORE_ROWS - 1 - i);
+  const holds = $derived<Map<string, ScoreHold>>(model ? scoreHolds(model, columns) : new Map());
+  const ghostCells = $derived<Map<string, ScoreGhostCell>>(view ? scoreGhostCells(view.ghosts, columns) : new Map());
+  const usage = $derived<Map<string, number>>(allNotes ? scorePatchUsage(allNotes) : new Map());
+  const patchPending = $derived(!!patch && !order.includes(patch));
+  const attention = $derived(docModel ? scoreAttention(docModel) : []);
+  const attentionPages = $derived(Math.max(1, Math.ceil(attention.length / SCORE_DIAGNOSTIC_PAGE)));
+  const currentAttentionPage = $derived(Math.min(attentionPage, attentionPages - 1));
+  const attentionSlice = $derived(attention.slice(currentAttentionPage * SCORE_DIAGNOSTIC_PAGE, (currentAttentionPage + 1) * SCORE_DIAGNOSTIC_PAGE));
+  // Recipe names and library membership are computed once per model/library change, never per
+  // cell: naming serialises the recipe against every library entry, and a page has 800 cells.
+  const names = $derived.by<Map<string, string>>(() => {
+    const result = new Map<string, string>();
+    for (const id of order) result.set(id, instrumentName(model!.patches[id], patchLibrary));
+    return result;
+  });
+  const docIdOf = $derived.by<Map<string, string>>(() => {
+    const result = new Map<string, string>();
+    if (!model) return result;
+    const byBytes = new Map<string, string>(order.map((id) => [canonicalJson(model.patches[id]), id]));
+    for (const item of library) { const hit = byBytes.get(canonicalJson(item.patch)); if (hit) result.set(libraryKey(item), hit); }
+    return result;
+  });
+  const selectedCell = $derived(model && selected ? model.cells[selected] ?? null : null);
+  /** The note key behind a surface cell: the shown note's own key, else the cell itself. */
+  const realKey = (key: string) => view?.keyOf.get(key) ?? key;
+  const selectedDiag = $derived(docModel && selected ? scoreSlotDiagnostic(docModel, realKey(selected).includes("/") ? "note" : "cell", realKey(selected)) : null);
+  /** The selected note and every note overlapping its run, owner first; more than one means a choice to make. */
+  const selectedNotes = $derived(model && selected ? (model.cells[selected] ? scoreOverlappingNotes(model, selected) : scoreNotesAt(model, Number(selected.split(":")[0]), Number(selected.split(":")[1]))) : []);
+  const occupied = $derived<Set<number>>(allNotes ? scoreOccupiedSteps(allNotes) : new Set());
+  const stepsPerBar = $derived(Math.max(1, model?.bpb ?? 4) * SCORE_STEPS_PER_BEAT);
+  const playhead = $derived(model && playing && positionMs !== null ? scorePlayheadStep(positionMs, model.bpm, model.steps, loop) : -1);
+  const shelves = $derived(groupShelves(library));
+  const issueCount = $derived(attention.length);
+  const bars = $derived(model ? Math.ceil(model.steps / stepsPerBar) : 0);
+  const totalMs = $derived(model ? scoreDurationMs(model.steps, model.bpm) : 0);
+  const cursor = $derived(playhead >= 0 ? playhead : selected ? Number(selected.split(":")[0]) : columns[0] ?? 0);
+  const cursorMs = $derived(model ? (playhead >= 0 && positionMs !== null ? (loop && totalMs > 0 ? positionMs % totalMs : Math.min(positionMs, totalMs)) : scoreDurationMs(cursor, model.bpm)) : 0);
+  const scaleRows = $derived(scoreScaleRows(scaleKind, scaleRoot));
+  const scaleOn = $derived(scaleKind !== "chromatic");
+  // Rows the scale view folds. Pads are not pitches, so in pads mode the pad lane never folds.
+  const folded = $derived.by<Set<number>>(() => {
+    const result = new Set<number>();
+    if (!scaleOn) return result;
+    for (const row of rows) if (!scaleRows.has(row) && !(mode === "drum" && scorePadForRow(row) !== null)) result.add(row);
+    return result;
+  });
+  const rowPx = $derived(dense ? 16 : 22);
+  const gridRows = $derived(`${rowPx}px ${rows.map((row) => (folded.has(row) ? "6px" : `${rowPx}px`)).join(" ")}`);
+  // Roving focus: one cell in the grid is tabbable (the selection, else the page's first cell),
+  // so Tab enters the grid once and arrows move inside it, instead of hundreds of Tab stops.
+  const tabbable = $derived(selected && columns.includes(Number(selected.split(":")[0])) ? selected : `${columns[0] ?? 0}:${SCORE_ROWS - 1}`);
+  const canUndo = $derived(undoStack.length > 0 && !blocked);
+  const canRedo = $derived(redoStack.length > 0 && !blocked);
+  /** The bar the selection (else the page) is in, for "repeat bar". */
+  const currentBar = $derived(Math.floor((selected ? Number(selected.split(":")[0]) : columns[0] ?? 0) / stepsPerBar));
+  // The voices are clipped to the end, so a hold crossing it is read from the raw shown notes too:
+  // "fit to last note" must still be able to lengthen the score to cover it (third review L2).
+  const lastSounding = $derived(allNotes && docModel ? Math.max(scoreLastSoundingStep(allNotes), scoreLastSoundingStep({ cells: docModel.notes })) : -1);
+  /** The cells a click would fill right now: exactly what `fitPlacement` would write. */
+  const target = $derived.by<Set<string>>(() => {
+    const result = new Set<string>();
+    if (!model || drag || blocked || !hover || tool !== "place" || mode !== "note" || !selectedPatch || !placeable) return result;
+    const [step, row] = hover.split(":").map(Number);
+    const fit = fitPlacement(step, row);
+    if (!fit) return result;
+    for (let s = fit.start; s < fit.start + fit.len; s++) result.add(`${s}:${row}`);
+    return result;
+  });
+  // Follow the playhead across pages while the document plays.
+  $effect(() => {
+    const ph = playhead, s = size;
+    if (ph < 0) return;
+    untrack(() => { if (Math.floor(ph / s) !== currentPage) start = Math.floor(ph / s) * s; });
+  });
+  // A gesture cannot outlive its editing context: a read-only turn, a lost model or a change of
+  // the cell it began on cancels it with nothing written.
+  $effect(() => {
+    const locked = blocked;
+    // Through `dragCancel`, so the press is remembered: a block that lifts before the release
+    // must not let that release's click place what the cancelled gesture did not.
+    untrack(() => { if (locked && drag) dragCancel(); });
+  });
+
+  // --- helpers -----------------------------------------------------------------------------------
+  const message = (cause: unknown) => cause instanceof Error ? cause.message : String(cause);
+  const swatch = (id: string) => { const i = order.indexOf(id); return i < 0 ? "var(--faint)" : `var(--sc-p${i % 8})`; };
+  const nameOf = (id: string) => names.get(id) ?? "?";
+  const stepLabel = (step: number) => `step ${step + 1}`;
+  const holdName = (n: number) => n === 1 ? "sixteenth" : n === 2 ? "eighth" : n === 4 ? "quarter" : n === 8 ? "half" : n === 16 ? "whole" : `${n} / 16`;
+  const snapName = (n: number) => n === 1 ? "1/16" : n === 2 ? "1/8" : "1/4";
+  const show = (page: number) => { start = Math.max(0, Math.min(pages - 1, page)) * size; };
+  const goTo = (step: number) => { start = Math.floor(Math.max(0, step) / size) * size; };
+  /**
+   * Where a click at `step` places a note and how long it is: the snapped start when every cell
+   * from there to the click is free (otherwise the exact cell was meant), for the remembered hold
+   * fitted to the free run and the authored end. Null when the cell itself is taken, past the
+   * end or folded away. The hover preview and the write share this, so they cannot disagree.
+   */
+  function fitPlacement(step: number, row: number): { start: number; len: number } | null {
+    if (!model || !placeable || step >= model.steps || folded.has(row) || scoreOnsetAt(model, step, row)) return null;
+    const snapped = scoreSnapStart(step, snap, model.steps);
+    const start = snapped < step && scoreFreeRun(model, snapped, row, step - snapped + 1) === step - snapped + 1 ? snapped : step;
+    const len = scoreFreeRun(model, start, row, hold);
+    return len > 0 ? { start, len } : null;
   }
-  function clickCell(step: number, row: number) {
+  function valueLabel(value: unknown): string {
+    if (value === null || value === undefined) return "cleared";
+    if (typeof value === "object" && "k" in (value as object)) {
+      const cell = value as ScoreCell;
+      return cell.k === "d" ? PAD_NAMES[cell.pad] ?? `pad ${cell.pad}` : `${nameOf(cell.p)} · ${cell.len ?? 1}`;
+    }
+    if (typeof value === "object") return instrumentName(value as JamPatch, patchLibrary);
+    return String(value);
+  }
+  function itemLabel(item: ScoreDiagnostic): string {
+    if (item.kind === "header") return item.key;
+    if (item.kind === "patch") return nameOf(item.key);
+    const at = parseNoteKey(item.key);
+    if (!at) return item.key;
+    const layer = at.layer === null ? "" : at.layer === SCORE_DRUM_LAYER ? " · drums" : ` · ${nameOf(at.layer)}`;
+    return `${scorePitch(at.row)} · ${stepLabel(at.step)}${layer}`;
+  }
+  /** Readiness of the note shown at a surface cell (or of the legacy slot there, shown or not). */
+  const issuesOf = (key: string) => docModel ? scoreIssuesAt(docModel, realKey(key)) : undefined;
+  /** What the slot behind a surface cell retains: other values, who wrote the shown one, and a clear
+   * that beat a value (legacy only: a layered clear never beats a live note). */
+  function slotOf(key: string): { others: string[]; author: string | null; gone: boolean } {
+    const real = realKey(key);
+    if (!docModel) return { others: [], author: null, gone: false };
+    // `others` are the authors of DIFFERENT values only: two members placing the same note is one
+    // note, not a conflict (readiness agrees).
+    const differing = (shown: ScoreCell | null, alternatives: { value: ScoreCell | null; source: { author: string } }[]) => {
+      const bytes = shown === null ? null : canonicalJson(shown);
+      return alternatives.filter((a) => a.value !== null && canonicalJson(a.value) !== bytes).map((a) => a.source.author);
+    };
+    // While an edit of this note is queued the working projection shows its value, which is none of
+    // the register's: that edit replaces them all once it lands, so there is no other value to name
+    // yet (the working readiness agrees; third review L4).
+    if (real.includes("/")) {
+      const slot = docModel.layerSlots[real];
+      if (!slot) return { others: [], author: null, gone: false };
+      const live = [slot.register.selected, ...slot.register.conflicts].filter((a) => a.value !== null);
+      const shown = docModel.notes[real] ?? live[0]?.value ?? null;
+      const by = live.find((a) => a.value !== null && shown !== null && canonicalJson(a.value) === canonicalJson(shown));
+      if (!by) return { others: [], author: null, gone: false };
+      return { others: differing(shown, live), author: by.source.author, gone: false };
+    }
+    const slot = docModel.cellSlots[real];
+    if (!slot) return { others: [], author: null, gone: false };
+    const current = docModel.cells[real];
+    if (current && slot.register.selected.value !== null && canonicalJson(current) !== canonicalJson(slot.register.selected.value)) return { others: [], author: null, gone: false };
+    const beaten = slot.removed && (slot.register.selected.value !== null || slot.register.conflicts.some((c) => c.value !== null));
+    return { others: differing(slot.register.selected.value, slot.register.conflicts), author: slot.register.selected.source.author, gone: beaten };
+  }
+  function cellLabel(step: number, row: number): string {
+    const key = `${step}:${row}`, cell = model?.cells[key], held = holds.get(key);
+    const base = `${scorePitch(row)}, ${stepLabel(step)}`;
+    if (cell) return `${base}: ${cell.k === "d" ? PAD_NAMES[cell.pad] : `${nameOf(cell.p)}, ${cell.len ?? 1} step${(cell.len ?? 1) === 1 ? "" : "s"}${cell.vol === undefined ? "" : `, ${cell.vol}%`}`}`;
+    if (held) return `${base}: ${nameOf(held.p)} continues${held.others.length ? ` (${held.others.length} more here)` : ""}`;
+    return `${base}: empty`;
+  }
+  function cellTitle(step: number, row: number, label: string): string {
+    const key = `${step}:${row}`, issues = issuesOf(key), slot = slotOf(key), held = holds.get(key);
+    const flags = issues ? (Object.entries(issues) as [keyof typeof SCORE_ISSUE_LABELS, boolean][]).filter(([, v]) => v).map(([k]) => SCORE_ISSUE_LABELS[k]) : [];
+    const parts = [label];
+    if (held?.others.length) parts.push(`also ${held.others.map((k) => `${nameOf(model!.cells[k].k === "n" ? (model!.cells[k] as { p: string }).p : "")} from ${stepLabel(Number(k.split(":")[0]))}`).join(", ")}`);
+    if (view?.stacked.has(key)) parts.push("more sounds here");
+    if (slot.others.length) parts.push(`another value by ${slot.others.map((author) => who(author)).join(", ")}`);
+    if (slot.gone && !model?.cells[key]) parts.push("cleared");
+    if (slot.author && model?.cells[key]) parts.push(`by ${who(slot.author)}`);
+    return [...parts, ...flags].join(" · ");
+  }
+  function cellClass(step: number, row: number): string {
+    const key = `${step}:${row}`, cell = model?.cells[key], held = holds.get(key), issues = issuesOf(key), slot = slotOf(key);
+    const ghost = !cell && !held ? ghostCells.get(key) : undefined;
+    const classes: string[] = [];
+    if ((step + 1) % stepsPerBar === 0) classes.push("bar"); else if ((step + 1) % SCORE_STEPS_PER_BEAT === 0) classes.push("beat");
+    if (cell?.k === "n") { classes.push("n"); if ((cell.len ?? 1) === 1) classes.push("end"); }
+    if (cell?.k === "d") classes.push("pad");
+    if (held) { classes.push("held"); if (held.last) classes.push("end"); if (held.others.length) classes.push("stacked"); }
+    if (view?.stacked.has(key)) classes.push("stacked");
+    // A ghosted sound: an outline in its colour, nothing else. The cell under it is empty to every
+    // gesture, which is what lets another sound be written over it.
+    if (ghost) classes.push(ghost.p === null ? "ghost gpad" : "ghost", ...(ghost.onset ? ["gon"] : []), ...(ghost.last ? ["gend"] : []));
+    if (issues?.count) classes.push("over");
+    if (issues?.extent || step >= (model?.steps ?? 0)) classes.push("past");
+    // Readiness is keyed by the onset; a hold whose recipe is gone is hollow along its whole run.
+    if (issues?.recipe || (held && issuesOf(held.onset)?.recipe)) classes.push("norecipe");
+    if (issues?.overlap) classes.push("overlap");
+    if (issues?.conflict || slot.others.length > 0) classes.push("conf");
+    // A clear that beat a value (its own setter or a concurrent one) leaves a mark the attention
+    // list can explain; a plain clear with nothing beaten is just an empty cell.
+    if (slot.gone && !cell && !held && !ghost) classes.push("gone");
+    if (folded.has(row)) classes.push("fold");
+    if (mode === "drum" && scorePadForRow(row) !== null) classes.push("lane");
+    if (selected === key || (selected !== null && held?.onset === selected)) classes.push("sel");
+    if (phrase && (groupSet.has(key) || (held !== undefined && groupSet.has(held.onset)))) classes.push("sel", "grp");
+    if (drag?.kind === "move") {
+      if (drag.moved) {
+        // Every carried note previews at its own destination; the pressed one is `to`, the rest
+        // follow by the same offset.
+        for (const carried of drag.keys) {
+          const [cs, cr] = carried.split(":").map(Number), c = model?.cells[carried];
+          const len = c?.k === "n" ? (c.len ?? 1) : 1, ds = cs + drag.delta.step, dr = cr + drag.delta.row;
+          if (row === dr && step >= ds && step < ds + len) { classes.push(drag.fits ? "drag" : "drag bad"); break; }
+        }
+        if (drag.keys.includes(key) || (held !== undefined && drag.keys.includes(held.onset))) classes.push("lifting");
+      }
+    } else if (drag?.kind === "marquee") {
+      if (drag.moved && step >= Math.min(drag.from.step, drag.to.step) && step <= Math.max(drag.from.step, drag.to.step) && row >= Math.min(drag.from.row, drag.to.row) && row <= Math.max(drag.from.row, drag.to.row)) classes.push("mq");
+    } else if (drag && drag.row === row && step >= (drag.kind === "place" ? drag.start : drag.from) && step <= drag.end) classes.push("drag");
+    if (target.has(key)) classes.push("target");
+    if (step === playhead) classes.push("ph");
+    return classes.join(" ");
+  }
+  function cellStyle(step: number, row: number): string {
+    const key = `${step}:${row}`, cell = model?.cells[key], held = holds.get(key);
+    const id = cell?.k === "n" ? cell.p : held?.p ?? (!cell ? ghostCells.get(key)?.p ?? undefined : undefined);
+    return id ? `--pc: ${swatch(id)}` : "";
+  }
+  function rulerLabel(step: number): string {
+    if (step % stepsPerBar === 0) return String(step / stepsPerBar + 1);
+    return step % SCORE_STEPS_PER_BEAT === 0 ? "·" : "";
+  }
+  /** Pad-lane rows show the pad's code (the name is the tooltip); 34px fits two letters, not "open hat". */
+  function rowLabel(row: number): string {
+    const lane = mode === "drum" ? scorePadForRow(row) : null;
+    return lane === null ? scorePitch(row) : PAD_CODES[lane];
+  }
+  function rowTitle(row: number): string {
+    const lane = mode === "drum" ? scorePadForRow(row) : null;
+    return lane === null ? scorePitch(row) : `${PAD_NAMES[lane]} · ${scorePitch(row)} doubles as its lane`;
+  }
+  /** Keyboard navigation moves DOM focus with the selection, so the next key still lands here. */
+  async function focusSelected() {
+    const key = selected;
+    await tick();
+    if (!alive || !key || key !== selected) return;
+    cardEl?.querySelector<HTMLButtonElement>(`[data-score-cell="${key}"]`)?.focus();
+  }
+
+  // --- writes ------------------------------------------------------------------------------------
+  /**
+   * Send one gesture: `make` builds its operations against the model as it is now; each is
+   * queued through the host in order. The inverses are computed against a local projection that
+   * advances with the gesture (the prop updates only after the host's next flush), so an undo
+   * replays exactly the values each operation replaced. A gesture the host refuses midway is
+   * recorded for the operations that were accepted, so even that much can be undone.
+   */
+  function sendAll(make: (current: ScoreModel) => ScoreOp[], label: string, space: "surface" | "document" = "surface", resolving: string | null = null): Gesture | null {
+    if (blocked || !model || !docModel || !view) return null;
+    // `surface` gestures are built against the grid's one-note-per-cell surface and translated to
+    // layered document operations here; `document` ones (undo, redo, a retained value) already are
+    // document operations. Either way what is queued, recorded and inverted is document operations,
+    // so an undo never depends on which sound happens to be chosen when it runs.
+    let ops: ScoreOp[];
+    try { ops = space === "surface" ? scoreSurfaceOps(docModel, view, make(model)) : make(docModel); } catch (cause) { onnotice(message(cause), "error"); return null; }
+    if (!ops.length) return null;
+    // Only a shown sound's notes change. Undo, redo, a retained value and an attention clear carry
+    // document keys and skip the surface, so the rule is enforced here, for the whole gesture; the
+    // history entry stays for when the sound is shown again (review of e7250d48, MEDIUM 2).
+    if ([...scoreOpLayers(docModel, ops)].some((layer) => scoreVisibilityOf(visibility, layer) !== "show")) {
+      onnotice("Show that sound to change its notes.", "info");
+      return null;
+    }
+    // A note with several different live versions plays them all, and the grid shows one. Moving,
+    // resizing or rewriting it would drop the versions the member cannot see, so only the member's
+    // own erase on the grid (a surface gesture of clears alone) or the review list acting on that
+    // one key (`resolving`) may change it. An undo or redo is neither: its clears would remove
+    // versions added since (design question 1 of the review of e7250d48 and its re-review M-A,
+    // M-B; docs/design-score-layers.md section 8).
+    if (scoreOpSeveralValues(docModel, ops, space === "surface", resolving).length) {
+      onnotice("More than one version of this note plays. Choose one in the review list first, or erase it.", "info");
+      return null;
+    }
+    // An erase or a choice that passed the rule above still replaces every version, and its undo
+    // can only write the one value that was shown: sequential edits cannot recreate concurrent
+    // versions. Say so when it happens rather than promise an exact undo (re-review of 73b68ada,
+    // design question).
+    const replacesVersions = scoreOpSeveralValues(docModel, ops).length > 0;
+    // A gesture the host cannot queue whole is refused before anything is sent: a phrase moved
+    // half way, or cleared without room for the restore, is worse than a refusal.
+    const room = onroom?.();
+    if (room !== undefined && ops.length > room) {
+      onnotice(room > 0 ? `too many changes at once (${ops.length}); save first, or pick fewer notes` : "no room for more unsaved edits; save first", "error");
+      return null;
+    }
+    // `undos[i]` is what puts back whatever `forward[i]` replaced, taken before it was sent.
+    const forward: ScoreOp[] = [], undos: (ScoreOp | null)[] = [];
+    let working = docModel;
+    const gesture = scoreGestureId();
+    const queue = (op: ScoreOp): boolean => { try { return onop(op, gesture) !== false; } catch (cause) { onnotice(message(cause), "error"); return false; } };
+    for (const op of ops) {
+      const undo = scoreInverse(working, op);
+      if (!queue(op)) break;
+      forward.push(op); undos.push(undo);
+      working = scoreApplyLocal(working, op);
+    }
+    if (!forward.length) return null;
+    sent++;
+    const newestFirst = (list: (ScoreOp | null)[]) => list.filter((op): op is ScoreOp => op !== null).reverse();
+    if (forward.length < ops.length) {
+      // The host refused an operation after accepting earlier ones (its queue is full, or it
+      // changed under the gesture). A half gesture is put back, newest first. The compensation
+      // STOPS at its first refusal: an older inverse may depend on a newer one (a move's restore of
+      // its source, then the clear of its destination), and running it after the restore failed
+      // clears the last copy of a note (review of e7250d48, HIGH 2). What is left is a prefix of the
+      // gesture, which keeps every note (scoreSurfaceOps orders it so), and it stays undoable.
+      let i = forward.length - 1;
+      for (; i >= 0; i--) {
+        const back = undos[i];
+        if (back && !queue(back)) break;
+      }
+      const kept = forward.slice(0, i + 1), keptUndos = undos.slice(0, i + 1);
+      onnotice(kept.length ? "that change could only partly be made; undo it or save and retry" : "that change could not be made right now; nothing was changed", "error");
+      if (kept.length && replacesVersions) onnotice("This note had more than one version. Undo brings back only the one that was shown.", "info");
+      return kept.length ? { label, forward: kept, inverse: newestFirst(keptUndos) } : null;
+    }
+    if (replacesVersions) onnotice("This note had more than one version. Undo brings back only the one that was shown.", "info");
+    return { label, forward, inverse: newestFirst(undos) };
+  }
+  function send(make: () => ScoreOp, label = "edit"): boolean {
+    const gesture = sendAll(() => [make()], label);
+    if (gesture) record(gesture);
+    return gesture !== null;
+  }
+  function record(gesture: Gesture) {
+    undoStack = [...undoStack.slice(-(HISTORY_MAX - 1)), gesture];
+    redoStack = [];
+  }
+  // Undo and redo replay a recorded gesture's operations through the same guards a hand edit gets
+  // (`scoreReplay`), against the document as it is now; what was actually sent, with the inverses
+  // computed at that moment, is what the opposite stack receives, so a change by someone else
+  // between an undo and its redo is restored rather than cleared.
+  function undo() {
+    const gesture = undoStack.at(-1);
+    if (!gesture || blocked) return;
+    // A refusal (`scoreReplay`'s `history` check among them) leaves the entry on the stack.
+    const sent = sendAll((current) => scoreReplay(current, gesture.inverse, true), gesture.label, "document");
+    if (!sent) return;
+    undoStack = undoStack.slice(0, -1);
+    redoStack = [...redoStack.slice(-(HISTORY_MAX - 1)), { label: gesture.label, forward: sent.inverse, inverse: sent.forward }];
+  }
+  function redo() {
+    const gesture = redoStack.at(-1);
+    if (!gesture || blocked) return;
+    const sent = sendAll((current) => scoreReplay(current, gesture.forward, true), gesture.label, "document");
+    if (!sent) return;
+    redoStack = redoStack.slice(0, -1);
+    undoStack = [...undoStack.slice(-(HISTORY_MAX - 1)), sent];
+  }
+  /** One note through the host at the level it is (or will be) written with. */
+  function audition(id: string, row: number, len: number, level = SCORE_VOLUME_MAX) {
+    const descriptor = model?.patches[id];
+    if (!onaudition || !descriptor || !model) return;
+    onaudition(descriptor, SCORE_ROW_BASE_NOTE + row, Math.max(1, scoreDurationMs(len, model.bpm)), level);
+  }
+  /** Hear a sound without touching the document: one beat at C5. */
+  function listen(descriptor: JamPatch) {
+    if (!onaudition || !model) return;
+    onaudition(descriptor, SCORE_ROW_BASE_NOTE + 12, Math.max(1, scoreDurationMs(SCORE_STEPS_PER_BEAT, model.bpm)), SCORE_VOLUME_MAX);
+  }
+  /** Hear what a cell holds, note or pad. */
+  function auditionCell(cell: ScoreCell, row: number) {
+    if (cell.k === "d") onauditionpad?.(cell.pad);
+    else audition(cell.p, row, cell.len ?? 1, cell.vol ?? SCORE_VOLUME_MAX);
+  }
+  /** `remember` keeps `len` as the next default: a length the author chose, not one the end or a neighbour forced. */
+  function place(step: number, row: number, len: number, recipe = selectedPatch, remember = true) {
+    if (!model || !placeable) return;
+    const entry = mode === "drum" ? { mode: "drum" as const, pad: scorePadForRow(row) ?? pad } : { mode: "note" as const, patch: recipe, len, volume };
+    if (!send(() => scoreCellOperation(model!, step, row, entry), entry.mode === "drum" ? "place a hit" : "place a note")) return;
+    selected = `${step}:${row}`;
+    if (entry.mode === "note" && remember) hold = len;
+    if (playing) return; // the loop's next pass plays it
+    if (entry.mode === "note") audition(entry.patch, row, len, entry.volume);
+    else onauditionpad?.(entry.pad);
+  }
+  /** Carry the onset at `from` to `to` as one undoable gesture (a clear and a set, batched by the host). */
+  function moveOnset(from: string, to: { step: number; row: number }): boolean {
+    if (!model) return false;
+    const cell = model.cells[from];
+    if (!cell) return false;
+    if (folded.has(to.row)) { onnotice("that row is folded away by the scale view", "info"); return false; }
+    const gesture = sendAll((current) => scoreMoveOperations(current, from, to), cell.k === "d" ? "move a hit" : "move a note");
+    if (!gesture) return false;
+    record(gesture);
+    selected = `${to.step}:${to.row}`;
+    goTo(to.step);
+    if (!playing) auditionCell(cell, to.row);
+    void focusSelected();
+    return true;
+  }
+  /** Shift the phrase, or the selected note, by an interval as one gesture (the panel's chooser,
+   *  Alt+PageUp/PageDown). A note that would leave the grid refuses; nothing is clamped. */
+  function transpose(semitones: number) {
+    if (!model || !semitones) return;
+    if (phrase) { moveGroup(0, semitones); return; }
+    if (!selected || !model.cells[selected]) return;
+    const [s, r] = selected.split(":").map(Number), row = r + semitones;
+    if (row < 0 || row >= SCORE_ROWS) { onnotice("that would push the note off the grid", "info"); return; }
+    moveOnset(selected, { step: s, row });
+  }
+  /** Alt+arrows: nudge the selected onset, or the whole phrase, one step or one pitch. */
+  function nudgeSelected(dStep: number, dRow: number) {
     if (!model) return;
-    send(() => scoreCellOperation(model!, step, row, model!.cells[`${step}:${row}`] ? { mode: "clear" } : mode === "drum" ? { mode, pad } : { mode, patch: selectedPatch, len: hold }));
+    if (phrase) { moveGroup(dStep, dRow); return; }
+    if (!selected || !model.cells[selected]) return;
+    const [s, r] = selected.split(":").map(Number);
+    const cell = model.cells[selected], len = cell.k === "n" ? (cell.len ?? 1) : 1;
+    const to = { step: Math.max(0, Math.min(model.steps - len, s + dStep)), row: Math.max(0, Math.min(SCORE_ROWS - 1, r + dRow)) };
+    if (to.step === s && to.row === r) return;
+    moveOnset(selected, to);
+  }
+  /** Whether every note a drag picked up is still, under its cell, the same document note with the
+   *  same value. */
+  function boundStill(bound: readonly { cell: string; key: string; bytes: string }[]): boolean {
+    return !!model && bound.every((b) => !!model!.cells[b.cell] && realKey(b.cell) === b.key && canonicalJson(model!.cells[b.cell]) === b.bytes);
+  }
+  /** Carry the whole phrase (or exactly the notes a drag picked up) by an offset as one gesture;
+   *  the phrase stays picked at its new place. */
+  function moveGroup(dStep: number, dRow: number, keys: string[] = group): boolean {
+    if (!model || keys.length < 2) return false;
+    if (keys.some((key) => folded.has(Number(key.split(":")[1]) + dRow))) { onnotice("that would land on a row the scale view folds away", "info"); return false; }
+    const gesture = sendAll((current) => scoreMoveSelection(current, keys, dStep, dRow), "move the phrase");
+    if (!gesture) return false;
+    record(gesture);
+    const moved = keys.map((key) => { const [s, r] = key.split(":").map(Number); return `${s + dStep}:${r + dRow}`; });
+    picked = new Set(moved);
+    const anchor = selected && keys.includes(selected) ? moved[keys.indexOf(selected)] : moved[0];
+    selected = anchor;
+    goTo(Number(anchor.split(":")[0]));
+    void focusSelected();
+    return true;
+  }
+  /** Copy the phrase (or the one selected note) to start where it ends; the copy becomes the phrase. */
+  function duplicateSelection() {
+    if (!model) return;
+    const keys = phrase ? group : selected && model.cells[selected] ? [selected] : [];
+    if (!keys.length) return;
+    let result: ReturnType<typeof scoreDuplicateSelection> | null = null;
+    // A copy with nothing to place must not even grow the score.
+    const gesture = sendAll((current) => { result = scoreDuplicateSelection(current, keys); return result.copied ? result.ops : []; }, phrase ? "duplicate the phrase" : "duplicate a note");
+    const summary = result as ReturnType<typeof scoreDuplicateSelection> | null;
+    if (summary && !summary.copied) { onnotice("nothing could be copied: the cells it would use are taken, or its sound is gone", "info"); return; }
+    if (!gesture || !summary) return;
+    record(gesture);
+    if (summary.skipped) onnotice(`${summary.copied} copied · ${summary.skipped} skipped, their cells were taken or their sound is gone`, "info");
+    if (summary.keys.length) {
+      picked = new Set(summary.keys.length > 1 ? summary.keys : []);
+      selected = summary.keys[0];
+      goTo(Number(summary.keys[0].split(":")[0]));
+      void focusSelected();
+    }
+  }
+  /** Clear the whole phrase as one gesture. */
+  function clearSelection() {
+    if (!model || !phrase) return;
+    const gesture = sendAll((current) => scoreClearSelection(current, group), "clear the phrase");
+    if (!gesture) return;
+    record(gesture);
+    // Notes the composer would never author (overlapping holds, past the end, a sound that is
+    // gone) can be cleared but not put back as they were: say so now, not at the undo.
+    try { scoreReplay(gesture.forward.reduce((m, op) => scoreApplyLocal(m, op), docModel!), gesture.inverse, true); }
+    catch (cause) { onnotice(`cleared · undo cannot restore every note as it was (${message(cause)})`, "info"); }
+    picked = new Set(); selected = null;
+  }
+  /** Shift+click: add a note to the phrase or take it out; the first pick joins the selected note.
+   *  Fewer than two picks is no phrase: the survivor becomes the ordinary selection. */
+  function togglePick(key: string) {
+    if (!model?.cells[key]) return;
+    const next = new Set(picked);
+    if (!next.size && selected && model.cells[selected] && selected !== key) next.add(selected);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    if (next.size < 2) { selected = [...next][0] ?? key; next.clear(); } else selected = key;
+    picked = next;
+  }
+  function selectAll() {
+    if (!model) return;
+    picked = new Set(Object.keys(model.cells));
+    if (!selected || !model.cells[selected]) selected = [...picked][0] ?? null;
+  }
+  /** Steps per page: fewer is closer. Zooming keeps the first visible step in view. */
+  function zoomBy(direction: 1 | -1) {
+    const at = ZOOM_LEVELS.indexOf(size), next = ZOOM_LEVELS[Math.max(0, Math.min(ZOOM_LEVELS.length - 1, (at < 0 ? ZOOM_LEVELS.indexOf(SCORE_PAGE_STEPS) : at) + direction))];
+    const first = columns[0] ?? 0;
+    zoom = next;
+    start = Math.floor(first / next) * next;
+  }
+  /** Copy the current bar one bar later; the destination grows if it has to. */
+  function repeatBar() {
+    if (!model) return;
+    let result: ReturnType<typeof scoreRepeatBar> | null = null;
+    const gesture = sendAll((current) => { result = scoreRepeatBar(current, currentBar, stepsPerBar); return result.ops; }, "repeat a bar");
+    const summary = result as ReturnType<typeof scoreRepeatBar> | null;
+    if (gesture && summary) {
+      record(gesture);
+      if (summary.skipped) onnotice(`${summary.copied} copied · ${summary.skipped} skipped, their cells were taken or their sound is gone`, "info");
+      goTo((currentBar + 1) * stepsPerBar);
+    } else if (summary && !summary.ops.length) onnotice("that bar is empty", "info");
+  }
+  function erase(step: number, row: number) {
+    if (!model) return;
+    const onset = scoreOnsetAt(model, step, row);
+    if (!onset) return;
+    const [s, r] = onset.key.split(":").map(Number);
+    if (send(() => scoreCellOperation(model!, s, r, { mode: "clear" }), "erase") && selected === onset.key) selected = null;
+  }
+  function clearKey(key: string) {
+    const [s, r] = key.split(":").map(Number);
+    send(() => scoreCellOperation(model!, s, r, { mode: "clear" }), "clear");
+  }
+  function clickCell(event: MouseEvent, step: number, row: number) {
+    if (dragged) { dragged = false; return; }
+    if (!model) return;
+    const key = `${step}:${row}`, onset = scoreOnsetAt(model, step, row);
+    if (event.shiftKey) { if (onset) togglePick(onset.key); return; }
+    // A plain click on anything ends the phrase: one note (or one empty cell) is the selection.
+    if (picked.size) picked = new Set();
+    if (tool === "erase") { erase(step, row); return; }
+    if (tool === "audition") {
+      selected = onset?.key ?? key;
+      if (onset) auditionCell(onset.cell, Number(onset.key.split(":")[1]));
+      // An empty cell sounds for the length a placement there would get: never past the end, and
+      // not on a folded row, which takes no placement either.
+      else if (mode === "drum" && step < model.steps) onauditionpad?.(scorePadForRow(row) ?? pad);
+      else if (selectedPatch && step < model.steps && !folded.has(row)) audition(selectedPatch, row, Math.max(1, Math.min(hold, model.steps - step)));
+      return;
+    }
+    if (onset) { select(onset.key, onset.cell); return; }
+    if (folded.has(row)) return; // a folded row takes no new note
+    if (mode === "drum") { place(step, row, 1); return; }
+    if (!selectedPatch) return;
+    const fit = fitPlacement(step, row);
+    if (fit) place(fit.start, row, fit.len, selectedPatch, fit.len === hold);
+  }
+  /** Selecting a note makes its sound the chosen one (a hit, the drum kit), so the cell keeps
+   *  showing it and the next placement continues with what was just picked up. */
+  function select(key: string, cell: ScoreCell) {
+    selected = key;
+    if (cell.k === "d") mode = "drum";
+    else if (order.includes(cell.p)) { patch = cell.p; mode = "note"; }
+  }
+  /** Placement is impossible here (past the end, no recipe, a sound not shown, folded row); the
+   *  cell stays focusable for navigation. */
+  function cellOff(step: number, row: number): boolean {
+    if (!model) return true;
+    const key = `${step}:${row}`;
+    if (model.cells[key] || holds.has(key)) return false;
+    return step >= model.steps || (mode === "note" && !selectedPatch) || !placeable || folded.has(row);
+  }
+  function contextCell(event: MouseEvent, step: number, row: number) {
+    event.preventDefault();
+    if (!blocked) erase(step, row);
+  }
+  function pointerDownCell(event: PointerEvent, step: number, row: number) {
+    // The cancelled press is forgotten only when ITS pointer presses again (a mouse keeps one
+    // pointer id, so its next primary press is that). Another pointer's press, a chord button or a
+    // second touch must not revive it: its release is still coming and must still be swallowed.
+    if (event.button === 0 && event.pointerId === cancelledPress) cancelledPress = null;
+    if (event.button !== 0 || blocked || !model || drag) return;
+    const key = `${step}:${row}`, cell = model.cells[key], held = holds.get(key);
+    // Shift+press starts a marquee, in any tool; without movement it is the Shift+click that
+    // toggles a pick.
+    if (event.shiftKey) {
+      drag = { kind: "marquee", pointerId: event.pointerId, from: { step, row }, to: { step, row }, moved: false };
+      return;
+    }
+    if (tool !== "place") return;
+    // A plain press anywhere outside the phrase ends it, exactly as a plain click does.
+    const pressedOnset = cell ? key : held?.onset ?? null;
+    if (picked.size && !(pressedOnset !== null && groupSet.has(pressedOnset))) picked = new Set();
+    // The handle at a note's last cell starts a resize; the rest of a note (or a pad hit) starts a
+    // move. The handle is the right part of that cell. Where the cell cannot be measured (the
+    // unit-test DOM) the whole last cell is the handle, which is what it was before moves existed.
+    const endOf = cell?.k === "n" && (cell.len ?? 1) === 1 ? key : held?.last ? held.onset : null;
+    const width = (event.currentTarget as HTMLElement | null)?.clientWidth ?? 0;
+    const atHandle = endOf !== null && (width <= 0 || event.offsetX / width >= 0.55);
+    if (endOf && atHandle) {
+      const note = model.cells[endOf];
+      if (note?.k !== "n") return;
+      const from = Number(endOf.split(":")[0]);
+      drag = { kind: "resize", pointerId: event.pointerId, onset: endOf, row, from, end: from + (note.len ?? 1) - 1, original: note.len ?? 1, patch: note.p };
+      return;
+    }
+    const onset = cell ? key : held?.onset ?? null;
+    if (onset) {
+      const carried = model.cells[onset];
+      if (!carried) return;
+      const onsetStep = Number(onset.split(":")[0]);
+      // Pressing a note of the phrase carries the whole phrase; any other note travels alone.
+      const keys = phrase && picked.has(onset) ? group : [onset];
+      const bound = keys.map((k) => ({ cell: k, key: realKey(k), bytes: canonicalJson(model!.cells[k]) }));
+      drag = { kind: "move", pointerId: event.pointerId, onset, cell: carried, len: carried.k === "n" ? (carried.len ?? 1) : 1, offset: step - onsetStep, to: { step: onsetStep, row }, fits: true, reason: "", moved: false, keys, bound, delta: { step: 0, row: 0 } };
+      return;
+    }
+    if (mode !== "note" || !selectedPatch || !placeable) return;
+    // The gesture starts as exactly the click the preview shows; moving the pointer lengthens it.
+    const fit = fitPlacement(step, row);
+    if (!fit) return;
+    const end = fit.start + fit.len - 1;
+    drag = { kind: "place", pointerId: event.pointerId, row, start: fit.start, end, min: end, origin: step, patch: selectedPatch, moved: false };
+  }
+  function dragMove(event: PointerEvent) {
+    if (!drag || event.pointerId !== drag.pointerId || !model) return;
+    const el = document.elementFromPoint(event.clientX, event.clientY)?.closest("[data-score-cell]") as HTMLElement | null;
+    const key = el?.dataset.scoreCell;
+    if (!key) return;
+    const [s, r] = key.split(":").map(Number);
+    if (drag.kind === "marquee") {
+      if (s === drag.to.step && r === drag.to.row) return;
+      drag = { ...drag, to: { step: s, row: r }, moved: true };
+      return;
+    }
+    if (drag.kind === "move") {
+      // The note follows the pointer at the offset it was grabbed with, clamped to the authored
+      // length; its own cells never count as occupied, so a one-step nudge is always offered.
+      const step = Math.max(0, Math.min(model.steps - drag.len, s - drag.offset));
+      if (drag.moved && step === drag.to.step && r === drag.to.row) return;
+      const [onsetStep, onsetRow] = drag.onset.split(":").map(Number);
+      const delta = { step: step - onsetStep, row: r - onsetRow };
+      // The preview asks the same question the release will: the very helper that builds the
+      // write decides, so a phrase that overlaps itself or a note whose sound is gone shows red
+      // here instead of being refused on release. Folded rows are the view's own rule.
+      const carried = drag.keys.filter((k) => model!.cells[k]);
+      let fits = carried.length === drag.keys.length && boundStill(drag.bound), reason = fits ? "" : "the phrase changed while you were moving it";
+      if (fits && carried.some((k) => folded.has(Number(k.split(":")[1]) + delta.row))) { fits = false; reason = "that row is folded away by the scale view"; }
+      if (fits) {
+        try { if (carried.length > 1) scoreMoveSelection(model, carried, delta.step, delta.row); else scoreMoveOperations(model, drag.onset, { step, row: r }); }
+        catch (cause) { fits = false; reason = message(cause); }
+      }
+      drag = { ...drag, to: { step, row: r }, delta, fits, reason, moved: true };
+      return;
+    }
+    if (r !== drag.row) return; // a hold runs along one pitch
+    if (drag.kind === "place") {
+      // Movement inside the pressed cell is a click, not a length; coming back to it after
+      // lengthening returns to the preview even when the move skipped the cells between.
+      if (s === drag.origin) { if (drag.moved && drag.end !== drag.min) drag = { ...drag, end: drag.min }; return; }
+      // Only lengthening beyond the preview is a gesture; shortening is the end handle's job.
+      const end = Math.max(drag.min, Math.min(s, model.steps - 1));
+      if (end !== drag.end || !drag.moved) drag = { ...drag, end, moved: true };
+      return;
+    }
+    const end = Math.max(drag.from, Math.min(s, model.steps - 1));
+    if (end !== drag.end) drag = { ...drag, end };
+  }
+  /** Drops the gesture; the press it came from is remembered so its completion click is swallowed. */
+  function dragCancel(event: PointerEvent | undefined = undefined) {
+    if (!drag || (event && event.pointerId !== drag.pointerId)) return;
+    cancelledPress = drag.pointerId;
+    drag = null;
+  }
+  function pointerUp(event: PointerEvent) {
+    if (cancelledPress !== null && event.pointerId === cancelledPress) {
+      cancelledPress = null;
+      dragged = true;
+      setTimeout(() => { dragged = false; }, 0);
+      return;
+    }
+    dragEnd(event);
+  }
+  function dragEnd(event: PointerEvent) {
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    const gesture = drag;
+    drag = null;
+    if (!model || blocked) return;
+    dragged = true;
+    setTimeout(() => { dragged = false; }, 0);
+    if (gesture.kind === "marquee") {
+      // A marquee that never left its cell is a Shift+click; the click handler takes it.
+      if (!gesture.moved) { dragged = false; return; }
+      picked = new Set(scoreOnsetsIn(model, gesture.from, gesture.to));
+      if (picked.size) selected = [...picked][0];
+      return;
+    }
+    if (gesture.kind === "move") {
+      const [s, r] = gesture.onset.split(":").map(Number);
+      // No movement, or back where it started: the click selects the note as before.
+      if (!gesture.moved || (gesture.to.step === s && gesture.to.row === r)) { dragged = false; return; }
+      // Release revalidates against the model as it is now, not as the press saw it: every carried
+      // note must still be the same document note with the same value, or nothing moves (review of
+      // e7250d48, MEDIUM 1: a collaborator's note that replaced a carried one used to move instead).
+      if (!boundStill(gesture.bound)) { onnotice(gesture.keys.length > 1 ? "the phrase changed while you were moving it" : "that note changed while you were moving it", "info"); return; }
+      if (!gesture.fits) { onnotice(gesture.reason || "that cannot land there", "info"); return; }
+      // Exactly the notes the press picked up move, never whatever the phrase is now.
+      if (gesture.keys.length > 1) moveGroup(gesture.delta.step, gesture.delta.row, gesture.keys);
+      else moveOnset(gesture.onset, gesture.to);
+      return;
+    }
+    if (gesture.kind === "resize") {
+      const note = model.cells[gesture.onset];
+      const len = gesture.end - gesture.from + 1;
+      if (note?.k !== "n" || note.p !== gesture.patch || (note.len ?? 1) !== gesture.original) { onnotice("that note changed while you were resizing it", "info"); return; }
+      if (len === gesture.original) { dragged = false; return; } // no change: the click selects
+      const [s, r] = gesture.onset.split(":").map(Number);
+      // A resize rewrites the whole cell, so the note's level travels with it (review H1: a drag
+      // that dropped `vol` silently reset the note to full volume).
+      if (send(() => scoreCellOperation(model!, s, r, { mode: "note", patch: note.p, len, volume: note.vol ?? SCORE_VOLUME_MAX }), "resize a note")) { selected = gesture.onset; hold = len; }
+      return;
+    }
+    // Release revalidates what pointer down saw: the start must still be free of any note and
+    // the recipe still the one chosen. A cell another edit filled meanwhile is never overwritten.
+    if (scoreOnsetAt(model, gesture.start, gesture.row) || gesture.patch !== selectedPatch || !model.patches[gesture.patch]) {
+      onnotice("another edit landed on that cell first; place the note again", "info");
+      return;
+    }
+    // A length the pointer chose, beyond what the preview already showed, becomes the next
+    // default; a click, drift inside the preview, or a fit the end or a neighbour forced keeps it.
+    place(gesture.start, gesture.row, gesture.end - gesture.start + 1, gesture.patch, gesture.end > gesture.min);
+  }
+  function hoverCell(event: PointerEvent) {
+    const key = (event.target as HTMLElement | null)?.closest?.("[data-score-cell]")?.getAttribute("data-score-cell") ?? null;
+    if (key !== hover) hover = key;
   }
   function header(field: "title" | "bpm" | "bpb" | "steps", event: Event) {
-    send(() => scoreHeaderOperation(field, (event.currentTarget as HTMLInputElement).value));
+    send(() => scoreHeaderOperation(field, (event.currentTarget as HTMLInputElement).value), `change the ${field}`);
   }
-  async function addPatch() {
-    const entry = patchLibrary[Number(library)];
-    if (blocked || adding || library === "" || !entry || patches.length >= SCORE_MAX_PATCHES) return;
-    const before = model;
-    adding = true;
+  function setBpm(next: number) { send(() => scoreHeaderOperation("bpm", String(next)), "change the tempo"); }
+  function setBpb(next: number) { send(() => scoreHeaderOperation("bpb", String(next)), "change the meter"); }
+  function setSteps(next: number) { send(() => scoreHeaderOperation("steps", String(next)), "change the length"); }
+  /** Taps settle before they write: one set_header once the tapping pauses, not one per tap. */
+  function tap() {
+    const now = Date.now();
+    taps = [...taps.filter((t) => now - t <= 2000), now].slice(-4);
+    if (tapTimer) clearTimeout(tapTimer);
+    tapTimer = setTimeout(() => {
+      tapTimer = null;
+      if (!alive) return;
+      const bpm = scoreTapTempo(taps);
+      if (bpm !== null && bpm !== model?.bpm) setBpm(bpm);
+    }, 700);
+  }
+  function setHold(next: number) {
+    hold = Math.max(1, Math.min(SCORE_MAX_STEPS, Math.round(next) || 1));
+  }
+  // The selected panel rewrites one field of a note at a time; the others travel unchanged, so a
+  // longer hold keeps its level and a quieter note keeps its hold and recipe.
+  // A hold that runs past the end (the score was shortened under it) plays clipped, but no edit
+  // shortens it on its own: every other edit of it is refused until the member shortens it or
+  // lengthens the score, so the authored length survives a score that is shortened and grown back.
+  // Shorten is that explicit step, and it brings such a hold to the end in one press; one step at a
+  // time would be refused until the last (review of e7250d48, design question 2). Its undo would
+  // write the overrun back, which native refuses while the score is that short (`change.rs`), so
+  // the undo waits until the score is lengthened, and the press says so. A length the end forced is
+  // not a deliberately chosen one, so it is not remembered as `hold` for the next placement.
+  function resizeSelected(delta: number) {
+    if (!model || !selected || selectedCell?.k !== "n") return;
+    const [step, row] = selected.split(":").map(Number), cell = selectedCell, authored = cell.len ?? 1;
+    const toEnd = delta < 0 && step + authored > model.steps;
+    const len = toEnd ? Math.max(1, model.steps - step) : Math.max(1, authored + delta);
+    if (!send(() => scoreCellOperation(model!, step, row, { mode: "note", patch: cell.p, len, volume: cell.vol ?? SCORE_VOLUME_MAX }), "resize a note")) return;
+    if (toEnd) onnotice(`Shortened to fit the score. Undo can bring back its full length of ${authored} only once the score is long enough again.`, "info");
+    else hold = len;
+  }
+  function reassignSelected(recipe: string) {
+    if (!model || !selected || selectedCell?.k !== "n" || !recipe || recipe === selectedCell.p) return;
+    const [step, row] = selected.split(":").map(Number), cell = selectedCell;
+    if (send(() => scoreCellOperation(model!, step, row, { mode: "note", patch: recipe, len: cell.len ?? 1, volume: cell.vol ?? SCORE_VOLUME_MAX }), "change a note's sound") && !playing) audition(recipe, row, cell.len ?? 1, cell.vol ?? SCORE_VOLUME_MAX);
+  }
+  function setVolume(next: number) {
+    volume = Math.max(SCORE_VOLUME_MIN, Math.min(SCORE_VOLUME_MAX, Math.round(next) || SCORE_VOLUME_MAX));
+  }
+  /** Rewrite the selected note at `next` percent; the level is remembered for the next placement and heard at once. */
+  function setVolumeSelected(next: number) {
+    if (!model || !selected || selectedCell?.k !== "n") return;
+    const [step, row] = selected.split(":").map(Number), cell = selectedCell;
+    const level = Math.max(SCORE_VOLUME_MIN, Math.min(SCORE_VOLUME_MAX, Math.round(next) || SCORE_VOLUME_MAX));
+    if (level === (cell.vol ?? SCORE_VOLUME_MAX)) return;
+    if (send(() => scoreCellOperation(model!, step, row, { mode: "note", patch: cell.p, len: cell.len ?? 1, volume: level }), "change a note's volume")) { volume = level; if (!playing) audition(cell.p, row, cell.len ?? 1, level); }
+  }
+  function useAlternative(item: ScoreDiagnostic, index: number) {
+    const gesture = sendAll((current) => scoreDiagnosticOperation(current, item, index), "choose a retained value", "document", item.key);
+    if (gesture) record(gesture);
+  }
+  /** Clear a slot the attention list names by its own note key (legacy or layered), shown or not. */
+  function clearSlot(key: string) {
+    const at = parseNoteKey(key);
+    if (!at) return;
+    const gesture = sendAll((current) => scoreReplay(current, [at.layer === null ? { op: "clear_cell", step: at.step, row: at.row } : { op: "clear_note", step: at.step, row: at.row, layer: at.layer }]), "clear", "document", key);
+    if (gesture) record(gesture);
+  }
+  /** One sound's (or the kit's) visibility steps show, ghost, hide. A ghosted or hidden layer
+   *  leaves the selection and the phrase: nothing on it may be edited. */
+  function cycleVisibility(layer: string) {
+    const next = SCORE_VISIBILITY_NEXT[scoreVisibilityOf(visibility, layer)];
+    if (next !== "show" && model && docModel) {
+      // The selection and the phrase are kept by cell; left alone they would re-bind to whatever
+      // another sound shows in those cells, and a phrase move would carry notes never picked.
+      const onLayer = (key: string) => { const cell = model!.cells[key]; return !!cell && scoreLayerOf(docModel!, cell) === layer; };
+      if (selected && onLayer(selected)) selected = null;
+      if ([...picked].some(onLayer)) picked = new Set([...picked].filter((key) => !onLayer(key)));
+    }
+    visibility = { ...visibility, [layer]: next };
+  }
+  function removePatch(id: string) {
+    const used = usage.get(id) ?? 0;
+    if (used > 0 && armedRemove !== id) { armedRemove = id; return; }
+    armedRemove = "";
+    send(() => ({ op: "remove_patch", patch: id }), "remove a sound");
+  }
+  function pickPatch(id: string) { patch = id; mode = "note"; }
+  /** Choosing a pad for placement is heard at once, like choosing a sound is listened to. */
+  function pickPad(index: number) { pad = index; onauditionpad?.(index); }
+  async function addFromLibrary(item: { name: string; patch: JamPatch }) {
+    if (blocked || adding || !model) return;
+    const already = docIdOf.get(libraryKey(item)) ?? order.find((id) => samePatch(model!.patches[id], item.patch));
+    if (already) { pickPatch(already); return; }
+    if (order.length >= SCORE_MAX_PATCHES) { onnotice(`this score already holds ${SCORE_MAX_PATCHES} sounds`, "error"); return; }
+    const key = libraryKey(item);
+    adding = key;
     try {
-      const id = await onaddpatch(entry.patch);
-      // The parent keys this component by the object. An additional reference fence avoids a
-      // late completion selecting a recipe in a refreshed/replaced view. The recipe chooser
-      // still exposes the read-back value; a successful queue alone never enables note entry.
-      if (alive && model === before) patch = id;
+      const id = await onaddpatch(item.patch);
+      // Target identity is the host's fence (`addStudioPatch` refuses when the object, kind,
+      // view or generation moved) and the host keys this component by object, so a resolved id
+      // belongs to this document. The model reference itself is NOT a usable fence: queuing the
+      // recipe replaces the working projection synchronously. An id the projection does not
+      // (yet) hold selects nothing, so adopting it early never enables placement with it.
+      if (alive) { patch = id; mode = "note"; }
     } catch (cause) {
-      if (alive) onnotice(cause instanceof Error ? cause.message : String(cause), "error");
-    } finally { if (alive) adding = false; }
+      if (alive) onnotice(message(cause), "error");
+    } finally { if (alive) adding = ""; }
   }
-  function inspect(id: string) { inspected = id; alternativePage = 0; }
+  function focusItem(item: ScoreDiagnostic) {
+    expanded = expanded === item.id ? "" : item.id;
+    altPage = 0;
+    if (item.kind === "cell" || item.kind === "note") {
+      const at = parseNoteKey(item.key);
+      if (!at) return;
+      // A note is reviewed in its own layer: choose it and show it, or the grid would show another
+      // sound's note (or nothing) in that cell. A legacy cell's layer is its value's.
+      // A removed legacy cell has no live value; its retained alternatives still name its sound.
+      const value = at.layer === null ? docModel?.cells[item.key] ?? (item.alternatives.find((a) => a.value !== null)?.value as ScoreCell | undefined) : null;
+      const layer = at.layer ?? (value ? scoreLayerOf(docModel!, value) : null);
+      if (layer !== null) {
+        if (layer === SCORE_DRUM_LAYER) mode = "drum"; else if (order.includes(layer)) pickPatch(layer);
+        if (scoreVisibilityOf(visibility, layer) !== "show") visibility = { ...visibility, [layer]: "show" };
+      }
+      selected = `${at.step}:${at.row}`;
+      goTo(at.step);
+    } else if (item.kind === "patch" && model?.patches[item.key]) pickPatch(item.key);
+  }
+  /** Tab into the grid with nothing selected adopts the focused cell, so the next arrow has a start. A
+   *  selection elsewhere (off the page, say) is never replaced by a focus change. */
+  function focusCell(key: string) { if (selected === null && !model?.cells[key] && !holds.has(key)) selected = key; }
+  /** Alt+arrows nudge the selected note. On the capture phase of the window, and stopped there: the
+   *  app binds Alt+Left/Right to its history, which must not also fire for a focused grid cell. */
+  function onNudgeKey(event: KeyboardEvent) {
+    if (!event.altKey || event.ctrlKey || event.metaKey || !cardEl?.contains(document.activeElement)) return;
+    const nudge: Record<string, [number, number]> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] };
+    const delta = nudge[event.key], jump = event.key === "PageUp" ? interval : event.key === "PageDown" ? -interval : 0;
+    if (!delta && !jump) return;
+    event.preventDefault(); event.stopPropagation();
+    if (delta) nudgeSelected(delta[0], delta[1]); else transpose(jump);
+  }
+  function moveSelection(dStep: number, dRow: number) {
+    const [s, r] = (selected ?? `${columns[0] ?? 0}:12`).split(":").map(Number);
+    const step = Math.max(0, Math.min(extent - 1, s + dStep)), row = Math.max(0, Math.min(SCORE_ROWS - 1, r + dRow));
+    selected = `${step}:${row}`;
+    goTo(step);
+    void focusSelected();
+  }
+  function toggleScale() { if (scaleOn) { scaleLast = scaleKind; scaleKind = "chromatic"; } else scaleKind = scaleLast; }
+  function onKey(event: KeyboardEvent) {
+    const target = event.target as HTMLElement | null;
+    const active = document.activeElement;
+    if (!rootEl || !rootEl.contains(active) || !target) return;
+    if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable) return;
+    // Undo, redo, select all and duplicate work anywhere in the composer.
+    if ((event.ctrlKey || event.metaKey) && !event.altKey) {
+      const chord: Record<string, () => void> = { z: () => { if (event.shiftKey) redo(); else undo(); }, Z: () => { if (event.shiftKey) redo(); else undo(); }, y: redo, a: selectAll, d: duplicateSelection };
+      const action = chord[event.key];
+      if (action) { event.preventDefault(); action(); return; }
+    }
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.key === "Escape" && drag) { event.preventDefault(); dragCancel(); return; }
+    // Tool and page keys work anywhere in the composer. Keys that move the selection or clear a
+    // cell work only while focus is on the grid card: the inspector hosts the history rail and
+    // the rack, where Backspace or an arrow must never turn into an edit of the score.
+    const map: Record<string, () => void> = {
+      b: () => { tool = "place"; }, e: () => { tool = "erase"; }, a: () => { tool = "audition"; },
+      k: () => { mode = "note"; }, d: () => { mode = "drum"; }, s: toggleScale,
+      "[": () => show(currentPage - 1), "]": () => show(currentPage + 1),
+      "-": () => zoomBy(1), "=": () => zoomBy(-1), "+": () => zoomBy(-1),
+    };
+    const clear = () => { if (phrase) clearSelection(); else if (selected) { const [s, r] = selected.split(":").map(Number); erase(s, r); } };
+    const onGrid: Record<string, () => void> = {
+      Escape: () => { if (picked.size) picked = new Set(); else selected = null; },
+      ArrowLeft: () => moveSelection(-1, 0), ArrowRight: () => moveSelection(1, 0), ArrowUp: () => moveSelection(0, 1), ArrowDown: () => moveSelection(0, -1),
+      Delete: clear, Backspace: clear,
+    };
+    const action = map[event.key] ?? (cardEl?.contains(active) ? onGrid[event.key] : undefined);
+    if (action) { event.preventDefault(); action(); }
+  }
 </script>
 
-<section class="score-editor" aria-label="Score composer">
-  <div class="score-toolbar">
-    <span class="eyebrow">Music · sixteenth-step composer</span>
-    <span class="grow"></span>
-    {#if playing}<button type="button" onclick={onstop} disabled={!onstop}>stop</button>
-    {:else}<button type="button" class="primary" onclick={onplay} disabled={loading || !model?.ready || !onplay}>play locally</button>{/if}
-  </div>
-  {#if error}<p class="warning" role="alert">{error}</p>{/if}
-  {#if readonlyReason}<p class="warning">{readonlyReason}</p>{/if}
-  {#if loading}<p role="status">Reading native score…</p>{/if}
-  {#if model}
-    <div class="score-headers">
-      <label class="title">Title <input aria-label="Score title" value={model.title} onchange={(event) => header("title", event)} disabled={blocked} /></label>
-      <label>BPM <input aria-label="Score BPM" type="number" min={JAM_MET_BPM_MIN} max={JAM_MET_BPM_MAX} step="1" value={model.bpm} onchange={(event) => header("bpm", event)} disabled={blocked} /></label>
-      <label>Beats / bar <input aria-label="Score beats per bar" type="number" min={JAM_MET_BPB_MIN} max={JAM_MET_BPB_MAX} step="1" value={model.bpb} onchange={(event) => header("bpb", event)} disabled={blocked} /></label>
-      <label>Steps <input aria-label="Score steps" type="number" min="1" max={SCORE_MAX_STEPS} step="1" value={model.steps} onchange={(event) => header("steps", event)} disabled={blocked} /></label>
+<svelte:window onkeydown={onKey} onkeydowncapture={onNudgeKey} onpointermove={drag ? dragMove : undefined} onpointerup={drag || cancelledPress !== null ? pointerUp : undefined} onpointercancel={drag ? dragCancel : undefined} onblur={drag ? () => dragCancel() : undefined} />
+
+<!-- The selected note's own controls, pinned above the inspector's tabs so that selecting
+     something always answers with its properties, whatever tab is open. -->
+{#snippet selectedPanel()}
+  {#if model && phrase}
+    {@const first = Math.min(...group.map((key) => Number(key.split(":")[0])))}
+    {@const last = Math.max(...group.map((key) => { const c = model!.cells[key]; return Number(key.split(":")[0]) + (c.k === "n" ? (c.len ?? 1) : 1); }))}
+    <div class="st-sec">phrase <span class="n">· {group.length} notes · {stepLabel(first)} to {stepLabel(last)}</span></div>
+    <div class="st-opt" data-score-phrase>
+      <span class="lb">move</span>
+      <button type="button" class="st-tile" aria-label="Move the phrase earlier" title="one step earlier [alt ←]" disabled={blocked} onclick={() => moveGroup(-1, 0)}>‹</button>
+      <button type="button" class="st-tile" aria-label="Move the phrase later" title="one step later [alt →]" disabled={blocked} onclick={() => moveGroup(1, 0)}>›</button>
+      <button type="button" class="st-tile" aria-label="Move the phrase up" title="one pitch up [alt ↑]" disabled={blocked} onclick={() => moveGroup(0, 1)}>↑</button>
+      <button type="button" class="st-tile" aria-label="Move the phrase down" title="one pitch down [alt ↓]" disabled={blocked} onclick={() => moveGroup(0, -1)}>↓</button>
+      <span class="grow"></span>
+      <button type="button" class="st-btn ghost" data-score-duplicate title="copy the phrase to start where it ends [ctrl d]" disabled={blocked} onclick={duplicateSelection}>duplicate</button>
+      <button type="button" class="st-tile" aria-label="Clear the phrase" title="clear [delete]" disabled={blocked} onclick={clearSelection}>×</button>
     </div>
-    <div class="score-entry">
-      <button type="button" class:on={mode === "note"} aria-pressed={mode === "note"} onclick={() => { mode = "note"; }}>note</button>
-      <button type="button" class:on={mode === "drum"} aria-pressed={mode === "drum"} onclick={() => { mode = "drum"; }}>drum</button>
-      {#if mode === "note"}
-        <label class="recipe">Recipe <select aria-label="Score recipe" value={selectedPatch} onchange={(event) => { patch = event.currentTarget.value; }} disabled={blocked || !patches.length}>
-          {#if !selectedPatch}<option value="">{patch ? "chosen recipe is not active yet" : "add a recipe first"}</option>{/if}
-          {#each patches as id}<option value={id}>{id}</option>{/each}
-        </select></label>
-        <label>Hold <input aria-label="Note hold in sixteenth steps" type="number" min="1" max={model.steps} step="1" bind:value={hold} disabled={blocked} /> × 1/16</label>
-      {:else}
-        <label>Pad <select aria-label="Drum pad" bind:value={pad} disabled={blocked}>{#each Array.from({ length: 10 }, (_, i) => i) as n}<option value={n}>{n}</option>{/each}</select></label>
-      {/if}
+    <div class="st-opt" data-score-transpose>
+      <span class="lb">transpose</span>
+      <select class="st-input" aria-label="Interval" title="the interval to transpose by" value={String(interval)} disabled={blocked} onchange={(e) => { interval = Number(e.currentTarget.value); }}>
+        {#each SCORE_INTERVALS as item (item.semitones)}<option value={String(item.semitones)}>{item.label}</option>{/each}
+      </select>
+      <button type="button" class="st-tile" aria-label="Transpose the phrase up" title="up by the interval [alt page up]" disabled={blocked} onclick={() => transpose(interval)}>↑</button>
+      <button type="button" class="st-tile" aria-label="Transpose the phrase down" title="down by the interval [alt page down]" disabled={blocked} onclick={() => transpose(-interval)}>↓</button>
     </div>
-    <div class="score-entry">
-      <label class="recipe">Patch library <select aria-label="Patch library recipe" bind:value={library} disabled={blocked || adding}>
-        <option value="">choose a saved synth recipe</option>
-        {#each patchLibrary as entry, index}<option value={String(index)}>{entry.name}</option>{/each}
-      </select></label>
-      <button type="button" onclick={addPatch} disabled={blocked || adding || library === "" || patches.length >= SCORE_MAX_PATCHES}>{adding ? "saving recipe…" : "add recipe to score"}</button>
-      <span class="micro">{patches.length} / {SCORE_MAX_PATCHES} active recipes</span>
-    </div>
-    <p class="hint">Click a filled onset to clear it. A line continues its authored hold; it is not another note. New holds must fit the score and cannot overlap the same pitch. Shrinking Steps retains out-of-range cells for cleanup below.</p>
-    <div class="score-toolbar">
-      <button type="button" aria-label="Previous score page" disabled={currentPage === 0} onclick={() => { page = currentPage - 1; }}>←</button>
-      <span class="micro">Steps {columns[0] + 1}–{columns.at(-1)! + 1} / {model.steps} · page {currentPage + 1} / {pages}</span>
-      <button type="button" aria-label="Next score page" disabled={currentPage + 1 >= pages} onclick={() => { page = currentPage + 1; }}>→</button>
-    </div>
-    <div class="score-scroll">
-      <table class="score-grid" aria-label="Chromatic score grid C4 to C6">
-        <thead><tr><th scope="col">pitch</th>{#each columns as step}<th scope="col" class:beat={step % 4 === 0}>{step + 1}</th>{/each}</tr></thead>
-        <tbody>{#each Array.from({ length: SCORE_ROWS }, (_, index) => SCORE_ROWS - 1 - index) as row}
-          <tr><th scope="row">{scorePitch(row)}</th>{#each columns as step}
-            {@const key = `${step}:${row}`}
-            {@const cell = model.cells[key]}
-            {@const slot = model.cellSlots[key]}
-            {@const issues = model.readiness.cells[key]}
-            <td class:beat={step % 4 === 0}><button type="button" data-score-cell={key} class:filled={!!cell} class:held={continuations.has(key)} class:problem={issues && Object.values(issues).some(Boolean)} class:cleared={slot?.removed}
-              aria-label={`${scorePitch(row)}, step ${step + 1}: ${cell ? scoreCellLabel(cell) : continuations.has(key) ? "held from an earlier onset" : slot?.removed ? "cleared" : "empty"}`}
-              title={cell ? scoreCellLabel(cell) : continuations.has(key) ? "Continuation: clear or shorten its earlier onset before adding a note here" : "Click to author a cell"}
-              disabled={blocked || (!cell && mode === "note" && !selectedPatch)} onclick={() => clickCell(step, row)}>{cell ? cell.k === "d" ? `d${cell.pad}` : cell.len ?? 1 : continuations.has(key) ? "—" : slot?.removed ? "×" : ""}</button></td>
-          {/each}</tr>
-        {/each}</tbody>
-      </table>
-    </div>
-    <div class="readiness" class:warning={!model.ready} role="status">{model.ready ? "Resolved score is ready for local playback/export." : "Score is not ready for playback/export. Retained conflicts, overflow, missing recipes, overlapping holds or out-of-length cells need attention."}</div>
-    <details class="score-evidence">
-      <summary>Retained evidence · {diagnostics.length} header / cell / recipe slots{model.readiness.headerConflicts ? " · header conflicts" : ""}</summary>
-      <p class="hint">Raw selected values are not necessarily effective: any concurrent clear/remove wins. Choosing a value authors a fresh Save against the current state; it does not replay its old signature. Every slot and source remains inspectable, including overflow and removals.</p>
-      <div class="score-toolbar">
-        <button type="button" aria-label="Previous evidence page" disabled={currentSlotPage === 0} onclick={() => { slotPage = currentSlotPage - 1; }}>←</button>
-        <span class="micro">Evidence page {currentSlotPage + 1} / {diagnosticPages}</span>
-        <button type="button" aria-label="Next evidence page" disabled={currentSlotPage + 1 >= diagnosticPages} onclick={() => { slotPage = currentSlotPage + 1; }}>→</button>
+  {:else if model && selected}
+    {@const [sStep, sRow] = selected.split(":").map(Number)}
+    <div class="st-sec">{selectedCell?.k === "d" ? "selected drum" : selectedCell?.k === "n" ? "selected note" : "selected cell"} <span class="n">· {scorePitch(sRow)} · {stepLabel(sStep)}</span></div>
+    {#if selectedCell?.k === "n"}
+      <div class="st-opt">
+        <i class="sw" style="background: {swatch(selectedCell.p)}"></i>
+        <select class="st-input grow" aria-label="Sound of this note" title="change this note's sound" value={selectedCell.p} disabled={blocked} onchange={(e) => reassignSelected(e.currentTarget.value)}>
+          <!-- Only a shown sound takes notes: moving a note into a ghosted or hidden one would make
+               it vanish from under the member's hand. -->
+          {#each order.filter((id) => id === selectedCell?.p || scoreVisibilityOf(visibility, id) === "show") as id (id)}<option value={id}>{nameOf(id)}</option>{/each}
+        </select>
+        {#if onaudition}<button type="button" class="st-tile" aria-label="Listen to this note" title="listen" onclick={() => auditionCell(selectedCell!, sRow)}><svg viewBox="0 0 16 16" class="solid" aria-hidden="true"><path d="M4 2.5 13 8 4 13.5z"></path></svg></button>{/if}
       </div>
-      <div class="slot-list">{#each visibleSlots as item (item.id)}
-        <button type="button" class:on={inspection?.id === item.id} data-score-evidence={item.id} onclick={() => inspect(item.id)}>
-          <span>{item.kind} {item.key}</span><span>{item.removed ? "removed · " : ""}{item.alternatives.length} value(s){item.issues.length ? ` · ${item.issues.join(", ")}` : ""}</span>
-        </button>
-      {/each}</div>
-      {#if inspection}
-        <section class="inspection" aria-label="Retained score alternatives">
-          <h4>{inspection.kind} {inspection.key}</h4>
-          <p>{inspection.removed ? "Effective removal wins this slot." : "The first value is the raw Automerge selection."} {inspection.issues.join(" · ")}</p>
-          {#if inspection.kind === "cell"}<button type="button" disabled={blocked} onclick={() => send(() => { const [step, row] = inspection!.key.split(":").map(Number); return scoreCellOperation(model!, step, row, { mode: "clear" }); })}>clear this coordinate</button>{/if}
-          {#if inspection.kind === "patch"}<button type="button" disabled={blocked} onclick={() => send(() => ({ op: "remove_patch", patch: inspection!.key }))}>remove this recipe</button>{/if}
-          {#each alternatives as alternative, index (alternative.source.opId)}
-            {@const absolute = currentAlternativePage * SCORE_ALTERNATIVE_PAGE + index}
-            <article class="alternative">
-              <span class="eyebrow">{absolute === 0 ? "raw selected" : "concurrent alternative"}</span>
-              <pre>{JSON.stringify(alternative.value, null, 2)}</pre>
-              <dl><dt>Operation</dt><dd>{alternative.source.opId}</dd><dt>Author</dt><dd>{alternative.source.author}</dd><dt>Nonce</dt><dd>{alternative.source.nonce}</dd></dl>
-              <button type="button" disabled={blocked} onclick={() => send(() => scoreDiagnosticOperation(model!, inspection!, absolute))}>{alternative.value === null ? "keep removal" : "use this value"}</button>
-            </article>
-          {/each}
-          <div class="score-toolbar"><button type="button" aria-label="Previous alternative page" disabled={currentAlternativePage === 0} onclick={() => { alternativePage = currentAlternativePage - 1; }}>←</button><span class="micro">Values page {currentAlternativePage + 1} / {alternativePages}</span><button type="button" aria-label="Next alternative page" disabled={currentAlternativePage + 1 >= alternativePages} onclick={() => { alternativePage = currentAlternativePage + 1; }}>→</button></div>
-        </section>
+      <div class="st-opt">
+        <span class="lb">length</span>
+        <button type="button" class="st-tile" aria-label="Shorten this note" disabled={blocked || (selectedCell.len ?? 1) <= 1} onclick={() => resizeSelected(-1)}>−</button>
+        <span class="mono strong">{selectedCell.len ?? 1}</span>
+        <button type="button" class="st-tile" aria-label="Lengthen this note" disabled={blocked || sStep + (selectedCell.len ?? 1) >= model.steps} onclick={() => resizeSelected(1)}>＋</button>
+        <span class="lb">move</span>
+        <button type="button" class="st-tile" aria-label="Move this note earlier" title="one step earlier [alt ←]" disabled={blocked || sStep <= 0} onclick={() => nudgeSelected(-1, 0)}>‹</button>
+        <button type="button" class="st-tile" aria-label="Move this note later" title="one step later [alt →]" disabled={blocked || sStep + (selectedCell.len ?? 1) >= model.steps} onclick={() => nudgeSelected(1, 0)}>›</button>
+        <button type="button" class="st-tile" aria-label="Move this note up" title="one pitch up [alt ↑]" disabled={blocked || sRow >= SCORE_ROWS - 1} onclick={() => nudgeSelected(0, 1)}>↑</button>
+        <button type="button" class="st-tile" aria-label="Move this note down" title="one pitch down [alt ↓]" disabled={blocked || sRow <= 0} onclick={() => nudgeSelected(0, -1)}>↓</button>
+        <span class="grow"></span>
+        <button type="button" class="st-tile" aria-label="Duplicate this note" title="copy it to start where it ends [ctrl d]" disabled={blocked} onclick={duplicateSelection}>⧉</button>
+        <button type="button" class="st-tile" aria-label="Clear this note" title="clear" disabled={blocked} onclick={() => clearKey(selected!)}>×</button>
+      </div>
+      <div class="st-opt">
+        <span class="lb">volume</span>
+        <button type="button" class="st-tile" aria-label="Quieter" disabled={blocked || (selectedCell.vol ?? SCORE_VOLUME_MAX) <= SCORE_VOLUME_MIN} onclick={() => setVolumeSelected((selectedCell?.k === "n" ? selectedCell.vol ?? SCORE_VOLUME_MAX : SCORE_VOLUME_MAX) - 10)}>−</button>
+        <input class="st-input num" type="number" min={SCORE_VOLUME_MIN} max={SCORE_VOLUME_MAX} step="1" aria-label="Volume of this note" title="how loud this note plays, as a percentage of its sound" value={selectedCell.vol ?? SCORE_VOLUME_MAX} disabled={blocked} onchange={(e) => setVolumeSelected(Number(e.currentTarget.value))} />
+        <button type="button" class="st-tile" aria-label="Louder" disabled={blocked || (selectedCell.vol ?? SCORE_VOLUME_MAX) >= SCORE_VOLUME_MAX} onclick={() => setVolumeSelected((selectedCell?.k === "n" ? selectedCell.vol ?? SCORE_VOLUME_MAX : SCORE_VOLUME_MAX) + 10)}>＋</button>
+        <span class="micro">%</span>
+      </div>
+    {:else if selectedCell?.k === "d"}
+      <div class="st-opt">
+        <span class="sc-padt mini"><span class="code">{PAD_CODES[selectedCell.pad]}</span></span>
+        <span class="t">{PAD_NAMES[selectedCell.pad]}</span>
+        {#if onauditionpad}<button type="button" class="st-tile" aria-label="Listen to this drum" title="listen" onclick={() => auditionCell(selectedCell!, sRow)}><svg viewBox="0 0 16 16" class="solid" aria-hidden="true"><path d="M4 2.5 13 8 4 13.5z"></path></svg></button>{/if}
+        <span class="lb">move</span>
+        <button type="button" class="st-tile" aria-label="Move this drum earlier" title="one step earlier [alt ←]" disabled={blocked || sStep <= 0} onclick={() => nudgeSelected(-1, 0)}>‹</button>
+        <button type="button" class="st-tile" aria-label="Move this drum later" title="one step later [alt →]" disabled={blocked || sStep + 1 >= model.steps} onclick={() => nudgeSelected(1, 0)}>›</button>
+        <span class="grow"></span>
+        <button type="button" class="st-tile" aria-label="Clear this pad hit" title="clear" disabled={blocked} onclick={() => clearKey(selected!)}>×</button>
+      </div>
+    {:else if holds.has(selected)}
+      <div class="st-opt"><span class="micro">part of {nameOf(holds.get(selected)!.p)} from {stepLabel(Number(holds.get(selected)!.onset.split(":")[0]))}</span><span class="grow"></span><button type="button" class="st-link" onclick={() => { selected = holds.get(selected!)!.onset; }}>select it</button></div>
+    {:else if selectedDiag?.removed}
+      <div class="st-opt"><span class="micro">cleared</span></div>
+    {:else}
+      <div class="st-opt"><span class="micro">empty</span></div>
+    {/if}
+    {#if selectedNotes.length > 1}
+      <!-- Overlapping holds: the owner sounds; the others are listed so the choice is explicit. -->
+      <div class="st-opt"><span class="chip warn"><i></i><span class="micro">{selectedNotes.length} notes here</span></span></div>
+      {#each selectedNotes.slice(1) as other (other.key)}
+        {#if other.cell.k === "n"}
+          <div class="sc-alt">
+            <i class="sw" style="background: {swatch(other.cell.p)}"></i>
+            <span class="t">{nameOf(other.cell.p)} · {stepLabel(Number(other.key.split(":")[0]))} · {other.cell.len ?? 1}</span>
+            <span class="grow"></span>
+            <button type="button" class="st-link" data-score-note-select={other.key} onclick={() => { selected = other.key; }}>select</button>
+            <button type="button" class="st-link" data-score-note-clear={other.key} disabled={blocked} onclick={() => clearKey(other.key)}>clear</button>
+          </div>
+        {/if}
+      {/each}
+    {/if}
+    {@const author = selectedCell ? slotOf(selected).author : null}
+    {#if author}
+      <p class="micro wrap">by <i class="who" style="background: {tint(author)}"></i>{who(author)}</p>
+    {/if}
+    {#if selectedDiag && (selectedDiag.alternatives.length > 1 || selectedDiag.issues.length)}
+      {#if selectedDiag.issues.length}<div class="st-opt">{#each selectedDiag.issues as issue (issue)}<span class="chip warn"><i></i><span class="micro">{SCORE_ISSUE_LABELS[issue as keyof typeof SCORE_ISSUE_LABELS] ?? issue}</span></span>{/each}</div>{/if}
+      <!-- The score tab's attention list already offers the retained values; the panel does not repeat them there. -->
+      {#if selectedDiag.alternatives.length > 1 && tab !== "score"}{@render alternatives(selectedDiag)}{/if}
+    {/if}
+  {/if}
+{/snippet}
+
+<!-- A layer's show / ghost / hide toggle: a symbol only (the owner's rule), its state named for
+     screen readers. Clicking steps to the next state. -->
+{#snippet visToggle(layer: string, name: string)}
+  {@const state = scoreVisibilityOf(visibility, layer)}
+  <button type="button" class="vis" data-v={state} data-score-visibility={layer} aria-label="{name}: {state === 'show' ? 'shown' : state === 'ghost' ? 'ghosted' : 'hidden'}" onclick={() => cycleVisibility(layer)}>
+    {#if state === "show"}<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.5" y="5.5" width="11" height="5" rx="1.5" fill="currentColor"></rect></svg>
+    {:else if state === "ghost"}<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.5" y="5.5" width="11" height="5" rx="1.5" stroke-dasharray="2 1.5"></rect></svg>
+    {:else}<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.5" y="5.5" width="11" height="5" rx="1.5"></rect><path d="M3 13 13 3"></path></svg>{/if}
+  </button>
+{/snippet}
+
+{#snippet alternatives(item: ScoreDiagnostic)}
+  {@const altPages = Math.max(1, Math.ceil(item.alternatives.length / SCORE_ALTERNATIVE_PAGE))}
+  {@const current = Math.min(altPage, altPages - 1)}
+  {@const effective = item.removed ? null : item.alternatives[0]?.value}
+  <div class="sc-alts">
+    {#each item.alternatives.slice(current * SCORE_ALTERNATIVE_PAGE, (current + 1) * SCORE_ALTERNATIVE_PAGE) as alt, i (alt.source.opId)}
+      {@const absolute = current * SCORE_ALTERNATIVE_PAGE + i}
+      <div class="sc-alt" class:cur={alt.value === effective || (alt.value === null && effective === null)}>
+        <i class="who" style="background: {tint(alt.source.author)}"></i>
+        <span class="t">{who(alt.source.author)} · {valueLabel(alt.value)}</span>
+        <span class="grow"></span>
+        <button type="button" class="st-link" data-score-alt={absolute} disabled={blocked} title={alt.value === null ? "author this clear again" : "author this value again as your own edit"} onclick={() => useAlternative(item, absolute)}>{alt.value === null ? "clear" : "use this"}</button>
+      </div>
+    {/each}
+    {#if altPages > 1}
+      <div class="sc-pager">
+        <button type="button" class="st-tile" aria-label="Previous alternative page" disabled={current === 0} onclick={() => { altPage = current - 1; }}>‹</button>
+        <span class="micro">{current + 1} / {altPages}</span>
+        <button type="button" class="st-tile" aria-label="Next alternative page" disabled={current + 1 >= altPages} onclick={() => { altPage = current + 1; }}>›</button>
+      </div>
+    {/if}
+  </div>
+{/snippet}
+
+<section class="sc" aria-label="Score composer" bind:this={rootEl}>
+  <!-- header: the document's facts and the export actions -->
+  <div class="sc-head">
+    <input class="st-title" aria-label="Score title" value={model?.title ?? ""} placeholder="untitled" disabled={blocked} onchange={(e) => header("title", e)} />
+    {#if differing.title.length}<span class="chip warn" title="another title was set at the same time by {differing.title.map((c) => who(c.source.author)).join(', ')}"><i></i><span class="micro">title</span></span>{/if}
+    {#if model}
+      <span class="chip"><span class="micro">{model.bpm} bpm</span></span>
+      <span class="chip"><span class="micro">{model.bpb} / bar</span></span>
+      <span class="chip"><span class="micro">{model.steps} steps · {bars} {bars === 1 ? "bar" : "bars"} · {scoreTimeLabel(totalMs)}</span></span>
+      <!-- Nothing here gates playing or exporting: concurrent edits merge by adding, and whatever
+           cannot play is skipped. The count only says there is something to look at. -->
+      {#if issueCount}
+        <button type="button" class="chip as-btn" title="open the list of notes, sounds and headers worth a look" onclick={() => { tab = "score"; }}><i></i><span class="micro">{issueCount} to review</span></button>
       {/if}
-    </details>
-  {:else if !loading}<p class="hint">Select a score to compose music. No fixture or local substitute is used when a native read fails.</p>{/if}
+    {/if}
+    <span class="grow"></span>
+    <button type="button" class="st-tg" class:on={scaleOn} aria-pressed={scaleOn} data-score-scale-toggle title="scale view [s] · folds rows outside the scale; notes there stay" onclick={toggleScale}><i></i><span class="micro">{scaleOn ? `${SCORE_ROOTS[scaleRoot]} ${scaleKind}` : "scale view"}</span></button>
+    {#if onpost}<button type="button" class="st-btn primary" data-score-post disabled={mediaBusy || playing || !model} title="attach this score to a chat message" onclick={onpost}><svg viewBox="0 0 16 16" class="ico" aria-hidden="true"><path d="M2 8l12-6-4 12-2.5-4.5z"></path></svg>post to chat</button>{/if}
+    {#if onexport}<button type="button" class="st-btn" disabled={mediaBusy || playing || !model} title="save this score as a .jamtake file" onclick={onexport}>download .jamtake</button>{/if}
+    {#if onshare}<button type="button" class="st-btn" disabled={mediaBusy || playing || !model} title="put a .jamtake of this score in the server share" onclick={onshare}>share</button>{/if}
+  </div>
+
+  {#if error}<div class="st-banner danger" role="alert">{error}</div>{/if}
+  {#if readonlyReason}<div class="st-banner warn">{readonlyReason}</div>{/if}
+  {#if loading}<p class="micro" role="status">reading…</p>{/if}
+
+  {#if model}
+    <div class="sc-row">
+      <!-- tool rail -->
+      <div class="sc-tools">
+        <button type="button" class="sc-tool" class:on={tool === "place"} aria-pressed={tool === "place"} aria-label="Place" title="place [b] · click sets a note, drag sets its length; drag a note to move it, drag its end handle to resize it" onclick={() => { tool = "place"; }}>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 13l1-4 7-7 3 3-7 7-4 1z"></path><path d="M9.5 3.5l3 3"></path></svg><span class="k">b</span>
+        </button>
+        <button type="button" class="sc-tool" class:on={tool === "erase"} aria-pressed={tool === "erase"} aria-label="Erase" title="erase [e] · right-click erases in any tool" onclick={() => { tool = "erase"; }}>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9 3l4 4-6 6H4.5L2.5 11z"></path><path d="M6 8l3.5 3.5M3 14h10"></path></svg><span class="k">e</span>
+        </button>
+        {#if onaudition}
+          <button type="button" class="sc-tool" class:on={tool === "audition"} aria-pressed={tool === "audition"} aria-label="Listen" title="listen [a] · click a cell to hear it" onclick={() => { tool = "audition"; }}>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 6v4h2.5L9 13V3L5.5 6z"></path><path d="M11 6a3 3 0 010 4"></path></svg><span class="k">a</span>
+          </button>
+        {/if}
+        <span class="sc-sep"></span>
+        <button type="button" class="sc-tool" class:on={mode === "note"} aria-pressed={mode === "note"} aria-label="Notes" data-score-mode="note" title="notes [k] · place notes with the chosen sound" onclick={() => { mode = "note"; }}>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1"></rect><path d="M5 3v6M8 3v6M11 3v6"></path></svg><span class="k">k</span>
+        </button>
+        <button type="button" class="sc-tool" class:on={mode === "drum"} aria-pressed={mode === "drum"} aria-label="Drums" data-score-mode="drum" title="drums [d] · the bottom ten rows are one drum each; elsewhere the chosen drum" onclick={() => { mode = "drum"; }}>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.5" y="2.5" width="4" height="4" rx="1"></rect><rect x="9.5" y="2.5" width="4" height="4" rx="1"></rect><rect x="2.5" y="9.5" width="4" height="4" rx="1"></rect><rect x="9.5" y="9.5" width="4" height="4" rx="1"></rect></svg><span class="k">d</span>
+        </button>
+        <span class="sc-sep"></span>
+        <button type="button" class="sc-tool" class:on={scaleOn} aria-pressed={scaleOn} aria-label="Scale view" title="scale view [s]" onclick={toggleScale}>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h12"></path><circle cx="6" cy="8" r="1.8" fill="currentColor"></circle></svg><span class="k">s</span>
+        </button>
+        <span class="sc-sep"></span>
+        <button type="button" class="sc-tool" aria-label="Undo" data-score-undo title={undoStack.length ? `undo ${undoStack.at(-1)!.label} [ctrl z]` : "nothing to undo"} disabled={!canUndo} onclick={undo}>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 4L2.5 7.5 6 11"></path><path d="M3 7.5h6.5a3.5 3.5 0 010 7H8"></path></svg>
+        </button>
+        <button type="button" class="sc-tool" aria-label="Redo" data-score-redo title={redoStack.length ? `redo ${redoStack.at(-1)!.label} [ctrl shift z]` : "nothing to redo"} disabled={!canRedo} onclick={redo}>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 4l3.5 3.5L10 11"></path><path d="M13 7.5H6.5a3.5 3.5 0 000 7H8"></path></svg>
+        </button>
+      </div>
+
+      <!-- the grid -->
+      <div class="sc-card" bind:this={cardEl}>
+        <div class="sc-grid" class:locked={blocked} class:pads={mode === "drum"} role="group" aria-label="Chromatic score grid C4 to C6" style="--cols: {columns.length}; --row: {rowPx}px; grid-template-rows: {gridRows}"
+          onpointerover={hoverCell} onpointerleave={() => { hover = null; }}>
+          <span class="sc-corner"></span>
+          {#each columns as step (step)}
+            <span class="sc-rs" class:bar={step % stepsPerBar === 0} class:beat={step % SCORE_STEPS_PER_BEAT === 0} class:ph={step === playhead} class:past={step >= model.steps}>{rulerLabel(step)}</span>
+          {/each}
+          {#each rows as row (row)}
+            <span class="sc-lab" class:blk={scoreRowIsBlack(row)} class:oct={row % 12 === 0} class:fold={folded.has(row)} class:lane={mode === "drum" && scorePadForRow(row) !== null} title={rowTitle(row)}>{rowLabel(row)}</span>
+            {#each columns as step (step)}
+              {@const key = `${step}:${row}`}
+              {@const cell = model.cells[key]}
+              {@const held = holds.get(key)}
+              {@const label = cellLabel(step, row)}
+              <button type="button" class="sc-cell {cellClass(step, row)}" class:blk={scoreRowIsBlack(row)} class:off={cellOff(step, row)} data-score-cell={key} data-k={cell?.k === "d" ? PAD_CODES[cell.pad] : undefined}
+                style={cellStyle(step, row)} aria-label={label} title={cellTitle(step, row, label)} tabindex={key === tabbable ? 0 : -1}
+                disabled={blocked} aria-disabled={cellOff(step, row)}
+                onclick={(e) => clickCell(e, step, row)} oncontextmenu={(e) => contextCell(e, step, row)} onpointerdown={(e) => pointerDownCell(e, step, row)} onfocus={() => focusCell(key)}></button>
+            {/each}
+          {/each}
+          {#if playhead >= 0 && columns.includes(playhead)}
+            <span class="sc-ph" aria-hidden="true" style="--i: {playhead - columns[0]}"></span>
+          {/if}
+        </div>
+        <div class="sc-foot">
+          <button type="button" class="st-tile" aria-label="Previous score page" disabled={currentPage === 0} onclick={() => show(currentPage - 1)}>‹</button>
+          <span class="mono">{columns.length ? `${columns[0] + 1}–${columns[columns.length - 1] + 1}` : "·"} <span class="dim">/ {model.steps}</span></span>
+          <button type="button" class="st-tile" aria-label="Next score page" disabled={currentPage + 1 >= pages} onclick={() => show(currentPage + 1)}>›</button>
+          <button type="button" class="st-tile" aria-label="Zoom out" data-score-zoom-out title="more steps per page [-]" disabled={size >= ZOOM_LEVELS[ZOOM_LEVELS.length - 1]} onclick={() => zoomBy(1)}>−</button>
+          <span class="micro" data-score-zoom={size} title="steps per page">{size}</span>
+          <button type="button" class="st-tile" aria-label="Zoom in" data-score-zoom-in title="fewer steps per page [=]" disabled={size <= ZOOM_LEVELS[0]} onclick={() => zoomBy(-1)}>＋</button>
+          <button type="button" class="st-tile txt" class:on={dense} aria-pressed={dense} data-score-density title={dense ? "compact rows · click for comfortable rows" : "comfortable rows · click for compact rows"} onclick={() => { dense = !dense; }}>{dense ? "compact" : "roomy"}</button>
+          <span class="grow"></span>
+          <span class="micro">{selected ? `${scorePitch(Number(selected.split(":")[1]))} · ${stepLabel(Number(selected.split(":")[0]))}` : ""}</span>
+          <span class="micro hi">{TOOL_NAMES[tool]}{mode === "drum" ? ` · ${PAD_NAMES[pad]}` : selectedPatch ? ` · ${nameOf(selectedPatch)} · ${holdName(hold)}` : patchPending ? " · saving sound…" : ""}</span>
+        </div>
+      </div>
+
+      <!-- inspector: the selected note first and always, then the tabs -->
+      <div class="sc-inspector">
+        {#if selected || phrase}
+          <div class="sc-selbox" data-score-selected>
+            {@render selectedPanel()}
+          </div>
+        {/if}
+        <div class="sc-itabs">
+          <button type="button" class="st-itab" class:on={tab === "sounds"} data-score-tab="sounds" onclick={() => { tab = "sounds"; }}>sounds</button>
+          <button type="button" class="st-itab" class:on={tab === "score"} data-score-tab="score" onclick={() => { tab = "score"; }}>score{#if issueCount}<i class="dot"></i>{/if}</button>
+          <button type="button" class="st-itab" class:on={tab === "history"} data-score-tab="history" onclick={() => { tab = "history"; }}>history</button>
+        </div>
+        <div class="sc-ibody">
+          {#if tab === "sounds"}
+            <div class="st-sec">new notes</div>
+            <div class="st-opt">
+              <button type="button" class="st-tile txt" class:on={mode === "note"} aria-pressed={mode === "note"} onclick={() => { mode = "note"; }}>notes</button>
+              <button type="button" class="st-tile txt" class:on={mode === "drum"} aria-pressed={mode === "drum"} onclick={() => { mode = "drum"; }}>drums</button>
+            </div>
+            {#if mode === "note"}
+              <div class="st-opt">
+                <span class="lb">note length</span>
+                <button type="button" class="st-tile" aria-label="Shorter note length" disabled={hold <= 1} onclick={() => setHold(hold - 1)}>−</button>
+                <input class="st-input num" type="number" min="1" max={SCORE_MAX_STEPS} step="1" aria-label="Note length in sixteenth steps" title="how many sixteenth steps a placed note lasts; dragging across the grid sets it too" value={hold} oninput={(e) => setHold(Number(e.currentTarget.value))} disabled={blocked} />
+                <button type="button" class="st-tile" aria-label="Longer note length" disabled={hold >= SCORE_MAX_STEPS} onclick={() => setHold(hold + 1)}>＋</button>
+                <span class="micro">{holdName(hold)}</span>
+              </div>
+              <div class="st-opt">
+                <span class="lb">volume</span>
+                <button type="button" class="st-tile" aria-label="Quieter placement" disabled={volume <= SCORE_VOLUME_MIN} onclick={() => setVolume(volume - 10)}>−</button>
+                <input class="st-input num" type="number" min={SCORE_VOLUME_MIN} max={SCORE_VOLUME_MAX} step="1" aria-label="Placement volume" title="how loud a placed note plays, as a percentage of its sound; the selected note's panel changes one note" value={volume} oninput={(e) => setVolume(Number(e.currentTarget.value))} disabled={blocked} />
+                <button type="button" class="st-tile" aria-label="Louder placement" disabled={volume >= SCORE_VOLUME_MAX} onclick={() => setVolume(volume + 10)}>＋</button>
+                <span class="micro">%</span>
+              </div>
+              <div class="st-opt">
+                <span class="lb">snap</span>
+                {#each SCORE_SNAPS as unit (unit)}
+                  <button type="button" class="st-tile txt" class:on={snap === unit} aria-pressed={snap === unit} data-score-snap={unit} title="a click lands on the nearest {snapName(unit)} boundary" onclick={() => { snap = unit; }}>{snapName(unit)}</button>
+                {/each}
+              </div>
+              <div class="st-opt">
+                <span class="lb">scale</span>
+                {#each SCORE_SCALE_KINDS as kind (kind)}
+                  <button type="button" class="st-tile txt" class:on={scaleKind === kind} aria-pressed={scaleKind === kind} data-score-scale={kind} onclick={() => { scaleKind = kind; if (kind !== "chromatic") scaleLast = kind; }}>{kind}</button>
+                {/each}
+                <select class="st-input" aria-label="Scale root" title="root note of the scale" value={scaleRoot} disabled={!scaleOn} onchange={(e) => { scaleRoot = Number(e.currentTarget.value); }}>
+                  {#each SCORE_ROOTS as name, i (name)}<option value={i}>{name}</option>{/each}
+                </select>
+              </div>
+            {/if}
+            {#if mode === "drum"}
+              <div class="sc-pads">
+                {#each PAD_NAMES as name, i (name)}
+                  <button type="button" class="sc-padt" class:on={pad === i} aria-pressed={pad === i} data-score-pad={i} title="{name} · row {scorePitch(i)} is its own lane" onclick={() => pickPad(i)}>
+                    <span class="code">{PAD_CODES[i]}</span><span class="nm">{name}</span>
+                  </button>
+                {/each}
+              </div>
+            {/if}
+
+            <div class="st-sec nxt">sounds in this score <span class="n">· {order.length} / {SCORE_MAX_PATCHES}</span></div>
+            <!-- The drum kit is one layer, toggled like a sound. -->
+            <div class="sc-prow" class:on={mode === "drum"}>
+              {@render visToggle(SCORE_DRUM_LAYER, "drums")}
+              <button type="button" class="pick" data-doc-kit aria-pressed={mode === "drum"} title="drums · {hitCount} {hitCount === 1 ? 'hit' : 'hits'} · click to place hits" onclick={() => { mode = "drum"; }}>
+                <i class="sw kit"></i>
+                <span class="nm">drums</span>
+                <span class="grow"></span>
+                <span class="micro">{hitCount}</span>
+              </button>
+            </div>
+            {#each order as id (id)}
+              {@const issues = model.readiness.patches[id]}
+              {@const used = usage.get(id) ?? 0}
+              <div class="sc-prow" class:on={selectedPatch === id && mode === "note"}>
+                {@render visToggle(id, nameOf(id))}
+                <button type="button" class="pick" data-doc-patch={id} aria-pressed={selectedPatch === id} title="{nameOf(id)} · {used} {used === 1 ? 'note' : 'notes'} · click to place with it" onclick={() => pickPatch(id)}>
+                  <i class="sw" style="background: {swatch(id)}"></i>
+                  <svg viewBox="0 0 26 12" aria-hidden="true"><path d={waveGlyph(model.patches[id])}></path></svg>
+                  <span class="nm">{nameOf(id)}</span>
+                  <span class="grow"></span>
+                  {#if issues?.count}<span class="chip warn"><span class="micro">over</span></span>{/if}
+                  {#if issues?.conflict}<span class="chip warn"><span class="micro">conflict</span></span>{/if}
+                  <span class="micro">{used}</span>
+                </button>
+                {#if onaudition}
+                  <button type="button" class="x listen" data-doc-listen={id} aria-label="Listen to {nameOf(id)}" title="listen" onclick={() => listen(model!.patches[id])}><svg viewBox="0 0 16 16" class="solid" aria-hidden="true"><path d="M4 2.5 13 8 4 13.5z"></path></svg></button>
+                {/if}
+                <button type="button" class="x" class:armed={armedRemove === id} data-remove-patch={id} aria-label="Remove {nameOf(id)}" disabled={blocked}
+                  title={armedRemove === id ? `${used} ${used === 1 ? "note keeps" : "notes keep"} this sound's id and ${used === 1 ? "is" : "are"} flagged until cleared or re-placed` : used ? `remove · ${used} ${used === 1 ? "note uses" : "notes use"} it` : "remove"}
+                  onclick={() => removePatch(id)}>{armedRemove === id ? "remove anyway" : "×"}</button>
+              </div>
+            {:else}
+              <p class="micro wrap">no sounds yet · add one below</p>
+            {/each}
+            {#if patchPending}<div class="st-card accent" data-pending-patch={patch}><span class="micro">saving sound…</span></div>{/if}
+
+            {#each shelves as group (group.shelf)}
+              <div class="sc-shelf">{group.label} · {group.items.length}</div>
+              <div class="sc-rack">
+                {#each group.items as item (libraryKey(item))}
+                  {@const inDoc = docIdOf.get(libraryKey(item)) ?? null}
+                  <div class="rk-wrap" class:indoc={!!inDoc} class:on={!!inDoc && selectedPatch === inDoc}>
+                    <button type="button" class="rk" class:indoc={!!inDoc} class:on={!!inDoc && selectedPatch === inDoc} class:busy={adding === libraryKey(item)} data-lib-patch={item.name}
+                      aria-busy={adding === libraryKey(item)} disabled={blocked || !!adding} title={inDoc ? `${item.name} · in this score · click to place with it` : `${item.name} · ${group.label} · click to add it to this score`} onclick={() => addFromLibrary(item)}>
+                      <svg viewBox="0 0 26 12" aria-hidden="true"><path d={waveGlyph(item.patch)}></path></svg>
+                      <span class="nm">{rackLabel(item.name)}</span>
+                    </button>
+                    {#if onaudition}
+                      <button type="button" class="rk-listen" data-lib-listen={item.name} aria-label="Listen to {item.name}" title="listen" onclick={() => listen(item.patch)}><svg viewBox="0 0 16 16" class="solid" aria-hidden="true"><path d="M4 2.5 13 8 4 13.5z"></path></svg></button>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {/each}
+            {#if onnew}
+              <div class="sc-rack one">
+                <button type="button" class="rk add" title="design a new sound in the sound designer, starting from the chosen one" disabled={blocked} onclick={() => onnew?.(selectedPatch ? model!.patches[selectedPatch] : null)}>
+                  <svg viewBox="0 0 26 12" aria-hidden="true"><path d="M13 2v8M9 6h8"></path></svg><span class="nm">sound designer…</span>
+                </button>
+              </div>
+            {/if}
+          {:else if tab === "score"}
+            <!-- tempo -->
+            <div class="st-sec">tempo <span class="n">· {JAM_MET_BPM_MIN} to {JAM_MET_BPM_MAX}</span></div>
+            <div class="sc-big"><b>{model.bpm}</b><span class="micro">bpm</span>
+              {#if differing.bpm.length}<span class="chip warn" title="another value by {differing.bpm.map((c) => who(c.source.author)).join(', ')}"><i></i><span class="micro">conflict</span></span>{/if}
+            </div>
+            <div class="st-opt">
+              <button type="button" class="st-tile txt" aria-label="Tempo down five" disabled={blocked || model.bpm - 5 < JAM_MET_BPM_MIN} onclick={() => setBpm(model!.bpm - 5)}>−5</button>
+              <button type="button" class="st-tile txt" aria-label="Tempo down one" disabled={blocked || model.bpm - 1 < JAM_MET_BPM_MIN} onclick={() => setBpm(model!.bpm - 1)}>−1</button>
+              <button type="button" class="st-tile txt" aria-label="Tempo up one" disabled={blocked || model.bpm + 1 > JAM_MET_BPM_MAX} onclick={() => setBpm(model!.bpm + 1)}>+1</button>
+              <button type="button" class="st-tile txt" aria-label="Tempo up five" disabled={blocked || model.bpm + 5 > JAM_MET_BPM_MAX} onclick={() => setBpm(model!.bpm + 5)}>+5</button>
+              <span class="grow"></span>
+              <button type="button" class="st-tile txt" aria-label="Tap tempo" title="tap along; the tempo follows your last four taps" disabled={blocked} onclick={tap}>tap</button>
+              <button type="button" class="st-tile txt" aria-label="Half tempo" disabled={blocked || Math.round(model.bpm / 2) < JAM_MET_BPM_MIN} onclick={() => setBpm(Math.round(model!.bpm / 2))}>½</button>
+              <button type="button" class="st-tile txt" aria-label="Double tempo" disabled={blocked || model.bpm * 2 > JAM_MET_BPM_MAX} onclick={() => setBpm(model!.bpm * 2)}>×2</button>
+            </div>
+            <!-- meter -->
+            <div class="st-sec nxt">beats per bar</div>
+            <div class="sc-seg">
+              {#each Array.from({ length: JAM_MET_BPB_MAX - JAM_MET_BPB_MIN + 1 }, (_, i) => i + JAM_MET_BPB_MIN) as n (n)}
+                <button type="button" class="st-tile" class:on={model.bpb === n} aria-pressed={model.bpb === n} aria-label="{n} beats per bar" disabled={blocked} onclick={() => setBpb(n)}>{n}</button>
+              {/each}
+            </div>
+            {#if differing.bpb.length}<p class="micro wrap">another value by {differing.bpb.map((c) => `${who(c.source.author)}: ${c.value}`).join(", ")}</p>{/if}
+            <!-- length -->
+            <div class="st-sec nxt">length</div>
+            <div class="sc-deriv">
+              <span><b>{model.steps}</b><span class="micro">steps</span></span>
+              <span><b>{Math.ceil(model.steps / SCORE_STEPS_PER_BEAT)}</b><span class="micro">beats</span></span>
+              <span><b>{bars}</b><span class="micro">{bars === 1 ? "bar" : "bars"}</span></span>
+              <span><b>{scoreTimeLabel(totalMs)}</b><span class="micro">at {model.bpm}</span></span>
+            </div>
+            <div class="st-opt">
+              <button type="button" class="st-btn ghost" title="add one bar of {stepsPerBar} steps" disabled={blocked || model.steps + stepsPerBar > SCORE_MAX_STEPS} onclick={() => setSteps(model!.steps + stepsPerBar)}>+ bar</button>
+              <button type="button" class="st-btn ghost" title="drop the last bar; notes there stay, past the end" disabled={blocked || model.steps <= stepsPerBar} onclick={() => setSteps(model!.steps - stepsPerBar)}>− bar</button>
+              <button type="button" class="st-btn ghost" title="end the score where its last note ends, shorter or longer; notes past the end start to sound" disabled={blocked || lastSounding < 0 || lastSounding + 1 === model.steps} onclick={() => setSteps(Math.max(1, lastSounding + 1))}>fit to last note</button>
+              <button type="button" class="st-btn ghost" title="round the length up to whole bars" disabled={blocked || model.steps % stepsPerBar === 0 || bars * stepsPerBar > SCORE_MAX_STEPS} onclick={() => setSteps(bars * stepsPerBar)}>fit to bars</button>
+              <button type="button" class="st-btn ghost" data-score-repeat-bar title="copy bar {currentBar + 1} into the bar after it; the score grows if it has to, and taken cells are left alone" disabled={blocked || (currentBar + 2) * stepsPerBar > SCORE_MAX_STEPS} onclick={repeatBar}>repeat bar {currentBar + 1}</button>
+            </div>
+            {#if differing.steps.length}<p class="micro wrap">another length by {differing.steps.map((c) => `${who(c.source.author)}: ${c.value}`).join(", ")} · cells past the shorter end stay, hatched</p>{/if}
+            <div class="sc-bar"><i style="width: {(model.steps / SCORE_MAX_STEPS) * 100}%"></i></div>
+            <span class="micro">{model.steps} of {SCORE_MAX_STEPS} steps · {noteCount} of {SCORE_MAX_CELLS} notes</span>
+
+            <!-- attention: things to look at, never a gate -->
+            {#if attention.length}<div class="st-sec nxt">{attention.length} to review</div>{/if}
+            {#each attentionSlice as item (item.id)}
+              <button type="button" class="sc-att" class:on={expanded === item.id} data-score-evidence={item.id} aria-expanded={expanded === item.id} onclick={() => focusItem(item)}>
+                <span class="kind">{item.kind === "cell" || item.kind === "note" ? "◼" : item.kind === "patch" ? "♪" : "⌂"}</span>
+                <span class="lb">{itemLabel(item)}</span>
+                <span class="grow"></span>
+                {#each item.issues as issue (issue)}<span class="chip warn"><span class="micro">{SCORE_ISSUE_LABELS[issue as keyof typeof SCORE_ISSUE_LABELS] ?? issue}</span></span>{/each}
+                {#if item.removed}<span class="chip"><span class="micro">cleared</span></span>{/if}
+                {#if item.alternatives.length > 1}<span class="chip warn"><span class="micro">{item.alternatives.length} values</span></span>{/if}
+              </button>
+              {#if expanded === item.id}
+                <div class="sc-attbody">
+                  {#if item.alternatives.length > 1 || item.removed}{@render alternatives(item)}{/if}
+                  <div class="acts">
+                    {#if item.kind === "cell" || item.kind === "note"}<button type="button" class="st-btn ghost" disabled={blocked} onclick={() => clearSlot(item.key)}>clear</button>{/if}
+                    {#if item.kind === "patch" && model.patches[item.key]}<button type="button" class="st-btn ghost" disabled={blocked} onclick={() => send(() => ({ op: "remove_patch", patch: item.key }), "remove a sound")}>remove sound</button>{/if}
+                  </div>
+                </div>
+              {/if}
+            {/each}
+            {#if attentionPages > 1}
+              <div class="sc-pager">
+                <button type="button" class="st-tile" aria-label="Previous evidence page" disabled={currentAttentionPage === 0} onclick={() => { attentionPage = currentAttentionPage - 1; }}>‹</button>
+                <span class="micro">{currentAttentionPage + 1} / {attentionPages}</span>
+                <button type="button" class="st-tile" aria-label="Next evidence page" disabled={currentAttentionPage + 1 >= attentionPages} onclick={() => { attentionPage = currentAttentionPage + 1; }}>›</button>
+              </div>
+            {/if}
+
+            <!-- export -->
+            <div class="st-sec nxt">export <span class="n">· jam-take:v1</span></div>
+            <!-- What the export will hold. Skipped notes are counted, never a reason to refuse. -->
+            <ul class="sc-check" data-score-export>
+              <li><i class={order.length <= SCORE_MAX_PATCHES && !Object.values(docModel!.readiness.patches).some((p) => p.count) ? "ok" : "warn"}></i><span>{order.length} {order.length === 1 ? "sound" : "sounds"} of {SCORE_MAX_PATCHES}</span></li>
+              <li><i class={docModel!.voices.skipped ? "warn" : "ok"}></i><span>{docModel!.voices.play.length} {docModel!.voices.play.length === 1 ? "note plays" : "notes play"}{docModel!.voices.skipped ? ` · ${docModel!.voices.skipped} skipped` : ""}</span></li>
+              <li><i class="ok"></i><span>step = {scoreDurationMs(1, model.bpm)} ms at {model.bpm} bpm</span></li>
+            </ul>
+            <div class="acts">
+              {#if onpost}<button type="button" class="st-btn primary" disabled={mediaBusy || playing} onclick={onpost}>post to chat</button>{/if}
+              {#if onexport}<button type="button" class="st-btn" disabled={mediaBusy || playing} onclick={onexport}>download .jamtake</button>{/if}
+              {#if onshare}<button type="button" class="st-btn" disabled={mediaBusy || playing} onclick={onshare}>share</button>{/if}
+            </div>
+          {:else}
+            {@render history?.()}
+          {/if}
+        </div>
+      </div>
+    </div>
+
+    <!-- transport -->
+    <div class="sc-transport">
+      <button type="button" class="sc-tool sm" aria-label="First page" disabled={currentPage === 0} onclick={() => show(0)}><svg viewBox="0 0 16 16" class="solid" aria-hidden="true"><path d="M8 3 2 8l6 5zM14 3 8 8l6 5z"></path></svg></button>
+      <button type="button" class="sc-tool sm" aria-label="Previous page" disabled={currentPage === 0} onclick={() => show(currentPage - 1)}><svg viewBox="0 0 16 16" class="solid" aria-hidden="true"><path d="M3 3h1.5v10H3zM12.5 3 6 8l6.5 5z"></path></svg></button>
+      {#if playing}
+        <button type="button" class="sc-tool play on" title="stop [space]" aria-label="stop" onclick={onstop} disabled={!onstop}><svg viewBox="0 0 16 16" class="solid" aria-hidden="true"><path d="M3.5 3.5h9v9h-9z"></path></svg></button>
+      {:else}
+        <button type="button" class="sc-tool play" title="play [space]" aria-label="play" onclick={() => onplay?.()} disabled={loading || !onplay}><svg viewBox="0 0 16 16" class="solid" aria-hidden="true"><path d="M4 2.5 13 8 4 13.5z"></path></svg></button>
+        {#if selected && cursor > 0}
+          <button type="button" class="sc-tool sm" aria-label="Play from the selected step" title="play from {stepLabel(cursor)}" disabled={loading || !onplay} onclick={() => onplay?.(scoreDurationMs(cursor, model!.bpm))}><svg viewBox="0 0 16 16" class="solid" aria-hidden="true"><path d="M2.5 3h1.5v10H2.5zM6 2.5 14 8 6 13.5z"></path></svg></button>
+        {/if}
+      {/if}
+      <button type="button" class="sc-tool sm" aria-label="Next page" disabled={currentPage + 1 >= pages} onclick={() => show(currentPage + 1)}><svg viewBox="0 0 16 16" class="solid" aria-hidden="true"><path d="M3.5 3 10 8l-6.5 5zM11.5 3H13v10h-1.5z"></path></svg></button>
+      <button type="button" class="sc-tool sm" aria-label="Last page" disabled={currentPage + 1 >= pages} onclick={() => show(pages - 1)}><svg viewBox="0 0 16 16" class="solid" aria-hidden="true"><path d="M2 3l6 5-6 5zM8 3l6 5-6 5z"></path></svg></button>
+      <button type="button" class="sc-tool sm" class:on={loop} class:next={nextPass} aria-pressed={loop} aria-label="Loop playback" title={loop ? nextPass ? "looping · your changes play on the next pass" : "looping the whole score" : "play once"} disabled={playing || !onloop} onclick={() => onloop?.(!loop)}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8a5 5 0 015-5h4M13 8a5 5 0 01-5 5H4"></path><path d="M10.5 1.5 12 3l-1.5 1.5M5.5 11.5 4 13l1.5 1.5"></path></svg></button>
+      {#if nextPass}<span class="chip ok" data-score-next-pass title="changes made during this pass play on the next one"><i></i><span class="micro">next pass</span></span>{/if}
+      {#if playing && refused > 0}<span class="chip warn" data-score-refused title="more notes at once than playback has voices for, so {refused === 1 ? 'one did' : `${refused} did`} not sound"><i></i><span class="micro">{refused} not played</span></span>{/if}
+      <span class="mono strong">{cursor + 1} <span class="dim">/ {model.steps}</span></span>
+      <span class="micro">{scoreTimeLabel(cursorMs)} <span class="dim">of {scoreTimeLabel(totalMs)}</span> · bar {scoreBarBeat(cursor, model.bpb).bar} · beat {scoreBarBeat(cursor, model.bpb).beat}</span>
+      <span class="grow"></span>
+      <label class="sc-field" title="tempo · {JAM_MET_BPM_MIN} to {JAM_MET_BPM_MAX}{differing.bpm.length ? ' · another value by ' + differing.bpm.map((c) => who(c.source.author)).join(', ') : ''}" class:conf={differing.bpm.length}>
+        <input type="number" aria-label="Score BPM" min={JAM_MET_BPM_MIN} max={JAM_MET_BPM_MAX} step="1" value={model.bpm} disabled={blocked} onchange={(e) => header("bpm", e)} /><span class="micro">bpm</span>
+      </label>
+      <label class="sc-field" title="beats per bar · {JAM_MET_BPB_MIN} to {JAM_MET_BPB_MAX}{differing.bpb.length ? ' · another value by ' + differing.bpb.map((c) => who(c.source.author)).join(', ') : ''}" class:conf={differing.bpb.length}>
+        <input type="number" aria-label="Score beats per bar" min={JAM_MET_BPB_MIN} max={JAM_MET_BPB_MAX} step="1" value={model.bpb} disabled={blocked} onchange={(e) => header("bpb", e)} /><span class="micro">/ bar</span>
+      </label>
+      <label class="sc-field" title="length in sixteenth steps · 1 to {SCORE_MAX_STEPS}{differing.steps.length ? ' · another value by ' + differing.steps.map((c) => who(c.source.author)).join(', ') : ''}" class:conf={differing.steps.length}>
+        <input type="number" aria-label="Score steps" min="1" max={SCORE_MAX_STEPS} step="1" value={model.steps} disabled={blocked} onchange={(e) => header("steps", e)} /><span class="micro">steps</span>
+      </label>
+      <button type="button" class="st-btn ghost" title="add one bar of {stepsPerBar} steps" disabled={blocked || model.steps + stepsPerBar > SCORE_MAX_STEPS} onclick={() => setSteps(model!.steps + stepsPerBar)}>+ bar</button>
+      <!-- Trim only ever shortens: with cells past the end the length is a decision, not a fit. -->
+      <button type="button" class="st-btn ghost" title="end the score after its last sounding step" disabled={blocked || lastSounding < 0 || lastSounding + 1 >= model.steps} onclick={() => setSteps(Math.max(1, lastSounding + 1))}>trim</button>
+    </div>
+    <div class="sc-ovw" role="group" aria-label="Score overview">
+      {#each Array.from({ length: extent }, (_, s) => s) as s (s)}
+        <button type="button" class="sc-ov" class:has={occupied.has(s)} class:win={columns.includes(s)} class:ph={s === playhead} class:past={s >= model.steps} class:bar={(s + 1) % stepsPerBar === 0} aria-label="Go to {stepLabel(s)}" onclick={() => goTo(s)}></button>
+      {/each}
+    </div>
+  {:else if !loading && !error}
+    <p class="micro wrap">pick a score on the left</p>
+  {/if}
 </section>
 
 <style>
-  .score-editor { display: flex; flex-direction: column; gap: 9px; min-width: 0; padding: 10px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-lg); }
-  .score-toolbar, .score-entry, .score-headers { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+  /* Recipe swatches and the pad colour are data colours, not theme colours: eight recipes must
+     stay apart under every preset and livery, and a pad must never be confused with a recipe.
+     Like the piano's ivory and ebony, they are the only literal colours in this component. */
+  .sc { --sc-p0: #6fb3e6; --sc-p1: #d08ad8; --sc-p2: #5fc9c0; --sc-p3: #f3b562; --sc-p4: #b7a6ff; --sc-p5: #e6dfc8; --sc-p6: #8ccf6f; --sc-p7: #ef8fc4; --sc-pad: #f0a07a;
+    display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; gap: 6px; }
+  /* Labels people read are set in --muted (about 5:1 on the panel); --faint stays for decoration. */
+  .micro { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
+  .micro.wrap { white-space: normal; line-height: 1.5; margin: 3px 0 0; }
+  .micro.hi { color: var(--accent-hi); }
+  .mono { font-family: var(--mono); font-size: 0.68rem; color: var(--text-2); white-space: nowrap; }
+  .mono.strong { color: var(--text); }
+  .dim { color: var(--faint); }
   .grow { flex: 1; }
-  .eyebrow, .micro, button, input, select, th { font-family: var(--mono); }
-  .eyebrow, .micro { font-size: 0.64rem; color: var(--muted); }
-  .eyebrow { letter-spacing: 0.08em; text-transform: uppercase; }
-  button { min-height: 27px; padding: 3px 8px; border: 1px solid var(--border); border-radius: var(--r); background: var(--bg-elev); color: var(--text-2); font-size: 0.65rem; }
+  .t { font-size: 0.78rem; color: var(--text); }
+  svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+  svg.solid { fill: currentColor; stroke: none; }
+  button { font: inherit; color: inherit; }
   button:not(:disabled) { cursor: pointer; }
-  button:disabled { opacity: 0.45; }
-  button.on { border-color: var(--accent); background: var(--accent-dim); color: var(--accent-hi); }
-  button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
-  button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  label { display: inline-flex; align-items: center; gap: 5px; color: var(--text-2); font-size: 0.7rem; }
-  label.title, label.recipe { flex: 1; min-width: 170px; }
-  input, select { min-width: 0; padding: 4px 6px; border: 1px solid var(--border); border-radius: var(--r); color: var(--text); background: var(--bg-elev); font-size: 0.7rem; }
-  input[type="number"] { width: 55px; }
-  .title input, .recipe select { flex: 1; width: 90px; }
-  p { margin: 0; font-size: 0.72rem; }
-  .hint { color: var(--muted); line-height: 1.5; }
-  .warning { padding: 7px; border: 1px solid var(--warn, var(--accent)); border-radius: var(--r); color: var(--text); background: var(--bg-elev); }
-  .score-scroll { overflow: auto; max-height: 550px; }
-  .score-grid { border-collapse: collapse; width: 100%; min-width: 450px; table-layout: fixed; }
-  .score-grid th:first-child { width: 34px; }
-  .score-grid th { font-size: 0.62rem; font-weight: normal; color: var(--muted); padding: 3px 0; }
-  .score-grid td { border: 1px solid var(--border-soft); padding: 1px; }
-  .score-grid .beat { border-left: 2px solid var(--border); }
-  .score-grid button { width: 100%; height: 19px; min-height: 19px; padding: 0; border: 1px solid transparent; border-radius: 2px; font-size: 0.58rem; }
-  .score-grid button.filled { background: var(--accent); color: var(--on-accent); }
-  .score-grid button.held { background: var(--accent-dim); color: var(--accent-hi); }
-  .score-grid button.problem { border-color: var(--warn, var(--text)); border-style: dashed; }
-  .score-grid button.cleared { color: var(--muted); }
-  .readiness { padding: 7px; color: var(--muted); font-size: 0.7rem; }
-  summary { cursor: pointer; font-size: 0.74rem; color: var(--text-2); }
-  .score-evidence { border-top: 1px solid var(--border); padding-top: 8px; }
-  .score-evidence > * { margin-bottom: 8px; }
-  .slot-list { display: flex; flex-direction: column; gap: 3px; }
-  .slot-list button { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px; text-align: left; overflow-wrap: anywhere; }
-  .inspection { padding: 8px; border: 1px solid var(--border); border-radius: var(--r); min-width: 0; }
-  h4 { margin: 0 0 5px; overflow-wrap: anywhere; font-size: 0.75rem; }
-  .alternative { margin: 8px 0; padding: 8px; background: var(--bg-elev); border: 1px solid var(--border-soft); border-radius: var(--r); }
-  pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.66rem; max-height: 240px; overflow: auto; }
-  dl { display: grid; grid-template-columns: 60px 1fr; gap: 3px; font-family: var(--mono); font-size: 0.6rem; }
-  dt { color: var(--muted); } dd { margin: 0; overflow-wrap: anywhere; }
+  button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+  /* Header: the same bar the flipnote editor wears, flush with the surface strip above. */
+  .sc-head { display: flex; align-items: center; gap: 0.6rem; padding: 0.4rem 0.6rem; background: var(--panel); border-bottom: 1px solid var(--border); margin: -0.3rem -0.5rem 0.2rem; flex-wrap: wrap; }
+  .st-title { font-size: 0.95rem; font-weight: 600; color: var(--text); background: transparent; border: 1px solid transparent; padding: 2px 4px; width: 9rem; font-family: inherit; }
+  .st-title:hover, .st-title:focus { border-color: var(--border); background: var(--bg-elev); }
+  .st-title:disabled { color: var(--text-2); }
+  .chip { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--border); border-radius: 999px; padding: 2px 9px; white-space: nowrap; background: transparent; }
+  .chip i { width: 5px; height: 5px; border-radius: 50%; background: var(--muted); display: inline-block; }
+  .chip .micro { color: var(--muted); }
+  .chip.ok { border-color: var(--ok-brd); background: var(--ok-dim); } .chip.ok .micro { color: var(--ok); } .chip.ok i { background: var(--ok); }
+  .chip.warn { border-color: var(--warn-brd); background: var(--warn-dim); } .chip.warn .micro { color: var(--warn); } .chip.warn i { background: var(--warn); }
+  .chip.as-btn { padding: 2px 9px; }
+  .st-tg { display: inline-flex; align-items: center; gap: 6px; background: transparent; border: none; padding: 0; color: inherit; }
+  .st-tg i { width: 22px; height: 12px; border-radius: 999px; background: var(--bg-elev); border: 1px solid var(--border); position: relative; display: inline-block; }
+  .st-tg i::after { content: ""; position: absolute; top: 1px; left: 1px; width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+  .st-tg.on i { background: var(--accent-dim); border-color: var(--accent); }
+  .st-tg.on i::after { left: 11px; background: var(--accent); }
+  .st-tg.on .micro { color: var(--text-2); }
+  .st-btn { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border: 1px solid var(--border); border-radius: var(--r); background: var(--bg-elev); color: var(--text-2); font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap; }
+  .st-btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .st-btn.ghost { background: transparent; border-color: var(--border-soft); color: var(--muted); }
+  .st-btn:disabled { opacity: 0.45; }
+  .st-link { background: none; border: none; padding: 0; color: var(--accent-hi); font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.06em; text-transform: uppercase; }
+  .st-link:disabled { opacity: 0.45; }
+  .st-banner { margin: 0.2rem 0; padding: 6px 10px; border-radius: var(--r); font-size: 0.78rem; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; color: var(--text-2); }
+  .st-banner.warn { background: var(--warn-dim); border: 1px solid var(--warn-brd); }
+  .st-banner.danger { background: var(--danger-dim); border: 1px solid var(--danger-brd); }
+  .st-card { display: flex; flex-direction: column; gap: 3px; padding: 6px 9px; border-radius: var(--r); border: 1px solid var(--border); background: var(--bg-elev); font-size: 0.78rem; color: var(--text-2); }
+  .st-card.accent { border-color: color-mix(in oklab, var(--accent) 40%, var(--panel)); background: var(--accent-dim); }
+  .acts { display: flex; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
+
+  /* Editor row: tools, the grid card, the inspector. */
+  .sc-row { flex: 1; min-height: 0; display: flex; gap: 10px; padding: 6px 0; align-items: stretch; }
+  .sc-tools { display: flex; flex-direction: column; gap: 4px; flex: none; }
+  .sc-tool { width: 32px; height: 32px; border: 1px solid var(--border-soft); border-radius: var(--r); background: var(--bg-elev); color: var(--muted); display: flex; align-items: center; justify-content: center; position: relative; padding: 0; }
+  .sc-tool.on { background: var(--accent-dim); border-color: var(--accent); color: var(--accent-hi); }
+  .sc-tool:disabled { opacity: 0.4; }
+  .sc-tool .k { position: absolute; right: 2px; bottom: 0; font-family: var(--mono); font-size: 0.5rem; color: var(--faint); }
+  .sc-tool.on .k { color: var(--accent-hi); }
+  .sc-tool.sm { width: 26px; height: 26px; } .sc-tool.sm svg { width: 11px; height: 11px; }
+  .sc-tool.next::after { content: ""; position: absolute; top: 2px; right: 2px; width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+  .sc-tool.play { width: 34px; height: 30px; border-radius: 999px; background: var(--accent); border-color: var(--accent); color: var(--on-accent); margin: 0 4px; }
+  .sc-tool.play svg { width: 14px; height: 14px; }
+  .sc-tool.play.on { background: var(--accent-dim); color: var(--accent-hi); }
+  .sc-sep { height: 1px; background: var(--border-soft); margin: 4px 2px; }
+
+  /* The card hugs its 25 rows and scrolls inside when the window is shorter than they are. */
+  .sc-card { flex: 1; min-width: 0; align-self: flex-start; max-height: 100%; display: flex; flex-direction: column; gap: 6px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-lg); padding: 10px; overflow: auto; scrollbar-gutter: stable; }
+  .sc-grid { position: relative; display: grid; grid-template-columns: 34px repeat(var(--cols), minmax(0, 1fr)); border: 1px solid var(--border); background: var(--bg-0); user-select: none; }
+  .sc-grid.locked .sc-cell { cursor: default; }
+  .sc-corner { border-bottom: 1px solid var(--border); border-right: 1px solid var(--border); background: var(--panel); }
+  .sc-rs { font-family: var(--mono); font-size: 0.66rem; color: var(--muted); line-height: var(--row, 22px); padding-left: 3px; border-bottom: 1px solid var(--border); overflow: hidden; white-space: nowrap; }
+  .sc-rs.beat { color: var(--text-2); }
+  .sc-rs.bar { color: var(--text); border-left: 1px solid var(--border); }
+  .sc-rs.past { background: repeating-linear-gradient(45deg, var(--border-soft) 0 2px, transparent 2px 6px); }
+  .sc-rs.ph { color: var(--accent-hi); }
+  .sc-lab { font-family: var(--mono); font-size: 0.66rem; color: var(--muted); text-align: right; padding-right: 5px; line-height: var(--row, 22px); border-right: 1px solid var(--border); background: var(--panel); white-space: nowrap; overflow: hidden; }
+  .sc-lab.oct { color: var(--text); }
+  .sc-lab.blk { background: color-mix(in oklab, var(--panel) 55%, var(--bg-0)); }
+  .sc-lab.lane { color: var(--sc-pad); font-size: 0.6rem; letter-spacing: 0; }
+  .sc-lab.fold { font-size: 0; line-height: 6px; background: var(--bg-0); }
+  .sc-cell { position: relative; min-width: 0; padding: 0; border: none; border-right: 1px solid var(--border-soft); border-bottom: 1px solid var(--border-soft); border-radius: 0; background: var(--panel); touch-action: none; }
+  .sc-cell.blk { background: color-mix(in oklab, var(--panel) 55%, var(--bg-0)); }
+  .sc-cell.lane { background: color-mix(in oklab, var(--sc-pad) 7%, var(--panel)); }
+  .sc-cell.beat { border-right-color: var(--border); }
+  .sc-cell.bar { border-right-color: color-mix(in oklab, var(--text-2) 35%, var(--border)); }
+  .sc-cell:disabled { cursor: default; }
+  .sc-cell:not(:disabled):hover { box-shadow: inset 0 0 0 1px var(--accent); }
+  /* Nothing can be placed here, but the cell stays focusable so arrow keys can pass through. */
+  .sc-cell.off { cursor: default; }
+  .sc-cell.off:not(:disabled):hover { box-shadow: none; }
+  /* A note's body moves it; the handle at its end (the right part of the last cell) resizes it. */
+  .sc-cell.n:not(:disabled), .sc-cell.held:not(:disabled), .sc-cell.pad:not(:disabled) { cursor: grab; }
+  .sc-cell.end:not(:disabled) { cursor: ew-resize; }
+  .sc-grid.locked .sc-cell.end, .sc-grid.locked .sc-cell.n, .sc-grid.locked .sc-cell.held, .sc-grid.locked .sc-cell.pad { cursor: default; }
+  /* The handle is drawn on the selected or hovered note so the resize gesture has a visible target. */
+  .sc-cell.end.sel::after, .sc-cell.end:not(.pad):hover::after { content: ""; position: absolute; right: 4px; top: 5px; bottom: 5px; width: 3px; border-radius: 2px; background: var(--bg-0); opacity: 0.75; pointer-events: none; }
+  /* A note being carried: its old place fades, its candidate place is outlined, red where it cannot land. */
+  .sc-cell.lifting::before { opacity: 0.35; }
+  .sc-cell.drag.bad { box-shadow: inset 0 0 0 1px var(--danger); background-color: var(--danger-dim); }
+  /* A phrase: every picked note shares the selection ring; the marquee tints what it will take. */
+  .sc-cell.grp { box-shadow: inset 0 0 0 2px color-mix(in oklab, var(--accent) 70%, var(--panel)); }
+  .sc-cell.mq { background-color: color-mix(in oklab, var(--accent) 14%, var(--panel)); }
+  /* A note: the onset starts the block, continuations carry it, the last step rounds it off. */
+  .sc-cell.n::before, .sc-cell.held::before { content: ""; position: absolute; top: 2px; bottom: 2px; left: 0; right: 0; background: var(--pc); }
+  .sc-cell.n::before { left: 2px; border-radius: 2px 0 0 2px; }
+  .sc-cell.held::before { left: -1px; }
+  .sc-cell.end::before { right: 2px; border-radius: 0 2px 2px 0; }
+  .sc-cell.n.end::before { border-radius: 2px; }
+  /* Overlapping holds: the owner's colour, striped so the second note is not invisible. */
+  .sc-cell.stacked::before { background-image: repeating-linear-gradient(135deg, transparent 0 3px, color-mix(in oklab, var(--bg-0) 45%, transparent) 3px 5px); }
+  /* A pad hit: a diamond with its two-letter code. */
+  .sc-cell.pad::before { content: ""; position: absolute; left: 50%; top: 50%; width: 11px; height: 11px; margin: -5.5px 0 0 -5.5px; background: var(--sc-pad); clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%); }
+  .sc-cell.pad::after { content: attr(data-k); position: absolute; inset: 0; font-family: var(--mono); font-size: 0.46rem; font-weight: 700; line-height: calc(var(--row, 22px) - 1px); text-align: center; color: var(--bg-0); letter-spacing: 0; }
+  /* Kept but silent: over the cap or past the authored length. */
+  .sc-cell.over::before, .sc-cell.past.n::before, .sc-cell.past.held::before { background: repeating-linear-gradient(45deg, var(--faint) 0 1px, transparent 1px 4px); outline: 1px dashed var(--faint); outline-offset: -1px; }
+  .sc-cell.past:not(.n):not(.held):not(.pad) { background: repeating-linear-gradient(45deg, var(--border-soft) 0 2px, transparent 2px 6px) var(--bg-0); }
+  .sc-cell.over.pad::before { background: var(--faint); }
+  /* Names a recipe the score no longer holds. */
+  .sc-cell.norecipe::before { background: transparent; outline: 1px dashed var(--muted); outline-offset: -1px; }
+  .sc-cell.overlap { box-shadow: inset 0 0 0 1px var(--danger); }
+  .sc-cell.conf { background-image: linear-gradient(225deg, var(--warn) 0 5px, transparent 5.5px); }
+  .sc-cell.gone::after { content: "×"; position: absolute; inset: 0; font-family: var(--mono); font-size: 0.6rem; line-height: calc(var(--row, 22px) - 1px); text-align: center; color: var(--muted); }
+  /* A ghosted sound: the outline of its run in its own colour, solid (dashes mean "no sound") and
+     with no fill, continuous across a hold: top and bottom on every cell, the left edge at the onset,
+     the right edge at the last step. The cell under it is empty to every gesture. */
+  .sc-cell.ghost::before { content: ""; position: absolute; top: 2px; bottom: 2px; left: -1px; right: 0; border-top: 1px solid var(--pc, var(--sc-pad)); border-bottom: 1px solid var(--pc, var(--sc-pad)); opacity: 0.8; pointer-events: none; }
+  .sc-cell.ghost.gon::before { left: 2px; border-left: 1px solid var(--pc, var(--sc-pad)); border-radius: 2px 0 0 2px; }
+  .sc-cell.ghost.gend::before { right: 2px; border-right: 1px solid var(--pc, var(--sc-pad)); border-radius: 0 2px 2px 0; }
+  .sc-cell.ghost.gon.gend::before { border-radius: 2px; }
+  /* A ghosted hit: the diamond's outline, drawn as a rotated square so it needs no clip-path fill. */
+  .sc-cell.ghost.gpad::before { left: 50%; top: 50%; right: auto; bottom: auto; width: 8px; height: 8px; margin: -4px 0 0 -4px; border: 1px solid var(--sc-pad); border-radius: 1px; transform: rotate(45deg); }
+  .sc-cell.fold.ghost::before { top: 1px; bottom: 1px; }
+  .sc-cell.fold.ghost.gpad::before { width: 4px; height: 4px; margin: -2px 0 0 -2px; }
+  /* Folded by the scale view: a sliver that still shows what it holds. */
+  .sc-cell.fold { background: var(--bg-0); border-bottom-color: var(--bg-0); }
+  .sc-cell.fold::before { top: 1px; bottom: 1px; }
+  .sc-cell.fold.pad::before { width: 5px; height: 5px; margin: -2.5px 0 0 -2.5px; }
+  .sc-cell.fold.pad::after, .sc-cell.fold.gone::after { content: ""; }
+  .sc-cell.target { box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent) 60%, transparent); background-color: color-mix(in oklab, var(--accent) 10%, var(--panel)); }
+  .sc-cell.drag { box-shadow: inset 0 0 0 1px var(--accent); background-color: var(--accent-dim); }
+  .sc-cell.sel { box-shadow: inset 0 0 0 2px var(--accent); z-index: 1; }
+  .sc-cell.ph { background-color: color-mix(in oklab, var(--accent) 12%, var(--panel)); }
+  .sc-ph { position: absolute; top: 0; bottom: 0; width: 1px; left: calc(34px + (100% - 34px) * var(--i) / var(--cols)); background: var(--accent); pointer-events: none; }
+  .sc-foot { display: flex; align-items: center; gap: 8px; }
+  .st-tile { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; border: 1px solid var(--border-soft); border-radius: var(--r); background: var(--bg-elev); color: var(--muted); font-family: var(--mono); font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.04em; }
+  .st-tile.txt { width: auto; padding: 0 8px; }
+  .st-tile.on { background: var(--accent-dim); border-color: var(--accent); color: var(--accent-hi); }
+  .st-tile:disabled { opacity: 0.45; }
+
+  /* Inspector */
+  .sc-inspector { flex: 0 0 272px; min-width: 250px; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-lg); overflow: hidden; }
+  /* The selected note's panel, pinned above the tabs: it never scrolls away under the rack. */
+  .sc-selbox { display: flex; flex-direction: column; gap: 4px; padding: 4px 12px 10px; border-bottom: 1px solid var(--border); background: color-mix(in oklab, var(--accent) 7%, var(--panel)); flex: none; }
+  .sc-itabs { display: flex; border-bottom: 1px solid var(--border); }
+  .st-itab { flex: 1; padding: 7px 0; border: none; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); display: inline-flex; align-items: center; justify-content: center; gap: 5px; }
+  .st-itab.on { color: var(--text); border-bottom-color: var(--accent); }
+  .st-itab .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--warn); display: inline-block; }
+  .sc-ibody { display: flex; flex-direction: column; gap: 4px; padding: 4px 12px 10px; overflow-y: auto; min-height: 0; }
+  .st-sec { padding: 6px 0 4px; font-family: var(--mono); font-size: 0.62rem; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-2); }
+  .st-sec.nxt { border-top: 1px solid var(--border-soft); margin-top: 6px; }
+  .st-sec .n { color: var(--faint); font-weight: 400; }
+  .st-opt { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; row-gap: 4px; }
+  .st-opt .lb { font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+  .st-input { background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--r); color: var(--text); font-family: var(--mono); font-size: 0.72rem; padding: 3px 6px; min-width: 0; }
+  .st-input.num { width: 3.2rem; height: 26px; text-align: center; }
+  select.st-input { height: 26px; }
+  .st-input:disabled { opacity: 0.45; }
+  .sw { width: 12px; height: 12px; border-radius: 3px; flex: none; display: inline-block; }
+  .who { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; margin-right: 4px; vertical-align: middle; }
+  .sc-pads { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px; margin-top: 4px; }
+  .sc-padt { height: 34px; border: 1px solid var(--border-soft); border-radius: var(--r); background: var(--bg-elev); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 0; min-width: 0; }
+  .sc-padt .code { font-family: var(--mono); font-size: 0.66rem; font-weight: 700; color: var(--sc-pad); line-height: 1; }
+  .sc-padt .nm { font-family: var(--mono); font-size: 0.58rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; line-height: 1.2; margin-top: 2px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sc-padt.on { border-color: var(--sc-pad); background: color-mix(in oklab, var(--sc-pad) 14%, var(--panel)); }
+  .sc-padt.mini { height: 20px; width: 26px; display: inline-flex; }
+  .sc-prow { display: flex; align-items: center; gap: 2px; }
+  .sc-prow .pick { flex: 1; min-width: 0; display: flex; align-items: center; gap: 7px; padding: 4px 6px; border-radius: var(--r); border: 1px solid transparent; background: transparent; text-align: left; }
+  .sc-prow .pick svg { width: 22px; height: 10px; stroke-width: 1.4; color: var(--muted); }
+  .sc-prow .pick .nm { font-size: 0.78rem; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sc-prow .pick:hover { background: var(--bg-elev); }
+  .sc-prow.on .pick { background: var(--accent-dim); border-color: color-mix(in oklab, var(--accent) 40%, var(--panel)); }
+  .sc-prow .x { width: 22px; height: 22px; flex: none; padding: 0; border: 1px solid transparent; border-radius: var(--r); background: transparent; color: var(--muted); font-family: var(--mono); font-size: 0.7rem; display: inline-flex; align-items: center; justify-content: center; }
+  .sc-prow .x:hover { color: var(--danger); border-color: var(--danger-brd); }
+  .sc-prow .x.listen svg { width: 10px; height: 10px; }
+  .sc-prow .x.listen:hover { color: var(--accent-hi); border-color: var(--border); }
+  /* A layer's visibility: the glyph is the state (a filled bar, its dashed outline, struck through). */
+  .sc-prow .vis { width: 22px; height: 22px; flex: none; padding: 0; border: 1px solid transparent; border-radius: var(--r); background: transparent; color: var(--text-2); display: inline-flex; align-items: center; justify-content: center; }
+  .sc-prow .vis svg { width: 14px; height: 14px; stroke-width: 1.3; }
+  .sc-prow .vis:hover { border-color: var(--border); color: var(--text); }
+  .sc-prow .vis[data-v="ghost"] { color: var(--muted); }
+  .sc-prow .vis[data-v="hide"] { color: var(--faint); }
+  .sc-prow .vis[data-v="hide"]:hover { color: var(--muted); }
+  .sw.kit { background: var(--sc-pad); clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%); border-radius: 0; }
+  .sc-prow .x.armed { width: auto; padding: 0 7px; font-size: 0.58rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--danger); border-color: var(--danger-brd); background: var(--danger-dim); }
+  .sc-prow .x:disabled { opacity: 0.45; }
+  .sc-shelf { font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); padding: 6px 0 2px; display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .sc-shelf::after { content: ""; flex: 1; height: 1px; background: var(--border-soft); }
+  .sc-rack { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
+  .sc-rack.one { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 4px; }
+  /* A library tile and its listen button share one frame; the tile adds, the button only plays. */
+  .rk-wrap { position: relative; min-width: 0; display: flex; }
+  .rk-wrap .rk { flex: 1; }
+  .rk-wrap.indoc .rk { opacity: 0.55; }
+  .rk-wrap.on .rk, .rk-wrap.on .rk:hover { opacity: 1; background: var(--accent-dim); border-color: var(--accent); color: var(--accent-hi); }
+  .rk-listen { position: absolute; right: 2px; top: 2px; width: 16px; height: 16px; padding: 0; border: none; border-radius: 50%; background: var(--bg-elev); color: var(--muted); display: inline-flex; align-items: center; justify-content: center; opacity: 0; }
+  .rk-listen svg { width: 8px; height: 8px; }
+  .rk-wrap:hover .rk-listen, .rk-listen:focus-visible { opacity: 1; }
+  .rk-listen:hover { color: var(--accent-hi); }
+  .rk { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 5px 4px 4px; border: 1px solid var(--border); border-radius: var(--r); background: transparent; color: var(--text-2); min-width: 0; position: relative; }
+  .rk:hover { background: var(--bg-elev); color: var(--text); }
+  .rk svg { width: 26px; height: 12px; stroke-width: 1.4; }
+  .rk .nm { font-family: var(--mono); font-size: 0.6rem; letter-spacing: 0.06em; text-transform: uppercase; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rk.add { border-style: dashed; color: var(--muted); }
+  .rk.busy { border-color: var(--accent); }
+  .rk:disabled { opacity: 0.45; }
+  .sc-alts { display: flex; flex-direction: column; gap: 3px; margin-top: 4px; }
+  .sc-alt { display: flex; align-items: center; gap: 6px; padding: 4px 7px; border-radius: var(--r); border: 1px solid var(--border-soft); background: var(--bg-elev); font-size: 0.76rem; color: var(--text-2); }
+  .sc-alt .who { margin: 0; }
+  .sc-alt.cur { border-color: var(--border); color: var(--text); }
+  .sc-alt .t { font-size: 0.76rem; color: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sc-pager { display: flex; align-items: center; gap: 8px; justify-content: center; padding: 4px 0; }
+  .sc-att { display: flex; align-items: center; gap: 6px; width: 100%; padding: 5px 7px; border: 1px solid transparent; border-radius: var(--r); background: transparent; text-align: left; font-size: 0.78rem; color: var(--text-2); min-width: 0; }
+  .sc-att:hover { background: var(--bg-elev); }
+  .sc-att.on { background: var(--bg-elev); border-color: var(--border); color: var(--text); }
+  .sc-att .kind { color: var(--muted); font-size: 0.7rem; width: 12px; text-align: center; flex: none; }
+  .sc-att .lb { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sc-att .chip { padding: 0 6px; } .sc-att .chip .micro { font-size: 0.52rem; }
+  .sc-attbody { padding: 2px 7px 6px; border-left: 2px solid var(--border); margin: 0 0 4px 6px; }
+  /* Tempo, meter, length */
+  .sc-big { display: flex; align-items: baseline; gap: 8px; }
+  .sc-big b { font-family: var(--mono); font-size: 1.9rem; font-weight: 600; color: var(--text); line-height: 1; letter-spacing: -0.02em; }
+  .sc-seg { display: flex; gap: 3px; }
+  .sc-seg .st-tile { flex: 1; width: auto; min-width: 0; padding: 0; }
+  .sc-deriv { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; margin: 2px 0; }
+  .sc-deriv span { display: flex; flex-direction: column; gap: 1px; padding: 5px 6px; border: 1px solid var(--border-soft); border-radius: var(--r); background: var(--bg-elev); min-width: 0; }
+  .sc-deriv b { font-family: var(--mono); font-size: 0.8rem; color: var(--text); }
+  .sc-deriv .micro { font-size: 0.5rem; }
+  .sc-bar { height: 5px; border-radius: 3px; background: var(--bg-elev); border: 1px solid var(--border-soft); overflow: hidden; margin-top: 4px; }
+  .sc-bar i { display: block; height: 100%; background: var(--accent); }
+  .sc-check { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+  .sc-check li { display: flex; align-items: center; gap: 7px; font-size: 0.74rem; color: var(--text-2); }
+  .sc-check li i { width: 7px; height: 7px; border-radius: 50%; flex: none; display: inline-block; background: var(--muted); }
+  .sc-check li i.ok { background: var(--ok); } .sc-check li i.warn { background: var(--warn); }
+
+  /* Transport */
+  .sc-transport { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding-top: 2px; }
+  .sc-field { display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 7px 0 2px; border: 1px solid var(--border); border-radius: var(--r); background: var(--bg-elev); }
+  .sc-field.conf { border-color: var(--warn-brd); background: var(--warn-dim); }
+  .sc-field input { width: 3.4rem; height: 22px; background: transparent; border: none; color: var(--text); font-family: var(--mono); font-size: 0.72rem; font-weight: 600; text-align: right; padding: 0 2px; }
+  .sc-field input:disabled { color: var(--text-2); }
+  .sc-ovw { display: flex; height: 18px; border: 1px solid var(--border); background: var(--bg-0); border-radius: var(--r); overflow: hidden; }
+  .sc-ov { flex: 1; min-width: 0; padding: 0; border: none; border-right: 1px solid var(--border-soft); border-radius: 0; background: transparent; position: relative; }
+  .sc-ov.bar { border-right-color: var(--border); }
+  .sc-ov.has::after { content: ""; position: absolute; left: 20%; right: 20%; top: 6px; height: 5px; border-radius: 1px; background: var(--muted); }
+  .sc-ov.win { background: var(--accent-dim); }
+  .sc-ov.win.has::after { background: var(--text-2); }
+  .sc-ov.past { background: repeating-linear-gradient(45deg, var(--border-soft) 0 2px, transparent 2px 6px); }
+  .sc-ov.ph { box-shadow: inset 1px 0 0 var(--accent); }
+  .sc-ov:hover { background: var(--bg-elev); }
 </style>

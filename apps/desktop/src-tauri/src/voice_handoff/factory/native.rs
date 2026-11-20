@@ -5,6 +5,8 @@ use super::*;
 use crate::voice_handoff::channel::NativeHold;
 use catcoms_sync::voice_v2::crypto_actions::{CryptoActionSnapshot, CryptoActionSnapshotPermit};
 use catcoms_sync::voice_v2::presence::PeerSnapshotPermit;
+#[cfg(test)]
+pub(in crate::voice_handoff) mod fixture;
 
 enum Selection {
     Exact(PairSelector),
@@ -52,6 +54,14 @@ pub(in crate::voice_handoff) struct NativeCompletion {
     result: Result<RowId, Refused>,
     #[cfg(test)]
     original: FixtureOriginalRequest,
+    // Negative test evidence belongs to this actual worker/output, never the lossy
+    // global diagnostic table. A discovery that returned before selecting a peer
+    // cannot have entered execute_selected, Begin, or publication.
+    #[cfg(test)]
+    discovery_refusal: Option<u8>,
+    // Harness-funded fixed capsule; only this handle belongs in the native8KiB graph.
+    #[cfg(test)]
+    fixture_witness: Option<Arc<fixture::Witness>>,
     _custody: NativeCustody,
 }
 impl NativeCompletion {
@@ -64,12 +74,28 @@ impl NativeCompletion {
     pub(in crate::voice_handoff) fn result(&self) -> Result<RowId, Refused> {
         self.result
     }
+
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn refused_before_selection(&self, cursor: u8) -> bool {
+        self.discovery_refusal == Some(cursor)
+            && self.result == Err(Refused::Protocol(VoiceError::Capacity))
+    }
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn fixture_witness(&self) -> Option<Arc<fixture::Witness>> {
+        self.fixture_witness.clone()
+    }
 }
 struct Worker {
     context: Option<Context>,
     selector: Selection,
     #[cfg(test)]
     original: FixtureOriginalRequest,
+    #[cfg(test)]
+    discovery_refusal: Option<u8>,
+    #[cfg(test)]
+    fixture_late_contention: bool,
+    #[cfg(test)]
+    fixture_witness: Option<Arc<fixture::Witness>>,
     custody: NativeCustody,
 }
 
@@ -154,7 +180,10 @@ pub(in crate::voice_handoff) fn produce_ready(
 fn spawn(context: &Context, route: &Route, selector: Selection) -> Result<NativeWaiter, Refused> {
     #[cfg(test)]
     let (kind, cursor) = diagnostic_selection(&selector);
+    #[cfg(not(test))]
     let result = spawn_inner(context, route, selector);
+    #[cfg(test)]
+    let result = spawn_inner(context, route, selector, None);
     #[cfg(test)]
     route
         .session()
@@ -179,6 +208,7 @@ fn spawn_inner(
     context: &Context,
     route: &Route,
     selector: Selection,
+    #[cfg(test)] fixture_witness: Option<Arc<fixture::Witness>>,
 ) -> Result<NativeWaiter, Refused> {
     let runtime = tokio::runtime::Handle::try_current().map_err(|_| Refused::Stopped)?;
     {
@@ -195,7 +225,7 @@ fn spawn_inner(
         NATIVE_TASK_BYTES,
         ResourceKind::Retained,
     )?;
-    route.require_open().map_err(|_| Refused::Closed)?;
+    route.require_pilot_open().map_err(|_| Refused::Closed)?;
     let native = route.session().native_hold().map_err(|error| match error {
         super::super::channel::Refused::Capacity => Refused::Protocol(VoiceError::Capacity),
         _ => Refused::Closed,
@@ -211,6 +241,12 @@ fn spawn_inner(
             _ => FixtureOriginalRequest::Unsupported,
         },
         selector,
+        #[cfg(test)]
+        discovery_refusal: None,
+        #[cfg(test)]
+        fixture_late_contention: false,
+        #[cfg(test)]
+        fixture_witness,
         custody: NativeCustody {
             _credit: credit,
             route: route.clone(),
@@ -302,13 +338,24 @@ async fn run_native(mut worker: Worker) -> NativeCompletion {
         result,
         #[cfg(test)]
         original: worker.original,
+        #[cfg(test)]
+        discovery_refusal: worker.discovery_refusal,
+        #[cfg(test)]
+        fixture_witness: worker.fixture_witness,
         _custody: worker.custody,
     }
 }
 async fn execute(worker: &mut Worker) -> Result<RowId, Refused> {
     let selector = match std::mem::replace(&mut worker.selector, Selection::Consumed) {
         Selection::Exact(selector) => selector,
-        Selection::Discover { cursor, permit } => discover(worker, cursor, permit).await?,
+        Selection::Discover { cursor, permit } => {
+            let result = discover(worker, cursor, permit).await;
+            #[cfg(test)]
+            if result == Err(Refused::Protocol(VoiceError::Capacity)) {
+                worker.discovery_refusal = Some(cursor);
+            }
+            result?
+        }
         Selection::Confirmation { cursor, incoming } => {
             return execute_confirmation(worker, cursor, incoming).await;
         }
@@ -383,7 +430,7 @@ async fn execute_confirmation(
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         require_current_selection(live.gate(), &authority, &selected)?;
-        route.require_open().map_err(|_| Refused::Closed)?;
+        route.require_pilot_open().map_err(|_| Refused::Closed)?;
     }
     let grant = selected.grant()?;
     let handshake = continuation.parent.confirmation_handshake()?;
@@ -499,6 +546,10 @@ async fn discover(
 }
 
 async fn execute_selected(worker: &Worker, selector: PairSelector) -> Result<RowId, Refused> {
+    #[cfg(test)]
+    if let Some(witness) = &worker.fixture_witness {
+        witness.selected(selector);
+    }
     let context = worker.context.as_ref().ok_or(Refused::Closed)?;
     let route = &worker.custody.route;
     let selected = route.selected().clone();
@@ -532,15 +583,29 @@ async fn execute_selected(worker: &Worker, selector: PairSelector) -> Result<Row
         route.session().fixture_native_stage(11);
         let authority = context.authority.lock().unwrap_or_else(|e| e.into_inner());
         require_current_selection(context.gate(), &authority, &selected)?;
-        route.require_open().map_err(|_| Refused::Closed)?;
+        route.require_pilot_open().map_err(|_| Refused::Closed)?;
     }
     let grant = selected.grant()?;
     // Recheck AFTER the Actor/UI waits, before any new counted Pending or Root
     // publication. Competing native/browser factories share this same UI commit.
     // Classify exact known work first: do not strand its original attachment/retry.
-    if !context.ledger.derivation_known(&selected, selector)
-        && !context.ledger.automatic_parent_available(&selected)?
-    {
+    let known = context.ledger.derivation_known(&selected, selector);
+    // Negative-only fixture pressure must come AFTER the blocking known lookup.
+    // With !known, the very next production check is the nonblocking Index check;
+    // this guard can only cause Capacity, then drops before Begin. In particular
+    // never hold Index through a known-work path or any blocking Index acquisition.
+    let available = known || {
+        #[cfg(test)]
+        let _pressure = if worker.fixture_late_contention {
+            Some(context.ledger.fixture_try_hold_index()?)
+        } else {
+            None
+        };
+        // Keep the test guard in this synchronous block: no MutexGuard can
+        // survive into Begin or an asynchronous publication future.
+        context.ledger.automatic_parent_available(&selected)?
+    };
+    if !available {
         return Err(VoiceError::Capacity.into());
     }
     #[cfg(test)]
@@ -549,16 +614,39 @@ async fn execute_selected(worker: &Worker, selector: PairSelector) -> Result<Row
         .ledger
         .begin(selected.clone(), Purpose::Derive(selector))?
     {
-        Begin::Existing(id) => return Ok(id),
+        Begin::Existing(id) => {
+            #[cfg(test)]
+            if let Some(witness) = &worker.fixture_witness {
+                let original = context
+                    .ledger
+                    .resolve(&selected, Purpose::Derive(selector), id)?;
+                witness.parent(id, original.fixture_address());
+            }
+            return Ok(id);
+        }
         Begin::Factory(registration) => registration,
     };
+    #[cfg(test)]
+    if let Some(witness) = &worker.fixture_witness {
+        witness.parent(registration.id(), registration.fixture_address());
+    }
     drop(context);
     // Only this task's weak context remains; no mounted Store/registry/Coordinator crosses
     // Actor publication. Retain the original selected owner and UI commit to the end of
     // this scope, after the shared exact-publication path has collected its Actor replies.
     #[cfg(test)]
     route.session().fixture_native_stage(5);
+    #[cfg(not(test))]
     let result = publish_derivation(registration, actor, grant, selector).await;
+    #[cfg(test)]
+    let result = publish_derivation(
+        registration,
+        actor,
+        grant,
+        selector,
+        worker.fixture_witness.as_deref(),
+    )
+    .await;
     drop(commit);
     drop(selected);
     result
@@ -567,3 +655,5 @@ async fn execute_selected(worker: &Worker, selector: PairSelector) -> Result<Row
 mod ready;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(in crate::voice_handoff) use tests::prove_discovery_late_refusal;

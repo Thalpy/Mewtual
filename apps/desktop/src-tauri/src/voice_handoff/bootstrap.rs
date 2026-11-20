@@ -3,37 +3,77 @@
 //! share64 slots; uncertain rows are never evicted. Collection requires actual independent
 //! owners to drain and the original lease to die permanently; serials never reset on reuse.
 use super::channel::bootstrap::{Prepared, PublicSetup};
+use super::channel::SessionWeak;
 use super::channel::{Refused, Session, SessionIdentity};
+use super::owned::{OwnedArc, OwnedBox, OwnedWeak, PlainOwner};
 use crate::voice_authority::SelectedHandoffOwner;
+use crate::voice_handoff::channel::SessionRef;
 use crate::{
     check_voice_activation_generation, check_voice_binding, require_unlocked_session, AppState,
 };
 use catcoms_rt::CryptoRngCore;
 use catcoms_sync::voice_v2::resources::{Credit, ProcessRetainedCredit, ResourceKind, Resources};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 
+type MetadataFundingOwner = PlainOwner<Credit>;
+type RowRef = OwnedArc<Row, MetadataFundingOwner>;
+pub(crate) type SetupOutputRef = OwnedArc<SetupOutput, MetadataFundingOwner>;
+type SetupOutputWeak = OwnedWeak<SetupOutput, MetadataFundingOwner>;
+type IndexOwner = OwnedBox<Index, ProcessRetainedCredit>;
+
+mod admission_mode;
+mod admission_slot;
+mod channel_owner;
+pub(in crate::voice_handoff) use channel_owner::{ChannelOwner, ChannelProfile};
+mod admitted;
+mod admitted_slot;
+pub(crate) use admitted::{collect_admitted_channel, ensure_admitted, settle_admitted_setup};
+pub(super) use admitted_slot::control_layout_bytes as admitted_control_layout_bytes;
 #[cfg(test)]
 mod diagnostics;
+pub(super) use admission_mode::observation_layout_bytes as admission_mode_layout_bytes;
+use admission_mode::AdmissionPin;
+pub(super) use admission_slot::control_layout_bytes as admission_capacity_layout_bytes;
 
 const ROWS: usize = 64;
 const INDEX_BYTES: usize = 4096;
-const ROW_BYTES: usize = 8192;
+// The complete graph includes Retirement's weak-only Session allocation tail.
+// The earlier graph measured9,080 bytes. Paired allocation owners and actual
+// return frames are additionally invoiced below; new fit awaits compilation.
+// Prepay10KiB before Row allocation; keep the complete inventories intact.
+// This changes only each retained Row's fee, not index slots or process caps.
+const ROW_BYTES: usize = 10 * 1024;
+
+fn index_layout_bytes() -> usize {
+    // Preserve the original complete Registry/backing terms and add the outside
+    // Box/payment owner. The fixed index still admits exactly64 entries.
+    std::mem::size_of::<Registry>()
+        + std::mem::size_of::<Index>()
+        + 2 * std::mem::size_of::<usize>()
+        + std::mem::size_of::<[Option<RowRef>; ROWS]>()
+        + std::mem::size_of::<IndexOwner>()
+        + std::mem::size_of::<ProcessRetainedCredit>()
+        + std::mem::size_of::<Reaper<'static>>()
+}
 
 struct Index {
     serial: u128,
     resources: Arc<Resources>,
-    rows: [Option<Arc<Row>>; ROWS],
-    _credit: ProcessRetainedCredit,
+    rows: [Option<RowRef>; ROWS],
 }
 struct Row {
-    selected: Arc<SelectedHandoffOwner>,
+    selected: ChannelOwner,
+    // SAME original physical history, never a Handle/Row backedge. The parent
+    // blocks Forget until its exact terminal receipt is explicitly observed.
+    physical_history: Option<crate::voice_call_activation::physical::PhysicalHistory>,
     device: [u8; 32],
     session_id: [u8; 16],
     slot: u8,
     state: Mutex<State>,
     projection_busy: AtomicBool,
-    _credit: Arc<Credit>,
+    admission_changed: tokio::sync::Notify,
+    _credit: MetadataFundingOwner,
 }
 struct State {
     pending: bool,
@@ -41,21 +81,142 @@ struct State {
     // Keep Control routing independently available until those actual owners drain.
     effects_closed: bool,
     closed: bool,
-    session: Option<Arc<Session>>,
-    public: Option<Arc<SetupOutput>>,
+    session: Option<SessionRef>,
+    public: Option<SetupOutputRef>,
     // Original native ECDH credit continues through browser setup/outgoing SDK promises.
     // Lease revocation and caller loss are NOT evidence that this work has drained.
     browser_setup: Option<Credit>,
     retirement: Option<Retirement>,
+    // Mode selection and setup ACK MUST share this mutex. Selection is sticky;
+    // cancellation or a lost reply cannot restore an old automatic producer.
+    admission: Option<AdmissionPin>,
+    admission_slot: admission_slot::Slot,
+    admitted_stage: Option<AdmittedStage>,
+}
+/// Exhaustive collection gate. An operational admitted consumer must add its
+/// actual debt/return state here; an empty Existing Slot is not that evidence.
+enum AdmittedStage {
+    BootstrapOnly,
+    /// Checked monotone pre-entry cancellation through this generation creates
+    /// no Box/task/RPC or Root mint; late Register cannot revive that intent.
+    CancelledBeforeStart(u64),
+    Admission(admitted_slot::PaidSlot),
+}
+impl State {
+    fn admitted_returned(&self) -> bool {
+        match self.admitted_stage.as_ref() {
+            None => true,
+            Some(stage) => {
+                self.admission.is_none() && self.admission_slot.collected() && stage.collected()
+            }
+        }
+    }
 }
 /// Direct Session/header/reply and public-output owners can outlive Row references. Paid
 /// weak witnesses keep their control blocks attributable until actual strong owners drain.
 /// Closed rows cannot reinstall a strong owner from these witnesses.
 struct Retirement {
-    session: Weak<Session>,
-    public: Weak<SetupOutput>,
+    session: Option<SessionWeak>,
+    public: Option<SetupOutputWeak>,
+    admitted: Option<AdmittedRetirement>,
     // Fixed original identity only; no Session/key/credit is kept alive by final history.
     identity: Option<Arc<SessionIdentity>>,
+}
+enum ActualOwner<T> {
+    NeverCreated,
+    Held(T),
+    Returning,
+    Returned,
+}
+impl<T> ActualOwner<T> {
+    fn returned(&self) -> bool {
+        matches!(self, Self::NeverCreated | Self::Returned)
+    }
+}
+struct AdmittedRetirement {
+    session: ActualOwner<SessionRef>,
+    public: ActualOwner<SetupOutputRef>,
+}
+impl Retirement {
+    fn owners_returned(&self) -> bool {
+        if let Some(admitted) = &self.admitted {
+            admitted.session.returned() && admitted.public.returned()
+        } else {
+            // Inherited Existing classifier. Paid weak witnesses preserve its
+            // allocation ownership, but strong0 alone is NOT a destructor-
+            // returned certificate. Admitted receipts never consume this arm.
+            self.session
+                .as_ref()
+                .is_none_or(|owner| owner.strong_count() == 0)
+                && self
+                    .public
+                    .as_ref()
+                    .is_none_or(|owner| owner.strong_count() == 0)
+        }
+    }
+    fn retained_session(&self) -> Option<SessionRef> {
+        if let Some(admitted) = &self.admitted {
+            match &admitted.session {
+                ActualOwner::Held(owner) => Some(owner.clone()),
+                _ => None,
+            }
+        } else {
+            self.session.as_ref().and_then(SessionWeak::upgrade)
+        }
+    }
+}
+#[derive(Clone, Copy)]
+enum ReturnedKind {
+    Session,
+    Public,
+}
+enum ReturningBody {
+    Session(SessionRef),
+    Public(SetupOutputRef),
+}
+struct ReturnedMarker {
+    row: RowRef,
+    kind: ReturnedKind,
+}
+impl Drop for ReturnedMarker {
+    fn drop(&mut self) {
+        {
+            let mut state = self.row.state.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(owners) = state
+                .retirement
+                .as_mut()
+                .and_then(|value| value.admitted.as_mut())
+            {
+                match self.kind {
+                    ReturnedKind::Session if matches!(owners.session, ActualOwner::Returning) => {
+                        owners.session = ActualOwner::Returned
+                    }
+                    ReturnedKind::Public if matches!(owners.public, ActualOwner::Returning) => {
+                        owners.public = ActualOwner::Returned
+                    }
+                    _ => {}
+                }
+            }
+        }
+        self.row.admission_changed.notify_waiters();
+    }
+}
+/// The marker remains OUTSIDE actual Arc destruction, including unwind. It can
+/// publish Returned only after the sole-strong/no-weak body and allocation have
+/// finished dropping. RowRef keeps the SAME metadata payer through every tail.
+struct ReturningOwner {
+    body: Option<ReturningBody>,
+    _returned: ReturnedMarker,
+}
+impl Drop for ReturningOwner {
+    fn drop(&mut self) {
+        if let Some(body) = self.body.take() {
+            match body {
+                ReturningBody::Session(owner) => drop(owner),
+                ReturningBody::Public(owner) => drop(owner),
+            }
+        }
+    }
 }
 /// Native-only evidence that the ORIGINAL closed channel has no remaining Session, header,
 /// reply, setup ticket or public-output owner and its lease is permanently dead. Only the
@@ -68,7 +229,7 @@ pub(super) struct CollectedChannel {
     // Otherwise its last allocation can outlive bootstrap's metadata credit when no action
     // Phase or Session remains. The Row's own retirement token is paid until _credit drops.
     identity: Option<Arc<SessionIdentity>>,
-    row: Arc<Row>,
+    row: RowRef,
 }
 impl CollectedChannel {
     pub(super) fn identity(&self) -> Option<&Arc<SessionIdentity>> {
@@ -77,7 +238,10 @@ impl CollectedChannel {
         self.identity.as_ref()
     }
     pub(super) fn selected(&self) -> &SelectedHandoffOwner {
-        &self.row.selected
+        self.row
+            .selected
+            .existing()
+            .expect("Existing collection witness")
     }
 }
 /// Exact retries share ONE immutable projection/allocation. Every returned owner retains the
@@ -85,7 +249,7 @@ impl CollectedChannel {
 /// buffers without separately paying its copy. Future IPC serialization needs its own flight.
 pub(crate) struct SetupOutput {
     public: PublicSetup,
-    _credit: Arc<Credit>,
+    _credit: MetadataFundingOwner,
 }
 impl SetupOutput {
     pub(crate) fn public(&self) -> &PublicSetup {
@@ -93,7 +257,7 @@ impl SetupOutput {
     }
 }
 pub(crate) struct PublicProjection {
-    output: Arc<SetupOutput>,
+    output: SetupOutputRef,
 }
 impl serde::Serialize for PublicProjection {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -110,32 +274,49 @@ impl serde::Serialize for PublicProjection {
 /// One original payment/serial position for EVERY successful setup variant. Closed and
 /// Pending replies allocate the same bounded JSON as Ready, so they cannot be bare Strings.
 pub(super) struct MetadataProjection {
-    row: Arc<Row>,
+    row: RowRef,
 }
 impl MetadataProjection {
     /// Original registry allocation, including after End. This is historical provenance,
     /// not a live grant upgrade or permission to construct replacement work.
-    pub(super) fn selected(&self) -> &SelectedHandoffOwner {
-        &self.row.selected
+    pub(super) fn existing_selected(&self) -> Result<&SelectedHandoffOwner, Refused> {
+        self.row
+            .selected
+            .existing()
+            .map(AsRef::as_ref)
+            .ok_or(Refused::Binding)
     }
 
     /// Conservative complete original Row/preparation/output inventory plus ONE serial
     /// metadata reply. General allocator, framework copies after handoff and OS overhead
-    /// are outside this application-owner bound. Refuse rather than raise its8KiB payment.
+    /// are outside this application-owner bound. Refuse before allocation if the
+    /// complete graph exceeds the independently prepaid 10 KiB Row payment.
     pub(super) fn require_reply_memory(&self, reply_bytes: usize) -> Result<(), Refused> {
+        Self::require_layout(reply_bytes)
+    }
+    fn require_layout(reply_bytes: usize) -> Result<(), Refused> {
         let arc_words = 2 * std::mem::size_of::<usize>();
         let retained = std::mem::size_of::<Row>()
+            + admission_slot::retained_layout_bytes()
             + std::mem::size_of::<SessionIdentity>()
             + arc_words * 2
             + std::mem::size_of::<Ticket>()
             + std::mem::size_of::<SetupOutput>()
             + std::mem::size_of::<Credit>()
             + arc_words * 2
-            + std::mem::size_of::<Arc<Session>>()
+            + std::mem::size_of::<SessionRef>()
+            // Retirement's Weak outlives Session's internal Credits. It retains
+            // the WHOLE emptied Arc allocation, not just a pointer/control word.
+            // Row's original payer must cover that tail until the Weak is freed.
+            + std::mem::size_of::<Session>() + arc_words
+            + super::channel::session_owner_layout_bytes()
             + std::mem::size_of::<Begin>()
             + std::mem::size_of::<Status>()
             + std::mem::size_of::<PublicProjection>()
             + std::mem::size_of::<MetadataProjection>();
+        // Session and output can retire independently on two concurrent callers.
+        // Both complete outside-guard frames remain paid during serialization.
+        let retained = retained + 2 * std::mem::size_of::<ReturningOwner>();
         let bytes = retained.checked_add(reply_bytes).ok_or(Refused::Capacity)?;
         #[cfg(test)]
         eprintln!("native work metadata row/reply inventory {bytes}/{ROW_BYTES}");
@@ -145,8 +326,8 @@ impl MetadataProjection {
         Ok(())
     }
 
-    pub(super) fn transcript(&self, output: Arc<SetupOutput>) -> Result<PublicProjection, Refused> {
-        if !Arc::ptr_eq(&self.row._credit, &output._credit) {
+    pub(super) fn transcript(&self, output: SetupOutputRef) -> Result<PublicProjection, Refused> {
+        if !self.row._credit.is_same(&output._credit) {
             return Err(Refused::Binding);
         }
         Ok(PublicProjection { output })
@@ -161,13 +342,24 @@ impl Drop for MetadataProjection {
 /// the actual shared native pool, before any row or bootstrap becomes externally observable.
 #[derive(Default)]
 pub(crate) struct Registry {
-    index: Mutex<Option<Box<Index>>>,
+    index: Mutex<Option<IndexOwner>>,
     stopping: AtomicBool,
+    reaper_busy: AtomicBool,
+}
+/// One original index payment covers one heavy collection frame. Callers never
+/// wait while another collector is destroying an owner (which may itself wake
+/// a reentrant collector). Unwind returns only this execution position, never
+/// a Row/Session or a proof that its actual obligations returned.
+struct Reaper<'a>(&'a AtomicBool);
+impl Drop for Reaper<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 pub(crate) enum Status {
     Pending,
     Closed { native_setup_drained: bool },
-    Ready(Arc<SetupOutput>),
+    Ready(SetupOutputRef),
 }
 #[allow(clippy::large_enum_variant)]
 enum Begin {
@@ -175,12 +367,42 @@ enum Begin {
     Work(Ticket),
 }
 struct Ticket {
-    row: Arc<Row>,
     prepared: Option<Prepared>,
     installed: bool,
+    // LAST: all actual preparation/credit fields retire before this Row alias
+    // can become the registry's sole owner. Count-zero is not setup return.
+    row: RowRef,
 }
 
 impl Registry {
+    /// Exact retained cleanup provenance only, including closed shutdown rows.
+    /// This grants no first effect and never creates a row, Session or selection.
+    fn original_route(&self, owner: &str, executor: [u8; 32]) -> Option<Route> {
+        let row = {
+            let held = self.index.lock().unwrap_or_else(|error| error.into_inner());
+            held.as_ref()?
+                .rows
+                .iter()
+                .flatten()
+                .find(|row| row.selected.id() == owner && row.selected.executor() == executor)?
+                .clone()
+        };
+        Self::row_route(row)
+    }
+    fn row_route(row: RowRef) -> Option<Route> {
+        // Sealed Existing route: no old operation/producer may see an admitted
+        // physical Session through this type, even for equal public identifiers.
+        row.selected.existing()?;
+        let (session, public) = {
+            let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+            (state.session.clone()?, state.public.clone()?)
+        };
+        Some(Route {
+            row,
+            session,
+            public,
+        })
+    }
     /// Cleanup-only routing under the caller's ORIGINAL UI commit. End/lock may revoke the
     /// call lease while its authenticated Control session still has final delivery work.
     /// Do not reuse first-effect require_open here, and do not weaken it for factories.
@@ -196,7 +418,7 @@ impl Registry {
                     .rows
                     .iter()
                     .flatten()
-                    .any(|row| Arc::ptr_eq(row, &route.row))
+                    .any(|row| row.is_same(&route.row))
             })
         {
             return Err(Refused::Binding);
@@ -211,11 +433,11 @@ impl Registry {
             || !state
                 .session
                 .as_ref()
-                .is_some_and(|session| Arc::ptr_eq(session, &route.session))
+                .is_some_and(|session| session.is_same(&route.session))
             || !state
                 .public
                 .as_ref()
-                .is_some_and(|public| Arc::ptr_eq(public, &route.public))
+                .is_some_and(|public| public.is_same(&route.public))
         {
             return Err(Refused::Binding);
         }
@@ -227,20 +449,45 @@ impl Registry {
     /// Caller holds the SAME UI commit as final publication; release these registry guards
     /// before consulting the ledger or destroying any Root owner.
     fn close_effects(&self, owner: &str, executor: [u8; 32]) -> Option<Arc<SelectedHandoffOwner>> {
-        self.index
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .as_ref()?
-            .rows
-            .iter()
-            .flatten()
-            .find(|row| row.selected.id() == owner && row.selected.executor() == executor)
-            .map(|row| {
+        let row = {
+            let held = self.index.lock().unwrap_or_else(|error| error.into_inner());
+            held.as_ref()?
+                .rows
+                .iter()
+                .flatten()
+                .find(|row| row.selected.id() == owner && row.selected.executor() == executor)
+                .cloned()
+        }?;
+        row.selected.existing()?;
+        {
+            let mut state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.effects_closed = true;
+            state.admission_slot.close();
+        }
+        // Direct wake after guards; shutdown/close cannot depend on a future
+        // maintenance cadence, nor wake a task while retaining its State lock.
+        row.admission_changed.notify_waiters();
+        row.selected.existing().cloned()
+    }
+
+    /// Pure readiness before terminating authenticated Control routing. First
+    /// effects must already be fenced/woken; pending Slot work keeps closed=false.
+    fn admission_may_close(&self, owner: &str, executor: [u8; 32]) -> bool {
+        let held = self.index.lock().unwrap_or_else(|error| error.into_inner());
+        held.as_ref()
+            .and_then(|index| {
+                index
+                    .rows
+                    .iter()
+                    .flatten()
+                    .find(|row| row.selected.id() == owner && row.selected.executor() == executor)
+            })
+            .is_none_or(|row| {
                 row.state
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
-                    .effects_closed = true;
-                row.selected.clone()
+                    .admission_slot
+                    .collected()
             })
     }
 
@@ -258,7 +505,7 @@ impl Registry {
             .iter()
             .flatten()
             .find(|row| row.selected.id() == owner && row.selected.executor() == executor)
-            .map(|row| row.selected.clone())
+            .and_then(|row| row.selected.existing().cloned())
     }
 
     /// Exact public projection after ensure, outside Coordinator. If collection won this
@@ -280,6 +527,9 @@ impl Registry {
                     })
                 })
                 .ok_or(Refused::Binding)?;
+        if row.selected.profile() != ChannelProfile::Existing {
+            return Err(Refused::Binding);
+        }
         row.projection_busy
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| Refused::Capacity)?;
@@ -312,6 +562,11 @@ impl Registry {
             .as_ref()
             .and_then(|index| index.rows[usize::from(slot)].as_ref())
             .ok_or(Refused::Binding)?;
+        // Do this before cloning Session/output or authenticating an old header.
+        // Only the distinct admitted route may eventually dispatch operation31.
+        if row.selected.profile() != ChannelProfile::Existing {
+            return Err(Refused::Binding);
+        }
         let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
         if state.closed {
             return Err(Refused::Binding);
@@ -324,21 +579,26 @@ impl Registry {
     }
 
     fn index<'a>(
-        held: &'a mut Option<Box<Index>>,
+        held: &'a mut Option<IndexOwner>,
         resources: &Arc<Resources>,
     ) -> Result<&'a mut Index, Refused> {
         if held.is_none() {
+            if index_layout_bytes() > INDEX_BYTES {
+                return Err(Refused::Capacity);
+            }
             let credit = resources
                 .charge_process_retained(INDEX_BYTES)
                 .map_err(|_| Refused::Capacity)?;
             // Charge before constructing the fixed index/Box. No synthetic group consumes a
             // real group record, and this process payment never lends crypto/data capacity.
-            *held = Some(Box::new(Index {
-                serial: 0,
-                resources: resources.clone(),
-                rows: std::array::from_fn(|_| None),
-                _credit: credit,
-            }));
+            *held = Some(OwnedBox::new(
+                Index {
+                    serial: 0,
+                    resources: resources.clone(),
+                    rows: std::array::from_fn(|_| None),
+                },
+                credit,
+            ));
         }
         let index = held.as_deref_mut().expect("installed paid index");
         if !Arc::ptr_eq(&index.resources, resources) {
@@ -352,6 +612,31 @@ impl Registry {
         selected: Arc<SelectedHandoffOwner>,
         device: [u8; 32],
     ) -> Result<Begin, Refused> {
+        // This is the Existing/pilot grammar. A genuinely published admitted key
+        // needs its separate profile selection and cannot enter an old Session,
+        // even through a second physical channel with equal owner/executor labels.
+        // Refuse before allocating an index, row, crypto work, or RNG state.
+        if selected.lease().is_admitted() {
+            return Err(Refused::Binding);
+        }
+        self.begin_owner(ChannelOwner::Existing(selected), device, None)
+    }
+
+    fn begin_owner(
+        &self,
+        selected: ChannelOwner,
+        device: [u8; 32],
+        physical_history: Option<crate::voice_call_activation::physical::PhysicalHistory>,
+    ) -> Result<Begin, Refused> {
+        MetadataProjection::require_layout(super::commands::bootstrap_reply_layout_bytes())?;
+        match (&selected, &physical_history) {
+            (ChannelOwner::Existing(_), None) => {}
+            (ChannelOwner::Admitted(key), Some(history))
+                if history.owner() == key.id()
+                    && history.executor() == key.executor()
+                    && history.join() == key.join() => {}
+            _ => return Err(Refused::Binding),
+        }
         let resources = selected.resources();
         let mut held = self.index.lock().unwrap_or_else(|error| error.into_inner());
         if self.stopping.load(Ordering::Acquire) {
@@ -361,7 +646,7 @@ impl Registry {
         if let Some(row) = index.rows.iter().flatten().find(|row| {
             row.selected.id() == selected.id() && row.selected.executor() == selected.executor()
         }) {
-            if !Arc::ptr_eq(&row.selected, &selected) {
+            if !row.selected.is_same(&selected) {
                 return Err(Refused::Binding);
             }
             let status = row.status();
@@ -387,31 +672,58 @@ impl Registry {
                 ResourceKind::Retained,
             )
             .map_err(|_| Refused::Capacity)?;
-        let prepared = Prepared::new(
-            selected.clone(),
-            serial.to_be_bytes(),
-            (slot + 1) as u8,
-            device,
-        )?;
+        let prepared = match &selected {
+            ChannelOwner::Existing(value) => Prepared::new(
+                value.clone(),
+                serial.to_be_bytes(),
+                (slot + 1) as u8,
+                device,
+            )?,
+            ChannelOwner::Admitted(_) => Prepared::new_owner(
+                selected.clone(),
+                serial.to_be_bytes(),
+                (slot + 1) as u8,
+                device,
+            )?,
+        };
+        let admitted_stage = match selected.profile() {
+            ChannelProfile::Existing => None,
+            ChannelProfile::Admitted => Some(AdmittedStage::BootstrapOnly),
+        };
         // Proven-unstarted refusal above has no row/serial effect. Once this Pending becomes
         // visible, its ticket always finishes or latches a closed fence, including unwind.
-        let row = Arc::new(Row {
-            selected,
-            device,
-            session_id: serial.to_be_bytes(),
-            slot: (slot + 1) as u8,
-            state: Mutex::new(State {
-                pending: true,
-                effects_closed: false,
-                closed: false,
-                session: None,
-                public: None,
-                browser_setup: None,
-                retirement: None,
-            }),
-            projection_busy: AtomicBool::new(false),
-            _credit: Arc::new(credit),
-        });
+        let credit = MetadataFundingOwner::new(credit);
+        let row = RowRef::new(
+            Row {
+                selected,
+                physical_history,
+                device,
+                session_id: serial.to_be_bytes(),
+                slot: (slot + 1) as u8,
+                state: Mutex::new(State {
+                    pending: true,
+                    effects_closed: false,
+                    closed: false,
+                    session: None,
+                    public: None,
+                    browser_setup: None,
+                    retirement: None,
+                    admission: None,
+                    admission_slot: admission_slot::Slot::default(),
+                    admitted_stage,
+                }),
+                projection_busy: AtomicBool::new(false),
+                admission_changed: tokio::sync::Notify::new(),
+                _credit: credit.clone(),
+            },
+            credit,
+        );
+        // Latch the SAME physical intent before this Pending Row or RNG can escape.
+        if let Some(history) = &row.physical_history {
+            history
+                .admit_row(row.session_id)
+                .map_err(|_| Refused::Binding)?;
+        }
         index.serial = serial;
         index.rows[slot] = Some(row.clone());
         Ok(Begin::Work(Ticket {
@@ -430,8 +742,15 @@ impl Registry {
         executor: [u8; 32],
         selected: Option<Arc<SelectedHandoffOwner>>,
     ) -> Result<Status, Refused> {
-        self.close_row(owner, executor, selected)
-            .map(|row| row.status())
+        self.close_row(owner, executor, selected).map(|row| {
+            row.state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .admission_slot
+                .close();
+            row.admission_changed.notify_waiters();
+            row.status()
+        })
     }
     /// Hold the actual Row across post-guard retirement; a collector cannot turn an admitted
     /// exact close into an ambiguous missing-row error between the two operations.
@@ -440,7 +759,7 @@ impl Registry {
         owner: &str,
         executor: [u8; 32],
         selected: Option<Arc<SelectedHandoffOwner>>,
-    ) -> Result<Arc<Row>, Refused> {
+    ) -> Result<RowRef, Refused> {
         let mut held = self.index.lock().unwrap_or_else(|error| error.into_inner());
         if let Some(row) = held.as_ref().and_then(|index| {
             index
@@ -449,6 +768,9 @@ impl Registry {
                 .flatten()
                 .find(|row| row.selected.id() == owner && row.selected.executor() == executor)
         }) {
+            if row.selected.profile() != ChannelProfile::Existing {
+                return Err(Refused::Binding);
+            }
             row.state
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
@@ -480,23 +802,32 @@ impl Registry {
                 ResourceKind::Retained,
             )
             .map_err(|_| Refused::Capacity)?;
-        let row = Arc::new(Row {
-            selected,
-            device: [0; 32],
-            session_id: serial.to_be_bytes(),
-            slot: (slot + 1) as u8,
-            state: Mutex::new(State {
-                pending: false,
-                effects_closed: true,
-                closed: true,
-                session: None,
-                public: None,
-                browser_setup: None,
-                retirement: None,
-            }),
-            projection_busy: AtomicBool::new(false),
-            _credit: Arc::new(credit),
-        });
+        let credit = MetadataFundingOwner::new(credit);
+        let row = RowRef::new(
+            Row {
+                selected: ChannelOwner::Existing(selected),
+                physical_history: None,
+                device: [0; 32],
+                session_id: serial.to_be_bytes(),
+                slot: (slot + 1) as u8,
+                state: Mutex::new(State {
+                    pending: false,
+                    effects_closed: true,
+                    closed: true,
+                    session: None,
+                    public: None,
+                    browser_setup: None,
+                    retirement: None,
+                    admission: None,
+                    admission_slot: admission_slot::Slot::default(),
+                    admitted_stage: None,
+                }),
+                projection_busy: AtomicBool::new(false),
+                admission_changed: tokio::sync::Notify::new(),
+                _credit: credit.clone(),
+            },
+            credit,
+        );
         index.serial = serial;
         index.rows[slot] = Some(row.clone());
         Ok(row)
@@ -522,22 +853,64 @@ impl Registry {
     /// Bounded collection requires an irreversibly dead original lease, no pending setup,
     /// and actual drainage of ALL detached owners. Keep the monotonic serial across reuse.
     pub(crate) fn collect_retired(&self, ledger: &super::ledger::Ledger) {
-        let mut removed: [Option<Arc<Row>>; ROWS] = std::array::from_fn(|_| None);
+        if self
+            .reaper_busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let _reaper = Reaper(&self.reaper_busy);
+        let paid_index = {
+            self.index
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_some()
+        };
+        if !paid_index {
+            // The independently paid ledger still needs quiet collection, but
+            // no index exists to sponsor a heavy Registry collection frame.
+            ledger.collect_retired();
+            return;
+        }
+        self.collect_retired_owned(ledger);
+    }
+
+    /// Keep the fixed Row array out of refused/reentrant caller frames. The
+    /// caller owns the sole affine Reaper through every actual drop and unwind.
+    #[inline(never)]
+    fn collect_retired_owned(&self, ledger: &super::ledger::Ledger) {
+        // Reap the two independent admitted custodians outside all guards FIRST.
+        // A held output must not pin a returned Session's lane/control payments.
+        // This is reachable even while the call lease itself remains live.
+        for _ in 0..ROWS * 2 {
+            let Some(owner) = self.take_one_returning_owner() else {
+                break;
+            };
+            drop(owner);
+        }
+        let mut removed: [Option<RowRef>; ROWS] = std::array::from_fn(|_| None);
         {
             let mut held = self.index.lock().unwrap_or_else(|error| error.into_inner());
             if let Some(index) = held.as_mut() {
                 for (slot, retired) in index.rows.iter_mut().zip(&mut removed) {
                     let reclaim = slot.as_ref().is_some_and(|row| {
-                        if row.selected.lease().is_live() || Arc::strong_count(row) != 1 {
+                        if row.selected.lease().is_live()
+                            || row.strong_count() != 1
+                            || row.selected.profile() == ChannelProfile::Admitted
+                                && row.weak_count() != 0
+                        {
                             return false;
                         }
                         let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
                         state.closed
                             && !state.pending
-                            && state.retirement.as_ref().is_some_and(|owners| {
-                                owners.session.strong_count() == 0
-                                    && owners.public.strong_count() == 0
-                            })
+                            && state.admitted_returned()
+                            && state.admission_slot.collected()
+                            && state
+                                .retirement
+                                .as_ref()
+                                .is_some_and(Retirement::owners_returned)
                     });
                     if reclaim {
                         *retired = slot.take();
@@ -557,11 +930,86 @@ impl Registry {
                 .retirement
                 .as_ref()
                 .and_then(|owners| owners.identity.clone());
-            ledger.channel_collected(CollectedChannel { row, identity });
+            match row.selected.profile() {
+                ChannelProfile::Existing => {
+                    ledger.channel_collected(CollectedChannel { row, identity })
+                }
+                // This slice exposes only bootstrap custody for admitted rows.
+                // It never mints the Existing ledger's collection certificate.
+                ChannelProfile::Admitted => {
+                    // Keep the SAME original Row payment outside actual final
+                    // Arc destruction: weak-only Session/output allocations
+                    // deallocate before we publish the collection receipt.
+                    let credit = row._credit.clone();
+                    let history = row.physical_history.clone();
+                    let serial = row.session_id;
+                    drop(identity);
+                    drop(row);
+                    if let Some(history) = history {
+                        history.row_actually_returned(serial);
+                    }
+                    drop(credit);
+                }
+            }
         }
         // Always sweep, including an empty/uninitialized registry. The original one-shot
         // witness may have arrived before the last cleanup/metadata handle actually dropped.
         ledger.collect_retired();
+    }
+
+    /// Move exactly one real sole owner, then release guards before destruction.
+    /// Returning is explicit: a concurrent/reentrant collector never interprets
+    /// the removed field as Returned. With no raw/escaping Weak and weak_count0,
+    /// no other caller can resurrect another body/header owner after this turn.
+    fn take_one_returning_owner(&self) -> Option<ReturningOwner> {
+        let held = self.index.lock().unwrap_or_else(|error| error.into_inner());
+        let index = held.as_ref()?;
+        for row in index.rows.iter().flatten() {
+            let mut state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+            if !state.closed
+                || state.pending
+                || !state.admitted_returned()
+                || !state.admission_slot.collected()
+            {
+                continue;
+            }
+            let Some(owners) = state
+                .retirement
+                .as_mut()
+                .and_then(|value| value.admitted.as_mut())
+            else {
+                continue;
+            };
+            let body = if matches!(&owners.session, ActualOwner::Held(owner) if owner.strong_count() == 1 && owner.weak_count() == 0)
+            {
+                let ActualOwner::Held(owner) =
+                    std::mem::replace(&mut owners.session, ActualOwner::Returning)
+                else {
+                    unreachable!()
+                };
+                Some((ReturningBody::Session(owner), ReturnedKind::Session))
+            } else if matches!(&owners.public, ActualOwner::Held(owner) if owner.strong_count() == 1 && owner.weak_count() == 0)
+            {
+                let ActualOwner::Held(owner) =
+                    std::mem::replace(&mut owners.public, ActualOwner::Returning)
+                else {
+                    unreachable!()
+                };
+                Some((ReturningBody::Public(owner), ReturnedKind::Public))
+            } else {
+                None
+            };
+            if let Some((body, kind)) = body {
+                return Some(ReturningOwner {
+                    body: Some(body),
+                    _returned: ReturnedMarker {
+                        row: row.clone(),
+                        kind,
+                    },
+                });
+            }
+        }
+        None
     }
 
     /// Process shutdown only: close every existing first-effect fence before collecting any
@@ -577,11 +1025,24 @@ impl Registry {
             self.stopping.store(true, Ordering::Release);
             if let Some(index) = held.as_ref() {
                 for row in index.rows.iter().flatten() {
-                    row.state
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .closed = true;
+                    let mut state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+                    state.closed = true;
+                    state.admission_slot.close();
+                    if let Some(stage) = state.admitted_stage.as_mut() {
+                        stage.close();
+                    }
                 }
+            }
+        }
+        // Wake EVERY permanent admission task before waiting for ANY Session.
+        // One transient Row owner at a time avoids a second64-entry snapshot.
+        for slot in 0..ROWS {
+            let row = {
+                let held = self.index.lock().unwrap_or_else(|error| error.into_inner());
+                held.as_ref().and_then(|index| index.rows[slot].clone())
+            };
+            if let Some(row) = row {
+                row.admission_changed.notify_waiters();
             }
         }
         // One paid Session/waiter at a time; no heap registry, detached waiter or 64-owner
@@ -590,6 +1051,70 @@ impl Registry {
         // Retired Sessions can have no Row references while a reply/worker still
         // owns them, so consult the original weak witness as well as live State.session.
         for slot in 0..ROWS {
+            let row = {
+                let held = self.index.lock().unwrap_or_else(|error| error.into_inner());
+                held.as_ref().and_then(|index| index.rows[slot].clone())
+            };
+            if let Some(route) = row
+                .as_ref()
+                .and_then(|row| Self::admitted_row_route(row.clone()))
+            {
+                loop {
+                    let notified = route.row.admission_changed.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    // Do not notify our own armed waiter on every pass. Only
+                    // actual Work/owner return may wake this shutdown loop.
+                    route.recover_admitted();
+                    if route
+                        .row
+                        .state
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .admitted_returned()
+                    {
+                        break;
+                    }
+                    if let Some(work) = route.admitted_work() {
+                        if !work.is_retired() {
+                            work.wait_retired().await;
+                            route.row.admission_changed.notify_waiters();
+                            continue;
+                        }
+                    }
+                    notified.await;
+                }
+            }
+            if let Some(route) = row.and_then(Self::row_route) {
+                loop {
+                    let notified = route.row.admission_changed.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    let recovered = route.recover_terminal_admission();
+                    if route
+                        .row
+                        .state
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .admission_slot
+                        .collected()
+                    {
+                        break;
+                    }
+                    if let Some(work) = route.admission_work() {
+                        if !work.is_retired() {
+                            work.wait_retired().await;
+                            continue;
+                        }
+                    }
+                    // Recovery may have unwound after partial real destruction.
+                    // Retry that SAME terminal custody, with no new allocation.
+                    if recovered {
+                        continue;
+                    }
+                    notified.await;
+                }
+            }
             let session = {
                 let held = self.index.lock().unwrap_or_else(|error| error.into_inner());
                 held.as_ref()
@@ -600,7 +1125,7 @@ impl Registry {
                             state
                                 .retirement
                                 .as_ref()
-                                .and_then(|retired| retired.session.upgrade())
+                                .and_then(Retirement::retained_session)
                         })
                     })
             };
@@ -615,11 +1140,32 @@ impl Registry {
 }
 /// Native-only immutable control routing. Retain the actual row, Session and paid public
 /// output across IO; copied session IDs alone cannot create this owner or authorize actions.
+/// Distinct admitted routing deliberately has no Existing selected-owner accessor.
+#[derive(Clone)]
+pub(in crate::voice_handoff) struct AdmittedRoute {
+    row: RowRef,
+    session: SessionRef,
+    public: SetupOutputRef,
+}
+impl AdmittedRoute {
+    pub(in crate::voice_handoff) fn selected(
+        &self,
+    ) -> &crate::voice_authority::AdmittedPublishedKey {
+        self.row.selected.admitted().expect("sealed admitted route")
+    }
+    pub(in crate::voice_handoff) fn session(&self) -> &SessionRef {
+        &self.session
+    }
+    pub(in crate::voice_handoff) fn public(&self) -> &SetupOutputRef {
+        &self.public
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct Route {
-    row: Arc<Row>,
-    session: Arc<Session>,
-    public: Arc<SetupOutput>,
+    row: RowRef,
+    session: SessionRef,
+    public: SetupOutputRef,
 }
 impl Route {
     #[cfg(test)]
@@ -640,12 +1186,13 @@ impl Route {
             && !state.effects_closed
             && !state.pending
             && state.browser_setup.is_none()
+            && state.admission.is_none()
             && self.row.selected.lease().is_live()
     }
     /// Only this immutable native row supplies selection. Request labels are lookup hints,
     /// never a substitute for the allocation which owns this Session and its payments.
     pub(super) fn selected(&self) -> &Arc<SelectedHandoffOwner> {
-        &self.row.selected
+        self.row.selected.existing().expect("sealed Existing route")
     }
     /// Pure first-effect fence. Repeat under the SAME original UI commit as close_row;
     /// otherwise a retained Route could start actor work after trusted channel collection.
@@ -698,7 +1245,7 @@ impl Route {
     pub(super) fn fixture_lock_route(&self) -> impl Drop + '_ {
         self.row.state.lock().unwrap()
     }
-    pub(super) fn session(&self) -> &Arc<Session> {
+    pub(super) fn session(&self) -> &SessionRef {
         &self.session
     }
     pub(super) fn session_id(&self) -> [u8; 16] {
@@ -741,29 +1288,44 @@ impl Row {
             if state.pending {
                 return Err(Refused::Capacity);
             }
-            if state.retirement.is_none() {
-                state.retirement = Some(Retirement {
-                    identity: state
-                        .session
-                        .as_ref()
-                        .map(|session| session.identity().clone()),
-                    session: state
-                        .session
-                        .as_ref()
-                        .map(Arc::downgrade)
-                        .unwrap_or_default(),
-                    public: state
-                        .public
-                        .as_ref()
-                        .map(Arc::downgrade)
-                        .unwrap_or_default(),
-                });
+            if !state.admission_slot.collected() {
+                // The direct close wake was already sent. Metadata closure cannot
+                // certify channel collection ahead of its original admission work.
+                return Err(Refused::Capacity);
             }
-            (
-                state.session.take(),
-                state.public.take(),
-                state.browser_setup.take(),
-            )
+            if !state.admitted_returned() {
+                return Err(Refused::Capacity);
+            }
+            let mut session = state.session.take();
+            let mut public = state.public.take();
+            if state.retirement.is_none() {
+                let identity = session.as_ref().map(|owner| owner.identity().clone());
+                let retirement = match self.selected.profile() {
+                    ChannelProfile::Existing => Retirement {
+                        identity,
+                        admitted: None,
+                        session: session.as_ref().map(SessionRef::downgrade),
+                        public: public.as_ref().map(SetupOutputRef::downgrade),
+                    },
+                    ChannelProfile::Admitted => Retirement {
+                        identity,
+                        session: None,
+                        public: None,
+                        admitted: Some(AdmittedRetirement {
+                            session: session
+                                .take()
+                                .map(ActualOwner::Held)
+                                .unwrap_or(ActualOwner::NeverCreated),
+                            public: public
+                                .take()
+                                .map(ActualOwner::Held)
+                                .unwrap_or(ActualOwner::NeverCreated),
+                        }),
+                    },
+                };
+                state.retirement = Some(retirement);
+            }
+            (session, public, state.browser_setup.take())
         };
         drop(retired);
         Ok(())
@@ -796,7 +1358,7 @@ impl Ticket {
     fn compute(
         &mut self,
         rng: &mut dyn CryptoRngCore,
-    ) -> Result<(Arc<Session>, PublicSetup, Credit), Refused> {
+    ) -> Result<(SessionRef, PublicSetup, Credit), Refused> {
         // The registry owns Pending before this first possible callback. Taking the sole
         // preparation is irreversible: an error/panic cannot create another scalar on retry.
         let prepared = self.prepared.take().ok_or(Refused::Binding)?;
@@ -815,7 +1377,7 @@ impl Ticket {
     /// this installation. Failed output stays in caller's Option and drops AFTER guards.
     fn install(
         &mut self,
-        output: &mut Option<(Arc<Session>, Arc<SetupOutput>, Credit)>,
+        output: &mut Option<(SessionRef, SetupOutputRef, Credit)>,
     ) -> Result<(), Refused> {
         let mut state = self
             .row
@@ -913,10 +1475,13 @@ pub(crate) async fn ensure(
     // No await after Pending admission. Injected RNG/arithmetic can run no final native lock;
     // the original UI commit still orders admission/completion against lock's report.
     let (session, public, setup) = ticket.compute(rng)?;
-    let reply = Arc::new(SetupOutput {
-        public,
-        _credit: ticket.row._credit.clone(),
-    });
+    let reply = SetupOutputRef::new(
+        SetupOutput {
+            public,
+            _credit: ticket.row._credit.clone(),
+        },
+        ticket.row._credit.clone(),
+    );
     let mut output = Some((session, reply.clone(), setup));
     {
         let mut authority = state
@@ -960,6 +1525,23 @@ async fn finish(
     executor: [u8; 32],
     closure: Closure,
 ) -> Result<Status, Refused> {
+    // A legacy cleanup adapter cannot reinterpret an admitted generation or
+    // report its still-retained physical setup as legacy no-work history.
+    if state.voice_channels.admitted_identity(owner, executor)
+        || state
+            .voice_authority
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .admitted_activation(owner)
+            .is_some()
+    {
+        return Err(Refused::Binding);
+    }
+    // An aborted permanent task transferred its actual position into the Row.
+    // Cleanup is negative only and must run OUTSIDE UI/Coordinator/State guards.
+    if let Some(route) = state.voice_channels.original_route(owner, executor) {
+        route.recover_terminal_admission();
+    }
     let _commit = state.ui_session_commit.clone().lock_owned().await;
     if let Some(original) = state.voice_channels.close_effects(owner, executor) {
         // Both setup-failure cleanup and final channel collection stop first effects now,
@@ -967,7 +1549,9 @@ async fn finish(
         // ACK/settlement/phase closure could become unreachable. All factory admissions use
         // this SAME UI commit, so a new Pending row cannot race the pure preflight below.
         // No Registry/Coordinator guard overlaps the ledger check or original-owner drop.
-        if !state.voice_handoff.channel_may_close(&original) {
+        if !state.voice_handoff.channel_may_close(&original)
+            || !state.voice_channels.admission_may_close(owner, executor)
+        {
             return Err(Refused::Capacity);
         }
     }
@@ -1004,6 +1588,9 @@ async fn finish(
             Err(error) => return Err(error),
         }
     };
+    // All first-effect fences are already closed. Keep that actual Row, release
+    // UI before retirement/Root destruction/collection, and never reopen it.
+    drop(_commit);
     match closure {
         Closure::Setup => row.retire_setup()?,
         Closure::Channel => row.retire_channel()?,
