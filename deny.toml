@@ -80,6 +80,7 @@ allow-wildcard-paths = true
 # the reviewed 0.26.11 forwarding crate and fixed >=1.0.10 bundles are permitted. Its parent
 # appears as a separate package in the graph, so resolving it to 1.0.9 fails these bans.
 deny = [
+    { name = "chrono", reason = "RUSTSEC-2026-0543: logging uses Jiff and Windows route queries require no Chrono integration" },
     { name = "h2", version = "<0.4.16", reason = "RUSTSEC-2026-0258: refuse unbounded empty-DATA queue versions" },
     { name = "zip", version = "<9.0.0", reason = "RUSTSEC-2026-0367/-0368/-0369: unsafe extraction; official updater artifacts need no legacy ZIP support" },
 

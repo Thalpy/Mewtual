@@ -124,6 +124,7 @@ xattr = "1.7.0"
 
 # Cargo patches belong to each workspace root, including this separate native workspace.
 [patch.crates-io]
+netwatch = { path = "../../../vendor/netwatch" }
 libp2p-gossipsub = { path = "../../../vendor/libp2p-gossipsub" }
 automerge = { path = "../../../vendor/automerge" }
 openmls_memory_storage = { path = "../../../vendor/openmls_memory_storage" }

@@ -327,7 +327,7 @@ fn new_session_id() -> String {
     // FNV-1a over the two values that differ between consecutive runs. Keeping this local avoids
     // a random-number dependency in a crate whose whole job is installing subscribers.
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    let nanos = chrono::Local::now().timestamp_nanos_opt().unwrap_or(0) as u64;
+    let nanos = jiff::Timestamp::now().as_nanosecond() as u64;
     let pid = u64::from(std::process::id());
     for byte in nanos.to_le_bytes().iter().chain(pid.to_le_bytes().iter()) {
         hash ^= u64::from(*byte);
@@ -393,7 +393,10 @@ pub fn init_debug_with(
 
     let dir = dir.as_ref();
     let session_id = new_session_id();
-    let base = format!("debug_log_{}", chrono::Local::now().format("%Y%m%d_%H%M%S"));
+    let base = format!(
+        "debug_log_{}",
+        jiff::ZonedDateTime::now().strftime("%Y%m%d_%H%M%S")
+    );
     let (file_writer, sink) = FileWriter::start(dir, &base, session_id.clone())?;
     let path = file_writer
         .path()

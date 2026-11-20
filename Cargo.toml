@@ -26,6 +26,7 @@ exclude = [
     "vendor/libp2p-gossipsub",
     "vendor/openmls_memory_storage",
     "vendor/openmls",
+    "vendor/netwatch",
 ]
 
 [workspace.package]
@@ -55,6 +56,7 @@ all = { level = "warn", priority = -1 }
 # Both workspaces must use this exact source so native and core document types agree.
 # See vendor/automerge/MEWTUAL-PATCH.md for provenance and the narrow readonly API patch.
 [patch.crates-io]
+netwatch = { path = "vendor/netwatch" }
 libp2p-gossipsub = { path = "vendor/libp2p-gossipsub" }
 automerge = { path = "vendor/automerge" }
 # Both workspaces also use the same reviewed provider backing-map observation.
