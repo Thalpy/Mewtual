@@ -10,7 +10,12 @@
 // - Saves to one document run in order. An uncertain or explicitly not-written save blocks the later saves of its lane
 //   until it is retried or discarded on purpose; other documents keep moving.
 // - Unsaved pixels survive every failure. They stay on the record until the save lands or the
-//   member discards them on purpose.
+//   member discards them on purpose. Changes to that retained work are signalled separately
+//   (`onWorkChange`), so App can checkpoint it into the sealed continuity snapshot; leaving the
+//   Studio surface needs that local checkpoint, not a native receipt (`preserveForDeparture`).
+// - A preview-local Save answered `pending` or `busy` is continued automatically with the
+//   identical request (`runUnconfirmed`): that is the native contract's progress answer, never a
+//   failure for the member to Retry.
 // - Every asynchronous result is fenced by scope generation (server, channel, session) and by a
 //   per-target request generation; a late result is dropped even after IPC delivered it, and a
 //   landed write supersedes the reads that were issued before it.
@@ -259,6 +264,22 @@ const SAVE_WORKERS = 2;
 /// so four such sends take about 22 s and outlast a departure's 10 s timeout, which then reports
 /// the Save as still running.
 const BUSY_BACKOFF_MS = [250, 500, 1000];
+/// Pacing for the automatic continuation of a preview-local (Unconfirmed or Closing) Save. Native
+/// answers the first visit of new authoring with `pending` (its plan is prepared off the actor) or
+/// `busy` (the one overlay slot holds other work), and its contract is that the caller repeats the
+/// IDENTICAL request until it is saved (receiver/unconfirmed.rs `save_unconfirmed_overlay`). That
+/// is progress, not failure, so the worker repeats it itself: quickly at first, because a small
+/// edit's plan is usually ready within a few hundred milliseconds, then once a second. The budget
+/// stays well inside native's 30 s park (catchup.rs `OVERLAY_PARK_MS`): a plan left parked longer
+/// is discarded and the next visit has to prepare it again. The budget is elapsed time on the
+/// session clock, native visits included; the backoff sum is a second bound (see runUnconfirmed).
+const OVERLAY_CONTINUE_MS = [100, 200, 400, 800];
+const OVERLAY_CONTINUE_STEADY_MS = 1000;
+const OVERLAY_CONTINUE_BUDGET_MS = 20_000;
+/// How long a departure that only needs local preservation (`preserveForDeparture`) gives queued
+/// Saves to land before it stops waiting. Their outcome is not a condition of leaving: whatever is
+/// still held after this is kept in the session and in the sealed continuity snapshot.
+const DEPARTURE_SETTLE_MS = 1500;
 
 type BlobJob = {
   key: string;
@@ -404,6 +425,23 @@ export class StudioSession {
   workingScore: ScoreModel | null = null;
   workingIndex: IndexModel | null = null;
 
+  /// Local-preservation bookkeeping (see `workRevision`, `authorRevision` and `onWorkChange`).
+  private workKey = "";
+  private workRev = 0;
+  private authorRev = 0;
+  private readonly workListeners = new Set<() => void>();
+  /// Per-array identity for the pixels a frame record holds, so the work key notices a coalesced
+  /// stroke (the same record with new pixels) without hashing or comparing the bytes themselves.
+  private readonly pixIds = new WeakMap<Uint8Array, number>();
+  private pixSeq = 0;
+  /// Coalesced refreshes in flight, by target: at most one read per target at a time, plus one
+  /// "read again" flag set when another invalidation arrives meanwhile (see `coalesceRefresh`).
+  private readonly refreshes = new Map<string, { again: boolean }>();
+  /// Frame CIDs the mounted editor has on screen (the open frame, its onion neighbours, visible
+  /// thumbnails). Cache eviction skips them so a mounted thumbnail cannot evict, refetch and evict
+  /// again in a loop when a long timeline exceeds the cache bounds.
+  private blobFocus = new Set<Hex64>();
+
   receivePaused = false;
   receivePauseDetail = "";
   private syncObservation: ReturnType<typeof parseStudioSyncState> | null = null;
@@ -476,6 +514,24 @@ export class StudioSession {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
   }
+
+  /// Bumped whenever something the continuity snapshot (`draftSnapshot`) would record about the
+  /// retained work changes: a record added, replaced or removed, new pixels, a status, an attempt,
+  /// uncertainty, a minted retry identity, or a restored draft arriving or leaving. Blob arrivals,
+  /// reads and every other display-only change leave it alone, so a listener can checkpoint the
+  /// work without serializing the queue on each redraw.
+  get workRevision(): number { return this.workRev; }
+  /// Bumped only by new authoring (an edit queued, a stroke folded into a queued frame, a
+  /// re-authored replacement). A departure compares this with the revision of the last sealed
+  /// snapshot: background progress on work already preserved never counts as unpreserved work.
+  get authorRevision(): number { return this.authorRev; }
+  /// Called (synchronously, after the surfaces' change listeners) when `workRevision` moves.
+  onWorkChange(fn: () => void): () => void {
+    this.workListeners.add(fn);
+    return () => this.workListeners.delete(fn);
+  }
+  private authored(): void { this.authorRev++; }
+
   private notify(): void {
     // The queue entries are mutated in place (their identity is what a retry resends); the
     // surfaces get fresh copies so a keyed row or a `find` never holds a stale object.
@@ -485,7 +541,31 @@ export class StudioSession {
     this.workingScore = this.doc?.score ? (pending.length ? workingScore(this.doc.score, pending) : this.doc.score) : null;
     this.workingIndex = this.indexModel ? (this.saves.length ? workingIndex(this.indexModel, this.saves) : this.indexModel) : null;
     this.updateEditorMedia();
+    const work = this.workFingerprint(), moved = work !== this.workKey;
+    if (moved) { this.workKey = work; this.workRev++; }
     for (const fn of this.listeners) fn();
+    if (moved) for (const fn of this.workListeners) fn();
+  }
+
+  /// A compact identity of what `draftSnapshot` would encode. Cheap on purpose (no pixel bytes,
+  /// no JSON of operation bodies): it runs on every notify, including during drawing.
+  private workFingerprint(): string {
+    // No work at all is one state, whichever channel is selected: switching channels with nothing
+    // retained must not look like a change that needs a checkpoint.
+    if (!this.records.length && !this.restoredDraft) return "";
+    const parts: string[] = [];
+    for (const s of this.records) {
+      let identity = "";
+      if (s.kind === "frame") {
+        let pix = this.pixIds.get(s.pix);
+        if (pix === undefined) { pix = ++this.pixSeq; this.pixIds.set(s.pix, pix); }
+        identity = `${pix}:${s.published?.cid ?? ""}:${s.apply?.nonce ?? ""}:${s.overlay?.nonce ?? ""}:${s.overlayRetry ?? ""}`;
+      } else if (s.kind === "overlayApply") identity = `${s.request?.nonce ?? ""}:${s.overlayRetry ?? ""}`;
+      else if (s.kind === "recoveryApply") identity = s.applied ? "applied" : "";
+      parts.push(`${s.id}:${s.status}:${s.attempts}:${s.mayHaveCommitted ? 1 : 0}:${s.epochChanged ? 1 : 0}:${identity}`);
+    }
+    const draft = this.restoredDraft;
+    return `${this.scope?.server ?? ""}/${this.scope?.channel ?? ""}|${draft ? `${draft.scope.server}/${draft.scope.channel}/${draft.records.length}/${draft.records[0]?.id ?? 0}` : ""}|${parts.join(",")}`;
   }
 
   private updateEditorMedia(): void {
@@ -594,7 +674,7 @@ export class StudioSession {
   get waitingDraft(): { server: number; channel: string; first: number; edits: number; uncertain: number } | null {
     const draft = this.restoredDraft;
     return draft ? { server: draft.scope.server, channel: draft.scope.channel, first: draft.records[0]?.id ?? 0, edits: draft.records.length,
-      uncertain: draft.records.filter(r => r.status === "inflight" || r.mayHaveCommitted).length } : null;
+      uncertain: draft.records.filter(r => mayHaveDispatched(r) || r.mayHaveCommitted).length } : null;
   }
 
   /// The member's explicit discard of a waiting restored draft: its channel may never open again
@@ -664,6 +744,8 @@ export class StudioSession {
     this.pendingIndex = false;
     this.pendingObjects.clear();
     this.pendingRecovery = false;
+    this.refreshes.clear(); // a read of the old scope still out must not hold back the new scope's
+    this.blobFocus = new Set();
     if (this.cancelFlush) { this.cancelFlush(); this.cancelFlush = null; }
   }
 
@@ -719,13 +801,20 @@ export class StudioSession {
     let ev;
     try { ev = parseStudioUpdated(payload); } catch { return; }
     if (!this.scope || ev.server !== this.scope.server || ev.channel !== this.scope.channel) return;
-    // Every event invalidates the Index; a named object additionally invalidates that object.
+    // Native names the target the accepted operation changed (actor.rs, `AppEvent::StudioUpdated`):
+    // `object: null` is the channel Index, a named object is that document alone. A note or a
+    // frame therefore does not re-read the Index, which costs a list, lifecycle and overlay read
+    // (and, natively, a cold Index reconstruction while a document owns the warm graph). The one
+    // document event that changes the Index too is a Create, whose event names only the new
+    // document; an object the Index does not list yet re-reads it, and so does our own Create
+    // (run() invalidates the Index after its receipt).
     // A blob that was unavailable or failed may have arrived with it: let the next request try.
     if (ev.object) this.releaseTransientFor(ev.object);
+    const listed = ev.object !== null && [...(this.indexModel?.entries ?? []), ...(this.indexModel?.overflow ?? [])].some((entry) => entry.id === ev.object);
     // Data notices may echo our just-acknowledged Save. Re-read them, then compare effective
     // content before stopping local playback. Settlement/membership invalidations still revoke
     // immediately; an unchanged delivery echo is not a new animation source.
-    this.invalidate({ index: true, objects: ev.object ? [ev.object] : [], dataNotice: true });
+    this.invalidate({ index: !listed, objects: ev.object ? [ev.object] : [], dataNotice: true });
   }
   onReceivePaused(payload: unknown): void {
     let ev;
@@ -776,13 +865,34 @@ export class StudioSession {
   flush(): void {
     if (this.cancelFlush) { this.cancelFlush(); this.cancelFlush = null; }
     if (!this.scope) { this.pendingIndex = false; this.pendingObjects.clear(); this.pendingRecovery = false; return; }
-    if (this.pendingIndex) { this.pendingIndex = false; void this.refreshIndex(); }
+    if (this.pendingIndex) { this.pendingIndex = false; this.coalesceRefresh("index", () => this.refreshIndex()); }
     for (const o of this.pendingObjects) {
-      if (this.doc?.object === o) void this.refreshDoc(o);
+      if (this.doc?.object === o) this.coalesceRefresh(`doc:${o}`, () => this.doc?.object === o ? this.refreshDoc(o) : Promise.resolve());
       else this.known.delete(o); // its trust state is no longer known until read again
     }
     this.pendingObjects.clear();
     if (this.pendingRecovery) { this.pendingRecovery = false; void this.refreshRecovery(); }
+  }
+
+  /// One invalidation-driven read per target at a time. The coalescing timer above only merges
+  /// events that arrive within one window; it never knew whether the previous window's reads had
+  /// come back, so a slow native answer let every later window start another full read of the
+  /// same target (list or document, then lifecycle, then overlay). A read already out records the
+  /// newer invalidation and runs exactly once more after it ends, so the final read still starts
+  /// after the last event. Direct callers (admission reads, receipt reconciliation, explicit
+  /// access) still call refreshIndex/refreshDoc themselves: they need a read that starts now, and
+  /// their request generation supersedes this one exactly as before.
+  private coalesceRefresh(key: string, read: () => Promise<void>): void {
+    const held = this.refreshes.get(key);
+    if (held) { held.again = true; return; }
+    const entry = { again: false };
+    this.refreshes.set(key, entry);
+    void read().catch(() => {}).finally(() => {
+      // A cleared scope owns a different map entry (or none); this read's flag is not its business.
+      if (this.refreshes.get(key) !== entry) return;
+      this.refreshes.delete(key);
+      if (entry.again && this.scope) this.coalesceRefresh(key, read);
+    });
   }
 
   async refreshIndex(): Promise<void> {
@@ -1338,6 +1448,7 @@ export class StudioSession {
       prior.published = null;
       prior.error = "";
       prior.status = "queued";
+      this.authored();
       this.notify();
       this.markDirty();
       return;
@@ -1692,6 +1803,7 @@ export class StudioSession {
       this.checkDraftBudget(record);
       this.records.push(record);
     }
+    this.authored();
     this.notify();
     // Creating a document and explicitly recovering history are save actions themselves. Ordinary
     // canvas, sound, music, header and Index edits use the same delayed queue afterward.
@@ -1746,8 +1858,13 @@ export class StudioSession {
     this.restoredDraft = null; this.draftGroup = draft.group;
     for (const record of draft.records) {
       // An interrupted delivery may have committed. Never automatically turn it into a new edit.
-      const interrupted = record.status === "inflight" || record.mayHaveCommitted;
-      const restored = { ...record, status: interrupted ? "uncertain" as const : record.status,
+      // An in-flight record that never reached its write (its pixels were still publishing, say)
+      // was not a delivery: it comes back queued, with this visit's count undone (see
+      // `mayHaveDispatched` for why the frozen identity is the evidence).
+      const interrupted = mayHaveDispatched(record) || record.mayHaveCommitted;
+      const unsent = record.status === "inflight" && !interrupted;
+      const restored = { ...record, status: interrupted ? "uncertain" as const : unsent ? "queued" as const : record.status,
+        attempts: unsent ? Math.max(0, record.attempts - 1) : record.attempts,
         mayHaveCommitted: interrupted || record.mayHaveCommitted };
       this.records.push(restored); this.saveSeq = Math.max(this.saveSeq, record.id);
       this.restoredHeld.add(record.id);
@@ -1836,8 +1953,48 @@ export class StudioSession {
     return null;
   }
 
-  /** Leaving the Studio, a channel or the window: every retained edit must reach a definite receipt. */
+  /** Leaving a channel (or the window, while its continuity snapshot cannot carry the work): every
+   * retained edit must reach a definite receipt, because the session's scope is about to change
+   * under it. Leaving only the Studio SURFACE uses `preserveForDeparture` instead. */
   async saveBeforeLeaving(): Promise<void> { await this.saveUntilClear(() => true); }
+
+  /** The local-preservation half of a departure. It stages the mounted drawing (a stroke the queue
+   * refuses to stage throws, exactly as a Save does: that work exists only on the canvas, so the
+   * departure must not proceed) and sends every queued edit now, as leaving always has. It then
+   * waits at most `settleMs` for those Saves to land, and never fails because of their outcome: a
+   * failed, uncertain or still-running Save stays on this session's queue with its exact retry
+   * identity, where the editor shows it again, and in the sealed continuity snapshot the caller
+   * writes next. That snapshot, not a native receipt, is what makes leaving safe; a caller that
+   * cannot write one must use `saveBeforeLeaving`. Resolves with how many records are still held.
+   *
+   * The session is not reset by leaving the surface: workers keep running, so a Save in flight or
+   * queued behind its deadline still completes in the background, and the change it makes to the
+   * queue schedules the next checkpoint through `onWorkChange`. */
+  async preserveForDeparture(settleMs = 0): Promise<number> {
+    this.prepareDocumentClose();
+    this.stageDrawing();
+    const generation = this.generation;
+    const ids = new Set(this.records.map(s => s.id));
+    this.cancelAutosaveTimer();
+    this.releaseQueued(true);
+    if (settleMs > 0 && ids.size) {
+      await new Promise<void>((resolve) => {
+        let detach = () => {}, cancel = () => {};
+        const check = () => {
+          // Done once nothing of what was sent is still queued or in flight: landed, refused or
+          // uncertain are all outcomes, and none of them is a reason to keep the member here.
+          const moving = this.records.some(s => ids.has(s.id) && (s.status === "queued" || s.status === "inflight") && !this.stuckBehind(new Set([s.id])));
+          if (generation !== this.generation || !moving) { detach(); cancel(); resolve(); }
+        };
+        detach = this.onChange(check);
+        cancel = this.schedule(() => { detach(); resolve(); }, settleMs);
+        check();
+      });
+    }
+    // A stroke made while the Saves above were awaited is new work for the snapshot, not lost.
+    if (generation === this.generation) this.stageDrawing();
+    return this.records.length;
+  }
 
   private async saveUntilClear(covers: (s: SaveRecord) => boolean): Promise<void> {
     this.prepareDocumentClose();
@@ -1939,6 +2096,7 @@ export class StudioSession {
     this.eligible.delete(s.id); this.restoredHeld.delete(s.id);
     this.eligible.add(replacement.id);
     this.settleRecord(s, "discarded");
+    this.authored();
     this.notify();
     this.pump();
   }
@@ -2055,9 +2213,18 @@ export class StudioSession {
     // newer remote/rotation state, so an older ACK must resolve the queue without rolling it back.
     // Captured after the admission read above, which is older than this Save's acknowledgement.
     const docRead = this.docReadSerial.get(s.object ?? "") ?? 0, indexRead = this.indexReadSerial;
+    // Whether this visit actually handed a write to native. `attempts` counts deliveries: it decides
+    // whether the next visit repeats first-delivery admission, and a restored draft reads it as
+    // evidence. A refusal raised before anything was sent (the binding check, a missing editable
+    // epoch, a refused local-draft ticket, a failed explicit access) is not a delivery, and counting
+    // it made the member's Retry skip admission and send the frozen request to a retired epoch,
+    // whose untyped native rejection then read as "may have committed".
+    let dispatched = false;
+    const sent = () => { dispatched = true; };
     try {
       if (s.attempts === 1 || s.kind === "frame" && !s.apply && !s.overlay || s.kind === "overlayApply" && !s.request) this.assertAdmission(s);
       if (s.kind === "create") {
+        sent();
         const view = await studioCreate(this.ipc, target, s.request);
         if (!this.current(gen)) return;
         await this.landed(s.object, view, docRead);
@@ -2078,7 +2245,7 @@ export class StudioSession {
           ? { op: "insert_frame", frame: s.frame, after: s.after, cid: s.published.cid, bytes: s.published.bytes }
           : { op: "replace_frame", frame: s.frame, cid: s.published.cid, bytes: s.published.bytes };
         if (s.route !== "ordinary") {
-          await this.runUnconfirmed(s, s.object, canonicalJson(op), gen);
+          await this.runUnconfirmed(s, s.object, canonicalJson(op), gen, sent);
           if (!this.current(gen)) return;
           await this.refreshDoc(s.object);
           if (!this.current(gen)) return;
@@ -2088,26 +2255,32 @@ export class StudioSession {
             const ep = this.editableEpoch(s.object);
             if (!("epochId" in ep)) throw new OverlayNoWrite(ep.refused);
             s.apply = { object: s.object, epochId: ep.epochId, nonce: this.newId(), body: canonicalJson(op) };
+            // The minted identity is retry evidence: checkpoint it before the request leaves.
+            this.notify();
           }
+          sent();
           const view = await studioApply(this.ipc, target, s.apply);
           if (!this.current(gen)) return;
           await this.landed(s.object, view, docRead);
         }
       } else if (s.kind === "apply") {
+        sent();
         const view = await studioApply(this.ipc, target, s.request);
         if (!this.current(gen)) return;
         await this.landed(s.object, view, docRead);
       } else if (s.kind === "applyIndex") {
+        sent();
         const view = await studioApplyIndex(this.ipc, target, s.request);
         if (!this.current(gen)) return;
         await this.landedIndex(view, indexRead);
       } else if (s.kind === "overlayApply") {
-        await this.runUnconfirmed(s, s.object, canonicalJson(s.op), gen);
+        await this.runUnconfirmed(s, s.object, canonicalJson(s.op), gen, sent);
         if (!this.current(gen)) return;
         if (s.object) await this.refreshDoc(s.object);
         else await this.refreshIndex();
         if (!this.current(gen)) return;
       } else {
+        sent();
         const applied = await recoveryApply(this.ipc, { ...target, object: s.object,
           ...(s.objectKind === "score" ? { objectKind: "score" as const } : {}) }, s.edit);
         if (!this.current(gen)) return;
@@ -2120,6 +2293,20 @@ export class StudioSession {
       this.finish(s);
     } catch (e) {
       if (!this.current(gen)) return;
+      // Nothing of this edit reached a native document write in this visit, whatever the error
+      // was: the admission and epoch checks, a refused local-draft ticket, a failed explicit
+      // access, and the frame's pixel publication all come before it. Publishing stores the PIX
+      // bytes and writes no document, so its failure (a storage or bridge error) proves nothing
+      // about the edit; classifying it as "may have committed" left a frame that a later epoch
+      // change made impossible to retry or re-author (review of 13792739, P2). The bridge's own
+      // pre-dispatch refusals keep their automatic resend below. Undo only this visit's count, and
+      // never below an earlier uncertain delivery, whose uncertainty settleFailure also keeps (a
+      // restored draft must keep attempts >= 1 whenever mayHaveCommitted is set; studio-draft.ts).
+      if (!dispatched && !nativeNoWrite(e)) {
+        if (!s.mayHaveCommitted) s.attempts = Math.max(0, s.attempts - 1);
+        this.settleFailure(s, e instanceof OverlayNoWrite ? e : new OverlayNoWrite(`${reason(e)}; nothing of this edit was sent`));
+        return;
+      }
       if (nativeNoWrite(e) && this.resendLater(s)) return;
       this.settleFailure(s, e);
     }
@@ -2198,16 +2385,25 @@ export class StudioSession {
     }
   }
 
-  /// Execute one visit of a preview-local Save while retaining the exact request on the queue.
-  /// A successful `pending`/`busy` response is not spun here: the member chooses when to repeat
-  /// the same bytes. `busy` proves no write began, while `pending` means a detached job may still
-  /// land and is therefore uncertain. A paused actor is first resumed by an explicit ordinary
-  /// document access, exactly as the native contract requires, then receives the same request.
+  /// Execute a preview-local Save while retaining the exact request on the queue.
+  /// `pending` and `busy` are the native contract's "repeat the identical request" answers, so
+  /// they are continued here automatically (see OVERLAY_CONTINUE_MS), never surfaced as a failure
+  /// the member has to Retry: new authoring is always answered `pending` on its first visit, and a
+  /// renderer that stopped there turned every ordinary preview or Closing edit into a save error
+  /// that held its whole lane. Each visit resends the same basis, branch, nonce and body. `busy`
+  /// proves the visit began no write; `pending` means a detached plan of THIS request exists and
+  /// may still be committed by any later Save visit, so once one was seen, running out of budget,
+  /// a refusal, a pause or a transport failure all leave the record uncertain (mayHaveCommitted)
+  /// rather than "not written". A paused actor is first resumed by an explicit ordinary document
+  /// access, exactly as the native contract requires, then receives the same request.
+  /// `sent` is called immediately before the first Save visit: the Begin ticket and the explicit
+  /// access writes nothing, so a refusal before that point is not a delivery (see run()).
   private async runUnconfirmed(
     s: Extract<SaveEntry, { kind: "frame" }> | Extract<SaveEntry, { kind: "overlayApply" }>,
     object: Hex32 | null,
     body: string,
     gen: number,
+    sent: () => void = () => {},
   ): Promise<UnconfirmedOverlaySave | ClosingOverlaySave> {
     const closing = s.route === "closing";
     const target: RecoveryTargetArgs = { ...this.target(), object,
@@ -2241,22 +2437,52 @@ export class StudioSession {
       this.notify();
     }
     if (!this.current(gen)) throw new StudioNativeError("Studio session changed before the local draft Save");
-    const result = closing ? await closingOverlaySave(this.ipc, target, request) : await unconfirmedOverlaySave(this.ipc, target, request);
-    if (result.state === "saved" || result.state === "disposed" || result.state === "handedOff") {
-      s.overlayRetry = null;
-      return result;
+    const frozen = request;
+    // The budget is elapsed time on the session clock, so time spent inside each native visit
+    // counts as well as the backoff between them (review of 13792739, P2: a slow bridge kept the
+    // lane for minutes while only the sleeps were counted). The summed backoff stays a second
+    // bound, which ends the continuation even where the clock does not move (tests, a frozen
+    // clock). A visit already in flight is never abandoned: its outcome would be unknown, and
+    // native bounds each visit itself (actor admission, publication deadline).
+    const deadline = this.now() + OVERLAY_CONTINUE_BUDGET_MS;
+    let scheduled = false, waited = 0;
+    try {
+      for (let visit = 0; ; visit++) {
+        sent();
+        const result = closing ? await closingOverlaySave(this.ipc, target, frozen) : await unconfirmedOverlaySave(this.ipc, target, frozen);
+        if (result.state === "saved" || result.state === "disposed" || result.state === "handedOff") {
+          s.overlayRetry = null;
+          return result;
+        }
+        s.overlayRetry = result.retry;
+        if (result.state === "refused") {
+          throw new OverlayNoWrite(`local draft refused (${overlayRefusalText(result.reason)}); retry=${result.retry}`);
+        }
+        if (result.state === "paused") {
+          throw new OverlayNoWrite("local draft Save paused; explicit document access is required before retrying the same request");
+        }
+        if (result.state === "pending") scheduled = true;
+        // Out of budget: hand the record to the member with its exact request intact, as before.
+        // A plan parked natively past its 30 s bound is discarded, and a later exact retry simply
+        // prepares it again.
+        const remaining = deadline - this.now();
+        if (remaining <= 0 || waited >= OVERLAY_CONTINUE_BUDGET_MS) {
+          if (result.state === "busy" && !scheduled) throw new OverlayNoWrite("local draft Save stayed busy; retry the same request");
+          throw new StudioNativeError("local draft Save is still being prepared and may still complete; retry the same request exactly");
+        }
+        const delay = Math.min(OVERLAY_CONTINUE_MS[visit] ?? OVERLAY_CONTINUE_STEADY_MS, remaining);
+        await new Promise<void>((resolve) => { this.schedule(resolve, delay); });
+        waited += delay;
+        // A reset or scope change ends this worker (run() drops the outcome); the native plan, if
+        // any, is committed by a later visit or expires on its own bound.
+        if (!this.current(gen) || !this.records.includes(s)) throw new StudioNativeError("Studio session changed while the local draft Save was continuing");
+      }
+    } catch (e) {
+      // Whatever ends the continuation after a `pending`, a detached plan of this exact request
+      // may still be committed by a later visit; no later answer can disprove that.
+      if (scheduled) s.mayHaveCommitted = true;
+      throw e;
     }
-    s.overlayRetry = result.retry;
-    if (result.state === "refused") {
-      throw new OverlayNoWrite(`local draft refused (${overlayRefusalText(result.reason)}); retry=${result.retry}`);
-    }
-    if (result.state === "paused") {
-      throw new OverlayNoWrite("local draft Save paused; explicit document access is required before retrying the same request");
-    }
-    if (result.state === "busy") {
-      throw new OverlayNoWrite("local draft Save busy; retry the same request");
-    }
-    throw new StudioNativeError("local draft Save pending and may still complete; retry the same request exactly");
   }
 
   private async landed(object: Hex32, view: StudioObjectView, readAtSave: number): Promise<void> {
@@ -2450,6 +2676,15 @@ export class StudioSession {
     }
   }
 
+  /// The frame CIDs the mounted editor shows right now. Eviction keeps them while they stay in
+  /// focus; the surface replaces the set as its view moves. Bounded by what one screen can show,
+  /// which is why it may hold the cache above its byte or entry bound rather than evict them: a
+  /// timeline may name more frames (999) than the cache holds (512 entries, 8 MiB), and a mounted
+  /// thumbnail whose bytes were evicted asks for them again at once.
+  focusBlobs(cids: Iterable<Hex64>): void {
+    this.blobFocus = new Set(cids);
+  }
+
   private remember(cid: Hex64, bytes: Uint8Array): void {
     if (this.blobs.has(cid)) return;
     this.unavailable.delete(cid);
@@ -2457,10 +2692,14 @@ export class StudioSession {
     this.invalid.delete(contentKey(cid, bytes.length));
     this.blobs.set(cid, bytes);
     this.cacheBytes += bytes.length;
-    while ((this.cacheBytes > this.cacheBytesCap || this.blobs.size > BLOB_CACHE_ENTRIES) && this.blobs.size > 1) {
-      const oldest = this.blobs.keys().next().value as Hex64;
-      this.cacheBytes -= this.blobs.get(oldest)!.length;
-      this.blobs.delete(oldest);
+    if (this.cacheBytes <= this.cacheBytesCap && this.blobs.size <= BLOB_CACHE_ENTRIES) return;
+    // Oldest first (Map order is the LRU order; `blob()` touches), skipping what is in focus and
+    // the bytes just stored. Stops when the bounds hold or only protected entries remain.
+    for (const [key, held] of this.blobs) {
+      if (this.cacheBytes <= this.cacheBytesCap && this.blobs.size <= BLOB_CACHE_ENTRIES) break;
+      if (key === cid || this.blobFocus.has(key)) continue;
+      this.cacheBytes -= held.length;
+      this.blobs.delete(key);
     }
   }
 
@@ -2736,6 +2975,21 @@ function choicesForContent(content: StudioContent, mode: RecoveryMode): { choice
     if (mode === "copy") for (const id of Object.keys(content.tombstones)) out.push({ choice: { kind: "objectDeletion", id }, label: `deletion of entry ${id.slice(0, 8)}` });
   }
   return out;
+}
+
+/** Whether an `inflight` record captured by a snapshot may have handed a write to native. `run()`
+ * calls `sent()` synchronously right before every writing IPC, so a write is possible only once
+ * the identity that call carries exists: a frame's minted Apply or local-draft request, a
+ * local-draft edit's request. Every other kind sends its frozen request first thing after it is
+ * marked in flight. Before that point the visit was only reading, checking admission, getting a
+ * ticket or publishing pixels, none of which writes the document (review of the departure seal:
+ * a frame sealed mid-publication used to come back "may have committed" and could then be
+ * neither retried into a moved epoch nor re-authored). */
+function mayHaveDispatched(s: SaveRecord): boolean {
+  if (s.status !== "inflight") return false;
+  if (s.kind === "frame") return s.apply !== null || s.overlay !== null;
+  if (s.kind === "overlayApply") return s.request !== null;
+  return true;
 }
 
 function laneOf(s: SaveRecord): string {

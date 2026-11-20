@@ -29,6 +29,124 @@ The actual-diff adversarial review found no blocker/high/medium issue. Fresh
 cross-platform execution is pending. This changes CI execution only; Chat V2
 remains disabled and shared delivery/production joining remain unfinished.
 
+## Studio backlog composition (16 November; complete CI pending)
+
+PR83 is composed with the consolidated Chat V2 prerequisite stack. The merge
+preserves Studio's sealed local departure and the later native-mode, route,
+close, unlock/video-retirement and continuity-revision fences together.
+Foundation Server constructors and genuine join fixtures remain intact.
+Studio snapshot state is initialized in every constructor, including the legacy
+fixture, and preserved with the same original across a refused founder handoff.
+
+All 3,507 frontend tests pass against the locked Vite 6.4.6 and DOMPurify 3.4.17
+installation. Svelte checking reports zero errors/warnings; the production build,
+standard browser flows and Studio attachment/playback/loop/post/deck flow pass.
+The latter uses the real localhost Svelte fixture at 900 ? 640; Art and Music
+screenshots were inspected. These are mocked native boundaries, not physical
+network/audio acceptance.
+
+After clearing only the App package's shared artifacts and confirming a fresh
+compile, all 18 exact Studio/backend cases pass. Three new native capacity cases,
+root and native all-target/all-feature strict Clippy, the separate default native
+compile check, root/native formatting and both static invariant gates also pass.
+An earlier cached test executable and the interrupted broad epoch-stress run are
+not counted as current-source evidence. Complete fresh backend/native CI remains
+required before merging; the named slow catch-up cost case stays deferred to
+final Chat V2 acceptance.
+
+Scoped design and resolved-diff review found no remaining blocker/high/medium.
+The original reviewed feature scope is retained below. Chat V2 remains disabled.
+
+## Studio save, departure and performance pass (2026-10-30, PR #83, branch `lab-performance-pass`)
+
+A review of the "edit, cannot save, cannot leave" reports found that ordinary preview-local and
+Closing saves were turned into errors, that leaving the editor required native receipts while
+failed edits were only checkpointed on lock, and several sources of avoidable read and redraw
+work. The branch is based on Gate7 (`afb2b2bb`) and deliberately not merged with its target yet.
+
+Review of `13792739` (all fixed in the follow-up commit):
+
+- **P1 tab-switch freeze.** `switchView` re-entered its gate on "the Studio has work" after
+  `route.leave()` succeeded; preserved work stays in the session, so it looped through resolved
+  promises forever. It now asks the gate's own `studioExit.mustLeave()` (false once the work is
+  sealed) and commits directly after its own successful departure (`released`). The preservation
+  host lives in named App functions (`preserveStudioDeparture`, `studioPreserved`) so the
+  production-text regression in `studio-exit-routes.test.ts` runs them with the real session.
+- **Reserved slot vs abandoned registrations.** The background reserve now counts started
+  entries only, through the single capacity check (`require_inline_download_capacity_reserving`);
+  begin-only registrations no longer starve Studio reads.
+- **Pixel publication failure** before any document write settles as not written (re-authorable),
+  not "may have committed"; an earlier genuine delivery's uncertainty is kept.
+- **Continuation budget** is elapsed time on the session clock, native visits included, with the
+  backoff sum as a second bound.
+- **Read-only Undo/Redo.** Both require `canEdit` (toolbar and shortcut); strokes stranded
+  mid-stroke by a document turning read-only get a two-step "Discard strokes" banner.
+- `thumbBytes` caller type error fixed. Test fixtures that run App's continuity text declare the
+  new Studio handles; the session-gate audit accepts `InvokeContext::background` and proves both
+  constructors go through the session-establishing `claiming`.
+
+From the adversarial review of those fixes (no blocker or high):
+
+- **Restore after a departure seal** (medium). A frame sealed while its pixels were still
+  publishing came back "may have committed". A sealed `inflight` record now restores as uncertain
+  only when it may have reached its write (`mayHaveDispatched`: a frame or local-draft edit whose
+  request identity exists, or any other kind); otherwise as queued and uncounted.
+- The "Discard strokes" confirmation is keyed to the strokes it was armed for and cleared with
+  the banner, with a Cancel. A background inline claim the reserve refuses no longer reclaims (and
+  cancels) a begin-only registration first.
+- Residual, accepted for now: with begin-only registrations present a background claim can take
+  the fourth slot, so if those turn out to be real downloads a Save can be refused and resent;
+  Ctrl+Z during playback does nothing silently; a stranded stroke's autosave staging error lands
+  in `indexError` until the next Index read.
+
+What changed:
+
+- **Pending/busy continuation** (`studio-session.ts` `runUnconfirmed`). Native answers new
+  Unconfirmed/Closing authoring `pending` (plan prepared off the actor) or `busy`, and its contract
+  is to repeat the identical request until saved. The worker now does that itself, paced 100, 200,
+  400, 800 ms then 1 s, for up to 20 s of elapsed time including native visits (inside native's
+  30 s `OVERLAY_PARK_MS`). Only an
+  exhausted continuation reaches the member: uncertain if any visit said `pending`, not written if
+  every visit said `busy`. Tests that pinned "pending becomes uncertain, member presses Retry" were
+  updated to the new contract.
+- **Delivery attempts count real dispatches** (`run`). A refusal before anything was sent (binding
+  check, missing epoch, refused ticket, failed explicit access) no longer counts as an attempt, so
+  Retry repeats first-delivery admission instead of sending the frozen request to a retired epoch.
+- **Local preservation milestone.** `StudioSession.workRevision`/`onWorkChange` signal changes to
+  retained work only (not reads or blob arrivals); App checkpoints them into the sealed continuity
+  snapshot within about a second (`scheduleStudioCheckpoint`). Leaving the Studio *surface* now
+  stages the drawing, sends queued edits, seals a snapshot and leaves (`preserveForDeparture`,
+  `studio-exit.ts` `preserve`/`preserved`); the session keeps saving in the background and a failed
+  Save waits in the editor with its exact retry identity. Channel and server changes still wait for
+  receipts. Window close tries the strict Save first and, only if that fails, closes with the work
+  in the final snapshot (restored on the next unlock); without a loaded continuity record it still
+  refuses. Still not a write-ahead log: see the header of `studio-draft.ts`.
+- **Fewer reads.** A document `studio-updated` event no longer re-reads the Index unless the Index
+  does not list that document yet (a Create's event names only the new document). Invalidation
+  reads are one in flight per target plus one "read again" flag (`coalesceRefresh`).
+- **Native inline slots.** Studio reads, overlay inspections and receiver passes leave one of the
+  four slots free (`FOREGROUND_RESERVED_INLINE_DOWNLOADS`, `InvokeContext::background`), so they
+  cannot refuse a Save. The classification of control actions is an exhaustive match.
+- **Server snapshot rewrite skipped when identical** (`catcoms-app/src/studio.rs`). A Save still
+  makes MLS/device/tenure durable first, but no longer re-seals and fsyncs a byte-identical
+  snapshot through the same mount (`Server::studio_saved_snapshot`, in memory only).
+- **Thumbnails** (`Studio.svelte`). Each thumbnail redraws only when its own bytes or the palette
+  change (it used to decode on every `studio.rev`, N(N+1)/2 decodes while N frames loaded), and
+  asks for bytes only while within a strip-width of view. `focusBlobs` keeps visible frames, the
+  open frame and its onion neighbour out of cache eviction, ending the evict/refetch loop.
+- **Sound shelf** keeps recipes read for the same unlocked scope when the member leaves the Studio
+  and returns; reads pause instead of clearing. **Studio code** starts loading on pointer or focus
+  over the Studio tab.
+- **Score layout**: the same header as the flipnote (save state, Save) and a right-hand
+  Music/History inspector with a show/hide toggle.
+
+Known gaps and follow-ups: unconfirmed-preview drafts are still excluded from automatic handoff
+(reconciliation needs a design); restored queued work still waits for an explicit Save after
+unlock; a retry identity minted inside a checkpoint window is not journalled ahead of dispatch;
+the Index cold-reconstruction cache (P1-PERFORMANCE) and an echo-skip for our own Save's
+`studio-updated` were not attempted; the main canvas still repaints on every session revision;
+the native epoch rejection of a retired request is still untyped (the frontend no longer sends it
+after a local refusal). No new regression covers `focusBlobs` eviction or the App checkpoint wiring.
 
 ## Chat V2 merge preparation follow-up (16 November)
 

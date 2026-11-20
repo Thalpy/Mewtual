@@ -542,6 +542,147 @@ test("before the Index is read, a restored edit is refused as unread without cou
   h.session.reset();
 });
 
+// Review of 13792739, P2: a failed pixel publication was classified as a possibly committed
+// document edit, so after the epoch moved the frame could be neither retried nor re-authored.
+test("a failed pixel publication is not a document write: the frame stays re-authorable after the epoch moves", async () => {
+  const h = await harness();
+  let publishFails = true;
+  h.ipc.on("publish_pix", a => {
+    if (publishFails) throw new Error("blob store unavailable");
+    return { cid: id64(4), bytes: atob(String(a.bytesB64)).length };
+  });
+  h.session.saveFrame(object, frame, pixBytes(3));
+  await h.tick(5000);
+  const [failed] = h.session.saves;
+  assert.deepEqual([failed.status, failed.attempts, failed.mayHaveCommitted], ["blocked", 0, false]);
+  assert.match(failed.error, /blob store unavailable; nothing of this edit was sent/);
+  assert.equal(h.ipc.calls.filter(c => c.cmd === "studio_apply").length, 0);
+  await h.rotate(); publishFails = false;
+  h.session.retry(failed.id); await settle(8);
+  assert.equal(h.ipc.calls.filter(c => c.cmd === "studio_apply").length, 0, "the old binding is refused before sending");
+  const [refused] = h.session.saves;
+  assert.deepEqual([refused.status, refused.mayHaveCommitted], ["blocked", false]);
+  assert.equal(h.session.canReauthor(refused.id), true, "the retained pixels can still be saved into the new epoch");
+  h.session.reauthor(refused.id); await settle(8);
+  const applied = h.ipc.calls.filter(c => c.cmd === "studio_apply");
+  assert.equal(applied.length, 1); assert.equal(applied[0].args.epochId, id32(0xe2));
+  assert.equal(h.session.saves.length, 0);
+  h.session.reset();
+});
+
+test("a publication failure never clears an earlier uncertain delivery of the same frame", async () => {
+  const h = await harness();
+  // A restored frame whose earlier delivery is uncertain but which holds no publication receipt
+  // or Apply identity, so the retry publishes again before anything is sent.
+  h.session.saveFrame(object, frame, pixBytes(3));
+  const json = h.session.draftSnapshot()!, draft = JSON.parse(json);
+  Object.assign(draft.records[0], { status: "uncertain", mayHaveCommitted: true, attempts: 1, error: "commit response was lost" });
+  h.session.reset(); h.session.restoreDraft(decodeStudioDraft(JSON.stringify(draft)));
+  h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.flush(); h.session.open(object); await settle(8);
+  let publishes = 0;
+  h.ipc.on("publish_pix", () => { publishes++; throw new Error("blob store unavailable"); });
+  h.session.retry(h.session.saves[0].id); await settle(8);
+  const [still] = h.session.saves;
+  assert.equal(publishes, 1, "the retry reached the publication step");
+  assert.equal(h.ipc.calls.filter(c => c.cmd === "studio_apply").length, 0);
+  assert.deepEqual([still.status, still.mayHaveCommitted], ["uncertain", true], "the earlier delivery's uncertainty stands");
+  assert.ok(still.attempts >= 1, "a restored draft must keep attempts >= 1 while mayHaveCommitted");
+  assert.match(still.error, /earlier attempt may already have committed/);
+  h.session.reset();
+});
+
+// Adversarial review of the follow-up, MEDIUM 1: leaving the surface seals the queue at once, so a
+// frame still publishing its pixels was sealed `inflight` and restored as "may have committed",
+// stranding it again after the epoch moved (the live path fixed above, but through restore).
+test("a frame sealed while its pixels were still publishing restores as unsent and re-authorable", async () => {
+  const h = await harness(), held = deferred<unknown>();
+  h.ipc.on("publish_pix", () => held.promise);
+  h.session.saveFrame(object, frame, pixBytes(3));
+  await h.session.preserveForDeparture(0); await settle(8);
+  assert.equal(h.session.saves[0].status, "inflight", "the departure released it and its publication is out");
+  const sealed = decodeStudioDraft(h.session.draftSnapshot()!);
+  h.session.reset(); h.session.restoreDraft(sealed);
+  h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.flush(); h.session.open(object); await settle(8);
+  const [restored] = h.session.saves;
+  assert.deepEqual([restored.status, restored.mayHaveCommitted, restored.attempts], ["queued", false, 0]);
+  h.ipc.on("publish_pix", a => ({ cid: id64(4), bytes: atob(String(a.bytesB64)).length }));
+  await h.rotate();
+  await assert.rejects(h.session.save());
+  const [refused] = h.session.saves;
+  assert.deepEqual([refused.status, refused.mayHaveCommitted], ["blocked", false]);
+  assert.equal(h.session.canReauthor(refused.id), true);
+  h.session.reauthor(refused.id); await settle(8);
+  const applied = h.ipc.calls.filter(c => c.cmd === "studio_apply");
+  assert.equal(applied.length, 1); assert.equal(applied[0].args.epochId, id32(0xe2));
+  h.session.reset();
+});
+
+test("a frame sealed after its Apply identity was sent still restores as possibly committed", async () => {
+  const h = await harness(), ack = deferred<unknown>();
+  h.ipc.on("studio_apply", () => ack.promise);
+  h.session.saveFrame(object, frame, pixBytes(3));
+  await h.session.preserveForDeparture(0); await settle(8);
+  assert.equal(h.ipc.calls.filter(c => c.cmd === "studio_apply").length, 1, "the Apply is out");
+  const sealed = decodeStudioDraft(h.session.draftSnapshot()!);
+  h.session.reset(); h.session.restoreDraft(sealed);
+  h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.flush(); await settle(8);
+  const [restored] = h.session.saves;
+  assert.deepEqual([restored.status, restored.mayHaveCommitted], ["uncertain", true]);
+  assert.equal(h.session.canReauthor(restored.id), false, "only the exact retry or a discard may resolve it");
+  h.session.reset();
+});
+
+test("leaving the surface sends queued edits but never waits for their receipt; background progress is not new authoring", async () => {
+  const h = await harness(), ack = deferred<unknown>();
+  h.ipc.on("studio_apply", () => ack.promise);
+  let work = 0; h.session.onWorkChange(() => work++);
+  const author = h.session.authorRevision;
+  h.session.setFps(object, 7);
+  assert.ok(h.session.authorRevision > author, "new authoring moves the author revision");
+  assert.ok(work > 0, "a change to retained work is signalled for a checkpoint");
+  const held = await h.session.preserveForDeparture(0);
+  assert.equal(held, 1, "the record is still held: the departure did not wait for its receipt");
+  assert.equal(h.ipc.calls.filter(c => c.cmd === "studio_apply").length, 1, "leaving still sends what was queued");
+  const sealed = h.session.authorRevision, signalled = work;
+  ack.resolve(h.view()); await settle(8);
+  assert.equal(h.session.saves.length, 0, "the Save lands in the background after the member left");
+  assert.equal(h.session.authorRevision, sealed, "a landing receipt is not unpreserved work");
+  assert.ok(work > signalled, "the emptier queue is signalled so the next checkpoint drops it");
+  h.session.reset();
+});
+
+test("leaving the surface keeps a failed Save, with its exact request, instead of refusing to leave", async () => {
+  const h = await harness();
+  h.ipc.on("studio_apply", () => { throw new Error("outcome=uncertain; commit response was lost"); });
+  h.session.setFps(object, 7);
+  await assert.rejects(h.session.save(), /Could not confirm the save/);
+  const [failed] = h.session.saves;
+  assert.equal(failed.status, "uncertain");
+  assert.equal(await h.session.preserveForDeparture(0), 1, "the uncertain record is preserved, not a reason to stay");
+  assert.deepEqual(decodeStudioDraft(h.session.draftSnapshot()!).records.map(r => [r.id, r.status, r.mayHaveCommitted]), [[failed.id, "uncertain", true]]);
+  h.session.reset();
+});
+
+// Performance/save review (2026-10-30), finding 3: an admission refusal raised before anything was
+// sent still counted as a delivery attempt, so the member's Retry skipped first-delivery admission
+// and sent the frozen request to the retired epoch; native's untyped rejection then read as
+// "may have committed" and disabled "save again as a new edit".
+test("a retry after a pre-dispatch admission refusal compares again instead of sending the frozen request", async () => {
+  const h = await harness();
+  h.session.setFps(object, 7); // authored against the first epoch
+  await h.rotate(); // a newer epoch arrives before the deadline
+  await h.tick(5000);
+  const [refused] = h.session.saves;
+  assert.deepEqual([refused.status, refused.attempts, refused.mayHaveCommitted], ["blocked", 0, false], "a refusal before sending is not a delivery");
+  assert.match(refused.error, /Shared history changed/);
+  h.session.retry(refused.id); await settle(8);
+  assert.equal(h.ipc.calls.filter(c => c.cmd === "studio_apply").length, 0, "the frozen request never left");
+  const [again] = h.session.saves;
+  assert.deepEqual([again.status, again.attempts, again.mayHaveCommitted], ["blocked", 0, false]);
+  assert.equal(h.session.canReauthor(again.id), true, "saving it again as a new edit stays available");
+  h.session.reset();
+});
+
 // Re-review of 22e4ed77, finding 2: a document's Save covered `object === id`, which a Closing or
 // Unconfirmed Index record (native target null, entry in its op) never matches. A restored rename
 // then saved only its document half, and the held Index half vanished from the editor.

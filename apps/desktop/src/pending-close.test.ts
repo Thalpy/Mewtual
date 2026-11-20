@@ -162,3 +162,37 @@ test("a replacement UI generation aborts the old close before snapshot or native
   assert.equal(app.state().locked, false);
   app.done();
 });
+
+// The new Studio snapshot fallback must retain the later Chat close fences.
+test("failed Studio save keeps earlier unlock and video work retired while close uses its snapshot", async () => {
+  const app = pendingManagerApp(initial()); await app.hydrate();
+  const save = deferred(); app.studioClose(() => save.promise, () => "retained-studio-token");
+  const review = app.review(new File([new Uint8Array(1)], "old-clip.mp4", { type: "video/mp4" }));
+  const before = app.state();
+  try {
+    const closing = app.close(); await settle();
+    assert.equal(app.state().unlockAttempt, before.unlockAttempt + 1, "old unlock retired before the Studio wait");
+    assert.equal(app.state().videoScopeEpoch, before.videoScopeEpoch + 1);
+    assert.equal(app.state().videoReview, null); assert.deepEqual(await review, { kind: "skip" });
+    assert.equal(app.state().closeCalls.length, 0);
+    save.reject(new Error("Studio receipt was lost")); await closing;
+    assert.equal(app.state().closeCalls.length, 1);
+    assert.equal(app.state().locked, true);
+    assert.equal(app.state().destroyCalls, 0, "the handler did not swallow a missing fixture dependency");
+    assert.equal(app.state().restartCalls, 0); assert.equal(app.state().videoReview, null);
+  } finally { save.resolve(); app.done(); }
+});
+
+test("Studio fallback refused after lock releases close through its fresh gate helper", async () => {
+  const app = pendingManagerApp(initial()); await app.hydrate();
+  const save = deferred(); app.studioClose(() => save.promise, () => "retained-studio-token");
+  try {
+    const closing = app.close(); await settle(); app.unknownVaultGate(); app.lock();
+    save.reject(new Error("Studio save interrupted by lock")); await closing; await settle();
+    assert.equal(app.state().windowCloseInFlight, false);
+    assert.equal(app.state().vaultGateReads, 1, "releaseClose must schedule the fresh locked-window read");
+    assert.equal(app.state().closeCalls.length, 0); assert.equal(app.state().locked, true);
+    assert.equal(app.state().unlockAttempt, 1); assert.equal(app.state().videoScopeEpoch, 1);
+    assert.equal(app.state().destroyCalls, 0);
+  } finally { save.resolve(); app.done(); }
+});

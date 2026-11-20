@@ -28,6 +28,13 @@ let session: StudioSession | null = null;
 let detach: (() => void) | null = null;
 let bumpQueued = false;
 let restoredDraft: StudioDraft | null = null;
+/// Distinguishes sessions (the test seam replaces them), so an author token sealed for one
+/// session can never match a fresh session's restarted counter.
+let sessionSerial = 0;
+/// The author token the most recent `studioDraftSnapshot` captured (see `studioSnapshotAuthor`).
+let snapshotAuthor: string | null = null;
+/// App-side listeners for retained-work changes; attached to whichever session exists.
+const workListeners = new Set<() => void>();
 
 function scheduleBump(): void {
   if (bumpQueued) return;
@@ -46,7 +53,9 @@ export function ensureStudio(me: string): StudioSession {
     return session;
   }
   session = new StudioSession({ ipc: ipcOverride ?? tauriIpc, me, autosaveMs: ipcOverride ? testAutosaveMs : 5000 });
+  sessionSerial++;
   session.onChange(scheduleBump);
+  session.onWorkChange(() => { for (const fn of workListeners) fn(); });
   if (restoredDraft) { session.restoreDraft(restoredDraft); restoredDraft = null; }
   void session.attach().then((d) => { detach = d; });
   return session;
@@ -103,7 +112,39 @@ export function retireStudioServer(server: number, keep: boolean): "none" | "kep
 }
 export function studioDraftSnapshot(): string | null {
   session?.stageDrawing();
-  return session?.draftSnapshot() ?? (restoredDraft ? encodeStudioDraft(restoredDraft) : null);
+  const json = session?.draftSnapshot() ?? (restoredDraft ? encodeStudioDraft(restoredDraft) : null);
+  // Captured after staging and encoding, in the same turn: this is exactly the authoring the
+  // returned JSON holds. App records it once the vault confirms the snapshot that carried it.
+  snapshotAuthor = authorToken();
+  return json;
+}
+
+function authorToken(): string { return `${sessionSerial}:${session?.authorRevision ?? 0}`; }
+
+/// The author token of the last snapshot `studioDraftSnapshot` built. App reads it right after it
+/// builds a continuity snapshot and keeps it as "sealed" only when that write succeeds.
+export function studioSnapshotAuthor(): string | null { return snapshotAuthor; }
+
+/// The current author token, after staging the mounted drawing. Null when that stroke cannot be
+/// staged: it exists only on the canvas, so no sealed snapshot can hold it.
+export function studioAuthorToken(): string | null {
+  try { session?.stageDrawing(); } catch { return null; }
+  return authorToken();
+}
+
+/// Notified when the session's retained work changes (records, pixels, statuses, retry identity),
+/// never for reads or blob arrivals. App uses it to checkpoint that work in the sealed continuity
+/// snapshot without waiting for a lock or an unrelated save.
+export function onStudioWork(fn: () => void): () => void {
+  workListeners.add(fn);
+  return () => { workListeners.delete(fn); };
+}
+
+/// Leaving the Studio surface: stage the drawing and send queued edits (see
+/// StudioSession.preserveForDeparture). Throws when the drawing cannot be staged. Resolves with the
+/// number of records still held; the caller must seal a continuity snapshot before it leaves.
+export async function preserveStudio(settleMs = 0): Promise<number> {
+  return await session?.preserveForDeparture(settleMs) ?? 0;
 }
 export function restoreStudioDraft(json: string | null): void {
   if (!json) return;

@@ -9,7 +9,12 @@ type Read = { cancellation: string; ready: Promise<void>; registered: boolean; c
 
 /** One serial, cancellable shelf read. Eligibility is supplied by the current share/trust policy;
  * each change revokes old continuations, including server A→B→A and lock/unlock. Retained recipes
- * are always a subset of the current sixteen eligible candidates, never a growing CID cache. */
+ * are always a subset of the current sixteen eligible candidates, never a growing CID cache.
+ *
+ * Reading can be paused without forgetting (`active: false`): leaving the Studio surface stops
+ * the reads but keeps what was already read for the same scope, so coming back to the same channel
+ * does not download every recipe again. Any scope change (channel, server, membership, lock) still
+ * clears them, exactly as before. */
 export class StudioSharedPatches {
   private generation = 0;
   private key = "";
@@ -20,6 +25,7 @@ export class StudioSharedPatches {
   private reading = false;
   private read: Read | null = null;
   private sequence = 0;
+  private active = true;
   private readonly invoke: Invoke;
   private readonly nonce: string;
   private readonly changed: (values: ReadonlyMap<string, { name: string; patch: JamPatch }>) => void;
@@ -30,13 +36,14 @@ export class StudioSharedPatches {
     this.allowed = allowed;
   }
 
-  update(scope: string | null, server: number | null, candidates: readonly SharedPatchCandidate[]): void {
+  update(scope: string | null, server: number | null, candidates: readonly SharedPatchCandidate[], active = true): void {
     const next = scope === null || server === null ? [] : candidates.slice(0, STUDIO_SHARED_PATCH_LIMIT);
     const key = JSON.stringify([scope, server, next]);
-    if (key === this.key) return;
+    if (key === this.key) { this.setActive(active); return; }
     const sameScope = this.server === server && this.scope === scope;
     const previous = new Map(this.candidates.map(f => [f.cid, f]));
     this.key = key; this.scope = scope; this.server = server; this.candidates = next; this.generation++;
+    this.active = active;
     if (this.read) this.cancel(this.read);
     const eligible = new Map(next.map(f => [f.cid, f]));
     this.values = new Map(sameScope ? [...this.values].filter(([cid]) => {
@@ -44,6 +51,19 @@ export class StudioSharedPatches {
       return old && current && old.binding === current.binding && old.name === current.name;
     }) : []);
     this.changed(this.values);
+    void this.drain();
+  }
+
+  /** Pause or resume reading for the same scope and candidates; held values are kept either way. */
+  private setActive(active: boolean): void {
+    if (active === this.active) return;
+    this.active = active;
+    if (!active) {
+      // Retire the running loop (it checks the generation after every await) and its native read.
+      this.generation++;
+      if (this.read) this.cancel(this.read);
+      return;
+    }
     void this.drain();
   }
 
@@ -58,7 +78,7 @@ export class StudioSharedPatches {
   }
 
   private async drain(): Promise<void> {
-    if (this.reading || this.server === null) return;
+    if (this.reading || this.server === null || !this.active) return;
     this.reading = true;
     const generation = this.generation, server = this.server, scope = this.scope, candidates = this.candidates;
     const current = () => this.generation === generation && this.server === server;

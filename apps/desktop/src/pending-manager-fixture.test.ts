@@ -60,13 +60,16 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
     async function switchServer(id,_then,route){if(route&&!route.current())return false;activeServerId=id;cur=servers.find(row=>row.id===id);await refreshNativeHistory();return true;}
     let windowCloseInFlight = false, unlocking = false, unlockAttempt = 0, closeAfterContinuityError = false, closeContinuityRevision = null;
     // This fixture is an already-known vault; lifecycle tests exercise actual gate reads.
-    const vaultExists = true, refreshVaultGate = () => { throw new Error("unexpected startup gate read"); };
+    let vaultExists = true, vaultGateReads = 0;
+    const refreshVaultGate = () => { if (vaultExists !== null) throw new Error("unexpected startup gate read"); vaultGateReads++; return Promise.resolve(); };
     let videoScopeEpoch = 0;
     const videoEditorScope = "closing", videoReviews = new VideoReviewQueue(() => {});
     // These chat tests leave the lazy Studio chunk unmounted. Keep its real continuity
     // fallback and close hooks in scope so the extracted App functions run unchanged.
     let studioSnapshot = null, studioRestore = null, restoredStudioDraft = null;
-    const studioBeginClose = null, studioSave = null;
+    let studioBeginClose = null, studioSave = null;
+    // The Studio checkpoint handles App declares beside its continuity state (unmounted here).
+    let studioSnapshotAuthor = null, studioAuthorToken = null, studioSealedAuthor = null, studioCheckpointTimer;
     let drafts = {}, readMarks = {}, statusCursors = {}, fileTrustPolicies = {}, latePast = {}, embedAutoLoad = false;
     let servers = [], cur = null, activeServerId = null, draft = "", replyingTo = "", draftRevisions = {};
     let pendingSendNonce = 0, mentionQuery = null, chatStickToBottom = false, tailLoaded = false;
@@ -187,12 +190,14 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
       bulkyPreferences() { latePast = { fixture: "x".repeat(1024*1024) }; },
       lock() { lockScreen(); },
       close() { return closeHandler({ preventDefault() {} }); },
+      studioClose(save, author) { studioSave = save; studioAuthorToken = author; },
+      unknownVaultGate() { vaultExists = null; },
       review(file) { return videoReviews.request(file, { index: 1, count: 1 }, "open", "chat"); },
       expireCloseWait() { for (const callback of [...closeTimers.values()]) callback(); },
       replaceUiGeneration() { uiStateLoadGeneration++; },
       async unlock() { await nativeVaultLock.settle(); nativeVaultLock.reset(); backend.nativeLocked = false; backend.nativeGeneration++; locked = false; uiStateLoadGeneration++; return loadUiContinuity(uiStateLoadGeneration); },
       done() { clearTimeout(uiStateSaveTimer);pendingSendRetry.cancel(); },
-      state() { return { uiSessionRetired,busy,activeServerId,startTab,nativeHistoryLoading,nativeRetryGeneration,uiStateLoadGeneration,nativeHistoryLoaded,nativeHistoryError,nativeCursor,nativeOriginals:structuredClone(nativeOriginals),nativeHistoryCalls,nativeTextIntents: structuredClone(nativeTextIntents), uiContinuityVersion, pendingSends: structuredClone(pendingSends), recoveredSendDrafts: structuredClone(recoveredSendDrafts), drafts: structuredClone(drafts), draft, editingId, editDraft, sealed: JSON.parse(backend.sealed), writes, submissions, stops, warnings, pendingSendResolution, locked, error, closeCalls, windowCloseInFlight, destroyCalls, restartCalls, contextCalls, uiStateReady, videoScopeEpoch, videoReview: videoReviews.current }; }
+      state() { return { uiSessionRetired,busy,activeServerId,startTab,nativeHistoryLoading,nativeRetryGeneration,uiStateLoadGeneration,nativeHistoryLoaded,nativeHistoryError,nativeCursor,nativeOriginals:structuredClone(nativeOriginals),nativeHistoryCalls,nativeTextIntents: structuredClone(nativeTextIntents), uiContinuityVersion, pendingSends: structuredClone(pendingSends), recoveredSendDrafts: structuredClone(recoveredSendDrafts), drafts: structuredClone(drafts), draft, editingId, editDraft, sealed: JSON.parse(backend.sealed), writes, submissions, stops, warnings, pendingSendResolution, locked, error, closeCalls, windowCloseInFlight, destroyCalls, restartCalls, contextCalls, uiStateReady, videoScopeEpoch, unlockAttempt, vaultGateReads, videoReview: videoReviews.current }; }
     };
   `)(...Object.values(dependencies));
 }

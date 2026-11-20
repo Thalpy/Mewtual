@@ -324,6 +324,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ArchiveFounderSourcePreparation<T, R> {
             admin_chat_ledger,
             delivery_snapshot_revision,
             devices_sig,
+            // Preserve process-local Studio durability state with this original on refusal.
+            studio_saved_snapshot,
             cache,
         } = server;
         match source.into_genesis_runtime_parts(sync, id) {
@@ -349,6 +351,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ArchiveFounderSourcePreparation<T, R> {
                     admin_chat_ledger,
                     delivery_snapshot_revision,
                     devices_sig,
+                    studio_saved_snapshot,
                     cache,
                 });
                 Err(refused())
