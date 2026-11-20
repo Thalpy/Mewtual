@@ -187,7 +187,12 @@ pub(in crate::voice_handoff) fn read_inner(
         .map_err(|_| REFUSED.to_string())?;
     let work = state
         .voice_handoff
-        .project_work(projection.selected(), from_slot)
+        .project_work(
+            projection
+                .existing_selected()
+                .map_err(|_| REFUSED.to_string())?,
+            from_slot,
+        )
         .map_err(|_| REFUSED.to_string())?;
     Ok(WorkReply {
         owner,

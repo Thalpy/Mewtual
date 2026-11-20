@@ -4523,6 +4523,7 @@ dependencies = [
  "async-trait",
  "automerge",
  "base64 0.22.1",
+ "blake3",
  "bytes",
  "catcoms-app",
  "catcoms-crypto",

@@ -76,24 +76,39 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 return Err(VoiceError::Capacity);
             }
         }
+        if self.voice_runtime.is_some() {
+            let (owner, registration) =
+                runtime.prepare_actor(group, self.device.device_id(), ticket)?;
+            self.voice_runtime
+                .as_mut()
+                .ok_or(VoiceError::Unauthorized)?
+                .candidates
+                .push(owner);
+            self.observe_voice_directory();
+            return Ok(registration);
+        }
+        // This already-fallible Root attachment knows the exact shared pool and
+        // group. Prepay all registry backing/inline metadata before constructing
+        // VoiceRuntime; failed Actor preparation drops Vec before plain funding.
+        let routes = voice_transport::RouteOwners::new(&runtime.resources(), group)?;
         let (owner, registration) =
             runtime.prepare_actor(group, self.device.device_id(), ticket)?;
-        let voice = self.voice_runtime.get_or_insert_with(|| VoiceRuntime {
+        let voice = VoiceRuntime {
             clock: runtime.clock(),
             resources: runtime.resources(),
             directory_doc,
             directory: Directory::new(group, runtime.resources(), reader, deletions),
-            candidates: Vec::new(),
+            candidates: vec![owner],
             current: None,
-            routes: voice_transport::RouteOwners::default(),
+            routes,
             endpoints: voice_endpoint::EndpointOwners::default(),
             next_collection: runtime.clock().monotonic_ms().saturating_add(1000),
             #[cfg(test)]
             view_builds: 0,
             #[cfg(test)]
             directory_reads: 0,
-        });
-        voice.candidates.push(owner);
+        };
+        self.voice_runtime = Some(voice);
         self.observe_voice_directory();
         Ok(registration)
     }
@@ -187,6 +202,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .map(|voice| (voice.clock.clone(), voice.next_collection))
     }
     pub fn collect_expired_voice(&mut self) {
+        // Idle/unjoined Roots can retain completed verification rows. Return
+        // their actual sole-owner metadata before any callback or shared-lane
+        // reservation, including while another Root needs the process Crypto cap.
+        self.prune_voice_routes();
         let Some(voice) = &mut self.voice_runtime else {
             return;
         };
@@ -194,6 +213,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if now < voice.next_collection {
             return;
         }
+        // Existing quiet-network housekeeping needs no fresh RPC or allocation.
+        // It also reclaims canceled preparations in OTHER rooms under full pressure.
+        // Original externally held aliases continue to retain their original payment.
+        if let Some(actor) = &voice.current {
+            actor.collect_closed_children();
+        }
+        for candidate in &voice.candidates {
+            candidate.collect_closed_children();
+        }
+        voice.directory.collect_all_closed_children();
         voice.endpoints.collect_expired(voice.clock.as_ref());
         voice.next_collection = now.saturating_add(1000);
     }
@@ -253,6 +282,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         &mut self,
         grant: &voice_v2::CallGrant,
     ) -> Result<(), VoiceError> {
+        self.require_existing_voice_call(grant)?;
         self.reconcile_voice_actor();
         self.observe_voice_directory();
         if self.voice_v2_context(grant.scope().room)?.scope != grant.scope() {
@@ -277,6 +307,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         &self,
         grant: &voice_v2::CallGrant,
     ) -> Result<(), VoiceError> {
+        self.require_existing_voice_call(grant)?;
         let context = self.voice_v2_context(grant.scope().room)?;
         if context.scope != grant.scope() {
             return Err(VoiceError::Scope);

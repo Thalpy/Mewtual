@@ -34,7 +34,6 @@ impl EpochObservation {
     }
     /// Complete independently retained allocations, including rounded Arc headers. The
     /// enclosing observer value itself is already included by size_of<PlanBinding>.
-    #[cfg(test)]
     pub(in crate::voice_v2) const fn retained_graph_bytes() -> usize {
         std::mem::size_of::<(usize, usize, EpochState)>()
             + 2 * std::mem::size_of::<(usize, usize, AtomicBool)>()

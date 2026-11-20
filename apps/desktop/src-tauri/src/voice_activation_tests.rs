@@ -1,9 +1,10 @@
-//! Actual native bridge/actor barriers. These do not exercise Tauri serialization or WebRTC.
+//! Actual native bridge/actor barriers. `admitted_ipc` also drives Tauri JSON; none exercise WebRTC.
 use super::*;
 use catcoms_rt::{Hub, ManualClock};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+mod admitted_ipc;
 mod join_key;
 
 pub(crate) struct Fixture {

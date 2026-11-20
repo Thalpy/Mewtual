@@ -51,9 +51,19 @@ pub enum StudioRecoveryItem {
         id: ElementId,
     },
     /// A reusable musical coordinate, selected by original source operation (including Clear).
+    /// Legacy `c/` cells: removal wins, and recovery keeps authoring `SetCell`/`ClearCell`.
     ScoreCell {
         step: u16,
         row: u8,
+        value: [u8; 32],
+    },
+    /// A layered note slot `n/{step}:{row}/{layer}` (add wins), selected by original source
+    /// operation (including a clear). Restore authors `SetNote` of the version's `shown()` value
+    /// or, in Copy, `ClearNote` for a recovered clear (docs/design-score-layers.md section 6).
+    ScoreNote {
+        step: u16,
+        row: u8,
+        layer: types::ScoreLayer,
         value: [u8; 32],
     },
     /// A reusable recipe slot, selected by original source operation (including Remove).

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { AUDITION_CALL, AUDITION_LANE_NONCE, auditionPlayback } from "./studio-audition.ts";
+import { AUDITION_CALL, AUDITION_LANE_NONCE, auditionPadPlayback, auditionPlayback } from "./studio-audition.ts";
 import { legacyJamPatch } from "./jam-patch.ts";
 import { validateJamTake } from "./jam-recorder.ts";
 import { planJamArchivalPlayback } from "./jam-archival-plan.ts";
@@ -45,4 +45,14 @@ test("the caller's patch object is not what the take carries", () => {
   const playback = auditionPlayback(ctx, patch, 60, 100);
   patch.o[0].l = 1;
   assert.notEqual(playback.take.patches[0].o[0].l, 1, "a later mutation of the input must not reach the planned take");
+});
+
+test("a pad audition is a one-hit take with the kit's own tail as its end, and refuses an unknown pad", () => {
+  const playback = auditionPadPlayback(ctx, 1);
+  assert.deepEqual(playback.take.events, [{ ms: 0, lane: 0, n: 1, d: 1, q: 0 }]);
+  assert.deepEqual(playback.take.patches, []);
+  assert.equal(playback.gridMs, 700, "the snare's tail from the kit table");
+  assert.equal(playback.take.call, AUDITION_CALL);
+  for (const pad of [-1, 10, 1.5, NaN]) assert.throws(() => auditionPadPlayback(ctx, pad), /outside the kit/);
+  assert.throws(() => auditionPadPlayback({ group: "", exporter: ctx.exporter }, 0), /group/);
 });

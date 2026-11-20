@@ -21,6 +21,20 @@ pub(in crate::voice_handoff) async fn channel_route(
     f: &Fixture,
     selected: &SelectedHandoffOwner,
 ) -> Route {
+    let route = unacknowledged_channel_route(f, selected).await;
+    // Factory tests begin AFTER the original browser setup has drained. Native
+    // production now enforces this same ACK boundary, so a pre-ACK old producer
+    // cannot race admission-mode selection. Setup/ACK order has dedicated tests.
+    route.acknowledge_setup().unwrap();
+    route
+}
+
+/// Preserve real outstanding browser setup for tests of the ACK boundary itself.
+/// Do not silently use an already-ACKed factory fixture in those scenarios.
+pub(in crate::voice_handoff) async fn unacknowledged_channel_route(
+    f: &Fixture,
+    selected: &SelectedHandoffOwner,
+) -> Route {
     let status = crate::voice_handoff::bootstrap::ensure(
         &f.state,
         selected.id(),
@@ -369,17 +383,25 @@ async fn registration_payment_refusal_before_handoff_calls_no_actor_and_removes_
     assert!(poll_once(pending.as_mut()).await.is_pending());
     let parked = park(&f.actor).await;
     let pool = selected.resources();
+    let group = selected.binding().scope.group;
     // Leave room for the fixed row+Phase, but less than the independent factory payment.
-    // This fixture now also owns bootstrap's4KiB PROCESS-only index. counts() includes it,
-    // but that charge consumes no group bytes; subtracting the process total alone would
-    // leave an extra4KiB in this group and accidentally allow the factory being tested.
+    // Fixed indexes are PROCESS-paid and consume no group headroom. Keep the
+    // existing fixed-row/Phase/factory cushion arithmetic unchanged; only use
+    // the actual group payer instead of compensating one historical index fee.
     let pressure = pool
         .charge(
-            selected.binding().scope.group,
-            catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.counts().0 + 4096 - 4096 - 1024,
+            group,
+            catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.group_counts(group).unwrap().0
+                + 4096
+                - 4096
+                - 1024,
             ResourceKind::Retained,
         )
         .unwrap();
+    assert_eq!(
+        pool.group_counts(group).unwrap().0,
+        catcoms_sync::voice_v2::resources::GROUP_BYTES + 4096 - 4096 - 1024
+    );
     let before = pool.counts();
     drop(boundary);
     assert!(

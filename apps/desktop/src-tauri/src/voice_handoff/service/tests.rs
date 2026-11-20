@@ -3,7 +3,7 @@
 //! layout already pinned by shared WebCrypto vectors; no native Session key is inspected.
 use super::*;
 use crate::voice_activation_tests::Fixture;
-use crate::voice_handoff::bootstrap::{ensure, SetupOutput, Status};
+use crate::voice_handoff::bootstrap::{ensure, SetupOutput, SetupOutputRef, Status};
 use aes_gcm::{
     aead::{AeadInPlace, KeyInit},
     Aes256Gcm,
@@ -23,6 +23,9 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 const POINT: &str = "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5";
 const DOMAIN: &[u8] = b"Mewtual native voice handoff v1";
+mod admission_capacity;
+mod admission_mode;
+mod admitted_admission;
 
 // Wall time only bounds a broken test harness. All service/protocol time comes from Clock.
 async fn bounded<T>(future: impl Future<Output = T>) -> T {
@@ -38,7 +41,7 @@ async fn until(mut condition: impl FnMut() -> bool) {
     })
     .await;
 }
-async fn setup() -> (Fixture, String, Arc<SetupOutput>, Arc<Runtime>, Client) {
+async fn setup() -> (Fixture, String, SetupOutputRef, Arc<Runtime>, Client) {
     let f = Fixture::new().await;
     let owner = f.candidate().await;
     crate::activate_voice_owner_inner(&f.state, owner.clone())
@@ -370,6 +373,8 @@ async fn admitted_begin_worker_keeps_physical_ownership_ahead_of_newer_history()
 /// Actual native bootstrap + independent client MAC/AEAD for sibling executor regressions.
 /// Fixture allocations are not application custody evidence; returned Incoming is the real
 /// original Session owner and has already passed header authentication and body opening.
+/// These synchronous helpers borrow only the body. Their callers retain the original
+/// paid SetupOutputRef; no output reference or ownership escapes into the returned frame.
 pub(in crate::voice_handoff) fn opened_frame(
     public: &SetupOutput,
     route: &super::super::bootstrap::Route,
@@ -510,6 +515,9 @@ pub(in crate::voice_handoff) fn opened_reply_kind(
 
 impl Client {
     fn new(public: &super::super::channel::bootstrap::PublicSetup) -> Self {
+        Self::with_label(public, b"Mewtual native voice bootstrap seed v1")
+    }
+    fn with_label(public: &super::super::channel::bootstrap::PublicSetup, label: &[u8]) -> Self {
         let mut scalar = [0; 32];
         scalar[31] = 1;
         let key = SecretKey::from_slice(&scalar).unwrap();
@@ -518,7 +526,7 @@ impl Client {
         let shared = p256::ecdh::diffie_hellman(key.to_nonzero_scalar(), native.as_affine());
         let mut seed = [0; 32];
         Hkdf::<Sha256>::new(Some(&public.hash), shared.raw_secret_bytes())
-            .expand(b"Mewtual native voice bootstrap seed v1", &mut seed)
+            .expand(label, &mut seed)
             .unwrap();
         Self {
             seed,
@@ -1831,7 +1839,7 @@ struct Parked {
     at: usize,
     writes: usize,
     dropped: Arc<AtomicBool>,
-    session: Arc<super::super::channel::Session>,
+    session: super::super::channel::SessionRef,
     expected_busy_on_drop: bool,
 }
 impl AsyncRead for Parked {
@@ -2059,10 +2067,10 @@ async fn shutdown_finds_a_retired_session_owned_only_by_an_uncollected_reply() {
 #[tokio::test]
 async fn completed_reply_without_a_row_reference_keeps_native_control_paid_through_final_close() {
     use crate::voice_handoff::bootstrap::collect_channel;
-    use crate::voice_handoff::channel::{BOOTSTRAP_BYTES, BROWSER_CONTROL_BYTES, CONTROL_BYTES};
+    use crate::voice_handoff::channel::{BROWSER_CONTROL_BYTES, CONTROL_BYTES};
     let (f, owner, output, runtime, client) = setup().await;
     let route = f.state.voice_channels.route(client.slot).unwrap();
-    let session = Arc::downgrade(route.session());
+    let session = route.session().downgrade();
     let (_, admission, body) = client.status(1);
     let submitted = wire(41891, &admission, &body);
     let mut worker = route.session().header().unwrap();
@@ -2087,11 +2095,9 @@ async fn completed_reply_without_a_row_reference_keeps_native_control_paid_throu
     assert_eq!(session.strong_count(), 0);
     assert_eq!(
         runtime.resources().counts(),
-        (
-            paid - CONTROL_BYTES - BOOTSTRAP_BYTES - BROWSER_CONTROL_BYTES,
-            0
-        )
+        (paid - CONTROL_BYTES - BROWSER_CONTROL_BYTES, 0)
     );
+    drop(session); // the diagnostic weak allocation itself still owns bootstrap-tail bytes
     drop(output);
     collect_channel(&f.state, &owner, [9; 32]).await.unwrap();
     let collected = runtime.resources().counts();

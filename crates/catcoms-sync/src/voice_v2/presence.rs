@@ -12,6 +12,7 @@ use catcoms_rt::{Clock, CryptoRngCore};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+mod admission;
 mod confirmation;
 mod snapshot;
 pub use confirmation::{
@@ -25,6 +26,9 @@ pub(crate) use confirmation::{
 pub use snapshot::{PeerSnapshot, PeerSnapshotPermit, PeerSnapshotWaiter};
 
 const RECORD_BYTES: usize = 1536;
+/// Independent Watcher body payment. Lease aliases keep their own enclosing
+/// funding; they do not keep this record alive after the Watcher itself drops.
+pub(super) const WATCHER_BYTES: usize = RECORD_BYTES;
 const MAX_PENDING: usize = 32;
 const RENEW_MS: u64 = 5000;
 
@@ -185,7 +189,7 @@ impl Watcher {
         resources: Arc<Resources>,
         rng: &mut dyn CryptoRngCore,
     ) -> Result<Self, VoiceError> {
-        let credit = resources.charge(context.scope.group, RECORD_BYTES, ResourceKind::Watcher)?;
+        let credit = resources.charge(context.scope.group, WATCHER_BYTES, ResourceKind::Watcher)?;
         lease.claim()?;
         let mut incarnation = [0; 32];
         rng.fill_bytes(&mut incarnation);
@@ -629,6 +633,11 @@ impl LocalJoin {
         lease: CallLease,
         resources: Arc<Resources>,
     ) -> Result<Self, VoiceError> {
+        // No admitted endpoint/packet constructor is exposed by this staged activation
+        // leaf. Its separate agreement/consume proof must precede key/packet producers.
+        if lease.is_admitted() {
+            return Err(VoiceError::Unauthorized);
+        }
         key.validate()?;
         let ledger = PacketLedger::new(
             context,

@@ -202,6 +202,7 @@ async fn key_release_after_ready_queue_revokes_actual_lower_without_early_refund
     f.receiver.stop_voice_endpoint(&f.grant);
     let closing = pool.counts();
     drop(lower);
+    f.receiver.prune_voice_routes();
     assert!(
         pool.counts().0 < closing.0,
         "last actual Lower Drop releases its payment"
@@ -313,6 +314,7 @@ async fn root_ready_source_actual_signed_ack_uses_original_capacity_with_full_or
         "every actual ACK completion Clock callback must run outside Group/Policy"
     );
     *clock.probe.lock().unwrap() = None;
+    f.receiver.prune_voice_routes();
     assert_eq!(pool.counts(), full);
     let source = f
         .receiver

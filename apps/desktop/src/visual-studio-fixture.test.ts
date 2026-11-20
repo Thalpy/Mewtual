@@ -89,6 +89,13 @@ test("unready Score fixture keeps losing setters, remove-wins clear and out-of-l
   assert.equal(score.cellSlots["8:7"].register.selected.value?.k, "n"); assert.equal(score.cellSlots["8:7"].register.conflicts[0].value, null);
   assert.equal(score.readiness.cells["8:7"], undefined, "native readiness skips removed slots, retaining their raw conflict evidence separately");
   assert.equal(score.readiness.cells["255:24"].extent, true); assert.equal(score.cells["255:24"].k, "d");
+  // Layered notes: two members' different notes in one slot both play and are flagged; a hit whose
+  // register a clear won is still live (add wins) and still shown.
+  const pair = `20:9/${VISUAL_STUDIO_PATCH}`;
+  assert.deepEqual(score.readiness.layers?.[pair], { count: false, extent: false, recipe: false, overlap: true, conflict: true });
+  assert.equal(score.voices.play.filter((voice) => voice.step === 20 && voice.row === 9).length, 2);
+  assert.deepEqual(score.notes["26:24/d"], { k: "d", pad: 4 });
+  assert.equal(score.readiness.layers?.["26:24/d"], undefined, "a live hit with nothing to review is not listed");
 });
 
 test("empty draft/recovery reads use exact native shapes without fake retained state", () => {

@@ -25,7 +25,9 @@ pub fn operation_blob_cid(op: &DomainOp) -> Result<Option<ContentId>, ReplError>
             let value = parse(&op.body)?;
             let obj = object(&value)?;
             let name = text(obj, "op")?;
-            if matches!(name, "set_cell" | "clear_cell")
+            // Every Score-only operation name. A name missing here falls through to the art
+            // grammar, which refuses it, so a vault holding that Score intent could not be read.
+            if matches!(name, "set_cell" | "clear_cell" | "set_note" | "clear_note")
                 || name == "set_header" && matches!(text(obj, "field")?, "bpm" | "bpb" | "steps")
             {
                 ScoreOp::decode(&op.body)?;
@@ -231,6 +233,17 @@ mod tests {
                 value: ScoreCell::Drum { pad: 0 },
             },
             ScoreOp::SetHeader(ScoreHeader::Bpm(120)),
+            // Layered notes are Score-only names too: a vault holding one must stay readable.
+            ScoreOp::SetNote {
+                step: 255,
+                row: 24,
+                value: ScoreCell::Drum { pad: 9 },
+            },
+            ScoreOp::ClearNote {
+                step: 0,
+                row: 0,
+                layer: ScoreLayer::Sound([3; 32]),
+            },
         ] {
             let mut op = DomainOp {
                 nonce: [1; 16],

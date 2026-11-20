@@ -19,6 +19,20 @@ early cohort on both OSes, so those narrower passes did not establish teardown
 safety in the complete run. Hosted validation is required for this correction;
 local checks are limited to source comparison, formatting and whitespace.
 
+## 20 November: native runtime pass and exact generation lint correction
+
+Hosted #76 Linux CI at `40e63bcc` passes all 1,274 native library cases, the
+six ACL/parser tests and the additional native test, with zero failed/ignored.
+This includes both corrected native custody/IPC fixtures. The subsequent strict
+Clippy step fails only on `cmp_owned` in the exact IPC generation assertion.
+
+The fixture now binds the expected decimal string, then compares borrowed JSON
+and expected strings. It still rejects a numeric generation and requires the
+exact registered value; the two-field shape and continuity checks remain.
+No production code, capacity, timeout or lint policy changes. Local verification
+uses formatting and whitespace checks only; fresh hosted strict validation is
+required. Root and other hosted checks remain pending; this is not acceptance.
+
 ## 20 November: CI runner backlog and current strict-build repair
 
 After refreshing CLI access, 20 active runs at superseded #89/#83/#76 commits
@@ -42,6 +56,33 @@ The full suite still executes after a focused failure and still fails the job.
 No build or test ran locally. Source comparison, YAML parsing, formatting and
 whitespace checks are the local checks. Chat V2 remains disabled and incomplete.
 
+## 20 November: hosted merge validation and composed voice fixtures
+
+PR84 is on main at `434232e2`; PR89, Studio PR83 and Score/voice PR76 remain
+the ordered integration candidates. No tests run on the resuming machine.
+PR89's failed/cancelled hosted jobs were retried; its Windows retry exposed the
+same cached observer source with a missing ownership marker previously seen
+on Studio. Both candidates now use fresh marked temporary observer source
+outside Cargo's cached target. Source verification, locks and selectors remain.
+
+This Score/voice candidate incorporates the Studio correction. Five inherited
+Sync fixtures now execute the actual route-registry pruning pass after dropping
+their last response/Lower owners and before testing returned capacity. The
+strong registry custody intentionally prevents an earlier refund. Original
+identity, revocation, capacity, attempt and clock assertions are retained.
+The real Tauri IPC fixture checks both current lock-response fields and its
+exact registered generation. The delayed Closed-reply fixture accounts for the
+original 10KiB Row and the separate 2KiB Session allocation retained by its paid
+weak witness; its no-early-refund check remains intact.
+
+The integration workflow executes those five Root and two native regressions
+before the complete suites on both OSes. A focused failure does not suppress
+the complete suite. Static formatting and whitespace checks pass; hosted
+execution is still required. No production path, resource cap, deadline or
+activation switch changes in these fixture corrections. The fresh Studio audit
+first exposed Chrono maintenance advisory RUSTSEC-2026-0543. The subsequent
+dependency repair and hosted audit results are recorded above; no advisory
+exemption is introduced.
 ## 16 November: Chat CI source isolation and bounded test batches
 
 At `b7fd788c`, Linux's Native4 predecessor itself passed all six fixtures and
@@ -70,6 +111,36 @@ and locks, and the hosted Windows 354-name inventory, were independently checked
 The actual-diff adversarial review found no blocker/high/medium issue. Fresh
 cross-platform execution is pending. This changes CI execution only; Chat V2
 remains disabled and shared delivery/production joining remain unfinished.
+## 16 November: reviewed Score/voice stack on the current Chat baseline
+
+The Score candidate now composes the reviewed voice admission history through
+`b239378b` with Studio `a41b5258` and Chat `b7fd788c`. The merge keeps current
+native text/admin wrappers, upload/session admission, typed registry/vault
+isolation and Studio preservation/close guards. Actor-only voice paths use the
+explicit Legacy lookup; TextV2 rows cannot supply an actor. Native allocation
+inventories name the actual ServerTable and MountedVault types. The new Session
+fixture still returns its same paid owner wrapper, and every test/assertion is
+retained.
+
+Fresh local evidence: Root strict Clippy (4m21), native strict all-target/all-
+feature Clippy (4m13), all 3912 frontend tests, Svelte zero errors/warnings,
+production build, default chat/friend flows, Score rendering/document switching,
+and Gate7 attachments/inline playback passed. Both static dependency/Store gates
+passed. The actual combined diff and its narrow compiler corrections received
+adversarial reviews with no blocker/high/medium issue. Native focused runtime,
+actual layout tests, complete suites and real startup are still pending. The
+low combined pre-Begin retry regression gap remains recorded in the backlog
+integration document. Both V2 switches stay disabled; this is not physical
+WebView/audio/network acceptance or completion of Chat V2.
+
+
+16 November Score/voice integration candidate: this branch combines the reviewed
+Score and voice admission history with the newer Chat/security and Studio save
+baseline. The entries below retain each branch's evidence; they do not establish
+fresh combined acceptance. Both V2 switches remain disabled. Combined focused and
+full CI checks are pending, and physical two-computer audio/network acceptance
+remains open.
+
 
 ## Studio backlog composition (16 November; complete CI pending)
 
@@ -4724,6 +4795,912 @@ confirmed Actor retirement, retained old snapshot restore without chat publicati
 These tests still await primary execution and actual-diff review. R6,
 historical authorization and a typed chat ledger are not claimed by this mutation slice.
 
+## Voice checkpoint while text chat takes priority (29 October)
+
+The user prioritised text-chat protocol work. Voice integration is parked at
+`85d26232` on `communication-v2-native-admission`; the separate browser SetupAck
+sender and prepared MLS-view drafts have not been merged here. V2 remains OFF.
+
+This checkpoint composes the native admitted Slot, paid Session/metadata owners,
+physical bootstrap/history and reaper correction. Native production checking,
+formatting and Root strict Clippy pass. The full frontend suite passes 3,719 tests,
+with clean Svelte checks and a production build. The native admitted filter passes
+73 tests; separate ownership, invoice and physical-history filters pass. The
+bootstrap filter's one stale weak-tail refund assertion was corrected and its
+focused rerun passes. These filters overlap and are not a complete native run.
+
+The full Root run was deliberately stopped when text chat became the priority;
+it is incomplete, not a passing run. Current complete Root/native validation,
+native strict Clippy and build/startup remain outstanding. Hosted Linux
+frontend/native validation passed for earlier pushed `a684e982`; hosted Root
+jobs failed test-only lock-scope lint errors, corrected here with passing local
+strict Clippy. Earlier CI's automatic browser-pump timeout has not been diagnosed;
+the new original-deadline diagnostic is evidence gathering, not a claimed fix.
+Its focused native regression passes (one test, 0.03s). The first compile stopped
+with LLVM's no-space-on-device error; after reclaiming 13GiB of stale native
+incremental caches, the `--lib` rerun compiled and passed. No full suite result
+is inferred from that rerun.
+
+Operational admission, bilateral agreement, admitted KDF/Ready/RTC, App/audio
+activation, relay and combined/physical acceptance remain open. One desktop is
+available. Older entries below describe their dated inputs; this paragraph
+supersedes their pending status only for the checks explicitly listed above.
+
+## Admitted Slot isolated draft (29 October; native unrun)
+
+The new separate native Slot/31 implementation is drafted from0b5c6739 plus the
+typed admitted-parent prerequisite. Eight new pure-codec tests and17 adjacent
+framing/negotiation tests pass, as does targeted strict TypeScript and leaf-only
+formatting. Native compilation/layouts/tests, actual-diff review and all integrated
+gates remain pending under primary Rust coordination. No operation31 production
+browser sender, Ready/RoundGate consumption or activation is enabled. See
+[the current contract and limitations](communication-recovery/VOICE-ADMITTED-SLOT.md).
+
+## Current admitted integration (29 October; V2 OFF, validation in progress)
+
+The separate admitted native parent primitive now reserves an actual shared
+allocator position/serial and the original two fees, with no Existing owner or
+dummy Row conversion. Four actual native fixture tests pass (complete claim graph
+1,160/2,304B), and the extra claim-outliving-physical-Row case passes its focused
+execution/re-review. This is no live SDP acceptance.
+[Contract and limits](communication-recovery/VOICE-ADMITTED-NATIVE-PARENT.md).
+
+The neutral Root factory and sealed Actor preparation are integrated with
+Control7 and the separate admitted physical bootstrap. The Actor bridge retains
+the whole registration/capacity result and distinguishes actual unstarted return
+from an entered callback loss. Seven Actor cases pass on the pre-funding-fix
+source (2,720/4,096B), and the integrated neutral Root filter passes13/0 (1.84s).
+The separate outside-lifecycle-funding correction/eighth Actor test is reviewed
+but unrun. Native
+Slot/operation31, bilateral agreement/RoundGate, admitted KDF/Ready/RTC and relay
+remain open.
+
+Three native bootstrap crypto/layout cases pass. The integrated admitted filter
+passed34 and failed16 because the complete Row/reply inventory measured9,080B
+against its old8KiB payment. The fee is now10KiB before allocation, with every
+invoice term preserved and unchanged64-row/group/process caps; the corrected
+integrated admitted filter passes54/0 (39.97s), including all six bootstrap
+lifecycle cases. The original failure log is retained. Full frontend3,695,
+Svelte check/build and10 real Edge flows pass. The first sandboxed flow attempt
+lost CDP, then the desktop-access rerun passed. Root/native dependency audits and
+the ambient gate pass. Complete Root/native suites, strict lint and native
+check/build/startup remain required; later source additions need their own gates.
+
+## Control7 Query/Support snapshot (29 October; focused draft, OFF)
+
+Twelve focused cases pass at34336b2f, including actual restricted A–B–C dispatch,
+unjoined B, q2/lateq1, duplicates/flood, expiry/old grammar, actual historical-owner
+return and3-submission exhaustion. New-family graph guards and actual replacement-D/
+MLS epoch/rejoin refusal cases pass. The inherited Group/escaping-ledger/counter
+backing correction passes rt authority11, Resources60, helper26, source32,
+runtime42 and route9 focused tests; the revised actual Root transport cases pass
+69/69 at4b9d2241. Its full3750-byte invoice prepays4KiB without changing caps.
+Final read-only review found no blocker/high/medium. Strict lint and complete
+integration remain primary-owned pending gates; earlier full suites cover earlier
+inputs. Counts are separate overlapping filters, not an aggregate unique total.
+[Exact ownership, fees, API and remaining V2 work](communication-recovery/VOICE-CONTROL-QUERY-SUPPORT.md).
+
+## Shared route registry custody prerequisite (29 October; focused passes)
+
+Before adding Control7 transport, this leaf fixes inherited raw-Weak route tails with
+strong rows and the SAME original outside payer; no Weak escapes and Arc destruction
+precedes payer release. Aggregate64 and per-flight512 metadata stay unchanged. First
+fallible voice attachment now prepays an explicit4KiB fixed registry/inline cost even
+when OFF, within unchanged group/process caps. Crypto/Forward entry points prune sole
+rows before reservation and on quiet housekeeping. External preparations, driver
+cancellation/replies and early refusal retain the SAME payer after final authority
+destruction even after Root retirement. Focused execution passes nine sync and eleven
+rt authority cases (two new rt regressions); all original assertions remain. Windows
+registry1904/4096, route376/512 and actual execution/completion/scheduler2056/4096
+guards pass. The first compile found one missing test-only RngCore import, corrected
+before the passing rerun. Strict lint/full suites remain primary-owned and pending;
+prior full suites cover earlier inputs. See
+[the source trace, accounting and exact limits](communication-recovery/VOICE-ROUTE-REGISTRY-CUSTODY.md).
+
+## Admitted Root presence draft (29 October; corrections pending rerun)
+
+## Desktop dependency and actual IPC validation (29 October; integration gates open)
+
+Tauri is aligned to 2.12.5, build/codegen/macros2.7.4, runtime2.12.2 and
+runtime-wry2.12.3; tauri-utils remains2.10.2. JavaScript API/CLI are2.12.4.
+Plugins and unrelated Node packages are unchanged. Explicit
+`build.windows.staticVCRuntime:false` preserves the previous absent-environment
+linking choice. This is a real desktop dependency update, not a test-only feature.
+The old family also falls in the published
+[cross-WebView channel-fetch advisory](https://github.com/tauri-apps/tauri/security/advisories/GHSA-w28w-mhc8-qvjv);
+the aligned release has the per-WebView ownership correction.
+
+The first new-family build compiled but Windows refused its library test executable
+before test execution: it imported Common Controls v6 without an embedded manifest.
+The fix links the SAME Tauri-generated resource into only the MSVC library/integration
+test harnesses; the normal application manifest remains unchanged. Final actual-diff
+review is clear. A fresh, unmodified Cargo build now passes both real JSON-dispatch
+tests (0.38s) and the native dialog-entrypoint regression. The generated executable's
+RT_MANIFEST1 contains Common Controls6, with no diagnostic sidecar present. Manually
+embedded diagnostic copies were investigative evidence only.
+
+The matching Node packages are installed in an isolated dependency directory; the
+repository's shared node_modules are untouched. The current full frontend suite
+passes3,687/0 with concurrency2. New-family frontend check/build/flows, actual ACL,
+native check/build/startup, dependency audit and complete Root/native suites remain
+open. Earlier passes below retain their recorded source/dependency boundaries.
+## Admitted neutral Root factory (29 October; initial focused tests pass)
+
+The separate typed Root factory reserves neutral6/6 and twelve Action positions
+from one paid pool set per admitted Presence. It validates the actual selected
+NativeActive residence/grant and preserves a newly created registration across
+later capacity refusal. Exact retries reuse its observer; this is not canonical
+native-generation or lost-first-reply recovery. Existing role consumers refuse
+Neutral before decomposition. Eleven focused tests pass, with complete pool
+648/2,048 and registration1,600/3,072-byte guards. Thirteen capacity and thirteen
+presence regressions also pass (Presence8,296/9,216). Two additional final-callback
+revocation/unwind tests remain unrun; strict/integration checks and final re-review
+remain open. V2 stays OFF. Actor/native Slot, operation31,
+bilateral agreement/RoundGate/consume, admitted KDF/Ready/RTC and relay remain open.
+See [the factory contract and required next consumers](communication-recovery/VOICE-NEUTRAL-ADMISSION.md).
+
+
+## Admitted native key handoff (29 October; implementation and validation in progress)
+
+The current leaf adds fixed admitted-profile activation/key commands with actual
+Actor/Root selection/publication and immutable Existing exclusion. Root presence
+has ten focused passes; Actor publication has five (2,744/4,096-byte graph). Ten
+native publication cases now pass, including 34 complete key lifecycles, locked
+final admission, lost replies, typed terminal history and actual execution
+destruction after result ACK/SDK settlement. Fourteen Coordinator, eleven Existing
+key, nine activation and 23 affected pressure regressions also pass. The integrated
+browser/native adapter suite passed 3,687 frontend tests with zero failures/skips;
+static checking, the production build and all ten Edge flow checks passed before
+the desktop dependency alignment above.
+
+Review found and corrected recursive Coordinator locking, stale final generation
+admission, missing rejected-activation cleanup, premature terminal-history removal,
+and taskless key rows stranded after early ACK followed by End. Accepted, rejected,
+unknown-closed and exact never-started results now have distinct public tags derived
+from typed facts. Known results stay paid until explicit ACK, actual task return
+and SDK settlement; the browser flow will ACK before SDK settlement so a lost ACK
+reply can recover the same cell. Missing records provide no proof. A bounded
+maintenance pass revisits both taskless key rows and acknowledged ended calls.
+
+Measured provisional fees refused rather than underpaying: native publication
+9,612 bytes versus 8 KiB now has 12 KiB; activation grew beyond 18 KiB and now has
+19 KiB; Existing key metadata measured 1,312/1,024 and now has 1.5 KiB; admitted
+key metadata has 2 KiB. The complete table now has a separate 64 KiB process
+payment for both profiles, with paid watch drains through actual deallocation.
+Current publication, activation and admitted-generation inventories measure
+9,772/12,288, 18,472/19,456 and 1,632/2,048 bytes. The shared index measures
+35,536/65,536 bytes. Process-only index backing is excluded from group pressure
+fillers; those tests still fill the actual group and preserve their refusal checks.
+The integration branch's full Root run found an undersized confirmation row; its
+2 KiB correction and pre-allocation production guard pass 120 focused chain tests.
+The complete Root rerun, complete native suite, current native check/build/startup
+and final strict checks remain open. The real Tauri JSON-dispatch and test-manifest
+checks now pass on the aligned desktop dependencies, as recorded above.
+
+V2 remains OFF. The retained admitted browser key adapter is integrated here;
+Query/Support is being tested separately. Operational bilateral admission/Ready,
+admitted KDF, SDP/ICE/RTC, multi-peer/relay
+and combined/physical acceptance remain unfinished. Only one desktop is available.
+See [the current native key contract](communication-recovery/VOICE-ADMITTED-KEY.md).
+
+## Admitted Root presence (29 October; ten focused tests pass)
+
+The isolated admitted-presence leaf adds a dedicated Root discovery owner under the
+same selected NativeActive residence, exact immutable native join/key publication,
+opaque historical receipt and separately sealed Ann/Proof Source intake. Existing
+LocalJoin/packet factories and shared discovery bytes remain unchanged; FreshPeer
+never implies profile support. Funding stays outside Presence/proof Boxes through
+deallocation. The first primary focused run compiled and passed five behavior cases;
+the complete Windows growth-guard test failed at8264/8192 and three internal fixtures stalled
+because their real P2P finalization policy was absent. Only the Presence fee rises to
+9KiB/9216 within unchanged group/process caps; full inventory is preserved and checked
+before allocation. The fixture now establishes policy and bounds its handshake with
+the sanctioned Clock watchdog. Ten corrected focused tests pass (0.34s), with the
+8,264/9,216-byte presence and 1,360/1,536-byte proof guards retained. Final strict
+lint and full integration suites remain pending; narrow static review passes. These suites
+remain primary-owned. See [the exact boundary and regression list](communication-recovery/VOICE-ADMITTED-PRESENCE.md).
+V2 remains OFF; operation31, neutral/native consume, RoundGate/agreement/Ready and
+SDP/ICE/RTC/relay/audio are still operational blockers.
+
+## Full backend validation found an undersized confirmation row (29 October)
+
+The full Root run failed `hello_receipt_and_action_layouts_fit_the_original_single_row`:
+the compiled 1,008-byte action plus 576-byte receipt exceeds the 1,536-byte row.
+That sync unit binary passed 1,395 other tests. This is a real accounting failure,
+not a waived assertion. The correction keeps the full formulas, raises only the
+chain row to 2 KiB and adds a production preallocation guard plus a regression
+for the old allowance's zero-charge/zero-position refusal. All 120 focused chain
+tests pass; the complete rerun remains pending and the backend gate stays open. Strict Root
+Clippy, formatting, deterministic-dependency checking and dependency audit passed
+before this correction. Native fixture recovery is integrated below but unrun.
+
+## Earlier native activation and mailbox checkpoint (29 October; inactive)
+
+This local continuation integrates issuer-bound call activation `f4e75ea1`, private
+admitted wire codec `ee52990c`, normal mailbox retirement `13ac6cd1`, control detachment
+`78cbb721` and native destruction/return-stamp correction `1c0cd4bb`. The evidence
+below records that earlier checkpoint. The admitted-key integration above supersedes
+its private/unregistered entry and original fee measurements; no operational agreement,
+Ready, SDP/RTC or media producer is enabled. V2 remains OFF.
+
+The actual Root issuer fixes the admitted profile before grant escape. Original UI
+generation/commit custody orders selection against lock and epoch changes. Existing
+endpoint/legacy writers cannot replace that admitted activation. One paid actor-local
+control supplies only exact original routing; native history holds real std Weak owners,
+not a strong Actor or raw Tokio WeakSender. The native runner destroys its execution Box
+before publishing an exact return stamp. All recovery uses the same stamped allocation.
+Final index backing remains paid through actual deallocation and revocation unwind.
+The complete native graph is 17,752/18,432 bytes; the measured 18 KiB fee replaces the
+insufficient provisional 16 KiB inside unchanged group/process limits. See
+[the scoped contract, tests and remaining gates](communication-recovery/VOICE-CALL-ACTIVATION.md).
+
+Normal actor termination retains its closed receiver through Closed delivery and joins
+actual pre-close permits using a negative-only final drain. The new-family control detaches
+before Root retirement/blocked Closed. The two old-admission regressions fail before the
+fix and pass afterward; the leaf's 35 actor tests and strict App Clippy pass. Abort/panic
+retirement of older queue families remains an inherited limitation. See
+[the exact shutdown boundary](communication-recovery/ACTOR-MAILBOX-RETIREMENT.md).
+
+Leaf evidence: Root activation17 plus source-retirement1, actor/control14, codec26 and
+native activation9 pass. The two adapted legacy fixtures retain their original assertions.
+Strict Root sync/App and native Clippy pass; separate native checking passes. Final
+actual-diff re-review has no remaining findings. Combined checks pass: 14 Actor/control,
+10 admission, 17 Root activation and 26 codec tests; 3,655 frontend tests with zero
+failures/skips, frontend static/production build, all ten real Edge flows and Root formatting.
+That complete Root run finished with the confirmation-row failure recorded above;
+the corrected full rerun, complete native validation and final native build/startup
+remain pending. Older complete results below apply
+to their recorded checkpoints, not automatically to this changed Root source.
+
+Hosted `fbe53dab` Linux native acceptance fails: 1,020 passed/39 failed. Its origin is
+`native_browser_local_discovery_refusal_selects_other_peer_and_preserves_indexed_sibling`:
+Capacity occurs after peer selection and creation/retention of an actual Pending row;
+the fixture then incorrectly requires a pre-selection refusal certificate. Stage5 alone
+does not identify pair preparation, derivation or native attachment as the deciding gate.
+Exact-row continuation under the original ten-second observer and a deterministic
+post-publication attachment-refusal regression have been drafted and reviewed separately;
+their compilation and execution remain pending integration. The 38
+later cases hit the closed fixture gate. This is unresolved evidence, not a flaky pass.
+
+The admitted original-key/presence integration above is now present. Bilateral
+agreement/role-specific consumption, Ready/SDP/ICE/RTC/audio, member relay and combined/physical acceptance remain
+unfinished. Only one physical desktop is available. External download resume is excluded.
+
+## Normal Actor mailbox retirement (29 October; focused checks pass)
+
+This separate leaf closes an inherited reserve-to-send custody gap. Normal terminal
+paths retain the SAME closed Receiver through `Closed` delivery, then negatively drain
+pre-close permits before Actor task return. Ordinary Actor handles remain alive; command
+destructors produce existing refusal/retirement without Root dispatch. Original Root/file
+retirement remains before event backpressure. Stop ACK is still first-effects closure.
+Abort/panic-derived exits remain an explicit inherited limitation. The scoped
+[custody note](communication-recovery/ACTOR-MAILBOX-RETIREMENT.md) records the boundary.
+Both actual admission-publisher regressions failed against unchanged production `actor.rs`:
+Work remained unretired after task return, and the task returned while a pre-close permit
+was still held. After the fix the focused voice-endpoint module passes35/35, including
+existing stop/freeze/cancellation/panic and payment guards. Scoped formatting and strict
+all-target/all-feature App Clippy pass. Read-only design and actual-diff reviews have no remaining
+findings. Primary owns complete integration suites; no full-suite result is claimed here.
+
+## Native discovery fixture recovery (29 October; reviewed, execution unrun)
+
+Hosted Linux `fbe53dab` failed the alternate-discovery helper after an unforced native
+Discover returned Capacity beyond its pre-selection boundary. That failure is real evidence;
+lossy global stage5/outcome counters do not establish whether Root pair, Derive or native
+attachment refused, and do not establish the older SDP storage-pressure cause.
+The separate harness leaf now retains exact worker-local selector/row/action evidence and
+drives the SAME normal Cursor to recover its original Pending within the unchanged10s
+observer bound. It preserves the forced pre-snapshot and alternate-peer/indexed-sibling
+oracles. A new real six-client case holds the actual published action's handoff loan to
+force native attach Capacity, then requires the same action/key/deadline/row to attach.
+Only cfg(test) hooks/test modules change behavior. Original native8KiB and all protocol
+limits remain; separate bounded harness graphs do not pay production work. Narrow formatting
+and static adversarial review pass. Compilation, actual layout guards, focused tests and
+lint are ALL UNRUN; primary owns integration and execution. See
+[the exact scope and test commands](communication-recovery/NATIVE-DISCOVERY-RECOVERY.md).
+
+## Individual media closure (29 October; inactive, complete suites pass)
+
+`359a2eb0` integrates the reviewed exact-peer native-request fence. Queued or encrypting
+Admit/Current/Detach cannot first-fetch after that peer closes. Indexed siblings retain
+their original Session and Current; negative cleanup retains its original route. Broker
+ABI51 refuses older retained brokers without replacing their ledger or disturbing cleanup.
+The six barriers failed before the fix and now pass; the IPC/media/status subset passes
+453 tests, and strict shipped-source TypeScript passes. The updated logical media graph
+fits its original 8 KiB fee. See [the ownership and evidence note](communication-recovery/VOICE-MEDIA-PEER-FENCE.md).
+
+`a99e4c23` separately corrects exact historical observation under real Index contention,
+documents the measured inline admission outcome for Clippy, and adds bounded native media
+refusal enums. Strict Root/native Clippy, Root formatting, ambient checks and focused
+native history scenarios pass. The prior complete Root 4,007-test result applies to
+unchanged Root inputs. Complete native validation passes 1,058 library tests plus six
+ACL/parser tests, with zero failures/ignores (2,615.13s library). The harness runs one test
+at a time; concurrency inside each P2P scenario is unchanged. The complete frontend suite
+passes 3,655 tests, with zero failures/ignores; Svelte checking has zero errors/warnings,
+the production build and all ten real Edge flows pass. The native rebuild passes (5m08s),
+and the unchanged startup probe passes with actual desktop access and the setup-complete
+marker. The application was not unlocked. The earlier intermittent native media
+refusal remains unclassified; no timeout or security limit was increased.
+
+At that earlier checkpoint, the operational call-profile/receiver-retirement work and
+admitted wire codec remained unintegrated drafts. The former contained paid actor-local
+control, the receiver-retirement fence and eight deterministic control tests with clear
+static review, but its compilation/layout and Rust execution gates were unrun. The codec's
+26 draft tests and agreed staged grammar were also awaiting Rust execution. The new top
+section records their subsequent focused results and local integration; neither enables V2.
+V2 remains OFF. Operational bilateral admission/Ready/SDP/RTC/audio, member relay and
+combined/physical acceptance are still incomplete. Only one physical desktop is available.
+
+## Admitted wire codec leaf (29 October; focused checks pass, V2 OFF)
+
+This isolated private codec implements the proposed signed control7/encrypted8/Ready9
+grammar, fixed agreement503 and derived RoundRef/transcript/KDF material, with no public
+producer or operational consumer. Existing wire/profile/Source/dispatch enums do not grow.
+The new [codec note](communication-recovery/VOICE-ADMITTED-WIRE-CODEC.md) records exact
+draft allocations, structural limits and outstanding authority and inventory work.
+Leaf-only formatting and the focused all-feature sync library suite pass:26/26, no
+failures/ignores. Actual Windows inline sizes are Signed592, Body352, Control344,
+Header208, Request328, Encrypted320, Ready344, Agreement512, Endpoint136 and Recorded152
+bytes. Wire A503 is distinct from its512-byte in-memory struct. These observations are
+not a paid native graph inventory. Strict all-target/all-feature crate Clippy passes
+with warnings denied. Independent static
+adversarial review/re-review has no remaining findings. The primary owns complete
+backend/native/frontend suites; no full-suite result is claimed for this leaf. No V2
+activation or whole-chain readiness follows from the codec.
+
+## V2 reservation and memory integration (28 October; integrated gates pending)
+
+The parallel continuation integrates browser budget policy `cb7ecd0b`, exact native SDP
+reservation diagnostics `71453ca5` and native parent-row reservation `91f06da3`.
+`262624bd` preserves the stable registration across ordinary reserved-generation Cancel;
+`ca7ad276` separately corrects the negative-close fixture's transient-Capacity assumption.
+Earlier passing checkpoint results below remain historical evidence.
+
+The browser now defaults to 512 KiB per group with the same 2 MiB aggregate. The local
+policy seam accepts integer KiB values from 256 through 1024 before broker construction;
+there is no settings UI or persistence yet. Broker ABI50 binds that immutable policy to
+the original retained ledger and requires reload for a changed selection. Cleanup of the
+original remains available. The individual 256 KiB job cap, packet/body limits, execution
+limits and existing fees stay fixed. Configuration still pays its measured 64 KiB.
+Actual configured admission/preclaim plus the separate capture helper charges 248 KiB;
+the sixteen-peer 408 KiB inventory is structural, not operational RTC acceptance. See
+[the measured policy and focused evidence](communication-recovery/VOICE-BROWSER-MEMORY-POLICY.md).
+
+Native Slot now also retains an affine parent claim: one real ledger position and checked
+serial, the existing 2,304-byte Row contribution and original 2 KiB PreparedPhase. All
+ordinary/confirmation and SDP allocators exclude its stamp. Exact Ledger, selected owner,
+physical Session and generation bind it; actual preparation/payment destruction precedes
+stamp reuse and per-generation return. There is no dummy selector, Pending row or Action,
+and no consumption/signing API. The unchanged v11 reply is capacity-only; older v11 builds
+did not reserve this native row. Future operational admission needs an explicit upgraded
+contract and cannot infer native-row support from arbitrary old Reserved replies.
+
+The latest completed older Linux run at `e14f3996` had 993 passes and 40 failures. Its sole
+origin was `native_browser_local_discovery_refusal_selects_other_media_peer_and_preserves_indexed_sibling`:
+actual opcode12 reached the 64 KiB SDP storage reservation and repeatedly hit a byte cap;
+39 later failures were the closed fixture gate. A and C use different pools, and old
+indexed media retains an independent 8 KiB partition. The retained owner causing pressure
+is still unestablished. New fixed scalar evidence records the exact group/process cap and
+counts under the deciding pool mutex, then reports them after unlocking with original
+parent and physical request sequence. It changes no limit, deadline, attempt or authority.
+
+Each implementation had its own read-only adversarial review. Browser focused tests pass
+574/574; the diagnostic's five Root regressions pass. The complete Root suite now passes
+4,007 tests with zero failures and 25 existing ignores. Integrated native diagnostic/layout
+checks and the former Linux alternate-peer scenario also pass locally on Windows. Complete
+native suite and final build/startup remain pending. The complete frontend suite passes
+3,648 tests; Svelte checking reports zero errors/warnings. Primary owns those runs;
+agents run focused checks only, with one heavy Rust process at a time.
+
+The first complete native library run has 1,045 passes and 13 failures. Its origin is
+`native_v2_pc_intent_original_sdp_completion_retires_body_but_keeps_task_and_ui_until_collection`:
+the fixture unwraps a legitimate local `Capacity` from nonblocking admission; twelve later
+cases fail the intentionally closed recovery-fixture gate. The test-only correction reuses
+the existing 32-observation/10ms helper with the SAME row/candidate/Session and original
+intent deadline. It forces an actual UI-lock refusal, proves the row callback did not enter
+and no task/body charge was acquired, releases that guard before waiting, and checks the
+returned ticket/outcome identity. No production source, protocol allowance or assertion is
+weakened. Read-only review has no findings; the test build and both actual TCP regressions
+pass (11.18s and 11.60s). The failed log remains `target/v2-final-native-full.log`; corrected
+complete validation will use separate logs and is still pending.
+
+The corrected Windows native rerun records 1,030 passes and 28 failures (2,028.91s).
+Its origin is `native_browser_two_peers_share_original_session_after_actual_history_collection`:
+the second peer closes during negotiation retirement after repeated authenticated native
+media refusals; 27 later cases encounter the closed fixture gate. The old trace omitted
+the four-byte refusal enums, so Capacity, closure and authorization cannot yet be
+distinguished. The bounded Node trace now records those enums without identifiers or
+plaintext. The five-second media freshness bound is unchanged. This failure remains open.
+
+Three isolated replays pass; a fourth instead exposes an immediate completed-history
+`retire_history().unwrap()` receiving legitimate Index contention. Its test-only correction
+forces that exact post-completion refusal, releases the real Index guard before waiting,
+and retries only Capacity on the SAME target within the existing three-second deadline
+and 32-observation/5ms bound. Proof, flags, no-revival and actual-destruction assertions
+remain. Read-only review finds no issues. The corrected native build, concrete layout
+guard (1,512/4,096-byte RPC and 4,656/8,192-byte task), two-peer scenario (75.00s) and
+independent collector scenario (45.80s) pass. The original media-refusal cause remains open.
+
+Hosted head `0225cf8a` passes all 1,059 Linux native library tests plus six ACL/parser
+tests. That job then fails strict Clippy because the inline admission `Outcome` grew with
+the affine parent claim. Its scoped lint annotation documents why the candidate stays
+inline: the concrete enum and preparation graph are already measured and runtime-checked
+against the original 8 KiB fee; boxing would introduce another allocation/custody path.
+Local strict native Clippy passes. The hosted pass does not explain the Windows failure.
+
+Review also identified a separate per-peer positive-fetch fence gap: an individual media
+Close can precede the first fetch of an already queued Admit/Detach while its shared
+Session remains live. Cleanup prevents demonstrated audio resurrection. A separate
+inactive correction and deterministic queued/encrypt barriers are integrated above;
+this diagnostic/fixture correction itself does not fix that boundary.
+
+The first hosted run of this integration (`153c573f`) stops in frontend testing:
+3,647 pass and one older confirmation pressure test assumes a fixed 256 KiB default.
+The test-only correction selects the existing 256 KiB local policy explicitly, preserving
+every original byte-cap, admission and cleanup assertion; all other fixtures keep the new
+default. Its confirmation/policy subset passes 36/36 and read-only review has no findings.
+The central complete frontend run now passes all 3,648 tests with that correction.
+No runtime source changed in the pressure-fixture correction.
+
+The next interface is documented in the reviewed
+[bilateral admission proposal](communication-recovery/VOICE-BILATERAL-ADMISSION-PROPOSAL.md).
+It is approved for staged implementation only. Current Root call-profile authority,
+role-specific consumption, exact negative-result recovery and owned native SDP storage
+remain implementation gates; the proposal is not a wire allocation or activation approval.
+
+V2 remains OFF. Bilateral agreement, role-specific consumption, RoundRef/KDF and operational
+Ready/SDP/RTC/audio, member media relay and combined/physical acceptance remain unfinished.
+Only one physical desktop is available. External download resume is outside this work.
+
+## Native capacity Control and browser pairing (28 October; inactive, local gates pass)
+
+The code checkpoint is `6245af85` in draft PR81, following pushed baseline `e14f3996`.
+Native capacity/codec is `4f3bc42c`, browser pairing is `83f3958a`, and the test-only SDP
+barrier correction is `6245af85`. This continuation implements distinct
+Session Control30/version11 over the canonical Slot; mode29/version10 remains unchanged.
+Its10-byte request carries Register/Observe/Cancel plus full-width ordinal. Its59-byte
+snapshot echoes requested/canonical ordinals, cancellation floor and an optional public
+Root incarnation. Exact Session/class/length is checked before nonce/RowId admission.
+Reserved is exact-generation capacity only. Returned/Superseded/Closed rely on original
+work/collection barriers and never assert browser drainage or task/Actor payer refund.
+
+Observe is noncreating. Early Cancel before ACK fences a delayed Register without buying
+a native task. Historical requests cannot see a successor's reservation. A cancellation
+race found by review at Pending->Actor acceptance now uses narrowly proven
+CancelledUnstarted; generic Stopped stays terminal. This preserves a current registration
+for g3 after g2 is canceled before enqueue. Actual Actor/native-position/payment barriers
+cover both initial-no-mint cancellation and known-incarnation reuse.
+
+All38 focused native capacity tests pass after correcting the TCP pressure fixture to fill
+actual group counts (process totals included independently paid infrastructure and underfilled
+that group). The final Control graph guard passes. All17 focused browser
+codec/frame tests pass: shared vectors, ordinal boundaries, changed/omitted/all-zero public
+identity, caller getter substitution and shadowed typed-array metadata/subarray are covered.
+The container allowlist and vector audit include the new JSON. Read-only review/re-review
+has no remaining blocker/high/medium in this boundary. Complete suite results are below.
+
+The local browser draft now pairs its original128KiB/twelve-row envelope to capacity30.
+`nativeAdmissionChannel` has an immutable mode and completes/recover mode29 BEFORE ACK9
+in the same serialized turn. Both constructor mismatch directions refuse. A separately
+prepaid8KiB Session coordinator owns one original claim/ordinal, remembered incarnation,
+flight and cadence; no existing metadata fee or resource ceiling increases. Paired binding
+precedes publication/subscription, and paired handles cannot use pilot conversion/work or
+lifecycle. Broker ABI49 uses the SAME retained window symbol and refuses old producers.
+
+Public retirement immediately detaches its cell; private Cancel retains all original bytes
+and rows through native ambiguity, Closing/Uncertain and actual framing/SDK/task return.
+End's mode29 fence precedes exact30 cancellation; negative work uses the codec independently
+of the status driver which waits for that browser drainage. Authenticated Unstarted retries
+Register at the same ordinal; ordinary observations reuse the existing native task.
+Review found and corrected a fresh-Register race after local cancellation during WebCrypto:
+Register now rechecks owner, exact claim/ordinal and negative flags after every await and
+before first fetch. Observe/Cancel alone keep the post-retirement route. All37 focused
+actual-WebCrypto pairing tests pass, including lost replies, full group pressure, changed
+incarnation, held SDK, subscription reentry, and Cancel/End at encrypt/sign/Clock/queued-codec
+barriers. A separate one-shot cadence/deadline owner now joins registered-then-thrown
+and failed-cancel timers before returning its actual frame. Inline/invalid cadence cannot
+drive an outer polling loop. Timer faults close positive admission; after one immediate
+negative recovery attempt, outstanding debt waits for explicit availability. Pre-ACK faults
+close the original channel without ACK. Nine focused timer units and actual pairing
+barriers cover unknown/cancel-failed IO deadlines, unknown cadence, late callbacks and
+always-inline scheduling. Browser re-review has no remaining blocker/high/medium. The
+complete3,635-test frontend suite, Svelte checking (zero errors/warnings), production build
+and all ten real Edge flows pass. Root/native formatting, ambient dependency gate and fresh
+dependency audit pass. The final complete Root suite passes4,002 with25 existing ignores;
+the final complete native suite passes1,043 library plus six ACL/parser tests with zero
+failures/ignores (2,489.58s library). Strict Root and native Clippy and explicit native
+checking pass. The final native build passes (3m44s), as does actual application startup
+with desktop permissions and the unchanged startup probe. The app was not unlocked.
+The first complete native run ended1,037 passed/six failed. Its originating
+failure was `native_v2_sdp_empty_result_cannot_replace_nonempty_original_open`: the SDP
+fixture assumed Task.execute's first poll must be Pending, but its real server-map
+observation can synchronously refuse Capacity before mailbox admission. The five other
+failures were closed fixture admission, not independent SDP/WebCrypto failures. The
+originating case passes in isolation. The test correction now forces that early refusal
+while retaining original Body/Task, then obtains an actual mailbox Pending using the SAME
+production publisher/body and genuine original grant before testing the UI-wins fence.
+It also forces an actual full mailbox: only a proven pre-enqueue sender may be canceled,
+then the Actor drains/reparks with the same Body/Task/grant/tag. Admission, UI and return
+waits use the original intent deadline with a fresh post-await check. The Open fixture
+uses the same bounded original Actor observation. No deadline or runtime behavior changes.
+The final bounded mailbox family passes all three focused cases (33.96s); deadline/Open
+corrections have no remaining blocker/high/medium on re-review. All three also pass in the
+complete native run. Logs use `target/capacity-root-verified.log`,
+`target/capacity-native-sdp-final.log`, `target/capacity-native-verified.log` and their
+separate exit markers. Final check/lint/build logs use `target/capacity-final-*.log` with
+`.log.exit` markers; real startup uses `target/capacity-final-startup.log` and `.exit`.
+The later already-full configured/audio composition still needs a measured solution.
+
+Mixed-native support now requires a pure30/Observe1 capability probe AFTER mode29 pin
+and BEFORE ACK9. Only exact Unstarted/request1/canonical0/floor0/no-incarnation permits
+ACK or a paired browser reservation. A mode29-only native cannot strand128KiB/twelve rows;
+unsupported/lost/held/malformed probes retain the SAME keys/counters and no preclaim.
+End can settle/collect without waiting for nonexistent capacity control. ABI49 on the
+same window symbol rejects retained pre-probe48 producers and preserves their cleanup.
+All37 pairing tests pass, including old native, probe loss/End, nonfresh positive/negative
+receipts, malformed replay and retained-old-broker refusal. Native TCP setup now verifies
+the noncreating pre-ACK probe and passes in the complete native suite. The final3,635-test
+frontend suite, static/build and all ten Edge flows pass after this correction. Compatibility
+re-review has no blocker/high/medium; retained old48 cleanup remains callable.
+
+Native ledger reservation, bilateral agreement/RoundRef/KDF, operational SDP/RTC/audio,
+member relay and combined/physical acceptance remain open. One desktop is available.
+V2 remains OFF. External download resume is outside this continuation.
+
+Backlog provenance: PR74 merged at `85b345cf` on 27 October at 23:48 UTC. The seventeen
+incorporated PRs48/52/53/58/59/61/62/63/64/65/66/67/68/69/70/71/72 were closed at 23:50-23:51
+after that merge. Every exact source head is an ancestor of both that merge and `main`;
+their original commits remain present. Their red Closed status records incorporation
+through PR74, not loss of the code or completion of the unfinished V2 programme.
+Those closures are separate from the later PR81 validation recorded above.
+
+## Native Slot continuation (28 October; inactive, complete local suites pass)
+
+Draft PR81 extends the reviewed `6c6c483c` checkpoint. The COMPLETE Root command passes
+4,002 tests with zero failures and25 existing ignores. Git confirms Root runtime/Cargo
+inputs stayed unchanged throughout this native-only continuation. The previous interrupted
+command remains excluded. The COMPLETE current native command passes1,032 library tests
+and six ACL tests, with zero failures/ignores, in2,333.77s. Logs and separate exit markers:
+`target/admission-root-full.log` and `target/native-admission-full.log`. Explicit native
+checking passes (1m11s), the native build passes (3m43s), and real application startup passes.
+The first sandboxed startup probe timed out without output; the SAME20s probe passes with
+desktop permissions. No timeout or runtime behavior was changed to obtain that result.
+
+The new local `bootstrap/admission_slot.rs` implementation is part of this continuation.
+It stores exact invocation/Work, one affine Root outcome and a stable registration
+under original Row.state. One persistent paid8KiB task/native position serves a
+physical Session; busy retries never replace its task or requeue an accepted Root
+factory. A callback-free nonblocking final UI/server-instance/Coordinator/State
+fence attaches original capacity. Local pressure retains the SAME candidate.
+Affine reclamation destroys owners before publishing its exact return, including
+unwind. Known round cancellation preserves registration; uncertainty closes it.
+
+Read-only review corrected interrupted reclamation, waiting while holding UI, lost
+next-generation demand, missing mounted-state checks and closing Control before pending
+work returned. Both closure variants now fence first effects while preserving negative/
+history routing until collection. Tests use the actual Actor, UI mutex, Store and resumable
+state at the real boundaries. Original resource limits and exact-return assertions remain.
+
+The implementation also transfers the SAME native position into Slot if its persistent task
+is destroyed before original work drains. Synchronous recovery is terminal/negative only;
+it uses the original8KiB funding, no new task, Root invocation or credit. End/host recovery
+runs outside native guards. Shutdown actively recovers and awaits SAME Work retirement before
+physical idle, even after maintenance stops. Actual position release precedes collection.
+All thirteen Slot regressions now pass, including added abort-before-first-poll and emergency
+reclamation-unwind cases. Concrete4KiB RPC/8KiB task inventories pass. Read-only review and
+re-review have no blocker/high/medium. Strict native all-target/all-feature Clippy passes;
+its initial run required four equivalent boolean simplifications and one `?` rewrite.
+All thirteen cases also pass inside the COMPLETE native suite. Current frontend3,580 tests, zero-diagnostic
+Svelte checking, production build and all ten real Edge flows pass. The first Edge attempt
+lost its CDP connection during launch; its successful rerun used local-browser permissions.
+
+PR76 is NOT green: current head `c8066137` fails Linux native acceptance at the real
+native/WebCrypto media-adoption test's30s control-step bound;36 later failures cascade from
+the fail-closed fixture guard. Root cause is not established. A separate reviewable test-only
+diagnostics change records fixed latest Node/native pipe/callback phases and nonblocking
+original-owner confirmation/SDP/Session snapshots on the SAME timeout path. It neither
+extends deadlines nor retries/replaces uncertain work. The acknowledged-wedge regression
+now uses that actual wrapper and retains explicit End/child-reap/service-collection checks.
+All thirteen diagnostic tests and the acknowledged-wedge regression pass. The original
+media-adoption scenario also passes locally in20.05s and in the full Windows suite; that does not establish
+the Linux cause or resolve its failure. Latest-only100ms progress sampling keeps diagnostics
+independent of fast Capacity attempts, and actual SDP children are excluded from confirmation
+counts. Read-only re-review has no blocker/high/medium in that test-only boundary.
+
+This earlier checkpoint predates the capacity adapter and browser pairing described above.
+Mode-only operation29 remains unchanged. Native ledger preclaim,
+bilateral agreement/RoundRef/KDF, operational
+SDP/RTC/audio, member relay and combined/physical acceptance remain open. V2 is OFF.
+
+## Native admission mode fence (28 October; focused checks passed)
+
+Authenticated local Control29/version10 now pins the original physical Session to
+admission mode BEFORE setup ACK. Register and Cancel both select that sticky mode;
+Observe creates nothing. First selection after ACK refuses. Exact pinned retries remain
+available after ACK, and cancellation never restores the pilot. Only ordinal1 is
+implemented; zero, skipped and MAX ordinals refuse before mutation. Its18-byte reply
+reports unselected, pinned, canceled or closed, never capacity/Ready.
+
+Every native pilot producer now requires completed setup ACK at preflight AND final
+publication. That monotone condition is mutually exclusive with first admission-mode
+selection. Mode pinning uses the SAME Row.state mutex as ACK. Cleanup/history keeps
+ordinary routing. No Actor/Root/Clock/factory/SDK work is created by this operation.
+Header admission binds exact Session, Control class and10+16-byte length before counters;
+post-AEAD decoding selects only version10. The existing Row8KiB and Control12KiB complete
+inventory guards include the inline pin and synchronous handler; limits are unchanged.
+
+All seven new mode tests pass, including actual TCP/MAC/AEAD dispatch, counter behavior,
+lost pin reply, both ACK orders, Cancel-before-Register, real End and direct pilot-factory
+refusal with no new row. Read-only review/re-review has no blocker/high/medium. The first
+broader run passed385/386: its one pre-ACK maintenance fixture had accidentally used the
+new already-ACKed factory helper. It now uses an explicit unacknowledged setup; assertions
+are unchanged. The386-test rerun passes in23.58s. Fresh cargo-deny and the ambient
+dependency gate pass. Strict Root/native all-target/all-feature Clippy passes; the first
+Root lint run required an explicit lexical lock scope in its new async test helper.
+The affected eight Actor tests pass again after that correction. Explicit native checking
+and final complete current backend gates remain pending.
+
+This is mode selection only. Canonical native Slot/invocation recovery, actual HIGH
+capacity attachment/cancellation/reclamation, browser pairing, native ledger reservation,
+bilateral agreement, SDP/RTC/audio composition and relay are still unfinished. V2 is OFF.
+
+## Actor admission outcome staging (28 October; focused checks passed)
+
+`communication-v2-native-admission` joins the reviewed Root and browser leaves at
+`a44b51b2`; Git verifies its Root code matches `fb53c00f` and its desktop code matches
+`c30676c2` before this change. The new Actor API uses an opaque4KiB
+RPC payment from the selected pool/scope, independently of Root registration3KiB and
+the native worker8KiB. `prepare_voice_admission_step` returns a newly minted registration
+even when HIGH capacity fails; exact existing-observer retries mint nothing.
+
+The native Publisher receives accepted Work BEFORE enqueue can wake Root, then stages
+the original affine outcome before callback completion. Queued-drop refusal carries the
+same Work; pre-enqueue refusal carries none. Actor apply removes the publisher BEFORE
+entering Root. Only an untouched queued publisher may report never-entered Stopped;
+post-entry unwind must quarantine uncertainty, never authorize another mint. Paid field
+order keeps actual arguments/callbacks alive through retirement. Native canonical Slot,
+concrete Publisher/worker, capacity Control operation and browser cancellation fence
+are NOT implemented yet. Staging alone supplies no Reserved/Ready or ledger row.
+
+Root/Actor regression drafts cover pressure retaining the same registration, foreign
+payment/scope/zero rejection, queue-full exact retry, caller loss while queued, destroyed
+command, post-entry unwind, cancellation and a held real callback. The held-callback test
+always releases/joins before assertions and uses the sanctioned Clock seam only for its
+harness failure bound. Both new Root preparation tests and all eight Actor admission tests
+pass. Three initial accounting assertions exposed a fixture error: moving the LAST call
+grant revoked the participant and independently returned its credit/LocalJoin. The fixtures
+now retain the original grant; their exact-return assertions are unchanged. Read-only
+adversarial review and re-review have no blocker/high/medium finding. All3,579 frontend
+tests pass on this integration checkout. Formatting/diff checks pass. Complete current
+backend validation is still required: the earlier frozen Root command at `fb53c00f`
+stopped without a final result and is NOT counted as passing. Native mode pinning is a
+separate subsequent boundary, not canonical Slot/invocation or browser integration.
+V2 remains OFF; bilateral admission, audio, relay and physical acceptance remain open.
+
+## Root admission registration leaf (28 October; focused checks and review passed)
+
+`communication-v2-admission-registration` adds native-only Root registration and
+inert HIGH-preclaim APIs. The affine session owner has a stable Root-RNG public
+incarnation; paid observers retain its exact allocation, immutable epoch, actual
+Actor identity, call/watch leases and original Resources/action-pool identity.
+HIGH reservation reborrows the current LocalJoin's packet/action pools. No peer,
+role boolean, row, agreement, transcript, deadline or packet is supplied/created.
+
+A monotone cancellation floor fences old uncommitted generations without treating
+cancellation as return. Closing registration leaves call/media custody independent.
+The original metadata anchor follows core destruction/deallocation through every
+observer. The first structural guard measured2,168B and correctly refused the proposed
+2KiB payment. The independent registration payment is now explicitly3KiB, debited
+from the same ordinary group/process pool; no chain/Source slack or new pool is used.
+
+Nine genuine Root fixture regressions and a graph guard are implemented; formatting passes.
+The suite covers final-allocation revocation/unwind, actual room deletion/recreation and
+runtime lock/reattachment while original capacity stays held. The first2KiB guard failed
+as above. All86 focused admission tests pass (7.79s), including the corrected graph.
+The final allocation callback asserts the real Group/Policy locks are free before
+revocation. Strict Root all-target/all-feature Clippy passes (1m51s); its earlier
+manual-bits lint was fixed by expressing the eight-word allocation as an array size.
+Read-only design/adversarial review and re-review have no blocker/high/medium finding.
+Complete Root/native/frontend validation of this new leaf remains pending.
+This leaf still lacks Actor command integration, native canonical registration/ordinal
+recovery/cancel ordering, browser preclaim transfer, native-row reservation, LOW candidate
+selection, bilateral agreement/RoundRef/KDF, audio and relay. V2 remains OFF.
+## Inert browser negotiation preclaim (28 October; browser gates and review passed)
+
+`communication-v2-browser-preclaim` reserves the existing128KiB intake envelope,
+twelve history rows and exact group progression position for the original selected
+owner/key/channel/negotiation. It names no peer/action/row and starts no clock, timer,
+Input or SDK work. Remounts coalesce the exact handle; draining old dispatch refuses
+replacement. Ordinary producers cannot consume the promised position.
+
+Conversion validates the same allocation/generation, then moves the same bytes/rows
+into an ordinary Intake in a callback-free publication tail. The original15s window
+starts once at conversion; scheduler callouts receive remaining time, never a renewal.
+Old caller operations become inert. Detach occurs AFTER the entered conversion returns,
+and End cannot refund the shared envelope during subscription/unsubscription callouts.
+New Intake subscription/publication precedes removal of the old listener. The logical
+initial-overlap guard fits the same8KiB metadata, before deferred Input can build the
+full chain. Byte/group/process/execution limits are unchanged. Retained Broker46 requires
+reload; Broker47 uses the SAME window symbol and refuses incompatible old ownership.
+
+All353 native-session frontend tests pass, including sixteen new preclaim cases: inert
+waiting beyond15s, full ordinary-pool conversion, exact row/byte ownership, forged handle,
+unstarted refusal/retry, reentrant reserve/work-pump contention, and End during owner,
+scheduler, subscription and unsubscription callouts. Nested conversion is latched before
+every callout; rejected nested calls cannot finalize the outer frame. A fresh preclaim
+rejects a retained Intake from an older negotiation without spending its reservation,
+then successfully converts a fresh row while existing indexed media stays live. These End unit fixtures have no
+native row and assert no Input; positive conversion traverses the framed mock native
+action and actual WebCrypto. They do not prove native canonical admission or real RTC.
+All3,579 frontend tests pass (76.69s), static checks report zero errors/warnings, production
+build passes39.16s with the existing chunk warning, and ten real Edge flows pass. Read-only
+adversarial review and re-review have no remaining blocker/high/medium. Disabling only the
+nested-conversion guard makes its regression fail; exact source bytes were restored before
+the passing final run. The overlap guard includes5,616B against8KiB, with explicit string
+headers/frozen descriptors. Complete combined backend gates remain pending.
+Root registration is a separate leaf; no native Register/Observe/Cancel grammar,
+ordinal fence, native-row reservation, signed bilateral agreement or Ready is wired here.
+Audio factory, multi-peer agreement, relay and physical acceptance remain open. V2 is OFF.
+
+## Combined admission/audio checkpoint (28 October; native gates passed)
+
+Frozen `56122a4f` passes the complete native suite:1,011 library tests and six ACL
+tests, with no failures (library2,303.45s). This includes the corrected discovery
+fixture, actual Node/native/HTTP/TCP handoff and indexed media regressions. Native
+`cargo check` and strict all-target/all-feature Clippy pass; both workspace format
+checks, the frontend production build,3,563 frontend tests and ten Edge flows pass.
+These are controlled RTC fixtures on one desktop, not microphone/WebView or physical
+network acceptance.
+
+The earlier complete Root run at `d55fa0db` failed its one exact-return accounting
+expectation (3,915 passes, one failure,25 existing ignores). `62be0add` corrects the
+expected original20KiB return; the complete affected sync crate then passes1,383
+tests. A clean complete Root command on the corrected source is still required;
+neither that focused success nor this native pass turns the earlier failure green.
+Operational native admission, bilateral agreement, audio composition, relay and
+combined/physical acceptance remain open. Production V2 remains OFF.
+
+## Native media logical inventory (28 October; browser checks passed)
+
+An executable guard now itemizes full-original setup, compact adopted state, cleanup
+waiting for actual work and joined cleanup:7,600 /6,144 /6,848 /5,952 bytes under the
+unchanged8KiB payment. It includes queued caller RPC storage independently of the
+physical Control envelope, two timer generations, history and actual cleanup/drain
+frames. Registry and outer refund ownership keep their original history/compacted2KiB
+payment. The model covers logical application owners, not VM/SDK heaps or RSS.
+
+All45 focused encoding/native-media tests,3,563 frontend tests, static checks (zero
+errors/warnings) and production build (41.94s) pass. Read-only review has no blocker,
+high or medium; the drain-funding clarification is recorded beside the formula.
+No audio partition, new group limit, audio factory or activation is implemented here.
+The ten ordinary Edge flows passed on identical runtime logic before this metric-only
+guard. The first flow invocation lost CDP before any test; its owned-browser rerun passed.
+
+## Compact native media encoding (28 October; browser checks passed)
+
+The browser media driver now prepares a private canonical226-byte template only after
+its driver/flight is published. It independently materializes the parent row, repeats
+the close fence and clears the full textual original in one callback-free tail before
+native RPC. Every original/current request gets fresh bytes; request zeroing cannot
+damage later cleanup. Disposal follows actual IO/SDK/timer retirement. A separate static
+timer-forwarder environment retains only the driver, not its constructor arguments.
+Repeated equal native proofs preserve the original retained value shared with status.
+
+All44 focused encoding/native-media tests pass, including every canonical mode and
+maximum integer, independent request clearing, disposal and End during compaction.
+An additional second-copy regression closes after template creation and before Admit:
+positive RPC repeats its close check after copying/provider lookup, while original
+Close/Release recovery remains available and paid. Adversarial review and re-review
+have no remaining finding. All3,562 frontend tests and static checks (zero errors or
+warnings) pass; production build passes40.78s with the existing chunk-size warning.
+The compact record's itemized640-byte component is not a whole-driver or audio partition
+proof. Combined native RPC/timer/history/sender/playback accounting remains required;
+no new audio allowance, factory, Current authority or activation is claimed here.
+Native and final combined gates remain pending, including the parent's known failures.
+
+## Detached capture funding (28 October; browser composition in progress)
+
+The isolated `communication-v2-audio-composition` branch separates byte accounting from
+the broker's owner/work graphs. Its capture funding owns one process-paid4KiB pool, at
+most two conservative group bindings (active selector plus old orphan), and one original
+8KiB capsule/master. Same-group references share their fixed group debit. Scope closure
+detaches inactive handles, while an old prompt retains only plain ledger metadata.
+
+Capsule release and actual finalizer return are independent latches. One observer tracks
+the SAME void `finishCapture` task, including `pool.returned`; the token stores no Promise.
+The original group fee returns only after both latches, with the final empty observer paid
+by fixed process inventory. Proven pre-SDK refusal has an explicit no-task transition.
+A failed observer registration detaches the target, prevents deferred SDK entry and keeps
+the real finalizer; it never invents no-task completion. No OS permission task borrows the
+shared RTC position, configuration loan, native channel activity or Call cleanup join.
+
+All90 focused byte-ledger/funding/capture/crypto/App-session tests and the complete3,557
+frontend tests pass. Final static checks report zero errors/warnings; production build
+passes in41.05s (existing chunk-size warning). These do not establish captured audio.
+Read-only adversarial review and re-review have no remaining finding. Fixed logical
+metadata is3776 retained /4032 binding bytes under4096; capture stages are6592/6944/6176
+under8192. Group materialization uses captured non-reentrant intrinsics and owned64-byte
+input; binding inventory still includes nested negative cleanup.
+
+This branch does NOT yet construct audio through a broker factory or attach sender clones
+or playback. App V2 stays OFF. Production App wiring, bilateral admission/native registration,
+relay and physical acceptance remain open. The initial browser slice did not change
+Rust inputs. This branch now integrates the reviewed Root/native corrections below;
+their focused checks pass, while complete combined native/Root sign-off remains open.
+
+## Ready funding compatibility assertions (28 October; focused reruns passed)
+
+The full Root command on `d55fa0db` stopped with3,915 passes, one failure and25
+existing ignores (36 result groups). The failing sync expiry test expected only
+16KiB at final HandoffLoan return; it actually returned20KiB. Remaining workspace
+groups were not run after that failure. This is not a passing complete Root result.
+
+The hosted Linux native command on the same checkpoint had972 passes and40 failures:
+the inherited discovery fixture below, the matching native custody expectation,
+and38 fail-closed fixture admission refusals. The ownership review confirms that
+the final loan retains Workflow/progression custody and Ready's original4KiB fee.
+Actual loan return releases16KiB, then final Workflow/claim destruction returns4KiB.
+With no loan, expiry collection already returns that metadata; dropping None returns0.
+
+Both exact test expectations now cover that ownership contract. Held-owner counts
+and negative drainage assertions remain unchanged; full-tuple and repeated collection/
+close checks strengthen the tests. No production payment, bound, deadline or authority
+was changed. Read-only ownership review/re-review has no finding. The affected complete
+sync suite passes1,383 tests in ten result groups, including1,334 library tests and ten
+compile-fail documentation checks. All379 focused native handoff tests pass24.41s.
+Both real-transport forced-alternate scenarios pass144.51s, including preserved indexed
+media and the genuine discovery-to-late-Capacity negative control. Full native, refreshed
+native checks/Clippy and a clean complete Root command remain required before sign-off.
+The reviewed discovery correction is integrated as `f8425239`.
+
+## Inert admission capacity groundwork (28 October; validation in progress)
+
+The isolated `communication-v2-admission-completion` branch adds reviewed group progression
+custody (`82a83ae3`) and an inert reserve/consume split. The same claim survives actual old
+Workflow work and independent prepared/transferred/Exchange owners. Native factories cannot
+substitute another same-group progression. Release follows actual final cell deallocation;
+plain outer payments survive the claim tail and enclosing Box destruction. Old retained work
+keeps the original Ready4KiB metadata fee until its actual return.
+
+`ChainCapacity` reserves original bytes/positions without a binding, lease or transcript
+clock. Consume reborrows CURRENT Resources/action/packet owners and validates group/role/live
+Binding before moving the exact prepayment and original deadline into the bound chain.
+Root metadata precedes packet allocations and survives its funded objects. No capacity,
+Source allowance or deadline was increased. Root1984/2048 and Ready2344/4096 structural guards
+pass, including inert/decomposition overlap. All729 focused V2 tests pass in20.97s, with
+actual final-release barriers, foreign-owner/pressure/refusal cases and decomposition unwind.
+Read-only design/adversarial review and re-review have no remaining finding.
+
+Strict Root Clippy across all targets/features and the complete frontend (3,539 tests)
+pass. Complete Root/native validation and separate native checks remain pending for this
+NEW source. The green combined candidate below predates these changes. Initial frontend
+invocation found missing worktree dependencies and executed no test bodies; a verified
+same-lockfile junction shares the existing installation, and the real rerun passes74.84s.
+This branch still has no native preclaim registration, signed bilateral Request/Grant/Commit,
+failed-round Forget, production audio composition or member relay. V2 stays OFF; #73's red
+all-three reproduction is not incorporated. One desktop remains available.
+
+## Linux alternate-discovery fixture correction (28 October; validation pending)
+
+The hosted Linux native run at `fa3107d2` failed with973 passes and39 failures.
+The causal failure was the forced-alternate discovery fixture expecting the first
+worker after one local refusal to publish successfully; the other38 tests hit the
+fixture's fail-closed admission gate. The log reports Capacity without its exact
+completed stage. Server-map contention is plausible, not an established cause.
+
+Production rotates discovery on worker admission, before asynchronous local checks.
+The corrected fixture retains one Cursor and one original10s observer deadline,
+forces repeated real server-map pressure, and permits only an exact worker's
+pre-selection Capacity to continue. A test-only completion field records that
+negative boundary; lossy global diagnostics never authorize a retry. Even discovery
+cursors remain refused so eventual success must still select the alternate peer.
+No selector, grant, cursor reset, new intent, attempt refund or larger bound is added.
+Failures after selection/publication remain failures. Focused/native gates are pending.
+
+PR #76 is back in draft until this correction passes. PR #75 is ready for review;
+its corrected Linux native run passed1,008 library tests plus six ACL tests. Its
+overlay rerun with the45-minute aggregate allowance also passed. Other hosted gates
+remain in progress. These results do not clear #76's separate failed run.
 
 ## Corrected combined validation passed locally (28 October)
 
@@ -4791,6 +5768,65 @@ A corrected complete native run remains required; the failed complete runs are n
 review finds no remaining issue in either correction. Production behavior, resource
 ceilings, Source attempts and protocol deadlines are unchanged; App V2 remains OFF.
 
+## Score backlog integration candidate (28 October)
+
+The isolated `score-backlog-integration` worktree combines PR #47's layered Score,
+composer and batched saves with the recovery/storage integration. It is still a
+candidate: the complete native gates must pass before merge. The full Root suite at
+`c27e7694` passes (3,960 tests, 25 ignored); compiled Root sources and lockfiles are
+unchanged by the native diagnostic merge. The Root construction gate also scans
+native Rust; its existing compiled test was rerun against the current merged tree
+and passes again after both corrections (0.47s). V2 remains OFF.
+
+Integration preserves the accepted departure contract: save the current document,
+keep it open on refusal, and only then switch. The independent Index half can finish
+afterward. PR #47's proposal to leave without awaiting Save is not adopted. The
+existing before/while-departing regressions are retained; the App callback test now
+executes the actual Save callback with a delayed receipt and a refusal. An external
+scope request cannot release restored held edits merely because another panel mounts.
+Flipnotes still loop by default; Score keeps its existing explicit, initially-off toggle.
+
+Remembered selection now belongs to native group/channel/object and the original
+editor generation. Lock/reset and server retirement revoke writers before clearing
+selection; old callbacks cannot refill it or revoke a replacement. A primitive ownership
+key preserves the mounted composer across ordinary revisions. Actual mounted wrapper/
+editor regressions check equal-valued fresh scopes, DOM identity, undo, an active press,
+group-only and generation-only replacement, A-B-A and reset while still mounted.
+
+All 3,539 frontend tests pass after the native diagnostic merge. Static checks and
+the production build passed before this test/diagnostic-only merge, with no production
+frontend changes. Integration test expectations and an error-literal collision were resolved without
+weakening the production source guard. Read-only UI review has no remaining findings;
+its additional regression-precision suggestions are included. New native acceptance
+tests cover the real batch parser/invoke/custody, concrete wrong epoch, admission after
+Lock or incarnation replacement, admitted-worker lost reply, physical store reopen,
+and exact signed-operation counts/bytes after retry or a refused partial prefix. All four
+pass at `6c2555d1`. The wrong-epoch assertion now checks the full public error prefix,
+avoiding confusion with the single production error literal; its stronger assertion
+will run again in the complete native gate. Root strict Clippy and both format checks pass.
+The normal ten-case Edge flow gate and the new Score grid/transport/recovery fixture
+pass, as does the existing Gate7 attachment/playback scenario. The Score fixture captures
+`target/score-integration.png` at 900x640; it was inspected.
+Its native commands are development mocks, not native or physical audio acceptance.
+Ambient-dependency and Store raw-fs gates pass. The lost-reply barrier is before the
+first batch item, after worker admission; it is
+separate from the genuine causal-refusal test of a durable partial prefix.
+
+The defensive channel-wait panel distinguishes restored held edits from active saving.
+It offers an explicit Save through the existing request path, with one operation-owned
+waiter token. Original source scope/generation, displayed destination and panel lifetime
+fence stale clicks/notices. The regression fails before this correction at the false
+"Saving" text. All 13 mounted navigation cases pass, including reentrant clicks, target-only
+replacement, reset, unmount and mixed held/blocked/uncertain records without retry or
+reauthoring. Architecture, interface and threat-model descriptions now match the retained
+Save-before-switch contract. Complete combined native gates and native startup remain pending.
+
+Layered Score operations require every member to run a compatible build before use.
+Older builds reject the new bodies/seeds; clearing current notes does not make retained
+operation history and recovery archives safe to downgrade. Complete native validation
+and the native build/startup gate remain required before acceptance.
+
+
 ## Second-peer native admission failure (28 October; diagnosis in progress)
 
 The corrected `c3877704` Linux native gate completed with 963 passes and 40
@@ -4852,10 +5888,10 @@ Three focused ownership regressions pass, pinning waiting cancellation, traced e
 ownership and queued custody after the sender future ends. The diagnostic voice-context
 future shrinks from1,264 to880 bytes; command/envelope sizes stay unchanged. The temporary
 diagnostic is removed; the unchanged whole-Control guard remains the regression.
-Static re-review has no blocker/high/medium finding. All375 focused native handoff
-tests pass after correction, including the unchanged whole-Control guard at12,244
-bytes against12,288. Complete gates still need to pass; the original failed suite
-is not sign-off evidence. No memory bound has been raised.
+Static re-review has no blocker/high/medium finding. At `c3877704`, all375 native
+handoff tests pass and the actual whole-Control graph is12,244 bytes. Complete gates
+still need a successful run; the original failed suite is not sign-off evidence.
+No memory bound has been raised.
 
 Windows CI at `c499228d` also stopped in strict Clippy before Root tests: the Windows
 path codec used a manual remainder check. The equivalent `is_multiple_of(2)` form is
@@ -11757,6 +12793,842 @@ Checks:
 - `git diff --check`: clean.
 - `cargo test --all --all-features`: 2463 passed, 0 failed. Rust is unchanged.
 - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml`: 363 passed, 0 failed.
+## Collaborative Score editing, stages 2 to 4: layers, additive merge, show/ghost/hide (2026-10-20, branch `score-composer-2`)
+
+Contract: `docs/design-score-layers.md` (design-reviewed; findings H1 to H4 and M1 to M5 are folded
+in and marked there). Interface summary: INTERFACES.md top section. Threat notes: THREAT-MODEL.md
+"Score layers".
+
+Renderer (apps/desktop/src):
+- `score-voices.ts` (new) is the one definition of what plays: candidates, clipping (`len` only
+  above 1), collapse, canonical order, skips, sparse flags, an O(n) overlap sweep. The shared
+  fixture `crates/catcoms-replication/tests/fixtures/studio-score-readiness-v1.json` pins it
+  against Rust readiness.
+- `studio-contract.ts`: `set_note`/`clear_note`, `ScoreLayer`, `layerOf`, `noteKey`, `parseNoteKey`.
+- `studio-native.ts`: optional `layers`/`readiness.layers` parse; `ScoreModel.notes`,
+  `layerSlots`, `voices`; `scoreVoiceSlots`, `layerShownValue`/`layerShownAlternative`;
+  `RecoveryChoice` `scoreNote`.
+- `studio-working.ts`: pending `set_note`/`clear_note`, readiness from `score-voices.ts`, split by
+  collection and kept sparse (the media key serialises it).
+- `studio-export.ts`: `notes` input, lanes for overlapping holds, `skipped`.
+  `studio-resolved-export.ts`: `scoreExportInput` never refuses; `withVoiceSkips`.
+- `studio-session.ts`: media key includes `voices.play`; `scoreNote` recovery choices;
+  `AUTO_REAUTHOR_OPS` has `set_note`. `studio-draft.ts` accepts the new ops and choice.
+- Playback: `JAM_DOCUMENT_HELD_MAX` (48), `heldCap` on the allocator, `document` flag from
+  `Studio.svelte` through `App.svelte`, `studio-audio.ts` and `studio-playback.ts`.
+- Composer: `score-editor.ts` gains the layer surface (`scoreSurface`, `scoreGhostCells`,
+  `scoreSurfaceOps`, `scoreNoteCheck`, `scoreIssuesAt`, visibility helpers) and `note`
+  diagnostics; `scoreDiagnosticOperation` returns a list. `ScoreEditor.svelte` reads the document as
+  `docModel` and edits `model`, the surface; every write leaves through `sendAll`, which
+  translates surface gestures and records document ops for undo. New hooks:
+  `data-score-visibility` (per sound and `d`), `data-doc-kit`; ghost cells carry
+  `ghost`/`gon`/`gend`/`gpad`. Ready gating of play, post, download and share is gone.
+- Visual fixture: "Recovery sketch" holds a concurrent pair in one layer and a hit a clear lost to.
+
+Rust (crates/catcoms-replication, crates/catcoms-app, src-tauri):
+- `score.rs`: `ScoreOp::SetNote`/`ClearNote`, `ScoreLayer` (`key`/`parse`, one spelling),
+  `ScoreCell::layer`. `references.rs` knows both names.
+- `score/state.rs`: `ScoreProjection.layers`, the `ScoreLayerSlot` newtype (no `value()`/
+  `removed()`; `live`, `cleared`, `shown`, `shown_alternative`), `n/` keys, `MAX_KEY_BYTES` 73,
+  readiness from `score/voices.rs` (the Rust half of `score-voices.ts`), distinct-value header and
+  patch conflicts.
+- `score/snapshot.rs`: the optional layer trailer (tag `0x01`, absent without layers, golden
+  vector), voice-order compaction outside the conflict budget, layer op ids in `source_ids`.
+- `admission.rs`: legacy cells and live layer slots share the 4096 cap; `change.rs`: `SetNote`
+  faces `SetCell`'s checks, `ClearNote` always admissible.
+- `catcoms-app` `restore/score.rs`: `StudioRecoveryItem::ScoreNote`; restore authors the shown
+  value into an empty slot only, Copy can clear; the combined cap.
+- src-tauri: the `layers` DTO (byte-identity pinned for layer-free scores) and the `scoreNote`
+  `ChoiceInput`.
+- Tests: `score/voices/tests.rs` runs the shared fixture, a pairwise overlap oracle and a timing
+  test; `score/change/tests/layers.rs` covers both Automerge orders of add vs clear, the 73/74-byte
+  key, the trailer, compaction, the budget exemption, the voice-order cap and the combined cap.
+  `studio-score-ops-v1.json` gained five layered vectors (23 cases).
+
+Gotchas:
+- The composer's surface is derived from the `model` prop. A test that changes the score under a
+  mounted composer must hand over a new model (Harness `update`); the in-place `apply` harness works
+  because `sendAll` bumps `sent`, which re-derives the surface.
+- Test `ScoreModel`s must carry `notes` (the fixtures alias it to `cells`) and `voices`.
+- A gesture's ops are writes before clears; refusal tests now refuse the clear.
+
+Adversarial review (2026-10-20): no blocker or high; a re-review of the first M1/M2 fixes found
+one high and two mediums in them, fixed as below. Fixed:
+- M1 (with re-review H1 and M2): discarding a refused write released its gesture's clear,
+  deleting the note. `onop` carries `scoreGestureId()`; `applyScoreOp(object, op, gesture)` keeps
+  a session-private link; `discard` of a linked Score write removes every LATER record of its
+  gesture in the lane (writes and clears, not in flight) in one pass, then pumps once (pumping per
+  record started the next clear). Links are not in the lock snapshot: after a restore, discarding
+  a Score write marks the restored note edits after it in its lane `blocked` ("An earlier edit was
+  discarded..."), so a bulk Save never runs them and each is the member's to retry or discard.
+- M2 (with re-review M1): a slide could overwrite a note before writing its value elsewhere.
+  `scoreMoveSelection` emits sets against the direction of travel, and `orderWrites` makes a write
+  wait for the write carrying the value it replaces (identity ignores `len: 1` vs absent and
+  `vol: 100` vs absent). An exhaustive test checks every prefix of every move of small patterns of
+  repeated values, in time and pitch.
+- M3 (doc): one slot can fill the 4096 voice cap and push others' notes out; recorded in
+  THREAT-MODEL as an accepted residual risk.
+- L2, L8: overclaiming or stale wording in INTERFACES, THREAT-MODEL, GATE6-ACTIVATION-DESIGN,
+  design-creative-suite, GATE7-UI-HANDOFF, Studio's history line, recovery labels (now name the
+  layer).
+- L3: the grid shows a layered copy before a stale legacy copy of the same sound; editing,
+  moving or clearing the shown note takes the stale copy with it.
+- L4: ghosting or hiding a sound drops a selection or picks on it; reviewing a legacy item
+  (removed ones too) shows its sound; "Sound of this note" lists shown sounds only.
+- L5: the full-score message now fits moves too.
+- L6: identical concurrent values carry no conflict mark, for notes and headers, and are not
+  listed for attention (`scoreHeaderOthers`, distinct values in `scoreAttention`).
+- L7: while a set of a header is queued, the working projection gives that header one value, so
+  readiness, chips and the attention list agree with the readback.
+- L9: usage, trim and the overview count every voice (`docModel.voices.all`, exact for queued
+  edits); the grid's extent also reads the raw shown notes so tails past the end stay visible.
+
+Third review pass (no blocker or high). Fixed:
+- M-A: a phrase move could replace a note of the moving sound stacked behind another sound in the
+  destination cell, never picked. `scoreSurfaceOps` refuses a set onto an existing document key
+  that is not the cell's shown note and was not vacated earlier in the gesture ("Another note of
+  that sound is in the way there."); this also covers changing a note's sound onto a stacked one
+  (L3). A randomized two-sound property test checks no move changes an unpicked note.
+- M-B: re-authoring a restored write dropped its restored mark; `reauthor` now carries it.
+- L1: the restored hold also covers failed restored records: it cancels their automatic resend
+  and re-save jobs and sets the hold message.
+- L2: "fit to last note" reads the raw shown notes too, so it can cover a hold crossing the end.
+- L4: a cell's "another value by" marks drop while an edit of that note is queued.
+- L5: Discard's confirmation says how many edits go (`discardCount`).
+
+Owner's review of `e7250d48` (no blocker; two high, four medium, one low). Fixed, each with a
+regression that fails when its fix is reverted:
+- H1: `staleCopy` cleared any legacy cell of the shown note's sound, so moving a layered note
+  deleted a distinct legacy note behind it. It needed the same note identity, but that identity
+  equated `vol: 100` with no `vol`, which playback hears as two voices: only partly fixed, see the
+  re-review of `73b68ada` below (it now uses `copyIdentity`). A distinct legacy note stays where it
+  is and the same-sound overlap guard (`scoreNoteCheck`) refuses an edit that would overlap it.
+  The random property now mixes legacy and layered keys, drums and distinct companions.
+- H2: a rollback after a host refusal ran every inverse, so after one inverse was refused an older
+  one could clear the last copy of a note. `sendAll` stops the rollback at its first refusal and
+  keeps the prefix (which keeps every note) as the undoable gesture.
+- M1: a phrase drag captured its keys at pointer-down and could move a collaborator's replacement
+  note. The drag binds each carried cell's document key and bytes (`bound`, `boundStill`) and
+  moves nothing if any changed; a multi-key drag moves exactly its captured keys.
+- M2: undo, redo and the review list's actions skipped the surface and wrote into ghosted or
+  hidden sounds. `sendAll` refuses any gesture whose ops reach a sound that is not shown
+  (`scoreOpLayers`); the history entry stays. Only partly fixed: a legacy `set_cell` replacing
+  another sound was missed (re-review of `73b68ada`, MEDIUM 1, below).
+- M3: an old batch's reconciliation read could outlive a lock and restore and clear the restored
+  records' eligibility. `finish` acts only on a record still in the queue, and the batch path
+  checks the session generation after `landed`.
+- M4: a recovery apply is eligible at once, so an admission refusal (Index unread, server group
+  changed) settled it inside `enqueue`, before the walk had installed its callback; the walk stayed
+  "applying". `enqueue(rec, settle)` installs the callback before the record can be pumped
+  (`studio-auto-retry.test.ts`, both refusals).
+- L1: attacks the voice allocator refused (`source-held`, `room-held`) were not counted.
+  `StudioPlaybackController.refused` counts them once each for the current start (releases,
+  `duplicate` and `sequence` are not counted; a stale playback's late result never counts);
+  `StudioAudioState.refused` reports the pass under way or the one before it, whichever is larger,
+  so a loop neither sums passes nor drops to 0 at each restart. The composer shows "N not played"
+  while the score plays (`data-score-refused`). Real-engine tests: 49 document notes give 48 held
+  and 1 counted, 17 shared ones 16 and 1, and a room full of held live voices counts both notes.
+- Design question 1 (several live values): the grid shows one value of a slot that holds several
+  different ones, so moving, resizing or rewriting it would drop the others unseen. `sendAll`
+  refuses such a gesture (`scoreOpSeveralValues`) and points to the review list, where choosing a
+  version rewrites the slot to it; the member's own erase on the grid (a surface gesture of clears
+  alone) removes every version. Identical values are one value and edit normally. Legacy cells are
+  unchanged (removal wins).
+- Design question 2 (hold past the end): the contract said an edit clips the length, the editor
+  refused. Kept the refusal (the authored length survives a score shortened and grown back) and
+  made it practical: Shorten brings a hold that runs past the end to the end in one press (one
+  step at a time was refused until the last). The design doc now says so.
+
+Re-review of those fixes (no blocker or high). Fixed, each verified by breaking it:
+- M-A: an undo or redo of clears alone took the erase exemption and removed a version a
+  collaborator added since. The exemption is now for surface gestures only (`erase`).
+- M-B: `resolving` exempted every key of the gesture, so choosing a removed legacy cell's value
+  overwrote a layered slot with two versions. `resolving` is now the reviewed key and only that
+  key is exempt; the review list's "clear" passes its key too.
+- L-A: the guard read the raw `layerSlots`, which keep both values until readback, so a queued
+  choice left the note uneditable while the review list showed nothing. It reads readiness
+  `conflict`, which the working projection recomputes.
+- L-B: undoing a one-press Shorten (or an erase) of a hold past the end was refused, which also
+  blocked every older undo. WITHDRAWN: the `pastEnd` exception added here queued writes that
+  native refuses (`change.rs` requires `step + len <= effective_steps`), so it was removed in the
+  re-review of `73b68ada` (MEDIUM 2, below). Kept from it: a length the end forced is not
+  remembered as `hold`.
+- L-D: THREAT-MODEL's wording, this entry's guard name, and `noteIdentity`'s place above
+  `orderWrites`'s comment.
+
+A second short re-review confirmed those (no blocker, high or medium) and found two lows, fixed:
+- LOW-1: the past-the-end mark was one per gesture and survived a partial rollback. Moot: the
+  mark itself was removed with L-B's exception (re-review of `73b68ada`, MEDIUM 2).
+- LOW-2: the guard trusted native readiness with no evidence check. `parseScoreContent` now
+  refuses a score whose `readiness.layers[key].conflict` disagrees with the distinct live values
+  of that slot (as it already did for `headerConflicts`), so a disagreeing native build fails
+  closed instead of letting a grid edit drop versions.
+- L-C (not changed): the chip keeps the previous pass's count for one pass after an overload is
+  fixed, by design, so it does not flicker to 0 at each restart; and the composer reads the one
+  app-wide audio session, so an inline chat PIXA playing meanwhile would show its own refusals (as
+  `playing` and `positionMs` already did).
+- Test gap: a maximal layered export (4096 notes as 64 sounds stacked on each of the 64 latest
+  cells, so 64 lanes, `v` on every attack, 64 maximal recipes, a 256-byte group) was 510,915 bytes
+  against the 524,288 cap. Strengthened below.
+- Correction: `test:startup` does not run in CI (the earlier review request said it did). It has
+  not been run on this branch; nothing here touches `setup` or process spawning.
+
+Owner's re-review of `73b68ada` (no blocker; one high, two medium, one design question). Fixed:
+- HIGH 1: the stale-copy test equated `vol: 100` with no `vol`, so moving or erasing a layered note
+  deleted a legacy note spelled the other way, which playback (`score-voices.ts`, Rust
+  `voices.rs`) hears as a second voice. It now uses `copyIdentity`: playback's spelling (absent
+  `len` is 1, `vol` exactly as authored) on the raw length, so a clipped longer note is not a copy
+  either. `noteIdentity` stays for `orderWrites` only. The regression checks both orientations with
+  the real `scoreVoices`; the random property now generates explicit `vol: 100` and companions
+  that differ only in that spelling, and its oracle uses playback's rule (it had copied the bug).
+- MEDIUM 1: `scoreOpLayers` took a legacy `set_cell` to reach only the sound it writes, so an undo
+  putting sound A back over a collaborator's B wrote into B while B was ghosted or hidden. It now
+  also counts the sound the cell holds now (mounted test: two sound orders and a drum, ghost and
+  hide, then shown: undo runs and redo puts B back).
+- MEDIUM 2: L-B's `pastEnd` exception is gone. `scoreReplay(model, ops, history)` refuses an undo
+  or redo whose hold would run past the current end ("Lengthen the score, then undo again")
+  before anything is queued; the entry stays and works once the score is long enough. Shorten
+  says so when it trims. The replaced test had pinned the invalid op (declared in the test).
+- Design question (undo after replacing several versions): an erase or a review-list choice of a
+  slot with several versions replaces them all, and its undo can only write the shown value back;
+  the composer now says so when it happens.
+- Test gap: the maximal export now uses explicit `vol: 100` (`v: 100`) and a group of 256 control
+  characters (six-byte JSON escapes), the reviewer's 516,557-byte case, pinned above 514,000.
+- Not covered by a test: native admission itself (no shared frontend/native case drives a Save of
+  the refused undo); the frontend test asserts no emitted set ever exceeds the score's length.
+- Verification: at the owner's instruction this round ran no local tests or checks at all; CI on
+  the pushed head is the evidence.
+
+Follow-ups (not done):
+- The review's remaining test gaps: the Rust maximal combined seed (L10 below), the overlay-route
+  discard cascade (below), and a randomized Rust/TypeScript parity run plus an old/new binary
+  interoperability session, neither of which exists.
+- L1: the exporter's lane skips (`ScorePlayback.skipped` beyond voice skips) are not shown
+  anywhere; the composer's export list shows voice skips only.
+- L5: at the 4096 cap a move or a legacy edit is refused, since it needs a free place between its
+  write and its clear.
+- L10: no Rust test pins the maximal combined seed (4096 voices backed twice, a full legacy
+  conflict budget, maximal titles) under 2 MiB; the reviewer estimates about 1.74 MB.
+- M3 mitigation: count only the first few distinct values of one slot toward the voice cap.
+- L4 remainder: the selection is kept by cell, so making a sound shown or choosing another sound
+  can re-bind it to that sound's note in the same cell (visible in the panel, not silent).
+- Residual: after discarding a refused move write, a later gesture that writes the same sound into
+  the vacated cell overwrites the note's only copy (no worse than before the fix).
+- Overlay-route (closing/unconfirmed) coverage of the discard cascade is by construction only
+  (the same `laneOf`/`isScoreWrite` path); no test drives that route.
+
+Contract changes in existing tests (all declared in the tests): placements author `set_note`;
+legacy edits are `set_note` then `clear_cell`; moves write before they clear, phrase moves write
+against the direction of travel (score-gestures and score-editor tests); flags never disable
+post/play/export ("to review", not "to fix"); the resolved-export refusal test now plays what it can.
+
+## Collaborative Score editing, stage 1: additions re-saved after an epoch move (2026-10-20, branch `score-composer-2`)
+
+The owner's decisions are recorded in INTERFACES.md (top section):
+
+- one note per sound per cell, as a format change;
+- additive merging: adds win and nothing blocks playback;
+- automatic re-save on an epoch move;
+- show/ghost/hide layers.
+
+The work is staged as follows:
+
+- S0: baselines, and the PIXA `v` gap.
+- S1: re-save. This entry.
+- S2: additive merge on today's format.
+- S3: per-sound note format, readers.
+- S4: authoring and the layer UI.
+
+Defaults taken for the plan's detail questions, any of which the owner may overturn:
+- legacy `c/` cells and sounds keep removal-wins;
+- a note running past the end is clipped;
+- drums are one layer;
+- re-save covers additions only;
+- hide does not mute, and visibility is per viewer;
+- a click acts on the selected sound;
+- readers and authoring ship in one build.
+
+**S1** is `scheduleAutoReauthor` in `studio-session.ts`, with its contract in INTERFACES.md. It
+also changed:
+- `reauthor(id, {pump})`;
+- `resaving(id)`;
+- the tally, `needsDecision`, `stuckBehind` and the banner, which treat a pending re-save as moving.
+
+Tests in `studio-auto-retry.test.ts`:
+- admission and native refusals;
+- the bound;
+- lane order across queued members;
+- a refused batch re-saved after one read, leaving as one batch again;
+- a later batch item, a clear and a closing history left with the member;
+- a reset during the read;
+- flipnote edits left manual.
+
+In `studio-score-batch.test.ts`, the member behind a retried record is now re-saved; that is the
+contract change.
+
+## `[desync fixes]`: Studio saves resolve on their own, leaving never waits (2026-10-19, branch `score-composer-2`)
+
+**What the owner saw**, editing a Score alone: "studio_apply_batch not allowed. Command not found ·
+attempt 1 · your work is kept · 4 later saves wait behind it". "Retry same request" failed again,
+and placing notes quickly locked the Studio with "Could not confirm the save. Your edits are still
+here; retry before leaving."
+
+**Root cause: there was no desync.** `studio_apply_batch` was registered but ungranted (see the
+merge entry below), so Tauri refused every batch before it ran. A lone edit travels as
+`studio_apply` and saved. Several edits queued together travel as one batch, and each was then
+settled uncertain. Retrying one card cleared that card; the next showed the same error, which read
+as "retry fails again". Leaving waited for every card, so one uncertain card kept the member in the
+Studio. `fea4342e` grants the command.
+
+**So that the next failure of any kind does not block anyone** (the contract changes are in
+INTERFACES.md, top section):
+
+- Failed exact saves are resent on their own, about two minutes of bounded backoff, then they are
+  the member's. A retried record never rides a batch.
+- A document navigation, leaving the Studio, and posting to chat hand edits to the background Save
+  and go. App shows a progress toast that ends "Studio edits saved", or a warning that stays. The
+  Index half of a rename follows once the document half lands. Window close still waits.
+- The Studio waits to change channel while its queue holds the last channel's work, with a panel
+  in both surfaces, and switches by itself.
+- Play never asks about save status. Exports still do.
+- New `studio-save-words.ts` holds every word a person reads about a save. The native text moved to
+  the tooltip. New strings use no "·" (standing owner rule: no "·" or em dashes in UI text; the
+  existing ones are not purged yet).
+
+**Contract changes in tests** (each rewritten, none loosened): in `studio-buffer.test.ts`, the two
+navigation-ownership tests (no waiting window now exists to be superseded in), the departure
+Index-half ordering, "never waits on an Index delivery" (the "while leaving" variant had no window
+left) and the refused-departure test (now three endings: retried, slow receipt, discarded). One test
+in `studio-native-no-write.test.ts` stops its clock before the first automatic resend and asserts it.
+Copy assertions changed in `studio-surface.test.ts` and `studio-navigation-surface.test.ts`.
+
+**New tests:** `studio-auto-retry.test.ts` (the field report with the exact ACL text; exact resend
+timing; backoff and stop; lane order; Retry now replacing the due resend; reset cancelling;
+restored and immediate-seam exclusions; no batch around a possibly delivered edit; hand-off; Play
+vs take export; linked-score playback), `studio-save-words.test.ts` (including pinning the
+withheld-Save text to `studio.rs`), `studio-save-toast.test.ts` (App's tracker from its production
+text), and the scope wait at the end of `studio-navigation-surface.test.ts`. The key guards were
+checked by breaking them: the resend, the batch rule, playback, linked-score playback and the scope
+deferral each fail their tests when disabled.
+
+**Adversarial review.** No blocker or high finding. It verified that an exact resend cannot apply
+an edit twice for every covered kind, and that the ACL grant is narrow. Fixed from its findings:
+
+- A retry of a changed-history refusal used to skip admission, send the stale request and lose
+  "Save as a new edit". `retry` now refuses `NEEDS_DECISION` refusals, and `canRetry`/`needsDecision`
+  drive the buttons.
+- A deferred channel switch used to retire App routes begun while it waited. There is now a separate
+  `leaseGeneration`.
+- The wait panel now says "need you" when nothing is moving and lists the stuck edits.
+- The toast used to say "saved" after a discard. It now uses the `discarded` count.
+- A restored snapshot for an unreachable channel used to block Studio editing for good. There is now
+  a discard card.
+- A scope switch during a window close used to throw inside effects.
+- Stuck and uncertain wording claimed failure. Hotkeys acted on the hidden document. Deterministic
+  refusals (retired epoch, gone member, existing id, unknown channel) were resent for two minutes.
+- Doc overclaims about rename splitting and the amplification bound are corrected.
+
+The short re-review found no blocker or high finding, and confirmed those fixes. It raised two
+more mediums, both now fixed:
+
+- A first delivery refused in a retired epoch settled uncertain, so Discard was the only way out.
+  It is refused ahead of native's intent barrier, so it now settles not written (see THREAT-MODEL).
+- The wait panel's bulk "Save as new edits" re-saved changed-history edits unseen. It is removed;
+  such edits are reviewed in their own channel.
+
+Its lows are fixed too: the real native texts for a removed member and a deleted channel, "need
+you" whenever nothing will resend, and a hint on held cards.
+
+**Follow-ups:**
+- The wait panel cannot name the old channel.
+- Flipnote Play can refuse "the displayed source changed" while a linked Score's queued edit lands;
+  press Play again.
+- An in-flight save has no client-side timeout.
+- Retained local-draft Copy requests are not counted in `retainsWork`, so a deferred switch clears
+  them (pre-existing).
+- The review's design question, an automatic resend overwriting a peer's newer value without a
+  click, is recorded in THREAT-MODEL.md.
+
+**Limitations.** Window close refuses at the first failure even while a resend is due; close again
+a moment later. Local-draft (Unconfirmed/Closing) and recovery saves keep manual retry. After the
+backoff, a refusal that keeps coming back is shown, not hidden.
+
+## Merge of Gate7 `d2548a37` into `score-composer-2` (2026-10-19)
+
+Both lines had fixed native "busy" refusals independently, so the merge composes them rather
+than picking one. Decisions a reader of either branch alone would not expect:
+
+- **Two retry layers, one classifier.** The branch's `busyRetrying` (`studio-busy.ts`) still wraps
+  every native call of the Studio session and repeats a storage-busy refusal five times over
+  1.24 s. Gate7's session-level resend (`resendLater`, `unlessBusy`: the Save worker and the
+  document/Index reads, three resends over 1.75 s) sits on top and covers all three no-write texts.
+  `nativeNoWrite` is the only "nothing was written" classifier. The branch's `isPreExecutionRefusal`
+  is removed: it knew two of the three texts and missed the full inline-slot refusal. A Save that
+  stays storage-busy therefore makes 4 × 6 calls of its request over about 6.7 s before it settles
+  not written. The overlay, recovery, fault and blob reads get the wrapper's repeats but no session
+  resend.
+- **Batched Score saves ride the resend.** Before this, a batch refused before dispatch settled
+  every member as not written while Gate7's outer catch quietly resent only the head, which
+  stranded the members as failed cards behind it. While the head has resends left, the members
+  now go back to queued behind it, uncounted, and travel with its resend. Once the resends are used
+  up, every member settles not written, as before. This supersedes "a refused batch settles every
+  member alike" in the busy-spam entry below, for refusals made before dispatch.
+- **`switchTo` answers with its route.** The branch's `return studioRequest === studioNavigation`
+  referenced a variable Gate7 had removed. Git merged it without a conflict, which would have broken
+  the build. It is now `return route.current()`. That checks the same counter and is stricter: it
+  also checks the lock, the reload generation and the Studio session's navigation lease. That is
+  safe for every caller that uses the result: each one that starts in the Studio moves the surface
+  before the channel, and a search hit is only reachable from chat.
+  `saveStudioForNavigation` is gone (Gate7 removed its callers). `noteStudioNavigation` stays: both
+  Studio surfaces still announce document navigations through `onnavigate`.
+- **Score surface.** Gate7's `heldQueuedCard` renders beside `pendingSaves`. The tabs, loop and
+  download controls Gate7 still showed there live in `ScoreEditor.svelte` on this branch.
+
+Test contracts changed by the composition: in `studio-native-no-write.test.ts`, the storage-busy
+cases of the two exhaustion tests now expect the wrapper's repeats inside every send.
+`studio-session.test.ts`'s "outlasts every pause" test now expects 24 calls. `studio-score-batch.test.ts`
+now checks that members ride the resend, that a lock snapshot taken while the head cools restores
+every edit as unsent, and that a resend failing after dispatch leaves every member uncertain with a
+counted attempt. `studio-busy.test.ts` checks that the wrapper's texts are on `NATIVE_NO_WRITE`, and
+`studio-navigation-token.test.ts` pins `return route.current();`.
+
+**Open on this branch from before the merge; fixed by `[desync fixes]` (2026-10-19).** These
+failed identically at `9f519570` and passed at the Gate7 tip:
+
+- `studio_apply_batch` was registered in `apps/desktop/src-tauri/src/lib.rs` but missing from
+  `security/command-policy.json`, `capabilities/main.json` and the reviewed ledger
+  (`tauri-command-security.ts`). This was confirmed in the native app: Tauri refused every batch
+  with "studio_apply_batch not allowed. Command not found", before the command ran. Several Score
+  edits queued together therefore never saved, and each member settled uncertain. This was the
+  whole "desync" a person saw editing alone. All three now name it, and `tests/command_acl.rs`
+  resolves it for `main` through the real `RuntimeAuthority`.
+- `busyRetrying` forwards the command name its caller passed. `studio-busy.ts` is now a
+  sanctioned wrapper beside `diagnostics.ts` in `tauri-command-security.test.ts`. Its callers in
+  `studio-native.ts` still pass literals, and the scan still reads them.
+- FETCH-002 (`studio-session-review.test.ts`) expected one blob request per explicit retry. It now
+  lets the wrapper's repeats run out and pins the exact bounded count (one request plus
+  `STUDIO_BUSY_RETRY_MS.length` repeats).
+
+Verification of the resolution:
+
+- `cargo test --all --all-features`: 2468 passed, 0 failed. No Rust differs from `9f519570`.
+- `npm test`: 1850 of 1854 passed. The 4 failures are exactly the ones listed above.
+- `npm run check`: 0 errors. `npm run build`: passed.
+- The `src-tauri` suite and `test:flows` were not run, because drive M: ran out of space mid-build.
+- An adversarial review found no blocker. It flagged the follow-ups above, plus two design
+  questions. A lock during the wrapper's pauses restores batch members as uncertain. A superseded
+  read keeps repeating beneath `unlessBusy`.
+
+## Score composer: phrases, preview lengths, zoom (2026-10-19, branch `score-composer-2`)
+
+The three items the previous entry deferred from the owner's UX assessment. Frontend only.
+
+**Phrases.** Several onsets can be handled as one: Shift+click adds a note to the phrase or takes
+it out (the first pick joins the selected note), a Shift+drag marquee picks every onset inside its
+rectangle, Ctrl+A picks every note, a plain click or Escape returns to one note. A phrase moves
+as one gesture: drag any of its notes (the whole phrase previews at its destination, red if any
+member is blocked), Alt+arrows or the pinned panel's move buttons nudge it, Ctrl+D or the panel's
+"duplicate" copies it to start where it ends (the score grows first if it must, taken cells are
+skipped and counted), Delete or the panel clears it. The helpers in `score-editor.ts`
+(`scoreOnsetsIn`, `scoreMoveSelection`, `scoreDuplicateSelection`, `scoreClearSelection`) build
+the operations: a move is every source cleared then every note set, validated with the phrase
+lifted out (it may slide over its own cells) and against the other members; one blocked member
+refuses the whole move, nothing partial. A single selected note also duplicates (right after
+itself). The phrase is composer view state: it is dropped with the component, and it dissolves
+when its notes are no longer in the document.
+
+**Preview lengths in the sound designer.** The audition keyboard held every key for 400 ms, and
+the envelope graph drew an illustrative shelf, so a slow attack was released before it had
+developed while the picture suggested the full curve. `StudioSoundfont.svelte` now has four
+preview lengths beside the register stepper (short 0.4 s, one beat, one bar of four beats, long
+2 s; beat and bar follow the open score's tempo through a new `bpm` prop, 120 otherwise) and
+passes the chosen hold to `onaudition` as a third argument, which the Studio hands to the same
+audition path. The envelope scope is now drawn on the preview's real time axis: attack, decay,
+the shelf until the key-up (a dashed rule at the chosen length), then the release; a key let go
+during the attack or decay releases from the level it had reached, which is what the engine does.
+The other scopes stay proportional, as before.
+
+**Zoom.** The grid's steps per page can be chosen: 8, 16, 32 or 64, from the footer's zoom
+buttons or the `-` / `=` keys, keeping the first visible step in view; with no choice the page
+follows the card's width as before. The row-height toggle stays.
+
+**Tests.** `score-gestures.test.ts` (marquee, phrase move and its refusals, duplicate with
+growth and skips, clear); `score-editor.test.ts` (Shift+click and marquee, phrase nudge, carried
+drag with a blocked member, Delete, Ctrl+A, Ctrl+D for a phrase and a single note, Escape, zoom
+from the footer and keys); `studio-soundfont.test.ts` (preview lengths, tempo-following beat and
+bar, the key-up marker moving with the hold).
+
+**Review.** This round's read-only adversarial review found no blocker. Its high finding is
+fixed: a phrase gesture longer than the session's draft queue (Ctrl+A on a large score, then a
+nudge) could half-apply and flood notices; the session now exposes `draftRoom()` and the composer
+(`onroom`) refuses a gesture it cannot queue whole before sending anything. Its mediums are fixed:
+the drag preview now asks the same helper the release will, so a phrase that overlaps itself or
+lost a sound shows red instead of being refused on release; taking a note out of a two-note phrase
+leaves one ordinary selection rather than an invisible pick; a press outside the phrase ends it
+like a click does; and clearing a phrase whose notes could not be re-authored as they were (an
+overlap, a note past the end, a sound that is gone) says so at once instead of at the undo. Lows:
+a duplicate that places nothing says so and sends nothing; stale picks no longer ring empty cells;
+a phrase that shrank under a drag moves what is left; the marquee works in every tool; the
+designer's chips are labelled "length"; a non-finite tempo falls back to 120.
+
+**Verification.** svelte-check, the production build and the focused frontend files
+(`score-gestures`, `score-editor`, `studio-soundfont`, `studio-surface`); the complete suites,
+`test:startup` and `test:flows` were not run (user instruction); no Rust changed.
+
+**Still open from the assessment.** The listen-adjust loop (editing during playback, a steady loop
+period, changes on the next pass) is the engine stream. Transposing a phrase by an interval other
+than one pitch at a time, and a selection that survives switching documents, are not built.
+
+## Score composer: moves, undo, pinned selection, listening feedback (2026-10-19, branch `score-composer-2`)
+
+The owner's UX assessment of `eb411f1` ranked the composer's gaps for a "short pieces, good
+manipulation" toy: moving a note meant recreating it, nothing could be undone, the selected note's
+controls scrolled away under the sound library, sounds and drums gave no feedback when chosen, and
+the screen was small and faint. This round takes the immediate stream of that assessment; it is
+frontend only (no native or wire change).
+
+**Moves.** `ScoreEditor.svelte` gained a third drag kind: pressing a note's body (any cell of it
+but the handle at its end) or a drum hit and carrying it previews the landing on any step or
+pitch, red where another note is in the way, and writes on release. Alt+arrows and the selected
+panel's move buttons nudge the selected onset one step or one pitch. A move is
+`scoreMoveOperations` in `score-editor.ts`: a clear of the source and a set of the same cell
+(sound, length, level) at the destination, validated against the projection without the source,
+sent as two ordinary operations that the session batches into one native transaction once the
+autosave releases them. It is not an atomic wire operation. Native admission refuses a Score
+`set_cell` only at the 4096-cell cap, so the real way the pair can split is the session's own
+limits: a full draft queue (512 records) refusing the set, or the pair straddling a 64-item batch
+boundary with a lock or refusal between the halves. The composer answers the first by rolling the
+accepted clear back (`sendAll` sends the inverses of what was accepted, newest first, and says
+"nothing was changed"; if even that is refused it records what remains so it can be undone); the
+second leaves the cleared value reachable from the attention list's "use this". The atomic
+`move_cell` the earlier entry promised
+was examined and deferred: a score change folds one record under one `c/<step>:<row>` key and the
+change validator requires exactly one entry key per change (`change.rs`, `change.len() > 7`), so
+a two-cell record needs the fold, the validator, the primitive bound and the snapshot's per-slot
+reconstruction changed together; that is a replication-crate design round of its own.
+
+**Undo and redo.** Every gesture the composer sends (placing, erasing, resizing, moving, a sound
+or volume change, a header change, a retained-value choice, a repeated bar; not adding a sound
+from the library, which is the host's own asynchronous save) is recorded with its inverse
+(`scoreInverse`, computed against a rolling local projection, `scoreApplyLocal`, because the model
+prop only updates on the host's next flush), 64 deep per mounted document; Ctrl+Z / Ctrl+Shift+Z
+(or Ctrl+Y) and two tool-rail buttons replay them. A replay passes the same guards a hand edit
+gets (`scoreReplay`: inside the length, with its sound, no overlap), checked against the document
+as it is now, so an undo after a collaborator's edit is refused with a notice rather than writing
+an overlap; a replay that passes overwrites that collaborator's value exactly as a hand edit would.
+What was actually sent, with inverses computed at that moment, is what the opposite stack receives,
+so a value someone wrote between an undo and its redo is restored by the next undo rather than
+cleared. The stack is dropped when the document is left (the component is keyed by object).
+Alt+arrows are taken on the window's capture phase and stopped there, because the app binds
+Alt+Left/Right to its history; while a grid cell is focused those keys nudge, elsewhere they
+navigate as before. A moved drum keeps its pad whatever row it lands on; the drum lane rows are a
+placement aid, not a constraint on moves.
+
+**Selection first.** The selected note's controls (sound, length, move, volume, clear, listen,
+overlapping notes, author, retained values) are a snippet pinned above the inspector's tabs, so
+selecting anything answers at once whatever tab is open; the sounds tab's own block is labelled
+"new notes" so the two are never confused.
+
+**Listening.** Sounds in the score and library tiles have a listen button (one beat at C5, no
+document change); choosing a drum and placing a hit play it through a new `auditionPadPlayback`
+(one-hit take, the kit's own tail as its end) over the same audition path; the listen tool hears
+drums too.
+
+**Wording and legibility.** patches → sounds, hold → note length, audition → listen, keys/pads →
+notes/drums, "+ new…" → "sound designer…", "no recipe" → "no sound". Rows are 22 px (a compact
+toggle keeps 16), labels people read use `--muted` (about 5:1 on the panel) instead of `--faint`,
+the row and ruler labels are larger, the resize handle is drawn on the selected or hovered note's
+last cell (the right part of that cell resizes; the rest of a note moves), and the grid keeps one
+tabbable cell (the selection, else the page's first) so Tab enters it once and arrows move inside.
+"repeat bar" on the score tab copies the current bar one bar later, growing the score first and
+skipping taken cells.
+
+**Tests.** `score-gestures.test.ts` (local projection, inverses, moves, repeats, replay guards);
+`score-editor.test.ts` (body drag with preview and refusal, the handle/body split with a measured
+cell, Alt+arrow and panel nudges, the capture-phase stop against an app-level Alt+arrow listener,
+undo/redo through keys and buttons, a refused undo, fresh inverses across a redo, a midway refusal
+rolled back, listen buttons, drum audition, pinned panel across tabs, roving tab stop that never
+replaces a selection, repeat bar and its undo); `studio-score-batch.test.ts` (a clear and a set in
+one batch, a clear never collapsed); `studio-audition.test.ts` (pad take). Renamed labels updated
+in the existing tests.
+
+**Review.** This round's read-only adversarial review found no blocker. Its high finding (the
+Alt+arrow collision with the app's history keys) and its mediums (replays bypassing the hand-edit
+guards; a move's clear left behind at the queue limit) are fixed above; its lows are fixed where
+they were defects (redo kept a stale inverse, a half-undo was lost, focus replaced the selection,
+a continuation cell read as empty, a nudge onto a folded row failed silently, a bar with a
+sound-less note could not be repeated, the past-the-end refusal was misworded, leftover "recipe"
+wording, instructional copy in the panel) and noted as design questions otherwise (a moved drum
+keeps its pad).
+
+**Verification.** svelte-check, the production build and the focused frontend files
+(`score-gestures`, `score-editor`, `studio-surface`, `studio-audition`); the complete suites,
+`test:startup` and `test:flows` were not run (user instruction); no Rust changed.
+
+**Deferred, in the assessment's order.** The listen-adjust loop (editing during playback and a
+steady loop period with changes applied on the next pass) is the engine stream and still needs the
+cyclic playback owner; playback still locks editing. Phrase selection (select several notes,
+transpose, duplicate a selection) and the sound designer's preview-length choices with a release
+marker on the envelope graph are next. Zoom is only the density toggle.
+
+## Score composer: busy spam, batched saves, note volume, post to chat (2026-10-19, branch `score-composer-2`)
+
+**Storage-busy spam.** With one person editing, the composer kept raising "Studio storage busy;
+retry the same request" save cards and the "Index draft status could not be read" banner. The
+refusal is native `authorize()` (`apps/desktop/src-tauri/src/studio.rs`) losing a `try_lock` once
+the actor has advertised Ready; the holder, when nobody else is online, is the app's own
+bookkeeping: the full server snapshot native seals after every studio save (`persist_server`),
+the UI-continuity write, a chat read. Each holds a guard for tens to hundreds of milliseconds and
+the renderer's follow-up reads and the next autosave land inside that window. The fix is a session
+seam, `apps/desktop/src/studio-busy.ts`: every native call of the Studio session repeats a
+storage-busy refusal with the byte-identical request after pauses of 40, 80, 160, 320 and 640 ms
+(the session's own timer seam, so tests drive it), and stops when the session generation moves.
+Because both native pre-execution refusals ("Studio storage busy; retry the same request",
+"Studio actor busy; retry") are raised before the request reaches the vault, a Save that still ends
+on one is now shown as known not written (re-authorable, discardable) instead of uncertain; every
+other native error keeps its uncertain classification. Two surface tests that used those texts as
+their "uncertain" vehicle now use a withheld-result text; that is the only test contract changed.
+
+**One transaction per autosave.** A score was saved one native transaction per placed note, and
+each transaction is a full server snapshot seal, a storage scan, a publication window and an
+update event. New `StudioRequest::ApplyBatch` (`crates/catcoms-app/src/studio.rs`) applies 1..64
+Score operations (256 KiB of bodies in all, distinct nonces, Score targets only) in one
+transaction through the same `apply` closure; every item is its own signed operation, so an exact
+retry of the whole batch reseals accepted items. It is not atomic: an item refused after earlier
+items were written leaves those durable, and the error names "item k of n". The Tauri command is
+`studio_apply_batch`; the session's `batchable()` gathers the queued, released, same-lane,
+same-epoch, same-binding Score edits behind the running one and sends them together (a lone edit
+still goes as `studio_apply`, which keeps every single-edit expectation). A refused batch settles
+every member alike; each card's retry resends its own item exactly. Tests:
+`crates/catcoms-app/src/studio/tests/batch.rs`, `studio-score-batch.test.ts`.
+
+**Editing while a save is read back.** `ScoreEditor.svelte` no longer treats a re-read of a score
+already on screen as read-only; only a first read with nothing to show blocks input. The working
+projection keeps the queued edits and the next readback corrects anything the author got ahead of.
+
+**Per-note volume.** `jam-score:v1` note cells gained an optional `vol` (1..100, percent of the
+recipe's level; absent means full level and is never rewritten to 100, like an absent `len`).
+Rust: `ScoreCell::Note { volume }` in `catcoms-replication/src/studio/score.rs` with encode-side
+range checks, the snapshot's presence byte (bit 0 `len`, bit 1 `vol`; old 0/1 bytes read
+unchanged), the bridge's cell JSON, two new shared vectors (18 in all). Frontend: the contract,
+native parser, draft validator, `scoreCellOperation` (writes `vol` only when it is not 100),
+export (`vol` rides the take note-on as `v`), take validator (closed key sets), archival plan
+(`level` 0..1), engine (`JamNoteInput.level`, multiplied into the recipe's oscillator mix, never
+the envelope), audition, and the composer (a placing-section level remembered for new notes, and
+quieter/louder steppers plus a number field in the selected panel; resize and reassign carry the
+level). **Compatibility floor:** a build before this one rejects a body or checkpoint carrying
+`vol` as malformed, and under the existing fail-closed admission rule that rejection pauses the old
+build's Studio sync for the whole server (the "sync paused" banner, reasserted by every further
+`vol` operation and by a checkpoint seed with the new presence bit) until an explicit Studio
+access; to its user it looks like corruption. A group editing volumes must therefore run this build
+or newer before anyone authors one; a score without volumes is byte-identical to before. Older take
+players likewise reject a note-on with `v`. Whether to ship the volume controls one release after
+the decoders (the codec and snapshot side is independent of the UI) is a product call left open.
+
+**Post to chat.** The composer offers "post to chat" (`data-score-post`) when the host can attach:
+`Studio.svelte` gained `onpostScore` and `downloadMedia("download" | "share" | "post")`;
+`App.svelte` `postStudioScore` mirrors `postStudioPixa` (upload to the member's embed folder,
+refresh, save the Studio, append the file marker to the draft; every await re-checks channel,
+server, view and the navigation claim).
+
+**Review findings (eb411f1).** P2: a Studio document navigation now announces itself through a
+new `onnavigate` prop (StudioNav `open`/`newFlipnote`/`newScore`, the Music tab's open/create) the
+moment it is decided, before its departure Save can wait; App's `noteStudioNavigation` bumps the
+`studioNavigation` counter, so an App route already waiting on its own Save finds itself
+superseded. `studio-navigation-token.test.ts` pins the wiring statically (it caught the sidebar's
+"new score" path). P3: a cancelled press is forgotten only when its own pointer presses again, so
+a second finger's tap cannot revive it (test added).
+
+**Verification.** `cargo check -p catcoms-app`; `cargo check` of the `src-tauri` workspace;
+`cargo test -p catcoms-replication score`; `cargo test -p catcoms-app --lib studio::tests::batch`
+(3/3); `cargo fmt --all`; `cargo clippy -p catcoms-app -p catcoms-replication --all-targets
+--all-features -- -D warnings`; `scripts/check-no-ambient.sh`; focused frontend files
+(`studio-busy`, `studio-score-batch`, `studio-navigation-token`, `studio-score`,
+`studio-score-session`, `studio-buffer`, `studio-session`, `score-editor`, `studio-surface`,
+`jam-recorder`, `jam-archival-plan`); `npm run check`; `npm run build`. The complete backend and
+frontend suites, `test:startup` and `test:flows` were not run this round (user instruction);
+`cargo deny check` was not run (no dependency change).
+
+**Review.** This round's read-only adversarial review found no blocker. Its high finding is
+fixed: a drag-resize rewrote the cell without its level, silently resetting a quieter note to full
+volume (now carried, pinned in the drag-resize test). Its medium is fixed: batch members only ride
+with a first delivery, because an exact retry skips admission on purpose and a member riding with
+it would have lost its "history changed" refusal (pinned in `studio-score-batch.test.ts`). The
+compatibility consequence above and the `studio_apply_batch` row in `docs/INTERFACES.md` are its
+other two findings. Recorded follow-ups: a refused batch settles every member uncertain although
+native applies in order and stops, so a structured refusal carrying the item index would let the
+items after it stay known-not-written; a 64-item batch materialises the projection and scans the
+log per item under one actor custody, so measure before keeping 64 as the default (16 would still
+remove most of the per-save cost) and note that packets past the two-second publication window
+rely on catch-up; items saved before a refused one are durable but unpublished until retried.
+Test gaps it lists: a lock snapshot during an in-flight batch, a binding or byte-bound split, a
+discard refused for an inflight member, a nonce reused across a single Apply and a batch item.
+
+**Residual.** The busy refusal still surfaces once the bounded repeats are spent (a wedged vault
+is reported, not hidden). A refused batch is retried one card at a time. Flipnote and Index edits
+do not batch (their admission inspects each body). The loop-at-bar/engine milestone and note
+move/undo are unchanged from the entry below.
+
+## Score composer: third review, green CI, studio loading (2026-10-18, PR #49)
+
+The third external review (PR #49 head `8568250e`) reported six findings; all are fixed here:
+
+- **An own Save no longer stops playback.** `workingScore` produced a readiness entry for every
+  cell and recipe, all flags false, while native readiness omits clean slots; the editor's media
+  fingerprint serialises readiness, so the readback of an identical score looked like a source
+  change and stopped audio started from the working projection. The working projection is now
+  sparse like native (`studio-working.ts`), pinned in `studio-buffer.test.ts`.
+- **Jitter is a click.** A place gesture records the pressed cell and the previewed end; movement
+  inside the pressed cell is ignored, the gesture never writes shorter than the preview, and only
+  entering another cell counts as a drag that may change the remembered hold.
+- **A cancelled press is over.** Escape, pointercancel and blur remember the press; its release
+  and completion click are swallowed, and the next press works normally.
+- **A superseded channel switch no longer acts.** `switchTo` returns false after its awaited read
+  unless it is still the newest route and its channel is still on screen; Search-in-channel and
+  Edit-topic then do nothing instead of forcing the pane or opening against another channel.
+- **Every held document is reachable.** The sidebar pages held documents eight at a time with
+  prev/next instead of counting the rest.
+- **Keyboard focus survives folded and past-the-end destinations.** Cells are disabled only when
+  the editor is read-only; cells that cannot take a note are marked `off`/`aria-disabled`, stay
+  focusable, and refuse placement in the click handler.
+
+CI: the 24 score-component failures were the test file's DOM globals (the runtime's event
+delegation needs `HTMLMediaElement`); the audition failure was the own-Save stop above; the
+pads-lane fold assertion now uses a row outside both the scale and the lane. The three focused
+files (`score-editor`, `studio-surface`, `studio-buffer`) pass 89/89; svelte-check and the
+production build pass. The full suites were not run this round (user instruction).
+
+Loading: both "Loading the studio…" placeholders are now an indeterminate bar with a seconds
+readout, and the three studio modules are warmed six seconds after unlock so the first visit does
+not pay the cold import under the click (in development that import is Vite's first transform of
+the editor graph, tens of seconds; in the packaged app it is a local chunk). Nothing but the
+modules is fetched by the warm-up.
+
+This round's own read-only review found no blocker or high. Its mediums are fixed: a superseded
+`switchTo` still refreshes the on-screen channel's topic and delivery ticks and refuses only the
+caller's follow-up action; drift inside a preview that a neighbour forced short no longer rewrites
+the remembered hold (only lengthening beyond the preview does); and a read-only turn mid-press
+now cancels through the same path as Escape, so its completion click is swallowed even after the
+block lifts. Its lows are fixed too: no audition on a folded empty cell, returning to the pressed
+cell returns to the preview even past skipped cells, a secondary-button press does not forget a
+cancelled primary press, the loading seconds are hidden from live announcement, the held-document
+pager resets when its page count changes, and the focus test covers a past-the-end destination.
+Residual, noted by the review: a second pointer's tap during a drag is an ordinary click; a drag
+lengthened across a neighbour ends in the overlap refusal rather than a clamp; working readiness
+does not model the 64-recipe admission cap.
+
+Not changed, by decision: the loop period still grows with the last note's release tail (the
+controller completes at `max(grid, lastRelease)` and the session restarts after that), which the
+review identifies as the likely cause of long sounds feeling out of time. The fix it proposes, a
+cyclic playback owner in the engine that repeats on the authored bar while earlier voices finish
+under the existing budgets, is the next milestone together with note moves and undo under a
+bounded native gesture operation. Gaps: the `switchTo` refusal and the held-document pager have
+no automated regression yet (the route reproduction needs extracted App functions; the pager
+needs nine restored held documents).
+
+## Score composer: review fixes and direct manipulation (2026-10-18, branch `score-composer-2`)
+
+The second review of the composer (PR #47, head `87ab2d89`) reported five P2 and one P3 defects,
+all reproduced from its descriptions and fixed on a worktree branched from that head with the
+`Gate7` review-fix commit merged in:
+
+- **Placing a note no longer cancels its own audition.** Studio records which object and editor
+  media generation each playback was started against (`claimAudio`) and stops audio only when the
+  source on screen is a different one; a note's own edit bumps the generation and then auditions,
+  and that audition survives. A remote invalidation, a navigation or a lock still stops playback.
+- **One owner per overlapped coordinate.** `scoreHolds`, `scoreOnsetAt` and the new `scoreNotesAt`
+  agree: the earliest onset owns a covered continuation cell, so colour, label, selection,
+  audition and erase name the same note there; a later note's own onset cell still shows that
+  note and lists the earlier one. Overlapped cells are striped, the tooltip names the other notes,
+  and the selected panel offers them to select or clear.
+- **A cancelled drag writes nothing.** A drag belongs to the pointer that began it; pointercancel,
+  Escape, a window blur and a read-only turn drop it without an operation or an audition, and a
+  foreign pointer's release is ignored by it.
+- **A drag revalidates its start on release.** The start cell must still be free and the recipe
+  still the chosen one; otherwise nothing is written and a notice says another edit landed first.
+- **Keyboard navigation keeps focus.** Arrow moves focus the selected cell after it renders, so
+  crossing a page boundary no longer parks focus on the body.
+- **Paging keeps an absolute first step.** The view coordinate is the first visible step; the
+  page index is derived from it and the current width, so widening the card keeps the same bars.
+
+Manipulation, the first milestone the review recommended, with the user's answers (short pieces;
+manipulation first, timing second): placement snaps to a chosen unit (eighth by default; the
+snap only moves the start, and only when every cell between the snapped start and the click is
+free), a hover preview shows exactly the cells a click writes (the remembered hold fitted to the
+free run before the next note and to the authored end), the hold is remembered only when the
+author chose it (a drag, a resize or the stepper, never a forced fit), a note's last cell drags to
+resize, the selected panel changes a note's recipe or length (lengthen is unavailable at the end),
+playback can start from the selected step, the pad lane (rows C4..A4 in pads mode) places its
+row's pad and never folds under the scale view, and the scale view (toggle in the header or `s`,
+kind and root in the placing section) folds rows outside the scale to slivers without hiding or
+disabling the notes there. The score tab gained the mockup's tempo (big readout, ±1/±5, tap that
+writes once the tapping settles, half/double), meter (segmented 1..8), length (steps, beats, bars,
+time; "+ bar", "− bar", "fit to last note", which may extend the score to notes past the end,
+"fit to bars") and export (checklist and actions) sections; the transport's "trim" still only
+shortens. Regression tests cover each finding and each gesture, including a real pointer click
+(pointerdown, pointerup, click) that must write the previewed hold; the "model changed under a
+drag" case mounts the composer through `scripts/fixtures/ScoreEditorHarness.svelte`. The round's
+own read-only review found no blocker; its two highs were defects in these unexecuted tests
+(fixed: the widened `ScoreHold` shape, and a fake backend that forgot the applied cell and so read
+as a source change), its medium was the pointer click writing `max(hold, snap)` (fixed as above),
+and its lows are fixed except two design notes: a later note's own onset cell shows that note
+(documented above), and tap tempo uses ambient time in the component (the pure helper is tested).
+
+Timing, deliberately not changed in this round: the engine already schedules each note's release
+on the audio clock when the note is created, so only attacks ride the 16 ms tick. A fix needs
+attack lookahead inside `jam-engine.ts` (allow a negative age in `playArchivalEvent` and
+`noteOnWithHold`, start the source at `now + lead`, hold the gain at zero until then, and give
+`noteOff` a scheduled release so two same-pitch notes inside the lookahead window are not seen as
+a duplicate), plus a controller tick that dispatches events up to the lookahead early. The other
+half of "longer envelopes feel off" is the loop: `StudioAudioSession` restarts only after the last
+release tail, and restarting on the bar instead needs the engine to keep a draining archival
+capability alive beside the new one. Both are engine changes and were not made without running
+the engine's suites. Per the user's instruction the unit suites were NOT run for this round; the
+tests above are written but unexecuted, and svelte-check passed.
+
+## Score composer surface (2026-10-18)
+
+The Studio's score composer now matches the designed surface instead of the table-based
+stand-in. `ScoreEditor.svelte` renders the native Score as a chromatic step grid (C4..C6 at
+sixteenths, 16 or 32 steps per page depending on the card width) with a tool rail (place, erase,
+audition; keys or pads), a recipe rack fed by the Sound tab's library shelves plus the soundfont
+popup, a transport (page navigation, play/stop, loop toggle, bpm, beats per bar, steps, "+ bar",
+"trim"), an overview strip, and an inspector with patches, score and history tabs; the history tab
+renders Studio's existing history rail through a snippet. Dragging along a row sets a note's hold;
+right-click, the erase tool, Delete and the selected-cell panel clear; placing a note auditions it
+through the existing one-note audition path. Studio's score block lost its own Music/History tab
+bar, loop checkbox and download/share buttons; those live in the composer's header and transport.
+
+Nothing retained is hidden: the grid pages over every live cell, including cells past a shortened
+length, hatches over-cap and past-the-end cells, hollows cells whose recipe is gone, marks
+concurrent values and clears that beat a value, and the score tab's attention list (24 per page,
+alternatives 8 per page) is where a value is re-authored or a coordinate cleared. A chosen recipe
+enables placement only once the working projection holds it (immediately under Gate 7's working
+edits, after native readback otherwise); it never falls back to another recipe. Pure helpers live in
+`score-editor.ts` (`scoreExtent`, `scoreHolds`, `scoreOnsetAt`, `scoreAttention`,
+`scorePlayheadStep` and friends) and are unit-tested beside the compiled component.
+
+The read-only adversarial review found no blocker or high finding. Its mediums are fixed: the
+add-recipe completion no longer fences on the model reference (the working projection replaces it
+synchronously, so the fence could never pass under autosave; target identity is the host's fence),
+Delete/Backspace/arrow keys act only while focus is on the grid card (never from the inspector's
+history rail), recipe names and library membership are memoised per model instead of serialised
+per cell, and the "read back" wording was corrected to "in the working projection". Lows fixed:
+"trim" only shortens, a removed recipe's clear is the highlighted current value, an empty-cell
+audition is clamped to the steps left, a hold whose recipe is gone is hollow along its whole run,
+the page keeps its first step across a 16/32 resize, and the header distinguishes "to review"
+(ready, retained values waiting) from "to fix". Left as follow-ups: the implicit first-recipe
+fallback when nothing was picked (visible in the footer), the host's art hotkeys still moving the
+art tool while a score has focus (view state only), and the loop playhead wrapping at the grid end
+while the release tail still sounds (display only).
+
+Limitations: pads share the 25 pitch rows because jam-score:v1 keys a cell by (step, row) with one
+note or one pad hit; there is no separate drum lane. Removing a recipe in use leaves its cells
+flagged until each is cleared or re-placed. Claims/Ask/Pass are unchanged. Checks run for this
+change: svelte-check, the focused `score-editor` and `studio-surface` files, the complete frontend
+unit suite, the root and native Cargo suites, the production frontend build, and fixture
+screenshots at 1280×800 and 900×640; the startup and flow gates were not run because the change
+touches neither `setup`, process spawning nor the chat/friend-request flows.
 
 ## PR #46 fifth review: two save workers; follow-ups closed (2026-10-19)
 

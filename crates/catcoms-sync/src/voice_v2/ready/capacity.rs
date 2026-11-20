@@ -1,7 +1,7 @@
 //! Ready has independent prepaid bytes, never SDP's one Source position. This subtree
 //! moves with the original affine successor and shares its original Crypto/Lower lanes.
 //! It grants no Ready, receive, signature, membership, SDP or RTC authority.
-use super::super::resources::{ByteBudget, Credit, Reservation, ResourceKind, Resources};
+use super::super::resources::{ByteBudget, ProgressFunding, Reservation, ResourceKind, Resources};
 use super::super::VoiceError;
 use std::sync::Arc;
 
@@ -23,7 +23,7 @@ const _: () = assert!(METADATA + CACHE + RECEIPT + SOURCE + 2 * LOWER + ACK_CRYP
 pub(in crate::voice_v2) struct ReadyCapacity {
     pub(in crate::voice_v2) reserve: Arc<Reservation>,
     // Last inside this subtree. The original enclosing SuccessorCustody still follows it.
-    _metadata: Credit,
+    pub(in crate::voice_v2) metadata: Arc<ProgressFunding>,
 }
 impl ReadyCapacity {
     pub(in crate::voice_v2) fn new(
@@ -39,7 +39,7 @@ impl ReadyCapacity {
         )?;
         Ok(Self {
             reserve,
-            _metadata: metadata,
+            metadata: ProgressFunding::new(metadata),
         })
     }
     pub(in crate::voice_v2) fn close(&self) {

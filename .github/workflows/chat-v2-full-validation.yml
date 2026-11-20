@@ -51,6 +51,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94.0
       - uses: Swatinem/rust-cache@v2
+      - name: Check original route custody and collection regressions
+        run: >-
+          cargo test --locked -p catcoms-sync --all-features --lib -- --exact --test-threads=1
+          voice_endpoint::ingress::tests::protected::protected_root_hello_returns_signed_admission_and_exact_lost_ack_without_new_work
+          voice_endpoint::ingress::tests::protected::protected_root_queued_ack_epoch_change_revokes_before_driver_send_and_first_result
+          voice_endpoint::ingress::tests::protected::ready::source::key_release_after_ready_queue_revokes_actual_lower_without_early_refund
+          voice_endpoint::ingress::tests::protected::ready::source::root_ready_source_actual_signed_ack_uses_original_capacity_with_full_ordinary_crypto_and_bytes
+          voice_endpoint::ingress::tests::protected_start::progress::protected_source_and_signed_ack_keep_original_capacity_under_full_ordinary_pressure
       # No warning override, stack increase, retry or ignored-test substitution.
       # --no-fail-fast collects other crate results after a failure; it still fails the job.
       # Strict Clippy and dependency audits remain separate mandatory gates in ci.yml.
@@ -58,6 +66,7 @@ jobs:
       # acceptance. Keep the test intact and make the execution exception visible. This
       # intermediate run cannot claim complete root sign-off until that case also passes.
       - name: Run root workspace except the explicitly deferred cost case
+        if: ${{ !cancelled() }}
         run: >-
           cargo test --locked --all --all-features --no-fail-fast --
           --exact --skip cold_provider_transfers_only_one_missing_change_after_ten_thousand_operations
@@ -126,8 +135,13 @@ jobs:
       # Native builds consume real frontend assets; build them on both operating systems.
       - name: Build frontend assets
         run: npm --prefix apps/desktop run build
+      - name: Check original native IPC and delayed-reply custody regressions
+        run: >-
+          cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --lib -- --exact --test-threads=1
+          voice_activation_tests::admitted_ipc::admitted_commands_cross_real_tauri_json_dispatch_and_recover_locked_history
+          voice_handoff::commands::tests::ready_and_closed_share_one_guard_and_delayed_closed_body_remains_paid_after_collection
       - name: Run the complete native workspace
-        if: github.event_name != 'workflow_dispatch' || inputs.scope != 'native-focused'
+        if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || inputs.scope != 'native-focused') }}
         run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --no-fail-fast
       - uses: actions/setup-python@v5
         if: github.event_name == 'workflow_dispatch' && inputs.scope == 'native-focused'

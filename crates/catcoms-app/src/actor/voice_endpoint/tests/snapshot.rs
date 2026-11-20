@@ -199,6 +199,10 @@ fn admitted_snapshot_caller_loss_cannot_release_payment_before_root_finishes() {
     let (entered, admission) = std::sync::mpsc::channel();
     let (release, proceed) = std::sync::mpsc::channel();
     *clock.gate.lock().unwrap() = Some((entered, proceed));
+    // This direct snapshot dispatch uses an actual inbox's inert control. It
+    // exercises no admitted-call preparation or send-fence authority.
+    let (command_sender, command_receiver) = mpsc::channel(64);
+    let mut inbox = ActorInbox::new(command_receiver, &command_sender);
     std::thread::scope(|scope| {
         let work = scope.spawn(|| {
             Command::ConfirmationActions {
@@ -208,7 +212,7 @@ fn admitted_snapshot_caller_loss_cannot_release_payment_before_root_finishes() {
                 permit,
                 reply,
             }
-            .apply(&mut server)
+            .apply(&mut server, inbox.control())
         });
         admission.recv().unwrap(); // Root Clock runs AFTER Command's receiver-is-open check.
         drop(completed);

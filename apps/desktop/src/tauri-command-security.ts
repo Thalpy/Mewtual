@@ -37,10 +37,23 @@ export const TAURI_COMMAND_GROUPS = {
       // Selected-key cleanup can close one paid selection before a delayed admission and
       // waits for actual publication drainage; it never returns engine/network authority.
       "settle_voice_join_key",
+      // Exact admitted terminal history and ACK/settlement survive lock. Only
+      // first activation/key admission/publication may create work, behind the
+      // original UI-generation and immutable admitted-profile checks in Rust.
+      "prepare_admitted_voice_owner", "activate_admitted_voice_owner",
+      "acknowledge_admitted_voice_activation", "admit_admitted_voice_join_key",
+      "admit_admitted_physical_voice_join_key",
+      "publish_admitted_voice_join_key", "settle_admitted_voice_join_key",
+      "acknowledge_admitted_voice_key_publication",
       // Exact original-channel cleanup must survive lock, End and lost setup/final replies.
       // It accepts no drain flag, private bytes or replacement generation; setup still gates
       // the unlocked session and native selected owner before RNG or channel admission.
       "setup_voice_channel", "settle_voice_channel_setup", "collect_voice_channel",
+      // Separate admitted physical bootstrap; no pilot/Ready/RTC conversion.
+      // Native setup crosses current UI/profile fences; exact negative cleanup
+      // deliberately survives End/lock without creating a replacement row.
+      "setup_admitted_voice_channel", "settle_admitted_voice_channel_setup", "collect_admitted_voice_channel",
+      "observe_admitted_voice_channel", "acknowledge_admitted_voice_channel",
       // Read existing original-channel work metadata after End/lock so unseen Pending can
       // be cleaned up. It cannot admit work, fetch payloads or assert actual drainage.
       "read_voice_channel_work",
@@ -234,6 +247,12 @@ export const TAURI_COMMAND_GROUPS = {
       // operation bound, ids must be exactly 32 lowercase hex characters, and the channel must be
       // canonical decimal, so an id or a channel is never a way to address something else.
       "studio_create", "studio_apply", "studio_apply_index",
+      // Several Score edits in one actor visit. Each item is the same signed operation a lone
+      // `studio_apply` would carry, with the same 64 KiB body cap, so the batch grants no authority
+      // a sequence of single Applies lacks. Natively it is Score-only and bounded before any body is
+      // decoded (1 to 64 items, 256 KiB of bodies, distinct nonces). It is not atomic: an item that
+      // is refused names itself, and the items before it stay saved.
+      "studio_apply_batch",
       // Manual local-draft lifecycle. Archive adds lossless local evidence; release and disposal
       // can destroy it only with exact typed identities/confirmation; copy apply is re-planned
       // against current source and destination bytes. None grants owner, receipt or handoff
