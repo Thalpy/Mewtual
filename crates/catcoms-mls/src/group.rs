@@ -26,7 +26,19 @@ pub use catalog::{
     MemberCatalogView, MAX_MEMBER_CATALOG_CREDENTIAL_BYTES, MAX_MEMBER_CATALOG_PROBES,
 };
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod add_explicit_time;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod merge_explicit_time;
 mod owner_observation;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod private_text_add;
+mod text_current;
+// Native, independently paid private Add, completed DATA and exact-receiver
+// whole-pair ownership handoff. Root governance/Source/save admission and
+// publication stay separate; no raw SDK extraction or mutable getter exists.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod text_current_add;
 pub use owner_observation::{LocalMembershipChange, LocalMembershipChangeKind};
 
 /// The result of adding a member: the joiner's Welcome, the Commit to fan out to

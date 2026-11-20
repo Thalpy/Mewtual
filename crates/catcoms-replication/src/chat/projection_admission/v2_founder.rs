@@ -61,8 +61,19 @@ impl V2FounderExpectation {
 }
 
 /// Explicit HOST selection of an already saved successor. This is not a proof that App
-/// storage selected it. Only the private actual Root adapter may supply this in production,
-/// after its exact SavedB/current proof (or authenticated frozen cold-selector replay).
+/// storage selected it. In production exactly two private consumers may supply it:
+///
+/// - the founder's actual Root adapter, after its exact SavedB/current proof (or
+///   authenticated frozen cold-selector replay);
+/// - the private joined-member Root consumer, only after it has established, in order: the
+///   independently mounted joined pin, complete historical replay of the pinned prefix, the
+///   own Add's binding to this device's actual consumed Welcome, and (postjoin) this node's
+///   supported FINALIZED MLS transition for the step. A warm joined selection is neither a
+///   founder SavedB receipt nor evidence that the joiner durably selected the record; the
+///   completed joined source also needs its durable selected-record/archive custody.
+///
+/// Copying a mathematically derived candidate's header/state into this value proves none of
+/// those facts. Keep it away from untrusted decoders and native/renderer arguments.
 pub struct V2HostSelectionExpectation {
     header: OwnerHeaderId,
     state: OwnerStateCommitment,
@@ -76,6 +87,11 @@ impl std::fmt::Debug for V2HostSelectionExpectation {
 impl V2HostSelectionExpectation {
     pub fn from_trusted_host(header: OwnerHeaderId, state: OwnerStateCommitment) -> Self {
         Self { header, state }
+    }
+
+    // Shared closed verifier comparison; this exposes no constructor, labels or authority.
+    pub(super) fn matches_data(&self, header: &SignedOwnerHeader) -> bool {
+        self.header == header.id() && self.state == header.spec().state
     }
 }
 
@@ -101,7 +117,7 @@ impl std::fmt::Debug for V2FounderReplayCursor {
 
 /// Shared complete-genesis verification for active and nonissuing replay. Keeping one
 /// enforcement path prevents a cold reader from accepting a weaker root or signature.
-fn verified_genesis_math(
+pub(super) fn verified_genesis_math(
     expectation: &V2FounderExpectation,
     profile: &SignedOwnerProfile,
     founder: &AdmissionBody,
@@ -244,6 +260,15 @@ impl V2RetiredAppendData {
 }
 
 impl V2FounderPrefixVerifier {
+    /// Small verifier/identity/founder-copy metadata, ADDITIONAL to its independently
+    /// funded complete ReplayMath invoice and original group/origin controls. No model
+    /// clone or new live verifier can be funded by this metadata-only layout constant.
+    pub const fn metadata_layout_bytes() -> usize {
+        std::mem::size_of::<Self>()
+            + crate::chat::owner_profile::MAX_ADMISSION_BYTES
+            + 4 * std::mem::size_of::<usize>()
+    }
+
     /// Authenticate COMPLETE genesis from independent HOST expectations. The supplied group
     /// owner is negative-only: it cannot replace the root expectation or signed replay.
     /// The caller funds the complete ReplayMath invoice and original observer/metadata first.
@@ -470,7 +495,7 @@ impl V2FounderPrefixVerifier {
             },
             view: view.life.clone(),
             open: None,
-            support: ProjectionSupport::V2FounderCreate {
+            support: ProjectionSupport::FounderCreate {
                 record: record.id(),
                 leaf_index: index,
                 origin: self.origin.clone(),

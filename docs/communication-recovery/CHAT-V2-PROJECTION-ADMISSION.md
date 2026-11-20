@@ -1,8 +1,12 @@
 # Default-closed v2 projection admission
 
-Core implementation authored after design review; compilation/execution remain paused. This is not
-a production verifier, mounted owner host, durable negative journal or native/UI adapter. All
-compilation remains paused. Keep existing semantic history and its tests unchanged.
+7 November status: compilation and focused execution are permitted. The general Core
+issuer passes ten production-verifier tests; its Draft/signing extension is now declared
+and all 252 tests in the broader chat subset pass. This document's original projection mechanisms
+remain a Core boundary, not a mounted owner host, durable negative journal or native/UI
+adapter. General Proven Delete remains deliberately refused until paired durable custody
+exists. [Current evidence](../HANDOVER.md) and
+[general issuer](CHAT-V2-GENERAL-OPEN-ISSUER.md) supersede earlier paused-test notes.
 
 ## Why a separate boundary is necessary
 
@@ -71,6 +75,46 @@ The core still explicitly bounds scan/traversal work; it must return work refusa
 partial projection labelled complete. Scalable cold-index/paged projection and automatic bounded
 repair belong to the active host and remain separate gates. Point-of-use scope checks are fixed
 runtime observations, with no arbitrary verifier callback or I/O per row.
+
+## V2 Delete and local cold-negative custody: required next implementation
+
+Current General V2 accepted-action issuance refuses Delete. The existing prior-Delete
+capsule issuer uses legacy proof identity and cannot be relabelled as V2. A separate
+own-Delete inclusion issuer must verify the actual current or frozen Admission, exact
+signed dependencies/own target, record binding and inclusion. Its V2 support must carry
+exact record/index/source provenance, never a parsed tip or status. Provisional Deletes
+can hide text but cannot mint prior-Proven custody.
+
+Both installation orders matter: Delete may arrive before its admitted Create. Core must
+preflight ALL newly eligible exact V2 capsules in an opaque non-Clone mutation plan; Root
+must durably save that exact negative batch before final positive token/capsule mutation.
+Final application rechecks the same plan/view revision under original group then ledger
+guards. A direct Create admission must not bypass required durable negatives. Each Delete
+keeps its own fixed obligation, whether or not a renderer ever displayed its effect.
+
+ChatSnapshot currently saves actions only and restores projection closed. Full governing
+replay authenticates acceptance tips, not the complete local negative inventory. Incremental
+Create/OPEN activation after restore can forget previously effective Delete custody unless
+a selected durable negative-closure index/journal, or equivalent per-target closure, is
+loaded first. Page EOF, a snapshot hash and the loaded-actions index do not prove that.
+This coverage is the mounted LOCAL known-obligation generation, never globally unseen
+remote Deletes. Fresh ordinary OPEN remains available after its complete local lookup;
+unknown remote signed Deletes merge when they arrive.
+
+Each selected negative row retains exact target/Delete/Create bindings and original signed
+Delete/proof locators. Decoding negative DATA may only suppress: it cannot issue Proven
+Deleted, OPEN, signing or clearing permission. Missing/corrupt/unsupported selected negative
+state keeps that target closed. Clearing requires a separate exact-capsule complete-current
+closure against the actual selected local inventory and governing source; missing proof,
+removal, a lone Reject or a Boolean cannot erase an obligation. Persist the exact resolution
+witness before runtime clearing and preserve the original row; proof loss suppresses again.
+
+Required tests cover genuine current/frozen inclusion, both arrival orders, provisional
+Create, minting without rendering, two independent Deletes, proof/view/source loss, stale
+and cross-source resolution, cancellation during remint and restart with partial action/
+proof loading. Root must test journal barriers, quota/refund, lost replies, corruption and
+no body publication before complete local negative lookup. These production consumers and
+the durable negative format are not implemented by the current Core issuer.
 
 ## Missing previously effective Delete evidence
 

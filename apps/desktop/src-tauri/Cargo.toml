@@ -124,10 +124,11 @@ xattr = "1.7.0"
 
 # Cargo patches belong to each workspace root, including this separate native workspace.
 [patch.crates-io]
+netwatch = { path = "../../../vendor/netwatch" }
+libp2p-gossipsub = { path = "../../../vendor/libp2p-gossipsub" }
 automerge = { path = "../../../vendor/automerge" }
 openmls_memory_storage = { path = "../../../vendor/openmls_memory_storage" }
-# Cargo patches are workspace-local; the native app must use the same repair.
-libp2p-gossipsub = { path = "../../../vendor/libp2p-gossipsub" }
+openmls = { path = "../../../vendor/openmls" }
 
 # Match the core workspace: keep the real KDF and all its costs/assertions, but
 # optimize its development/test arithmetic. Release settings are unchanged.

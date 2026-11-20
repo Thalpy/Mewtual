@@ -1,8 +1,10 @@
 //! Genuine SourceSaved -> complete activation seed -> NO row -> full drain/new mount/
 //! NEW paid source+SDK. These tests never manufacture a receipt, watch, row or scope permit.
+#[cfg(not(target_os = "linux"))]
 use super::*;
 #[cfg(windows)]
 use crate::store::critical_namespaces::current_layout::cold_read::tests::ColdFixture;
+#[cfg(not(target_os = "linux"))]
 use crate::store::critical_namespaces::current_layout::cold_read::tests::{
     fixture_at_cut, ColdFixtureCut,
 };
@@ -333,7 +335,7 @@ fn original_pre_receipt_and_exact_fee_tail_keep_no_source_sdk_or_store_alive() {
     drop(directory);
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 #[test]
 fn unsupported_native_inventory_profile_has_no_implicit_portable_fallback() {
     // The real portable producer supplies the complete journal and no row. Calling actual

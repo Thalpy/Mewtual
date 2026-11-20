@@ -91,6 +91,20 @@ pub(super) struct Parsed<'a> {
     pub(super) join_version: Option<u32>,
     pub(super) current_layout: Option<super::archive_current_namespace_codec::CurrentLayoutData>,
     pub(super) current_payload: Option<&'a [u8]>,
+    pub(in crate::store) governance:
+        Option<super::governance_namespace_codec::capability::GovernanceCapabilityData>,
+    pub(super) governance_payload: Option<&'a [u8]>,
+    // Namespace5 (ordinary-member outbox), populated only when the concrete configured
+    // member-outbox handler selected this grammar. Preserved byte for byte by every JOIN
+    // writer exactly like ID2/3/4; it is never inferred, normalized or dropped.
+    pub(in crate::store) member_outbox:
+        Option<super::member_outbox_namespace_codec::MemberOutboxCapabilityData>,
+    pub(super) member_outbox_payload: Option<&'a [u8]>,
+    pub(super) native_registry_payload: Option<&'a [u8]>,
+    // Captured only after the matching closed reader validates this actual
+    // entry. JOIN must conserve its version as well as its descriptor bytes;
+    // choosing the writer's historical default would relabel index2 as1.
+    pub(super) native_registry_version: Option<u32>,
 }
 
 /// Fixed, inert classification retained after dropping a complete plaintext. Digest equality
@@ -108,6 +122,13 @@ pub(in crate::store) struct Summary {
     pub(in crate::store) current_layout:
         Option<super::archive_current_namespace_codec::CurrentLayoutData>,
     pub(super) current_payload_digest: Option<[u8; 32]>,
+    pub(in crate::store) governance:
+        Option<super::governance_namespace_codec::capability::GovernanceCapabilityData>,
+    pub(super) governance_payload_digest: Option<[u8; 32]>,
+    pub(in crate::store) member_outbox:
+        Option<super::member_outbox_namespace_codec::MemberOutboxCapabilityData>,
+    pub(super) member_outbox_payload_digest: Option<[u8; 32]>,
+    pub(super) native_registry_payload_digest: Option<[u8; 32]>,
 }
 impl Parsed<'_> {
     pub(super) fn summary(&self, framed: [u8; 32]) -> Summary {
@@ -126,6 +147,17 @@ impl Parsed<'_> {
             current_payload_digest: self
                 .current_payload
                 .map(|bytes| *blake3::hash(bytes).as_bytes()),
+            governance: self.governance,
+            governance_payload_digest: self
+                .governance_payload
+                .map(|bytes| *blake3::hash(bytes).as_bytes()),
+            member_outbox: self.member_outbox,
+            member_outbox_payload_digest: self
+                .member_outbox_payload
+                .map(|bytes| *blake3::hash(bytes).as_bytes()),
+            native_registry_payload_digest: self
+                .native_registry_payload
+                .map(|bytes| *blake3::hash(bytes).as_bytes()),
         }
     }
 }
@@ -140,7 +172,7 @@ pub(super) fn binding_digest(immutable: &[u8]) -> [u8; 32] {
 /// Scan the complete outer candidate before deciding supported IDs. An unknown descriptor,
 /// including reserved ARCHIVE2, is never skipped/truncated into a known JOIN-only history.
 pub(super) fn parse<'a>(plain: &'a [u8], domain: &[u8; 32]) -> Result<Parsed<'a>, AppError> {
-    parse_known(plain, domain, SupportedLayout::PendingOnly)
+    parse_known(plain, domain, SupportedLayout::PENDING_ONLY)
 }
 
 /// Concrete known-layout DATA parsing for the archive constructor. This function is not a
@@ -149,21 +181,166 @@ pub(super) fn parse_bootstrap<'a>(
     plain: &'a [u8],
     domain: &[u8; 32],
 ) -> Result<Parsed<'a>, AppError> {
-    parse_known(plain, domain, SupportedLayout::ArchiveBootstrap)
+    parse_known(plain, domain, SupportedLayout::ARCHIVE_BOOTSTRAP)
 }
 
-enum SupportedLayout {
-    PendingOnly,
-    ArchiveBootstrap,
-    Executing,
-    ArchiveBootstrapExecuting,
-    CurrentLayout,
-    CurrentLayoutExecuting,
+/// The closed set of namespaces one concrete configured reader can fully inspect. Each flag
+/// is set only by the matching actual handler's policy, never by parsed DATA. An entry whose
+/// flag is clear refuses the whole catalog before any old cleaner; there is no generic
+/// unknown-namespace pass-through.
+#[derive(Clone, Copy)]
+struct SupportedLayout {
+    /// JOIN execution payload version2 is accepted as DATA.
+    executing: bool,
+    archive: bool,
+    current: bool,
+    governance: bool,
+    member_outbox: bool,
+    native_registry: Option<u32>,
+}
+impl SupportedLayout {
+    const PENDING_ONLY: Self = Self {
+        executing: false,
+        archive: false,
+        current: false,
+        governance: false,
+        member_outbox: false,
+        native_registry: None,
+    };
+    const ARCHIVE_BOOTSTRAP: Self = Self {
+        archive: true,
+        ..Self::PENDING_ONLY
+    };
+    const CURRENT_LAYOUT: Self = Self {
+        current: true,
+        ..Self::ARCHIVE_BOOTSTRAP
+    };
+    const GOVERNANCE_LAYOUT: Self = Self {
+        governance: true,
+        ..Self::CURRENT_LAYOUT
+    };
+    const fn executing(self, executing: bool) -> Self {
+        Self { executing, ..self }
+    }
+    const fn member_outbox(self, member_outbox: bool) -> Self {
+        Self {
+            member_outbox,
+            ..self
+        }
+    }
+    const fn native_registry(self, native_registry: Option<u32>) -> Self {
+        Self {
+            native_registry,
+            ..self
+        }
+    }
+}
+
+/// Closed grammar used only by the private native physical handler. The descriptor
+/// is checked against the same Current3 entry; parsing issues no mounted owner.
+pub(super) fn parse_native_registry_layout<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+    executing: bool,
+    governance: bool,
+) -> Result<Parsed<'a>, AppError> {
+    let layout = if governance {
+        SupportedLayout::GOVERNANCE_LAYOUT
+    } else {
+        SupportedLayout::CURRENT_LAYOUT
+    };
+    parse_known(
+        plain,
+        domain,
+        layout
+            .executing(executing)
+            .member_outbox(true)
+            .native_registry(Some(1)),
+    )
+}
+
+/// The distinct private v2 handler chooses this closed grammar. A v1 handler
+/// cannot opt into it, and knowing this parser does not construct either owner.
+pub(super) fn parse_operational_native_registry_layout<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+    executing: bool,
+) -> Result<Parsed<'a>, AppError> {
+    parse_known(
+        plain,
+        domain,
+        SupportedLayout::CURRENT_LAYOUT
+            .executing(executing)
+            .member_outbox(true)
+            .native_registry(Some(2)),
+    )
+}
+
+/// Explicit version3 DATA grammar for the owning lifecycle upgrade. Existing
+/// version1/2 handlers never select it; a descriptor cannot install a handler.
+/// Historical JOIN rows remain part of the catalog, including paused rows.
+pub(super) fn parse_lifecycle_native_registry_layout<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+    executing: bool,
+) -> Result<Parsed<'a>, AppError> {
+    parse_known(
+        plain,
+        domain,
+        SupportedLayout::CURRENT_LAYOUT
+            .executing(executing)
+            .member_outbox(true)
+            .native_registry(Some(3)),
+    )
+}
+
+/// Steady-state grammar selected only by the concrete governed native owner.
+/// None of its three critical handlers is optional. The declaration's original
+/// no4 parent is parsed separately, never as a steady-state fallback.
+pub(super) fn parse_governed_native_registry_layout<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+    executing: bool,
+) -> Result<Parsed<'a>, AppError> {
+    let parsed = parse_native_governance_family(plain, domain, executing)?;
+    if parsed.governance.is_none()
+        || parsed.member_outbox.is_none()
+        || parsed.native_registry_payload.is_none()
+    {
+        return Err(refused());
+    }
+    Ok(parsed)
+}
+
+/// Declaration-only native3 family. The actual unexposed continuation or cold
+/// declaration verifier must classify its exact parent/seed pair before use.
+pub(super) fn parse_native_governance_family<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+    executing: bool,
+) -> Result<Parsed<'a>, AppError> {
+    let parsed = parse_known(
+        plain,
+        domain,
+        SupportedLayout::GOVERNANCE_LAYOUT
+            .executing(executing)
+            .member_outbox(true)
+            .native_registry(Some(3)),
+    )?;
+    if parsed.member_outbox.is_none() || parsed.native_registry_payload.is_none() {
+        return Err(refused());
+    }
+    Ok(parsed)
 }
 
 /// Only the concrete Current-layout physical inspector may select this grammar. The default,
 /// Pending and ID2-only inspectors still reject namespace3 in EITHER fixed source before old
 /// cleanup. No parsed label or external flag can install this actual constructor policy.
+/// Namespace5 still refuses here; only `parse_configured_current_layout` with the concrete
+/// member-outbox handler configured accepts it. Production readers all go through
+/// `parse_configured_current_layout`; this fixed grammar remains as a regression oracle for
+/// "an opener without the member handler refuses ID5".
+#[cfg(test)]
 pub(super) fn parse_current_layout<'a>(
     plain: &'a [u8],
     domain: &[u8; 32],
@@ -172,11 +349,93 @@ pub(super) fn parse_current_layout<'a>(
     parse_known(
         plain,
         domain,
-        if executing {
-            SupportedLayout::CurrentLayoutExecuting
-        } else {
-            SupportedLayout::CurrentLayout
-        },
+        SupportedLayout::CURRENT_LAYOUT.executing(executing),
+    )
+}
+
+/// The Current3 opener's grammar, widened to namespace5 exactly when the caller's actual
+/// policy carries the concrete member-outbox handler (`member_outbox`). Without that handler
+/// an ID5 entry refuses like any unknown namespace.
+pub(super) fn parse_configured_current_layout<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+    executing: bool,
+    member_outbox: bool,
+) -> Result<Parsed<'a>, AppError> {
+    parse_known(
+        plain,
+        domain,
+        SupportedLayout::CURRENT_LAYOUT
+            .executing(executing)
+            .member_outbox(member_outbox),
+    )
+}
+
+pub(super) fn parse_governance_layout<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+    policy: &super::governance_layout::V2GovernanceLayoutPolicy,
+) -> Result<Parsed<'a>, AppError> {
+    parse_known(
+        plain,
+        domain,
+        SupportedLayout::GOVERNANCE_LAYOUT
+            .executing(policy.current.archive.pending.execution.is_some())
+            .member_outbox(policy.current.member_outbox.is_some())
+            .native_registry(
+                policy
+                    .current
+                    .native_registry
+                    .as_ref()
+                    .map(|handler| handler.namespace_version()),
+            ),
+    )
+}
+
+/// DATA grammar for the ORIGINAL side of a namespace5 declaration: a complete known Current3
+/// catalog with optional governance4 and any known JOIN version, and NO namespace5 (an
+/// existing ID5 refuses here, so a second declaration is impossible). The configured
+/// opener's own parser still decides runtime support before this is ever reached.
+pub(super) fn parse_member_outbox_declaration_original<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+) -> Result<Parsed<'a>, AppError> {
+    parse_known(
+        plain,
+        domain,
+        SupportedLayout::GOVERNANCE_LAYOUT.executing(true),
+    )
+}
+
+/// DATA grammar for the ORIGINAL side of a governance4 declaration: a complete known Current3
+/// catalog with optional namespace5 and any known JOIN version, and NO governance4.
+pub(super) fn parse_governance_declaration_original<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+) -> Result<Parsed<'a>, AppError> {
+    parse_known(
+        plain,
+        domain,
+        SupportedLayout::CURRENT_LAYOUT
+            .executing(true)
+            .member_outbox(true),
+    )
+}
+
+/// Regression-only grammar with EVERY known namespace (governance4 and member5 together),
+/// standing in for an opener configured with both concrete handlers. Not a support switch.
+#[cfg(test)]
+pub(super) fn parse_all_known_for_test<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+    executing: bool,
+) -> Result<Parsed<'a>, AppError> {
+    parse_known(
+        plain,
+        domain,
+        SupportedLayout::GOVERNANCE_LAYOUT
+            .executing(executing)
+            .member_outbox(true),
     )
 }
 
@@ -184,13 +443,17 @@ pub(super) fn parse_executing<'a>(
     plain: &'a [u8],
     domain: &[u8; 32],
 ) -> Result<Parsed<'a>, AppError> {
-    parse_known(plain, domain, SupportedLayout::Executing)
+    parse_known(plain, domain, SupportedLayout::PENDING_ONLY.executing(true))
 }
 pub(super) fn parse_bootstrap_executing<'a>(
     plain: &'a [u8],
     domain: &[u8; 32],
 ) -> Result<Parsed<'a>, AppError> {
-    parse_known(plain, domain, SupportedLayout::ArchiveBootstrapExecuting)
+    parse_known(
+        plain,
+        domain,
+        SupportedLayout::ARCHIVE_BOOTSTRAP.executing(true),
+    )
 }
 
 fn parse_known<'a>(
@@ -212,6 +475,12 @@ fn parse_known<'a>(
             join_version: None,
             current_layout: None,
             current_payload: None,
+            governance: None,
+            governance_payload: None,
+            member_outbox: None,
+            member_outbox_payload: None,
+            native_registry_payload: None,
+            native_registry_version: None,
         });
     }
     let mut rows = std::array::from_fn(|_| None);
@@ -221,29 +490,27 @@ fn parse_known<'a>(
     let mut join_version = None;
     let mut current_layout = None;
     let mut current_payload = None;
+    let mut governance = None;
+    let mut governance_payload = None;
+    let mut member_outbox = None;
+    let mut member_outbox_payload = None;
+    let mut native_registry_payload = None;
+    let mut native_registry_version = None;
     for index in 0..envelope.count {
         let entry = envelope.entry(index)?;
         match entry.id {
             JOIN_ID => {
-                (rows, count) = match (&layout, entry.version) {
-                    (
-                        SupportedLayout::Executing
-                        | SupportedLayout::ArchiveBootstrapExecuting
-                        | SupportedLayout::CurrentLayoutExecuting,
-                        super::pending_join::execution_payload::VERSION,
-                    ) => super::pending_join::execution_payload::parse(entry.payload, domain)?,
-                    _ => parse_join_entry(entry, domain)?,
+                (rows, count) = if layout.executing
+                    && entry.version == super::pending_join::execution_payload::VERSION
+                {
+                    super::pending_join::execution_payload::parse(entry.payload, domain)?
+                } else {
+                    parse_join_entry(entry, domain)?
                 };
                 join_version = Some(entry.version);
             }
             super::archive_bootstrap::ARCHIVE_ID
-                if matches!(
-                    layout,
-                    SupportedLayout::ArchiveBootstrap
-                        | SupportedLayout::ArchiveBootstrapExecuting
-                        | SupportedLayout::CurrentLayout
-                        | SupportedLayout::CurrentLayoutExecuting
-                ) && entry.version == super::archive_bootstrap::ARCHIVE_VERSION =>
+                if layout.archive && entry.version == super::archive_bootstrap::ARCHIVE_VERSION =>
             {
                 archive = Some(super::archive_bootstrap::Descriptor::parse(
                     entry.payload,
@@ -252,11 +519,9 @@ fn parse_known<'a>(
                 archive_payload = Some(entry.payload);
             }
             super::archive_current_namespace_codec::NAMESPACE_ID
-                if matches!(
-                    layout,
-                    SupportedLayout::CurrentLayout | SupportedLayout::CurrentLayoutExecuting
-                ) && entry.version
-                    == super::archive_current_namespace_codec::NAMESPACE_VERSION =>
+                if layout.current
+                    && entry.version
+                        == super::archive_current_namespace_codec::NAMESPACE_VERSION =>
             {
                 // Sorted outer IDs guarantee the original ID2 descriptor has been consumed.
                 // Namespace3 can never make a new root or accompany ID2's first declaration.
@@ -273,6 +538,63 @@ fn parse_known<'a>(
                 );
                 current_payload = Some(entry.payload);
             }
+            super::governance_namespace_codec::NAMESPACE_ID
+                if layout.governance
+                    && entry.version == super::governance_namespace_codec::NAMESPACE_VERSION =>
+            {
+                let current = current_layout.ok_or_else(refused)?;
+                governance = Some(super::governance_namespace_codec::capability::GovernanceCapabilityData::decode_data(
+                    entry.payload, current, current_payload.ok_or_else(refused)?,
+                )?);
+                governance_payload = Some(entry.payload);
+            }
+            super::member_outbox_namespace_codec::NAMESPACE_ID
+                if layout.member_outbox
+                    && entry.version == super::member_outbox_namespace_codec::NAMESPACE_VERSION =>
+            {
+                // Sorted outer IDs guarantee ID3 was already consumed. Namespace5 binds that
+                // SAME catalog's ID3 descriptor; it can never create a root of its own.
+                let current = current_layout.ok_or_else(refused)?;
+                member_outbox = Some(
+                    super::member_outbox_namespace_codec::MemberOutboxCapabilityData::decode_data(
+                        entry.payload,
+                        current,
+                        current_payload.ok_or_else(refused)?,
+                    )?,
+                );
+                member_outbox_payload = Some(entry.payload);
+            }
+            7 if layout.native_registry == Some(1) && entry.version == 1 => {
+                let expected =
+                    super::native_registry::capability::NativeCapabilityData::for_current_data(
+                        current_layout.ok_or_else(refused)?,
+                        current_payload.ok_or_else(refused)?,
+                    )?;
+                super::native_registry::capability::NativeCapabilityData::decode_exact(
+                    entry.payload,
+                    expected,
+                )?;
+                native_registry_payload = Some(entry.payload);
+                native_registry_version = Some(entry.version);
+            }
+            7 if layout.native_registry == Some(2) && entry.version == 2 => {
+                super::native_registry::operational::validate_descriptor_data(
+                    entry.payload,
+                    current_layout.ok_or_else(refused)?,
+                    current_payload.ok_or_else(refused)?,
+                )?;
+                native_registry_payload = Some(entry.payload);
+                native_registry_version = Some(entry.version);
+            }
+            7 if layout.native_registry == Some(3) && entry.version == 3 => {
+                super::native_registry::lifecycle::validate_descriptor_data(
+                    entry.payload,
+                    current_layout.ok_or_else(refused)?,
+                    current_payload.ok_or_else(refused)?,
+                )?;
+                native_registry_payload = Some(entry.payload);
+                native_registry_version = Some(entry.version);
+            }
             _ => return Err(refused()),
         }
     }
@@ -287,6 +609,12 @@ fn parse_known<'a>(
         join_version,
         current_layout,
         current_payload,
+        governance,
+        governance_payload,
+        member_outbox,
+        member_outbox_payload,
+        native_registry_payload,
+        native_registry_version,
     })
 }
 
@@ -471,6 +799,34 @@ pub(super) fn encode_original_row(
 /// exact immutable/ciphertext custody; one original add or one scheduling toggle is permitted.
 /// Duplicate same-plaintext files are handled separately by actual source classification.
 pub(super) fn successor(current: &Summary, next: &Summary) -> Result<(), AppError> {
+    // Only the native declaration's exact whole-frame validator may introduce ID7.
+    // JOIN cannot remove, normalize or replace it, including in a validly sealed stage.
+    if current.native_registry_payload_digest != next.native_registry_payload_digest {
+        return Err(refused());
+    }
+    // A namespace4 addition is NEVER inferred from Summary fields. The private
+    // declaration owns BOTH whole frames and uses its exact-pair validator.
+    if current.governance != next.governance
+        || current.governance_payload_digest != next.governance_payload_digest
+        || (current.governance.is_some()
+            && (current.current_layout != next.current_layout
+                || current.current_payload_digest != next.current_payload_digest
+                || current.archive != next.archive))
+    {
+        return Err(refused());
+    }
+    // Namespace5 likewise: its addition is validated only by the member-outbox handler's
+    // exact-pair declaration. Every ordinary JOIN successor (pause, resume, add, arm,
+    // execution, migration) must keep ID5 and its exact payload, and ID2/ID3 it binds.
+    if current.member_outbox != next.member_outbox
+        || current.member_outbox_payload_digest != next.member_outbox_payload_digest
+        || (current.member_outbox.is_some()
+            && (current.current_layout != next.current_layout
+                || current.current_payload_digest != next.current_payload_digest
+                || current.archive != next.archive))
+    {
+        return Err(refused());
+    }
     if current.generation.checked_add(1) != Some(next.generation)
         || next.parent != Some(current.digest)
         || next.count < current.count

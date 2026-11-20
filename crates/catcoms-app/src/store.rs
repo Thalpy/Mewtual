@@ -50,17 +50,44 @@ pub(crate) fn studio_refused(
 mod chat_admission;
 mod chat_fences;
 mod critical_namespaces;
+mod governance_open;
+mod mounted;
 pub use critical_namespaces::{
     ActivatedCheckpointJoin, ArchiveBootstrapCatalogPolicy, ArchiveFounderBegin,
     ArchiveFounderCreation, ArchiveFounderExisting, ArchiveFounderInputs, ArchiveFounderPlanning,
     ArchiveFounderPlanningProgress, ArchiveFounderPolicy, ArchiveFounderProgress,
     ArchiveFounderSourcePreparation, ArchiveFounderSourceProgress,
     CanonicalFilenameInventoryPolicy, CheckpointJoinExecutionPolicy, CheckpointJoinNetwork,
-    CheckpointJoinSubmissionStatus, CriticalCatalogReadPool, JournalledCheckpointJoinPreparation,
-    PendingJoinCatalogPolicy, PreparedArchiveBootstrapStore, PreparedV2CurrentLayoutStore,
-    ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs, ReturnedArchiveFounderPlanning,
-    ReturnedCheckpointJoinActivation, V2CurrentLayoutPolicy, V2CurrentLayoutStore,
+    CheckpointJoinSubmissionStatus, CriticalCatalogReadPool, FreshV2TextFounderBegin,
+    FreshV2TextFounderBinding, FreshV2TextFounderPolicy, JournalledCheckpointJoinPreparation,
+    NativeCreationStateData, NativeCreationStatusData, NativeIndexPolicy, NativeIndexStore,
+    NativeIndexUpgrade, NativeRegistryInstallation, NativeRegistryPolicy,
+    NativeRegistryPreparationPolicy, NativeRegistryStore, NativeTextCreationBudget,
+    NativeTextCreationInputs, NativeTextCreationJob, NativeTextCreationPreparation,
+    NativeTextCreationProgress, NativeTextCreationRefusal, NativeTextCreationRequest,
+    NativeTextCreationSettings, NativeTextGovernanceUpgrade, NativeTextGovernedStorage,
+    NativeTextHistoryResponseBudget, NativeTextHistoryResponseCredit,
+    NativeTextMemberAdmissionFailure, NativeTextMemberBudget, NativeTextMemberFinalPreparation,
+    NativeTextMemberHistoryItem, NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus,
+    NativeTextMemberJob, NativeTextMemberPreparation, NativeTextMemberSaveJob,
+    NativeTextRuntimeSelection, NativeTextSourceBudget, NativeTextSourceCommand,
+    NativeTextSourcePolicy, NativeTextSourcePreparation, NativeTextSourceRetirement,
+    NativeTextSourceRetirementPreparation, NativeTextSourceRetirementRefusal,
+    NativeTextSourceRetirementStatus, NativeTextSources, NativeTextUiCandidate,
+    NativeTextUiGarbage, NativeTextUiObservation, NativeTextUiPreparation, NativeTextUiRetirement,
+    NativeTextUiRetirementBatch, NativeTextUiRetirementDrain, NativeTextUiRetirementState,
+    NativeTextVault, NativeTextVaultAuthentication, NativeTextVaultAuthenticationCheck,
+    NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal, NativeTextWorkRetirement,
+    NativeTextWorkRetirementPreparation, NativeUiInvocationBudget, NativeUiInvocationMetadata,
+    NativeUiStateBudget, NativeUiStateCredit, NativeUiStatePreparation, NativeUiStateRead,
+    NativeUiStateSaved, PendingJoinCatalogPolicy, PreparedArchiveBootstrapStore,
+    PreparedFreshV2TextFounder, PreparedNativeRegistryMigration, PreparedV2CurrentLayoutStore,
+    PreparedV2GovernanceLayoutStore, ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs,
+    ReturnedArchiveFounderPlanning, ReturnedCheckpointJoinActivation, V2CurrentLayoutPolicy,
+    V2CurrentLayoutStore, V2GovernanceLayoutPolicy, V2GovernanceLayoutStore, V2MemberOutboxPolicy,
 };
+pub(crate) use mounted::LegacyStoreCustody;
+pub use mounted::{MountedLeaseRefusal, MountedLeaseRefusalKind, MountedVault};
 mod owner_evidence;
 pub use chat_admission::{
     ChatAdmissionBinding, ChatAdmissionCapture, ChatAdmissionFinish, ChatAdmissionKey,
@@ -308,9 +335,14 @@ impl ServerNet {
     /// and needs nothing persisted beyond the seed that is already there. The seed is secret and
     /// BLAKE3 is preimage-resistant, so publishing the port reveals nothing about the identity.
     pub fn derived_port(&self) -> u16 {
+        Self::derived_port_for_seed(&self.key_seed)
+    }
+    /// Same existing derivation for the private native reservation, before
+    /// any transport is constructed. This exposes no seed or fallback chooser.
+    pub(in crate::store) fn derived_port_for_seed(seed: &[u8; 32]) -> u16 {
         let mut input = Vec::with_capacity(PORT_DOMAIN.len() + 32);
         input.extend_from_slice(PORT_DOMAIN);
-        input.extend_from_slice(&self.key_seed);
+        input.extend_from_slice(seed);
         let h = blake3::hash(&input);
         let n = u32::from_be_bytes(h.as_bytes()[..4].try_into().expect("4 bytes"));
         (PORT_LOW + n % PORT_SPAN) as u16
@@ -547,10 +579,13 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
 /// code outside this module and three reviewed per-family sync helpers that take `&EpochMutation`.
 pub use persistence::RetainedBootstrapSourceData;
 pub use persistence::{
-    GenesisSeedBudget, GenesisSeedRefusal, PreparedColdV2GenesisCurrent,
-    PreparedColdV2GenesisInitializing, PreparedColdV2GenesisPreInitializing,
-    PreparedV2GenesisCurrent, RetainedBootstrapGenesisSeed, ReturnedBootstrapSourceData,
+    GenesisSeedBudget, GenesisSeedRefusal, MemberSaveJob, MemberSaveJobReport,
+    MemberSaveNativeAdmission, PreparedColdV2GenesisCurrent, PreparedColdV2GenesisInitializing,
+    PreparedColdV2GenesisPreInitializing, PreparedV2GenesisCurrent, PreparedV2TextHost,
+    PreparedV2TextRead, RetainedBootstrapGenesisSeed, ReturnedBootstrapSourceData,
     UnexposedColdV2GenesisCurrent, UnexposedRepairedV2GenesisCurrent, UnexposedV2GenesisCurrent,
+    V2MemberDependency, V2MemberSaveOutcome, V2MemberSaveRefusal, V2MemberSignRequest,
+    V2TextHostPolicy,
 };
 mod persistence {
     use super::*;
@@ -559,21 +594,43 @@ mod persistence {
     type OpenedArchiveObject = (File, Zeroizing<Vec<u8>>);
     use critical_namespaces::archive_bootstrap::founder_codec as founder;
     mod cold_source_read;
+    #[cfg(target_os = "linux")]
+    mod exact_inventory_linux;
+    pub(in crate::store) use cold_source_read::{
+        OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
+        PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
+        PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis,
+    };
     mod current_group;
     mod current_layout;
+    pub(in crate::store) mod governance_layout;
+    /// Namespace5 (member outbox layout) declaration and mount I/O.
+    mod member_outbox_layout;
+    /// Strict bounded native-registry migration reads; deliberately no writer yet.
+    pub(in crate::store) mod native_registry;
     mod v2_group_directory;
+    /// Chat V2 ordinary-member durable outbox; independent of the founder `v2_text` journal.
+    pub(in crate::store) mod v2_member_outbox;
+    pub(in crate::store) mod v2_text;
     pub(in crate::store) use cold_source_read::v2_genesis_activation;
     pub use cold_source_read::RetainedBootstrapSourceData;
     pub(super) use cold_source_read::{
         GenesisCurrentOwnerRef, GenesisSourceDataRef, OriginalBootstrapReadObservation,
+        V2TextOwnedCurrent, V2TextOwnerRef, V2TextSourceNegativeObserver,
         ORIGINAL_BOOTSTRAP_READ_OBSERVATION_BYTES,
     };
     pub use cold_source_read::{
-        GenesisSeedBudget, GenesisSeedRefusal, PreparedColdV2GenesisCurrent,
-        PreparedColdV2GenesisInitializing, PreparedColdV2GenesisPreInitializing,
-        PreparedV2GenesisCurrent, RetainedBootstrapGenesisSeed, ReturnedBootstrapSourceData,
+        GenesisSeedBudget, GenesisSeedRefusal, MemberSaveJob, MemberSaveJobReport,
+        MemberSaveNativeAdmission, PreparedColdV2GenesisCurrent, PreparedColdV2GenesisInitializing,
+        PreparedColdV2GenesisPreInitializing, PreparedV2GenesisCurrent, PreparedV2TextHost,
+        PreparedV2TextRead, RetainedBootstrapGenesisSeed, ReturnedBootstrapSourceData,
         UnexposedColdV2GenesisCurrent, UnexposedRepairedV2GenesisCurrent,
-        UnexposedV2GenesisCurrent,
+        UnexposedV2GenesisCurrent, V2MemberDependency, V2MemberSaveOutcome, V2MemberSaveRefusal,
+        V2MemberSignRequest, V2TextHostPolicy,
+    };
+    #[cfg(all(test, windows))]
+    pub(super) use cold_source_read::{
+        PreparedV2TextSourceObserver, V2_TEXT_SOURCE_OBSERVER_BYTES,
     };
     pub(in crate::store) use current_layout::{
         CurrentCanonicalFilenameAssociation, CURRENT_FILENAME_SCRATCH_FEE,
@@ -1153,9 +1210,12 @@ mod persistence {
         /// Consume BEFORE taking the actual original SDK inputs. No error/SDK failure may
         /// mint another ticket or return this one to a captured/decoded invocation.
         pub(super) fn consume_for_sdk(
-            self,
+            &self,
             store: &ServerStore,
             captured: &CapturedFounderInvocation,
+            native: Option<
+                &mut critical_namespaces::archive_bootstrap::founder::NativeFounderSdkEntry<'_>,
+            >,
         ) -> Result<(), AppError> {
             use critical_namespaces::refused;
             if !std::sync::Arc::ptr_eq(&self.original, &captured.original) {
@@ -1199,6 +1259,12 @@ mod persistence {
             // Revalidate the SAME actual objects again; exact bytes at a replacement path do
             // not inherit this live creator's original SDK admission.
             validate_founder_original_root(store, &self.original, root)?;
+            if let Some(entry) = native {
+                // All blocking held-file/parent/full-byte proofs are finished.
+                // The caller retains End outside this Root guard through the
+                // actual Server::found result cache. Refusal spends no SDK unit.
+                entry.enter()?;
+            }
             // File/parent checks above can block. Sample the original negatives AFTER them,
             // immediately before the one irreversible SDK admission; no reread by logical key
             // can replace this creator when a close/unlock/new mount wins first.
@@ -3002,6 +3068,10 @@ mod persistence {
         ) -> Result<(), AppError> {
             use critical_namespaces::pending_join::Settle;
             use critical_namespaces::Slot;
+            // Runtime callers hold the catalog mutex; startup has not exposed
+            // an index owner. This cached check covers every existing-result
+            // settlement path without recursively acquiring that mutex.
+            self.require_native_index_idle_cached()?;
             opened.validate_original(self)?;
             for file in opened.current.iter().chain(opened.stage.iter()) {
                 file.sync_all()
@@ -3041,6 +3111,7 @@ mod persistence {
         ) -> Result<(), AppError> {
             use critical_namespaces::pending_join_codec::MAX_CATALOG_FRAMED;
             use critical_namespaces::{refused, Slot};
+            self.require_native_index_idle_cached()?; // Caller retains catalog exclusion through all IO.
             permit.validate_candidate(candidate)?;
             if candidate.bytes.len() > MAX_CATALOG_FRAMED
                 || *blake3::hash(&candidate.bytes).as_bytes() != candidate.next.framed
@@ -3482,6 +3553,10 @@ mod persistence {
 
     #[derive(Clone, Copy)]
     enum ArchiveOutputMode {
+        /// New immutable native network output: only create_new or the SAME
+        /// already-held warm object. Even an equal complete foreign file is
+        /// refused. This is not cold repair or an adoption/reseal path.
+        NewOriginal,
         /// Only a newly created or SAME warm held object can be completed. A pre-existing
         /// complete exact output may be re-synced; an unowned partial first seed refuses.
         Original,
@@ -3632,6 +3707,9 @@ mod persistence {
                     if metadata.file_type().is_file()
                         && metadata.len() <= expected.len() as u64 =>
                 {
+                    if matches!(mode, ArchiveOutputMode::NewOriginal) {
+                        return Err(refused());
+                    }
                     if matches!(mode, ArchiveOutputMode::Original) {
                         // Do NOT retain an unowned prefix and turn it into "already held" on
                         // the next retry. Only a complete exact original output may be adopted
@@ -5643,6 +5721,20 @@ pub struct ServerStore {
     // constructors continue rejecting its descriptor, seed and root before old cleaners.
     archive_bootstrap_policy: Option<ArchiveBootstrapCatalogPolicy>,
     current_layout_policy: Option<critical_namespaces::current_layout::V2CurrentLayoutPolicy>,
+    governance_layout_policy:
+        Option<critical_namespaces::governance_layout::V2GovernanceLayoutPolicy>,
+    governance_layout:
+        std::sync::Mutex<Option<critical_namespaces::governance_layout::MountedGovernanceLayout>>,
+    // Namespace5 marker + held member-outbox parent, installed only by the concrete configured
+    // handler. Its presence is mount DATA, never a member-source or save permission.
+    member_outbox_layout: std::sync::Mutex<
+        Option<critical_namespaces::member_outbox_layout::MountedMemberOutboxLayout>,
+    >,
+    // Member-outbox production owners of THIS physical mount (registry, production parent,
+    // per-context custody cells), installed lazily from the namespace5 mount above. Custody and
+    // exclusion only; never a member-source, save or publication permission.
+    member_outbox_mount:
+        std::sync::Mutex<Option<std::sync::Arc<persistence::v2_member_outbox::MemberOutboxMount>>>,
     current_layout:
         std::sync::Mutex<Option<critical_namespaces::current_layout::MountedCurrentLayout>>,
     archive_bootstrap_root: critical_namespaces::archive_bootstrap::SharedRoot,
@@ -5786,11 +5878,78 @@ impl ServerStore {
         archive_bootstrap_policy: Option<ArchiveBootstrapCatalogPolicy>,
         current_layout_policy: Option<critical_namespaces::current_layout::V2CurrentLayoutPolicy>,
     ) -> Result<Self, AppError> {
+        Self::open_with_catalog_policies(
+            dir,
+            passphrase,
+            rng,
+            governance_open::CatalogPolicies {
+                catalog_read_pool,
+                pending_join_policy,
+                archive_bootstrap_policy,
+                current_layout_policy,
+                governance_layout_policy: None,
+            },
+        )
+    }
+
+    fn open_with_catalog_policies(
+        dir: impl AsRef<Path>,
+        passphrase: &[u8],
+        rng: &mut impl CryptoRngCore,
+        policies: governance_open::CatalogPolicies,
+    ) -> Result<Self, AppError> {
         let dir = dir.as_ref().to_path_buf();
-        // Mount exclusion comes before Argon2/unsealing. A losing second process therefore gets a
-        // prompt `VaultBusy` without doing expensive password work or observing decrypted keys.
+        // Keep every existing opener's exclusion-before-KDF ordering unchanged.
         let session = acquire_vault_session(&dir)?;
-        critical_namespaces::refuse_orphan_before_vault_creation(&dir)?;
+        Self::open_catalog_in_session(dir, passphrase, rng, policies, session)
+    }
+
+    /// Closed initial native factory edge. Strict absence is proved AFTER the
+    /// actual lifetime session is acquired, including all old/orphan artifacts.
+    /// The normal default grammar still opens all lower inventories exactly
+    /// once. No configured gate, raw-key return or skip-gate flag is exposed.
+    fn create_private_for_native_registry(
+        dir: &Path,
+        passphrase: &[u8],
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Self, AppError> {
+        let session = acquire_vault_session(dir)?;
+        session.require_fresh_directory(dir)?;
+        Self::open_catalog_in_session(
+            dir.to_path_buf(),
+            passphrase,
+            rng,
+            governance_open::CatalogPolicies {
+                catalog_read_pool: None,
+                pending_join_policy: None,
+                archive_bootstrap_policy: None,
+                current_layout_policy: None,
+                governance_layout_policy: None,
+            },
+            session,
+        )
+    }
+
+    fn open_catalog_in_session(
+        dir: PathBuf,
+        passphrase: &[u8],
+        rng: &mut impl CryptoRngCore,
+        policies: governance_open::CatalogPolicies,
+        session: VaultSessionGuard,
+    ) -> Result<Self, AppError> {
+        let governance_open::CatalogPolicies {
+            catalog_read_pool,
+            pending_join_policy,
+            archive_bootstrap_policy,
+            current_layout_policy,
+            governance_layout_policy,
+        } = policies;
+        critical_namespaces::refuse_orphan_before_vault_creation(
+            &dir,
+            current_layout_policy
+                .as_ref()
+                .is_some_and(|policy| policy.native_registry.is_some()),
+        )?;
         owner_evidence::operations::refuse_orphaned_intent_before_vault_creation(&dir)?;
         let (keys, format) = open_or_create_vault_classified(&dir, passphrase, rng)?.into_parts();
         fs::create_dir_all(dir.join("servers")).map_err(|e| AppError::Io(e.to_string()))?;
@@ -5799,6 +5958,10 @@ impl ServerStore {
             pending_join_policy,
             archive_bootstrap_policy,
             current_layout_policy,
+            governance_layout_policy,
+            governance_layout: Default::default(),
+            member_outbox_layout: Default::default(),
+            member_outbox_mount: Default::default(),
             current_layout: Default::default(),
             archive_bootstrap_root: Default::default(),
             founder_invocations: Default::default(),
@@ -5862,6 +6025,14 @@ impl ServerStore {
     /// only safe way to reopen that webview boundary while still rejecting a wrong passphrase.
     pub fn verify_passphrase(&self, passphrase: &[u8]) -> Result<(), AppError> {
         verify_vault_passphrase(&self.dir, passphrase)?;
+        Ok(())
+    }
+
+    /// Same mounted critical-key identity, without acquiring a second physical
+    /// session or returning keys. Selected3 reauthentication uses this instead
+    /// of legacy's path-only helper; the storage layer holds one wrapper lock.
+    fn verify_native_critical_passphrase(&self, secret: &[u8]) -> Result<(), AppError> {
+        catcoms_storage::verify_critical_vault_passphrase_for_keys(&self.dir, secret, &self.keys)?;
         Ok(())
     }
 
@@ -5949,14 +6120,25 @@ impl ServerStore {
     /// state; malformed/tampered ciphertext is an error so the UI can disclose that recovery is
     /// needed instead of silently discarding drafts.
     pub fn load_ui_state(&self) -> Result<Vec<u8>, AppError> {
+        Ok(self.load_ui_state_record()?.unwrap_or_default())
+    }
+
+    /// Preserve absence separately from authenticated empty plaintext. Only a
+    /// genuine NotFound is None; a present record always reaches the UI schema
+    /// validator, including empty/whitespace/future content. No file is rewritten.
+    pub fn load_ui_state_record(&self) -> Result<Option<Vec<u8>>, AppError> {
         let path = self.ui_state_path();
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
+        // Only actual NotFound means first run. Path::exists also hides
+        // access failures and a dangling symlink, which would silently reset
+        // drafts instead of preserving/refusing the unexpected object.
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(AppError::Io(error.to_string())),
+        };
         // Check both metadata and the actual read: a file may grow after metadata was observed.
         // Seal overhead is the 24-byte nonce plus the 16-byte authentication tag.
         let max_sealed = MAX_UI_STATE_BYTES + 40;
-        let metadata = fs::symlink_metadata(&path).map_err(|e| AppError::Io(e.to_string()))?;
         if !metadata.file_type().is_file() || metadata.len() > max_sealed as u64 {
             return Err(AppError::Invalid(
                 "UI state is not bounded and regular".into(),
@@ -5970,19 +6152,36 @@ impl ServerStore {
         {
             return Err(AppError::Invalid("opened UI state is not regular".into()));
         }
-        let mut bytes = Vec::new();
-        file.take(max_sealed as u64 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|e| AppError::Io(e.to_string()))?;
-        if bytes.len() > max_sealed {
-            return Err(AppError::Invalid("UI state exceeds its bound".into()));
-        }
+        let bytes = Self::read_ui_state_bytes(file, max_sealed)?;
         let sealed = unframe(&bytes)?;
         let plain = unseal(&self.keys.db_key()?, &sealed)?;
         if plain.len() > MAX_UI_STATE_BYTES {
             return Err(AppError::Invalid("UI state exceeds its bound".into()));
         }
-        Ok(plain)
+        Ok(Some(plain))
+    }
+
+    /// One controlled allocation, including one overflow sentinel byte. Retry
+    /// Interrupted as read_to_end did before this bounded loop replaced it.
+    fn read_ui_state_bytes(mut reader: impl Read, maximum: usize) -> Result<Vec<u8>, AppError> {
+        let mut bytes = vec![0; maximum + 1];
+        let mut filled = 0;
+        while filled < bytes.len() {
+            let read = match reader.read(&mut bytes[filled..]) {
+                Ok(read) => read,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(AppError::Io(error.to_string())),
+            };
+            if read == 0 {
+                break;
+            }
+            filled += read;
+        }
+        bytes.truncate(filled);
+        if bytes.len() > maximum {
+            return Err(AppError::Invalid("UI state exceeds its bound".into()));
+        }
+        Ok(bytes)
     }
 
     /// Seal + atomically write a server's [`ServerNet`] (its libp2p identity seed, listen port and
@@ -6971,6 +7170,86 @@ mod tests {
         file.set_len((MAX_UI_STATE_BYTES + 41) as u64).unwrap();
         assert!(
             matches!(store.load_ui_state(), Err(AppError::Invalid(message)) if message.contains("bounded and regular"))
+        );
+    }
+
+    #[test]
+    fn ui_state_reader_retries_interrupted_io_and_bounds_an_endless_source() {
+        struct InterruptedOnce {
+            interrupted: bool,
+            data: std::io::Cursor<Vec<u8>>,
+        }
+        impl Read for InterruptedOnce {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                if !self.interrupted {
+                    self.interrupted = true;
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                self.data.read(bytes)
+            }
+        }
+        let reader = InterruptedOnce {
+            interrupted: false,
+            data: std::io::Cursor::new(vec![1, 2, 3]),
+        };
+        assert_eq!(
+            ServerStore::read_ui_state_bytes(reader, 3).unwrap(),
+            vec![1, 2, 3]
+        );
+        assert!(ServerStore::read_ui_state_bytes(std::io::repeat(0), 3).is_err());
+    }
+
+    #[test]
+    fn ui_state_record_distinguishes_missing_from_authenticated_empty_plaintext() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(15);
+        let store = ServerStore::open(dir.path(), b"pw", &mut rng).unwrap();
+        assert!(store.load_ui_state_record().unwrap().is_none());
+        store.save_ui_state(b"", &mut rng).unwrap();
+        let bytes = fs::read(store.ui_state_path()).unwrap();
+        assert_eq!(store.load_ui_state_record().unwrap(), Some(Vec::new()));
+        assert_eq!(fs::read(store.ui_state_path()).unwrap(), bytes);
+        fs::write(store.ui_state_path(), []).unwrap();
+        assert!(
+            store.load_ui_state_record().is_err(),
+            "present truncated ciphertext cannot become missing"
+        );
+    }
+
+    #[test]
+    fn ui_state_refuses_and_preserves_a_nonregular_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(13);
+        let store = ServerStore::open(dir.path(), b"pw", &mut rng).unwrap();
+        fs::create_dir(store.ui_state_path()).unwrap();
+        assert!(matches!(store.load_ui_state(), Err(AppError::Invalid(_))));
+        assert!(fs::symlink_metadata(store.ui_state_path())
+            .unwrap()
+            .is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ui_state_dangling_link_is_not_an_absent_first_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(14);
+        let store = ServerStore::open(dir.path(), b"pw", &mut rng).unwrap();
+        std::os::unix::fs::symlink(
+            dir.path().join("missing-ui-state-target"),
+            store.ui_state_path(),
+        )
+        .unwrap();
+        assert!(
+            !store.ui_state_path().exists(),
+            "reproduces the old false-absence preflight"
+        );
+        assert!(matches!(store.load_ui_state(), Err(AppError::Invalid(_))));
+        assert!(
+            fs::symlink_metadata(store.ui_state_path())
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "a refused object must not be replaced or removed"
         );
     }
 

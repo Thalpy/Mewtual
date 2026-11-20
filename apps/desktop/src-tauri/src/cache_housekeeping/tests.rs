@@ -33,7 +33,7 @@ impl LimitWriteCase {
         use catcoms_rt::{Hub, ManualClock};
         let root = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState::default());
-        *state.store.lock().await = Some(store_in(root.path()));
+        *state.store.lock().await = Some((store_in(root.path())).into());
         *state.session_resumable.lock().await = true;
         let server = Server::found(
             Hub::new().join(PeerId::from_u64(55_001)),
@@ -46,7 +46,7 @@ impl LimitWriteCase {
         let group = server.group_id();
         let device = server.device_id();
         let (actor, events, task) = spawn(server);
-        state.servers.lock().await.insert(
+        state.servers.lock().await.install_legacy_fixture(
             1,
             crate::tests::snapshot_test_entry(55_001, actor.clone(), group.clone(), device),
         );
@@ -71,6 +71,8 @@ impl LimitWriteCase {
             .lock()
             .await
             .as_ref()
+            .unwrap()
+            .as_legacy()
             .unwrap()
             .save_cache_setting(
                 1,
@@ -99,7 +101,7 @@ impl LimitWriteCase {
 
     async fn finish(mut self) {
         self.start_drain();
-        self.state.servers.lock().await.clear();
+        self.state.servers.lock().await.clear_legacy_fixture();
         self.actor.shutdown().await;
         self.task.await.unwrap();
         self.drain.take().unwrap().await.unwrap();
@@ -119,7 +121,7 @@ async fn cache_limit_queued_before_lock_cannot_write_or_revive_after_unlock() {
         );
         lock_session_inner(&case.state, None).await.unwrap();
         if unlock_again {
-            let generation = case.state.ui_session_generation.load(Ordering::Acquire);
+            let generation = case.state.ui_session_generation.load(Ordering::SeqCst);
             finalize_unlock_session(&case.state, generation, false)
                 .await
                 .unwrap();
@@ -209,7 +211,11 @@ async fn queued_cache_limit_cannot_select_a_replacement_server() {
         .set_cache_limit(CacheLimit::Unlimited)
         .await
         .unwrap();
-    case.state.servers.lock().await.insert(1, replacement);
+    case.state
+        .servers
+        .lock()
+        .await
+        .install_legacy_fixture(1, replacement);
     drop(serial);
     assert!(write.await.is_err());
     assert_eq!(
@@ -219,7 +225,7 @@ async fn queued_cache_limit_cannot_select_a_replacement_server() {
     );
     assert!(replacement_actor.cache_status().await.unwrap().unlimited);
     assert_ne!(replacement_group, case.group);
-    case.state.servers.lock().await.clear();
+    case.state.servers.lock().await.clear_legacy_fixture();
     replacement_actor.shutdown().await;
     task.await.unwrap();
     drain.await.unwrap();
@@ -239,7 +245,7 @@ async fn cache_limit_cannot_recreate_a_record_after_committed_leave() {
     // The same order and real retirement/store operations used by leave_server. Store is
     // deliberately held until the old command has resumed, exposing the former late write.
     let persist = persist_lock_for(&case.state, 1).lock_owned().await;
-    let generation = case.state.ui_session_generation.load(Ordering::Acquire);
+    let generation = case.state.ui_session_generation.load(Ordering::SeqCst);
     let session = require_ui_session_generation(&case.state, generation)
         .await
         .unwrap();
@@ -249,7 +255,13 @@ async fn cache_limit_cannot_recreate_a_record_after_committed_leave() {
     let removed = stopped
         .remove(&mut *case.state.servers.lock().await)
         .unwrap();
-    store.as_ref().unwrap().remove_server(1).unwrap();
+    store
+        .as_ref()
+        .unwrap()
+        .as_legacy()
+        .unwrap()
+        .remove_server(1)
+        .unwrap();
     drop((removed, store, session, persist));
     assert!(write.await.is_err());
     assert!(
@@ -308,6 +320,8 @@ async fn admitted_cache_limit_outlives_its_waiter_and_precedes_actual_lock() {
         .lock()
         .await
         .as_ref()
+        .unwrap()
+        .as_legacy()
         .unwrap()
         .load_cache_setting(1, &case.group);
     assert_eq!(
@@ -408,7 +422,7 @@ async fn leave_cleanup_empties_the_namespace_under_a_claim_and_reports_freed_byt
     let namespace = store.cache_namespace_dir(&key).unwrap();
     assert!(mark_leaving(&store, &GROUP).unwrap());
     let state = AppState::default();
-    *state.store.lock().await = Some(store);
+    *state.store.lock().await = Some((store).into());
 
     let claim = state.cache.claim(&GROUP).unwrap();
     assert!(state.cache.claim(&GROUP).is_none(), "one cleanup per group");
@@ -440,7 +454,7 @@ async fn cleanup_never_empties_a_namespace_a_live_join_still_holds() {
     let claim = state.cache.claim(&GROUP).unwrap();
     assert!(mark_leaving(&store, &GROUP).unwrap());
     drop(running);
-    *state.store.lock().await = Some(store);
+    *state.store.lock().await = Some((store).into());
     let report = clean_namespace(&state, &claim, None, false).await;
     assert_eq!(report.freed_bytes, 0);
     assert!(report.failed > 0, "reported as not finished");
@@ -524,7 +538,7 @@ async fn a_leave_claims_the_group_before_the_server_stops() {
     let (entry, task, drain) = crate::leaving::tests::running(951);
     let group = entry.group_id.clone();
     let actor = entry.actor.clone();
-    state.servers.lock().await.insert(1, entry);
+    state.servers.lock().await.install_legacy_fixture(1, entry);
     let claim = claim_for_leave(&state, 1)
         .await
         .expect("a registered server with no alias is claimed");
@@ -538,7 +552,7 @@ async fn a_leave_claims_the_group_before_the_server_stops() {
     let second = claim_for_leave(&state, 1);
     tokio::pin!(second);
     assert!(still_pending(second.as_mut()).await);
-    state.servers.lock().await.remove(&1); // the first leave removed the row
+    state.servers.lock().await.remove_legacy_fixture(&1); // the first leave removed the row
     drop(claim);
     assert!(
         second.await.is_none(),
@@ -554,8 +568,8 @@ async fn a_leave_claims_the_group_before_the_server_stops() {
     three.group_id = two.group_id.clone();
     let shared = two.group_id.clone();
     let actors = [two.actor.clone(), three.actor.clone()];
-    state.servers.lock().await.insert(2, two);
-    state.servers.lock().await.insert(3, three);
+    state.servers.lock().await.install_legacy_fixture(2, two);
+    state.servers.lock().await.install_legacy_fixture(3, three);
     let first = claim_for_leave(&state, 2)
         .await
         .expect("an alias row is claimed too");
@@ -566,7 +580,7 @@ async fn a_leave_claims_the_group_before_the_server_stops() {
         "the other alias's leave waits"
     );
     // `leave_server` for row 2: removed, an alias remains, so its claim goes unused.
-    state.servers.lock().await.remove(&2);
+    state.servers.lock().await.remove_legacy_fixture(&2);
     drop(first);
     let last = last
         .await
@@ -631,7 +645,7 @@ async fn the_sweep_finishes_marked_namespaces_but_skips_claimed_ones() {
     let busy_dir = store.cache_namespace_dir(&hex::encode(busy)).unwrap();
     let left_dir = store.cache_namespace_dir(&hex::encode(left)).unwrap();
     let state = AppState::default();
-    *state.store.lock().await = Some(store);
+    *state.store.lock().await = Some((store).into());
     let held = state.cache.claim(&busy).unwrap();
     sweep_leaving(&state, None).await;
     assert!(!left_dir.exists(), "an interrupted leave is finished");

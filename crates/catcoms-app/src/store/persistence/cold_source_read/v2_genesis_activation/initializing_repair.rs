@@ -21,6 +21,7 @@ mod inventory;
 // independent settlement worker; this child cannot select another File or mint a receipt.
 mod pre_initializing;
 mod settlement;
+mod text_origin;
 
 #[cfg(test)]
 std::thread_local! {
@@ -288,7 +289,7 @@ impl PreparedColdV2GenesisRepairCapture {
 /// Pure negative platform predicate, also used at the public owning retry BEFORE wrapper/
 /// scope payment or maintenance. It issues no permission and performs no IO/allocation.
 pub(in crate::store) fn require_supported_profile() -> Result<(), AppError> {
-    if cfg!(windows) {
+    if cfg!(any(windows, target_os = "linux")) {
         Ok(())
     } else {
         Err(critical_namespaces::refused())

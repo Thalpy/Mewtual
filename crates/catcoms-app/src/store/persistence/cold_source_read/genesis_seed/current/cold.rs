@@ -4,6 +4,7 @@
 //! operational heads need their own reader and can never fall back to this genesis path.
 use super::*;
 mod settlement;
+mod text;
 use crate::store::chat_admission::v2_current::{
     ColdV2CurrentPreparation, ColdV2CurrentProgressData,
 };

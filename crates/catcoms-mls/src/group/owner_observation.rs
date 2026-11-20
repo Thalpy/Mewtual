@@ -2,6 +2,8 @@
 //! certificate may attest these facts under its independently pinned trust profile; this
 //! token itself is neither portable historical proof nor permission to publish before save.
 use super::*;
+#[cfg(not(target_arch = "wasm32"))]
+mod private_text_add;
 
 /// Which actual operation produced this observation. Unsupported staged/remote operations
 /// do not acquire a local owner observation merely because today's roster looks plausible.
@@ -52,6 +54,12 @@ impl LocalMembershipChange {
     }
     pub fn after_epoch(&self) -> u64 {
         self.after_epoch
+    }
+    /// Cached historical fingerprint only. The private completed-Add view uses
+    /// this without entering SDK/provider state; it is not fresh source proof.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::group) fn private_text_add_after_authenticator_data(&self) -> &[u8; 32] {
+        &self.state
     }
     /// Exact already-produced MLS bytes. The caller must retain them with its candidate
     /// publication obligation; obtaining this token is not a durable-export permit.

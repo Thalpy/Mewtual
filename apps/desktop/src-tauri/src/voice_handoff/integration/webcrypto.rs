@@ -33,7 +33,7 @@ enum Frame {
     Failed { reason: String },
     Blocked,
 }
-#[derive(Deserialize, Clone, Copy)]
+#[derive(Debug, Deserialize, Clone, Copy)]
 #[serde(rename_all = "camelCase")]
 enum Method {
     AdmitKey,
@@ -80,10 +80,16 @@ struct Callbacks {
     refuse_collect: bool,
     // Rust-only observation scope, derived from actual native discovery, never Node input.
     expected_parent: Option<ledger::RowId>,
+    // Actual discovery observation, used ONLY for failure diagnostics. Automatic
+    // consumers still choose their own work; this never scopes terminal success.
+    diagnostic_pair: Option<PairSelector>,
     pause_setup: bool,
     discovery_hold: Option<super::super::channel::NativeHold>,
     // Negative test-owned cadence barrier; dropping always resumes the actual Host.
     deferred_maintenance: Option<tokio::sync::oneshot::Sender<()>>,
+    // Only the automatic-consumer fixture owns this startup barrier. Manual tests
+    // intentionally allow work before browser intake and retain their old order.
+    initial_auto_consumer: bool,
 }
 impl Default for Callbacks {
     fn default() -> Self {
@@ -94,9 +100,11 @@ impl Default for Callbacks {
             refuse_publish: true,
             refuse_collect: true,
             expected_parent: None,
+            diagnostic_pair: None,
             pause_setup: false,
             discovery_hold: None,
             deferred_maintenance: None,
+            initial_auto_consumer: false,
         }
     }
 }
@@ -120,10 +128,22 @@ pub(crate) struct Endpoint {
     media_http: bool,
 }
 impl Endpoint {
-    /// Complete the actual selected-key publication and channel Status before starting a
-    /// protected pair. A slow process launch/setup cannot consume the original pair deadline.
+    /// Complete actual selected-key publication and channel Status. Manual scenarios
+    /// deliberately let native work exist before they drive the browser input.
     pub(crate) async fn prepare(state: Arc<AppState>, owner: String) -> Result<Self, Failure> {
-        Self::prepare_inner(state, owner, false, false).await
+        Self::prepare_inner(state, owner, false, false, false).await
+    }
+
+    /// Model the production order: the local consumer is installed as soon as
+    /// authenticated setup is ready. The process fixture must return from Setup
+    /// before it can receive its pump command; retain the original factory position
+    /// and cadence only across that artificial no-consumer interval. The first
+    /// authenticated ReadWork releases them, independently on each endpoint.
+    pub(crate) async fn prepare_initial_automatic(
+        state: Arc<AppState>,
+        owner: String,
+    ) -> Result<Self, Failure> {
+        Self::prepare_inner(state, owner, true, true, true).await
     }
 
     /// Pause only the actual native factory position before delivering Setup/Ready ACK.
@@ -132,14 +152,14 @@ impl Endpoint {
         state: Arc<AppState>,
         owner: String,
     ) -> Result<Self, Failure> {
-        Self::prepare_inner(state, owner, true, false).await
+        Self::prepare_inner(state, owner, true, false, false).await
     }
 
     pub(crate) async fn prepare_deferred_discovery(
         state: Arc<AppState>,
         owner: String,
     ) -> Result<Self, Failure> {
-        Self::prepare_inner(state, owner, true, true).await
+        Self::prepare_inner(state, owner, true, true, false).await
     }
 
     async fn prepare_inner(
@@ -147,6 +167,7 @@ impl Endpoint {
         owner: String,
         pause_setup: bool,
         defer_maintenance: bool,
+        initial_auto_consumer: bool,
     ) -> Result<Self, Failure> {
         super::super::channel::Session::fixture_prepare_native_diagnostics();
         let runtime = crate::voice_runtime(&state);
@@ -264,6 +285,7 @@ impl Endpoint {
             callbacks: Callbacks {
                 pause_setup,
                 deferred_maintenance: deferred.map(|(_, sender)| sender),
+                initial_auto_consumer,
                 ..Callbacks::default()
             },
             media_fixture_grant: None,
@@ -309,6 +331,46 @@ impl Endpoint {
             .as_ref()
             .expect("only a completed native publication supplies a selected owner")
             .clone()
+    }
+
+    /// Read only this original endpoint's existing bounded observers after a
+    /// paired pump failed. No replacement row selection, Actor await, locking
+    /// pool getter, retry or protocol mutation is introduced by diagnostics.
+    pub(crate) fn automatic_diagnostic(&self) -> String {
+        let selected = self.selected();
+        let (selector, ledger) = self
+            .state
+            .voice_handoff
+            .fixture_sdp_diagnostic(&selected, self.callbacks.expected_parent);
+        let native = selector.map(|selector| {
+            self.state
+                .voice_channels
+                .fixture_native_diagnostic(&selected, selector)
+        });
+        let session = self
+            .state
+            .voice_channels
+            .fixture_sdp_session_diagnostic(&selected);
+        format!("{ledger}; {native:?}; independent {session}")
+    }
+
+    /// Bounded, read-only regression oracle while BOTH original startup holds
+    /// still exist. It names no parent for the browser and creates no work.
+    pub(crate) fn assert_initial_consumer_fenced(&self, selector: PairSelector) {
+        assert!(self.callbacks.initial_auto_consumer);
+        assert!(self.callbacks.discovery_hold.is_some());
+        assert!(self.callbacks.deferred_maintenance.is_some());
+        assert!(
+            self.state
+                .voice_handoff
+                .lookup_original(&self.selected(), ledger::Purpose::Derive(selector))
+                .is_none(),
+            "native work must not consume its deadline before the local consumer exists"
+        );
+    }
+
+    pub(crate) fn observe_discovered_pair(&mut self, selector: PairSelector) {
+        self.callbacks.diagnostic_pair = Some(selector);
     }
 
     async fn step(&mut self, value: Value) -> Value {
@@ -957,7 +1019,13 @@ impl Endpoint {
                     );
                 }
             } else if lose_replies {
-                super::super::media::tests::negative_before_admission(&route, parent);
+                let clock = crate::voice_runtime(&self.state).clock();
+                super::super::media::tests::negative_before_admission(
+                    &route,
+                    parent,
+                    clock.as_ref(),
+                )
+                .await;
             } else {
                 self.media_fixture_grant = Some(if matches!(round, Round::NativeIndexDrop) {
                     super::super::media::tests::exercise_index_drop(&self.state, &route, parent)
@@ -1156,7 +1224,22 @@ impl Endpoint {
         assert!(receipt.admitted && !receipt.current && !receipt.closed && !receipt.released);
         // Drop the successful observation. Exact repetition recovers completed tombstone,
         // without requiring any of its erased rows or pretending Session collection.
-        let recovered = target.retire_history().unwrap();
+        // Even a completed tombstone read uses nonblocking Index/entry checks.
+        // Force that exact local refusal, then recover ONLY this same target
+        // under the already-latched limit; no SDK Release/other effect retries.
+        assert!(matches!(
+            target.retire_history_with_state_locked_for_test(),
+            Err(VoiceError::Capacity)
+        ));
+        let recovered = loop {
+            match target.retire_history() {
+                Ok(receipt) => break receipt,
+                Err(VoiceError::Capacity) if clock.monotonic_ms() < limit => {
+                    clock.sleep(std::time::Duration::from_millis(5)).await
+                }
+                Err(error) => panic!("same completed history observation failed: {error:?}"),
+            }
+        };
         assert_eq!(receipt.proof, recovered.proof);
         assert!(ledger
             .lookup_original(&selected, ledger::Purpose::Derive(selector))
@@ -1387,6 +1470,18 @@ async fn drive_streams(
     diagnostic_scope: Option<&SelectedHandoffOwner>,
     step: Value,
 ) -> (Value, Option<[u8; 32]>) {
+    let step_name = step["name"]
+        .as_str()
+        .filter(|name| {
+            name.len() <= 32
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'-')
+        })
+        .unwrap_or("unknown")
+        .to_owned();
+    // Fixed metadata only. No payload, identity, key, SDP or result is retained here.
+    let observed = std::sync::Mutex::new((0usize, None::<Method>));
     // This bounds a broken subprocess/harness, never a protocol deadline. Cancelling this
     // waiter drops its original pipe/process owners; admitted native work keeps its own
     // custody. No timeout creates a replacement key, action, Phase or channel.
@@ -1398,7 +1493,7 @@ async fn drive_streams(
     } else {
         30
     };
-    tokio::time::timeout(
+    let result = tokio::time::timeout(
         std::time::Duration::from_secs(bound),
         drive_streams_inner(
             state,
@@ -1409,10 +1504,40 @@ async fn drive_streams(
             callbacks,
             diagnostic_scope,
             step,
+            &observed,
         ),
     )
-    .await
-    .expect("native/WebCrypto control step exceeded its harness bound")
+    .await;
+    match result {
+        Ok(done) => done,
+        Err(_) => {
+            // Read only the original scope's bounded diagnostic observers. No Actor
+            // await, replacement lookup, retry or protocol deadline change on timeout.
+            let detail = diagnostic_scope.map(|selected| {
+                let (selector, ledger) = state
+                    .voice_handoff
+                    .fixture_sdp_diagnostic(selected, callbacks.expected_parent);
+                let native = selector.map(|selector| {
+                    state
+                        .voice_channels
+                        .fixture_native_diagnostic(selected, selector)
+                });
+                let session = state
+                    .voice_channels
+                    .fixture_sdp_session_diagnostic(selected);
+                let confirmation = callbacks.diagnostic_pair.map(|pair| {
+                    state
+                        .voice_handoff
+                        .fixture_derivation_diagnostic(selected, pair)
+                });
+                format!(
+                    "{ledger}; {native:?}; independent {session}; confirmation={confirmation:?}"
+                )
+            });
+            let observed = *observed.lock().unwrap_or_else(|error| error.into_inner());
+            panic!("native/WebCrypto control timeout: step={step_name}, observed={observed:?}; original-scope diagnostics={detail:?}");
+        }
+    }
 }
 #[allow(clippy::too_many_arguments)] // Never resolve a replacement owner on failure.
 async fn drive_streams_inner(
@@ -1424,6 +1549,7 @@ async fn drive_streams_inner(
     callbacks: &mut Callbacks,
     diagnostic_scope: Option<&SelectedHandoffOwner>,
     step: Value,
+    observed: &std::sync::Mutex<(usize, Option<Method>)>,
 ) -> (Value, Option<[u8; 32]>) {
     let automatic = step["name"] == "pump";
     let coordinator = step["name"] == "coordinator";
@@ -1444,7 +1570,7 @@ async fn drive_streams_inner(
     } else {
         32
     };
-    for _ in 0..callbacks_bound {
+    for count in 0..callbacks_bound {
         let length = output
             .read_u32()
             .await
@@ -1455,6 +1581,7 @@ async fn drive_streams_inner(
         );
         let mut bytes = [0; FRAME_BYTES];
         output.read_exact(&mut bytes[..length]).await.unwrap();
+        observed.lock().unwrap_or_else(|error| error.into_inner()).0 = count + 1;
         match serde_json::from_slice::<Frame>(&bytes[..length]).expect("closed metadata protocol") {
             Frame::Done { value } => return (value, published_executor),
             Frame::Failed { reason } => {
@@ -1470,12 +1597,14 @@ async fn drive_streams_inner(
                     let session = state
                         .voice_channels
                         .fixture_sdp_session_diagnostic(selected);
-                    format!("{ledger}; {native:?}; independent {session}")
+                    let confirmation = callbacks.diagnostic_pair.map(|pair| state.voice_handoff.fixture_derivation_diagnostic(selected, pair));
+                    format!("{ledger}; {native:?}; independent {session}; confirmation={confirmation:?}")
                 });
                 panic!("actual native/WebCrypto step failed: {reason}; original-scope diagnostics={detail:?}")
             }
             Frame::Blocked => panic!("unexpected blocked-step acknowledgement"),
             Frame::Call { method, args } => {
+                observed.lock().unwrap_or_else(|error| error.into_inner()).1 = Some(method);
                 let stop_pump = automatic
                     && matches!(method, Method::ObserveTerminal)
                     && hex::decode(&args.executor)
@@ -1528,6 +1657,31 @@ async fn drive_streams_inner(
                 } else {
                     metadata(state, owner, port, method, args, callbacks.expected_parent).await
                 };
+                if (automatic || coordinator)
+                    && matches!(method, Method::ReadWork)
+                    && reply.is_ok()
+                    && callbacks.initial_auto_consumer
+                {
+                    // This call traversed the actual selected-owner/executor checks.
+                    // A refused/malformed ReadWork cannot release these holds. Historical
+                    // same-owner ReadWork is intentionally allowed even after End; dropping
+                    // negative startup gates cannot reopen that ended Session. Drop
+                    // factory custody before cadence; no peer/RowId/deadline is supplied
+                    // or renewed, and no remote endpoint is awaited by this release.
+                    callbacks.initial_auto_consumer = false;
+                    drop(
+                        callbacks
+                            .discovery_hold
+                            .take()
+                            .expect("original factory hold"),
+                    );
+                    drop(
+                        callbacks
+                            .deferred_maintenance
+                            .take()
+                            .expect("original cadence hold"),
+                    );
+                }
                 if matches!(method, Method::Setup) && reply.is_ok() && callbacks.pause_setup {
                     // Setup has installed the actual Session, but Node cannot ACK it until
                     // this reply returns. Reserve its existing sole factory position here;

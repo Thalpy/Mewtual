@@ -23,8 +23,10 @@ exclude = [
     "apps/desktop/src-tauri",
     # Temporary pinned upstream observer patch; not a Mewtual workspace member.
     "vendor/automerge",
-    "vendor/openmls_memory_storage",
     "vendor/libp2p-gossipsub",
+    "vendor/openmls_memory_storage",
+    "vendor/openmls",
+    "vendor/netwatch",
 ]
 
 [workspace.package]
@@ -54,11 +56,13 @@ all = { level = "warn", priority = -1 }
 # Both workspaces must use this exact source so native and core document types agree.
 # See vendor/automerge/MEWTUAL-PATCH.md for provenance and the narrow readonly API patch.
 [patch.crates-io]
+netwatch = { path = "vendor/netwatch" }
+libp2p-gossipsub = { path = "vendor/libp2p-gossipsub" }
 automerge = { path = "vendor/automerge" }
 # Both workspaces also use the same reviewed provider backing-map observation.
 openmls_memory_storage = { path = "vendor/openmls_memory_storage" }
-# Keep both shipping workspaces on the same reviewed bounded-hello correction.
-libp2p-gossipsub = { path = "vendor/libp2p-gossipsub" }
+# Same pinned SDK; reviewed explicit-time and bounded private-Add patches.
+openmls = { path = "vendor/openmls" }
 
 # Real-vault tests retain the same Argon2id algorithm, parameters and assertions.
 # Optimize only dependency arithmetic in development and the inherited test

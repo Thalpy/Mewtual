@@ -5,6 +5,13 @@ only for its exact canonical topic. Other retained originals preserve their
 ownership/order and normal periodic retry; wire and delivery claims below are
 unchanged. [Scope](communication-recovery/MAIN-SECURITY-PREREQUISITE.md).
 
+Disabled native V2 invite continuation (15 November): the original runtime can
+prepare one unsigned invite through its same member verifier and actual
+Current4 checks. Its output is hash/expiry DATA and contains no usable contact,
+signed invite or covering receipt. No join/message transport changes follow;
+the active network flow below remains Legacy.
+[Producer status](communication-recovery/CHAT-V2-INVITE-ISSUER.md).
+
 Status: a **trace of what the code does today**. It began as a trace written before any change;
 sections 1 to 5 have since been brought back in line with the fixes recorded in sections 8 to 11,
 so the trace and the fix log describe the same code. It records the send path, the live receive
@@ -27,6 +34,22 @@ separate work.
 ---
 
 ## Chat history adversarial continuation (20 October)
+
+The disabled Native Text frontend now seals an exact critical4 intent before
+local save, retries the same token automatically and reads bounded pages of its
+own saved originals. Backend mode is explicit even for an empty vault. There is
+still no V2 second-member delivery or shared projection, so the live network
+trace below remains Legacy. [Current native flow](communication-recovery/CHAT-V2-NATIVE-SESSION.md).
+
+15 November disabled native V2 continuation: original-runtime member preparation
+signs once into namespace5; final admission holds actual native custody through
+the local save and restores the runtime afterward. Its own-history reader also
+includes settled originals, using fixed bounded ordinal pages. This Root path
+does not publish a message or receive another member's history. The checked
+native founder/plain-send and own-history routes are implemented behind the
+disabled switch; frontend integration and V2 transport remain unfinished. The
+active desktop send path below still uses the legacy durable transaction.
+[Implementation and evidence](communication-recovery/CHAT-V2-NATIVE-TEXT-OPERATIONS.md).
 
 MLS key epochs do not reset the chat operation graph. The additive ledger, causal edit/delete
 rules, newly found message-addressing and failed-page cursor defects, compatibility-conscious

@@ -14,13 +14,13 @@ enum ExistingOwnerCore<'guard, 'writer> {
     Cold(ColdOwnedV2CurrentOwnerNamespace<'guard, 'writer>),
     Repaired(ColdRepairedV2GenesisCurrentNamespace<'guard, 'writer>),
 }
-struct ExistingOwner<'guard, 'writer> {
+pub(super) struct ExistingOwner<'guard, 'writer> {
     core: ExistingOwnerCore<'guard, 'writer>,
     admission: &'guard GenesisCurrent2SettlementReadAdmission<'writer>,
     identifier: [u8; 32],
 }
 impl ExistingOwner<'_, '_> {
-    fn validate_source_only(&self) -> Result<(), AppError> {
+    pub(super) fn validate_source_only(&self) -> Result<(), AppError> {
         self.admission.validate_source_only()?;
         match &self.core {
             ExistingOwnerCore::Warm(n) => n.validate_source_only()?,
@@ -32,7 +32,7 @@ impl ExistingOwner<'_, '_> {
         }
         Ok(())
     }
-    fn validate_old_files(&self) -> Result<(), AppError> {
+    pub(super) fn validate_old_files(&self) -> Result<(), AppError> {
         self.validate_source_only()?;
         match &self.core {
             ExistingOwnerCore::Warm(n) => n.validate_old_files()?,
@@ -41,7 +41,26 @@ impl ExistingOwner<'_, '_> {
         }
         self.validate_source_only()
     }
-    fn registration_parts(&self) -> (&super::super::v2_registration::Runtime, &[u8; 32]) {
+    pub(super) fn text_lane_runtime(&self) -> &super::super::text_lane::TextLaneRuntime {
+        match &self.core {
+            ExistingOwnerCore::Warm(n) => &n.inner.pool.text_lanes,
+            ExistingOwnerCore::Cold(n) => n.text_lane_runtime(),
+            ExistingOwnerCore::Repaired(n) => n.text_lane_runtime(),
+        }
+    }
+    /// Canonical-family-only negative active-lane storage. No installed writer mutation.
+    pub(super) fn text_lane_runtime_mut(
+        &mut self,
+    ) -> &mut super::super::text_lane::TextLaneRuntime {
+        match &mut self.core {
+            ExistingOwnerCore::Warm(n) => &mut n.inner.pool.text_lanes,
+            ExistingOwnerCore::Cold(n) => n.text_lane_runtime_mut(),
+            ExistingOwnerCore::Repaired(n) => n.text_lane_runtime_mut(),
+        }
+    }
+    pub(super) fn registration_parts(
+        &self,
+    ) -> (&super::super::v2_registration::Runtime, &[u8; 32]) {
         let runtime = match &self.core {
             ExistingOwnerCore::Warm(n) => &n.inner.pool.v2_writers,
             ExistingOwnerCore::Cold(n) => n.settlement_registration_runtime(),
@@ -94,7 +113,7 @@ existing_namespace!(
     SettledGenesisCurrent2ReadAdmission
 );
 
-fn lock_existing<'guard, 'writer>(
+pub(super) fn lock_existing<'guard, 'writer>(
     admission: &'guard GenesisCurrent2SettlementReadAdmission<'writer>,
 ) -> Result<ExistingOwner<'guard, 'writer>, AppError> {
     admission.validate_source_only()?;

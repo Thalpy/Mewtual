@@ -30,6 +30,8 @@ pub struct MemoryStorage {
     pub values: RwLock<StorageMap>,
     // None is legacy. Once installed, Complete/Cancelled never become None again.
     owner_restore: Mutex<Option<Arc<owner_restore::Attempt>>>,
+    // Separate fresh-candidate-only operation state. Never an unrestricted window.
+    text_add: Mutex<Option<Arc<owner_restore::text_add::Candidate>>>,
 }
 
 // For testing we want to clone.
@@ -40,6 +42,7 @@ impl Clone for MemoryStorage {
         Self {
             values: RwLock::new(values.clone()),
             owner_restore: Mutex::new(self.owner_restore.lock().unwrap().clone()),
+            text_add: Mutex::new(self.text_add.lock().unwrap().clone()),
         }
     }
 }
@@ -97,6 +100,7 @@ impl MemoryStorage {
         Ok(Self {
             values: RwLock::new(map),
             owner_restore: Mutex::new(None),
+            text_add: Mutex::new(None),
         })
     }
 }
@@ -364,6 +368,10 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         group_id: &GroupId,
         tree: &TreeSync,
     ) -> Result<(), Self::Error> {
+        // Candidate branch checks/charges BEFORE any legacy key/serde/diagnostics.
+        if self.text_add_write_group(TREE_LABEL, group_id, tree)? {
+            return Ok(());
+        }
         self.require_unrestricted()?;
         self.write::<CURRENT_VERSION>(
             TREE_LABEL,
@@ -380,6 +388,14 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         group_id: &GroupId,
         interim_transcript_hash: &InterimTranscriptHash,
     ) -> Result<(), Self::Error> {
+        // Candidate branch checks/charges BEFORE any legacy key/serde/diagnostics.
+        if self.text_add_write_group(
+            INTERIM_TRANSCRIPT_HASH_LABEL,
+            group_id,
+            interim_transcript_hash,
+        )? {
+            return Ok(());
+        }
         self.require_unrestricted()?;
         #[cfg(test)]
         owner_restore::before_values_writer();
@@ -402,6 +418,10 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         group_id: &GroupId,
         group_context: &GroupContext,
     ) -> Result<(), Self::Error> {
+        // Candidate branch checks/charges BEFORE any legacy key/serde/diagnostics.
+        if self.text_add_write_group(GROUP_CONTEXT_LABEL, group_id, group_context)? {
+            return Ok(());
+        }
         self.require_unrestricted()?;
         #[cfg(test)]
         owner_restore::before_values_writer();
@@ -424,6 +444,10 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         group_id: &GroupId,
         confirmation_tag: &ConfirmationTag,
     ) -> Result<(), Self::Error> {
+        // Candidate branch checks/charges BEFORE any legacy key/serde/diagnostics.
+        if self.text_add_write_group(CONFIRMATION_TAG_LABEL, group_id, confirmation_tag)? {
+            return Ok(());
+        }
         self.require_unrestricted()?;
         #[cfg(test)]
         owner_restore::before_values_writer();
@@ -744,6 +768,10 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         group_id: &GroupId,
         group_state: &GroupState,
     ) -> Result<(), Self::Error> {
+        // Candidate branch checks/charges BEFORE any legacy key/serde/diagnostics.
+        if self.text_add_write_group(GROUP_STATE_LABEL, group_id, group_state)? {
+            return Ok(());
+        }
         self.require_unrestricted()?;
         self.write::<CURRENT_VERSION>(
             GROUP_STATE_LABEL,
@@ -779,6 +807,10 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         group_id: &GroupId,
         message_secrets: &MessageSecrets,
     ) -> Result<(), Self::Error> {
+        // Candidate branch checks/charges BEFORE any legacy key/serde/diagnostics.
+        if self.text_add_write_group(MESSAGE_SECRETS_LABEL, group_id, message_secrets)? {
+            return Ok(());
+        }
         self.require_unrestricted()?;
         self.write::<CURRENT_VERSION>(
             MESSAGE_SECRETS_LABEL,
@@ -814,6 +846,10 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         group_id: &GroupId,
         resumption_psk_store: &ResumptionPskStore,
     ) -> Result<(), Self::Error> {
+        // Candidate branch checks/charges BEFORE any legacy key/serde/diagnostics.
+        if self.text_add_write_group(RESUMPTION_PSK_STORE_LABEL, group_id, resumption_psk_store)? {
+            return Ok(());
+        }
         self.require_unrestricted()?;
         self.write::<CURRENT_VERSION>(
             RESUMPTION_PSK_STORE_LABEL,
@@ -849,6 +885,10 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         group_id: &GroupId,
         own_leaf_index: &LeafNodeIndex,
     ) -> Result<(), Self::Error> {
+        // Candidate branch checks/charges BEFORE any legacy key/serde/diagnostics.
+        if self.text_add_write_group(OWN_LEAF_NODE_INDEX_LABEL, group_id, own_leaf_index)? {
+            return Ok(());
+        }
         self.require_unrestricted()?;
         self.write::<CURRENT_VERSION>(
             OWN_LEAF_NODE_INDEX_LABEL,
@@ -884,6 +924,10 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         group_id: &GroupId,
         group_epoch_secrets: &GroupEpochSecrets,
     ) -> Result<(), Self::Error> {
+        // Candidate branch checks/charges BEFORE any legacy key/serde/diagnostics.
+        if self.text_add_write_group(EPOCH_SECRETS_LABEL, group_id, group_epoch_secrets)? {
+            return Ok(());
+        }
         self.require_unrestricted()?;
         self.write::<CURRENT_VERSION>(
             EPOCH_SECRETS_LABEL,
@@ -911,6 +955,10 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         leaf_index: u32,
         key_pairs: &[HpkeKeyPair],
     ) -> Result<(), Self::Error> {
+        // Candidate branch checks/charges BEFORE any legacy key/serde/diagnostics.
+        if self.text_add_write_epoch(group_id, epoch, leaf_index, key_pairs)? {
+            return Ok(());
+        }
         self.require_unrestricted()?;
         let key = epoch_key_pairs_id(group_id, epoch, leaf_index)?;
         let value = serde_json::to_vec(key_pairs)?;
@@ -934,6 +982,10 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         epoch: &EpochKey,
         leaf_index: u32,
     ) -> Result<Vec<HpkeKeyPair>, Self::Error> {
+        // Candidate branch checks/charges BEFORE any legacy key/serde/diagnostics.
+        if let Some(result) = self.text_add_read_epoch(group_id, epoch, leaf_index)? {
+            return Ok(result);
+        }
         self.require_owner_read_label(EPOCH_KEY_PAIRS_LABEL)?;
         let key = epoch_key_pairs_id(group_id, epoch, leaf_index)?;
         let storage_key = build_key_from_vec::<CURRENT_VERSION>(EPOCH_KEY_PAIRS_LABEL, key);
@@ -963,6 +1015,10 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         epoch: &EpochKey,
         leaf_index: u32,
     ) -> Result<(), Self::Error> {
+        // Candidate branch checks/charges BEFORE any legacy key/serde/diagnostics.
+        if self.text_add_delete_epoch(group_id, epoch, leaf_index)? {
+            return Ok(());
+        }
         self.require_unrestricted()?;
         let key = epoch_key_pairs_id(group_id, epoch, leaf_index)?;
         self.delete::<CURRENT_VERSION>(EPOCH_KEY_PAIRS_LABEL, &key)
@@ -975,6 +1031,10 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        // Candidate branch checks/charges BEFORE any legacy key/serde/diagnostics.
+        if self.text_add_delete_empty_group(PROPOSAL_QUEUE_REFS_LABEL, group_id)? {
+            return Ok(());
+        }
         self.require_unrestricted()?;
         // Get all proposal refs for this group.
         let proposal_refs: Vec<ProposalRef> =
@@ -1053,6 +1113,10 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<(), Self::Error> {
+        // Candidate branch checks/charges BEFORE any legacy key/serde/diagnostics.
+        if self.text_add_delete_empty_group(OWN_LEAF_NODES_LABEL, group_id)? {
+            return Ok(());
+        }
         self.require_unrestricted()?;
         self.delete::<CURRENT_VERSION>(OWN_LEAF_NODES_LABEL, &serde_json::to_vec(group_id).unwrap())
     }

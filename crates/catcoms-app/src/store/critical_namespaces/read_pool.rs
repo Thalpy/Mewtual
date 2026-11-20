@@ -35,6 +35,19 @@ impl std::fmt::Debug for CriticalCatalogReadPool {
     }
 }
 impl CriticalCatalogReadPool {
+    /// Cached allocation identity only; never reserves credit or proves that
+    /// a debit remains valid. Guard-safe captures use this before pinning real
+    /// work, then validate the actual debit outside the native guard.
+    pub(in crate::store) fn same_pool_cached(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+    /// Test only: hold the genuine account writer while another thread
+    /// exercises a purported atomic-only capture. The test owns release/join.
+    #[cfg(test)]
+    pub(in crate::store) fn with_counter_locked_for_test(&self, run: impl FnOnce()) {
+        let _held = self.inner.state.lock().expect("test account writer");
+        run();
+    }
     /// Negative contention observation for actual blocked-I/O tests; no credit or guard.
     #[cfg(test)]
     pub(in crate::store) fn counter_available_for_test(&self) -> bool {
@@ -70,6 +83,22 @@ impl CriticalCatalogReadPool {
                 before_read: Mutex::new(None),
             }),
         })
+    }
+
+    /// The trusted configured hard capacity, for a policy's own sizing check at configuration
+    /// time. DATA only: it grants no credit, and an account that already lost accounting
+    /// (`unavailable`) or is poisoned reports zero so no policy can be sized against it.
+    pub(in crate::store) fn capacity(&self) -> usize {
+        match self.inner.state.lock() {
+            Ok(state) if !state.unavailable => state.capacity,
+            _ => 0,
+        }
+    }
+
+    /// Whether two handles share ONE account (clones of the same pool). DATA for a policy's
+    /// own independence check; no credit or authority follows.
+    pub(in crate::store) fn same_account(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
     }
 
     pub(in crate::store) fn try_reserve(

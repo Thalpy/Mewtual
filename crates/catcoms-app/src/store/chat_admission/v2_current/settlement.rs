@@ -124,7 +124,7 @@ impl<'writer> GenesisCurrent2SettlementReadAdmission<'writer> {
         Ok(&self.binding()?.writer)
     }
     // Only the Windows physical-settlement tests exercise this observation.
-    #[cfg(all(test, windows))]
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store) fn owner_observer(&self) -> &RequestCancellation {
         match &self.scope {
             ReadScope::Warm(admission) => &admission.preparation.inner.admission,
@@ -202,7 +202,7 @@ fn require_binding(
     Ok(())
 }
 
-fn read<'writer>(
+pub(super) fn read<'writer>(
     store: &'writer ServerStore,
     runtime: &'writer Runtime,
     owner: &'writer GenesisCurrentOwnerRef<'writer>,

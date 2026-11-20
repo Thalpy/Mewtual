@@ -8,3 +8,17 @@ impl ColdOwnedV2CurrentOwnerNamespace<'_, '_> {
         &self.inner.pool.v2_writers
     }
 }
+
+impl ColdOwnedV2CurrentOwnerNamespace<'_, '_> {
+    pub(in crate::store::owner_evidence::canonical) fn text_lane_runtime(
+        &self,
+    ) -> &crate::store::owner_evidence::canonical::text_lane::TextLaneRuntime {
+        &self.inner.pool.text_lanes
+    }
+    /// Family-private negative-lane storage only; no mutable writer map escapes.
+    pub(in crate::store::owner_evidence::canonical) fn text_lane_runtime_mut(
+        &mut self,
+    ) -> &mut crate::store::owner_evidence::canonical::text_lane::TextLaneRuntime {
+        &mut self.inner.pool.text_lanes
+    }
+}

@@ -14,6 +14,11 @@ pub(super) struct GroupViewLife {
     closed: AtomicBool,
 }
 impl GroupViewLife {
+    /// Historical negative evidence from this EXACT original view. Replacement
+    /// views share its flat gate but cannot undo a completed original drain.
+    pub(super) fn has_completed_drain(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
     pub(super) fn live(&self) -> bool {
         !self.cancelled.load(Ordering::Acquire)
             && !self.pending.load(Ordering::Acquire)
@@ -22,7 +27,7 @@ impl GroupViewLife {
     fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
     }
-    fn request_close(this: &Arc<Self>) -> ProjectionGroupCloseCompletion {
+    pub(super) fn request_close(this: &Arc<Self>) -> ProjectionGroupCloseCompletion {
         this.cancel();
         ProjectionGroupCloseCompletion { life: this.clone() }
     }
@@ -42,6 +47,21 @@ impl std::fmt::Debug for ProjectionGroup {
     }
 }
 impl ProjectionGroup {
+    /// Logical metadata for ONE domain and its initial view/close owners. The host
+    /// pays this before construction and keeps that payment through every escaping
+    /// view/revoker/completion tail. This is neither a quota nor an RSS estimate;
+    /// replacement views and per-ledger publication windows need their own invoices.
+    pub const fn initial_metadata_layout_bytes() -> usize {
+        std::mem::size_of::<Self>()
+            + std::mem::size_of::<ProjectionGroupView>()
+            + std::mem::size_of::<GroupViewLife>()
+            + std::mem::size_of::<RwLock<()>>()
+            + std::mem::size_of::<ProjectionGroupViewRevoker>()
+            + std::mem::size_of::<ProjectionGroupCloseCompletion>()
+            + MAX_GROUP_ID_BYTES
+            + 12 * std::mem::size_of::<usize>()
+    }
+
     /// Only a bounded exact group identity, never a root/admission or positive capability.
     pub fn new(group: &[u8]) -> Result<Self, ChatError> {
         if group.is_empty() || group.len() > MAX_GROUP_ID_BYTES {

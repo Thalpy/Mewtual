@@ -458,3 +458,17 @@ impl ColdRepairedV2GenesisCurrentNamespace<'_, '_> {
         &self.inner.pool.v2_writers
     }
 }
+
+impl ColdRepairedV2GenesisCurrentNamespace<'_, '_> {
+    pub(in crate::store::owner_evidence::canonical) fn text_lane_runtime(
+        &self,
+    ) -> &super::super::text_lane::TextLaneRuntime {
+        &self.inner.pool.text_lanes
+    }
+    /// Family-private negative-lane storage only; no mutable writer map escapes.
+    pub(in crate::store::owner_evidence::canonical) fn text_lane_runtime_mut(
+        &mut self,
+    ) -> &mut super::super::text_lane::TextLaneRuntime {
+        &mut self.inner.pool.text_lanes
+    }
+}

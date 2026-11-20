@@ -23,6 +23,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         binding: &impl ManagedOwnerOperationBinding,
     ) -> Result<(), SyncError> {
         let bad = || SyncError::ChatScopeUnavailable;
+        // The V2 joined-member source and this v1 owner install are mutually exclusive on one
+        // node incarnation. This replaces group/device/tenure OUTSIDE
+        // `with_observed_mls_transition`, so a joined source's fence would never observe it.
+        // Refuse FIRST, before any take or replacement, so the whole candidate is preserved.
+        self.require_no_v2_joined_source()?;
         let candidate = prepared.as_ref().ok_or_else(bad)?;
         if !candidate.matches_original(self)
             || membership_snapshot::governing_fingerprint(self)? != candidate.original_governance
@@ -58,6 +63,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.commit_log.push_back(candidate.commit);
         self.owner_operation = Some(Arc::new(candidate.operation));
         self.owner_commit_submitted = false;
+        // This incarnation is now the v1 owner's; V2 join facts can never be taken from it.
+        self.note_v1_owner_install();
         // Do not call with_observed_mls_transition: the private tenure already applied the
         // actual transition once, and that helper would apply it again. Preserve its negative
         // reconciliation order explicitly before the caller can admit response/commit debt.

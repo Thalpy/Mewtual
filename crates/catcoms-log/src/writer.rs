@@ -267,7 +267,7 @@ impl WriterStats {
 }
 
 fn now_ms() -> i64 {
-    chrono::Local::now().timestamp_millis()
+    jiff::Timestamp::now().as_millisecond()
 }
 
 // --- the queue -------------------------------------------------------------------------------

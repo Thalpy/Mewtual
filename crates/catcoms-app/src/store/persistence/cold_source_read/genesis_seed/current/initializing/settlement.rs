@@ -21,6 +21,26 @@ fn require_repaired_head(
 }
 
 impl<T, R> UnexposedRepairedV2GenesisCurrent<T, R> {
+    /// Cached prerequisite only; new operational physical proof is separate. An ambiguous
+    /// cleanup must first finish its SAME worker, not adopt file absence.
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn text_owner_ref(
+        &self,
+    ) -> Result<GenesisCurrentOwnerRef<'_>, AppError> {
+        self.seed_settlement
+            .as_ref()
+            .and_then(|worker| worker.saved_outcome())
+            .ok_or_else(critical_namespaces::refused)?;
+        self.settlement_owner_ref()
+    }
+    /// Negative only; explicit close joins real work separately from this revocation.
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn cancel_for_text(
+        &self,
+    ) {
+        self.writer.cancel_original();
+        self.scope.cancel_original();
+        self.task.cancel_original();
+    }
+
     /// Cached exact association only. In particular no old mandatory-seed physical
     /// validator occurs here: this loan is also needed after an admitted ambiguous unlink.
     pub(in crate::store) fn settlement_owner_ref(

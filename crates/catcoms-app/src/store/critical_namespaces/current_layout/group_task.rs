@@ -86,6 +86,15 @@ pub(in crate::store) struct OriginalV2GenesisGroupObservation {
     _fee: Arc<CatalogReadReservation>,
 }
 impl OriginalV2GenesisGroupObservation {
+    /// Negative observation of the original tiny atomic control only. Upgrading this
+    /// GroupTaskLife cannot retain a sender, graph, File, Store, fee or session: none is
+    /// stored in that type. The observation itself keeps its real metadata payment.
+    pub(in crate::store) fn is_cancelled(&self) -> bool {
+        self.life
+            .upgrade()
+            .is_none_or(|life| life.cancelled.load(Ordering::Acquire))
+    }
+
     pub(in crate::store) fn require_same_original(
         &self,
         task: &PreparedV2GenesisGroupNamespace,

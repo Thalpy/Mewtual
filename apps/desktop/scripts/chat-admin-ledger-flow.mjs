@@ -57,8 +57,14 @@ export const chatAdminLedgerFlowExpression = String.raw`(async () => {
   await wait(() => held !== null, 'held original invocation');
   document.querySelector('button.dm-circle').click();
   await wait(() => document.querySelector('.dm-list button'), 'DM rail');
-  document.querySelector('.dm-list button').click();
-  await wait(() => !document.querySelector('.chat-admin-ledger') && document.querySelector('.server-title') === null, 'different server');
+  const targetDm = document.querySelector('.dm-list button');
+  targetDm.click();
+  // The DM sidebar also has a server-title ("Direct messages"). Require the chosen
+  // conversation to become active AND the old privileged pane to unmount before
+  // releasing its held response. Merely opening the DM rail is not a server switch.
+  await wait(() => targetDm.matches('.active') && targetDm.isConnected
+    && !document.querySelector('.chat-admin-ledger')
+    && document.querySelector('.server-title')?.textContent.trim() === 'Direct messages', 'different server');
   const retired = held;
   retired.reply.legacyChange.mutations[0].value.text = 'PRIVATE OLD SCOPE MUST NOT LAND';
   retired.resolve(retired.reply); held = null;

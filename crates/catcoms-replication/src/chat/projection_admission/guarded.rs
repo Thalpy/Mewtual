@@ -148,6 +148,11 @@ impl ChatLedger {
             };
             match entry.action.spec().body {
                 Body::Edit { .. } => {
+                    // Every live edit affects the candidate heads, even when it
+                    // does not win: a provisional descendant can suppress an
+                    // accepted ancestor. Its independent Admission closure must
+                    // invalidate this exact cached selection before publication.
+                    lease.observe(token);
                     edits.insert(id);
                 }
                 Body::Delete { .. } if token.certainty() == ProjectionCertainty::Proven => {

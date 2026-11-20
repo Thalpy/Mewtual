@@ -50,7 +50,11 @@ pub(super) async fn saved_warning(
             .filter_map(|route| route.peer_id.map(PeerId::new)),
     );
     let guard = state.store.lock().await;
-    let net = guard.as_ref()?.load_server_net(server).ok()??;
+    let net = guard
+        .as_ref()
+        .and_then(MountedVault::as_legacy)?
+        .load_server_net(server)
+        .ok()??;
     (!net.reconnect_routes.iter().any(|route| {
         claims.contains(&PeerId::new(route.peer_id))
             && (net.reconnect_policy == ReconnectPolicy::MemberMesh
@@ -162,7 +166,7 @@ pub(super) async fn persist_with_proofs(
         .servers
         .lock()
         .await
-        .get(&server)
+        .legacy(&server)
         .filter(|entry| entry.instance == instance)
         .and_then(|entry| entry.mesh.as_ref().map(MeshHandle::local_peer))
         .ok_or_else(|| "group changed during reconnect finalization".to_string())?;
@@ -291,10 +295,11 @@ pub(super) async fn persist_with_proofs(
     let guard = state.store.lock().await;
     let store = guard
         .as_ref()
+        .and_then(MountedVault::as_legacy)
         .ok_or_else(|| "vault is not mounted".to_string())?;
     let registry = state.servers.lock().await;
     if registry
-        .get(&server)
+        .legacy(&server)
         .is_none_or(|entry| entry.instance != instance)
     {
         return Err("group changed during reconnect finalization".into());
@@ -388,7 +393,7 @@ pub(super) async fn before_shutdown(state: &AppState) -> Result<(), String> {
         .servers
         .lock()
         .await
-        .iter()
+        .legacy_iter()
         .map(|(id, entry)| (*id, entry.instance, entry.actor.clone(), entry.mesh.clone()))
         .collect();
     for (id, instance, actor, mesh) in entries {
@@ -418,7 +423,7 @@ pub(super) async fn run_capture_worker(
             .servers
             .lock()
             .await
-            .get(&server)
+            .legacy(&server)
             .is_none_or(|entry| entry.instance != instance)
         {
             break;

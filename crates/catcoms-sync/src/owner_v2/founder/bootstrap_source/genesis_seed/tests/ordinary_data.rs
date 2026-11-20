@@ -6,13 +6,15 @@
 use super::super::ordinary_append::{self as append, *};
 use super::super::ordinary_create::{self as create, *};
 use super::*;
+mod materialized;
+mod member_signing;
 use catcoms_crypto::{unseal, SealedBlob};
 use catcoms_replication::chat::owner_state::transition::{ReplayBody, ReplayMath};
 use catcoms_replication::chat::{Body, SignedAction};
 use catcoms_storage::pad::{unpad, OP_PAD_CEILING, OP_PAD_FLOOR};
 use catcoms_wire::{Decoder, DocType};
 
-fn prepared_node(
+pub(in super::super) fn prepared_node(
     id: u64,
 ) -> (
     UnboundV2GenesisNode<MemNetwork, ChaCha20Rng>,
@@ -20,7 +22,19 @@ fn prepared_node(
     OpenedBootstrapSourceData,
     Arc<AtomicUsize>,
 ) {
-    let f = fixture(id);
+    prepared_node_with_clock(id, Box::new(ManualClock::new(1000)))
+}
+
+pub(in super::super) fn prepared_node_with_clock(
+    id: u64,
+    clock: Box<dyn Clock + Send>,
+) -> (
+    UnboundV2GenesisNode<MemNetwork, ChaCha20Rng>,
+    Reservation,
+    OpenedBootstrapSourceData,
+    Arc<AtomicUsize>,
+) {
+    let f = fixture_with_clock(id, clock);
     let count = Arc::new(AtomicUsize::new(0));
     let mut restored = seed(&f.opened, &count);
     restored.prepare_scope(&f.reservation).unwrap();
@@ -671,6 +685,13 @@ fn unsigned_append_refuses_negative_handoff_but_raw_signature_survives_failed_so
         .unwrap()
         .observe_plan_data(&node, &model)
         .unwrap();
+    assert_eq!(
+        append
+            .as_ref()
+            .unwrap()
+            .borrow_existing_raw_signature_data(&observation),
+        Err(V2CreateRefusal::Terminal)
+    );
     let expected = append
         .as_ref()
         .unwrap()
@@ -694,6 +715,31 @@ fn unsigned_append_refuses_negative_handoff_but_raw_signature_survives_failed_so
     assert!(node
         .materialize_signed_append_data(&model, append.as_mut().unwrap())
         .is_err());
+    let cached_raw = *append
+        .as_ref()
+        .unwrap()
+        .borrow_existing_raw_signature_data(&observation)
+        .unwrap();
+    for _ in 0..3 {
+        assert_eq!(
+            *append
+                .as_ref()
+                .unwrap()
+                .borrow_existing_raw_signature_data(&observation)
+                .unwrap(),
+            cached_raw
+        );
+    }
+    assert!(catcoms_crypto::verify_with_public_bytes(
+        action.signer(),
+        &expected,
+        &cached_raw
+    ));
+    assert_eq!(
+        append::signs_for_test(),
+        1,
+        "negative raw borrows cannot repeat a key call"
+    );
     let detached = append.take().unwrap().into_handoff_data().unwrap();
     assert!(
         detached.header_data().is_none(),
@@ -746,12 +792,40 @@ fn exact_plan_observation_cannot_sign_another_prepared_child() {
     node.sign_reserved_append_bytes_data(&observation, first.as_mut().unwrap())
         .unwrap();
     assert_eq!(append::signs_for_test(), 1);
+    let raw = *first
+        .as_ref()
+        .unwrap()
+        .borrow_existing_raw_signature_data(&observation)
+        .unwrap();
+    assert_eq!(
+        *first
+            .as_ref()
+            .unwrap()
+            .borrow_existing_raw_signature_data(&observation)
+            .unwrap(),
+        raw
+    );
+    assert_eq!(
+        second
+            .as_ref()
+            .unwrap()
+            .borrow_existing_raw_signature_data(&observation),
+        Err(V2CreateRefusal::RequestMismatch)
+    );
+    assert_eq!(append::signs_for_test(), 1);
     node.sign_reserved_append_bytes_data(&observation, first.as_mut().unwrap())
         .unwrap();
     assert_eq!(append::signs_for_test(), 1);
     let detached = first.take().unwrap().into_handoff_data().unwrap();
     assert!(detached.header_data().is_none());
     assert!(!observation.matches_original_data(second.as_ref().unwrap()));
+    assert_eq!(
+        second
+            .as_ref()
+            .unwrap()
+            .borrow_existing_raw_signature_data(&observation),
+        Err(V2CreateRefusal::RequestMismatch)
+    );
 }
 
 #[test]
