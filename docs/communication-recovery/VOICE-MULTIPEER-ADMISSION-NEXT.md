@@ -1,8 +1,10 @@
 # Automatic multi-peer admission: failing reproduction and next boundary
 
-27 October 2026. This is an open implementation requirement, not a completed protocol.
-App V2 remains disabled. The isolated composition branch deliberately contains a failing
-positive acceptance test. Do not merge it as a green checkpoint or enable V2 from it.
+20 November 2026: the positive three-coordinator reproduction is being integrated on main
+at the user's request. Its last recorded result remains failing; the new combined source
+requires hosted validation. This is an open implementation requirement, not a completed
+protocol or activation approval. App V2 remains disabled. The dated evidence below retains
+its original source and must not be counted as current-source acceptance.
 
 28 October capacity implementation: `communication-v2-admission-completion` now has an
 exact group progression claim through actual original/successor custody and an inert

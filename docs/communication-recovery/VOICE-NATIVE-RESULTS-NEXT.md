@@ -1,6 +1,14 @@
 # Next voice milestone: native result recovery
 
-## Current integration status (27 October; App V2 OFF)
+## Integration checkpoint (20 November 2026)
+
+The reviewed stack and #73's unscripted three-peer reproduction are being integrated
+on main. The reproduction's recorded failure remains open until the combined source
+passes. Production audio/lifecycle, automatic multi-peer recovery, member relay and
+physical acceptance remain outstanding. Chat V2 stays disabled. The dated entries
+below describe their original checkpoints; current CI is tracked on main.
+
+## Historical integration status (27 October; App V2 OFF)
 
 Draft #74 combines the reviewed voice/recovery checkpoints with Rust 1.94 and the
 dependency upgrade. See [PR-BACKLOG-INTEGRATION](PR-BACKLOG-INTEGRATION.md) for the exact
@@ -13,6 +21,19 @@ The Source's bounded SDP shape gate is implemented before HIGH's constructor and
 local output. Runtime transceiver/receiver/direction validation and actual audio cells,
 capture/playback, App lifecycle/renewal, automatic multi-peer admission, member relay
 and combined/physical acceptance remain open. One desktop is available; V2 stays OFF.
+
+## Historical composition and audio checkpoint (27 October)
+
+Broker45's Source audio-profile gate is now wired and its combined native897-library/5-ACL
+checkpoint passes. Broker46 owns bounded RTC setting strings; its full native run was interrupted across the restart.
+The older dated sections below describe their historical checkpoints, including formerly
+unwired helpers. Current handover/acceptance entries supersede those pending-gate notes.
+
+A new three-coordinator positive acceptance test fails before every endpoint has two peers.
+See [the reproduction and required admission/round design](VOICE-MULTIPEER-ADMISSION-NEXT.md).
+Do not clear failed history, renew an old handshake or enable V2 to bypass that gap. Capture/
+playback and App wiring/renewal, member relay and combined/physical acceptance remain open.
+Only one desktop exists; the programme is not ready for V2 two-computer acceptance.
 
 ## Real RTC direction fixed; audio cells and App still next (27 October)
 

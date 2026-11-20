@@ -51,14 +51,12 @@ Do not record microphone content unless both participants consent.
 
 ## Current blockers and ownership
 
-The primary voice implementation still owns operational Ready/admission and negotiation
-retirement, production App/native/RTC composition, peer-local failure recovery, member media
-relay and combined acceptance. The corrected combined candidate at `fa3107d2` passes
-complete local native acceptance (1,011 library plus six ACL tests), Root/frontend gates,
-native build and actual startup. This remains controlled-fixture evidence; hosted CI is pending.
-External-download resume is now included in draft #75 and its stacked Score candidate #76;
-their combined gates/merge are still pending. The refreshed dependency audits pass on that
-candidate. Verify the tested binary's ancestry rather than assuming another branch changes
-it. Operational admission, production audio composition and member relay remain entry
-blockers; a passing controlled two-peer fixture does not remove them. Physical acceptance
-remains unrun because only one desktop is currently available.
+The reviewed integration stack, including the three-coordinator reproduction from #73,
+is now being integrated on main at the user's request. The reproduction's last recorded
+result is failing; the newly combined source still requires hosted validation. See
+[multi-peer admission](VOICE-MULTIPEER-ADMISSION-NEXT.md). Existing controlled two-peer
+results do not establish production audio, automatic multi-peer progress or member relay.
+
+External-download and dependency repairs are included in the integrated history. Validate
+the exact binary/source and current audits before recording a new result. Physical audio,
+network and multi-device acceptance remain unrun. Chat V2 remains disabled.
