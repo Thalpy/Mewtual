@@ -1,8 +1,8 @@
 # Automatic multi-peer admission: failing reproduction and next boundary
 
-20 November 2026: the positive three-coordinator reproduction is being integrated on main
-at the user's request. Its last recorded result remains failing; the new combined source
-requires hosted validation. This is an open implementation requirement, not a completed
+20 November 2026: the positive three-coordinator reproduction is integrated on main
+through #73 at `0685a6b6`, at the user's request. Its last recorded result remains
+failing; the combined source requires hosted validation. This is an open implementation requirement, not a completed
 protocol or activation approval. App V2 remains disabled. The dated evidence below retains
 its original source and must not be counted as current-source acceptance.
 

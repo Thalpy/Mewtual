@@ -1,5 +1,41 @@
 # Mewtual; Handover
 
+## 20 November: all remaining PRs merged; completion status reconciled
+
+Main `0685a6b6` includes foundation #84, Chat #89, Studio #83, Score/voice #76,
+CI repair #140 and the formerly draft three-peer reproduction #73. GitHub's
+open-PR inventory is empty. #97/#47 are closed as superseded with their full
+heads included through the merged stacks. Original source histories are
+preserved; #73's main tree matches its composed head `3878c2ee`.
+
+The user explicitly chose to merge with hosted validation pending and repair
+failures on main. #73's positive test and exact assertions are preserved; its
+last recorded original-branch run failed. Current main
+[CI](https://github.com/Thalpy/Mewtual/actions/runs/44744721743) was queued at
+this checkpoint. Earlier source-specific passes do not establish a complete
+pass of this composition. No local build or test ran.
+
+[The completion overview](communication-recovery/CHAT-FILES-VOICE-PLAN.md)
+now separates implemented warm local-message behavior from missing production
+invitation/Add/join, shared delivery/projection, governing history, cold
+operational restore and Leave/rejoin. The minimum real multi-member scenario,
+20–50-member/epoch/restart/load checks and final deferred cost case remain due.
+Voice admission/rounds, real audio/lifecycle, member relay and physical
+acceptance are separate unfinished work. Both V2 activation switches stay off.
+
+[The integration report](communication-recovery/PR-BACKLOG-INTEGRATION.md)
+records merge commits, included CI repairs and remaining validation. Older
+entries below are dated snapshots; their open-PR lists and merge holds are
+superseded by this checkpoint, while their failures and evidence remain valid
+for the source they name. CI's later #140 change cancels superseded main CI
+runs and aligns Linux target/cache ownership; other workflow policies remain.
+
+Two #76 Windows runtime-mutation shards subsequently hit their first command's
+900-second bound without leaving partial output. The shared harness now writes
+each Cargo log as it runs, including before timeout. No bound, selector,
+source-restoration rule or mutant/restored assertion changes. Compilation
+versus runtime cause is unproven until hosted logs identify the stalled phase.
+
 ## 20 November: receipt regression host joins before actor shutdown
 
 The completed Windows Root job at `f80c3e9c` finally captures the automatic-repair

@@ -52,8 +52,8 @@ Do not record microphone content unless both participants consent.
 ## Current blockers and ownership
 
 The reviewed integration stack, including the three-coordinator reproduction from #73,
-is now being integrated on main at the user's request. The reproduction's last recorded
-result is failing; the newly combined source still requires hosted validation. See
+is integrated on main through `0685a6b6` at the user's request. The reproduction's
+last recorded result is failing; the combined source still requires hosted validation. See
 [multi-peer admission](VOICE-MULTIPEER-ADMISSION-NEXT.md). Existing controlled two-peer
 results do not establish production audio, automatic multi-peer progress or member relay.
 

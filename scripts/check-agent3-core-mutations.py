@@ -201,11 +201,25 @@ MUTATIONS = [
 ]
 
 
-def run(test):
-    return subprocess.run(
-        COMMAND + [test if "::" in test else PREFIX + test, "--", "--exact", "--nocapture"],
-        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, encoding="utf-8", errors="replace", timeout=900, check=False,
+def run(test, log_path):
+    selector = test if "::" in test else PREFIX + test
+    command = COMMAND + [selector, "--", "--exact", "--nocapture"]
+    # Write while Cargo runs: TimeoutExpired otherwise discards its captured
+    # output before main can create the artifact. Keep the same command bound
+    # and failure behavior for both mutants and restored controls.
+    print(f"RUN {selector} (900s bound); log: {log_path.relative_to(ROOT)}", flush=True)
+    with log_path.open("w", encoding="utf-8") as output:
+        try:
+            result = subprocess.run(
+                command, cwd=ROOT, stdout=output, stderr=subprocess.STDOUT,
+                timeout=900, check=False,
+            )
+        except subprocess.TimeoutExpired:
+            print(f"TIMEOUT; partial output retained: {log_path.relative_to(ROOT)}", flush=True)
+            raise
+    return subprocess.CompletedProcess(
+        command, result.returncode,
+        stdout=log_path.read_text(encoding="utf-8", errors="replace"),
     )
 
 
@@ -226,8 +240,7 @@ def main(log_name="agent3-core-mutations"):
         changed = original.replace(before, after, 1)
         try:
             source.write_bytes(changed)
-            result = run(test)
-            (log_dir / f"{name}-mutant.log").write_text(result.stdout, encoding="utf-8")
+            result = run(test, log_dir / f"{name}-mutant.log")
             if not (result.returncode != 0 and assertion in result.stdout
                     and "test result: FAILED. 0 passed; 1 failed;" in result.stdout):
                 print(result.stdout, flush=True)
@@ -241,8 +254,7 @@ def main(log_name="agent3-core-mutations"):
             print(f"RESTORED {path} byte-for-byte", flush=True)
         # Recheck after each restoration, not just at the end: each detected failure must have
         # its own passing control before another mutation can touch the sources.
-        restored = run(test)
-        (log_dir / f"{name}-restored.log").write_text(restored.stdout, encoding="utf-8")
+        restored = run(test, log_dir / f"{name}-restored.log")
         if restored.returncode != 0 or "test result: ok. 1 passed; 0 failed;" not in restored.stdout:
             print(restored.stdout, flush=True)
             raise AssertionError(f"restored regression failed: {name}")

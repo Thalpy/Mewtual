@@ -1,14 +1,73 @@
 # Chat file sharing and voice reliability plan
 
-Prepared 17 October 2026; amended 18 October 2026 following external design review.
-Status: implementation in progress on `chat-update-implementation`, based on accepted Gate 7
-commit `4d321fef17514c5080f96d98f01be3e86c375333`. Runtime changes and focused results are recorded
-in [the separate communication acceptance ledger](CHAT-FILES-VOICE-ACCEPTANCE.md); the programme
-is not complete or accepted.
-Initial source baseline: `f3596ac859293293701b0e5d2dd0339bd7b1f5fe`. Amendments checked against
-`b2f26d0b208ca67952032cf44cbcbcc509b49033` and the current worktree, which contains unrelated
-Studio, native and frontend changes. Preserve those changes and record the actual implementation
-baseline before starting each package.
+Updated 20 November 2026. All remaining integration PRs, including the previously
+draft three-peer reproduction #73, are merged into `main` at `0685a6b6`.
+The implementation is substantial but Chat V2 is **incomplete and disabled**.
+Merging the backlog does not establish working multi-member chat or acceptance.
+See [the merged inventory and CI status](PR-BACKLOG-INTEGRATION.md) and
+[the source-pinned evidence ledger](CHAT-FILES-VOICE-ACCEPTANCE.md).
+
+This document is the current completion overview followed by the original
+communication design and its exit criteria. Dated test results in feature
+documents apply to their named source, not automatically to current `main`.
+
+## Chat V2 completion status
+
+| Area | Implemented and merged | Still required |
+| --- | --- | --- |
+| Native foundations | Typed protocol/storage boundaries, source/key custody, accounting, signed binding codecs and recovery primitives. | Production consumers and end-to-end acceptance of the combined system. |
+| Warm native local messages | Real App group creation, native saves, own-saved-original reader, sealed exact-intent retry journal and warm session restoration. | Shared message delivery and projection. The UI currently promises only **messages saved on this device**. |
+| Invitations | Same-row unsigned preparation, retained routing-plan data and a separate native signing-key tail. | Covering invitation journal, SavedInvite issuer, native invitation command and usable publication. |
+| MLS Add and join | Real SDK candidate, exact ownership handoff, sealed routing transfer and Welcome binding/signature primitives. | Root-covered transaction, current native Source4 admission, durable installation, Welcome release and joined native/transport consumers. |
+| Shared chat | Original-operation and recovery machinery at library boundaries. | Real V2 transport/delivery loop, catch-up, shared projection, edits/deletes and authorized audit through the production path. |
+| Restart and membership | Durable data readers, recovery formats and warm continuity. | Scalable governing history/pins, cold operational authoring restore, usable durable Leave/Retired/rejoin and joined cold reconstruction. |
+| Voice V2 | Bounded native/browser machinery and two-peer evidence; #73's unscripted three-peer reproduction and diagnostics are now merged. | Resolve its recorded positive-test failure, complete automatic admission/rounds, production audio/lifecycle, member relay and physical acceptance. |
+
+The native text switch is still `ENABLED = false`; voice activation still returns
+`UNAVAILABLE`. Warm restoration does not establish cold signer restoration.
+Studio, Score and file-recovery integrations support the broader programme but
+do not complete Chat V2 networking.
+
+### Remaining work in dependency order
+
+1. Establish current hosted evidence and fix actual failures on `main`. Preserve
+   the three-peer reproduction's positive assertions, original deadlines and
+   bounded diagnostics. Its last recorded original-branch result failed in
+   60.67 seconds; current combined-source execution remains pending.
+2. Complete invitation issuance and the covered real MLS Add/join transaction,
+   including installation, Welcome release and native joined-source consumers.
+   Follow [invite issuance](CHAT-V2-INVITE-ISSUER.md),
+   [production join](CHAT-V2-PRODUCTION-JOIN.md),
+   [the founder continuation](CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md) and
+   [Add ownership](CHAT-V2-ADD-OWNERSHIP.md).
+3. Connect original delivery/catch-up to the shared projection and edit/delete
+   audit. Prove the minimum functional scenario: A admits B and C, A stops,
+   B saves once, C receives the same signed original over permitted real
+   transport, and B/C recover history including edits/deletes after restart.
+   No per-message founder certification or test-only save may substitute.
+4. Finish durable governing history, cold authoring recovery and Leave/rejoin,
+   then run the 20–50-member, epoch/removal, partition, restart, load,
+   compatibility and missing/corrupt-archive matrix. The one explicitly deferred
+   10,000-operation catch-up cost case remains due at final acceptance.
+5. Complete voice's separate admission/round, audio/lifecycle and member-relay
+   work, then combined and physical multi-device acceptance. Controlled RTC
+   fixtures do not prove audible WebView/ICE behavior. Use
+   [the multi-peer requirements](VOICE-MULTIPEER-ADMISSION-NEXT.md) and
+   [the physical checklist](TWO-COMPUTER-ACCEPTANCE.md).
+
+No local build or test can run on the current machine. Formatting, syntax,
+source and whitespace checks are local evidence; hosted suites, strict lint,
+audits and physical checks retain their own gates. No completion percentage or
+activation approval is justified by the merged PR count.
+
+## Original programme design and acceptance criteria
+
+Prepared 17 October; amended 18 October 2026 after external design review.
+The initial branch was `chat-update-implementation`, based on Gate 7
+`4d321fef17514c5080f96d98f01be3e86c375333`. Initial source was
+`f3596ac859293293701b0e5d2dd0339bd7b1f5fe`; amendments were checked against
+`b2f26d0b208ca67952032cf44cbcbcc509b49033`. These are historical design
+baselines. Record the actual source for each new implementation and result.
 
 Improve ordinary member connections and apply the existing Flipnote recovery patterns to chat,
 file sharing and voice. Members connected through an authorized bridge should exchange chat,
@@ -52,9 +111,11 @@ have different responsibilities. A successful join or chat exchange proves none 
 three. Recovery requires a surviving authorized copy and a usable path; a current voice call
 requires contemporaneous connectivity, not a time-separated store-and-forward chain.
 
-## Existing mechanisms and first investigations
+## Initial source observations (17–20 October)
 
-Source observations below identify inspection targets, not reproduced root causes.
+These historical observations identify the original inspection targets, not
+current completion claims or reproduced root causes. Later source-pinned
+feature evidence supersedes them where implementation has changed.
 
 - Chat already has durable desktop sends, sealed pending retries, bounded signed catch-up,
   neighbor sweeps, saved member routes and six-client recovery fixtures. Extend and test these
@@ -81,7 +142,8 @@ Relevant implementation seams include `catcoms-discovery/src/reconnect.rs`, nati
 `member_reconnect.rs`, `six_client_recovery.rs`, the app actor, sync catch-up/blob service,
 `catcoms-storage/src/kept.rs` and `catcoms-mls/src/channel.rs`,
 `voice-signaling.ts`, `call-identity.ts`, `callroutes.ts` and the call lifecycle in `App.svelte`.
-The current worktree already modifies `App.svelte`; coordinate surgical changes with that work.
+The original worktree also modified `App.svelte`; preserve integrated changes
+when working in these seams.
 
 ## Shared design rules
 
@@ -118,10 +180,11 @@ Each package delivers a small reviewable change with focused regressions and an 
 ledger. Existing programme items CR02-CR08 and CR10 remain useful dependency labels; this plan
 does not mark them complete.
 
-Start with Package 0, narrow Package 1 fixes supported by reproductions, and Package 2's
-room/session investigation. Run Package 5A's existing TURN feasibility experiment alongside
-that early work; it need not wait for broader chat or file changes. Follow with Package 3 and
-Package 4, then Package 5B implementation and Package 6 rollout after their design gates pass.
+The original dependency sequence starts with Package 0, narrow reproduction-backed
+Package 1 fixes and Package 2's room/session investigation, alongside Package 5A's
+TURN experiment. Packages 3/4 and gated 5B/6 follow. Use the current completion
+overview above to choose unfinished work; these package descriptions retain their
+design and exit criteria rather than resetting already integrated work.
 
 ### Package 0 Reproduce failures and pin the baseline
 
@@ -420,8 +483,9 @@ setup, runtime/thread placement or process spawning. Use the visual fixture for 
 evidence and real native clients for WebView/media behavior.
 
 Update architecture, interfaces, threat model, handover and per-feature evidence when their
-contracts change. This planning-only addition does not require runtime suites; implementation
-acceptance remains outstanding for every package above.
+contracts change. Documentation-only updates do not require runtime suites.
+The original package exit criteria remain binding; individual recorded passes
+do not close the programme's combined acceptance.
 
 ## Design review amendments
 

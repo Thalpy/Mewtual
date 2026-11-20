@@ -2,9 +2,9 @@
 
 ## Integration checkpoint (20 November 2026)
 
-The reviewed stack and #73's unscripted three-peer reproduction are being integrated
-on main. The reproduction's recorded failure remains open until the combined source
-passes. Production audio/lifecycle, automatic multi-peer recovery, member relay and
+The reviewed stack and #73's unscripted three-peer reproduction are integrated
+on main through `0685a6b6`. The reproduction's recorded failure remains open
+until the combined source passes. Production audio/lifecycle, automatic multi-peer recovery, member relay and
 physical acceptance remain outstanding. Chat V2 stays disabled. The dated entries
 below describe their original checkpoints; current CI is tracked on main.
 
