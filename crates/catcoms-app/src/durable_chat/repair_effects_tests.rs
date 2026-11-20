@@ -410,9 +410,15 @@ async fn automatic_repair_tracks_send_before_real_peer_receipt_without_frontend_
     let worker_actor = alice.clone();
     let worker_store = store.clone();
     let (repaired, repaired_rx) = tokio::sync::oneshot::channel();
+    let (stop_host, mut stop_host_rx) = tokio::sync::oneshot::channel();
     let host = tokio::spawn(async move {
         let mut repaired = Some(repaired);
-        while let Some(event) = alice_events.recv().await {
+        loop {
+            let event = tokio::select! {
+                _ = &mut stop_host_rx => break,
+                event = alice_events.recv() => event,
+            };
+            let Some(event) = event else { break };
             if matches!(event.event, AppEvent::SnapshotNeeded) {
                 if let Some(ready) = worker_actor.prepare_durable_chat_repair().await.unwrap() {
                     ready
@@ -453,11 +459,16 @@ async fn automatic_repair_tracks_send_before_real_peer_receipt_without_frontend_
     assert_eq!(bob.messages(channel).await[0].id, pending.message_id);
     let saved = original_from_store(store.lock().await.as_ref().unwrap(), 9);
     assert_eq!(saved.messages(channel)[0].id, pending.message_id);
+    // Buffered SnapshotNeeded events can still request repair. Join the host while its
+    // actor is live, rather than racing those requests against actor shutdown.
+    stop_host
+        .send(())
+        .expect("repair host remains live until explicitly stopped");
+    host.await.unwrap();
     alice.shutdown().await;
     bob.shutdown().await;
     alice_task.await.unwrap();
     bob_task.await.unwrap();
-    host.await.unwrap();
     bob_drain.await.unwrap();
 }
 
