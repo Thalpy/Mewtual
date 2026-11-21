@@ -86,8 +86,8 @@ impl<'a> InviteRecoveryRead<'a> {
         route: &[u8],
         genesis: V2GenesisSeedData<'_>,
     ) -> Result<NativeTextInviteRecovery, AppError> {
-        let (intent, signed) = self.recover(routing_plan, genesis)?;
-        intent.result(request, routing_plan)?;
+        let (intent, signed) = self.recover(route, genesis)?;
+        intent.result(request, route)?;
         Ok(match signed {
             Some(signed) => NativeTextInviteRecovery::SignatureRecovered {
                 binding_id: signed.id_data(),

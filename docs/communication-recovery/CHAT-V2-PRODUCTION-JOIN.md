@@ -113,7 +113,9 @@ The request carries the signed Invite, signed JoinRequest and exact
 KeyPackage. The response carries the signed Welcome binding, the MLS Welcome
 and the sealed routing transfer. Each field is length prefixed, separately
 bounded and decoded with exact end of input. Signed binding verification
-precedes use of request identifiers or payloads.
+precedes use of request identifiers or payloads. The joiner charges the exact
+response frame, including tags, length fields and the encoded binding, against
+its original exchange limit before entering the Welcome SDK.
 
 On the native founder, `check_received_join_request` verifies both request
 signatures and the package wire commitment. It compares the complete
@@ -137,11 +139,11 @@ required for production.
 
 ## Namespace6 and original pin custody
 
-The prerequisite combined governance/native constructor now has a separate
-[implementation design](CHAT-V2-GOVERNED-NATIVE-STORAGE.md). It is not built;
-existing native3 still refuses governance4. Its startup-only Selected3 handoff
-must complete before group/Source creation, and its exact native tuple and
-first-torn recovery proofs must be paired before runtime use.
+The [combined governance/native constructor](CHAT-V2-GOVERNED-NATIVE-STORAGE.md)
+implements the startup-only Selected3 handoff before group or Source creation.
+The combined handler requires namespaces 4, 5 and 7. The ordinary native3
+handler still refuses governance4. The joined namespace6 pin and its
+pending-JOIN recovery grammar remain open.
 
 Namespace6 needs its own critical handler and versioned authenticated format.
 Founder `GroupPinData` and pending Legacy `CapturedOwnerProfilePin` are different

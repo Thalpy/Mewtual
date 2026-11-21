@@ -68,16 +68,18 @@ jobs:
           python-version: '3.12'
       - name: Check original join binding codecs
         run: python .github/scripts/check-chat-v2-invite-intent.py bindings
+      - name: Check the retained V2 JoinRequest and private KeyPackage
+        run: python .github/scripts/check-chat-v2-invite-intent.py join-request
+      - name: Check exact V2 join response frame accounting
+        run: python .github/scripts/check-chat-v2-invite-intent.py join-response
+      - name: Check genuine MLS Add and Welcome against the verified V2 prefix
+        run: python .github/scripts/check-chat-v2-invite-intent.py join-welcome
       - name: Check invitation journal format and physical-prefix controls
         run: python .github/scripts/check-chat-v2-invite-intent.py journal
       - name: Check native invitation ownership, signing and durable retries
         run: python .github/scripts/check-chat-v2-invite-intent.py native
       - name: Check invitation packet framing and bound bodies
         run: python .github/scripts/check-chat-v2-invite-intent.py packet
-      - name: Check the retained V2 JoinRequest and private KeyPackage
-        run: python .github/scripts/check-chat-v2-invite-intent.py join-request
-      - name: Check genuine MLS Add and Welcome against the verified V2 prefix
-        run: python .github/scripts/check-chat-v2-invite-intent.py join-welcome
       - name: Check actual predecessor save and physical retirement preservation
         if: runner.os == 'Windows'
         run: python .github/scripts/check-chat-v2-invite-intent.py predecessor

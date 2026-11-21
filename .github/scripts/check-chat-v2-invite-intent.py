@@ -9,6 +9,7 @@ COHORTS = {
     "native": ("catcoms-app", "native_runtime_invite_", 15),
     "packet": ("catcoms-app", "native_invite_packet_", 3),
     "join-request": ("catcoms-sync", "prepared_direct_join::v2::tests::", 3),
+    "join-response": ("catcoms-sync", "prepared_direct_join::v2::welcome::tests::", 1),
     "join-welcome": ("catcoms-sync", "v2_join_request_and_welcome_complete_with_actual_add", 1),
     "predecessor": (
         "catcoms-app",

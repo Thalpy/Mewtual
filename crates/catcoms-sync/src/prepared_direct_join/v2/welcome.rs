@@ -12,8 +12,9 @@ use catcoms_replication::chat::{
 
 const MAX_ROUTING_FRAME: usize = MAX_TEXT_ADD_ROUTING_PLAIN_BYTES + 48;
 const TAG: &[u8] = b"mewtual/chat/join-response-packet/v2\0";
+const FRAME_OVERHEAD: usize = 4 + TAG.len() + 2 + 3 * 4;
 pub const MAX_V2_JOIN_RESPONSE_PACKET_BYTES: usize =
-    4 + TAG.len() + 2 + 3 * 4 + MAX_JOIN_BINDING_BYTES + MAX_JOIN_PAYLOAD_BYTES + MAX_ROUTING_FRAME;
+    FRAME_OVERHEAD + MAX_JOIN_BINDING_BYTES + MAX_JOIN_PAYLOAD_BYTES + MAX_ROUTING_FRAME;
 
 /// Exact signed response and its separately bounded payloads.
 #[derive(Clone, Copy)]
@@ -33,18 +34,10 @@ impl V2JoinResponseData<'_> {
     /// Frame exact authenticated bytes. The owning host needs its separate
     /// covering and publication proof before releasing this frame.
     pub fn encode_packet_data(&self) -> Result<Vec<u8>, SyncError> {
-        check_payload_bounds(self.welcome, self.sealed_routing)?;
+        let (binding, length) = self.bounded_frame_data(MAX_V2_JOIN_RESPONSE_PACKET_BYTES)?;
         self.binding
             .check_payloads_data(self.welcome, self.sealed_routing)
             .map_err(|_| SyncError::JoinRejected)?;
-        let binding = self.binding.encode();
-        let length = 4
-            + TAG.len()
-            + 2
-            + 3 * 4
-            + binding.len()
-            + self.welcome.len()
-            + self.sealed_routing.len();
         let malformed = |_| SyncError::Malformed;
         let mut e = Encoder::with_capacity(length);
         e.put_bytes(TAG).map_err(malformed)?;
@@ -53,6 +46,17 @@ impl V2JoinResponseData<'_> {
         e.put_bytes(self.welcome).map_err(malformed)?;
         e.put_bytes(self.sealed_routing).map_err(malformed)?;
         Ok(e.finish())
+    }
+
+    fn bounded_frame_data(&self, cap: usize) -> Result<(Vec<u8>, usize), SyncError> {
+        check_payload_bounds(self.welcome, self.sealed_routing)?;
+        let binding = self.binding.encode();
+        let length =
+            FRAME_OVERHEAD + binding.len() + self.welcome.len() + self.sealed_routing.len();
+        if binding.len() > MAX_JOIN_BINDING_BYTES || length > cap {
+            return Err(SyncError::Malformed);
+        }
+        Ok((binding, length))
     }
 }
 
@@ -165,16 +169,7 @@ impl PreparedV2JoinRequest {
         response: V2JoinResponseData<'_>,
         prefix: &V2GeneralPrefixVerifier,
     ) -> Result<&CompletedV2JoinCandidate, SyncError> {
-        check_payload_bounds(response.welcome, response.sealed_routing)?;
-        let wire_len = response
-            .welcome
-            .len()
-            .checked_add(response.sealed_routing.len())
-            .and_then(|size| size.checked_add(MAX_JOIN_BINDING_BYTES))
-            .filter(|size| *size <= self.limits.exchange);
-        if wire_len.is_none() {
-            return Err(SyncError::Malformed);
-        }
+        let (response_binding, _) = response.bounded_frame_data(self.limits.exchange)?;
         let reject = |_| SyncError::JoinRejected;
         let packet = V2JoinRequestPacketData::decode(&self.request)?;
         let request = packet.request.spec_data();
@@ -219,7 +214,6 @@ impl PreparedV2JoinRequest {
             .binding
             .check_payloads_data(response.welcome, response.sealed_routing)
             .map_err(reject)?;
-        let response_binding = response.binding.encode();
         if self.completed.is_none() {
             if self.welcome_entered {
                 return Err(SyncError::JoinRejected);
@@ -365,4 +359,51 @@ fn open_routing(
     let policy = GroupPolicy::decode(policy_bytes)?;
     crate::group_policy::require_supported(&policy)?;
     Ok((policy, routing, file_key))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use catcoms_crypto::DeviceKeypair;
+    use catcoms_replication::chat::join_bindings::WelcomeBindingSpecData;
+
+    #[test]
+    fn join_response_budget_counts_the_exact_frame() {
+        let founder = DeviceKeypair::from_seed(&[3; 32]);
+        let welcome = b"welcome";
+        let sealed_routing = b"routing";
+        let binding = SignedWelcomeBindingData::sign_using(
+            WelcomeBindingSpecData {
+                invite: [1; 32],
+                anchor: [2; 32],
+                request_binding: [3; 32],
+                key_package_wire: [4; 32],
+                key_package_reference: [5; 32],
+                admitter: founder.verifying_key().to_bytes(),
+                add_header: [6; 32],
+                admission: [7; 32],
+                welcome: JoinPayloadKindData::Welcome
+                    .commitment_data(welcome)
+                    .unwrap(),
+                policy: [8; 32],
+                public_routing_plan: [9; 32],
+                sealed_routing_transfer: JoinPayloadKindData::RoutingTransfer
+                    .commitment_data(sealed_routing)
+                    .unwrap(),
+            },
+            |bytes| Ok(founder.sign(bytes)),
+        )
+        .unwrap();
+        let response = V2JoinResponseData {
+            binding: &binding,
+            welcome,
+            sealed_routing,
+        };
+        let wire = response.encode_packet_data().unwrap();
+        assert_eq!(
+            response.bounded_frame_data(wire.len()).unwrap().1,
+            wire.len()
+        );
+        assert!(response.bounded_frame_data(wire.len() - 1).is_err());
+    }
 }
