@@ -102,11 +102,12 @@ pub(super) fn select(
     let current_id = session_id(catalog.0).map_err(io)?;
     let mut index = SelectedPinIndex::open(store, key, layout, None, index_fee)?;
     let Some(original) = read(&pending_path, MAX_FRAME)? else {
-        if warm.is_some() {
+        // This profile inserts its first pin only through the exact covered
+        // Pending. A selected pin already names its original acceptance.
+        if warm.is_some() || !index.index.is_empty() {
             return Err(denied());
         }
         require_pending_names(store, None)?;
-        welcome::require_absent(store)?;
         return Ok(index);
     };
     let pending_id = session_id(&original.0).map_err(io)?;

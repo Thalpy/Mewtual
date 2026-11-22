@@ -215,7 +215,9 @@ for each group and checks the held index when reading pin context. The first
 pending-JOIN record covers the private request and the one exact index
 insertion. The original warm owner can select the insert and release the
 exact signed request bytes while keeping the private package. Cold opening
-can complete the same insertion and verify the original request. The warm
+can complete the same insertion and verify the original request. A selected
+nonempty index refuses cold opening when its original Pending file is missing.
+Restoring the original file preserves the selected pin and request. The warm
 store can create and cover a first request directly from the caller's accepted
 signed invite. It checks the anchor and mounted pin before creating the MLS
 device, then retains the same request on an exact retry. The warm
@@ -276,8 +278,10 @@ unlock. Each connected request recaptures the original row and generation
 before any founder work. Lock revokes the old receiver and any retained reply
 authority. A later authenticated unlock can attach a fresh receiver for exact
 retries. Legacy invitation commands are refused in the gated native mode
-before any Legacy handler or transport work. Certified dialing, renderer
-invitation commands and native joiner installation remain open.
+before any Legacy handler or transport work. Gated native preview verifies the
+signed invite metadata, and the founder can mint its first covered invitation
+through the native desktop command. Certified dialing and native joiner
+installation remain open.
 
 Unknown/ambiguous remnants are preserved and refused, never cleared as debris.
 The `joined-predecessor` CI scope builds the pinned governed reader from

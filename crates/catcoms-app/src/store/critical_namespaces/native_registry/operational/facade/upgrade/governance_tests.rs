@@ -667,6 +667,26 @@ fn governed_joined_pin_pending_replays_the_same_private_request_and_index_insert
             .unwrap()
             .is_some_and(|pin| pin == context));
         drop(joined);
+
+        let pending = dir
+            .path()
+            .join("chat-critical-namespaces.joined-pending.bin");
+        let held_pending = dir.path().join("first-join-original-pending");
+        let selected = dir
+            .path()
+            .join(crate::store::persistence::governance_layout::joined::INDEX_NAME);
+        let selected_bytes = fs::read(&selected).unwrap();
+        let pending_bytes = fs::read(&pending).unwrap();
+        fs::rename(&pending, &held_pending).unwrap();
+        assert!(
+            NativeTextJoinedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy())
+                .is_err()
+        );
+        assert!(!pending.exists());
+        assert_eq!(fs::read(&held_pending).unwrap(), pending_bytes);
+        assert_eq!(fs::read(&selected).unwrap(), selected_bytes);
+        fs::rename(&held_pending, &pending).unwrap();
+
         let joined =
             NativeTextJoinedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy())
                 .unwrap();
