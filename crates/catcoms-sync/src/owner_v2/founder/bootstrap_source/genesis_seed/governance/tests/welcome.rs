@@ -459,7 +459,7 @@ fn complete_original_welcome(native_joiner: bool) {
         "the independently restored prefix has the same bytes but no warm origin"
     );
     assert!(warm_inputs.is_some());
-    let joined_node = prepared
+    let mut joined_node = prepared
         .take_closed_warm_node(&warm_prefix, &mut warm_inputs)
         .unwrap();
     assert!(warm_inputs.is_none());
@@ -492,7 +492,9 @@ fn complete_original_welcome(native_joiner: bool) {
         .is_err());
     assert!(unused.is_some());
 
-    let member_plan = |selected: &crate::PreparedV2JoinedPrefix, group: &ProjectionGroupView| {
+    let member_plan = |selected: &crate::PreparedV2JoinedPrefix,
+                       group: &ProjectionGroupView,
+                       (presented_ms, nonce)| {
         let mut ledger = ChatLedger::new(
             joined_realm.clone(),
             LedgerLimits {
@@ -508,8 +510,8 @@ fn complete_original_welcome(native_joiner: bool) {
                 realm: joined_realm.clone(),
                 basis: joined_labels.basis,
                 grant: joined_labels.grant,
-                nonce: [109; 16],
-                presented_ms: now,
+                nonce,
+                presented_ms,
                 parents: vec![],
                 body: Body::Create {
                     text: "Joined member draft".into(),
@@ -523,8 +525,9 @@ fn complete_original_welcome(native_joiner: bool) {
         (ledger, view, draft, plan)
     };
     let (_warm_ledger, _warm_channel, warm_draft, warm_plan) =
-        member_plan(&warm_prefix, &warm_view);
-    let (_cold_ledger, _cold_channel, cold_draft, cold_plan) = member_plan(&prefix, &member_view);
+        member_plan(&warm_prefix, &warm_view, (now, [109; 16]));
+    let (_cold_ledger, _cold_channel, cold_draft, cold_plan) =
+        member_plan(&prefix, &member_view, (now, [109; 16]));
     assert_eq!(warm_draft.action_id_data(), cold_draft.action_id_data());
     assert_eq!(warm_plan.admission_id_data(), cold_plan.admission_id_data());
     assert!(joined_node.admit_member_save(&cold_plan).is_err());
@@ -533,6 +536,73 @@ fn complete_original_welcome(native_joiner: bool) {
     assert!(joined_node.admit_member_save(&warm_plan).is_err());
     drop(original);
     drop(cold_node.admit_member_save(&cold_plan).unwrap());
+    if let Some(joiner) = &joiner {
+        let mut inputs = crate::owner_v2::V2MemberDraftInputs::new();
+        let drawn = joined_node.draw_member_draft_inputs(&mut inputs).unwrap();
+        assert_eq!(
+            joined_node.draw_member_draft_inputs(&mut inputs).unwrap(),
+            drawn
+        );
+        let (_ledger, _view, draft, mut plan) = member_plan(&warm_prefix, &warm_view, drawn);
+        let original = joiner.source.observe();
+        let mut ends = catcoms_rt::NativeChatKeyEnds::new();
+        let mut foreign = native.cut(NativeChatKeyPurpose::MemberAction);
+        assert!(joined_node
+            .sign_member_action_native(
+                &inputs,
+                &draft,
+                &mut plan,
+                &native.source.observe(),
+                &mut foreign,
+                &mut ends
+            )
+            .is_err());
+        let mut wrong = joiner.cut(NativeChatKeyPurpose::JoinerWelcomeSdk);
+        assert!(joined_node
+            .sign_member_action_native(&inputs, &draft, &mut plan, &original, &mut wrong, &mut ends)
+            .is_err());
+        let mut cut = joiner.cut(NativeChatKeyPurpose::MemberAction);
+        assert!(cold_node
+            .sign_member_action_native(&inputs, &draft, &mut plan, &original, &mut cut, &mut ends)
+            .is_err());
+        assert!(!ends.holds_admitted_purpose_data(&original, NativeChatKeyPurpose::MemberAction));
+        drop(
+            joined_node
+                .sign_member_action_native(
+                    &inputs, &draft, &mut plan, &original, &mut cut, &mut ends,
+                )
+                .unwrap(),
+        );
+        assert!(ends.holds_admitted_purpose_data(&original, NativeChatKeyPurpose::MemberAction));
+        let action = plan
+            .complete_cached_raw64_data(&plan.observe_original(), &draft)
+            .unwrap();
+        assert!(action.verify());
+        assert_eq!(action.id(), draft.action_id_data());
+        drop(ends);
+        let mut retry_ends = catcoms_rt::NativeChatKeyEnds::new();
+        drop(
+            joined_node
+                .sign_member_action_native(
+                    &inputs,
+                    &draft,
+                    &mut plan,
+                    &original,
+                    &mut cut,
+                    &mut retry_ends,
+                )
+                .unwrap(),
+        );
+        assert!(
+            !retry_ends.holds_admitted_purpose_data(&original, NativeChatKeyPurpose::MemberAction)
+        );
+        assert_eq!(
+            plan.complete_cached_raw64_data(&plan.observe_original(), &draft)
+                .unwrap()
+                .encode(),
+            action.encode()
+        );
+    }
     drop(warm_view.revoker().close());
     assert!(joined_node.admit_member_save(&warm_plan).is_err());
     drop(cold_node.admit_member_save(&cold_plan).unwrap());

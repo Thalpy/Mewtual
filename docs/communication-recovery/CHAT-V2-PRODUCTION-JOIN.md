@@ -398,6 +398,12 @@ exact original pin, selected Profile, initial tenure and full device key.
 The warm receipt and independently verified cold receipt derive the same
 context. The current epoch and Admission are separate from that identity.
 
+The warm joined node can draw and sign an ordinary action through the original
+native Joiner Source. Its signing cut requires the ordinary member purpose and
+retains the one result in the original Core plan. An independently reopened
+graph carries no warm native key issuer. The native save driver still needs to
+retain the action and issue its save-source end under the same joined fence.
+
 The actual joined fence orders every transition/removal against final issuance.
 An admission that wins retains its original end through IO; removal that wins
 prevents issuance. A1 saved/uncertain originals stay historical across A2 rejoin;

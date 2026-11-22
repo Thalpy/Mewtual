@@ -5,10 +5,11 @@ use super::*;
 pub type V2JoinedRuntimeInputs<T, R> = (T, R, Box<dyn Clock + Send>);
 use crate::owner_v2::{
     JoinFactsSlot, JoinedFenceNode, V2JoinFacts, V2JoinedFenceAdmission, V2JoinedSourceFence,
+    V2MemberDraftInputs, V2MemberSignRefusal,
 };
 use catcoms_replication::chat::{
     join_bindings::SignedWelcomeBindingData, owner_facts::OwnerFactId, owner_header::OwnerHeaderId,
-    V2AuthenticatedAdmission, V2OrdinarySigningPlan,
+    ActionDraft, V2AuthenticatedAdmission, V2OrdinarySigningGuard, V2OrdinarySigningPlan,
 };
 
 /// Owns the original verified group, device, routing and runtime. Only a
@@ -21,6 +22,7 @@ pub struct ClosedV2JoinedNode<T: MeshTransport, R: CryptoRngCore> {
     head: OwnerHeaderId,
     admission: V2AuthenticatedAdmission,
     admission_id: OwnerFactId,
+    native_origin: Option<NativeChatSourceObservation>,
 }
 
 enum JoinedOrigin {
@@ -74,6 +76,52 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
         Ok(admitted)
     }
 
+    /// Draw this request's time and nonce on the original selected runtime.
+    /// The slot retains the draw across retries. Root supplies current Source
+    /// admission and must hold exclusive custody of this node.
+    pub fn draw_member_draft_inputs(
+        &mut self,
+        inputs: &mut V2MemberDraftInputs,
+    ) -> Result<(u64, [u8; 16]), V2MemberSignRefusal> {
+        self.selected_join_data()
+            .map_err(|_| V2MemberSignRefusal::Source)?;
+        let instance = self.node.registry_instance();
+        self.node.draw_ordinary_draft_inputs(&instance, inputs)
+    }
+
+    /// Sign using this warm native joiner's original device and Source. The
+    /// caller must hold the mounted prefix/source custody and keep its native
+    /// cut and ends outside the enclosing writers. No historical graph can
+    /// manufacture the original native issuer.
+    pub fn sign_member_action_native<'a>(
+        &self,
+        inputs: &V2MemberDraftInputs,
+        draft: &'a ActionDraft,
+        plan: &'a mut V2OrdinarySigningPlan,
+        original: &NativeChatSourceObservation,
+        cut: &mut NativeChatPreparedKeyCut,
+        ends: &mut NativeChatKeyEnds,
+    ) -> Result<V2OrdinarySigningGuard<'a>, V2MemberSignRefusal> {
+        if !self
+            .native_origin
+            .as_ref()
+            .is_some_and(|source| source.same_original(original))
+        {
+            return Err(V2MemberSignRefusal::Source);
+        }
+        let signer = self
+            .node
+            .ordinary_member_signer_data(&self.node.registry_instance())?;
+        let _fence = self
+            .admit_member_save(plan)
+            .map_err(|_| V2MemberSignRefusal::Source)?;
+        let guard = plan
+            .admit_signing(draft, &signer)
+            .map_err(|_| V2MemberSignRefusal::Source)?;
+        self.node
+            .sign_ordinary_admitted_native(inputs, guard, original, cut, ends)
+    }
+
     pub fn was_recovered_data(&self) -> bool {
         matches!(self.origin, JoinedOrigin::Recovered(_))
     }
@@ -108,6 +156,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
             head,
             admission,
             admission_id,
+            native_origin: None,
         })
     }
 }
@@ -175,6 +224,7 @@ impl PreparedV2JoinRequest {
             head: OwnerHeaderId::from_bytes(welcome.spec_data().add_header),
             admission,
             admission_id,
+            native_origin: self.native_origin.clone(),
         })
     }
 }
