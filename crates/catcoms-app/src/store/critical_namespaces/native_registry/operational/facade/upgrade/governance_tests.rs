@@ -15,6 +15,54 @@ use rand_core::{CryptoRng, RngCore, SeedableRng};
 use std::{fs, path::Path, sync::atomic::Ordering};
 
 struct NeverRng;
+
+#[test]
+#[ignore = "hosted predecessor harness supplies an isolated fixture root"]
+fn joined_pin_write_predecessor_fixtures() {
+    let root = std::path::PathBuf::from(std::env::var_os("MEWTUAL_JOINED_PIN_FIXTURES").unwrap());
+    fs::create_dir(&root).unwrap();
+    for (ordinal, kind) in ["governed", "staged", "selected"].into_iter().enumerate() {
+        let path = root.join(kind);
+        fs::create_dir(&path).unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0xc461 + ordinal as u64);
+        let mut plan = original(&path, &mut rng).prepare_governance().unwrap();
+        plan.retry(&mut rng).unwrap();
+        drop(plan.into_vault().unwrap());
+        if kind != "governed" {
+            let mut governed =
+                NativeTextGovernedStorage::open(&path, SECRET, &mut NeverRng, current_policy())
+                    .unwrap();
+            governed.stage_joined_pin_layout(&mut rng).unwrap();
+            drop(governed);
+        }
+        if kind == "selected" {
+            let joined =
+                NativeTextJoinedStorage::open(&path, SECRET, &mut NeverRng, current_policy())
+                    .unwrap();
+            assert_eq!(joined.row_count_data().unwrap(), 0);
+        }
+    }
+}
+
+#[test]
+#[ignore = "hosted predecessor harness supplies an isolated fixture root"]
+fn joined_pin_verify_predecessor_fixtures() {
+    let root = std::path::PathBuf::from(std::env::var_os("MEWTUAL_JOINED_PIN_FIXTURES").unwrap());
+    let governed = NativeTextGovernedStorage::open(
+        root.join("governed"),
+        SECRET,
+        &mut NeverRng,
+        current_policy(),
+    )
+    .unwrap();
+    assert_eq!(governed.row_count_data().unwrap(), 0);
+    for kind in ["staged", "selected"] {
+        let joined =
+            NativeTextJoinedStorage::open(root.join(kind), SECRET, &mut NeverRng, current_policy())
+                .unwrap();
+        assert_eq!(joined.row_count_data().unwrap(), 0);
+    }
+}
 impl CryptoRng for NeverRng {}
 impl RngCore for NeverRng {
     fn next_u32(&mut self) -> u32 {

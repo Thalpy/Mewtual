@@ -235,7 +235,10 @@ authority. A later authenticated unlock can attach a fresh receiver for exact
 retries. Certified dialing and native joiner installation remain open.
 
 Unknown/ambiguous remnants are preserved and refused, never cleared as debris.
-Predecessor tests must use a real prior binary with positive open controls.
+The `joined-predecessor` CI scope builds the pinned governed reader from
+`e0ff1033`. It must open the real governed control, refuse the staged and
+selected joined-pin cases without changing their files, and leave both cases
+available to the current joined-aware reader.
 
 ## Founder operation and whole-node handoff
 
