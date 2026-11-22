@@ -616,9 +616,10 @@ mod persistence {
     #[cfg(target_os = "linux")]
     mod exact_inventory_linux;
     pub(in crate::store) use cold_source_read::{
-        JoinedMemberLane, JoinedMemberSource, OriginalV2TextResidentObservation,
-        OriginalV2UnsignedPlanObservation, PreparedV2NextUnsignedAppend,
-        PreparedV2TextResidentProjection, PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis,
+        prepare_joined_member_history, JoinedMemberLane, JoinedMemberSource,
+        OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
+        PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
+        PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis,
     };
     mod current_group;
     mod current_layout;

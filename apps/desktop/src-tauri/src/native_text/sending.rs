@@ -303,29 +303,19 @@ async fn capture(state: &AppState, invocation: &Invocation) -> Result<Preparatio
                 server_table::NativeSelection::Joined(selection) => state
                     .native_text
                     .sources
-                    .capture_join(&store, |sources, vault| {
-                        if !selection.is_current_cached()
-                            || !selection.is_from_original_vault_cached(vault)
-                        {
-                            return Err(STALE);
-                        }
-                        let command = vault
-                            .bind_native_source_command(&mut ui)
-                            .map_err(|_| STALE)?;
-                        joined =
-                            Some((sources.capture_joined_selection(command), selection.clone()));
-                        Ok(())
-                    }),
+                    .capture_joined_member(&store, &mut ui, selection, &mut joined),
             }
         })()
     };
     result.map_err(str::to_owned)?;
-    if let Some(original) = founder {
-        Ok(Preparation::Founder(original))
-    } else {
-        joined
-            .map(|(original, row)| Preparation::Joined(original, row))
-            .ok_or_else(|| STALE.to_owned())
+    match (&invocation.selection, founder, joined) {
+        (server_table::NativeSelection::Founder(_), Some(original), _) => {
+            Ok(Preparation::Founder(original))
+        }
+        (server_table::NativeSelection::Joined(row), _, Some(original)) => {
+            Ok(Preparation::Joined(original, row.clone()))
+        }
+        _ => Err(STALE.to_owned()),
     }
 }
 

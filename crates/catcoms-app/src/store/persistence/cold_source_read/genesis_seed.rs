@@ -16,9 +16,10 @@ use catcoms_sync::owner_v2::{
 };
 pub(in crate::store) use current::settlement::GenesisCurrentOwnerRef;
 pub(in crate::store) use current::{
-    JoinedMemberLane, JoinedMemberSource, OriginalV2TextResidentObservation,
-    OriginalV2UnsignedPlanObservation, PreparedV2NextUnsignedAppend,
-    PreparedV2TextResidentProjection, PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis,
+    prepare_joined_member_history, JoinedMemberLane, JoinedMemberSource,
+    OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
+    PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
+    PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis,
 };
 pub use current::{
     MemberSaveJob, MemberSaveJobReport, MemberSaveNativeAdmission, PreparedColdV2GenesisCurrent,

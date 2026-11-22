@@ -13,12 +13,14 @@ use super::*;
 use crate::store::persistence::governance_layout::joined::{
     AcceptedFirstJoin, AcceptedJoinTransport, JoinedPendingIo, JoinedRegistrationDependency,
 };
-use crate::store::persistence::v2_member_outbox::MemberOutboxContextId;
-use crate::store::persistence::{JoinedMemberLane, JoinedMemberSource};
+use crate::store::persistence::v2_member_outbox::{MemberHistoryRead, MemberOutboxContextId};
+use crate::store::persistence::{
+    prepare_joined_member_history, JoinedMemberLane, JoinedMemberSource,
+};
 use crate::store::{
     MemberSaveJob, MemberSaveJobReport, MemberSaveNativeAdmission, NativeTextInvitePacketData,
-    NativeTextJoinedRegistrationData, NativeTextJoinedRegistryRowData, V2MemberSaveOutcome,
-    V2MemberSaveRefusal, V2MemberSignRequest,
+    NativeTextJoinedRegistrationData, NativeTextJoinedRegistryRowData, NativeTextMemberHistoryPage,
+    V2MemberSaveOutcome, V2MemberSaveRefusal, V2MemberSignRequest,
 };
 use catcoms_replication::chat::join_bindings::GenesisAnchorBindingData;
 use catcoms_replication::chat::owner_facts::OwnerFactId;
@@ -829,8 +831,9 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         } = runtime;
         let proof = registration.as_deref().ok_or(Refusal::Unavailable)?;
         let node = node.as_mut().ok_or(Refusal::Unavailable)?;
-        let result = metadata.with_registered_warm_member(
-            proof,
+        let result = metadata.with_registered_joined_member(
+            proof.data(),
+            Some(proof),
             selection.original.row,
             |layout, store| {
                 let (prefix, view) = held
@@ -965,6 +968,62 @@ impl<R: CryptoRngCore> NativeTextJoinedMemberFinalPreparation<R> {
 }
 
 impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
+    /// Read a bounded page of the selected joined member's saved originals.
+    /// Warm and cold rows use the same authenticated outbox context.
+    pub fn prepare_member_history(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        start: u64,
+        end: Option<u64>,
+        maximum: usize,
+        negative: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<NativeTextMemberHistoryPage, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        self.original
+            .require_current(negative)
+            .map_err(|_| Refusal::Cancelled)?;
+        if !selection.is_current_cached() {
+            return Err(Refusal::Stale);
+        }
+        let mounted = self.mounted.upgrade().ok_or(Refusal::Unavailable)?;
+        let slot = mounted.try_lock().map_err(|_| Refusal::Busy)?;
+        let runtime = slot
+            .as_ref()
+            .filter(|runtime| runtime.matches_selection(selection))
+            .ok_or(Refusal::Stale)?;
+        let data = runtime
+            .recovered
+            .or_else(|| runtime.registration.as_ref().map(|proof| proof.data()))
+            .ok_or(Refusal::Unavailable)?;
+        let metadata = self.original.work.as_ref().ok_or(Refusal::Unavailable)?;
+        let page = metadata.with_registered_joined_member(
+            data,
+            runtime.registration.as_deref(),
+            selection.original.row,
+            |layout, _| {
+                prepare_joined_member_history(
+                    layout,
+                    MemberHistoryRead {
+                        start,
+                        end,
+                        maximum,
+                    },
+                    negative,
+                    rng,
+                    data,
+                )
+            },
+        )?;
+        self.original
+            .require_current(negative)
+            .map_err(|_| Refusal::Cancelled)?;
+        if !selection.is_current_cached() {
+            return Err(Refusal::Stale);
+        }
+        Ok(NativeTextMemberHistoryPage::from_original(page))
+    }
+
     /// Observe the one original parked slot before choosing a retry phase.
     /// Actual contact and registry writes still verify their exact inputs.
     pub fn has_parked_runtime(self, negative: &RequestCancellation) -> Result<bool, AppError> {

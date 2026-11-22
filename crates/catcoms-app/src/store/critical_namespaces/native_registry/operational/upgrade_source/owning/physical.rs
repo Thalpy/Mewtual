@@ -1095,9 +1095,14 @@ pub(in crate::store::critical_namespaces::native_registry) struct JoinedConnecti
 }
 
 impl MetadataWork {
-    pub(in crate::store::critical_namespaces::native_registry) fn with_registered_warm_member<T>(
+    pub(in crate::store::critical_namespaces::native_registry) fn with_registered_joined_member<
+        T,
+    >(
         &self,
-        warm: &crate::store::persistence::governance_layout::joined::JoinedRegistrationDependency,
+        original: crate::store::NativeTextJoinedRegistrationData,
+        warm: Option<
+            &crate::store::persistence::governance_layout::joined::JoinedRegistrationDependency,
+        >,
         row: crate::store::NativeTextJoinedRegistryRowData,
         run: impl FnOnce(
             &V2CurrentLayoutStore,
@@ -1113,7 +1118,7 @@ impl MetadataWork {
         let store = layout.checked_store().map_err(|_| Refusal::Unavailable)?;
         let require_original = || {
             if self
-                .registered_joined_row_in(store, warm.data(), Some(warm))
+                .registered_joined_row_in(store, original, warm)
                 .map_err(|_| Refusal::Unavailable)?
                 .0
                 != row

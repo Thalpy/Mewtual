@@ -1290,6 +1290,11 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
         listed["servers"].as_array().unwrap(),
         std::slice::from_ref(&original)
     );
+    let empty = native_history_request(&joiner_window, &original, "0", None, 8);
+    run(&joiner_queue).await;
+    let empty = found_value(empty.await.unwrap());
+    assert_eq!(empty["end_exclusive"], "0");
+    assert!(empty["items"].as_array().unwrap().is_empty());
     let send = native_send_request(&joiner_window, &original, 9, "Joined message");
     run(&joiner_queue).await;
     let saved = found_value(send.await.unwrap());
@@ -1297,6 +1302,13 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     assert!(saved["message_id"]
         .as_str()
         .is_some_and(|id| id.len() == 64));
+    let history = native_history_request(&joiner_window, &original, "0", None, 8);
+    run(&joiner_queue).await;
+    let history = found_value(history.await.unwrap());
+    assert_eq!(history["scope"], "own-saved-originals");
+    assert_eq!(history["end_exclusive"], "1");
+    assert_eq!(history["items"][0]["action"], saved["message_id"]);
+    assert_eq!(history["items"][0]["body"]["text"], "Joined message");
     let locked = snapshot_request(&joiner_window, None);
     run(&joiner_queue).await;
     assert!(snapshot_result(locked.await.unwrap())["continuity_error"].is_null());
@@ -1325,6 +1337,9 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     let retry = native_send_request(&window, &restored[0], 9, "Joined message");
     run(&queue).await;
     assert_eq!(found_value(retry.await.unwrap()), saved);
+    let page = native_history_request(&window, &restored[0], "0", Some("1"), 8);
+    run(&queue).await;
+    assert_eq!(found_value(page.await.unwrap()), history);
     let changed = native_send_request(&window, &restored[0], 9, "Changed joined message");
     run(&queue).await;
     refused(changed.await.unwrap());

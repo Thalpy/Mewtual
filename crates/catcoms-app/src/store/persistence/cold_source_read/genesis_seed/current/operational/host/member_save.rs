@@ -70,6 +70,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 mod history;
+pub(in crate::store) use history::prepare_joined_member_history;
 
 /// Native custody for ONE member-save admission.
 ///
@@ -661,12 +662,12 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         let Some(lane) = self.member.as_deref() else {
             return Err((native, V2MemberSaveRefusal::Stale));
         };
-        MemberSaveFinal::<T, R>::Founder {
+        let final_edge: MemberSaveFinal<'_, '_, T, R> = MemberSaveFinal::Founder {
             lane,
             origin: &self.origin,
             access: &access,
-        }
-        .admit(layout, token, native)
+        };
+        final_edge.admit(layout, token, native)
     }
 }
 

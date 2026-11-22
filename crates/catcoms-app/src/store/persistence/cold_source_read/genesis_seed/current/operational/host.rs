@@ -53,6 +53,7 @@ pub(in crate::store) use member::{
 // DATA and an owned admitted job out. None of these types is authority by itself.
 pub(in crate::store) use member::{JoinedMemberLane, JoinedMemberSource};
 pub use member::{V2MemberDependency, V2MemberSignRequest};
+pub(in crate::store) use member_save::prepare_joined_member_history;
 pub use member_save::{
     MemberSaveJob, MemberSaveJobReport, MemberSaveNativeAdmission, V2MemberSaveOutcome,
     V2MemberSaveRefusal,

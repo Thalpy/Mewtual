@@ -30,6 +30,11 @@ impl std::fmt::Debug for NativeTextMemberHistoryItem<'_> {
     }
 }
 impl NativeTextMemberHistoryPage {
+    pub(in crate::store::critical_namespaces::native_registry) fn from_original(
+        inner: MemberHistoryPage,
+    ) -> Self {
+        Self { inner }
+    }
     pub fn next(&self) -> u64 {
         self.inner.next()
     }
@@ -120,7 +125,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberJob<T, R> {
         self.inner
             .require_current()
             .map_err(|_| V2MemberSaveRefusal::Cancelled)?;
-        result.map(|inner| NativeTextMemberHistoryPage { inner })
+        result.map(NativeTextMemberHistoryPage::from_original)
         // Consuming self restores the whole runtime BEFORE the paid page leaves.
     }
 }

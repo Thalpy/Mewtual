@@ -101,6 +101,28 @@ pub(super) struct Controller {
     pub(super) boot: Arc<boot_lifetime::Control>,
 }
 impl Controller {
+    pub(super) fn capture_joined_member(
+        &self,
+        store: &Option<MountedVault>,
+        ui: &mut Option<catcoms_app::store::NativeTextUiObservation>,
+        selection: &catcoms_app::store::NativeTextJoinedRowSelection,
+        output: &mut Option<catcoms_app::store::NativeTextJoinedSelectionPreparation<OsCryptoRng>>,
+    ) -> Result<(), &'static str> {
+        if output.is_some() {
+            return Err(listing::STALE);
+        }
+        self.capture_join(store, |sources, vault| {
+            if !selection.is_current_cached() || !selection.is_from_original_vault_cached(vault) {
+                return Err(listing::STALE);
+            }
+            let command = vault
+                .bind_native_source_command(ui)
+                .map_err(|_| listing::STALE)?;
+            *output = Some(sources.capture_joined_selection(command));
+            Ok(())
+        })
+    }
+
     pub(super) fn capture_join(
         &self,
         store: &Option<MountedVault>,

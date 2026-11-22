@@ -400,6 +400,9 @@ context. The current epoch and Admission are separate from that identity.
 The approved joined row can look up a saved request through that context.
 An absent namespace stays absent. An ambiguous or damaged namespace refuses
 and preserves the original files.
+The desktop history route pages the original locally saved actions through
+the same context, including after a cold reopen. This is the local member
+outbox view. Peer catch-up and shared history projection remain open.
 
 The warm joined node can draw and sign an ordinary action through the original
 native Joiner Source. Its signing cut requires the ordinary member purpose and

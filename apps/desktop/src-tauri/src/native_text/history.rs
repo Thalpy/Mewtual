@@ -3,15 +3,22 @@
 //! native copies/serialization, then rechecks the actual installed objects.
 use super::*;
 use catcoms_app::store::{
-    NativeTextHistoryResponseCredit, NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus,
-    NativeTextMemberPreparation,
+    NativeTextHistoryResponseCredit, NativeTextJoinedRowSelection,
+    NativeTextJoinedSelectionPreparation, NativeTextMemberHistoryPage,
+    NativeTextMemberHistoryStatus, NativeTextMemberPreparation,
 };
 use catcoms_replication::chat::{Body, SignedAction};
 use serde::Serialize;
 use std::io::Write;
 use tauri::ipc::InvokeResponseBody;
 
-type Preparation = NativeTextMemberPreparation<catcoms_net::MeshService, OsCryptoRng>;
+enum Preparation {
+    Founder(NativeTextMemberPreparation<catcoms_net::MeshService, OsCryptoRng>),
+    Joined(
+        NativeTextJoinedSelectionPreparation<OsCryptoRng>,
+        NativeTextJoinedRowSelection,
+    ),
+}
 const STALE: &str = "The chat session changed. Refresh this chat.";
 const BUSY: &str = "Chat history is busy. Try again.";
 // Eight maximum-size texts, even with sixfold JSON escaping, fit below this
@@ -244,16 +251,21 @@ fn current(
         })
 }
 async fn capture(state: &AppState, call: &Invocation) -> Result<Preparation, String> {
-    let mut budget = Some(
-        state
-            .native_text
-            .sources
-            .policy()
-            .prepare_member()
-            .map_err(|_| BUSY)?,
-    );
+    let mut budget = if call.selection.founder().is_some() {
+        Some(
+            state
+                .native_text
+                .sources
+                .policy()
+                .prepare_member()
+                .map_err(|_| BUSY)?,
+        )
+    } else {
+        None
+    };
     let mut ui = Some(founding::ui_capture(state, call.generation, &call.target).await?);
-    let mut output = None;
+    let mut founder = None;
+    let mut joined = None;
     let result = {
         let _commit = require_ui_session_generation(state, call.generation).await?;
         let store = state.store.lock().await;
@@ -261,17 +273,28 @@ async fn capture(state: &AppState, call: &Invocation) -> Result<Preparation, Str
         if !current(state, call, &store, &table) {
             Err(STALE)
         } else {
-            state.native_text.sources.capture_member(
-                &store,
-                &mut ui,
-                &call.selection,
-                &mut budget,
-                &mut output,
-            )
+            match &call.selection {
+                server_table::NativeSelection::Founder(_) => state
+                    .native_text
+                    .sources
+                    .capture_member(&store, &mut ui, &call.selection, &mut budget, &mut founder),
+                server_table::NativeSelection::Joined(selection) => state
+                    .native_text
+                    .sources
+                    .capture_joined_member(&store, &mut ui, selection, &mut joined),
+            }
         }
     };
     result.map_err(str::to_owned)?;
-    Ok(output.take().unwrap())
+    match (&call.selection, founder, joined) {
+        (server_table::NativeSelection::Founder(_), Some(original), _) => {
+            Ok(Preparation::Founder(original))
+        }
+        (server_table::NativeSelection::Joined(row), _, Some(original)) => {
+            Ok(Preparation::Joined(original, row.clone()))
+        }
+        _ => Err(STALE.to_owned()),
+    }
 }
 struct Work {
     preparation: Preparation,
@@ -290,17 +313,22 @@ struct Output {
 }
 impl Work {
     fn run(self) -> Result<Output, String> {
-        let page = self
-            .preparation
-            .finish()
-            .map_err(|_| STALE)?
-            .prepare_member_history(
-                self.read.start,
-                self.read.end,
-                self.read.maximum,
+        let read = self.read;
+        let page = match self.preparation {
+            Preparation::Founder(original) => original
+                .finish()
+                .map_err(|_| STALE)?
+                .prepare_member_history(read.start, read.end, read.maximum, &self.scope),
+            Preparation::Joined(original, row) => original.prepare_member_history(
+                &row,
+                read.start,
+                read.end,
+                read.maximum,
                 &self.scope,
-            )
-            .map_err(|_| "Chat history could not be read. Try again.")?;
+                &mut OsCryptoRng,
+            ),
+        }
+        .map_err(|_| "Chat history could not be read. Try again.")?;
         // Consuming the Root job restores its runtime before any native await.
         let body = serialize_page(&page, self.read.channel, SERIALIZED_LIMIT)?;
         Ok(Output {
