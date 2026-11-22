@@ -299,8 +299,15 @@ impl ServerStore {
                 }
                 let plain = Zeroizing::new(unseal(&key, &unframe(&raw)?)?);
                 let layout = self.parse_joined_pin_catalog(&plain)?;
-                let index =
-                    pending::select(self, &key, layout, &directory, (&current, &raw), index_fee)?;
+                let index = pending::select(
+                    self,
+                    &key,
+                    layout,
+                    &directory,
+                    (&current, &raw),
+                    index_fee,
+                    None,
+                )?;
                 (current, raw, None, index)
             };
         let value = ColdJoinedSelection {

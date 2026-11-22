@@ -42,6 +42,12 @@ pub(super) struct SelectedPending {
     _fee: CatalogReadReservation,
 }
 
+pub(super) struct WarmSelection<'a> {
+    original_pending: &'a CreatedStage,
+    previous_index: &'a SelectedPinIndex,
+    stage: &'a mut Option<CreatedStage>,
+}
+
 pub(super) fn require_pending_names(
     store: &ServerStore,
     pending: Option<&SelectedPending>,
@@ -63,6 +69,7 @@ pub(super) fn select(
     directory: &GovernanceDirectoryCapture,
     catalog: (&File, &[u8]),
     index_fee: CatalogReadReservation,
+    mut warm: Option<WarmSelection<'_>>,
 ) -> Result<SelectedPinIndex, AppError> {
     let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
     let fee = policy
@@ -78,10 +85,19 @@ pub(super) fn select(
     let current_id = session_id(catalog.0).map_err(io)?;
     let mut index = SelectedPinIndex::open(store, key, layout, None, index_fee)?;
     let Some(original) = read(&pending_path, MAX_FRAME)? else {
+        if warm.is_some() {
+            return Err(denied());
+        }
         require_pending_names(store, None)?;
         return Ok(index);
     };
     let pending_id = session_id(&original.0).map_err(io)?;
+    if warm
+        .as_ref()
+        .is_some_and(|owned| owned.original_pending.identity != Some(pending_id))
+    {
+        return Err(denied());
+    }
     let pending = RecoveredPinnedPending::open(key, layout, &original.1, limits()?)?;
     let (before, after) = pending.index_frames();
     let (request, context) = pending.pending_data();
@@ -92,13 +108,20 @@ pub(super) fn select(
     }
     let selected = index.selected.1.as_slice();
     if selected == before {
-        let mut stage = match read(&stage_path, after.len())? {
-            Some((file, bytes)) if after.starts_with(&bytes) => Some(CreatedStage {
-                identity: Some(session_id(&file).map_err(io)?),
-                file,
-            }),
-            Some(_) => return Err(denied()),
-            None => None,
+        let mut cold_stage;
+        let stage = if let Some(owned) = warm.as_mut() {
+            owned.previous_index.require_file(store)?;
+            &mut *owned.stage
+        } else {
+            cold_stage = match read(&stage_path, after.len())? {
+                Some((file, bytes)) if after.starts_with(&bytes) => Some(CreatedStage {
+                    identity: Some(session_id(&file).map_err(io)?),
+                    file,
+                }),
+                Some(_) => return Err(denied()),
+                None => None,
+            };
+            &mut cold_stage
         };
         let before_selection = || {
             store.require_governance_directory_matches_root_if_mounted(directory)?;
@@ -108,12 +131,12 @@ pub(super) fn select(
         };
         before_selection()?;
         if stage.is_none() {
-            ensure_native_claim(&stage_path, &mut stage)?;
+            ensure_native_claim(&stage_path, stage)?;
         }
         ensure(
             &stage_path,
             after,
-            &mut stage,
+            stage,
             ArchiveOutputMode::SeedRepair,
             #[cfg(test)]
             0,
@@ -122,8 +145,8 @@ pub(super) fn select(
         )?;
         sync_directory(&store.dir).map_err(io)?;
         before_selection()?;
-        let stage = stage.ok_or_else(denied)?;
-        exact_retained(&stage_path, &stage, after)?;
+        let stage = stage.as_ref().ok_or_else(denied)?;
+        exact_retained(&stage_path, stage, after)?;
         held(&current_path, catalog.0, current_id)?;
         held(
             &index_path,
@@ -131,9 +154,11 @@ pub(super) fn select(
             session_id(&index.selected.0).map_err(io)?,
         )?;
         fs::rename(&stage_path, &index_path).map_err(io)?;
-        index = SelectedPinIndex::open(store, key, layout, Some(&stage), index._fee)?;
+        index = SelectedPinIndex::open(store, key, layout, Some(stage), index._fee)?;
     } else if selected != after {
         return Err(denied());
+    } else if let Some(owned) = warm {
+        exact_retained(&index_path, owned.stage.as_ref().ok_or_else(denied)?, after)?;
     }
     absent(&stage_path)?;
     if index.selected.1.as_slice() != after {
@@ -152,10 +177,14 @@ pub(super) fn select(
 }
 
 pub(in crate::store) struct JoinedPendingIo {
-    _prepared: PreparedPinnedPending,
+    prepared: PreparedPinnedPending,
     exact: Zeroizing<Vec<u8>>,
     pending: Option<CreatedStage>,
+    stage: Option<CreatedStage>,
+    directory: GovernanceDirectoryCapture,
+    catalog: OpenedArchiveObject,
     _fee: CatalogReadReservation,
+    _catalog_fee: CatalogReadReservation,
 }
 
 impl ServerStore {
@@ -174,11 +203,27 @@ impl ServerStore {
             .pending
             .pool
             .try_reserve(SOURCE_FEE)?;
+        let catalog_fee = policy
+            .current
+            .archive
+            .pending
+            .pool
+            .try_reserve(governance::codec::DECLARATION_FEE)?;
+        let inventory = self.read_governance_inventory(&catalog_fee)?;
+        if inventory.stage.is_some() || inventory.seed.is_some() {
+            return Err(denied());
+        }
+        let catalog = inventory.current.ok_or_else(denied)?;
         let slot = self.joined_pin_index.lock().map_err(|_| denied())?;
         let selected = slot.as_ref().ok_or_else(denied)?;
         selected.require_file(self)?;
         let layout = selected.index.layout_data();
         let key = Zeroizing::new(self.keys.db_key()?);
+        let catalog_plain = Zeroizing::new(unseal(&key, &unframe(&catalog.1)?)?);
+        if self.parse_joined_pin_catalog(&catalog_plain)? != layout {
+            return Err(denied());
+        }
+        drop(catalog_plain);
         let source_id = original_pending_id(
             &key,
             layout,
@@ -201,12 +246,18 @@ impl ServerStore {
         }
         selected.require_file(self)?;
         require_pending_names(self, None)?;
-        Ok(JoinedPendingIo {
-            _prepared: prepared,
+        let output = JoinedPendingIo {
+            prepared,
             exact,
             pending: None,
+            stage: None,
+            directory: inventory.directory,
+            catalog,
             _fee: fee,
-        })
+            _catalog_fee: catalog_fee,
+        };
+        output.require_catalog(self)?;
+        Ok(output)
     }
 
     pub(in crate::store) fn selected_pending_join_data(
@@ -228,8 +279,25 @@ impl ServerStore {
 }
 
 impl JoinedPendingIo {
+    fn require_catalog(&self, store: &ServerStore) -> Result<(), AppError> {
+        store.require_governance_directory_matches_root(&self.directory)?;
+        absent(&fixed(store, false, governance::GOVERNANCE_SEED)?)?;
+        absent(&fixed(
+            store,
+            false,
+            critical_namespaces::Slot::Stage.name(),
+        )?)?;
+        exact_held(
+            &fixed(store, false, critical_namespaces::Slot::Current.name())?,
+            &self.catalog.0,
+            session_id(&self.catalog.0).map_err(io)?,
+            &self.catalog.1,
+        )
+    }
+
     pub(in crate::store) fn stage(&mut self, store: &ServerStore) -> Result<(), AppError> {
         store.validate_mounted_governance_layout()?;
+        self.require_catalog(store)?;
         let path = fixed(store, false, PENDING_NAME)?;
         let slot = store.joined_pin_index.lock().map_err(|_| denied())?;
         let selected = slot.as_ref().ok_or_else(denied)?;
@@ -258,11 +326,62 @@ impl JoinedPendingIo {
             0,
         )?;
         sync_directory(&store.dir).map_err(io)?;
+        self.require_catalog(store)?;
         selected.require_file(store)?;
         exact_retained(
             &path,
             self.pending.as_ref().ok_or_else(denied)?,
             &self.exact,
         )
+    }
+
+    pub(in crate::store) fn install(&mut self, store: &ServerStore) -> Result<(), AppError> {
+        store.validate_mounted_governance_layout()?;
+        self.require_catalog(store)?;
+        let claim = self.pending.as_ref().ok_or_else(denied)?;
+        exact_retained(&fixed(store, false, PENDING_NAME)?, claim, &self.exact)?;
+        let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
+        let index_fee = policy.current.archive.pending.pool.try_reserve(INDEX_FEE)?;
+        let key = Zeroizing::new(store.keys.db_key()?);
+        let mut slot = store.joined_pin_index.lock().map_err(|_| denied())?;
+        let previous_index = slot.as_ref().ok_or_else(denied)?;
+        let selected = select(
+            store,
+            &key,
+            previous_index.index.layout_data(),
+            &self.directory,
+            (&self.catalog.0, &self.catalog.1),
+            index_fee,
+            Some(WarmSelection {
+                original_pending: claim,
+                previous_index,
+                stage: &mut self.stage,
+            }),
+        )?;
+        self.require_catalog(store)?;
+        *slot = Some(selected);
+        Ok(())
+    }
+
+    pub(in crate::store) fn request_data<'a>(
+        &'a self,
+        store: &ServerStore,
+    ) -> Result<&'a [u8], AppError> {
+        store.validate_mounted_governance_layout()?;
+        self.require_catalog(store)?;
+        let slot = store.joined_pin_index.lock().map_err(|_| denied())?;
+        let selected = slot.as_ref().ok_or_else(denied)?;
+        let chosen = selected.pending.as_ref().ok_or_else(denied)?;
+        let claim = self.pending.as_ref().ok_or_else(denied)?;
+        if claim.identity != Some(session_id(&chosen.original.0).map_err(io)?) {
+            return Err(denied());
+        }
+        let (recovered, _) = chosen._pending.pending_data();
+        let request = self.prepared.request_bytes_data();
+        if request != recovered.request_bytes_data() {
+            return Err(denied());
+        }
+        selected.require(store)?;
+        Ok(request)
     }
 }

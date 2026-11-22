@@ -197,9 +197,11 @@ It can finish an authenticated interrupted declaration or open an already
 selected joined catalog. The mounted index preserves the first pin ciphertext
 for each group and checks the held index when reading pin context. The first
 pending-JOIN record covers the private request and the one exact index
-insertion. Cold opening can complete that insertion and verify the original
-request. Welcome entry, recovery of other pending-JOIN transitions, and native
-runtime installation remain open.
+insertion. The original warm owner can select the insert and release the
+exact signed request bytes while keeping the private package. Cold opening
+can complete the same insertion and verify the original request. Welcome
+entry, other pending-JOIN transitions, and native runtime installation
+remain open.
 Unknown/ambiguous remnants are preserved and refused, never cleared as debris.
 Predecessor tests must use a real prior binary with positive open controls.
 

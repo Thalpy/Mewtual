@@ -395,79 +395,107 @@ fn governed_joined_pin_pending_replays_the_same_private_request_and_index_insert
         GenesisAnchorBindingData, InviteBindingSpecData, SignedInviteBindingData,
     };
     use catcoms_sync::{DirectJoinLimits, PreparedV2JoinRequest};
-    let dir = tempfile::tempdir().unwrap();
-    let mut rng = ChaCha20Rng::seed_from_u64(0xc498);
-    let mut plan = original(dir.path(), &mut rng).prepare_governance().unwrap();
-    plan.retry(&mut rng).unwrap();
-    drop(plan);
-    let mut original =
-        NativeTextGovernedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy())
-            .unwrap();
-    original.stage_joined_pin_layout(&mut rng).unwrap();
-    drop(original);
-    let mut joined =
-        NativeTextJoinedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy()).unwrap();
-    assert!(joined.pending_join_data().unwrap().is_none());
+    for install_warm in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0xc498);
+        let mut plan = original(dir.path(), &mut rng).prepare_governance().unwrap();
+        plan.retry(&mut rng).unwrap();
+        drop(plan);
+        let mut original =
+            NativeTextGovernedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy())
+                .unwrap();
+        original.stage_joined_pin_layout(&mut rng).unwrap();
+        drop(original);
+        let mut joined =
+            NativeTextJoinedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy())
+                .unwrap();
+        assert!(joined.pending_join_data().unwrap().is_none());
 
-    let founder = DeviceKeypair::from_seed(&[144; 32]);
-    let anchor = GenesisAnchorBindingData {
-        group: vec![145; 16],
-        founder: founder.verifying_key().to_bytes(),
-        profile: [146; 32],
-        admission: [147; 32],
-        tenure: [148; 32],
-        header: [149; 32],
-        state: [150; 32],
-    };
-    let invite = SignedInviteBindingData::sign_using(
-        InviteBindingSpecData {
-            anchor: anchor.clone(),
-            inviter: anchor.founder,
-            nonce: [151; 16],
-            expires_at_ms: 800,
-            policy: [152; 32],
-            public_routing_plan: [153; 32],
-        },
-        |bytes| Ok(founder.sign(bytes)),
-    )
-    .unwrap();
-    let prepare = || {
-        PreparedV2JoinRequest::prepare(
-            catcoms_mls::MlsDevice::generate().unwrap(),
-            &anchor,
-            &invite,
-            [154; 32],
-            700,
-            DirectJoinLimits::new(512 * 1024, 2 * 1024 * 1024, 256 * 1024).unwrap(),
+        let founder = DeviceKeypair::from_seed(&[144; 32]);
+        let anchor = GenesisAnchorBindingData {
+            group: vec![145; 16],
+            founder: founder.verifying_key().to_bytes(),
+            profile: [146; 32],
+            admission: [147; 32],
+            tenure: [148; 32],
+            header: [149; 32],
+            state: [150; 32],
+        };
+        let invite = SignedInviteBindingData::sign_using(
+            InviteBindingSpecData {
+                anchor: anchor.clone(),
+                inviter: anchor.founder,
+                nonce: [151; 16],
+                expires_at_ms: 800,
+                policy: [152; 32],
+                public_routing_plan: [153; 32],
+            },
+            |bytes| Ok(founder.sign(bytes)),
         )
-        .unwrap()
-    };
-    let request = prepare();
-    let expected = *blake3::hash(request.request_bytes_data()).as_bytes();
-    joined.stage_first_join(request, &invite, &mut rng).unwrap();
-    joined.retry_first_join().unwrap();
-    assert!(joined.pending_join_data().is_err());
-    assert!(joined
-        .stage_first_join(prepare(), &invite, &mut NeverRng)
-        .is_err());
-    drop(joined);
+        .unwrap();
+        let prepare = || {
+            PreparedV2JoinRequest::prepare(
+                catcoms_mls::MlsDevice::generate().unwrap(),
+                &anchor,
+                &invite,
+                [154; 32],
+                700,
+                DirectJoinLimits::new(512 * 1024, 2 * 1024 * 1024, 256 * 1024).unwrap(),
+            )
+            .unwrap()
+        };
+        let request = prepare();
+        let expected = *blake3::hash(request.request_bytes_data()).as_bytes();
+        joined.stage_first_join(request, &invite, &mut rng).unwrap();
+        joined.retry_first_join().unwrap();
+        assert!(joined.pending_join_data().is_err());
+        assert!(joined.first_join_request_data().is_err());
+        assert!(joined
+            .stage_first_join(prepare(), &invite, &mut NeverRng)
+            .is_err());
+        if install_warm {
+            joined.select_first_join().unwrap();
+            joined.select_first_join().unwrap();
+            let request = joined.first_join_request_data().unwrap();
+            assert_eq!(blake3::hash(request).as_bytes(), &expected);
+            assert_eq!(joined.pending_join_data().unwrap().unwrap().0, expected);
+            let selected = dir
+                .path()
+                .join(crate::store::persistence::governance_layout::joined::INDEX_NAME);
+            let held = dir.path().join("first-join-original-index");
+            let bytes = fs::read(&selected).unwrap();
+            fs::rename(&selected, &held).unwrap();
+            fs::write(&selected, &bytes).unwrap();
+            assert!(joined.first_join_request_data().is_err());
+            fs::remove_file(&selected).unwrap();
+            fs::rename(&held, &selected).unwrap();
+            assert_eq!(
+                blake3::hash(joined.first_join_request_data().unwrap()).as_bytes(),
+                &expected
+            );
+        }
+        drop(joined);
 
-    let joined =
-        NativeTextJoinedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy()).unwrap();
-    let (actual, context) = joined.pending_join_data().unwrap().unwrap();
-    assert_eq!(actual, expected);
-    assert_ne!(context.original_pending, [0; 32]);
-    assert!(joined
-        .joined_pin_context_data(&anchor)
-        .unwrap()
-        .is_some_and(|pin| pin == context));
-    drop(joined);
-    let joined =
-        NativeTextJoinedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy()).unwrap();
-    assert!(joined
-        .pending_join_data()
-        .unwrap()
-        .is_some_and(|actual| actual == (expected, context)));
+        let joined =
+            NativeTextJoinedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy())
+                .unwrap();
+        let (actual, context) = joined.pending_join_data().unwrap().unwrap();
+        assert!(joined.first_join_request_data().is_err());
+        assert_eq!(actual, expected);
+        assert_ne!(context.original_pending, [0; 32]);
+        assert!(joined
+            .joined_pin_context_data(&anchor)
+            .unwrap()
+            .is_some_and(|pin| pin == context));
+        drop(joined);
+        let joined =
+            NativeTextJoinedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy())
+                .unwrap();
+        assert!(joined
+            .pending_join_data()
+            .unwrap()
+            .is_some_and(|actual| actual == (expected, context)));
+    }
 }
 
 #[test]

@@ -27,6 +27,10 @@ pub(in crate::store) struct PreparedPinnedPending {
 }
 
 impl PreparedPinnedPending {
+    pub(in crate::store) fn request_bytes_data(&self) -> &[u8] {
+        self.source.request_bytes_data()
+    }
+
     pub(in crate::store) fn prepare(
         source: PreparedV2JoinRequest,
         selected_index: &[u8],
@@ -144,12 +148,25 @@ impl RecoveredPinnedPending {
         {
             return Err(refused());
         }
-        let original_pending = d.get_bytes().map_err(bad)?.try_into().map_err(bad)?;
-        let pin = d.get_bytes().map_err(bad)?.try_into().map_err(bad)?;
+        let original_pending: [u8; 32] = d
+            .get_bytes()
+            .map_err(bad)?
+            .try_into()
+            .map_err(|_| refused())?;
+        let pin: [u8; 32] = d
+            .get_bytes()
+            .map_err(bad)?
+            .try_into()
+            .map_err(|_| refused())?;
         let original = d.get_bytes().map_err(bad)?;
         let candidate = d.get_bytes().map_err(bad)?;
-        let accepted = SignedInviteBindingData::decode(d.get_bytes().map_err(bad)?).map_err(bad)?;
-        let nonce = d.get_bytes().map_err(bad)?.try_into().map_err(bad)?;
+        let accepted =
+            SignedInviteBindingData::decode(d.get_bytes().map_err(bad)?).map_err(|_| refused())?;
+        let nonce = d
+            .get_bytes()
+            .map_err(bad)?
+            .try_into()
+            .map_err(|_| refused())?;
         let bytes = d.get_bytes().map_err(bad)?;
         d.finish().map_err(bad)?;
         if bytes.len() > MAX_SOURCE {

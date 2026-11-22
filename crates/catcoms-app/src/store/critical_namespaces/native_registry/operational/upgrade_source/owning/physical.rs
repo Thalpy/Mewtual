@@ -78,6 +78,15 @@ impl Physical {
         self.current()?.checked_store()
     }
 
+    pub(super) fn joined_request_data<'a>(
+        &self,
+        pending: &'a crate::store::persistence::governance_layout::joined::JoinedPendingIo,
+    ) -> Result<&'a [u8], AppError> {
+        self.handler.require()?;
+        self.handler.require_idle_cached()?;
+        pending.request_data(self.current()?.checked_store()?)
+    }
+
     pub(super) fn selected_pending_join_data(
         &self,
     ) -> Result<Option<([u8; 32], catcoms_sync::V2PendingJoinContextData)>, AppError> {

@@ -111,6 +111,18 @@ impl NativeTextJoinedStorage {
             .stage_joined_pending(self.pending.as_mut().ok_or_else(refused)?)
     }
 
+    pub fn select_first_join(&mut self) -> Result<(), AppError> {
+        self.index
+            .install_joined_pending(self.pending.as_mut().ok_or_else(refused)?)
+    }
+
+    /// The original signed request is available after its selected working
+    /// index and Pending record have been covered.
+    pub fn first_join_request_data(&self) -> Result<&[u8], AppError> {
+        self.index
+            .joined_request_data(self.pending.as_ref().ok_or_else(refused)?)
+    }
+
     /// Reference to the exact saved request for diagnostics and later admission.
     pub fn pending_join_data(
         &self,

@@ -53,14 +53,22 @@ impl JoinedPinIndex {
         {
             return Err(refused());
         }
-        let parent: [u8; 32] = d.get_bytes().map_err(bad)?.try_into().map_err(bad)?;
+        let parent: [u8; 32] = d
+            .get_bytes()
+            .map_err(bad)?
+            .try_into()
+            .map_err(|_| refused())?;
         let count = d.get_u32().map_err(bad)? as usize;
         if count > MAX_PINS || ((parent == [0; 32]) != (count == 0)) {
             return Err(refused());
         }
         let mut rows: Vec<Row> = Vec::with_capacity(count);
         for _ in 0..count {
-            let group: [u8; 16] = d.get_bytes().map_err(bad)?.try_into().map_err(bad)?;
+            let group: [u8; 16] = d
+                .get_bytes()
+                .map_err(bad)?
+                .try_into()
+                .map_err(|_| refused())?;
             let sealed = d.get_bytes().map_err(bad)?;
             if rows.last().is_some_and(|entry| entry.group >= group) {
                 return Err(refused());

@@ -338,6 +338,21 @@ impl Store {
         pending.stage(physical.joined_pending_store()?)
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn install_joined_pending(
+        &mut self,
+        pending: &mut crate::store::persistence::governance_layout::joined::JoinedPendingIo,
+    ) -> Result<(), AppError> {
+        let physical = Arc::get_mut(&mut self.physical).ok_or_else(refused)?;
+        pending.install(physical.joined_pending_store()?)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn joined_request_data<'a>(
+        &self,
+        pending: &'a crate::store::persistence::governance_layout::joined::JoinedPendingIo,
+    ) -> Result<&'a [u8], AppError> {
+        self.physical.joined_request_data(pending)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn selected_pending_join_data(
         &self,
     ) -> Result<Option<([u8; 32], catcoms_sync::V2PendingJoinContextData)>, AppError> {
