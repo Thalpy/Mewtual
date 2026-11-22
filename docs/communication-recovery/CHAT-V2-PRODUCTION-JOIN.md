@@ -144,6 +144,11 @@ reuses the original response. Rejecting a different request still requires
 the original nonce fence. Network delivery and the joined native owner
 remain required for production.
 
+The response carries a bounded public proof of the original genesis and
+first Add. The joiner compares it with the accepted anchor and replays the
+exact Admission and state before opening Welcome. A truncated or unrelated
+proof leaves the original private KeyPackage available for a valid retry.
+
 The warm founder continues to use its existing ordinary-member lane after
 installation. Before signing a new action it checks the selected Head2,
 the exact archive and the same verifier's governing Header and epoch.

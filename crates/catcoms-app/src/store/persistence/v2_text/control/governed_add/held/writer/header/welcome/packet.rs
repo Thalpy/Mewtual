@@ -3,7 +3,10 @@
 use super::*;
 use crate::store::native_text_invite::PreparedNativeTextJoinResponse;
 use crate::store::NativeTextSavedJoinResponse;
-use catcoms_sync::V2JoinResponseData;
+use catcoms_replication::chat::owner_header::SignedOwnerHeader;
+use catcoms_sync::{
+    V2AdmissionStepData, V2FirstAddProofData, V2JoinResponseData, MAX_V2_FIRST_ADD_PROOF_BYTES,
+};
 
 mod archive_file;
 
@@ -21,6 +24,7 @@ impl PreparedGovernedAddFence {
         source: &GenesisSourceDataRef<'_>,
         preimage: &[u8],
         outcome: &V2FounderAddOutcomeData<'_>,
+        signed_header: &SignedOwnerHeader,
         response: &V2JoinResponseData<'_>,
         rng: &mut dyn CryptoRngCore,
     ) -> Result<(), AppError> {
@@ -33,6 +37,14 @@ impl PreparedGovernedAddFence {
             .filter(|outcome| outcome.covered)
             .ok_or_else(refused)?;
         let header = self.header.as_mut().ok_or_else(refused)?;
+        let (governing, _) = header
+            .governing
+            .as_ref()
+            .filter(|(_, governing)| governing.covered)
+            .ok_or_else(refused)?;
+        if *governing != signed_header.id() {
+            return Err(refused());
+        }
         let (intent_digest, _) = header
             .welcome
             .as_ref()
@@ -69,8 +81,10 @@ impl PreparedGovernedAddFence {
                 return Err(refused());
             }
         } else {
-            const BYTES: usize =
-                6 * (response::MAX_BYTES + 1) + 4 * std::mem::size_of::<PreparedResponse>() + 4096;
+            const BYTES: usize = 6 * (response::MAX_BYTES + 1)
+                + 4 * MAX_V2_FIRST_ADD_PROOF_BYTES
+                + 4 * std::mem::size_of::<PreparedResponse>()
+                + 4096;
             let pool = &store
                 .archive_bootstrap_policy
                 .as_ref()
@@ -80,10 +94,30 @@ impl PreparedGovernedAddFence {
             let fee = pool.try_reserve(BYTES)?;
             fee.validate(pool, BYTES)?;
             original.require_packet(response)?;
+            let (signature, _) = header.raw.as_ref().ok_or_else(refused)?;
+            governing_record::require_original_signature(
+                signed_header,
+                signature,
+                outcome.unsigned_data().signing_bytes_data(),
+            )?;
+            let genesis = source.data();
+            let proof = V2FirstAddProofData::encode(
+                genesis.profile,
+                V2AdmissionStepData {
+                    admission: genesis.admission,
+                    header: genesis.header,
+                    image: genesis.state,
+                },
+                V2AdmissionStepData {
+                    admission: outcome.admission_data(),
+                    header: signed_header,
+                    image: outcome.unsigned_data().image_data(),
+                },
+            )?;
             let packet = Zeroizing::new(response.encode_packet_data()?);
             let key = Zeroizing::new(store.keys.db_key()?);
             let frame = response::seal_data(&key, raw_frame, &packet, rng)?;
-            let packet = PreparedNativeTextJoinResponse::prepare(pool, packet)?;
+            let packet = PreparedNativeTextJoinResponse::prepare(pool, packet, proof)?;
             stage.response = Some(PreparedResponse {
                 record: PreparedSmallControl::new(frame),
                 packet,

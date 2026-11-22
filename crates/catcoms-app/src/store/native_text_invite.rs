@@ -185,6 +185,7 @@ pub(super) struct PreparedNativeTextJoinResponse(Arc<PaidJoinResponse>);
 
 struct PaidJoinResponse {
     packet: Zeroizing<Vec<u8>>,
+    proof: Vec<u8>,
     _payment: CatalogReadReservation,
 }
 
@@ -192,22 +193,34 @@ impl PreparedNativeTextJoinResponse {
     pub(super) fn prepare(
         pool: &CriticalCatalogReadPool,
         packet: Zeroizing<Vec<u8>>,
+        proof: Vec<u8>,
     ) -> Result<Self, AppError> {
-        if packet.is_empty() || packet.capacity() > catcoms_sync::MAX_V2_JOIN_RESPONSE_PACKET_BYTES
+        if packet.is_empty()
+            || packet.capacity() > catcoms_sync::MAX_V2_JOIN_RESPONSE_PACKET_BYTES
+            || proof.is_empty()
+            || proof.capacity() > catcoms_sync::MAX_V2_FIRST_ADD_PROOF_BYTES
         {
             return Err(refused());
         }
-        let bytes = packet.capacity() + 4 * std::mem::size_of::<PaidJoinResponse>() + 256;
+        let bytes = packet.capacity()
+            + proof.capacity()
+            + 4 * std::mem::size_of::<PaidJoinResponse>()
+            + 256;
         let payment = pool.try_reserve(bytes)?;
         payment.validate(pool, bytes)?;
         Ok(Self(Arc::new(PaidJoinResponse {
             packet,
+            proof,
             _payment: payment,
         })))
     }
 
     pub(super) fn packet_bytes_data(&self) -> &[u8] {
         &self.0.packet
+    }
+
+    fn governing_proof_bytes_data(&self) -> &[u8] {
+        &self.0.proof
     }
 
     pub(super) fn saved_data(&self) -> NativeTextSavedJoinResponse {
@@ -218,6 +231,19 @@ impl PreparedNativeTextJoinResponse {
 impl NativeTextSavedJoinResponse {
     pub fn packet_bytes_data(&self) -> &[u8] {
         self.0.packet_bytes_data()
+    }
+
+    /// Exact signed genesis and first governing Add records for the joiner.
+    pub fn governing_proof_bytes_data(&self) -> &[u8] {
+        self.0.governing_proof_bytes_data()
+    }
+
+    /// The transport owner supplies the separate bounded output allocation.
+    pub fn encode_delivery_data(&self) -> Result<Vec<u8>, AppError> {
+        Ok(catcoms_sync::V2FirstJoinDeliveryData::encode(
+            self.packet_bytes_data(),
+            self.governing_proof_bytes_data(),
+        )?)
     }
 }
 

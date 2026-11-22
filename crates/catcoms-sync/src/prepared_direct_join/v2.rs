@@ -8,7 +8,12 @@ use catcoms_replication::chat::join_bindings::{
 };
 use catcoms_replication::chat::ChatError;
 use catcoms_wire::Encoder;
+mod first_add_proof;
 mod welcome;
+pub use first_add_proof::{
+    V2AdmissionStepData, V2FirstAddProofData, V2FirstJoinDeliveryData,
+    MAX_V2_FIRST_ADD_PROOF_BYTES, MAX_V2_FIRST_JOIN_DELIVERY_BYTES,
+};
 pub use welcome::{
     CompletedV2JoinCandidate, V2JoinResponseData, V2JoinResponsePacketData,
     MAX_V2_JOIN_RESPONSE_PACKET_BYTES,

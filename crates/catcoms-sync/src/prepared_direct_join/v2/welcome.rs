@@ -6,7 +6,8 @@ use catcoms_mls::group::text_current_add::MAX_TEXT_ADD_ROUTING_PLAIN_BYTES;
 use catcoms_replication::chat::{
     join_bindings::{SignedWelcomeBindingData, MAX_JOIN_PAYLOAD_BYTES},
     owner_facts::OwnerFactId,
-    owner_profile::AdmissionOrigin,
+    owner_header::SignedOwnerHeader,
+    owner_profile::{AdmissionBody, AdmissionOrigin, SignedOwnerProfile},
     V2GeneralPrefixVerifier,
 };
 
@@ -159,6 +160,13 @@ impl fmt::Debug for CompletedV2JoinCandidate {
     }
 }
 
+struct WelcomeAdmission<'a> {
+    profile: &'a SignedOwnerProfile,
+    body: &'a AdmissionBody,
+    header: &'a SignedOwnerHeader,
+    epoch: u64,
+}
+
 impl PreparedV2JoinRequest {
     /// The verifier must replay the accepted genesis through this exact Add.
     /// Authenticate the response and prefix *before* restoring or entering the
@@ -169,15 +177,12 @@ impl PreparedV2JoinRequest {
         response: V2JoinResponseData<'_>,
         prefix: &V2GeneralPrefixVerifier,
     ) -> Result<&CompletedV2JoinCandidate, SyncError> {
-        let (response_binding, _) = response.bounded_frame_data(self.limits.exchange)?;
         let reject = |_| SyncError::JoinRejected;
-        let packet = V2JoinRequestPacketData::decode(&self.request)?;
-        let request = packet.request.spec_data();
-        prefix
-            .require_join_genesis_data(request.anchor)
-            .map_err(reject)?;
+        let request_bytes = self.request.clone();
+        let packet = V2JoinRequestPacketData::decode(&request_bytes)?;
+        let anchor = packet.request.spec_data().anchor;
+        prefix.require_join_genesis_data(anchor).map_err(reject)?;
         let replay = prefix.replay_data();
-        let header = replay.header();
         let admission = prefix
             .admission(OwnerFactId::from_bytes(
                 response.binding.spec_data().admission,
@@ -186,7 +191,85 @@ impl PreparedV2JoinRequest {
         if !admission.is_open_data() {
             return Err(SyncError::JoinRejected);
         }
-        let body = admission.admission_data();
+        let cap = self.limits.exchange;
+        let result = self.finish_verified_welcome(
+            &packet,
+            response,
+            WelcomeAdmission {
+                profile: replay.profile(),
+                body: admission.admission_data(),
+                header: replay.header(),
+                epoch: replay.mls_epoch_data(),
+            },
+            cap,
+        )?;
+        prefix.require_join_genesis_data(anchor).map_err(reject)?;
+        if !admission.is_open_data() {
+            return Err(SyncError::JoinRejected);
+        }
+        Ok(result)
+    }
+
+    /// Replay this request's accepted genesis and the first governing Add
+    /// from the supplied public records, then process its exact Welcome.
+    /// The resulting private candidate still needs its original joined pin
+    /// and native installation before it can author or publish.
+    pub fn finish_first_welcome(
+        &mut self,
+        response: V2JoinResponseData<'_>,
+        proof: &V2FirstAddProofData<'_>,
+    ) -> Result<&CompletedV2JoinCandidate, SyncError> {
+        let cap = self
+            .limits
+            .exchange
+            .checked_sub(proof.frame_bytes())
+            .ok_or(SyncError::Malformed)?;
+        let request_bytes = self.request.clone();
+        let packet = V2JoinRequestPacketData::decode(&request_bytes)?;
+        let (profile, body, header) =
+            proof.verified_admission(&packet.invite.spec_data().anchor)?;
+        self.finish_verified_welcome(
+            &packet,
+            response,
+            WelcomeAdmission {
+                profile,
+                body,
+                header,
+                epoch: 1,
+            },
+            cap,
+        )
+    }
+
+    /// Charge the complete wire response, including the history and framing,
+    /// to the original exchange limit before verifying or entering the SDK.
+    pub fn finish_first_join_delivery(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<&CompletedV2JoinCandidate, SyncError> {
+        if bytes.len() > self.limits.exchange {
+            return Err(SyncError::Malformed);
+        }
+        let delivery = V2FirstJoinDeliveryData::decode(bytes)?;
+        let (response, proof) = delivery.data();
+        self.finish_first_welcome(response, proof)
+    }
+
+    fn finish_verified_welcome(
+        &mut self,
+        packet: &V2JoinRequestPacketData<'_>,
+        response: V2JoinResponseData<'_>,
+        WelcomeAdmission {
+            profile,
+            body,
+            header,
+            epoch,
+        }: WelcomeAdmission<'_>,
+        cap: usize,
+    ) -> Result<&CompletedV2JoinCandidate, SyncError> {
+        let (response_binding, _) = response.bounded_frame_data(cap)?;
+        let reject = |_| SyncError::JoinRejected;
+        let request = packet.request.spec_data();
         let AdmissionOrigin::Add {
             before_epoch,
             after_epoch,
@@ -195,20 +278,12 @@ impl PreparedV2JoinRequest {
         else {
             return Err(SyncError::JoinRejected);
         };
-        if after_epoch != replay.mls_epoch_data()
-            || before_epoch.checked_add(1) != Some(after_epoch)
-        {
+        if after_epoch != epoch || before_epoch.checked_add(1) != Some(after_epoch) {
             return Err(SyncError::JoinRejected);
         }
         response
             .binding
-            .check_links_data(
-                &packet.invite,
-                &packet.request,
-                replay.profile(),
-                body,
-                header,
-            )
+            .check_links_data(&packet.invite, &packet.request, profile, body, header)
             .map_err(reject)?;
         response
             .binding
@@ -221,7 +296,7 @@ impl PreparedV2JoinRequest {
             // Only a fully authenticated response can spend the original
             // finite SDK attempt. Ambiguous or failed SDK entry stays held.
             self.welcome_entered = true;
-            let device = self.restore_exact_device(&packet)?;
+            let device = self.restore_exact_device(packet)?;
             let group = ServerGroup::join_for_v2_key_package(
                 &device,
                 response.welcome,
@@ -242,7 +317,7 @@ impl PreparedV2JoinRequest {
             );
             let (policy, routing_secret, file_key) = open_routing(
                 &plain,
-                &packet,
+                packet,
                 before_epoch,
                 after_epoch,
                 header.spec().parent.as_bytes(),
@@ -275,12 +350,6 @@ impl PreparedV2JoinRequest {
         }
         let result = self.completed.as_ref().ok_or(SyncError::JoinRejected)?;
         result.validate_initial_state_data()?;
-        prefix
-            .require_join_genesis_data(request.anchor)
-            .map_err(reject)?;
-        if !admission.is_open_data() {
-            return Err(SyncError::JoinRejected);
-        }
         Ok(result)
     }
 }

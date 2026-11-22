@@ -75,7 +75,7 @@ async fn native_governed_add_fixture(case: JoinCase) {
         .unwrap();
     let invite =
         crate::store::NativeTextInvitePacketData::decode(saved.packet_bytes_data()).unwrap();
-    let request = PreparedV2JoinRequest::prepare(
+    let mut request = PreparedV2JoinRequest::prepare(
         catcoms_mls::MlsDevice::generate().unwrap(),
         &invite.binding().spec_data().anchor,
         invite.binding(),
@@ -176,6 +176,30 @@ async fn native_governed_add_fixture(case: JoinCase) {
         assert_eq!(
             saved.packet_bytes_data().as_ptr(),
             retry.packet_bytes_data().as_ptr()
+        );
+        assert_eq!(
+            saved.governing_proof_bytes_data().as_ptr(),
+            retry.governing_proof_bytes_data().as_ptr()
+        );
+        let proof_bytes = saved.governing_proof_bytes_data();
+        assert!(
+            catcoms_sync::V2FirstAddProofData::decode(&proof_bytes[..proof_bytes.len() - 1])
+                .is_err()
+        );
+        let proof = catcoms_sync::V2FirstAddProofData::decode(proof_bytes).unwrap();
+        let delivery = saved.encode_delivery_data().unwrap();
+        assert!(request
+            .finish_first_join_delivery(&delivery[..delivery.len() - 1])
+            .is_err());
+        let from_delivery = request.finish_first_join_delivery(&delivery).unwrap() as *const _;
+        let joined = request
+            .finish_first_welcome(decoded.response_data(), &proof)
+            .unwrap();
+        assert_eq!(joined as *const _, from_delivery);
+        assert_eq!(joined.facts_data().join_epoch_data(), 1);
+        assert_eq!(
+            joined.facts_data().group_data(),
+            invite.binding().spec_data().anchor.group.as_slice()
         );
         let message = body("founder message after governed Add");
         let request = || V2MemberSignRequest {

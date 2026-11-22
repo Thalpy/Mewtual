@@ -90,8 +90,10 @@ pub use prepared_direct_join::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use prepared_direct_join::{
-    CompletedV2JoinCandidate, PreparedV2JoinRequest, V2JoinRequestPacketData, V2JoinResponseData,
-    V2JoinResponsePacketData, MAX_V2_JOIN_REQUEST_PACKET_BYTES, MAX_V2_JOIN_RESPONSE_PACKET_BYTES,
+    CompletedV2JoinCandidate, PreparedV2JoinRequest, V2AdmissionStepData, V2FirstAddProofData,
+    V2FirstJoinDeliveryData, V2JoinRequestPacketData, V2JoinResponseData, V2JoinResponsePacketData,
+    MAX_V2_FIRST_ADD_PROOF_BYTES, MAX_V2_FIRST_JOIN_DELIVERY_BYTES,
+    MAX_V2_JOIN_REQUEST_PACKET_BYTES, MAX_V2_JOIN_RESPONSE_PACKET_BYTES,
 };
 pub mod local_chat_scope;
 pub mod owner_evidence;

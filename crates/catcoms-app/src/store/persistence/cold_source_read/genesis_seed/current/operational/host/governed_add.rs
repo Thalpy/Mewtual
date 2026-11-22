@@ -300,13 +300,21 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         let store = layout.checked_store()?;
         let preimage = self.owner.freeze_governed_welcome(store)?;
         self.owner.materialize_governed_response(store)?;
+        let signed_header = self.owner.materialize_governed_header(store)?;
         let owner = self.owner.borrow_current()?;
         let outcome = self.owner.governed_outcome_data(store)?;
         let response = self.owner.governed_response_data(store)?;
         let p = self.governed_add.as_mut().ok_or_else(refused)?;
         let selected = p.parent.selected_data().ok_or_else(refused)?;
-        p.fence
-            .prepare_response(store, owner.source(), &preimage, &outcome, &response, rng)?;
+        p.fence.prepare_response(
+            store,
+            owner.source(),
+            &preimage,
+            &outcome,
+            &signed_header,
+            &response,
+            rng,
+        )?;
         store.with_v2_text_current(&owner, |admission| {
             let guard = store.lock_v2_text_current_group(admission, p.parent.resources())?;
             keys.preflight(&self.origin)?;
