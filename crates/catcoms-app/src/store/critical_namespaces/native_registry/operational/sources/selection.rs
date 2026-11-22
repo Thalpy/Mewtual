@@ -17,6 +17,7 @@ pub(super) struct Selection<T: MeshTransport, R: CryptoRngCore> {
     pub(super) status: crate::store::NativeCreationStatusData,
     pub(super) invocation: [u8; 32],
     pub(super) request: [u8; 32],
+    pub(super) join_ingress: Option<catcoms_net::NativeChatJoinIngress>,
     source_close: catcoms_rt::NativeChatSourceClose,
     // LAST: actual weak RuntimeCell allocation and all copied metadata must
     // remain paid even after the whole canonical Sources/SDK has been dropped.
@@ -51,6 +52,10 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextRuntimeSelection<T, R> {
                 status,
                 invocation: request.invocation,
                 request: request.digest,
+                join_ingress: body
+                    .network
+                    .as_ref()
+                    .and_then(|network| network.join_ingress.clone()),
                 source_close: body.source_close.clone(),
                 _metadata: body._metadata.clone(),
             }),

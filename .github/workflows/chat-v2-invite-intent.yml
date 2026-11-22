@@ -70,6 +70,8 @@ on:
       - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/invite.rs'
       - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/member.rs'
       - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/member/connected.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/network.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/selection.rs'
       - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/member/tests.rs'
       - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/member/tests/invite.rs'
       - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/network/tests.rs'

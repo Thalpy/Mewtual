@@ -64,13 +64,13 @@ async fn native_governed_add_fixture(case: JoinCase) {
     use rand_core::SeedableRng;
     let directory = tempfile::tempdir().unwrap();
     let (vault, budget) = selected_governed(directory.path());
+    let seed = match case {
+        JoinCase::Staged => 0xe710,
+        JoinCase::InterruptedInstall => 0xe717,
+        JoinCase::NativeResponse => 0xe718,
+    };
     let (owner, row) = activate(
-        prepared_mesh_founder_with_clock(
-            &vault,
-            &budget,
-            0xe710,
-            Box::new(catcoms_rt::SystemClock),
-        ),
+        prepared_mesh_founder_with_clock(&vault, &budget, seed, Box::new(catcoms_rt::SystemClock)),
         &vault,
         &budget,
     );
@@ -186,7 +186,7 @@ async fn native_governed_add_fixture(case: JoinCase) {
     let replacement = prepare(&owner, &row, &vault, &budget)
         .check_received_join_request(replacement_request.request_bytes_data(), &negative)
         .unwrap();
-    let accept = |wire| {
+    let accept = |wire: &[u8]| {
         owner
             .capture_member(
                 &row,
@@ -196,17 +196,97 @@ async fn native_governed_add_fixture(case: JoinCase) {
             .accept_join_request(wire, &negative)
     };
     if case == JoinCase::NativeResponse {
-        let saved = accept(bytes).unwrap();
+        let expected_request = packet.founder_add_data().request.id_data();
+        let original_request = bytes.to_vec();
+        let joined = joined_storage.as_mut().unwrap();
+        let join_dir = join_directory.as_ref().unwrap().path();
+        assert!(joined.finish_first_join(&[0], &mut join_rng).is_err());
+        let entry_name = "chat-critical-namespaces.joined-welcome-entry.bin";
+        let outcome_name = "chat-critical-namespaces.joined-welcome-outcome.bin";
+        assert!(find_named(join_dir, entry_name).is_empty());
+        use catcoms_rt::{Responder, TransportEvent};
+        let (client, _) = catcoms_net::MeshService::new_tcp(None, &[]).unwrap();
+        assert!(joined
+            .exchange_first_join(&invite, &client, negative.clone(), &mut join_rng)
+            .await
+            .is_err());
+        let capture = || {
+            owner.capture_member(
+                &row,
+                command(&vault, &budget),
+                owner.policy.prepare_member().unwrap(),
+            )
+        };
+        let mut requests = capture()
+            .open_connected_join_requests(negative.clone())
+            .unwrap();
+        assert!(matches!(
+            capture().open_connected_join_requests(negative.clone()),
+            Err(V2MemberSaveRefusal::Busy)
+        ));
+        let address = {
+            let cell = row.original.runtime.upgrade().unwrap();
+            let state = cell.state.lock().unwrap();
+            state
+                .body
+                .as_ref()
+                .unwrap()
+                .network
+                .as_ref()
+                .unwrap()
+                .loopback_dial_address_for_test()
+        };
+        tokio::task::yield_now().await;
+        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            client.dial(address.parse().unwrap()).await.unwrap();
+            client
+                .wait_for_peer_connected(invite.connected_peer_data())
+                .await
+                .unwrap();
+        })
+        .await
+        .unwrap();
+        let serve = async {
+            let Some(TransportEvent::Request {
+                data,
+                responder,
+                proto,
+                ..
+            }) = requests.next().await
+            else {
+                panic!("connected exact JoinRequest");
+            };
+            let (abandoned, receiver) = Responder::channel();
+            drop(receiver);
+            assert!(matches!(
+                capture().serve_connected_join_request(proto, &data, abandoned, negative.clone()),
+                Err(V2MemberSaveRefusal::Cancelled)
+            ));
+            assert!(find_named(directory.path(), "text.add.response.v2").is_empty());
+            capture()
+                .serve_connected_join_request(proto, &data, responder, negative.clone())
+                .unwrap();
+        };
+        let (joined_result, ()) = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            tokio::join!(
+                joined.exchange_first_join(&invite, &client, negative.clone(), &mut join_rng),
+                serve,
+            )
+        })
+        .await
+        .unwrap();
+        joined_result.unwrap();
+        drop(requests);
+        let saved = accept(&original_request).unwrap();
         let decoded =
             catcoms_sync::V2JoinResponsePacketData::decode(saved.packet_bytes_data()).unwrap();
         assert_eq!(
             decoded.response_data().binding.spec_data().request_binding,
-            packet.founder_add_data().request.id_data()
+            expected_request
         );
         assert!(find_named(directory.path(), "text.add.head-stage.v2").is_empty());
         assert!(accept(replacement.packet_bytes_data()).is_err());
-        let retry = accept(bytes).unwrap();
-        assert_eq!(saved.packet_bytes_data(), retry.packet_bytes_data());
+        let retry = accept(&original_request).unwrap();
         assert_eq!(
             saved.packet_bytes_data().as_ptr(),
             retry.packet_bytes_data().as_ptr()
@@ -222,62 +302,13 @@ async fn native_governed_add_fixture(case: JoinCase) {
         );
         catcoms_sync::V2FirstAddProofData::decode(proof_bytes).unwrap();
         let delivery = saved.encode_delivery_data().unwrap();
-        let joined = joined_storage.as_mut().unwrap();
-        let join_dir = join_directory.as_ref().unwrap().path();
-        assert!(joined
-            .finish_first_join(&delivery[..delivery.len() - 1], &mut join_rng)
-            .is_err());
-        let entry_name = "chat-critical-namespaces.joined-welcome-entry.bin";
-        let outcome_name = "chat-critical-namespaces.joined-welcome-outcome.bin";
-        assert!(find_named(join_dir, entry_name).is_empty());
-        use catcoms_rt::{Hub, MeshTransport, PeerId, Responder, TransportEvent};
-        let hub = Hub::new();
-        let client = hub.join(PeerId::from_u64(0x9e));
-        assert!(joined
-            .exchange_first_join(&invite, &client, negative.clone(), &mut join_rng)
-            .await
-            .is_err());
-        let invited_peer = hub.join(invite.connected_peer_data());
-        let serve = async {
-            let Some(TransportEvent::Request {
-                data,
-                responder,
-                proto,
-                ..
-            }) = invited_peer.next_event().await
-            else {
-                panic!("connected exact JoinRequest");
-            };
-            let capture = || {
-                owner.capture_member(
-                    &row,
-                    command(&vault, &budget),
-                    owner.policy.prepare_member().unwrap(),
-                )
-            };
-            let (abandoned, receiver) = Responder::channel();
-            drop(receiver);
-            assert!(matches!(
-                capture().serve_connected_join_request(proto, &data, abandoned, negative.clone()),
-                Err(V2MemberSaveRefusal::Cancelled)
-            ));
-            capture()
-                .serve_connected_join_request(proto, &data, responder, negative.clone())
-                .unwrap();
-        };
-        let (joined_result, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            tokio::join!(
-                joined.exchange_first_join(&invite, &client, negative.clone(), &mut join_rng),
-                serve,
-            )
-        })
-        .await
-        .unwrap();
-        joined_result.unwrap();
         let entry = only_named(join_dir, entry_name);
         let outcome = only_named(join_dir, outcome_name);
         let exact_entry = std::fs::read(&entry).unwrap();
         let exact_outcome = std::fs::read(&outcome).unwrap();
+        assert!(joined
+            .finish_first_join(&delivery[..delivery.len() - 1], &mut join_rng)
+            .is_err());
         joined.finish_first_join(&delivery, &mut join_rng).unwrap();
         assert_eq!(std::fs::read(&entry).unwrap(), exact_entry);
         assert_eq!(std::fs::read(&outcome).unwrap(), exact_outcome);

@@ -210,16 +210,18 @@ remain open.
 The joined storage owner can exchange the exact selected JoinRequest on an
 already authenticated connection to the peer named by the signed invite.
 It keeps the original connection and vault cancellation through response
-receipt. The fixture uses the connected transport harness and the actual
-native founder responder. The request kind selects separate transport size
+receipt. The connected fixture uses loopback TCP and the actual native
+founder responder. The request kind selects separate transport size
 limits before the decoder allocates either body. The founder stops upon
 loss of the original response waiter. The queued reply retains the original
 native session and Source checks and pays for its transport copies through
 the lower send. Native TCP has a separate single-subscriber JoinRequest queue
 for the original native session. Queue and reply ownership still follow the
 ordinary transport budgets and authenticated connection. The native receiver
-can retire without consuming the mesh's other events. Certified dialing and
-desktop registration of the receiver remain open.
+can retire without consuming the mesh's other events. The founder's selected
+row carries a weak observation of its original mesh queue. App rechecks the
+covered row and its actual Source when attaching a receiver. Certified dialing
+and desktop registration of the receiver remain open.
 
 Unknown/ambiguous remnants are preserved and refused, never cleared as debris.
 Predecessor tests must use a real prior binary with positive open controls.

@@ -7,22 +7,25 @@ use catcoms_rt::{
     CHAT_V2_JOIN_REQUEST_MAX_BYTES, CHAT_V2_JOIN_RESPONSE_MAX_BYTES,
 };
 
-struct ReplyAuthority {
+struct JoinAuthority {
+    mount: Arc<Scope>,
     source: Arc<NativeChatKeyCurrentCheck>,
     caller: RequestCancellation,
     waiting: Option<Arc<dyn RequestAuthority>>,
 }
 
-impl std::fmt::Debug for ReplyAuthority {
+impl std::fmt::Debug for JoinAuthority {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("JoinReplyAuthority").finish_non_exhaustive()
+        f.debug_struct("NativeJoinAuthority")
+            .finish_non_exhaustive()
     }
 }
 
 #[async_trait::async_trait]
-impl RequestAuthority for ReplyAuthority {
+impl RequestAuthority for JoinAuthority {
     fn authorized(&self) -> bool {
-        self.source.is_current()
+        self.mount.is_open()
+            && self.source.is_current()
             && !self.caller.is_cancelled()
             && self
                 .waiting
@@ -49,13 +52,53 @@ impl RequestAuthority for ReplyAuthority {
     }
 }
 
-struct ReplyPayment {
+struct JoinPayment {
     _fee: CatalogReadReservation,
 }
 
-impl std::fmt::Debug for ReplyPayment {
+impl std::fmt::Debug for JoinPayment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("JoinReplyPayment").finish_non_exhaustive()
+        f.debug_struct("NativeJoinPayment").finish_non_exhaustive()
+    }
+}
+
+impl<R: CryptoRngCore> NativeTextMemberPreparation<catcoms_net::MeshService, R> {
+    /// Attach one paid receiver to the exact retained founder's native mesh.
+    /// The receiver grants no member operation. Every request must separately
+    /// capture the same installed row and original UI generation before work.
+    pub fn open_connected_join_requests(
+        self,
+        caller: RequestCancellation,
+    ) -> Result<catcoms_net::NativeChatJoinRequests, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Error;
+        let fee = self
+            .budget
+            .metadata
+            .pool
+            .try_reserve(4096)
+            .map_err(|_| Error::Busy)?;
+        let (_, source) = self.prepare_using_issuer(|owner, command| {
+            owner
+                .prepare_cut(command, catcoms_rt::NativeChatKeyPurpose::JoinWelcome)
+                .map(|cut| cut.observe_current())
+                .map_err(|_| refused())
+        })?;
+        let ingress = self
+            .row
+            .original
+            .join_ingress
+            .as_ref()
+            .ok_or(Error::Unavailable)?;
+        let authority = Arc::new(JoinAuthority {
+            mount: self.scope.clone(),
+            source: Arc::new(source),
+            caller: caller.retain_custody(Arc::new(JoinPayment { _fee: fee })),
+            waiting: None,
+        });
+        if !authority.authorized() {
+            return Err(Error::Cancelled);
+        }
+        ingress.try_attach(authority).ok_or(Error::Busy)
     }
 }
 
@@ -90,7 +133,9 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
             catcoms_sync::V2JoinRequestPacketData::decode(body).map_err(|_| Error::Failed)?;
         let (keys, [add, header, welcome]) = self.prepare_join_keys()?;
         let source = Arc::new(welcome.observe_current());
-        let work = caller.clone().with_authority(Arc::new(ReplyAuthority {
+        let mount = self.scope.clone();
+        let work = caller.clone().with_authority(Arc::new(JoinAuthority {
+            mount: mount.clone(),
             source: source.clone(),
             caller: caller.clone(),
             waiting: Some(waiting),
@@ -105,7 +150,8 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
         if delivery.len() > CHAT_V2_JOIN_RESPONSE_MAX_BYTES {
             return Err(Error::Failed);
         }
-        let authority = Arc::new(ReplyAuthority {
+        let authority = Arc::new(JoinAuthority {
+            mount,
             source,
             caller,
             waiting: None,
@@ -114,7 +160,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
             .try_respond_with_custody(
                 bytes::Bytes::from(delivery),
                 authority,
-                Arc::new(ReplyPayment { _fee: fee }),
+                Arc::new(JoinPayment { _fee: fee }),
             )
             .map_err(|_| Error::Cancelled)
     }

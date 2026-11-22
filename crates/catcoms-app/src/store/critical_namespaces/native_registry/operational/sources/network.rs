@@ -42,6 +42,7 @@ pub(super) struct Reservation {
     status: Option<crate::store::NativeCreationStatusData>,
     active: Option<crate::store::NativeCreationStatusData>,
     actual_peer: Option<String>,
+    pub(super) join_ingress: Option<catcoms_net::NativeChatJoinIngress>,
     factory_started: bool,
     tcp: Option<catcoms_net::NativeTcpPreparation>,
     transport_build: TransportBuild,
@@ -51,6 +52,15 @@ pub(super) struct Reservation {
     io: Option<crate::store::persistence::native_registry::network::NetworkIo>,
 }
 impl Reservation {
+    #[cfg(test)]
+    pub(super) fn loopback_dial_address_for_test(&self) -> String {
+        format!(
+            "/ip4/127.0.0.1/tcp/{}/p2p/{}",
+            self.port,
+            self.actual_peer.as_deref().unwrap()
+        )
+    }
+
     /// Canonical public reservation DATA, not a reachable contact. Wildcard
     /// listening and configured advertise/relay/rendezvous strings prove no
     /// external address or relay reservation, so this initial profile encodes
@@ -113,6 +123,7 @@ impl Reservation {
             status: None,
             active: None,
             actual_peer: None,
+            join_ingress: None,
             factory_started: false,
             tcp: None,
             transport_build: TransportBuild::Fresh,
@@ -669,6 +680,7 @@ impl<R: CryptoRngCore> NativeTextCreationJob<catcoms_net::MeshService, R> {
                     return Err(Error::Storage);
                 }
             };
+            network.join_ingress = transport.native_chat_join_ingress();
             body.transport = Some(transport); // cache before every late check
             network.actual_peer = Some(actual.to_string());
         }
