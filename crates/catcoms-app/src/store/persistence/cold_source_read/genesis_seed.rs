@@ -11,7 +11,8 @@ use catcoms_mls::persist::{
 };
 use catcoms_sync::owner_v2::{
     prepare_v2_genesis_seed, FounderSnapshotLimits, OriginalV2GenesisSeedObservation,
-    UnboundV2GenesisSeed, V2GenesisSeedData, V2GenesisSeedLimits, V2_GENESIS_SEED_METADATA_BYTES,
+    UnboundV2GenesisSeed, V2GenesisSeedData, V2GenesisSeedLimits, V2GenesisSourceFields,
+    V2_GENESIS_SEED_METADATA_BYTES,
 };
 pub(in crate::store) use current::settlement::GenesisCurrentOwnerRef;
 pub use current::{
@@ -166,16 +167,16 @@ struct BootstrapGenesisResources {
     _metadata_fee: critical_namespaces::read_pool::CatalogReadReservation,
 }
 
-/// Borrow BOTH the actual immutable closed seed and its original supporting payments. Only
+/// Borrow the actual immutable seed fields and the original supporting payments. Only
 /// real paid owners in this module construct this view; no raw labels/adopter/trait can do so.
 /// Later Node ownership uses the identical view for final checks AFTER pairing callbacks.
 #[derive(Clone, Copy)]
 pub(in crate::store) struct GenesisSourceDataRef<'owner> {
-    seed: &'owner UnboundV2GenesisSeed,
+    seed: V2GenesisSourceFields<'owner>,
     resources: &'owner BootstrapGenesisResources,
 }
 impl<'owner> GenesisSourceDataRef<'owner> {
-    pub(in crate::store) fn seed(&self) -> &'owner UnboundV2GenesisSeed {
+    pub(in crate::store) fn seed(&self) -> V2GenesisSourceFields<'owner> {
         self.seed
     }
     pub(in crate::store) fn data(&self) -> V2GenesisSeedData<'owner> {
@@ -190,7 +191,7 @@ impl<'owner> GenesisSourceDataRef<'owner> {
     ) -> Result<(), AppError> {
         self.resources
             .original_seed
-            .require_same_seed_data(self.seed)?;
+            .require_same_source_fields(self.seed)?;
         self.resources
             .original_read
             .require_same_original(self.source())?;
@@ -211,7 +212,7 @@ impl RetainedBootstrapGenesisSeed {
     /// Borrowed DATA only; the opaque seed has no run/Server/SDK getter. Rust borrowing keeps
     /// this capsule's separate non-SDK fees alive through every use of this reference.
     pub fn seed(&self) -> &UnboundV2GenesisSeed {
-        self.borrow_source_data().seed()
+        &self.seed
     }
     pub fn data(&self) -> V2GenesisSeedData<'_> {
         self.borrow_source_data().data()
@@ -236,7 +237,7 @@ impl RetainedBootstrapGenesisSeed {
         &self,
     ) -> crate::store::persistence::GenesisSourceDataRef<'_> {
         GenesisSourceDataRef {
-            seed: &self.seed,
+            seed: self.seed.source_fields(),
             resources: &self.resources,
         }
     }

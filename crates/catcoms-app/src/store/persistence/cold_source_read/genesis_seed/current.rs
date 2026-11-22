@@ -52,7 +52,7 @@ impl<T, R> Graph<T, R> {
         match self {
             Self::Seed(seed) => Ok(seed.borrow_source_data()),
             Self::Node { node, resources } => Ok(GenesisSourceDataRef {
-                seed: node.borrow_genesis_seed_data(),
+                seed: node.borrow_genesis_seed_data().source_fields(),
                 resources,
             }),
             Self::Moving => Err(critical_namespaces::refused()),
@@ -577,7 +577,7 @@ impl<T, R> UnexposedV2GenesisCurrent<T, R> {
 
     fn source(&self) -> GenesisSourceDataRef<'_> {
         GenesisSourceDataRef {
-            seed: self.original_seed(),
+            seed: self.original_seed().source_fields(),
             resources: &self.resources,
         }
     }

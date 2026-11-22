@@ -229,7 +229,8 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
         Ok(())
     }
 
-    /// Move finite native custody only AFTER the actual Cell is fully closed.
+    /// Move finite native custody after the Cell has fully closed or the
+    /// successful installation has cached both returned retired owners.
     /// Partial resumable SDK work must keep its original End; there is no
     /// inference from phase alone or another UI generation. The closed Cell
     /// remains historical DATA, while SDK continuation is permanently fenced.
@@ -241,11 +242,13 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
         &mut self,
     ) -> Result<RetiredV2FounderAddNativeCustody, SyncError> {
         let p = self.pending.as_mut().ok_or_else(unavailable)?;
-        p.cell
-            .as_ref()
-            .ok_or_else(unavailable)?
-            .completed_result_data()
-            .map_err(|_| unavailable())?;
+        if p.retired_sdk.is_none() || p.retired_core.is_none() {
+            p.cell
+                .as_ref()
+                .ok_or_else(unavailable)?
+                .completed_result_data()
+                .map_err(|_| unavailable())?;
+        }
         if p.phase == Phase::SdkEntered {
             // A lost Sync return may leave phase behind the actual Cell.
             p.phase = Phase::Complete;

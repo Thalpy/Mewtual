@@ -33,7 +33,7 @@ pub use bootstrap_source::{
     PreparedV2CreateData, ReturnedV2GenesisAttach, UnboundV2GenesisNode, UnboundV2GenesisSeed,
     V2AppendDataView, V2AppendPlanObservation, V2CreateDataView, V2CreatePacketId, V2CreateRefusal,
     V2CreateRequest, V2GenesisRuntimeParts, V2GenesisRuntimeRefusal, V2GenesisSeedData,
-    V2GenesisSeedLimits, V2UnsignedAppendDataView, APPEND_DATA_BUFFER_BYTES,
+    V2GenesisSeedLimits, V2GenesisSourceFields, V2UnsignedAppendDataView, APPEND_DATA_BUFFER_BYTES,
     BOOTSTRAP_SOURCE_NESTED_DATA_INVOICE, BOOTSTRAP_SOURCE_OPEN_BUFFER_BYTES,
     BOOTSTRAP_SOURCE_SEAL_BUFFER_BYTES, CREATE_DATA_BUFFER_BYTES, MAX_BOOTSTRAP_SOURCE_FRAME_BYTES,
     MAX_BOOTSTRAP_SOURCE_PLAIN_BYTES, MAX_CREATE_ACTION_BYTES, MAX_CREATE_CIPHERTEXT_BYTES,
@@ -42,11 +42,12 @@ pub use bootstrap_source::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use bootstrap_source::{
-    PreparedV2FounderGovernanceNode, PreparedV2FounderInviteData, RetiredV2FounderAddNativeCustody,
-    V2FounderAddNativeStage, V2FounderAddOutcomeData, V2FounderAddPreparationRefusal,
-    V2FounderAddRequestData, V2FounderAddSigning, V2FounderGovernanceNegative,
-    V2FounderInviteRequestData, V2InstalledFounderAddData, FOUNDER_GOVERNANCE_DATA_BYTES,
-    FOUNDER_INVITE_DATA_BYTES, MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES, MAX_FOUNDER_INVITE_LIFETIME_MS,
+    PreparedV2FounderAddInstall, PreparedV2FounderGovernanceNode, PreparedV2FounderInviteData,
+    RetiredV2FounderAddInstall, RetiredV2FounderAddNativeCustody, V2FounderAddNativeStage,
+    V2FounderAddOutcomeData, V2FounderAddPreparationRefusal, V2FounderAddRequestData,
+    V2FounderAddSigning, V2FounderGovernanceNegative, V2FounderInviteRequestData,
+    V2InstalledFounderAddData, FOUNDER_GOVERNANCE_DATA_BYTES, FOUNDER_INVITE_DATA_BYTES,
+    MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES, MAX_FOUNDER_INVITE_LIFETIME_MS,
 };
 
 const KEY_BINDING_DOMAIN: &str = "catcoms/private-chat-genesis-archive-key-binding/v1";

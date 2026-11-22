@@ -11,11 +11,12 @@ mod codec;
 mod genesis_seed;
 #[cfg(not(target_arch = "wasm32"))]
 pub use genesis_seed::{
-    PreparedV2FounderGovernanceNode, PreparedV2FounderInviteData, RetiredV2FounderAddNativeCustody,
-    V2FounderAddNativeStage, V2FounderAddOutcomeData, V2FounderAddPreparationRefusal,
-    V2FounderAddRequestData, V2FounderAddSigning, V2FounderGovernanceNegative,
-    V2FounderInviteRequestData, V2InstalledFounderAddData, FOUNDER_GOVERNANCE_DATA_BYTES,
-    FOUNDER_INVITE_DATA_BYTES, MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES, MAX_FOUNDER_INVITE_LIFETIME_MS,
+    PreparedV2FounderAddInstall, PreparedV2FounderGovernanceNode, PreparedV2FounderInviteData,
+    RetiredV2FounderAddInstall, RetiredV2FounderAddNativeCustody, V2FounderAddNativeStage,
+    V2FounderAddOutcomeData, V2FounderAddPreparationRefusal, V2FounderAddRequestData,
+    V2FounderAddSigning, V2FounderGovernanceNegative, V2FounderInviteRequestData,
+    V2InstalledFounderAddData, FOUNDER_GOVERNANCE_DATA_BYTES, FOUNDER_INVITE_DATA_BYTES,
+    MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES, MAX_FOUNDER_INVITE_LIFETIME_MS,
 };
 mod s0;
 pub use codec::{
@@ -30,10 +31,10 @@ pub use genesis_seed::{
     PreparedV2AppendData, PreparedV2CreateData, ReturnedV2GenesisAttach, UnboundV2GenesisNode,
     UnboundV2GenesisSeed, V2AppendDataView, V2AppendPlanObservation, V2CreateDataView,
     V2CreatePacketId, V2CreateRefusal, V2CreateRequest, V2GenesisRuntimeParts,
-    V2GenesisRuntimeRefusal, V2GenesisSeedData, V2GenesisSeedLimits, V2UnsignedAppendDataView,
-    APPEND_DATA_BUFFER_BYTES, CREATE_DATA_BUFFER_BYTES, MAX_CREATE_ACTION_BYTES,
-    MAX_CREATE_CIPHERTEXT_BYTES, MAX_CREATE_ENCRYPTED_PAYLOAD_BYTES, MAX_CREATE_ENVELOPE_BYTES,
-    MAX_CREATE_PADDED_BYTES, V2_GENESIS_SEED_METADATA_BYTES,
+    V2GenesisRuntimeRefusal, V2GenesisSeedData, V2GenesisSeedLimits, V2GenesisSourceFields,
+    V2UnsignedAppendDataView, APPEND_DATA_BUFFER_BYTES, CREATE_DATA_BUFFER_BYTES,
+    MAX_CREATE_ACTION_BYTES, MAX_CREATE_CIPHERTEXT_BYTES, MAX_CREATE_ENCRYPTED_PAYLOAD_BYTES,
+    MAX_CREATE_ENVELOPE_BYTES, MAX_CREATE_PADDED_BYTES, V2_GENESIS_SEED_METADATA_BYTES,
 };
 
 const KEY_BINDING_DOMAIN: &str = "catcoms/private-chat-bootstrap-source-key-binding/v1";

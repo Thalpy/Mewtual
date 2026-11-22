@@ -45,7 +45,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         let fence = &mut original.fence;
         self.owner.prepare_governed_node(store)?;
         let owner = self.owner.borrow_current()?;
-        original_seed.require_same_seed_data(owner.source().seed())?;
+        original_seed.require_same_source_fields(owner.source().seed())?;
         store.with_v2_text_current(&owner, |admission| {
             let guard = store.lock_v2_text_current_group(admission, &resources)?;
             keys.preflight(&self.origin)?;
@@ -418,7 +418,9 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         let p = self.governed_add.as_ref().ok_or_else(refused)?;
         let selected = p.parent.selected_data().ok_or_else(refused)?;
         assert_ne!(head, selected.head_id_data());
-        let owner = self.owner.borrow_current()?;
+        let (owner, install) = self.owner.borrow_governed_install_parts(store)?;
+        assert_eq!(install.expected_data().header, admitted.id());
+        original_seed.require_same_source_fields(owner.source().seed())?;
         store.with_v2_text_current(&owner, |admission| {
             let guard = store.lock_v2_text_current_group(admission, &resources)?;
             selected.validate_under_current_guard(&guard)

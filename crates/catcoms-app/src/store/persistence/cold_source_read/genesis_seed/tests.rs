@@ -233,13 +233,13 @@ fn borrowed_view_rejects_another_genuine_graphs_resources_even_for_identical_sou
     // Private-field corruption seam only. Production views have no caller constructor or
     // trait adopter; each real owner loans its OWN graph and resource bundle together.
     let swapped = GenesisSourceDataRef {
-        seed: a.seed(),
+        seed: a.seed().source_fields(),
         resources: &b.resources,
     };
     assert!(swapped.require_original_negative(&f.store).is_err());
     assert!(swapped.validate_original(&f.store).is_err());
     let swapped = GenesisSourceDataRef {
-        seed: b.seed(),
+        seed: b.seed().source_fields(),
         resources: &a.resources,
     };
     assert!(swapped.require_original_negative(&f.store).is_err());

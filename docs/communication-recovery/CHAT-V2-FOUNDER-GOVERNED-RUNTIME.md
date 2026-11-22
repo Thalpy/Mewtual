@@ -320,6 +320,12 @@ owner before the infallible MLS swap, then cache both MLS retired custody and
 installed evidence immediately. No hook, Result, IO or owning destructor may
 intervene in that successful tail. Dispose retired owners outside writers.
 
+Sync now preflights the exclusive install while lending the immutable fields
+of the same seed. App's Current check uses those fields with its original
+writer, source and payment. A Core refusal keeps the original MLS candidate
+intact. Successful Core selection caches its retired owner before the MLS
+swap, and Sync keeps both retired owners for disposal outside the guards.
+
 ### Lock and close cycle
 
 Whole-Source retirement now loans an idle original runtime after its Source

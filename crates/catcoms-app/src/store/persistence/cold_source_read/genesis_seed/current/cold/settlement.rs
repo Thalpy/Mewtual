@@ -84,7 +84,7 @@ impl<T, R> UnexposedColdV2GenesisCurrent<T, R> {
         }
         let owner = GenesisCurrentOwnerRef {
             source: GenesisSourceDataRef {
-                seed: node.borrow_genesis_seed_data(),
+                seed: node.borrow_genesis_seed_data().source_fields(),
                 resources,
             },
             task,

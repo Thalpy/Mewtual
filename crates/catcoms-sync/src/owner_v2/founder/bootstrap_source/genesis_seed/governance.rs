@@ -21,6 +21,8 @@ use catcoms_rt::{
 
 mod request;
 use request::FrozenAddRequest;
+mod installation;
+pub use installation::{PreparedV2FounderAddInstall, RetiredV2FounderAddInstall};
 mod welcome;
 pub use request::{V2FounderAddRequestData, MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES};
 use welcome::PreparedWelcome;
@@ -146,6 +148,8 @@ struct PendingAdd {
     header: Option<SignedOwnerHeader>,
     raw: Option<[u8; 64]>,
     welcome: Option<PreparedWelcome>,
+    retired_core: Option<catcoms_replication::chat::V2GeneralRetiredData>,
+    retired_sdk: Option<catcoms_mls::group::text_current_add::RetiredTextCurrentAdd>,
     phase: Phase,
     original: NativeChatSourceObservation,
     sdk_cut: Option<NativeChatPreparedKeyCut>,
@@ -241,6 +245,7 @@ pub const FOUNDER_GOVERNANCE_DATA_BYTES: usize = UNSIGNED_ADMISSION_DATA_INVOICE
     + 4 * std::mem::size_of::<V2InstalledFounderAddData>()
     + 4 * std::mem::size_of::<V2FounderAddOutcomeData<'static>>()
     + 4 * std::mem::size_of::<V2FounderAddSigning<'static>>()
+    + 4 * std::mem::size_of::<PreparedV2FounderAddInstall<'static>>()
     + 4 * std::mem::size_of::<RetiredV2FounderAddNativeCustody>()
     + 4 * std::mem::size_of::<PreparedV2FounderGovernanceNode<(), ()>>()
     + 4 * std::mem::size_of::<(
@@ -429,6 +434,8 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
             header: None,
             raw: None,
             welcome: None,
+            retired_core: None,
+            retired_sdk: None,
             phase: Phase::Prepared,
             original,
             sdk_cut: Some(sdk_cut),
@@ -645,7 +652,7 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
     /// loan retains only this operation's fixed native signing state.
     pub fn signing_parts_data(
         &mut self,
-    ) -> Result<(&UnboundV2GenesisSeed, V2FounderAddSigning<'_>), SyncError> {
+    ) -> Result<(V2GenesisSourceFields<'_>, V2FounderAddSigning<'_>), SyncError> {
         let seed = &self.node.seed;
         let negative = V2FounderGovernanceNegative {
             source: seed.body.source,
@@ -658,7 +665,7 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
         };
         let pending = self.pending.as_deref_mut().ok_or_else(unavailable)?;
         Ok((
-            seed,
+            seed.source_fields(),
             V2FounderAddSigning {
                 seed,
                 negative,

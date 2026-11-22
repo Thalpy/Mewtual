@@ -292,7 +292,7 @@ impl<T, R> UnexposedV2GenesisCurrent<T, R> {
         self.activation.require_same_saved_head(head)?;
         Ok(GenesisCurrentOwnerRef {
             source: GenesisSourceDataRef {
-                seed: self.original_seed(),
+                seed: self.original_seed().source_fields(),
                 resources: &self.resources,
             },
             task: &self.task,
@@ -333,7 +333,7 @@ impl<T, R> UnexposedV2GenesisCurrent<T, R> {
         activation.require_same_saved_head(head)?;
         let owner = GenesisCurrentOwnerRef {
             source: GenesisSourceDataRef {
-                seed: node.borrow_genesis_seed_data(),
+                seed: node.borrow_genesis_seed_data().source_fields(),
                 resources,
             },
             task,
@@ -345,6 +345,61 @@ impl<T, R> UnexposedV2GenesisCurrent<T, R> {
             wrapper_fee: fee,
         };
         retry_owned_settlement(&owner, seed_settlement, layout, rng)
+    }
+}
+
+impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> UnexposedV2GenesisCurrent<T, R> {
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn borrow_governed_install_parts(
+        &mut self,
+        store: &ServerStore,
+    ) -> Result<
+        (
+            GenesisCurrentOwnerRef<'_>,
+            catcoms_sync::owner_v2::PreparedV2FounderAddInstall<'_>,
+        ),
+        AppError,
+    > {
+        let refused = critical_namespaces::refused;
+        self.require_text_original_data(store)
+            .map_err(|_| refused())?;
+        let Self {
+            node,
+            governed,
+            resources,
+            activation,
+            task,
+            scope,
+            writer,
+            fee,
+            seed_settlement,
+            ..
+        } = self;
+        if node.is_some()
+            || seed_settlement
+                .as_ref()
+                .and_then(|work| work.saved_outcome())
+                .is_none()
+        {
+            return Err(refused());
+        }
+        let head = scope.saved_head().ok_or_else(refused)?;
+        activation.require_same_saved_head(head)?;
+        let (seed, installation) = governed
+            .as_mut()
+            .and_then(|owner| owner.node.as_mut())
+            .ok_or_else(refused)?
+            .prepare_install_data()?;
+        let owner = GenesisCurrentOwnerRef {
+            source: GenesisSourceDataRef { seed, resources },
+            task,
+            role: GenesisCurrentOwnerRole::Warm {
+                scope,
+                head,
+                writer,
+            },
+            wrapper_fee: fee,
+        };
+        Ok((owner, installation))
     }
 }
 

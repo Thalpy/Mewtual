@@ -91,6 +91,7 @@ fn v2_join_request_and_welcome_complete_with_actual_add() {
         saved_outcome.unsigned_data().intent_commitment_data(),
         unsigned_intent
     );
+    let after_authenticator = *completed.after_authenticator_data();
     let response = node.join_response_data().unwrap();
     assert!(response.binding.encode().ends_with(&raw));
     let response_wire = response.encode_packet_data().unwrap();
@@ -111,12 +112,43 @@ fn v2_join_request_and_welcome_complete_with_actual_add() {
             )
             .unwrap(),
     );
-    let selection = V2HostSelectionExpectation::from_trusted_host(header.id(), header.spec().state);
+    let header_id = header.id();
+    let (fields, install) = node.prepare_install_data().unwrap();
+    original_seed.require_same_source_fields(fields).unwrap();
+    assert!(other_seed.require_same_source_fields(fields).is_err());
+    assert_eq!(install.expected_data().header, header_id);
+    assert!(install
+        .finish_host_selected(&mut g.verifier, &mut None)
+        .is_err());
+    assert!(node.installed_add_data().is_none());
+    assert_eq!(
+        node.completed_add_data()
+            .unwrap()
+            .secret_snapshot_data()
+            .as_ptr(),
+        before_header
+    );
+    let (_, install) = node.prepare_install_data().unwrap();
+    install
+        .finish_host_selected(&mut g.verifier, &mut candidate)
+        .unwrap();
+    assert!(candidate.is_none());
+    assert_eq!(
+        node.installed_add_data().unwrap().authenticator,
+        after_authenticator
+    );
+    assert!(node.completed_add_data().is_err());
+    node.require_sdk_current_data().unwrap();
+    assert!(node.prepare_install_data().is_err());
+    let closed = native.ui.retire();
+    assert!(!closed.is_drained());
     drop(
-        g.verifier
-            .advance_host_selected(&selection, &mut candidate)
+        node.retire_add_for_closed_ui(&[Some(&closed)])
+            .unwrap()
             .unwrap(),
     );
+    assert!(closed.is_drained());
+    drop(node.take_retired_install_data().unwrap());
     let mut other_routing = response.sealed_routing.to_vec();
     *other_routing.last_mut().unwrap() ^= 1;
     assert!(prepared
@@ -139,10 +171,7 @@ fn v2_join_request_and_welcome_complete_with_actual_add() {
         &request.request.spec_data().credential
     );
     assert_eq!(facts.join_epoch_data(), 1);
-    assert_eq!(
-        facts.admission_state_data(),
-        completed.after_authenticator_data()
-    );
+    assert_eq!(facts.admission_state_data(), &after_authenticator);
     assert_eq!(
         joined.policy_data().mode(),
         catcoms_mls::GroupMode::PeerToPeer

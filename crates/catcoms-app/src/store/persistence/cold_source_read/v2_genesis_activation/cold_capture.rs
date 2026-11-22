@@ -138,7 +138,7 @@ impl ColdV2GenesisReadResources {
             .require_same_original(source.source())?;
         self.body
             .original_seed
-            .require_same_seed_data(source.seed())?;
+            .require_same_source_fields(source.seed())?;
         if self.body.negative.is_cancelled()
             || !Arc::ptr_eq(&self.body.mount, &store.registry_mount())
             || self.body.expected.context != *source.data().context

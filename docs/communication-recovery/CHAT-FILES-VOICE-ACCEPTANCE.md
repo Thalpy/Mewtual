@@ -40,6 +40,12 @@ actual Host SDK execution and Header signing. Linux also passed the pinned
 predecessor check.
 [Warm Host CI](https://github.com/Thalpy/Mewtual/actions/runs/45029874030).
 
+At `55d3350c`, both platforms passed the focused Add persistence checks. The
+native fixture covered and independently recovered the complete Welcome
+response and the original signed JoinRequest. It also checked stale absence
+observations through the actual original Current.
+[Add persistence CI](https://github.com/Thalpy/Mewtual/actions/runs/45032672855).
+
 ## Invitation and join branch CI (22 November 2026)
 
 Both hosted workflows passed on Linux and Windows at

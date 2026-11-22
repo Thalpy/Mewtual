@@ -117,6 +117,25 @@ impl<T, R> V2TextOwnedCurrent<T, R> {
 }
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurrent<T, R> {
+    pub(super) fn borrow_governed_install_parts(
+        &mut self,
+        store: &ServerStore,
+    ) -> Result<
+        (
+            V2TextOwnerRef<'_>,
+            catcoms_sync::owner_v2::PreparedV2FounderAddInstall<'_>,
+        ),
+        AppError,
+    > {
+        match &mut self.core {
+            OwnedCurrent::Warm(current) => {
+                let (original, install) = current.borrow_governed_install_parts(store)?;
+                Ok((V2TextOwnerRef { original }, install))
+            }
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
     pub(super) fn materialize_governed_response(
         &mut self,
         store: &ServerStore,

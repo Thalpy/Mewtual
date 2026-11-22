@@ -33,6 +33,7 @@ on:
       - 'crates/catcoms-sync/src/prepared_direct_join/v2.rs'
       - 'crates/catcoms-sync/src/prepared_direct_join/v2/**'
       - 'crates/catcoms-sync/src/lib.rs'
+      - 'crates/catcoms-sync/src/owner_v2/founder/bootstrap_source/genesis_seed.rs'
       - 'crates/catcoms-sync/src/owner_v2/founder/bootstrap_source/genesis_seed/governance.rs'
       - 'crates/catcoms-sync/src/owner_v2/founder/bootstrap_source/genesis_seed/governance/**'
       - 'crates/catcoms-replication/src/chat/projection_admission/v2_general.rs'
@@ -126,7 +127,6 @@ jobs:
         if: inputs.scope != 'governed-add'
         run: python .github/scripts/check-chat-v2-invite-intent.py interrupted-header
       - name: Check real MLS Add, exact Welcome, and native lifecycle regressions
-        if: inputs.scope != 'governed-add'
         run: python .github/scripts/check-chat-v2-invite-intent.py join-welcome
       - name: Check that whole-Source shutdown drains the original partial Add
         if: inputs.scope != 'governed-add'

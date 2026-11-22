@@ -397,7 +397,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedColdV2GenesisInitializing<T, R>
 impl<T, R> UnexposedRepairedV2GenesisCurrent<T, R> {
     fn source(&self) -> GenesisSourceDataRef<'_> {
         GenesisSourceDataRef {
-            seed: self.node.borrow_genesis_seed_data(),
+            seed: self.node.borrow_genesis_seed_data().source_fields(),
             resources: &self.resources,
         }
     }
