@@ -15,6 +15,7 @@ mod connected;
 pub(super) mod continuity;
 mod founding;
 mod history;
+mod invite_preview;
 mod listing;
 pub(super) mod retirement;
 mod sending;
@@ -244,17 +245,16 @@ fn router<R: tauri::Runtime>(
         if enabled
             && matches!(
                 invoke.message.command(),
-                "join_server"
-                    | "preview_invite"
-                    | "get_invite"
-                    | "mint_invite_fresh"
-                    | "send_dm_invite"
+                "join_server" | "get_invite" | "mint_invite_fresh" | "send_dm_invite"
             )
         {
             invoke
                 .resolver
                 .reject("Invitations are unavailable in this Chat V2 checkpoint.");
             return true;
+        }
+        if enabled && invoke.message.command() == "preview_invite" {
+            return invite_preview::route(invoke, &spawn);
         }
         if enabled
             && matches!(

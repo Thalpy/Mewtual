@@ -107,8 +107,9 @@ async fn run(queue: &Queue) {
     task.await;
 }
 fn success(reply: tauri::ipc::InvokeResponse) {
-    let tauri::ipc::InvokeResponse::Ok(body) = reply else {
-        panic!("actual unlock refused");
+    let body = match reply {
+        tauri::ipc::InvokeResponse::Ok(body) => body,
+        tauri::ipc::InvokeResponse::Err(error) => panic!("actual unlock refused: {}", error.0),
     };
     let restored = body.deserialize::<serde_json::Value>().unwrap();
     assert_eq!(restored["backend"], "text-v2");
@@ -1034,7 +1035,9 @@ async fn native_text_connected_join_keeps_legacy_invitation_handlers_outside_nat
             let tauri::ipc::InvokeResponse::Err(error) = reply.await.unwrap() else {
                 panic!("invitation IPC reached a worker");
             };
-            let expected = if enabled {
+            let expected = if enabled && command == "preview_invite" {
+                listing::STALE
+            } else if enabled {
                 "Invitations are unavailable in this Chat V2 checkpoint."
             } else {
                 "existing backend"
@@ -1044,6 +1047,21 @@ async fn native_text_connected_join_keeps_legacy_invitation_handlers_outside_nat
         }
         assert!(!path.exists());
     }
+}
+
+fn preview_request(window: &tauri::WebviewWindow<MockRuntime>, hex: String) -> Reply {
+    let (send, reply) = oneshot::channel();
+    let mut invocation = request(window, "1", SECRET);
+    invocation.cmd = "preview_invite".into();
+    invocation.body = InvokeBody::Json(serde_json::json!({ "inviteHex": hex }));
+    let view: &tauri::Webview<MockRuntime> = window.as_ref();
+    view.clone().on_message(
+        invocation,
+        Box::new(move |_, _, result, _, _| {
+            let _ = send.send(result);
+        }),
+    );
+    reply
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1107,6 +1125,25 @@ async fn native_text_connected_join_retries_original_welcome_after_authenticated
     .unwrap();
     let invite =
         catcoms_app::store::NativeTextInvitePacketData::decode(saved.packet_bytes_data()).unwrap();
+    let hex = hex::encode(saved.packet_bytes_data());
+    let preview = preview_request(&main, hex.clone());
+    run(&queue).await;
+    assert_eq!(
+        found_value(preview.await.unwrap()),
+        serde_json::json!({
+            "direct_routes": 0, "rendezvous_routes": 0, "switchboards": 0,
+            "expires_at_ms": saved.expires_at_ms(), "communication_mode": "peer_to_peer"
+        })
+    );
+    let trailing = preview_request(&main, format!("{hex}00"));
+    run(&queue).await;
+    refused(trailing.await.unwrap());
+    let too_large = preview_request(
+        &main,
+        "00".repeat(catcoms_app::store::MAX_NATIVE_TEXT_INVITE_PACKET_BYTES + 1),
+    );
+    refused(too_large.await.unwrap());
+    assert!(queue.lock().unwrap().is_empty());
     let request = PreparedV2JoinRequest::prepare(
         catcoms_mls::MlsDevice::generate().unwrap(),
         &invite.binding().spec_data().anchor,
@@ -1153,9 +1190,12 @@ async fn native_text_connected_join_retries_original_welcome_after_authenticated
         .validate_first_join_delivery_data(&original)
         .unwrap();
 
+    let stale_preview = preview_request(&main, hex);
     let locked = snapshot_request(&main, None);
     run(&queue).await;
     assert!(snapshot_result(locked.await.unwrap())["continuity_error"].is_null());
+    run(&queue).await;
+    refused(stale_preview.await.unwrap());
     assert!(matches!(send().await, Err(TransportError::NoResponse)));
     unlock_current(&app, &main, &queue).await;
     assert_eq!(send().await.unwrap(), original);

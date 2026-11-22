@@ -143,12 +143,14 @@ The Host assembles the separately paid packet outside writers from the retained
 policy, original plan and verified signed binding. Raw coverage still runs if
 packet assembly refuses. The receipt is created after the Raw barriers and
 current checks, and the original native job checks cancellation and authority
-again before returning it. No renderer command or network consumer accepts the
-packet yet.
+again before returning it. The connected join path uses the authenticated
+transport identity. The gated desktop preview verifies the signed packet and
+expiry under the original authenticated UI session, and reports zero certified
+routes for this packet profile. Its scope is authenticated metadata.
 
 ## Remaining publication and admission
 
-A desktop command needs a separate publication check and certified contacts.
+Desktop mint and join still need a publication check and certified contacts.
 Cold operational restore must supply its own exact Current and original source
 proofs before it can use the read-only recovery step below. Broader writers
 need per-context serialization, and a versioned retention policy is required

@@ -188,20 +188,26 @@ impl Bootstrap {
                     }
                 }
                 Self::Governing(mut original) => {
-                    if original.retry(&mut rng).is_err() {
+                    if let Err(_error) = original.retry(&mut rng) {
+                        #[cfg(test)]
+                        eprintln!("native startup refused during governed selection: {_error}");
                         *self = Self::Governing(original);
                         return Err(FAILED.into());
                     }
                     match (*original).prepare_joined_vault() {
                         Ok(original) => *self = Self::Joining(Box::new(original)),
                         Err(original) => {
+                            #[cfg(test)]
+                            eprintln!("native startup refused the original governed handoff");
                             *self = Self::Governing(Box::new(original));
                             return Err(FAILED.into());
                         }
                     }
                 }
                 Self::Joining(mut original) => {
-                    if original.retry(&mut rng).is_err() {
+                    if let Err(_error) = original.retry(&mut rng) {
+                        #[cfg(test)]
+                        eprintln!("native startup refused during joined selection: {_error}");
                         *self = Self::Joining(original);
                         return Err(FAILED.into());
                     }
@@ -213,6 +219,8 @@ impl Bootstrap {
                             )?)
                         }
                         Err(original) => {
+                            #[cfg(test)]
+                            eprintln!("native startup refused the original joined handoff");
                             *self = Self::Joining(Box::new(original));
                             return Err(FAILED.into());
                         }
