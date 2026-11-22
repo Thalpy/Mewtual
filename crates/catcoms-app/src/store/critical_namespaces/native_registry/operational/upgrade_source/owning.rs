@@ -413,6 +413,22 @@ impl Store {
             .copy_selected_governing_proof(pending, headers, output)
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn copy_recovered_join_request(
+        &self,
+        output: &mut Vec<u8>,
+    ) -> Result<(), AppError> {
+        self.physical.copy_recovered_join_request(output)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn validate_recovered_join_delivery(
+        &self,
+        request: &[u8],
+        delivery: &[u8],
+    ) -> Result<(), AppError> {
+        self.physical
+            .validate_recovered_join_delivery(request, delivery)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn attach_recovered_joined_node<
         T: catcoms_rt::MeshTransport,
         R: catcoms_rt::CryptoRngCore,

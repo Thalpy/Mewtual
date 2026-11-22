@@ -343,6 +343,55 @@ impl ServerStore {
         selected.require(self)
     }
 
+    fn require_recovered_request<'a>(
+        &self,
+        selected: &'a SelectedPinIndex,
+    ) -> Result<&'a catcoms_sync::RecoveredV2PendingJoinSource, AppError> {
+        selected.require(self)?;
+        welcome::require_absent(self)?;
+        let pending = selected
+            .pending
+            .as_ref()
+            .filter(|pending| pending.welcome.is_none())
+            .ok_or_else(denied)?;
+        Ok(pending._pending.pending_data().0)
+    }
+
+    pub(in crate::store) fn copy_recovered_join_request(
+        &self,
+        output: &mut Vec<u8>,
+    ) -> Result<(), AppError> {
+        self.validate_mounted_governance_layout()?;
+        let slot = self.joined_pin_index.lock().map_err(|_| denied())?;
+        let selected = slot.as_ref().ok_or_else(denied)?;
+        let bytes = self
+            .require_recovered_request(selected)?
+            .request_bytes_data();
+        if !output.is_empty() || bytes.len() > output.capacity() {
+            return Err(denied());
+        }
+        output.extend_from_slice(bytes);
+        self.require_recovered_request(selected).map(|_| ())
+    }
+
+    pub(in crate::store) fn validate_recovered_join_delivery(
+        &self,
+        exact_request: &[u8],
+        delivery: &[u8],
+    ) -> Result<(), AppError> {
+        self.validate_mounted_governance_layout()?;
+        let slot = self.joined_pin_index.lock().map_err(|_| denied())?;
+        let selected = slot.as_ref().ok_or_else(denied)?;
+        let source = self.require_recovered_request(selected)?;
+        if source.request_bytes_data() != exact_request {
+            return Err(denied());
+        }
+        source
+            .validate_first_join_delivery_data(delivery)
+            .map_err(|_| denied())?;
+        self.require_recovered_request(selected).map(|_| ())
+    }
+
     /// Exclusive access keeps the original held index and Welcome outside
     /// mutex guards during runtime assembly.
     pub(in crate::store) fn attach_recovered_joined_node<

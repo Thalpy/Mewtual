@@ -166,6 +166,26 @@ impl Physical {
         }
     }
 
+    pub(super) fn copy_recovered_join_request(&self, output: &mut Vec<u8>) -> Result<(), AppError> {
+        self.handler.require()?;
+        self.handler.require_idle_cached()?;
+        self.current()?
+            .checked_store()?
+            .copy_recovered_join_request(output)
+    }
+
+    pub(super) fn validate_recovered_join_delivery(
+        &self,
+        request: &[u8],
+        delivery: &[u8],
+    ) -> Result<(), AppError> {
+        self.handler.require()?;
+        self.handler.require_idle_cached()?;
+        self.current()?
+            .checked_store()?
+            .validate_recovered_join_delivery(request, delivery)
+    }
+
     pub(super) fn selected_pending_join_data(
         &self,
     ) -> Result<Option<([u8; 32], catcoms_sync::V2PendingJoinContextData)>, AppError> {

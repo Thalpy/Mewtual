@@ -100,6 +100,9 @@ refuses an original preview queued before lock. [Native joined-vault and invitat
 At `0058ccf1`, Windows and Linux passed both selected-history page cases,
 including verification of a proof read through pages produced by actual Core
 selection. [Selected-history page CI](https://github.com/Thalpy/Mewtual/actions/runs/45058635166).
+Both platforms also passed the focused joined-storage matrix at that revision,
+including the same-mount startup handoff, replacement refusals, original
+Welcome replay, and connected two-vault cases. [Joined storage CI](https://github.com/Thalpy/Mewtual/actions/runs/45058685095).
 
 ## Invitation and join branch CI (22 November 2026)
 

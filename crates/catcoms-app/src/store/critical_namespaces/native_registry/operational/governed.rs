@@ -34,6 +34,17 @@ struct JoinFramePayment {
     _fee: CatalogReadReservation,
 }
 
+struct ConnectedJoinDelivery {
+    bytes: bytes::Bytes,
+    scope: RequestCancellation,
+}
+
+impl AsRef<[u8]> for ConnectedJoinDelivery {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
 impl std::fmt::Debug for JoinFramePayment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("JoinFramePayment").finish_non_exhaustive()
@@ -285,6 +296,54 @@ impl NativeTextJoinedStorage {
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
         let request = self.require_exact_invite(invite)?;
+        let delivery = self
+            .receive_original_join(request, invite, transport, negative)
+            .await?;
+        self.index.finish_joined_pending(
+            self.pending.as_mut().ok_or_else(refused)?,
+            &delivery.bytes,
+            rng,
+            Some(&delivery.scope),
+        )
+    }
+
+    /// Reissue the authenticated original request from an independently
+    /// reopened vault whose Pending precedes any local Welcome entry. This
+    /// only returns verified delivery data and owns no Welcome execution grant.
+    pub async fn replay_recovered_first_delivery(
+        &self,
+        invite: &crate::store::NativeTextInvitePacketData<'_>,
+        transport: &impl MeshTransport,
+        negative: RequestCancellation,
+    ) -> Result<bytes::Bytes, AppError> {
+        if self.pending.is_some() || negative.is_cancelled() {
+            return Err(refused());
+        }
+        let (_, _request_fee) = self
+            .index
+            .joined_exchange_resources(MAX_V2_JOIN_REQUEST_PACKET_BYTES + 4096)?;
+        let mut request =
+            zeroize::Zeroizing::new(Vec::with_capacity(MAX_V2_JOIN_REQUEST_PACKET_BYTES));
+        self.index.copy_recovered_join_request(&mut request)?;
+        Self::require_invite_bytes(&request, invite)?;
+        let reply = self
+            .receive_original_join(&request, invite, transport, negative)
+            .await?;
+        self.index
+            .validate_recovered_join_delivery(&request, &reply.bytes)?;
+        if reply.scope.is_cancelled() {
+            return Err(refused());
+        }
+        Ok(bytes::Bytes::from_owner(reply))
+    }
+
+    async fn receive_original_join(
+        &self,
+        request: &[u8],
+        invite: &crate::store::NativeTextInvitePacketData<'_>,
+        transport: &impl MeshTransport,
+        negative: RequestCancellation,
+    ) -> Result<ConnectedJoinDelivery, AppError> {
         let target = invite.connected_peer_data();
         let connection = transport.connection_lease(target).ok_or_else(refused)?;
         let (mount, fee) = self.index.joined_exchange_resources(
@@ -317,12 +376,10 @@ impl NativeTextJoinedStorage {
         if !authority.authorized() || delivery.len() > MAX_V2_FIRST_JOIN_DELIVERY_BYTES {
             return Err(refused());
         }
-        self.index.finish_joined_pending(
-            self.pending.as_mut().ok_or_else(refused)?,
-            &delivery,
-            rng,
-            Some(&negative),
-        )
+        Ok(ConnectedJoinDelivery {
+            bytes: delivery,
+            scope: negative,
+        })
     }
 
     fn require_exact_invite(
@@ -330,11 +387,19 @@ impl NativeTextJoinedStorage {
         invite: &crate::store::NativeTextInvitePacketData<'_>,
     ) -> Result<&[u8], AppError> {
         let request = self.first_join_request_data()?;
+        Self::require_invite_bytes(request, invite)?;
+        Ok(request)
+    }
+
+    fn require_invite_bytes(
+        request: &[u8],
+        invite: &crate::store::NativeTextInvitePacketData<'_>,
+    ) -> Result<(), AppError> {
         let packet = V2JoinRequestPacketData::decode(request).map_err(|_| refused())?;
         if packet.founder_add_data().invite.encode() != invite.binding().encode() {
             return Err(refused());
         }
-        Ok(request)
+        Ok(())
     }
 
     /// Historical outcome installed by the cold storage opener.

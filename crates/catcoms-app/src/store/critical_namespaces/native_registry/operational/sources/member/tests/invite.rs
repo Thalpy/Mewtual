@@ -53,12 +53,19 @@ async fn native_runtime_invite_returns_only_the_original_installed_join_response
     native_governed_add_fixture(JoinCase::WarmRuntime).await;
 }
 
+#[tokio::test]
+async fn native_runtime_invite_returns_only_the_original_installed_join_response_to_reopened_pending(
+) {
+    native_governed_add_fixture(JoinCase::ColdPending).await;
+}
+
 #[derive(PartialEq, Eq)]
 enum JoinCase {
     Staged,
     InterruptedInstall,
     NativeResponse,
     WarmRuntime,
+    ColdPending,
 }
 
 async fn native_governed_add_fixture(case: JoinCase) {
@@ -76,6 +83,7 @@ async fn native_governed_add_fixture(case: JoinCase) {
         JoinCase::InterruptedInstall => 0xe717,
         JoinCase::NativeResponse => 0xe718,
         JoinCase::WarmRuntime => 0xe719,
+        JoinCase::ColdPending => 0xe722,
     };
     let (owner, row) = activate(
         prepared_mesh_founder_with_clock(&vault, &budget, seed, Box::new(catcoms_rt::SystemClock)),
@@ -89,7 +97,10 @@ async fn native_governed_add_fixture(case: JoinCase) {
         .unwrap();
     let invite =
         crate::store::NativeTextInvitePacketData::decode(saved.packet_bytes_data()).unwrap();
-    let native_joiner = matches!(case, JoinCase::NativeResponse | JoinCase::WarmRuntime);
+    let native_joiner = matches!(
+        case,
+        JoinCase::NativeResponse | JoinCase::WarmRuntime | JoinCase::ColdPending
+    );
     let request = (!native_joiner).then(|| {
         PreparedV2JoinRequest::prepare(
             catcoms_mls::MlsDevice::generate().unwrap(),
@@ -309,6 +320,44 @@ async fn native_governed_add_fixture(case: JoinCase) {
                 .serve_connected_join_request(proto, &data, responder, negative.clone())
                 .unwrap();
         };
+        if case == JoinCase::ColdPending {
+            let identity = *blake3::hash(&original_request).as_bytes();
+            let pending = only_named(join_dir, "chat-critical-namespaces.joined-pending.bin");
+            let raw = std::fs::read(&pending).unwrap();
+            drop(joined_storage.take());
+            let cold =
+                NativeTextJoinedStorage::open(join_dir, SECRET, &mut join_rng, current_policy())
+                    .unwrap();
+            assert_eq!(cold.pending_join_data().unwrap().unwrap().0, identity);
+            let entry = join_dir.join(entry_name);
+            std::fs::write(&entry, [1]).unwrap();
+            assert!(tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                cold.replay_recovered_first_delivery(&invite, &client, negative.clone())
+            )
+            .await
+            .unwrap()
+            .is_err());
+            std::fs::remove_file(&entry).unwrap();
+            let (received, ()) = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                tokio::join!(
+                    cold.replay_recovered_first_delivery(&invite, &client, negative.clone()),
+                    serve
+                )
+            })
+            .await
+            .unwrap();
+            let original = accept(&original_request)
+                .unwrap()
+                .encode_delivery_data()
+                .unwrap();
+            assert_eq!(received.unwrap().as_ref(), original.as_slice());
+            assert_eq!(std::fs::read(&pending).unwrap(), raw);
+            assert!(!entry.exists());
+            assert!(!join_dir.join(outcome_name).exists());
+            assert!(cold.recovered_join_outcome_data().unwrap().is_none());
+            return;
+        }
         if case == JoinCase::WarmRuntime {
             use crate::store::persistence::governance_layout::joined::BEFORE_WELCOME_SDK;
             let mut runtime = joined_storage

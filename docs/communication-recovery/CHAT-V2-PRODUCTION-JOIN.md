@@ -247,7 +247,11 @@ returns the original public proof from the covered delivery under a separate
 buffer credit. The addressed member catch-up transport is still pending.
 The joined storage owner can exchange the exact selected JoinRequest on an
 already authenticated connection to the peer named by the signed invite.
-It keeps the original connection and vault cancellation through response
+An independently reopened Pending with no Welcome files can resend the exact
+original request over the same connected protocol. It verifies the reply
+against that request and the original held files before returning delivery data.
+Restart authorization for new Welcome SDK entry remains a separate requirement.
+The warm exchange keeps the original connection and vault cancellation through response
 receipt and rechecks that authority before covering or entering the Welcome.
 Revocation after covering Entry and before SDK entry leaves no Outcome.
 A fresh authorization can retry the same covered Entry. The connected
