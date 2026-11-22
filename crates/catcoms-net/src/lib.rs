@@ -6593,6 +6593,15 @@ impl MeshTransport for MeshService {
         .await
     }
 
+    fn capture_authorized_publication(
+        &self,
+    ) -> Option<Box<dyn catcoms_rt::AuthorizedMeshPublication>> {
+        Some(Box::new(publication::Outbound {
+            commands: self.cmd_tx.downgrade(),
+            slots: self.publish_once_slots.clone(),
+        }))
+    }
+
     async fn request(
         &self,
         peer: PeerId,

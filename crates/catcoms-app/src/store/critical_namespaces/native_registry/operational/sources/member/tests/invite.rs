@@ -586,13 +586,63 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 .unwrap(),
             saved
         );
+        let head_path = outbox_path.join("head.bin");
+        let head = std::fs::read(&head_path).unwrap();
+        let (cancel, signal) = tokio::sync::watch::channel(false);
+        let pending = recovered_row()
+            .prepare_member_publication(
+                &selection,
+                RequestCancellation::new(signal, None),
+                &mut history_rng,
+            )
+            .unwrap()
+            .expect("the original saved action is still owed");
+        assert_eq!(
+            recovered_row()
+                .lookup_saved_member(&selection, &request(), &fresh, &mut history_rng)
+                .unwrap(),
+            saved,
+            "the prepared network attempt leaves the physical metadata slot available"
+        );
+        cancel.send_replace(true);
+        assert!(matches!(
+            pending.submit().await,
+            Err(catcoms_sync::SyncError::Publication(
+                catcoms_rt::PublishOnceError::Revoked
+            ))
+        ));
+        let offline = recovered_row()
+            .prepare_member_publication(&selection, fresh.clone(), &mut history_rng)
+            .unwrap()
+            .expect("cancellation preserves debt on the original action");
+        assert!(matches!(
+            offline.submit().await,
+            Err(catcoms_sync::SyncError::Publication(
+                catcoms_rt::PublishOnceError::NoPeers
+            ))
+        ));
+        assert_eq!(std::fs::read(&head_path).unwrap(), head);
+        assert!(
+            recovered_row()
+                .prepare_member_publication(&selection, fresh.clone(), &mut history_rng)
+                .unwrap()
+                .is_some(),
+            "the no-peers result preserves debt for a fresh attempt"
+        );
     } else {
+        assert!(recovered_row()
+            .prepare_member_publication(&selection, fresh.clone(), &mut history_rng)
+            .unwrap()
+            .is_none());
         assert!(!outbox_path.exists());
         std::fs::create_dir(&outbox_path).unwrap();
         let damaged = outbox_path.join("head.bin");
         std::fs::write(&damaged, b"damaged").unwrap();
         assert!(recovered_row()
             .lookup_saved_member(&selection, &request(), &fresh, &mut history_rng)
+            .is_err());
+        assert!(recovered_row()
+            .prepare_member_publication(&selection, fresh.clone(), &mut history_rng)
             .is_err());
         assert_eq!(std::fs::read(&damaged).unwrap(), b"damaged");
     }

@@ -31,11 +31,12 @@ use super::data::{
     MemberRequestData, MemberRequestToken, MemberSignedOriginal,
 };
 use super::engine::{
-    MemberLookup, MemberOutbox, MemberOutboxError, MemberOutboxOpen, MemberOutboxParentDirectory,
-    MemberOutboxQuota, MemberOutboxRefusal, MemberOutboxRegistry, MEMBER_OUTBOX_LOOKUP_FEE,
+    MemberDebtBatch, MemberLookup, MemberOutbox, MemberOutboxError, MemberOutboxOpen,
+    MemberOutboxParentDirectory, MemberOutboxQuota, MemberOutboxRefusal, MemberOutboxRegistry,
+    MEMBER_OUTBOX_CHECKPOINT_FEE, MEMBER_OUTBOX_DEBT_FEE, MEMBER_OUTBOX_LOOKUP_FEE,
     MEMBER_OUTBOX_OWNER_FEE, MEMBER_OUTBOX_RECOVERY_FEE,
 };
-use super::transaction::PreparedMemberAppend;
+use super::transaction::{MemberCheckpointSaved, PreparedMemberAppend};
 use crate::store::critical_namespaces::member_outbox_layout::{
     MAX_BASE_PATH, MAX_MEMBER_OUTBOX_CONTEXTS, MEMBER_OUTBOX_SLOT_FEE,
 };
@@ -46,6 +47,7 @@ use crate::store::critical_namespaces::read_pool::{
 use crate::store::critical_namespaces::refused;
 use crate::store::ServerStore;
 use crate::AppError;
+use catcoms_replication::chat::owner_facts::OwnerFactId;
 use catcoms_replication::chat::{ActionId, MAX_GROUP_ID_BYTES, MAX_PARENTS};
 use catcoms_rt::{CryptoRngCore, RequestCancellation};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
@@ -381,15 +383,101 @@ impl MemberOutboxMount {
             body: request.body,
         };
         request.digest(id)?;
+        self.with_existing_outbox(store, context, key, rng, |state, _| {
+            let has_original = state
+                .custody
+                .as_ref()
+                .is_some_and(|value| value.token() == request.token);
+            match state
+                .owner
+                .as_ref()
+                .ok_or(MemberOutboxRefusal::Incomplete)?
+                .lookup(key, &request, payment)?
+            {
+                MemberLookup::Hit(hit) => Ok(Some(*hit.receipt())),
+                MemberLookup::Conflict(other) => {
+                    Err(MemberOutboxRefusal::TokenConflict(other).into())
+                }
+                MemberLookup::Absent if !has_original => Ok(None),
+                MemberLookup::Absent => Err(MemberOutboxRefusal::Incomplete.into()),
+            }
+        })
+        .map(Option::flatten)
+    }
+
+    pub(in crate::store) fn read_publication_debt(
+        &self,
+        store: &ServerStore,
+        context: MemberOutboxContextData,
+        key: &[u8; 32],
+        current: OwnerFactId,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<Option<MemberDebtBatch>, MemberOutboxError> {
+        let payment = self
+            .pay(MEMBER_OUTBOX_DEBT_FEE)
+            .map_err(|_| MemberOutboxRefusal::Payment)?;
+        let batch = self.with_existing_outbox(store, context, key, rng, |state, _| {
+            state
+                .owner
+                .as_ref()
+                .ok_or(MemberOutboxRefusal::Incomplete)?
+                .debt_batch(key, current, 1, payment)
+        })?;
+        Ok(batch.filter(|batch| !batch.items().is_empty()))
+    }
+
+    pub(in crate::store) fn checkpoint_publication_debt(
+        &self,
+        store: &ServerStore,
+        context: MemberOutboxContextData,
+        key: &[u8; 32],
+        batch: MemberDebtBatch,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<MemberCheckpointSaved, MemberOutboxError> {
+        let payment = self
+            .pay(MEMBER_OUTBOX_CHECKPOINT_FEE)
+            .map_err(|_| MemberOutboxRefusal::Payment)?;
+        self.with_existing_outbox(store, context, key, rng, |state, rng| {
+            // A checkpoint changes the selected parent. Keep a parked or
+            // unresolved original's save transition and retry path intact.
+            if matches!(
+                state.custody,
+                Some(MemberOriginalCustody::Prepared(_) | MemberOriginalCustody::Unresolved { .. })
+            ) {
+                return Err(MemberOutboxRefusal::Busy.into());
+            }
+            let prepared = state
+                .owner
+                .as_ref()
+                .ok_or(MemberOutboxRefusal::Incomplete)?
+                .prepare_checkpoint(key, batch, rng, payment)
+                .map_err(|returned| returned.error)?;
+            let owner = state.owner.take().ok_or(MemberOutboxRefusal::Incomplete)?;
+            let run = prepared.run(owner, store._session.retain_for_physical_work());
+            state.owner = Some(run.owner);
+            run.outcome
+        })?
+        .ok_or_else(|| MemberOutboxRefusal::Incomplete.into())
+    }
+
+    fn with_existing_outbox<T>(
+        &self,
+        store: &ServerStore,
+        context: MemberOutboxContextData,
+        key: &[u8; 32],
+        rng: &mut dyn CryptoRngCore,
+        run: impl FnOnce(
+            &mut MemberContextState,
+            &mut dyn CryptoRngCore,
+        ) -> Result<T, MemberOutboxError>,
+    ) -> Result<Option<T>, MemberOutboxError> {
+        self.require_live(store)?;
+        let id = context.id();
         let cell = self.cell(id)?;
         let mut state = cell.try_lock()?.ok_or(MemberOutboxRefusal::Busy)?;
         if matches!(state.custody, Some(MemberOriginalCustody::Running { .. })) {
             return Err(MemberOutboxRefusal::Busy.into());
         }
-        let has_original = state
-            .custody
-            .as_ref()
-            .is_some_and(|value| value.token() == request.token);
         if state.owner.is_none() {
             match self.open_owner_for(store, context, key, rng, false) {
                 Ok(owner) => state.owner = Some(owner),
@@ -411,16 +499,10 @@ impl MemberOutboxMount {
         if owner.needs_recovery() {
             self.recover_owner(store, owner, key, rng)?;
         }
-        let receipt = match owner.lookup(key, &request, payment)? {
-            MemberLookup::Hit(hit) => Some(*hit.receipt()),
-            MemberLookup::Conflict(other) => {
-                return Err(MemberOutboxRefusal::TokenConflict(other).into())
-            }
-            MemberLookup::Absent if !has_original => None,
-            MemberLookup::Absent => return Err(MemberOutboxRefusal::Incomplete.into()),
-        };
         self.require_live(store)?;
-        Ok(receipt)
+        let result = run(&mut state, rng)?;
+        self.require_live(store)?;
+        Ok(Some(result))
     }
 
     /// Re-derive an owner's state from its files after an uncertain operation.

@@ -1,13 +1,12 @@
 # Ordinary member text without the founder online
 
-Integration checkpoint, 11 November. The founder-as-ordinary-member signing vertical
-and independent outbox storage engine compile and pass focused tests. Production save,
-joined-member sources and native routing remain open; Chat V2 stays disabled.
-
-The signing boundary below is tested for the founder acting as an ordinary member,
-plus the Sync seams for a joined member's `ChannelSync`. See
-[CHAT-V2-ORDINARY-MEMBER-SIGNER](CHAT-V2-ORDINARY-MEMBER-SIGNER.md). Nonfounder App
-orchestration still waits for the joined-member source.
+Native founder and joined-member text saves use the same durable outbox. The joined
+member can save and recover the original local receipt with the founder offline, then
+author a new message after restarting with the same registered source. Focused Windows
+and Linux CI covers both paths. Chat V2 stays disabled pending peer delivery, shared
+projection and the remaining acceptance gates.
+[Joined storage and cold authoring CI](https://github.com/Thalpy/Mewtual/actions/runs/45078038029)
+[Native join and local save CI](https://github.com/Thalpy/Mewtual/actions/runs/45077351739)
 
 ## Two independent paths
 
@@ -97,10 +96,11 @@ prefix to validate the claimed Admission before projection. The joined runtime d
 blinded topic from the distinct MLS metadata exporter and checks the original selected
 verifier before sealing or opening the envelope. The receiver issues a provisional token
 only for the actual current Admission, exact channel view and validated dependencies.
-The joined runtime prepares one sealed submission for its own mesh. The caller, original
-Core Admission and selected MLS fence must still authorize it at the driver's submission
-boundary. App outbox scheduling, inbound projection and the durable publication checkpoint
-still need to consume this data.
+The mounted joined source prepares one exact debt item for its original mesh and releases
+the metadata slot before awaiting the driver. The caller, original Core Admission and
+selected MLS fence must still authorize it at the driver's submission boundary. A real
+`Submitted` result produces a receipt that a fresh capture of the same registered row can
+checkpoint. Desktop scheduling and inbound projection remain open.
 Original audit chunks and request receipts remain retained after scheduling debt clears.
 Removal changes active view, never deletes the audit. Unproven late removed actions stay
 Held pending the separately authorized moderation path; ordinary concurrent edits resolve

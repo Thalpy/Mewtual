@@ -9,7 +9,8 @@ use catcoms_replication::chat::{
     V2OrdinaryDependency, MAX_ACTION_BYTES,
 };
 use catcoms_rt::{
-    CryptoRngCore, MeshTransport, PublishSubmission, RequestAuthority, RequestCancellation, Topic,
+    AuthorizedMeshPublication, CryptoRngCore, PublishSubmission, RequestAuthority,
+    RequestCancellation, Topic,
 };
 use catcoms_storage::pad::{self, OP_PAD_CEILING, OP_PAD_FLOOR, PAD_FOOTER_BYTES};
 use catcoms_wire::{Decoder, DocType, Encoder};
@@ -37,17 +38,29 @@ const _: () = assert!(MAX_V2_MEMBER_TRANSPORT_BYTES <= catcoms_rt::MAX_PUBLISH_O
 /// One ownership-scoped attempt, including its original mesh and sealed bytes.
 /// Only the driver's `Submitted` result can later settle local outbox debt.
 #[must_use = "an envelope prepared in memory has not been submitted"]
-pub struct PreparedV2MemberSubmission<T: MeshTransport> {
-    pub(crate) transport: T,
+pub struct PreparedV2MemberSubmission {
+    pub(crate) transport: Box<dyn AuthorizedMeshPublication>,
     pub(crate) topic: Topic,
     pub(crate) wire: bytes::Bytes,
+    pub(crate) observation: V2MemberPublicationObservation,
+}
+
+/// The exact current Core lifetime and finalized MLS selection for one joined
+/// Source. This is a negative observation and carries no driver or SDK graph.
+pub struct V2MemberPublicationObservation {
     pub(crate) member: V2LiveMemberObservation,
     pub(crate) fence: V2JoinedPublicationFence,
 }
 
-impl<T: MeshTransport> PreparedV2MemberSubmission<T> {
+impl V2MemberPublicationObservation {
     pub fn is_current_cached(&self) -> bool {
         self.member.is_live_cached() && self.fence.is_current_cached()
+    }
+}
+
+impl PreparedV2MemberSubmission {
+    pub fn is_current_cached(&self) -> bool {
+        self.observation.is_current_cached()
     }
 
     /// Retain the caller's original lifetime and payment through queue custody.
@@ -57,29 +70,24 @@ impl<T: MeshTransport> PreparedV2MemberSubmission<T> {
             transport,
             topic,
             wire,
-            member,
-            fence,
+            observation,
         } = self;
         let authority = Arc::new(MemberSubmissionAuthority {
             caller: caller.clone(),
-            member,
-            fence,
+            observation,
             retired: AtomicBool::new(false),
         });
         if !authority.authorized() {
             return Err(catcoms_rt::PublishOnceError::Revoked.into());
         }
         let checked = caller.with_authority(authority);
-        Ok(transport
-            .publish_once_authorized(topic, wire, checked)
-            .await?)
+        Ok(transport.submit(topic, wire, checked).await?)
     }
 }
 
 struct MemberSubmissionAuthority {
     caller: RequestCancellation,
-    member: V2LiveMemberObservation,
-    fence: V2JoinedPublicationFence,
+    observation: V2MemberPublicationObservation,
     retired: AtomicBool,
 }
 
@@ -96,10 +104,7 @@ impl RequestAuthority for MemberSubmissionAuthority {
         if self.retired.load(Ordering::Acquire) {
             return false;
         }
-        if self.caller.is_cancelled()
-            || !self.member.is_live_cached()
-            || !self.fence.is_current_cached()
-        {
+        if self.caller.is_cancelled() || !self.observation.is_current_cached() {
             self.retired.store(true, Ordering::Release);
             return false;
         }

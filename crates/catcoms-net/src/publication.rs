@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use catcoms_rt::{
-    PublishOnceError, PublishSubmission, RequestCancellation, Topic, MAX_PUBLISH_ONCE_BYTES,
-    MAX_PUBLISH_ONCE_TOPIC_BYTES,
+    AuthorizedMeshPublication, PublishOnceError, PublishSubmission, RequestCancellation, Topic,
+    MAX_PUBLISH_ONCE_BYTES, MAX_PUBLISH_ONCE_TOPIC_BYTES,
 };
 use libp2p::gossipsub;
 use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
@@ -17,6 +17,26 @@ use super::{to_ident, Command};
 /// At most 8 MiB of compact payloads plus 1 KiB of topics queued/being attempted per service.
 /// This excludes already-admitted gossip-cache/handler state and caller-owned input allocations.
 pub(super) const MAX_IN_FLIGHT: usize = 16;
+
+pub(super) struct Outbound {
+    pub(super) commands: mpsc::WeakSender<Command>,
+    pub(super) slots: Arc<Semaphore>,
+}
+
+#[async_trait::async_trait]
+impl AuthorizedMeshPublication for Outbound {
+    async fn submit(
+        &self,
+        topic: Topic,
+        data: Bytes,
+        authority: RequestCancellation,
+    ) -> Result<PublishSubmission, PublishOnceError> {
+        let commands = self.commands.upgrade().ok_or(PublishOnceError::Closed)?;
+        let result = queue(&commands, &self.slots, topic, data, Some(authority))?;
+        drop(commands);
+        result.await.map_err(|_| PublishOnceError::Closed)?
+    }
+}
 
 pub(super) struct Publication {
     topic: Topic,
@@ -87,6 +107,18 @@ pub(super) async fn publish_once_with_authority(
     data: Bytes,
     authority: Option<RequestCancellation>,
 ) -> Result<PublishSubmission, PublishOnceError> {
+    queue(commands, slots, topic, data, authority)?
+        .await
+        .map_err(|_| PublishOnceError::Closed)?
+}
+
+fn queue(
+    commands: &mpsc::Sender<Command>,
+    slots: &Arc<Semaphore>,
+    topic: Topic,
+    data: Bytes,
+    authority: Option<RequestCancellation>,
+) -> Result<oneshot::Receiver<Result<PublishSubmission, PublishOnceError>>, PublishOnceError> {
     if authority
         .as_ref()
         .is_some_and(RequestCancellation::is_cancelled)
@@ -120,7 +152,7 @@ pub(super) async fn publish_once_with_authority(
         })?;
     // Drop of this receiver is the cancellation signal owned by the future itself. There is no
     // detached task which could keep the signal alive and later submit abandoned work.
-    result.await.map_err(|_| PublishOnceError::Closed)?
+    Ok(result)
 }
 
 #[cfg(test)]

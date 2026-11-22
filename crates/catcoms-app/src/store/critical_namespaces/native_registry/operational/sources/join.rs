@@ -39,6 +39,11 @@ use std::{
 };
 use tokio::sync::watch;
 
+mod publication;
+pub use publication::{
+    NativeTextJoinedMemberPublication, NativeTextJoinedMemberPublicationReceipt,
+};
+
 #[derive(Default)]
 pub(super) struct PendingJoin {
     state: Mutex<PendingJoinState>,
@@ -238,6 +243,7 @@ impl NativeTextJoinedRequestPreparation {
             authentication,
             invocation: live,
             caller: caller.clone(),
+            row: None,
         });
         Ok(NativeTextJoinedExchange {
             request,
@@ -262,6 +268,7 @@ struct JoinEffect {
     authentication: AuthenticationNegative,
     invocation: watch::Receiver<bool>,
     caller: RequestCancellation,
+    row: Option<NativeTextJoinedRowSelection>,
 }
 
 impl std::fmt::Debug for JoinEffect {
@@ -278,6 +285,10 @@ impl RequestAuthority for JoinEffect {
             && self.scope.is_open()
             && self.ui.is_current_cached()
             && self.authentication.is_live_cached()
+            && self
+                .row
+                .as_ref()
+                .is_none_or(NativeTextJoinedRowSelection::is_current_cached)
     }
 
     async fn revoked(&self) {

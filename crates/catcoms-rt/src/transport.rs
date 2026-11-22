@@ -932,6 +932,18 @@ pub struct RendezvousRegistration {
     pub ttl_secs: u64,
 }
 
+/// Outbound-only handle to one original driver's bounded publication queue.
+/// This handle carries neither an event consumer nor an effect authority.
+#[async_trait]
+pub trait AuthorizedMeshPublication: Send + Sync {
+    async fn submit(
+        &self,
+        topic: Topic,
+        data: Bytes,
+        authority: RequestCancellation,
+    ) -> Result<PublishSubmission, PublishOnceError>;
+}
+
 /// The messaging seam. Outbound operations take `&self` so the transport can be
 /// shared (e.g. behind an `Arc`); [`MeshTransport::next_event`] is single-consumer.
 #[async_trait]
@@ -1015,6 +1027,12 @@ pub trait MeshTransport: Send + Sync {
         _authority: RequestCancellation,
     ) -> Result<PublishSubmission, PublishOnceError> {
         Err(PublishOnceError::Unsupported)
+    }
+
+    /// Capture the actual driver without lending its event stream or owning its lifecycle.
+    /// Callers reserve retained-handle and queued-envelope capacity before capture.
+    fn capture_authorized_publication(&self) -> Option<Box<dyn AuthorizedMeshPublication>> {
+        None
     }
 
     /// Send an addressed request to `peer` and await its reply.

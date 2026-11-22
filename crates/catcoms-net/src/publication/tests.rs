@@ -100,6 +100,44 @@ async fn original_publication_authority_is_checked_at_driver_handoff() {
 }
 
 #[tokio::test]
+async fn captured_publication_checks_queued_authority_and_never_adopts_a_replacement_driver() {
+    let (tx, mut rx) = mpsc::channel(1);
+    let slots = Arc::new(Semaphore::new(1));
+    let handle = Outbound {
+        commands: tx.downgrade(),
+        slots: slots.clone(),
+    };
+    let (owner, observer) = tokio::sync::watch::channel(false);
+    let mut pending = Box::pin(handle.submit(
+        topic(),
+        Bytes::from_static(b"original"),
+        RequestCancellation::new(observer, None),
+    ));
+    assert!(poll!(&mut pending).is_pending());
+    let queued = take(&mut rx);
+    assert_eq!(slots.available_permits(), 0);
+    owner.send_replace(true);
+    drop(tx);
+    assert!(rx.is_closed(), "the outbound handle owns no command sender");
+    queued.run_with(|_, _| panic!("revoked original must not submit"));
+    assert_eq!(pending.await, Err(PublishOnceError::Revoked));
+    let (_replacement, mut replacement_rx) = mpsc::channel::<Command>(1);
+    let (_current, observer) = tokio::sync::watch::channel(false);
+    assert_eq!(
+        handle
+            .submit(
+                topic(),
+                Bytes::new(),
+                RequestCancellation::new(observer, None)
+            )
+            .await,
+        Err(PublishOnceError::Closed)
+    );
+    assert!(replacement_rx.try_recv().is_err());
+    assert_eq!(slots.available_permits(), 1);
+}
+
+#[tokio::test]
 async fn retirement_after_publication_admission_does_not_retract_submission() {
     let (tx, mut rx) = mpsc::channel(1);
     let slots = Arc::new(Semaphore::new(1));

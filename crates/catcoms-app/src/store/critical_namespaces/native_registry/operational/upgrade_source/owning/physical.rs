@@ -1471,6 +1471,12 @@ impl MetadataWork {
             mount: self.physical.current()?.capture_cached_physical_negative(),
         })
     }
+    pub(in crate::store::critical_namespaces::native_registry) fn capture_source_work(
+        &self,
+    ) -> Result<SourceWork, AppError> {
+        self.physical.capture_source().ok_or_else(refused)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn is_live_cached(&self) -> bool {
         self.physical.open_for_custody()
     }

@@ -59,7 +59,6 @@ pub use critical_namespaces::NativeTextJoinedRegistryRowData;
 pub use critical_namespaces::NativeTextJoinedRequestPreparation;
 pub use critical_namespaces::NativeTextJoinedRowSelection;
 pub use critical_namespaces::NativeTextJoinedRuntime;
-pub use critical_namespaces::NativeTextJoinedSelectionPreparation;
 pub use critical_namespaces::NativeTextJoinedVaultUpgrade;
 pub use critical_namespaces::{
     ActivatedCheckpointJoin, ArchiveBootstrapCatalogPolicy, ArchiveFounderBegin,
@@ -100,6 +99,10 @@ pub use critical_namespaces::{
 };
 pub use critical_namespaces::{
     NativeTextJoinedMemberFinalPreparation, NativeTextJoinedMemberSaveJob,
+};
+pub use critical_namespaces::{
+    NativeTextJoinedMemberPublication, NativeTextJoinedMemberPublicationReceipt,
+    NativeTextJoinedSelectionPreparation,
 };
 pub(crate) use mounted::LegacyStoreCustody;
 pub use mounted::{MountedLeaseRefusal, MountedLeaseRefusalKind, MountedVault};
