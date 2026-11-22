@@ -180,6 +180,17 @@ async fn native_runtime_invite_join_request_requires_the_actual_signed_journal()
                     }
                     return;
                 }
+                if name == "text.add.raw-welcome.v2" {
+                    let raw_welcome =
+                        only_named(directory.path(), "text.add.sdk-entry.v2").with_file_name(name);
+                    let parked = raw_welcome.with_extension("test-parked");
+                    if present {
+                        std::fs::rename(&raw_welcome, &parked).unwrap();
+                    } else {
+                        std::fs::rename(&parked, &raw_welcome).unwrap();
+                    }
+                    return;
+                }
                 assert_eq!(name, "text.add.outcome.v2");
                 let outcome = only_named(directory.path(), "text.add.sdk-entry.v2")
                     .with_file_name("text.add.outcome.v2");
