@@ -1343,6 +1343,15 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     let changed = native_send_request(&window, &restored[0], 9, "Changed joined message");
     run(&queue).await;
     refused(changed.await.unwrap());
+    let fresh = native_send_request(&window, &restored[0], 10, "Message after restart");
+    run(&queue).await;
+    let fresh = found_value(fresh.await.unwrap());
+    assert_eq!(fresh["disposition"], "saved-local");
+    assert_eq!(fresh["ordinal"], "1");
+    assert_ne!(fresh["message_id"], saved["message_id"]);
+    let fixed_page = native_history_request(&window, &restored[0], "0", Some("1"), 8);
+    run(&queue).await;
+    assert_eq!(found_value(fixed_page.await.unwrap()), history);
     assert_eq!(
         std::fs::read(joiner_path.join("chat-critical-namespaces.joined-pin.index")).unwrap(),
         saved_pins

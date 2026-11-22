@@ -478,7 +478,7 @@ fn complete_original_welcome(native_joiner: bool) {
         .take_closed_recovered_node(&warm_prefix, &mut cold_inputs)
         .is_err());
     assert!(cold_inputs.is_some());
-    let cold_node = recovered
+    let mut cold_node = recovered
         .take_closed_recovered_node(&prefix, &mut cold_inputs)
         .unwrap();
     assert!(cold_inputs.is_none());
@@ -603,6 +603,26 @@ fn complete_original_welcome(native_joiner: bool) {
                 .encode(),
             action.encode()
         );
+        let restarted = Native::new();
+        let source = restarted.source.observe();
+        let member = restarted.cut(NativeChatKeyPurpose::MemberAction);
+        assert!(cold_node
+            .bind_recovered_member_source(&warm_prefix, &source, &member)
+            .is_err());
+        let sdk = restarted.cut(NativeChatKeyPurpose::JoinerWelcomeSdk);
+        assert!(cold_node
+            .bind_recovered_member_source(&prefix, &source, &sdk)
+            .is_err());
+        cold_node
+            .bind_recovered_member_source(&prefix, &source, &member)
+            .unwrap();
+        cold_node
+            .bind_recovered_member_source(&prefix, &source, &member)
+            .unwrap();
+        let old_member = joiner.cut(NativeChatKeyPurpose::MemberAction);
+        assert!(cold_node
+            .bind_recovered_member_source(&prefix, &original, &old_member)
+            .is_err());
     }
     drop(warm_view.revoker().close());
     assert!(joined_node.admit_member_save(&warm_plan).is_err());

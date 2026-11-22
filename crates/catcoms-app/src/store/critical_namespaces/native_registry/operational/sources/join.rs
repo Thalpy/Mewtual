@@ -42,7 +42,7 @@ use tokio::sync::watch;
 #[derive(Default)]
 pub(super) struct PendingJoin {
     state: Mutex<PendingJoinState>,
-    close: OnceLock<NativeChatSourceClose>,
+    close: Arc<OnceLock<NativeChatSourceClose>>,
 }
 
 #[derive(Default)]
@@ -58,6 +58,27 @@ impl PendingJoin {
             close.close();
         }
     }
+
+    fn ensure_native_owner(
+        &self,
+        state: &mut PendingJoinState,
+        command: &NativeTextSourceCommand,
+        control: &Arc<retirement::Control>,
+    ) -> Result<(), AppError> {
+        if state.owner.is_none() {
+            let owner =
+                NativeChatSourceOwner::for_trusted_source(&command.ui.command, control.clone())
+                    .map_err(|_| refused())?;
+            self.close
+                .set(owner.close_handle())
+                .map_err(|_| refused())?;
+            state.owner = Some(owner);
+            if !command.scope.is_open() {
+                self.close_keys();
+            }
+        }
+        Ok(())
+    }
 }
 pub(super) type MountedJoin<R> = Mutex<Option<MountedNode<R>>>;
 
@@ -65,6 +86,7 @@ pub(super) fn invoice<R: CryptoRngCore>() -> usize {
     2 * std::mem::size_of::<NativeTextJoinedRequestPreparation>()
         + 2 * std::mem::size_of::<NativeTextJoinedDelivery>()
         + std::mem::size_of::<PendingJoin>()
+        + std::mem::size_of::<OnceLock<NativeChatSourceClose>>() + 2 * std::mem::size_of::<usize>()
         + 2 * std::mem::size_of::<NativeTextJoinedInstallation<R>>()
         + 2 * std::mem::size_of::<NativeTextJoinedSelectionPreparation<R>>()
         + std::mem::size_of::<MountedJoin<R>>()
@@ -158,19 +180,7 @@ impl NativeTextJoinedRequestPreparation {
         }
         if pending.owner.is_none() {
             require_current()?;
-            let owner = NativeChatSourceOwner::for_trusted_source(
-                &self.command.ui.command,
-                self._control.clone(),
-            )
-            .map_err(|_| refused())?;
-            original
-                .close
-                .set(owner.close_handle())
-                .map_err(|_| refused())?;
-            pending.owner = Some(owner);
-            if !self.scope.is_open() {
-                original.close_keys();
-            }
+            original.ensure_native_owner(&mut pending, &self.command, &self._control)?;
             require_current()?;
         }
         let owner = pending.owner.as_ref().ok_or_else(refused)?;
@@ -617,7 +627,7 @@ struct JoinedRowSelection {
     member_outbox: MemberOutboxContextId,
     scope: Arc<Scope>,
     retired: AtomicBool,
-    keys: Option<NativeChatSourceClose>,
+    keys: Arc<OnceLock<NativeChatSourceClose>>,
     _metadata: Arc<retirement::Control>,
 }
 
@@ -657,7 +667,7 @@ impl NativeTextJoinedRowSelection {
     }
     pub fn close_original_cached(&self) {
         self.original.retired.store(true, Ordering::SeqCst);
-        if let Some(keys) = &self.original.keys {
+        if let Some(keys) = self.original.keys.get() {
             keys.close();
         }
     }
@@ -714,11 +724,22 @@ impl<R: CryptoRngCore> NativeTextSources<catcoms_net::MeshService, R> {
         if !authentication.is_for_original_vault(vault) {
             return Err(refused());
         }
-        runtime.select(row, name, data, &self.scope, None, &self.retirement)
+        runtime.select(
+            row,
+            name,
+            data,
+            &self.scope,
+            self.pending_join.close.clone(),
+            &self.retirement,
+        )
     }
 }
 
 impl<R: CryptoRngCore> MountedNode<R> {
+    fn registration_data(&self) -> Option<NativeTextJoinedRegistrationData> {
+        self.recovered
+            .or_else(|| self.registration.as_ref().map(|proof| proof.data()))
+    }
     fn matches_selection(&self, selection: &NativeTextJoinedRowSelection) -> bool {
         self.selection
             .as_ref()
@@ -743,7 +764,7 @@ impl<R: CryptoRngCore> MountedNode<R> {
         names: LocalNames,
         data: NativeTextJoinedRegistrationData,
         scope: &Arc<Scope>,
-        keys: Option<NativeChatSourceClose>,
+        keys: Arc<OnceLock<NativeChatSourceClose>>,
         control: &Arc<retirement::Control>,
     ) -> Result<NativeTextJoinedRowSelection, AppError> {
         let member_outbox = data.member_outbox_context_data()?.id();
@@ -795,7 +816,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             .pending
             .upgrade()
             .ok_or(Refusal::Unavailable)?;
-        let pending = original.state.try_lock().map_err(|_| Refusal::Busy)?;
+        let mut pending = original.state.try_lock().map_err(|_| Refusal::Busy)?;
         let mounted = self.mounted.upgrade().ok_or(Refusal::Unavailable)?;
         let mut slot = mounted.try_lock().map_err(|_| Refusal::Busy)?;
         let runtime = slot
@@ -803,18 +824,32 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             .filter(|runtime| runtime.matches_selection(selection))
             .ok_or(Refusal::Stale)?;
         let metadata = self.original.work.as_ref().ok_or(Refusal::Unavailable)?;
-        if let Some(receipt) = runtime.recovered {
+        let recovered = runtime.recovered;
+        if let Some(receipt) = recovered.filter(|_| runtime.member.is_none()) {
             let saved = metadata
                 .lookup_saved_joined_member(receipt, None, selection.original.row, &request, rng)
                 .map_err(|_| Refusal::Failed)?;
             self.original
                 .require_current(negative)
                 .map_err(|_| Refusal::Cancelled)?;
-            return saved
-                .map(|(action, ordinal)| V2MemberSaveOutcome::Saved { action, ordinal })
-                .ok_or(Refusal::Unavailable);
+            if let Some((action, ordinal)) = saved {
+                return Ok(V2MemberSaveOutcome::Saved { action, ordinal });
+            }
         }
-        let held = pending.io.as_ref().ok_or(Refusal::Unavailable)?;
+        if recovered.is_some() {
+            original
+                .ensure_native_owner(
+                    &mut pending,
+                    &self.original.command,
+                    &self.original._control,
+                )
+                .map_err(|_| Refusal::Unavailable)?;
+            if !selection.is_current_cached() {
+                original.close_keys();
+                return Err(Refusal::Stale);
+            }
+        }
+        let held = pending.io.as_ref();
         let owner = pending.owner.as_ref().ok_or(Refusal::Unavailable)?;
         let native = owner.observe();
         let mut cut = owner
@@ -823,22 +858,36 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 NativeChatKeyPurpose::MemberAction,
             )
             .map_err(|_| Refusal::Unavailable)?;
+        let data = runtime.registration_data().ok_or(Refusal::Unavailable)?;
         let MountedNode {
             member,
             node,
             registration,
             ..
         } = runtime;
-        let proof = registration.as_deref().ok_or(Refusal::Unavailable)?;
+        let proof = registration.as_deref();
         let node = node.as_mut().ok_or(Refusal::Unavailable)?;
         let result = metadata.with_registered_joined_member(
-            proof.data(),
-            Some(proof),
+            data,
+            proof,
             selection.original.row,
             |layout, store| {
-                let (prefix, view) = held
-                    .borrow_warm_member_prefix(store)
+                let recovered_prefix = recovered
+                    .map(|data| store.capture_recovered_member_prefix(data))
+                    .transpose()
                     .map_err(|_| Refusal::Unavailable)?;
+                let (prefix, view) = match &recovered_prefix {
+                    Some(original) => {
+                        let (prefix, view) = original.member_parts();
+                        node.bind_recovered_member_source(prefix, &native, &cut)
+                            .map_err(|_| Refusal::Unavailable)?;
+                        (prefix, view)
+                    }
+                    None => held
+                        .ok_or(Refusal::Unavailable)?
+                        .borrow_warm_member_prefix(store)
+                        .map_err(|_| Refusal::Unavailable)?,
+                };
                 if member.is_none() {
                     *member = Some(
                         JoinedMemberLane::new(store, selection.clone())
@@ -859,7 +908,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 member
                     .as_mut()
                     .ok_or(Refusal::Unavailable)?
-                    .prepare_member_save(layout, request, source, proof.data(), negative, rng)
+                    .prepare_member_save(layout, request, source, data, negative, rng)
             },
         )?;
         self.original
@@ -893,14 +942,13 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 .as_ref()
                 .filter(|runtime| runtime.matches_selection(&selection))
                 .ok_or(Refusal::Stale)?;
-            let proof = runtime
-                .registration
-                .as_deref()
+            let data = runtime
+                .registration_data()
                 .filter(|_| runtime.member.is_some())
                 .ok_or(Refusal::Stale)?;
             let metadata = self.original.work.as_ref().ok_or(Refusal::Unavailable)?;
             if runtime
-                .observe_selected(metadata, proof.data())
+                .observe_selected(metadata, data)
                 .map_err(|_| Refusal::Unavailable)?
                 .0
                 != selection.original.row
@@ -1098,7 +1146,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             name,
             data,
             &self.original.scope,
-            pending.close.get().cloned(),
+            pending.close.clone(),
             &self.original._control,
         )
     }

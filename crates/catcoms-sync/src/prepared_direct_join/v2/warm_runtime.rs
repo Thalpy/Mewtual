@@ -96,10 +96,40 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
             .ordinary_member_signer_data(&self.node.registry_instance())
     }
 
+    /// Arm the restored graph only under its exact selected Core Admission
+    /// and the new, currently authenticated host's original native Source.
+    /// The native host must have restored its own registered physical row.
+    pub fn bind_recovered_member_source(
+        &mut self,
+        prefix: &PreparedV2JoinedPrefix,
+        original: &NativeChatSourceObservation,
+        cut: &NativeChatPreparedKeyCut,
+    ) -> Result<(), SyncError> {
+        let expected = prefix
+            .selected_member_verifier()?
+            .admission(self.admission_id)
+            .map_err(|_| SyncError::JoinRejected)?;
+        if !self.was_recovered_data() || !self.admission.same_original(&expected) {
+            return Err(SyncError::JoinRejected);
+        }
+        self.selected_join_data()?;
+        cut.preflight(original, NativeChatKeyPurpose::MemberAction)
+            .map_err(|_| SyncError::JoinRejected)?;
+        if let Some(bound) = self.native_origin.as_ref() {
+            return bound
+                .same_original(original)
+                .then_some(())
+                .ok_or(SyncError::JoinRejected);
+        }
+        self.native_origin = Some(original.clone());
+        Ok(())
+    }
+
     /// Sign using this warm native joiner's original device and Source. The
     /// caller must hold the mounted prefix/source custody and keep its native
     /// cut and ends outside the enclosing writers. No historical graph can
-    /// manufacture the original native issuer.
+    /// manufacture the original native issuer. A restored graph needs its own
+    /// separately bound native Source before it can use this cut.
     pub fn sign_member_action_native<'a>(
         &self,
         inputs: &V2MemberDraftInputs,

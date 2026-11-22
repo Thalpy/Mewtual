@@ -18,6 +18,7 @@ const SOURCE_ID_DOMAIN: &str = "catcoms/private-chat-v2-native-pending-source-id
 mod registration;
 mod welcome;
 pub(in crate::store) use registration::JoinedRegistrationDependency;
+pub(in crate::store) use welcome::RecoveredMemberPrefix;
 
 fn first_join_limits() -> Result<DirectJoinLimits, AppError> {
     DirectJoinLimits::new(
@@ -256,6 +257,25 @@ std::thread_local! {
 }
 
 impl ServerStore {
+    pub(in crate::store) fn capture_recovered_member_prefix(
+        &self,
+        expected: NativeTextJoinedRegistrationData,
+    ) -> Result<RecoveredMemberPrefix, AppError> {
+        if self.recovered_join_registration_data()? != Some(expected) {
+            return Err(denied());
+        }
+        let slot = self.joined_pin_index.lock().map_err(|_| denied())?;
+        let selected = slot.as_ref().ok_or_else(denied)?;
+        selected.require(self)?;
+        let data = selected
+            .pending
+            .as_ref()
+            .and_then(|pending| pending.welcome.as_ref())
+            .ok_or_else(denied)?
+            .capture_member_prefix()?;
+        selected.require(self)?;
+        Ok(data)
+    }
     pub(in crate::store) fn cover_accepted_first_join(
         &self,
         pending: &mut Option<JoinedPendingIo>,

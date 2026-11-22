@@ -87,6 +87,10 @@ impl std::fmt::Debug for V2AuthenticatedAdmission {
     }
 }
 impl V2AuthenticatedAdmission {
+    pub fn same_original(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.core, &other.core)
+    }
+
     pub fn admission_data(&self) -> &AdmissionBody {
         &self.core.body
     }

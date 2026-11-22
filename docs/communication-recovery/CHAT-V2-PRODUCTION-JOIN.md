@@ -407,10 +407,11 @@ outbox view. Peer catch-up and shared history projection remain open.
 The warm joined node can draw and sign an ordinary action through the original
 native Joiner Source. Its signing cut requires the ordinary member purpose and
 retains the one result in the original Core plan. An independently reopened
-graph carries no warm native key issuer. The native save driver retains the
-action in the shared outbox and issues its save-source end under the same
-joined fence. The desktop can recover an exact saved request after restart.
-Fresh ordinary authoring after restart still requires a restored native Source.
+graph binds a new native Source only after the original registered row and the
+exact independently replayed Core Admission have been proved under a fresh
+authenticated desktop session. The same save driver retains the action in the
+shared outbox and issues its save-source end under the joined fence. A saved
+request can be recovered before the restored Source draws or signs anything.
 
 The actual joined fence orders every transition/removal against final issuance.
 An admission that wins retains its original end through IO; removal that wins

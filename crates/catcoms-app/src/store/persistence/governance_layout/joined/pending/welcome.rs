@@ -18,6 +18,7 @@ use catcoms_sync::{
 };
 use critical_namespaces::joined_pin::pending::SelectedJoinData;
 use critical_namespaces::joined_pin::welcome as codec;
+use std::sync::Arc;
 
 pub(super) const ENTRY: &str = "chat-critical-namespaces.joined-welcome-entry.bin";
 pub(super) const OUTCOME: &str = "chat-critical-namespaces.joined-welcome-outcome.bin";
@@ -240,7 +241,17 @@ pub(super) struct RecoveredWelcome {
 struct ClosedOutcome {
     file: OpenedArchiveObject,
     graph: RecoveredV2JoinedOutcome,
-    selection: JoinedCore,
+    selection: Arc<JoinedCore>,
+}
+
+/// Paid capture of the exact independently replayed cold prefix. It retains
+/// no physical graph, transport, or native key owner.
+pub(in crate::store) struct RecoveredMemberPrefix(Arc<JoinedCore>);
+
+impl RecoveredMemberPrefix {
+    pub(in crate::store) fn member_parts(&self) -> (&PreparedV2JoinedPrefix, &ProjectionGroupView) {
+        (&self.0.core, &self.0._view)
+    }
 }
 
 struct JoinedCore {
@@ -406,7 +417,7 @@ impl ClosedOutcome {
         Ok(Self {
             file,
             graph,
-            selection,
+            selection: Arc::new(selection),
         })
     }
 }
@@ -476,9 +487,20 @@ impl RecoveredWelcome {
 
     pub(super) fn finish_core(&mut self) -> Result<(), AppError> {
         if let Some(outcome) = self.outcome.as_mut() {
-            outcome.selection.finish()?;
+            Arc::get_mut(&mut outcome.selection)
+                .ok_or_else(denied)?
+                .finish()?;
         }
         Ok(())
+    }
+
+    pub(super) fn capture_member_prefix(&self) -> Result<RecoveredMemberPrefix, AppError> {
+        let outcome = self
+            .outcome
+            .as_ref()
+            .filter(|outcome| outcome.selection.retired.is_some())
+            .ok_or_else(denied)?;
+        Ok(RecoveredMemberPrefix(outcome.selection.clone()))
     }
 
     pub(super) fn outcome_data(

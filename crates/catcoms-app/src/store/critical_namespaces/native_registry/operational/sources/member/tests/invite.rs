@@ -559,6 +559,33 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 .unwrap(),
             crate::store::V2MemberSaveOutcome::Saved { action, ordinal }
         );
+        let mut next = request();
+        next.token = [143; 32];
+        let next_token = next.token;
+        assert_eq!(
+            recovered_row()
+                .prepare_member_save(&selection, next, &fresh, &mut history_rng)
+                .unwrap(),
+            crate::store::V2MemberSaveOutcome::Ready
+        );
+        let mut final_work = Some(
+            recovered_row()
+                .finish_member_admission(selection.clone(), next_token, &fresh)
+                .unwrap(),
+        );
+        let job = crate::store::NativeTextJoinedMemberFinalPreparation::try_admit_member_save(
+            &mut final_work,
+            &fresh,
+            crate::store::MemberSaveNativeAdmission::new((), fresh.clone()),
+        )
+        .unwrap();
+        assert_eq!(job.run(), crate::store::MemberSaveJobReport::SavedLocal);
+        assert_eq!(
+            recovered_row()
+                .lookup_saved_member(&selection, &request(), &fresh, &mut history_rng)
+                .unwrap(),
+            saved
+        );
     } else {
         assert!(!outbox_path.exists());
         std::fs::create_dir(&outbox_path).unwrap();
