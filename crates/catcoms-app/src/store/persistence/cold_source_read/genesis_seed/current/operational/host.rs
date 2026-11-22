@@ -28,6 +28,7 @@ use recovery::PromotionRecovery;
 mod lookup;
 use lookup::PendingTokenLookup;
 mod create;
+mod governed_add;
 // ORDINARY-member lane (founder-as-member vertical): general verifier + signing plan,
 // never the founder A/I/S/B certification lane. Mutually exclusive with founder Create.
 mod member;

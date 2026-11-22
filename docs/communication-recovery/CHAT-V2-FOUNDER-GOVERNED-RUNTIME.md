@@ -216,6 +216,13 @@ without a fallible operation between the two moves. A refused or occupied
 destination leaves both owners in place. The new owner can lend the original
 genesis seed for Root's existing association check without exposing the SDK.
 
+App can reserve the native Add candidate's complete buffer and SDK metadata
+inventory from the mounted shared pool before committing a reservation. The
+SDK admission carries the real debit until its candidate ownership drains.
+The outcome codec shares the same snapshot cap. The SDK still checks the
+actual tree at entry. Root must acquire this payment before making durable
+progress on an Add request.
+
 An original physical Current guard must cover the exact request and parent,
 then the SAME SDK outcome, unsigned preimage, raw Header, governing history and
 response before selecting head2. A decoder or namespace4 descriptor cannot

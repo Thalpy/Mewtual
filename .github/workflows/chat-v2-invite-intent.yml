@@ -39,6 +39,9 @@ on:
       - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current.rs'
       - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/settlement.rs'
       - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/text.rs'
+      - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host.rs'
+      - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/governed_add.rs'
+      - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/governed_add/**'
       - 'crates/catcoms-sync/src/owner_v2/founder/bootstrap_source/genesis_seed/invite/**'
       - 'crates/catcoms-sync/src/owner_v2/founder/bootstrap_source/genesis_seed/invite.rs'
       - 'crates/catcoms-rt/src/native_chat_key.rs'
@@ -104,6 +107,8 @@ jobs:
         run: python .github/scripts/check-chat-v2-invite-intent.py add-fence
       - name: Check SDK entry binding to the exact covered fence
         run: python .github/scripts/check-chat-v2-invite-intent.py add-sdk-entry
+      - name: Check the governed Add SDK candidate debit
+        run: python .github/scripts/check-chat-v2-invite-intent.py add-sdk-budget
       - name: Check the sealed outcome and original SDK entry binding
         run: python .github/scripts/check-chat-v2-invite-intent.py add-outcome
       - name: Check the existing authenticated scratch controls

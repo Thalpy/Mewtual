@@ -237,6 +237,8 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             negative,
         )?;
         let store = layout.checked_store()?;
+        let sdk_admission = super::governed_add::prepare_sdk_admission(store)?;
+        assert!(sdk_admission.supports_routing_data());
         let owner = self.owner.borrow_current()?;
         let original_seed = owner.source().seed().observe_original_seed_data();
         let mut parent = PreparedV2TextParentCapture::prepare(store, owner.source())?;

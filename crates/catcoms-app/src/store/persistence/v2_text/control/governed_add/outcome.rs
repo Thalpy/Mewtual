@@ -6,6 +6,7 @@ use super::*;
 use crate::store::critical_namespaces::read_pool::CatalogReadReservation;
 use crate::store::ServerStore;
 use catcoms_mls::group::text_current_add::MAX_TEXT_ADD_ROUTING_PLAIN_BYTES;
+use catcoms_mls::persist::text_current_add::TextCurrentAddLimits;
 use catcoms_replication::chat::{
     join_bindings::MAX_JOIN_PAYLOAD_BYTES, owner_header::MAX_HEADER_SEMANTIC_BYTES,
     owner_profile::MAX_ADMISSION_BYTES, owner_state::MAX_STATE_BYTES,
@@ -19,7 +20,7 @@ const ENTRY_DOMAIN: &str = "catcoms/private-chat-text-governed-add-outcome-paren
 const VERSION: u16 = 2;
 // Provider snapshots have their own bounded family. None of these limits
 // extends the original Head1, Archive1, or WAL grammars.
-const MAX_SNAPSHOT: usize = 8 * 1024 * 1024;
+const MAX_SNAPSHOT: usize = TextCurrentAddLimits::governed_text_v2().max_snapshot_bytes;
 const BODY_CAPS: [usize; 8] = [
     MAX_JOIN_PAYLOAD_BYTES, // Commit
     MAX_JOIN_PAYLOAD_BYTES, // Welcome

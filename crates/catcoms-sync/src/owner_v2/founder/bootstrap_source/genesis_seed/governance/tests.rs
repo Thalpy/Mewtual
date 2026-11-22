@@ -15,14 +15,12 @@ use catcoms_replication::chat::V2HostSelectionExpectation;
 use catcoms_rt::{
     ManualClock, MemNetwork, NativeChatSourceOwner, NativeChatUiBinding, NativeChatUiSessionOwner,
 };
-use openmls_memory_storage::owner_restore::TextAddOperationLimits;
 use rand_chacha::ChaCha20Rng;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::SeqCst};
 
 type Node = PreparedV2FounderGovernanceNode<MemNetwork, ChaCha20Rng>;
 const NOW: u64 = 1_800_000_000_000;
 const RAW: usize = 2 * 1024 * 1024;
-const WORK: usize = 2 * 1024 * 1024 * 1024 - 1;
 
 mod native_stage;
 mod signed_request;
@@ -85,27 +83,7 @@ impl Native {
 struct Fee(Arc<AtomicUsize>);
 impl TextCurrentAddReservation for Fee {
     fn limits(&self) -> TextCurrentAddLimits {
-        TextCurrentAddLimits {
-            max_snapshot_bytes: 4 * RAW,
-            max_provider_backing_bytes: RAW,
-            max_provider_payload_bytes: 8 * RAW,
-            prepare_work: WORK,
-            package_typed_bytes: RAW,
-            package_work: WORK,
-            restore_typed_bytes: RAW,
-            restore_work: WORK,
-            operation: TextAddOperationLimits {
-                max_typed_bytes: RAW,
-                max_serialized_bytes: 16 * RAW,
-                max_provider_bytes: 16 * RAW,
-                max_work: WORK,
-            },
-            sdk_typed_bytes: 32 * RAW,
-            sdk_work: WORK,
-            output_bytes: 4 * RAW,
-            routing_typed_bytes: catcoms_mls::group::text_current_add::TEXT_ADD_ROUTING_TYPED_BYTES,
-            routing_work: catcoms_mls::group::text_current_add::TEXT_ADD_ROUTING_WORK,
-        }
+        TextCurrentAddLimits::governed_text_v2()
     }
 }
 impl Drop for Fee {
