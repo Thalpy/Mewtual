@@ -13,7 +13,7 @@ pub(in crate::store) use lifecycle::preparation::VerifiedColdCatalog as Verified
 pub(in crate::store) use lifecycle::wal::{
     Decision as NativeIndex3WalDecision, VerifiedWal as VerifiedNativeIndex3Wal,
 };
-pub(in crate::store) use lifecycle::VerifiedGovernanceNative;
+pub(in crate::store) use lifecycle::{verify_joined_pin_parent, VerifiedGovernanceNative};
 // Named full invoice shared with the closed physical reader. Publishing its
 // size grants no policy, reserve, handler or physical/native authority.
 pub(in crate::store) const NATIVE_INDEX3_FULL_FEE: usize = lifecycle::preparation::PREPARATION_FEE;

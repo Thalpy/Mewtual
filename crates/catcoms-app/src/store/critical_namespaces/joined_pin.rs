@@ -14,6 +14,7 @@ use catcoms_rt::CryptoRngCore;
 use catcoms_wire::{Decoder, Encoder};
 use zeroize::Zeroizing;
 
+pub(in crate::store) mod declaration;
 pub(super) mod namespace;
 
 const TAG: &[u8] = b"catcoms/private-chat-v2-joined-anchor-pin/v1\0";
@@ -23,14 +24,17 @@ const OVERHEAD: usize = 4 + TAG.len() + 2 + 3 * (4 + 32) + 4 + 40;
 const MAX_BYTES: usize = OVERHEAD + MAX_JOIN_BINDING_BYTES;
 
 pub(super) struct JoinedAnchorPin {
-    pub(super) anchor: GenesisAnchorBindingData,
-    pub(super) accepted_invite: [u8; 32],
-    pub(super) original_pending: [u8; 32],
+    accepted_invite: SignedInviteBindingData,
+    original_pending: [u8; 32],
     layout: CurrentLayoutData,
     id: V2GroupPinId,
 }
 
 impl JoinedAnchorPin {
+    pub(super) fn anchor_data(&self) -> &GenesisAnchorBindingData {
+        &self.accepted_invite.spec_data().anchor
+    }
+
     pub(super) fn pending_context_data(&self) -> catcoms_sync::V2PendingJoinContextData {
         catcoms_sync::V2PendingJoinContextData {
             vault: self.layout.vault,
@@ -38,6 +42,22 @@ impl JoinedAnchorPin {
             original_pending: self.original_pending,
             pin: *self.id.as_bytes(),
         }
+    }
+
+    pub(super) fn open_pending_source(
+        &self,
+        key: &[u8; 32],
+        sealed: &catcoms_sync::SealedV2PendingJoinSource,
+        limits: catcoms_sync::DirectJoinLimits,
+    ) -> Result<catcoms_sync::RecoveredV2PendingJoinSource, AppError> {
+        catcoms_sync::RecoveredV2PendingJoinSource::open(
+            sealed,
+            key,
+            self.pending_context_data(),
+            &self.accepted_invite,
+            limits,
+        )
+        .map_err(|_| refused())
     }
 }
 
@@ -117,8 +137,7 @@ pub(super) fn open_original(
     let invite = SignedInviteBindingData::decode(invite).map_err(|_| refused())?;
     require_accepted(&invite, accepted_anchor)?;
     Ok(JoinedAnchorPin {
-        accepted_invite: invite.id_data(),
-        anchor: invite.spec_data().anchor.clone(),
+        accepted_invite: invite,
         original_pending,
         layout,
         id: expected,

@@ -33,7 +33,7 @@ pub(in crate::store) mod current_group;
 pub(in crate::store) mod current_layout;
 pub(in crate::store) mod governance_layout;
 pub(in crate::store) mod governance_namespace_codec;
-mod joined_pin;
+pub(in crate::store) mod joined_pin;
 // Namespace5: the ordinary-member outbox layout. Its descriptor codec is DATA only; the
 // configured handler in `member_outbox_layout` is the only physical interpreter.
 pub(in crate::store) mod member_outbox_layout;

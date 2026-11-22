@@ -30,7 +30,7 @@ COHORTS = {
     "add-response": ("catcoms-app", "governed_add_response_", 1),
     "add-archive": ("catcoms-app", "governed_add_archive_", 1),
     "add-head2": ("catcoms-app", "governed_add_head2_", 1),
-    "joined-pin": ("catcoms-app", "governed_joined_pin_", 2),
+    "joined-pin": ("catcoms-app", "governed_joined_pin_", 3),
     "add-source-close": ("catcoms-sync", "governed_add_whole_source_retirement_", 1),
     "add-ui-lock": ("catcoms-sync", "governed_add_ui_retirement_", 1),
     "source-retirement": ("catcoms-app", "operational::sources::retirement::tests::", 11),

@@ -15,7 +15,9 @@ mod metadata;
 mod migration;
 mod network;
 pub(super) mod preparation;
-pub(in crate::store) use preparation::{verify_governance_native, VerifiedGovernanceNative};
+pub(in crate::store) use preparation::{
+    verify_governance_native, verify_joined_pin_parent, VerifiedGovernanceNative,
+};
 
 /// Finish only the actual constructor-private native opening observation.
 /// Caller keeps any new declaration witness overlapping these same files

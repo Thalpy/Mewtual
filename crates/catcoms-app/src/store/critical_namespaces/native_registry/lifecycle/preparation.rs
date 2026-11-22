@@ -322,12 +322,47 @@ pub(in crate::store) fn verify_governance_native(
     original_catalog: &[u8],
     expected: Option<crate::store::critical_namespaces::governance_layout::codec::NativeTupleData>,
 ) -> Result<VerifiedGovernanceNative, AppError> {
+    verify_declaration_parent(store, inventory, original_catalog, expected, None)
+}
+
+pub(in crate::store) fn verify_joined_pin_parent(
+    store: &crate::store::ServerStore,
+    inventory: crate::store::persistence::native_registry::lifecycle::governed::NativeGovernanceInventory,
+    original_catalog: &[u8],
+    governance_marker: &[u8],
+) -> Result<VerifiedGovernanceNative, AppError> {
+    verify_declaration_parent(
+        store,
+        inventory,
+        original_catalog,
+        None,
+        Some(governance_marker),
+    )
+}
+
+fn verify_declaration_parent(
+    store: &crate::store::ServerStore,
+    inventory: crate::store::persistence::native_registry::lifecycle::governed::NativeGovernanceInventory,
+    original_catalog: &[u8],
+    expected: Option<crate::store::critical_namespaces::governance_layout::codec::NativeTupleData>,
+    governance_marker: Option<&[u8]>,
+) -> Result<VerifiedGovernanceNative, AppError> {
     inventory.require_leaves(store)?;
     let layout = inventory.layout(store)?;
     let original = NativeCapabilityData::for_current_data(layout, &layout.encode_data()?)?;
     let key = Zeroizing::new(store.keys.db_key()?);
     let plain = Zeroizing::new(unseal(&key, &unframe(original_catalog)?)?);
-    let parsed = grammar::parse_lifecycle_native_registry_layout(&plain, &original.vault, true)?;
+    let parsed = if let Some(marker) = governance_marker {
+        let parsed = grammar::parse_governed_native_registry_layout(&plain, &original.vault, true)?;
+        crate::store::critical_namespaces::governance_layout::codec::require_marker(
+            &key,
+            parsed.governance.ok_or_else(refused)?,
+            marker,
+        )?;
+        parsed
+    } else {
+        grammar::parse_lifecycle_native_registry_layout(&plain, &original.vault, true)?
+    };
     if parsed.member_outbox.is_none() || parsed.count != 0 {
         return Err(refused());
     }

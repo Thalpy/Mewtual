@@ -133,7 +133,10 @@ fn native_governance_same_owner_warm_constructor_and_cold_metadata_roundtrip() {
 
 #[test]
 fn governed_joined_pin_catalog_inserts_only_six_over_actual_governed_native() {
-    use crate::store::critical_namespaces::joined_pin::namespace;
+    use crate::store::critical_namespaces::joined_pin::{
+        declaration::{AuthenticatedSeed, DeclarationLeaves, PreparedDeclaration},
+        namespace,
+    };
     let dir = tempfile::tempdir().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(0xc409);
     let mut plan = original(dir.path(), &mut rng).prepare_governance().unwrap();
@@ -163,10 +166,104 @@ fn governed_joined_pin_catalog_inserts_only_six_over_actual_governed_native() {
         prior.native_registry_payload
     );
     assert!(catalog::successor(&prior.summary([0; 32]), &joined.summary([1; 32])).is_err());
+    let key = store.keys.db_key().unwrap();
+    let layout = prior.current_layout.unwrap();
+    let governance_marker = fs::read(
+        dir.path()
+            .join(ARCHIVE_BOOTSTRAP_ROOT)
+            .join(governance::GOVERNANCE_MARKER),
+    )
+    .unwrap();
+    let [native_index, native_marker, outbox_marker] = leaves(dir.path());
+    let original_leaves = DeclarationLeaves::from_frames(
+        &governance_marker,
+        &outbox_marker,
+        &native_marker,
+        &native_index,
+    )
+    .unwrap();
+    let prepared =
+        PreparedDeclaration::prepare(&key, &selected, layout, original_leaves, &mut rng).unwrap();
+    let seed = AuthenticatedSeed::open(&key, &prepared.seed).unwrap();
+    let reopened = seed.validate(&key, layout, original_leaves).unwrap();
+    assert_eq!(reopened.original, selected);
+    assert_eq!(reopened.candidate, prepared.candidate.as_slice());
+    let reopened_plain =
+        crate::store::unseal(&key, &crate::store::unframe(reopened.candidate).unwrap()).unwrap();
+    assert_eq!(reopened_plain, successor.as_slice());
+    let mut changed_index = native_index.clone();
+    changed_index[0] ^= 1;
+    let changed_leaves = DeclarationLeaves::from_frames(
+        &governance_marker,
+        &outbox_marker,
+        &native_marker,
+        &changed_index,
+    )
+    .unwrap();
+    assert!(seed.validate(&key, layout, changed_leaves).is_err());
+    let mut other_layout = layout;
+    other_layout.root[0] ^= 1;
+    assert!(seed.validate(&key, other_layout, original_leaves).is_err());
+    assert!(AuthenticatedSeed::open(&key, &prepared.seed[..prepared.seed.len() - 1]).is_err());
+    assert!(PreparedDeclaration::prepare(
+        &key,
+        &prepared.candidate,
+        layout,
+        original_leaves,
+        &mut NeverRng,
+    )
+    .is_err());
     assert_eq!(
         fs::read(dir.path().join(Slot::Current.name())).unwrap(),
         selected
     );
+}
+
+#[test]
+fn governed_joined_pin_stage_holds_its_first_claim_and_older_openers_preserve_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc40a);
+    let mut plan = original(dir.path(), &mut rng).prepare_governance().unwrap();
+    plan.retry(&mut rng).unwrap();
+    let store = actual(&plan);
+    let current = dir.path().join(Slot::Current.name());
+    let claim = dir.path().join(governance::GOVERNANCE_SEED);
+    let stage = dir.path().join(Slot::Stage.name());
+    let selected = fs::read(&current).unwrap();
+    let mut declaration = store.prepare_joined_pin_declaration(&mut rng).unwrap();
+    assert!(!claim.exists() && !stage.exists());
+    declaration.stage(store).unwrap();
+    let first_claim = fs::read(&claim).unwrap();
+    let first_stage = fs::read(&stage).unwrap();
+    declaration.stage(store).unwrap();
+    assert_eq!(fs::read(&claim).unwrap(), first_claim);
+    assert_eq!(fs::read(&stage).unwrap(), first_stage);
+    assert_eq!(fs::read(&current).unwrap(), selected);
+
+    let original_stage = dir.path().join("held-joined-stage");
+    fs::rename(&stage, &original_stage).unwrap();
+    fs::write(&stage, &first_stage).unwrap();
+    assert!(declaration.stage(store).is_err());
+    assert_eq!(fs::read(&stage).unwrap(), first_stage);
+    fs::remove_file(&stage).unwrap();
+    fs::rename(&original_stage, &stage).unwrap();
+    declaration.stage(store).unwrap();
+    drop(declaration);
+    drop(plan);
+    assert!(
+        NativeTextGovernedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy())
+            .is_err()
+    );
+    assert_eq!(fs::read(&claim).unwrap(), first_claim);
+    assert_eq!(fs::read(&stage).unwrap(), first_stage);
+    assert_eq!(fs::read(&current).unwrap(), selected);
+
+    // A positive baseline confirms the refusal came from declaration custody.
+    fs::remove_file(&claim).unwrap();
+    fs::remove_file(&stage).unwrap();
+    let old = NativeTextGovernedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy())
+        .unwrap();
+    assert_eq!(old.row_count_data().unwrap(), 0);
 }
 
 #[test]
