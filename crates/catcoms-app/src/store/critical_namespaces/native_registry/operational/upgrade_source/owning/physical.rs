@@ -168,6 +168,49 @@ impl Physical {
             .recovered_join_registration_data()
     }
 
+    pub(super) fn require_registered_native_join(
+        &self,
+        data: crate::store::NativeTextJoinedRegistrationData,
+    ) -> Result<(), AppError> {
+        let cell = self.cell.try_lock().map_err(|_| refused())?;
+        cell.require_idle()?;
+        self.handler.require_idle_cached()?;
+        if !self.handler.uses_joined_pin_layout() {
+            return Err(refused());
+        }
+        let store = self.current()?.checked_store()?;
+        let inventory =
+            UpgradeInventory::capture(store, self.handler.debit(), self.handler.pool())?;
+        super::super::super::super::lifecycle::preparation::require_registered_native_join(
+            store, &inventory, data,
+        )?;
+        if store.recovered_join_registration_data()? != Some(data) {
+            return Err(refused());
+        }
+        inventory.require(store)
+    }
+
+    pub(super) fn prepare_recovered_native_join_tcp(
+        &self,
+        data: &crate::store::NativeTextJoinedRegistrationData,
+    ) -> Result<(Zeroizing<[u8; 32]>, catcoms_net::NativeTcpPreparation), AppError> {
+        use super::super::super::governed::JoinFramePayment;
+        let store = self.current()?.checked_store()?;
+        let (mount, fee) =
+            self.joined_exchange_resources(catcoms_net::NATIVE_TCP_LIFETIME_BYTES)?;
+        let seed = store.recovered_join_transport_seed(data)?;
+        if mount.is_cancelled() {
+            return Err(refused());
+        }
+        // The producer is still the unique pre-exposure physical owner. The
+        // actor retains exclusion without cloning its mutable startup owner.
+        let lease = store._session.retain_for_physical_work();
+        Ok((
+            seed,
+            catcoms_net::NativeTcpPreparation::new(lease, Arc::new(JoinFramePayment { _fee: fee })),
+        ))
+    }
+
     pub(super) fn copy_selected_governing_proof(
         &self,
         pending: Option<&crate::store::persistence::governance_layout::joined::JoinedPendingIo>,

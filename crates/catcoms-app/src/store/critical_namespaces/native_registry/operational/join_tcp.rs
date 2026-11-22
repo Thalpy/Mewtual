@@ -1,10 +1,13 @@
 //! The original reserved TCP actor temporarily belongs to one invitation job.
+use super::sources::NativeTextSourceRetirementRefusal;
 use super::*;
 use catcoms_net::{MeshService, NativeTcpPreparation};
-use catcoms_rt::MeshTransport;
+use catcoms_rt::{MeshTransport, PeerId};
+use std::sync::Mutex;
+use zeroize::Zeroizing;
 
 #[derive(Default)]
-pub(in super::super) struct Transport {
+pub(super) struct Transport {
     attempt: Mutex<Option<Attempt>>,
 }
 
@@ -31,9 +34,8 @@ pub(super) struct Loan {
 impl Transport {
     pub(super) fn checkout(
         self: &Arc<Self>,
-        metadata: &MetadataWork,
-        pending: &JoinedPendingIo,
         local: (PeerId, u16),
+        prepare: impl FnOnce() -> Result<(Zeroizing<[u8; 32]>, NativeTcpPreparation), AppError>,
         require_current: impl Fn() -> Result<(), AppError>,
     ) -> Result<Loan, AppError> {
         let retired = {
@@ -51,7 +53,7 @@ impl Transport {
 
         let mut slot = self.attempt.try_lock().map_err(|_| refused())?;
         if slot.is_none() {
-            let (seed, original) = metadata.prepare_join_tcp(pending)?;
+            let (seed, original) = prepare()?;
             let key = catcoms_net::keypair_from_seed(*seed).map_err(|_| refused())?;
             let (peer, port) = local;
             let listen = [
@@ -93,7 +95,7 @@ impl Transport {
         })
     }
 
-    pub(in super::super) fn try_retire(&self) -> Result<bool, NativeTextSourceRetirementRefusal> {
+    pub(super) fn try_retire(&self) -> Result<bool, NativeTextSourceRetirementRefusal> {
         use NativeTextSourceRetirementRefusal as Error;
         let (service, drain) = {
             let mut slot = match self.attempt.try_lock() {

@@ -393,6 +393,24 @@ async fn mounted_join_fixture(recover_stage: bool) {
         Some(local_transport)
     );
     assert_eq!(std::fs::read(&path).unwrap(), ciphertext);
+    let (foreign, _) = catcoms_net::MeshService::new_tcp(None, &[]).unwrap();
+    let cold = match cold.bind_recovered_join_runtime(
+        foreign,
+        rng.clone(),
+        Box::new(catcoms_rt::SystemClock),
+    ) {
+        Err((original, _)) => original,
+        Ok(_) => panic!("a foreign TCP actor cannot replace the covered joiner identity"),
+    };
+    let mut reopened = cold
+        .bind_recovered_native_runtime(rng, Box::new(catcoms_rt::SystemClock), &fresh)
+        .map_err(|(_, error)| error)
+        .unwrap();
+    assert_eq!(
+        reopened.complete_recovery(&fresh).unwrap(),
+        (head, own_add, epoch)
+    );
+    assert_eq!(reopened.local_peer_data(), Some(local_transport.0));
 }
 
 #[derive(PartialEq, Eq)]

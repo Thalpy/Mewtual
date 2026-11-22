@@ -255,6 +255,11 @@ joined-pin index, Pending, Entry and Outcome. The CAS rechecks those files
 before selection. A cold opener proves the same registered facts before
 recovering a staged row or consuming an already selected row. The desktop Join
 command still needs runtime and joined-member save dispatch.
+The explicit cold native storage owner can reopen that selected row with a TCP
+actor built from its same covered seed and port. It attaches the independently
+restored private graph after matching its receipt and governing replay. The
+external transport constructor accepts the earlier external profile only.
+Desktop startup still needs to take ownership of the reopened native runtime.
 
 The warm owner verifies the delivery before covering possible Welcome entry, then
 seals and covers the exact successful outcome. New outcome records also retain

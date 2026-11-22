@@ -204,6 +204,23 @@ pub(in crate::store::critical_namespaces::native_registry) fn authenticate_selec
     Ok((index.rows.len(), catalog))
 }
 
+pub(in crate::store::critical_namespaces::native_registry) fn require_registered_native_join(
+    store: &crate::store::ServerStore,
+    inventory: &crate::store::persistence::native_registry::lifecycle::upgrade::UpgradeInventory,
+    original: crate::store::NativeTextJoinedRegistrationData,
+) -> Result<(), AppError> {
+    if inventory.index_stage().is_some()
+        || inventory.catalog_stage().is_some()
+        || inventory.seed().is_some()
+        || inventory.has_upgrade_outputs()
+    {
+        return Err(refused());
+    }
+    let (index, _) = decode_selected_data(store, inventory)?;
+    super::joined::require_original(&index, original)?;
+    inventory.require(store)
+}
+
 /// Internal paid decoder for the retained normal3 cell/inspector. The full
 /// index stays inside the lifecycle implementation, never a public snapshot.
 /// Closed native facade projection. Keep decoded indexes inside this paid

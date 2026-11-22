@@ -340,6 +340,13 @@ pub(in crate::store) struct RecoveredPinnedPending {
 }
 
 impl RecoveredPinnedPending {
+    pub(in crate::store) fn native_transport_seed(&self) -> Result<Zeroizing<[u8; 32]>, AppError> {
+        self.transport
+            .as_ref()
+            .map(|original| original.seed.clone())
+            .ok_or_else(refused)
+    }
+
     pub(in crate::store) fn open(
         key: &[u8; 32],
         layout: CurrentLayoutData,

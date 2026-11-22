@@ -52,6 +52,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
         matches!(self.origin, JoinedOrigin::Recovered(_))
     }
 
+    pub fn local_peer_data(&self) -> catcoms_rt::PeerId {
+        self.node.local_peer()
+    }
+
     pub(super) fn from_exact_recovered_graph(
         mut node: ChannelSync<T, R>,
         head: OwnerHeaderId,

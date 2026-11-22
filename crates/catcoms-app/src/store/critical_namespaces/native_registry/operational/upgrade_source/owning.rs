@@ -436,6 +436,20 @@ impl Store {
         self.physical.recovered_join_registration_data()
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn require_registered_native_join(
+        &self,
+        data: crate::store::NativeTextJoinedRegistrationData,
+    ) -> Result<(), AppError> {
+        self.physical.require_registered_native_join(data)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn prepare_recovered_native_join_tcp(
+        &self,
+        data: &crate::store::NativeTextJoinedRegistrationData,
+    ) -> Result<(Zeroizing<[u8; 32]>, catcoms_net::NativeTcpPreparation), AppError> {
+        self.physical.prepare_recovered_native_join_tcp(data)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn copy_selected_governing_proof(
         &self,
         pending: Option<&crate::store::persistence::governance_layout::joined::JoinedPendingIo>,

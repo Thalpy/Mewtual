@@ -140,7 +140,7 @@ impl Drop for CaptureAck {
 pub struct NativeTextSourceRetirement<T: MeshTransport, R: CryptoRngCore> {
     rows: [Option<Row<T, R>>; MAX_SOURCES],
     mounted_join: Arc<join::MountedJoin<R>>,
-    joined_tcp: Arc<join::Transport>,
+    joined_tcp: Arc<super::super::join_tcp::Transport>,
     // LAST: another worker cannot enter until all old cell/key pins are gone.
     _ack: CaptureAck,
 }
@@ -152,7 +152,7 @@ pub struct NativeTextSourceRetirementPreparation<T: MeshTransport, R: CryptoRngC
     #[cfg(test)]
     weak_drop_order: Option<WeakDropOrder>,
     mounted_join: Weak<join::MountedJoin<R>>,
-    joined_tcp: Weak<join::Transport>,
+    joined_tcp: Weak<super::super::join_tcp::Transport>,
     // Slot acknowledgement follows real Weak/cell work. Busy has no slot but
     // still owns the unconditional fee-only tail below.
     ack: Option<CaptureAck>,

@@ -467,6 +467,26 @@ impl ServerStore {
         Ok(receipt)
     }
 
+    pub(in crate::store) fn recovered_join_transport_seed(
+        &self,
+        data: &NativeTextJoinedRegistrationData,
+    ) -> Result<Zeroizing<[u8; 32]>, AppError> {
+        if self.recovered_join_registration_data()?.as_ref() != Some(data) {
+            return Err(denied());
+        }
+        let slot = self.joined_pin_index.lock().map_err(|_| denied())?;
+        let original = slot.as_ref().ok_or_else(denied)?;
+        original.require(self)?;
+        let seed = original
+            .pending
+            .as_ref()
+            .ok_or_else(denied)?
+            ._pending
+            .native_transport_seed()?;
+        original.require(self)?;
+        Ok(seed)
+    }
+
     pub(in crate::store) fn selected_pending_join_data(
         &self,
     ) -> Result<Option<([u8; 32], catcoms_sync::V2PendingJoinContextData)>, AppError> {

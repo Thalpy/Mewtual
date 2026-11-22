@@ -1,4 +1,5 @@
 //! One selected warm join with its original private graph and transport.
+use super::super::join_tcp;
 use super::*;
 use crate::store::persistence::governance_layout::joined::JoinedRuntimeInputs;
 use catcoms_replication::chat::{owner_facts::OwnerFactId, owner_header::OwnerHeaderId};
@@ -20,6 +21,11 @@ pub struct NativeTextJoinedRuntime<T: MeshTransport, R: CryptoRngCore> {
     node: Option<ClosedV2JoinedNode<T, R>>,
     inputs: Option<JoinedRuntimeInputs<T, R>>,
     storage: NativeTextJoinedStorage,
+    _fee: CatalogReadReservation,
+}
+
+pub(super) struct RecoveredTcp {
+    owner: Arc<join_tcp::Transport>,
     _fee: CatalogReadReservation,
 }
 
@@ -50,12 +56,67 @@ impl NativeTextJoinedStorage {
         clock: Box<dyn catcoms_rt::Clock + Send>,
     ) -> Result<NativeTextJoinedRuntime<T, R>, (Self, AppError)> {
         let checked = self.recovered_join_outcome_data().and_then(|outcome| {
-            if self.pending.is_some() || outcome.is_none() {
+            if self.pending.is_some()
+                || outcome.is_none()
+                || self.recovered_join_transport_data()?.is_some()
+            {
                 return Err(refused());
             }
             Ok(())
         });
         self.bind_runtime(checked, (transport, rng, clock))
+    }
+
+    /// Restore the same reserved identity from a completed and selected native
+    /// joined row. The old Welcome is independently verified without SDK entry.
+    pub fn bind_recovered_native_runtime<R: CryptoRngCore>(
+        mut self,
+        rng: R,
+        clock: Box<dyn catcoms_rt::Clock + Send>,
+        negative: &RequestCancellation,
+    ) -> Result<NativeTextJoinedRuntime<catcoms_net::MeshService, R>, (Self, AppError)> {
+        let prepared = (|| {
+            if self.pending.is_some() || negative.is_cancelled() {
+                return Err(refused());
+            }
+            let receipt = self
+                .recovered_join_registration_data()?
+                .ok_or_else(refused)?;
+            let require_original = || {
+                if negative.is_cancelled() {
+                    return Err(refused());
+                }
+                self.index.require_registered_native_join(receipt)
+            };
+            require_original()?;
+            let allowance = runtime_invoice::<catcoms_net::MeshService, R>();
+            let (_, fee) = self.index.joined_exchange_resources(allowance)?;
+            if self.recovered_tcp.is_none() {
+                let (_, owner_fee) = self.index.joined_exchange_resources(32 * 1024)?;
+                self.recovered_tcp = Some(RecoveredTcp {
+                    owner: Arc::new(join_tcp::Transport::default()),
+                    _fee: owner_fee,
+                });
+            }
+            let original = self.recovered_tcp.as_ref().ok_or_else(refused)?;
+            let mut loan = original.owner.checkout(
+                receipt.transport_data(),
+                || self.index.prepare_recovered_native_join_tcp(&receipt),
+                require_original,
+            )?;
+            let transport = loan.take()?;
+            loan.attached();
+            Ok((transport, fee))
+        })();
+        match prepared {
+            Ok((transport, fee)) => Ok(NativeTextJoinedRuntime {
+                node: None,
+                inputs: Some((transport, rng, clock)),
+                storage: self,
+                _fee: fee,
+            }),
+            Err(error) => Err((self, error)),
+        }
     }
 
     fn bind_runtime<T: MeshTransport, R: CryptoRngCore>(
@@ -64,8 +125,7 @@ impl NativeTextJoinedStorage {
         inputs: JoinedRuntimeInputs<T, R>,
     ) -> Result<NativeTextJoinedRuntime<T, R>, (Self, AppError)> {
         let prepared = checked.and_then(|()| {
-            let allowance = ClosedV2JoinedNode::<T, R>::allocation_bytes()
-                + 2 * std::mem::size_of::<NativeTextJoinedRuntime<T, R>>();
+            let allowance = runtime_invoice::<T, R>();
             let (_, fee) = self.index.joined_exchange_resources(allowance)?;
             Ok(fee)
         });
@@ -81,7 +141,15 @@ impl NativeTextJoinedStorage {
     }
 }
 
+fn runtime_invoice<T: MeshTransport, R: CryptoRngCore>() -> usize {
+    ClosedV2JoinedNode::<T, R>::allocation_bytes()
+        + 2 * std::mem::size_of::<NativeTextJoinedRuntime<T, R>>()
+}
+
 impl<T: MeshTransport, R: CryptoRngCore> NativeTextJoinedRuntime<T, R> {
+    pub fn local_peer_data(&self) -> Option<catcoms_rt::PeerId> {
+        self.node.as_ref().map(ClosedV2JoinedNode::local_peer_data)
+    }
     /// Read the original signed governing proof from an attached first join.
     /// The exact parent and selected child identify this bounded history read.
     /// The returned historical data keeps its own credit through all clones.
@@ -134,6 +202,18 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextJoinedRuntime<T, R> {
             .filter(|node| node.was_recovered_data())
             .ok_or_else(refused)?;
         let (head, own, epoch) = node.selected_join_data().map_err(|_| refused())?;
+        if self.storage.recovered_tcp.is_some() {
+            let receipt = self
+                .storage
+                .recovered_join_registration_data()?
+                .ok_or_else(refused)?;
+            if receipt.selected_data() != (head, own, epoch)
+                || receipt.transport_data().0 != node.local_peer_data()
+            {
+                return Err(refused());
+            }
+            self.storage.index.require_registered_native_join(receipt)?;
+        }
         if negative.is_cancelled()
             || self.storage.recovered_join_outcome_data()? != Some((head, epoch))
         {

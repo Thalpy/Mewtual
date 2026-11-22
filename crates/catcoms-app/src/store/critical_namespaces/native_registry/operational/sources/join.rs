@@ -3,6 +3,7 @@ use super::super::governed::{
     connect_approved_host, receive_connected_join, ConnectedJoinDelivery, JoinFramePayment,
     NativeTextJoinedStorage,
 };
+use super::super::join_tcp;
 use super::super::native_ui::UiEffectNegative;
 use super::super::upgrade_source::owning::{
     AuthenticationNegative, JoinedConnectionPreparation, MetadataWork,
@@ -29,8 +30,6 @@ use std::{
     time::Duration,
 };
 use tokio::sync::watch;
-mod transport;
-pub(super) use transport::Transport;
 
 #[derive(Default)]
 pub(super) struct PendingJoin {
@@ -61,7 +60,7 @@ pub(super) fn invoice<R: CryptoRngCore>() -> usize {
         + 2 * std::mem::size_of::<NativeTextJoinedInstallation<R>>()
         + 2 * std::mem::size_of::<NativeTextJoinedSelectionPreparation<R>>()
         + std::mem::size_of::<MountedJoin<R>>()
-        + std::mem::size_of::<Transport>()
+        + std::mem::size_of::<join_tcp::Transport>()
         + 2 * std::mem::size_of::<NativeChatKeyEnds>()
         + 4096 // original joined Source counter, cuts, and their Arc allocations
         + 6 * std::mem::size_of::<usize>()
@@ -72,7 +71,7 @@ pub(super) fn invoice<R: CryptoRngCore>() -> usize {
 pub struct NativeTextJoinedRequestPreparation {
     scope: Arc<Scope>,
     pending: Weak<PendingJoin>,
-    tcp: Weak<Transport>,
+    tcp: Weak<join_tcp::Transport>,
     command: NativeTextSourceCommand,
     work: Option<MetadataWork>,
     end: Option<retirement::PreparationEnd>,
@@ -197,9 +196,8 @@ impl NativeTextJoinedRequestPreparation {
             let metadata = self.work.as_ref().ok_or_else(refused)?;
             let prepared = metadata.prepare_join_connection(pending, invite)?;
             let tcp = self.tcp.upgrade().ok_or_else(refused)?.checkout(
-                metadata,
-                pending,
                 prepared.local_transport,
+                || metadata.prepare_join_tcp(pending),
                 || self.require_current(&caller),
             )?;
             (prepared, tcp)
@@ -284,7 +282,7 @@ pub struct NativeTextJoinedExchange {
     request: Zeroizing<Vec<u8>>,
     target: PeerId,
     local_transport: (PeerId, u16),
-    tcp: transport::Loan,
+    tcp: join_tcp::Loan,
     signal: RequestCancellation,
     command: NativeChatUiCommand,
     mount: RequestCancellation,
