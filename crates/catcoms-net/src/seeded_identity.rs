@@ -27,6 +27,15 @@ impl SeededTransportIdentityData {
         peer: &[u8],
         commitment: &[u8],
     ) -> Result<bool, NetError> {
+        Ok(Self::authenticated_peer_data(bytes, peer, commitment)?.is_some())
+    }
+
+    /// Derive the routing ID only from a complete canonical transport binding.
+    pub fn authenticated_peer_data(
+        bytes: &[u8; 36],
+        peer: &[u8],
+        commitment: &[u8],
+    ) -> Result<Option<PeerId>, NetError> {
         let invalid = || NetError::Build("invalid seeded public-key encoding".into());
         let public =
             libp2p::identity::PublicKey::try_decode_protobuf(bytes).map_err(|_| invalid())?;
@@ -34,8 +43,13 @@ impl SeededTransportIdentityData {
         if public.encode_protobuf().as_slice() != bytes || public.try_into_ed25519().is_err() {
             return Err(invalid());
         }
-        Ok(canonical_peer.to_string().as_bytes() == peer
-            && transport_key_commitment(bytes).as_slice() == commitment)
+        if canonical_peer.to_string().as_bytes() == peer
+            && transport_key_commitment(bytes).as_slice() == commitment
+        {
+            Ok(Some(phase0_peer_id(&canonical_peer)))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Canonical full libp2p protobuf Ed25519 public key, including its type tag.

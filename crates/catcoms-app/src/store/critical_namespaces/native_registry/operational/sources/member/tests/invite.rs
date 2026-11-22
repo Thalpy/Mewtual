@@ -230,7 +230,35 @@ async fn native_governed_add_fixture(case: JoinCase) {
         let entry_name = "chat-critical-namespaces.joined-welcome-entry.bin";
         let outcome_name = "chat-critical-namespaces.joined-welcome-outcome.bin";
         assert!(find_named(join_dir, entry_name).is_empty());
-        joined.finish_first_join(&delivery, &mut join_rng).unwrap();
+        use catcoms_rt::{Hub, MeshTransport, PeerId, TransportEvent};
+        let hub = Hub::new();
+        let client = hub.join(PeerId::from_u64(0x9e));
+        assert!(joined
+            .exchange_first_join(&invite, &client, negative.clone(), &mut join_rng)
+            .await
+            .is_err());
+        let invited_peer = hub.join(invite.connected_peer_data());
+        let serve = async {
+            let Some(TransportEvent::Request {
+                data, responder, ..
+            }) = invited_peer.next_event().await
+            else {
+                panic!("connected exact JoinRequest");
+            };
+            let response = accept(&data).unwrap();
+            let bytes = response.encode_delivery_data().unwrap();
+            assert_eq!(bytes, delivery);
+            responder.try_respond(bytes::Bytes::from(bytes)).unwrap();
+        };
+        let (joined_result, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(
+                joined.exchange_first_join(&invite, &client, negative.clone(), &mut join_rng),
+                serve,
+            )
+        })
+        .await
+        .unwrap();
+        joined_result.unwrap();
         let entry = only_named(join_dir, entry_name);
         let outcome = only_named(join_dir, outcome_name);
         let exact_entry = std::fs::read(&entry).unwrap();

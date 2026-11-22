@@ -78,6 +78,7 @@ fn native_invite_packet_requires_exact_complete_versioned_envelope() {
     assert_eq!(opened.binding().id_data(), binding.id_data());
     assert_eq!(opened.policy_bytes(), f.policy.as_slice());
     assert_eq!(opened.reservation_bytes(), f.reservation.as_slice());
+    assert_eq!(opened.connected_peer_data(), f.transport.phase0_peer_data());
     assert!(InviteToken::decode(&packet).is_err());
     assert!(NativeTextInvitePacketData::decode(&binding.encode()).is_err());
     for len in 0..packet.len() {

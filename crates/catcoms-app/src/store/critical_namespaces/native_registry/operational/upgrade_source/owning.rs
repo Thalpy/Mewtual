@@ -353,6 +353,13 @@ impl Store {
         self.physical.joined_request_data(pending)
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn joined_exchange_resources(
+        &self,
+        byte_count: usize,
+    ) -> Result<(catcoms_rt::RequestCancellation, CatalogReadReservation), AppError> {
+        self.physical.joined_exchange_resources(byte_count)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn finish_joined_pending(
         &mut self,
         pending: &mut crate::store::persistence::governance_layout::joined::JoinedPendingIo,

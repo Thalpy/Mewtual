@@ -41,6 +41,7 @@ pub struct NativeTextInvitePacketData<'a> {
     binding: SignedInviteBindingData,
     policy: &'a [u8],
     reservation: &'a [u8],
+    peer: catcoms_rt::PeerId,
 }
 
 impl std::fmt::Debug for NativeTextInvitePacketData<'_> {
@@ -67,11 +68,12 @@ impl<'a> NativeTextInvitePacketData<'a> {
             return Err(ChatError::Bound);
         }
         let binding = SignedInviteBindingData::decode(binding)?;
-        check_parts(&binding, policy, reservation)?;
+        let peer = check_parts(&binding, policy, reservation)?;
         Ok(Self {
             binding,
             policy,
             reservation,
+            peer,
         })
     }
 
@@ -86,13 +88,18 @@ impl<'a> NativeTextInvitePacketData<'a> {
     pub fn reservation_bytes(&self) -> &'a [u8] {
         self.reservation
     }
+
+    /// The invite's authenticated transport identity for connected routing.
+    pub fn connected_peer_data(&self) -> catcoms_rt::PeerId {
+        self.peer
+    }
 }
 
 fn check_parts(
     binding: &SignedInviteBindingData,
     policy: &[u8],
     reservation: &[u8],
-) -> Result<(), ChatError> {
+) -> Result<catcoms_rt::PeerId, ChatError> {
     if policy.len() > MAX_POLICY || reservation.len() > MAX_ROUTING {
         return Err(ChatError::Bound);
     }
@@ -110,7 +117,7 @@ fn check_parts(
     check_reservation(reservation, &anchor.group)
 }
 
-fn check_reservation(bytes: &[u8], group: &[u8]) -> Result<(), ChatError> {
+fn check_reservation(bytes: &[u8], group: &[u8]) -> Result<catcoms_rt::PeerId, ChatError> {
     let mut d = Decoder::new(bytes);
     if d.get_bytes()? != RESERVATION || d.get_u16()? != VERSION {
         return Err(ChatError::Malformed);
@@ -128,12 +135,9 @@ fn check_reservation(bytes: &[u8], group: &[u8]) -> Result<(), ChatError> {
         return Err(ChatError::Malformed);
     }
     d.finish()?;
-    if !SeededTransportIdentityData::check_public_binding_data(key, peer, commitment)
+    SeededTransportIdentityData::authenticated_peer_data(key, peer, commitment)
         .map_err(|_| ChatError::Malformed)?
-    {
-        return Err(ChatError::Scope);
-    }
-    Ok(())
+        .ok_or(ChatError::Scope)
 }
 
 pub(super) fn encode_reservation(

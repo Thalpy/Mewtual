@@ -87,6 +87,26 @@ impl Physical {
         pending.request_data(self.current()?.checked_store()?)
     }
 
+    pub(super) fn joined_exchange_resources(
+        &self,
+        byte_count: usize,
+    ) -> Result<(catcoms_rt::RequestCancellation, CatalogReadReservation), AppError> {
+        self.handler.require()?;
+        self.handler.require_idle_cached()?;
+        let store = self.current()?.checked_store()?;
+        let policy = store
+            .governance_layout_policy
+            .as_ref()
+            .ok_or_else(refused)?;
+        let fee = policy
+            .current
+            .archive
+            .pending
+            .pool
+            .try_reserve(byte_count)?;
+        Ok((store.chat_mount.observer(), fee))
+    }
+
     pub(super) fn recovered_join_outcome_data(
         &self,
     ) -> Result<Option<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64)>, AppError>

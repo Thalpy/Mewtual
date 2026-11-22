@@ -4,8 +4,51 @@ use super::super::lifecycle::preparation::Policy;
 use super::*;
 use crate::store::persistence::governance_layout::joined::{JoinedPendingIo, JoinedPinDeclaration};
 use catcoms_replication::chat::join_bindings::SignedInviteBindingData;
-use catcoms_rt::CryptoRngCore;
-use catcoms_sync::{PreparedV2JoinRequest, V2PendingJoinContextData};
+use catcoms_rt::{
+    ConnectionLease, CryptoRngCore, MeshTransport, ProtocolId, RequestAuthority,
+    RequestCancellation,
+};
+use catcoms_sync::{
+    PreparedV2JoinRequest, V2JoinRequestPacketData, V2PendingJoinContextData,
+    MAX_V2_FIRST_JOIN_DELIVERY_BYTES,
+};
+
+pub(in crate::store::critical_namespaces::native_registry) const JOIN_PROTOCOL: ProtocolId =
+    ProtocolId("/catcoms/rr/1");
+
+#[derive(Debug)]
+struct JoinConnectionAuthority {
+    connection: ConnectionLease,
+    mount: RequestCancellation,
+    caller: RequestCancellation,
+}
+
+struct JoinFramePayment {
+    _fee: CatalogReadReservation,
+}
+
+impl std::fmt::Debug for JoinFramePayment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JoinFramePayment").finish_non_exhaustive()
+    }
+}
+
+#[async_trait::async_trait]
+impl RequestAuthority for JoinConnectionAuthority {
+    fn authorized(&self) -> bool {
+        self.connection.is_live() && !self.mount.is_cancelled() && !self.caller.is_cancelled()
+    }
+
+    async fn revoked(&self) {
+        let mut mount = self.mount.clone();
+        let mut caller = self.caller.clone();
+        tokio::select! {
+            _ = self.connection.revoked() => {},
+            _ = mount.cancelled() => {},
+            _ = caller.cancelled() => {},
+        }
+    }
+}
 
 /// Original opaque combined4+5+native3 physical custody. Metadata reads do not
 /// reconstruct a signer, reuse fresh Welcome evidence or grant a native caller.
@@ -132,6 +175,48 @@ impl NativeTextJoinedStorage {
     ) -> Result<(), AppError> {
         self.index
             .finish_joined_pending(self.pending.as_mut().ok_or_else(refused)?, delivery, rng)
+    }
+
+    /// Exchange the exact covered request with the invited peer over an
+    /// existing authenticated connection, then cover the verified Welcome.
+    pub async fn exchange_first_join(
+        &mut self,
+        invite: &crate::store::NativeTextInvitePacketData<'_>,
+        transport: &impl MeshTransport,
+        negative: RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        let request = self.first_join_request_data()?;
+        let packet = V2JoinRequestPacketData::decode(request).map_err(|_| refused())?;
+        if packet.founder_add_data().invite.encode() != invite.binding().encode() {
+            return Err(refused());
+        }
+        let target = invite.connected_peer_data();
+        let connection = transport.connection_lease(target).ok_or_else(refused)?;
+        let (mount, fee) = self.index.joined_exchange_resources(
+            4 * (request.len() + catcoms_rt::MAX_REQUEST_RESPONSE_FRAME_BYTES) + 4096,
+        )?;
+        let fee = Arc::new(JoinFramePayment { _fee: fee });
+        let authority = Arc::new(JoinConnectionAuthority {
+            connection,
+            mount,
+            caller: negative.clone(),
+        });
+        if !authority.authorized() {
+            return Err(refused());
+        }
+        let negative = negative
+            .with_authority(authority.clone())
+            .retain_custody(fee.clone());
+        let request = bytes::Bytes::copy_from_slice(request);
+        let delivery = transport
+            .request_connected_cancellable(target, JOIN_PROTOCOL, request, negative)
+            .await
+            .map_err(|_| refused())?;
+        if !authority.authorized() || delivery.len() > MAX_V2_FIRST_JOIN_DELIVERY_BYTES {
+            return Err(refused());
+        }
+        self.finish_first_join(&delivery, rng)
     }
 
     /// Historical outcome installed by the cold storage opener.
