@@ -208,6 +208,25 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
             .run_join_request(&packet, cuts, negative)
     }
 
+    /// The connected service has its own byte class before the native SDK and
+    /// uses exactly the same signed request and covering transaction.
+    pub fn accept_connected_join_request(
+        self,
+        proto: catcoms_rt::ProtocolId,
+        wire: &[u8],
+        negative: &RequestCancellation,
+    ) -> Result<crate::store::NativeTextSavedJoinResponse, V2MemberSaveRefusal> {
+        if proto != crate::store::critical_namespaces::native_registry::operational::governed::JOIN_PROTOCOL
+            || wire.len() > catcoms_rt::CHAT_V2_JOIN_REQUEST_MAX_BYTES
+        {
+            return Err(V2MemberSaveRefusal::Failed);
+        }
+        let body = wire
+            .strip_prefix(&[catcoms_rt::CHAT_V2_JOIN_KIND])
+            .ok_or(V2MemberSaveRefusal::Failed)?;
+        self.accept_join_request(body, negative)
+    }
+
     fn finish_prepared(
         mut self,
         (cell, keys): MemberKeys<T, R>,

@@ -23,18 +23,30 @@ async fn within<T>(future: impl Future<Output = T>) -> T {
 
 #[tokio::test]
 async fn new_service_rejects_oversized_headers_before_body_read_or_allocation() {
-    for kind in [FILE_BRIDGE_KIND, FILE_SOURCE_KIND] {
+    for (kind, request_max, response_max) in [
+        (
+            FILE_BRIDGE_KIND,
+            FILE_SERVICE_REQUEST_MAX_BYTES,
+            FILE_SERVICE_RESPONSE_MAX_BYTES,
+        ),
+        (
+            FILE_SOURCE_KIND,
+            FILE_SERVICE_REQUEST_MAX_BYTES,
+            FILE_SERVICE_RESPONSE_MAX_BYTES,
+        ),
+        (
+            CHAT_V2_JOIN_KIND,
+            CHAT_V2_JOIN_REQUEST_MAX_BYTES,
+            CHAT_V2_JOIN_RESPONSE_MAX_BYTES,
+        ),
+    ] {
         let mut codec = BytesCodec::default();
         let mut output = Cursor::new(Vec::new());
         codec
             .write_request(&protocol(), &mut output, vec![kind])
             .await
             .unwrap();
-        let mut header = Cursor::new(
-            ((FILE_SERVICE_RESPONSE_MAX_BYTES + 1) as u32)
-                .to_be_bytes()
-                .to_vec(),
-        );
+        let mut header = Cursor::new(((response_max + 1) as u32).to_be_bytes().to_vec());
         let error = codec
             .read_response(&protocol(), &mut header)
             .await
@@ -46,9 +58,7 @@ async fn new_service_rejects_oversized_headers_before_body_read_or_allocation() 
             "no response body is needed to refuse allocation"
         );
 
-        let mut bytes = ((FILE_SERVICE_REQUEST_MAX_BYTES + 1) as u32)
-            .to_be_bytes()
-            .to_vec();
+        let mut bytes = ((request_max + 1) as u32).to_be_bytes().to_vec();
         bytes.push(kind);
         let mut header = Cursor::new(bytes);
         let error = codec

@@ -30,6 +30,9 @@ on:
       - 'crates/catcoms-app/src/store/persistence/v2_member_outbox/production.rs'
       - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/tests/text_group_guard/host/member.rs'
       - 'crates/catcoms-net/src/seeded_identity.rs'
+      - 'crates/catcoms-net/src/bytes_codec_tests.rs'
+      - 'crates/catcoms-net/src/lib.rs'
+      - 'crates/catcoms-rt/src/transport.rs'
       - 'crates/catcoms-mls/src/policy.rs'
       - 'crates/catcoms-mls/src/group.rs'
       - 'crates/catcoms-mls/src/group/text_current_add/**'
@@ -226,6 +229,8 @@ jobs:
         run: python .github/scripts/check-chat-v2-invite-intent.py joined-pin
       - name: Check the connected native two-vault join
         run: python .github/scripts/check-chat-v2-invite-intent.py joined-native-exchange
+      - name: Check Chat V2 request and response bounds before allocation
+        run: python .github/scripts/check-chat-v2-invite-intent.py joined-wire
       - uses: actions/upload-artifact@v4
         if: always()
         with:

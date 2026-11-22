@@ -87,7 +87,8 @@ use catcoms_rt::{
     Clock, ConnectionDirection, ConnectionFamily, ConnectionPath, ConnectionTransport,
     CryptoRngCore, DiscoveredPeer, MeshTransport, OsCryptoRng, PeerConnectionSnapshot, PeerId,
     ProtocolId, RendezvousRegistration, RequestCancellation, Responder, SharedRequestKeepalive,
-    SystemClock, Topic, TransportError, TransportEvent, FILE_BRIDGE_KIND,
+    SystemClock, Topic, TransportError, TransportEvent, CHAT_V2_JOIN_KIND,
+    CHAT_V2_JOIN_REQUEST_MAX_BYTES, CHAT_V2_JOIN_RESPONSE_MAX_BYTES, FILE_BRIDGE_KIND,
     FILE_SERVICE_REQUEST_MAX_BYTES, FILE_SERVICE_RESPONSE_MAX_BYTES, FILE_SOURCE_KIND,
     MAX_PEER_DIAL_BATCH,
 };
@@ -430,13 +431,19 @@ impl BytesCodec {
     fn begin_request(&mut self, kind: Option<u8>) -> usize {
         // Always reset, including empty/legacy requests. Value-only clone state cannot narrow
         // another concurrent stream, and reusing a codec cannot inherit its preceding class.
-        if matches!(kind, Some(FILE_BRIDGE_KIND | FILE_SOURCE_KIND)) {
-            self.response_max = FILE_SERVICE_RESPONSE_MAX_BYTES;
-            FILE_SERVICE_REQUEST_MAX_BYTES
-        } else {
-            self.response_max = MAX_FRAME;
-            MAX_FRAME
-        }
+        let (request, response) = match kind {
+            Some(FILE_BRIDGE_KIND | FILE_SOURCE_KIND) => (
+                FILE_SERVICE_REQUEST_MAX_BYTES,
+                FILE_SERVICE_RESPONSE_MAX_BYTES,
+            ),
+            Some(CHAT_V2_JOIN_KIND) => (
+                CHAT_V2_JOIN_REQUEST_MAX_BYTES,
+                CHAT_V2_JOIN_RESPONSE_MAX_BYTES,
+            ),
+            _ => (MAX_FRAME, MAX_FRAME),
+        };
+        self.response_max = response;
+        request
     }
 }
 

@@ -240,12 +240,22 @@ async fn native_governed_add_fixture(case: JoinCase) {
         let invited_peer = hub.join(invite.connected_peer_data());
         let serve = async {
             let Some(TransportEvent::Request {
-                data, responder, ..
+                data,
+                responder,
+                proto,
+                ..
             }) = invited_peer.next_event().await
             else {
                 panic!("connected exact JoinRequest");
             };
-            let response = accept(&data).unwrap();
+            let response = owner
+                .capture_member(
+                    &row,
+                    command(&vault, &budget),
+                    owner.policy.prepare_member().unwrap(),
+                )
+                .accept_connected_join_request(proto, &data, &negative)
+                .unwrap();
             let bytes = response.encode_delivery_data().unwrap();
             assert_eq!(bytes, delivery);
             responder.try_respond(bytes::Bytes::from(bytes)).unwrap();

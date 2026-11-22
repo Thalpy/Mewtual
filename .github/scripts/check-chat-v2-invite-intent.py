@@ -36,6 +36,7 @@ COHORTS = {
         "native_runtime_invite_returns_only_the_original_installed_join_response",
         1,
     ),
+    "joined-wire": ("catcoms-net", "new_service_rejects_oversized_headers_before_body_read_or_allocation", 1),
     "add-source-close": ("catcoms-sync", "governed_add_whole_source_retirement_", 1),
     "add-ui-lock": ("catcoms-sync", "governed_add_ui_retirement_", 1),
     "source-retirement": ("catcoms-app", "operational::sources::retirement::tests::", 11),

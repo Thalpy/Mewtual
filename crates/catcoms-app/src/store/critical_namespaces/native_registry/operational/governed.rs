@@ -6,15 +6,18 @@ use crate::store::persistence::governance_layout::joined::{JoinedPendingIo, Join
 use catcoms_replication::chat::join_bindings::SignedInviteBindingData;
 use catcoms_rt::{
     ConnectionLease, CryptoRngCore, MeshTransport, ProtocolId, RequestAuthority,
-    RequestCancellation,
+    RequestCancellation, CHAT_V2_JOIN_KIND, CHAT_V2_JOIN_REQUEST_MAX_BYTES,
+    CHAT_V2_JOIN_RESPONSE_MAX_BYTES,
 };
 use catcoms_sync::{
     PreparedV2JoinRequest, V2JoinRequestPacketData, V2PendingJoinContextData,
-    MAX_V2_FIRST_JOIN_DELIVERY_BYTES,
+    MAX_V2_FIRST_JOIN_DELIVERY_BYTES, MAX_V2_JOIN_REQUEST_PACKET_BYTES,
 };
 
 pub(in crate::store::critical_namespaces::native_registry) const JOIN_PROTOCOL: ProtocolId =
     ProtocolId("/catcoms/rr/1");
+const _: () = assert!(MAX_V2_JOIN_REQUEST_PACKET_BYTES < CHAT_V2_JOIN_REQUEST_MAX_BYTES);
+const _: () = assert!(MAX_V2_FIRST_JOIN_DELIVERY_BYTES <= CHAT_V2_JOIN_RESPONSE_MAX_BYTES);
 
 #[derive(Debug)]
 struct JoinConnectionAuthority {
@@ -194,7 +197,7 @@ impl NativeTextJoinedStorage {
         let target = invite.connected_peer_data();
         let connection = transport.connection_lease(target).ok_or_else(refused)?;
         let (mount, fee) = self.index.joined_exchange_resources(
-            4 * (request.len() + catcoms_rt::MAX_REQUEST_RESPONSE_FRAME_BYTES) + 4096,
+            4 * (request.len() + 1 + CHAT_V2_JOIN_RESPONSE_MAX_BYTES) + 4096,
         )?;
         let fee = Arc::new(JoinFramePayment { _fee: fee });
         let authority = Arc::new(JoinConnectionAuthority {
@@ -208,9 +211,16 @@ impl NativeTextJoinedStorage {
         let negative = negative
             .with_authority(authority.clone())
             .retain_custody(fee.clone());
-        let request = bytes::Bytes::copy_from_slice(request);
+        let mut wire = Vec::with_capacity(1 + request.len());
+        wire.push(CHAT_V2_JOIN_KIND);
+        wire.extend_from_slice(request);
         let delivery = transport
-            .request_connected_cancellable(target, JOIN_PROTOCOL, request, negative)
+            .request_connected_cancellable(
+                target,
+                JOIN_PROTOCOL,
+                bytes::Bytes::from(wire),
+                negative,
+            )
             .await
             .map_err(|_| refused())?;
         if !authority.authorized() || delivery.len() > MAX_V2_FIRST_JOIN_DELIVERY_BYTES {

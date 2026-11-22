@@ -211,7 +211,9 @@ The joined storage owner can exchange the exact selected JoinRequest on an
 already authenticated connection to the peer named by the signed invite.
 It keeps the original connection and vault cancellation through response
 receipt. The fixture uses the connected transport harness and the actual
-native founder responder. Certified dialing and desktop dispatch remain open.
+native founder responder. The request kind selects separate transport size
+limits before the decoder allocates either body. Certified dialing and
+desktop dispatch remain open.
 
 Unknown/ambiguous remnants are preserved and refused, never cleared as debris.
 Predecessor tests must use a real prior binary with positive open controls.

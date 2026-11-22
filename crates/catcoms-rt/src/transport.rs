@@ -26,6 +26,10 @@ pub const FILE_SOURCE_KIND: u8 = 30;
 /// The response includes signatures and the helper wrapper, not just a 64 KiB page.
 pub const FILE_SERVICE_REQUEST_MAX_BYTES: usize = 2 * 1024;
 pub const FILE_SERVICE_RESPONSE_MAX_BYTES: usize = 72 * 1024;
+/// Chat V2's separate connected JoinRequest service and its wire ceilings.
+pub const CHAT_V2_JOIN_KIND: u8 = 31;
+pub const CHAT_V2_JOIN_REQUEST_MAX_BYTES: usize = 64 * 1024;
+pub const CHAT_V2_JOIN_RESPONSE_MAX_BYTES: usize = 768 * 1024;
 
 /// A stable peer identifier. In production this is derived from a libp2p public
 /// key; here it is an opaque 32-byte value so tests need no real keys.
