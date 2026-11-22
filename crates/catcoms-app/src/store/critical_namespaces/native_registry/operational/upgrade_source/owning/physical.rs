@@ -87,6 +87,15 @@ impl Physical {
         pending.request_data(self.current()?.checked_store()?)
     }
 
+    pub(super) fn recovered_join_outcome_data(
+        &self,
+    ) -> Result<Option<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64)>, AppError>
+    {
+        self.current()?
+            .checked_store()?
+            .recovered_join_outcome_data()
+    }
+
     pub(super) fn selected_pending_join_data(
         &self,
     ) -> Result<Option<([u8; 32], catcoms_sync::V2PendingJoinContextData)>, AppError> {

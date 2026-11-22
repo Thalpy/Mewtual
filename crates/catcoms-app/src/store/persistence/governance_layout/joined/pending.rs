@@ -11,6 +11,7 @@ const PENDING_NAME: &str = "chat-critical-namespaces.joined-pending.bin";
 const INDEX_STAGE: &str = "chat-critical-namespaces.joined-pin.stage";
 const SOURCE_FEE: usize = 12 * MAX_FRAME + 4 * 1024 * 1024;
 const SOURCE_ID_DOMAIN: &str = "catcoms/private-chat-v2-native-pending-source-id/v1";
+mod welcome;
 
 fn limits() -> Result<DirectJoinLimits, AppError> {
     DirectJoinLimits::new(
@@ -39,6 +40,7 @@ fn original_pending_id(
 pub(super) struct SelectedPending {
     original: OpenedArchiveObject,
     _pending: RecoveredPinnedPending,
+    welcome: Option<welcome::RecoveredWelcome>,
     _fee: CatalogReadReservation,
 }
 
@@ -56,9 +58,14 @@ pub(super) fn require_pending_names(
     let path = fixed(store, false, PENDING_NAME)?;
     if let Some(pending) = pending {
         let (file, bytes) = &pending.original;
-        exact_held(&path, file, session_id(file).map_err(io)?, bytes)
+        exact_held(&path, file, session_id(file).map_err(io)?, bytes)?;
+        if let Some(welcome) = &pending.welcome {
+            welcome.require(store)?;
+        }
+        Ok(())
     } else {
-        absent(&path)
+        absent(&path)?;
+        welcome::require_absent(store)
     }
 }
 
@@ -89,6 +96,7 @@ pub(super) fn select(
             return Err(denied());
         }
         require_pending_names(store, None)?;
+        welcome::require_absent(store)?;
         return Ok(index);
     };
     let pending_id = session_id(&original.0).map_err(io)?;
@@ -107,6 +115,17 @@ pub(super) fn select(
         return Err(denied());
     }
     let selected = index.selected.1.as_slice();
+    let welcome = if selected == after && warm.is_none() {
+        absent(&stage_path)?;
+        store.require_governance_directory_matches_root_if_mounted(directory)?;
+        exact_held(&pending_path, &original.0, pending_id, &original.1)?;
+        exact_held(&current_path, catalog.0, current_id, catalog.1)?;
+        index.require_file(store)?;
+        welcome::recover(store, key, &original.1, &pending)?
+    } else {
+        welcome::require_absent(store)?;
+        None
+    };
     if selected == before {
         let mut cold_stage;
         let stage = if let Some(owned) = warm.as_mut() {
@@ -170,6 +189,7 @@ pub(super) fn select(
     index.pending = Some(SelectedPending {
         original,
         _pending: pending,
+        welcome,
         _fee: fee,
     });
     index.require(store)?;
@@ -183,6 +203,7 @@ pub(in crate::store) struct JoinedPendingIo {
     stage: Option<CreatedStage>,
     directory: GovernanceDirectoryCapture,
     catalog: OpenedArchiveObject,
+    welcome: Option<welcome::WarmWelcome>,
     _fee: CatalogReadReservation,
     _catalog_fee: CatalogReadReservation,
 }
@@ -253,6 +274,7 @@ impl ServerStore {
             stage: None,
             directory: inventory.directory,
             catalog,
+            welcome: None,
             _fee: fee,
             _catalog_fee: catalog_fee,
         };
@@ -275,6 +297,22 @@ impl ServerStore {
         });
         index.require(self)?;
         Ok(data)
+    }
+
+    pub(in crate::store) fn recovered_join_outcome_data(
+        &self,
+    ) -> Result<Option<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64)>, AppError>
+    {
+        self.validate_mounted_governance_layout()?;
+        let slot = self.joined_pin_index.lock().map_err(|_| denied())?;
+        let index = slot.as_ref().ok_or_else(denied)?;
+        let result = index
+            .pending
+            .as_ref()
+            .and_then(|pending| pending.welcome.as_ref())
+            .and_then(welcome::RecoveredWelcome::outcome_data);
+        index.require(self)?;
+        Ok(result)
     }
 }
 
@@ -383,5 +421,47 @@ impl JoinedPendingIo {
         }
         selected.require(store)?;
         Ok(request)
+    }
+
+    pub(in crate::store) fn finish_welcome(
+        &mut self,
+        store: &ServerStore,
+        delivery: &[u8],
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        self.request_data(store)?;
+        let key = Zeroizing::new(store.keys.db_key()?);
+        if self.welcome.is_none() {
+            self.welcome = Some(welcome::WarmWelcome::prepare(
+                store,
+                &self.prepared,
+                &key,
+                &self.exact,
+                delivery,
+                rng,
+            )?);
+        }
+        let welcome = self.welcome.as_mut().ok_or_else(denied)?;
+        if welcome.delivery.as_slice() != delivery {
+            return Err(denied());
+        }
+        welcome.cover_entry(store)?;
+        self.request_data(store)?;
+        self.welcome.as_mut().ok_or_else(denied)?.prepare_outcome(
+            store,
+            &mut self.prepared,
+            &key,
+            rng,
+        )?;
+        self.request_data(store)?;
+        self.welcome
+            .as_mut()
+            .ok_or_else(denied)?
+            .cover_outcome(store)?;
+        self.request_data(store)?;
+        self.welcome
+            .as_ref()
+            .ok_or_else(denied)?
+            .require_outcome(store)
     }
 }

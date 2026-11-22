@@ -157,6 +157,15 @@ fn v2_join_request_and_welcome_complete_with_actual_add() {
     )
     .unwrap();
     let delivery = V2FirstJoinDeliveryData::encode(&response_wire, &proof).unwrap();
+    assert!(prepared
+        .validate_first_join_delivery_data(&delivery[..delivery.len() - 1])
+        .is_err());
+    prepared
+        .validate_first_join_delivery_data(&delivery)
+        .unwrap();
+    assert!(prepared
+        .seal_joined_outcome(&vault_key, pending, &mut journal_rng)
+        .is_err());
     let mut candidate = Some(
         g.verifier
             .derive_successor(

@@ -171,6 +171,71 @@ struct WelcomeAdmission<'a> {
     epoch: u64,
 }
 
+struct ValidatedWelcome<'a> {
+    binding: Vec<u8>,
+    state: StateFrame<'a>,
+    before_epoch: u64,
+    after_epoch: u64,
+}
+
+impl<'a> WelcomeAdmission<'a> {
+    fn first(
+        proof: &'a V2FirstAddProofData<'_>,
+        anchor: &GenesisAnchorBindingData,
+    ) -> Result<Self, SyncError> {
+        let (profile, body, header) = proof.verified_admission(anchor)?;
+        Ok(Self {
+            profile,
+            body,
+            header,
+            state_image: proof.add_image_data(),
+            epoch: 1,
+        })
+    }
+
+    fn validate(
+        &self,
+        packet: &V2JoinRequestPacketData<'_>,
+        response: V2JoinResponseData<'_>,
+        cap: usize,
+    ) -> Result<ValidatedWelcome<'a>, SyncError> {
+        let (binding, _) = response.bounded_frame_data(cap)?;
+        let reject = |_| SyncError::JoinRejected;
+        let AdmissionOrigin::Add {
+            before_epoch,
+            after_epoch,
+            ..
+        } = self.body.spec().origin
+        else {
+            return Err(SyncError::JoinRejected);
+        };
+        if after_epoch != self.epoch || before_epoch.checked_add(1) != Some(after_epoch) {
+            return Err(SyncError::JoinRejected);
+        }
+        response
+            .binding
+            .check_links_data(
+                &packet.invite,
+                &packet.request,
+                self.profile,
+                self.body,
+                self.header,
+            )
+            .map_err(reject)?;
+        response
+            .binding
+            .check_payloads_data(response.welcome, response.sealed_routing)
+            .map_err(reject)?;
+        let state = StateFrame::decode(self.state_image).map_err(reject)?;
+        Ok(ValidatedWelcome {
+            binding,
+            state,
+            before_epoch,
+            after_epoch,
+        })
+    }
+}
+
 impl PreparedV2JoinRequest {
     /// The verifier must replay the accepted genesis through this exact Add.
     /// Authenticate the response and prefix *before* restoring or entering the
@@ -231,20 +296,15 @@ impl PreparedV2JoinRequest {
             .ok_or(SyncError::Malformed)?;
         let request_bytes = self.request.clone();
         let packet = V2JoinRequestPacketData::decode(&request_bytes)?;
-        let (profile, body, header) =
-            proof.verified_admission(&packet.invite.spec_data().anchor)?;
-        self.finish_verified_welcome(
-            &packet,
-            response,
-            WelcomeAdmission {
-                profile,
-                body,
-                header,
-                state_image: proof.add_image_data(),
-                epoch: 1,
-            },
-            cap,
-        )
+        let admission = WelcomeAdmission::first(proof, &packet.invite.spec_data().anchor)?;
+        self.finish_verified_welcome(&packet, response, admission, cap)
+    }
+
+    /// Verify the full delivery without restoring the private provider or
+    /// consuming the original Welcome attempt. The mounted owner can cover its
+    /// exact possible-entry record after this check and before calling finish.
+    pub fn validate_first_join_delivery_data(&self, bytes: &[u8]) -> Result<(), SyncError> {
+        validate_delivery_data(&self.request, self.limits, bytes)
     }
 
     /// Charge the complete wire response, including the history and framing,
@@ -265,38 +325,17 @@ impl PreparedV2JoinRequest {
         &mut self,
         packet: &V2JoinRequestPacketData<'_>,
         response: V2JoinResponseData<'_>,
-        WelcomeAdmission {
-            profile,
-            body,
-            header,
-            state_image,
-            epoch,
-        }: WelcomeAdmission<'_>,
+        admission: WelcomeAdmission<'_>,
         cap: usize,
     ) -> Result<&CompletedV2JoinCandidate, SyncError> {
-        let (response_binding, _) = response.bounded_frame_data(cap)?;
-        let reject = |_| SyncError::JoinRejected;
-        let request = packet.request.spec_data();
-        let AdmissionOrigin::Add {
+        let ValidatedWelcome {
+            binding: response_binding,
+            state,
             before_epoch,
             after_epoch,
-            ..
-        } = body.spec().origin
-        else {
-            return Err(SyncError::JoinRejected);
-        };
-        if after_epoch != epoch || before_epoch.checked_add(1) != Some(after_epoch) {
-            return Err(SyncError::JoinRejected);
-        }
-        response
-            .binding
-            .check_links_data(&packet.invite, &packet.request, profile, body, header)
-            .map_err(reject)?;
-        response
-            .binding
-            .check_payloads_data(response.welcome, response.sealed_routing)
-            .map_err(reject)?;
-        let state = StateFrame::decode(state_image).map_err(reject)?;
+        } = admission.validate(packet, response, cap)?;
+        let header = admission.header;
+        let request = packet.request.spec_data();
         if self.completed.is_none() {
             if self.welcome_entered {
                 return Err(SyncError::JoinRejected);
@@ -362,6 +401,26 @@ impl PreparedV2JoinRequest {
         result.validate_initial_state_data()?;
         Ok(result)
     }
+}
+
+pub(super) fn validate_delivery_data(
+    request: &[u8],
+    limits: DirectJoinLimits,
+    bytes: &[u8],
+) -> Result<(), SyncError> {
+    if bytes.len() > limits.exchange {
+        return Err(SyncError::Malformed);
+    }
+    let delivery = V2FirstJoinDeliveryData::decode(bytes)?;
+    let (response, proof) = delivery.data();
+    let cap = limits
+        .exchange
+        .checked_sub(proof.frame_bytes())
+        .ok_or(SyncError::Malformed)?;
+    let packet = V2JoinRequestPacketData::decode(request)?;
+    let admission = WelcomeAdmission::first(proof, &packet.invite.spec_data().anchor)?;
+    admission.validate(&packet, response, cap)?;
+    Ok(())
 }
 
 pub(super) fn matches_welcome_roster(group: &ServerGroup, state: &StateFrame) -> bool {

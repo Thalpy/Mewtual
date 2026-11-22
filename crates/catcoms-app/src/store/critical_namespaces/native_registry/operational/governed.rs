@@ -123,6 +123,25 @@ impl NativeTextJoinedStorage {
             .joined_request_data(self.pending.as_ref().ok_or_else(refused)?)
     }
 
+    /// Save possible entry before invoking MLS on the original private
+    /// package. Exact retries retain the same delivery and completed outcome.
+    pub fn finish_first_join(
+        &mut self,
+        delivery: &[u8],
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        self.index
+            .finish_joined_pending(self.pending.as_mut().ok_or_else(refused)?, delivery, rng)
+    }
+
+    /// Historical outcome installed by the cold storage opener.
+    pub fn recovered_join_outcome_data(
+        &self,
+    ) -> Result<Option<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64)>, AppError>
+    {
+        self.index.recovered_join_outcome_data()
+    }
+
     /// Reference to the exact saved request for diagnostics and later admission.
     pub fn pending_join_data(
         &self,

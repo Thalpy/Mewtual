@@ -353,6 +353,23 @@ impl Store {
         self.physical.joined_request_data(pending)
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn finish_joined_pending(
+        &mut self,
+        pending: &mut crate::store::persistence::governance_layout::joined::JoinedPendingIo,
+        delivery: &[u8],
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        let physical = Arc::get_mut(&mut self.physical).ok_or_else(refused)?;
+        pending.finish_welcome(physical.joined_pending_store()?, delivery, rng)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn recovered_join_outcome_data(
+        &self,
+    ) -> Result<Option<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64)>, AppError>
+    {
+        self.physical.recovered_join_outcome_data()
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn selected_pending_join_data(
         &self,
     ) -> Result<Option<([u8; 32], catcoms_sync::V2PendingJoinContextData)>, AppError> {

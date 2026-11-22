@@ -31,6 +31,30 @@ impl PreparedPinnedPending {
         self.source.request_bytes_data()
     }
 
+    pub(in crate::store) fn context_data(&self) -> V2PendingJoinContextData {
+        self.context
+    }
+
+    pub(in crate::store) fn validate_delivery_data(&self, delivery: &[u8]) -> Result<(), AppError> {
+        self.source
+            .validate_first_join_delivery_data(delivery)
+            .map_err(|_| refused())
+    }
+
+    pub(in crate::store) fn finish_delivery(
+        &mut self,
+        key: &[u8; 32],
+        delivery: &[u8],
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<&catcoms_sync::SealedV2JoinedOutcome, AppError> {
+        self.source
+            .finish_first_join_delivery(delivery)
+            .map_err(|_| refused())?;
+        self.source
+            .seal_joined_outcome(key, self.context, rng)
+            .map_err(|_| refused())
+    }
+
     pub(in crate::store) fn prepare(
         source: PreparedV2JoinRequest,
         selected_index: &[u8],

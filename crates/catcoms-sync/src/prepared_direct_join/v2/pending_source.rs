@@ -171,6 +171,10 @@ impl RecoveredV2PendingJoinSource {
     pub fn request_bytes_data(&self) -> &[u8] {
         &self.request
     }
+
+    pub fn validate_first_join_delivery_data(&self, bytes: &[u8]) -> Result<(), SyncError> {
+        super::welcome::validate_delivery_data(&self.request, self.limits, bytes)
+    }
 }
 
 #[cfg(test)]

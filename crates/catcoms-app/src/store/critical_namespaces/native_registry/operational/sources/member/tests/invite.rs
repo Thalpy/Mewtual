@@ -55,7 +55,13 @@ enum JoinCase {
 }
 
 async fn native_governed_add_fixture(case: JoinCase) {
+    use crate::store::critical_namespaces::native_registry::preparation::tests::{
+        current_policy, SECRET,
+    };
+    use crate::store::{NativeTextGovernedStorage, NativeTextJoinedStorage};
+    use catcoms_replication::chat::owner_header::OwnerHeaderId;
     use catcoms_sync::{DirectJoinLimits, PreparedV2JoinRequest};
+    use rand_core::SeedableRng;
     let directory = tempfile::tempdir().unwrap();
     let (vault, budget) = selected_governed(directory.path());
     let (owner, row) = activate(
@@ -75,16 +81,44 @@ async fn native_governed_add_fixture(case: JoinCase) {
         .unwrap();
     let invite =
         crate::store::NativeTextInvitePacketData::decode(saved.packet_bytes_data()).unwrap();
-    let mut request = PreparedV2JoinRequest::prepare(
-        catcoms_mls::MlsDevice::generate().unwrap(),
-        &invite.binding().spec_data().anchor,
-        invite.binding(),
-        [59; 32],
-        saved.expires_at_ms() - 1,
-        DirectJoinLimits::new(512 * 1024, 512 * 1024, 64 * 1024).unwrap(),
-    )
-    .unwrap();
-    let bytes = request.request_bytes_data();
+    let mut request = Some(
+        PreparedV2JoinRequest::prepare(
+            catcoms_mls::MlsDevice::generate().unwrap(),
+            &invite.binding().spec_data().anchor,
+            invite.binding(),
+            [59; 32],
+            saved.expires_at_ms() - 1,
+            DirectJoinLimits::new(512 * 1024, 512 * 1024, 64 * 1024).unwrap(),
+        )
+        .unwrap(),
+    );
+    let join_directory = (case == JoinCase::NativeResponse).then(|| tempfile::tempdir().unwrap());
+    let mut join_rng = rand_chacha::ChaCha20Rng::seed_from_u64(0xe715);
+    let mut joined_storage = join_directory.as_ref().map(|join_dir| {
+        drop(selected_governed(join_dir.path()));
+        let mut original = NativeTextGovernedStorage::open(
+            join_dir.path(),
+            SECRET,
+            &mut join_rng,
+            current_policy(),
+        )
+        .unwrap();
+        original.stage_joined_pin_layout(&mut join_rng).unwrap();
+        drop(original);
+        let mut joined =
+            NativeTextJoinedStorage::open(join_dir.path(), SECRET, &mut join_rng, current_policy())
+                .unwrap();
+        joined
+            .stage_first_join(request.take().unwrap(), invite.binding(), &mut join_rng)
+            .unwrap();
+        joined.select_first_join().unwrap();
+        joined
+    });
+    let bytes = if let Some(joined) = &joined_storage {
+        joined.first_join_request_data().unwrap()
+    } else {
+        request.as_ref().unwrap().request_bytes_data()
+    };
     let raw = only_named(directory.path(), "invite.raw.v1");
     let parked = raw.with_extension("held");
     let original = std::fs::read(&raw).unwrap();
@@ -186,20 +220,48 @@ async fn native_governed_add_fixture(case: JoinCase) {
             catcoms_sync::V2FirstAddProofData::decode(&proof_bytes[..proof_bytes.len() - 1])
                 .is_err()
         );
-        let proof = catcoms_sync::V2FirstAddProofData::decode(proof_bytes).unwrap();
+        catcoms_sync::V2FirstAddProofData::decode(proof_bytes).unwrap();
         let delivery = saved.encode_delivery_data().unwrap();
-        assert!(request
-            .finish_first_join_delivery(&delivery[..delivery.len() - 1])
+        let joined = joined_storage.as_mut().unwrap();
+        let join_dir = join_directory.as_ref().unwrap().path();
+        assert!(joined
+            .finish_first_join(&delivery[..delivery.len() - 1], &mut join_rng)
             .is_err());
-        let from_delivery = request.finish_first_join_delivery(&delivery).unwrap() as *const _;
-        let joined = request
-            .finish_first_welcome(decoded.response_data(), &proof)
+        let entry_name = "chat-critical-namespaces.joined-welcome-entry.bin";
+        let outcome_name = "chat-critical-namespaces.joined-welcome-outcome.bin";
+        assert!(find_named(join_dir, entry_name).is_empty());
+        joined.finish_first_join(&delivery, &mut join_rng).unwrap();
+        let entry = only_named(join_dir, entry_name);
+        let outcome = only_named(join_dir, outcome_name);
+        let exact_entry = std::fs::read(&entry).unwrap();
+        let exact_outcome = std::fs::read(&outcome).unwrap();
+        joined.finish_first_join(&delivery, &mut join_rng).unwrap();
+        assert_eq!(std::fs::read(&entry).unwrap(), exact_entry);
+        assert_eq!(std::fs::read(&outcome).unwrap(), exact_outcome);
+        let add_header =
+            OwnerHeaderId::from_bytes(decoded.response_data().binding.spec_data().add_header);
+        drop(joined_storage.take());
+        std::fs::remove_file(&outcome).unwrap();
+        let ambiguous =
+            NativeTextJoinedStorage::open(join_dir, SECRET, &mut join_rng, current_policy())
+                .unwrap();
+        assert!(ambiguous.recovered_join_outcome_data().unwrap().is_none());
+        assert!(ambiguous.first_join_request_data().is_err());
+        drop(ambiguous);
+        let mut corrupt = exact_outcome.clone();
+        *corrupt.last_mut().unwrap() ^= 1;
+        std::fs::write(&outcome, &corrupt).unwrap();
+        assert!(
+            NativeTextJoinedStorage::open(join_dir, SECRET, &mut join_rng, current_policy())
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&outcome).unwrap(), corrupt);
+        std::fs::write(&outcome, exact_outcome).unwrap();
+        let cold = NativeTextJoinedStorage::open(join_dir, SECRET, &mut join_rng, current_policy())
             .unwrap();
-        assert_eq!(joined as *const _, from_delivery);
-        assert_eq!(joined.facts_data().join_epoch_data(), 1);
         assert_eq!(
-            joined.facts_data().group_data(),
-            invite.binding().spec_data().anchor.group.as_slice()
+            cold.recovered_join_outcome_data().unwrap(),
+            Some((add_header, 1))
         );
         let message = body("founder message after governed Add");
         let request = || V2MemberSignRequest {
