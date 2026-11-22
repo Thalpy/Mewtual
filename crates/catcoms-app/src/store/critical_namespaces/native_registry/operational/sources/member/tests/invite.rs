@@ -157,7 +157,7 @@ async fn mounted_join_request_uses_the_original_native_command_and_retains_its_p
     assert!(capture()
         .prepare_exchange(&invite, negative.clone())
         .unwrap()
-        .receive(client.clone())
+        .receive(client)
         .await
         .is_err());
     let founder_capture = || {
@@ -189,10 +189,14 @@ async fn mounted_join_request_uses_the_original_native_command_and_retains_its_p
     let revoked = capture()
         .prepare_exchange(&invite, RequestCancellation::new(signal, None))
         .unwrap();
+    let local_transport = revoked.local_transport_data();
+    assert_ne!(local_transport.0, invite.connected_peer_data());
+    assert_ne!(local_transport.1, 0);
     assert!(capture()
         .cover(&invite, anchor, token, after, &negative, &mut rng)
         .is_ok_and(|original| original == selected));
     let scheduler = catcoms_discovery::EndpointDialScheduler::new(Default::default());
+    let (client, _) = catcoms_net::MeshService::new_tcp(None, &[]).unwrap();
     revoked
         .connect_approved_host(
             &invite,
@@ -202,13 +206,14 @@ async fn mounted_join_request_uses_the_original_native_command_and_retains_its_p
         )
         .await
         .unwrap();
-    let mut receive = async |original: crate::store::NativeTextJoinedExchange| {
-        let (delivery, ()) = tokio::join!(original.receive(client.clone()), serve());
+    let mut receive = async |original: crate::store::NativeTextJoinedExchange, client| {
+        let (delivery, ()) = tokio::join!(original.receive(client), serve());
         delivery.unwrap()
     };
-    let delivery = tokio::time::timeout(std::time::Duration::from_secs(10), receive(revoked))
-        .await
-        .unwrap();
+    let delivery =
+        tokio::time::timeout(std::time::Duration::from_secs(10), receive(revoked, client))
+            .await
+            .unwrap();
     revocation.send(true).unwrap();
     assert!(delivery.cover(&mut rng).is_err());
     assert!(find_named(
@@ -220,7 +225,19 @@ async fn mounted_join_request_uses_the_original_native_command_and_retains_its_p
     let exact = capture()
         .prepare_exchange(&invite, negative.clone())
         .unwrap();
-    let delivery = tokio::time::timeout(std::time::Duration::from_secs(10), receive(exact))
+    assert_eq!(exact.local_transport_data(), local_transport);
+    let (client, _) = catcoms_net::MeshService::new_tcp(None, &[]).unwrap();
+    let scheduler = catcoms_discovery::EndpointDialScheduler::new(Default::default());
+    exact
+        .connect_approved_host(
+            &invite,
+            std::net::Ipv4Addr::LOCALHOST.into(),
+            &client,
+            &scheduler,
+        )
+        .await
+        .unwrap();
+    let delivery = tokio::time::timeout(std::time::Duration::from_secs(10), receive(exact, client))
         .await
         .unwrap();
 
@@ -278,6 +295,10 @@ async fn mounted_join_request_uses_the_original_native_command_and_retains_its_p
             .unwrap();
     assert!(cold.pending_join_data().unwrap() == Some(selected));
     assert_eq!(cold.recovered_join_outcome_data().unwrap(), Some(outcome));
+    assert_eq!(
+        cold.recovered_join_transport_data().unwrap(),
+        Some(local_transport)
+    );
     assert_eq!(std::fs::read(&path).unwrap(), ciphertext);
 }
 

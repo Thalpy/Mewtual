@@ -10,11 +10,50 @@ use index::{JoinedPinIndex, MAX_FRAME as MAX_INDEX_FRAME};
 
 const TAG: &[u8] = b"catcoms/private-chat-v2-pinned-pending-join/v1\0";
 const VERSION: u16 = 1;
+const NATIVE_TRANSPORT_VERSION: u16 = 2;
 const KEY_DOMAIN: &str = "catcoms/private-chat-v2-pinned-pending-join-key/v1";
 const MAX_SOURCE: usize = 512 * 1024 + MAX_V2_JOIN_REQUEST_PACKET_BYTES + 1024;
 const HEAD: usize = 4 + TAG.len() + 2 + 4 * 36 + 4 + 24 + 4 * 4;
 pub(in crate::store) const MAX_FRAME: usize =
-    HEAD + 2 * MAX_INDEX_FRAME + MAX_SOURCE + MAX_JOIN_BINDING_BYTES + 40;
+    HEAD + 2 * MAX_INDEX_FRAME + MAX_SOURCE + MAX_JOIN_BINDING_BYTES + 40 + 36 + 2;
+
+/// The first native transport reservation, bound to the original Pending.
+/// Storage readers may view public facts without creating a transport.
+pub(in crate::store) struct JoinedTransportReservation {
+    seed: Zeroizing<[u8; 32]>,
+    port: u16,
+}
+
+impl JoinedTransportReservation {
+    pub(in crate::store) fn generate(rng: &mut impl CryptoRngCore) -> Result<Self, AppError> {
+        let mut seed = Zeroizing::new([0; 32]);
+        rng.try_fill_bytes(seed.as_mut()).map_err(|_| refused())?;
+        let port = crate::store::ServerNet::derived_port_for_seed(&seed);
+        Self::new(seed, port)
+    }
+
+    fn new(seed: Zeroizing<[u8; 32]>, port: u16) -> Result<Self, AppError> {
+        if *seed == [0; 32]
+            || port == 0
+            || port != crate::store::ServerNet::derived_port_for_seed(&seed)
+        {
+            return Err(refused());
+        }
+        Ok(Self { seed, port })
+    }
+
+    pub(in crate::store) fn identity_data(
+        &self,
+    ) -> Result<(catcoms_rt::PeerId, u16, [u8; 32]), AppError> {
+        let identity =
+            catcoms_net::seeded_transport_identity_data(&self.seed).map_err(|_| refused())?;
+        Ok((
+            identity.phase0_peer_data(),
+            self.port,
+            identity.commitment_data(),
+        ))
+    }
+}
 
 pub(in crate::store) struct PreparedPinnedPending {
     source: PreparedV2JoinRequest,
@@ -23,6 +62,7 @@ pub(in crate::store) struct PreparedPinnedPending {
     before: Zeroizing<Vec<u8>>,
     next: Zeroizing<Vec<u8>>,
     sealed: Option<Zeroizing<Vec<u8>>>,
+    transport: Option<JoinedTransportReservation>,
     key_id: [u8; 32],
 }
 
@@ -33,6 +73,15 @@ impl PreparedPinnedPending {
 
     pub(in crate::store) fn context_data(&self) -> V2PendingJoinContextData {
         self.context
+    }
+
+    pub(in crate::store) fn transport_data(
+        &self,
+    ) -> Result<Option<(catcoms_rt::PeerId, u16, [u8; 32])>, AppError> {
+        self.transport
+            .as_ref()
+            .map(JoinedTransportReservation::identity_data)
+            .transpose()
     }
 
     pub(in crate::store) fn group_data(&self) -> Result<Vec<u8>, AppError> {
@@ -107,9 +156,10 @@ impl PreparedPinnedPending {
         accepted: &SignedInviteBindingData,
         key: &[u8; 32],
         layout: CurrentLayoutData,
-        original_pending: [u8; 32],
+        identity: ([u8; 32], Option<JoinedTransportReservation>),
         rng: &mut impl CryptoRngCore,
     ) -> Result<Self, AppError> {
+        let (original_pending, transport) = identity;
         let packet =
             V2JoinRequestPacketData::decode(source.request_bytes_data()).map_err(|_| refused())?;
         let invite = accepted.encode();
@@ -133,6 +183,7 @@ impl PreparedPinnedPending {
             before: Zeroizing::new(selected_index.to_vec()),
             next,
             sealed: None,
+            transport,
             key_id: *blake3::keyed_hash(key, TAG).as_bytes(),
         })
     }
@@ -155,11 +206,19 @@ impl PreparedPinnedPending {
                 return Err(refused());
             }
             let mut e = Encoder::with_capacity(
-                HEAD + self.before.len() + self.next.len() + self.invite.len() + bytes.len(),
+                HEAD + self.before.len()
+                    + self.next.len()
+                    + self.invite.len()
+                    + bytes.len()
+                    + self.transport.as_ref().map_or(0, |_| 36 + 2),
             );
             let bad = |_| refused();
             e.put_bytes(TAG).map_err(bad)?;
-            e.put_u16(VERSION);
+            e.put_u16(if self.transport.is_some() {
+                NATIVE_TRANSPORT_VERSION
+            } else {
+                VERSION
+            });
             for field in [
                 self.context.vault,
                 self.context.root,
@@ -176,6 +235,10 @@ impl PreparedPinnedPending {
                 bytes,
             ] {
                 e.put_bytes(field).map_err(bad)?;
+            }
+            if let Some(transport) = &self.transport {
+                e.put_bytes(transport.seed.as_slice()).map_err(bad)?;
+                e.put_u16(transport.port);
             }
             let plain = Zeroizing::new(e.finish());
             let key = Zeroizing::new(blake3::derive_key(KEY_DOMAIN, key));
@@ -195,6 +258,7 @@ pub(in crate::store) struct RecoveredPinnedPending {
     candidate: Zeroizing<Vec<u8>>,
     pending: RecoveredV2PendingJoinSource,
     context: V2PendingJoinContextData,
+    transport: Option<JoinedTransportReservation>,
 }
 
 impl RecoveredPinnedPending {
@@ -211,10 +275,11 @@ impl RecoveredPinnedPending {
         let plain = Zeroizing::new(unseal(&journal_key, &unframe(raw)?)?);
         let mut d = Decoder::new(&plain);
         let bad = |_| refused();
-        if d.get_bytes().map_err(bad)? != TAG
-            || d.get_u16().map_err(bad)? != VERSION
-            || d.get_bytes().map_err(bad)? != layout.vault
-            || d.get_bytes().map_err(bad)? != layout.root
+        if d.get_bytes().map_err(bad)? != TAG {
+            return Err(refused());
+        }
+        let version = d.get_u16().map_err(bad)?;
+        if d.get_bytes().map_err(bad)? != layout.vault || d.get_bytes().map_err(bad)? != layout.root
         {
             return Err(refused());
         }
@@ -238,6 +303,22 @@ impl RecoveredPinnedPending {
             .try_into()
             .map_err(|_| refused())?;
         let bytes = d.get_bytes().map_err(bad)?;
+        let transport = match version {
+            VERSION => None,
+            NATIVE_TRANSPORT_VERSION => {
+                let seed = Zeroizing::new(
+                    d.get_bytes()
+                        .map_err(bad)?
+                        .try_into()
+                        .map_err(|_| refused())?,
+                );
+                Some(JoinedTransportReservation::new(
+                    seed,
+                    d.get_u16().map_err(bad)?,
+                )?)
+            }
+            _ => return Err(refused()),
+        };
         d.finish().map_err(bad)?;
         if bytes.len() > MAX_SOURCE {
             return Err(refused());
@@ -265,11 +346,21 @@ impl RecoveredPinnedPending {
             candidate: Zeroizing::new(candidate.to_vec()),
             pending,
             context,
+            transport,
         })
     }
 
     pub(in crate::store) fn index_frames(&self) -> (&[u8], &[u8]) {
         (&self.original, &self.candidate)
+    }
+
+    pub(in crate::store) fn transport_data(
+        &self,
+    ) -> Result<Option<(catcoms_rt::PeerId, u16, [u8; 32])>, AppError> {
+        self.transport
+            .as_ref()
+            .map(JoinedTransportReservation::identity_data)
+            .transpose()
     }
 
     pub(in crate::store) fn pending_data(

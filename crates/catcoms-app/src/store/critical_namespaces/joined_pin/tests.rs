@@ -146,7 +146,7 @@ fn governed_joined_pin_keeps_the_original_anchor_ciphertext_and_pending_provenan
         &invite,
         &key,
         layout,
-        pending,
+        (pending, None),
         &mut rng,
     )
     .is_err());
@@ -158,7 +158,7 @@ fn governed_joined_pin_keeps_the_original_anchor_ciphertext_and_pending_provenan
         &invite,
         &key,
         layout,
-        pending,
+        (pending, None),
         &mut rng,
     )
     .unwrap();

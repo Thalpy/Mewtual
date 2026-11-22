@@ -8,7 +8,9 @@ use super::super::upgrade_source::owning::{
     AuthenticationNegative, JoinedConnectionPreparation, MetadataWork,
 };
 use super::*;
-use crate::store::persistence::governance_layout::joined::{AcceptedFirstJoin, JoinedPendingIo};
+use crate::store::persistence::governance_layout::joined::{
+    AcceptedFirstJoin, AcceptedJoinTransport, JoinedPendingIo,
+};
 use crate::store::NativeTextInvitePacketData;
 use catcoms_replication::chat::join_bindings::GenesisAnchorBindingData;
 use catcoms_replication::chat::owner_facts::OwnerFactId;
@@ -107,6 +109,7 @@ impl NativeTextJoinedRequestPreparation {
             anchor,
             token,
             now_ms,
+            transport: AcceptedJoinTransport::Native,
         };
         work.cover_accepted_first_join(&mut pending, accepted, require_current, rng)
     }
@@ -133,6 +136,7 @@ impl NativeTextJoinedRequestPreparation {
             mount,
             authentication,
             work,
+            local_transport,
             fee,
         } = prepared;
         let (invocation, live) = watch::channel(false);
@@ -146,6 +150,7 @@ impl NativeTextJoinedRequestPreparation {
         Ok(NativeTextJoinedExchange {
             request,
             target: invite.connected_peer_data(),
+            local_transport,
             signal: caller.with_authority(authority),
             mount,
             work,
@@ -201,6 +206,7 @@ pub struct NativeTextJoinedExchange {
     _invocation: watch::Sender<bool>,
     request: Zeroizing<Vec<u8>>,
     target: PeerId,
+    local_transport: (PeerId, u16),
     signal: RequestCancellation,
     mount: RequestCancellation,
     work: SourceWork,
@@ -217,6 +223,11 @@ impl std::fmt::Debug for NativeTextJoinedExchange {
 }
 
 impl NativeTextJoinedExchange {
+    /// Historical public local transport reservation covered by this Pending.
+    pub fn local_transport_data(&self) -> (PeerId, u16) {
+        self.local_transport
+    }
+
     /// Contact one explicitly approved IP using the exact covered invitation.
     pub async fn connect_approved_host(
         &self,

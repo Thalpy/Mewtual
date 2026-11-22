@@ -3,7 +3,7 @@
 use super::super::lifecycle::preparation::Policy;
 use super::*;
 use crate::store::persistence::governance_layout::joined::{
-    AcceptedFirstJoin, JoinedPendingIo, JoinedPinDeclaration,
+    AcceptedFirstJoin, AcceptedJoinTransport, JoinedPendingIo, JoinedPinDeclaration,
 };
 use catcoms_replication::chat::join_bindings::{GenesisAnchorBindingData, SignedInviteBindingData};
 use catcoms_rt::{
@@ -193,6 +193,7 @@ impl NativeTextJoinedStorage {
                 anchor: accepted,
                 token,
                 now_ms,
+                transport: AcceptedJoinTransport::External,
             },
             || (!negative.is_cancelled()).then_some(()).ok_or_else(refused),
             rng,
@@ -362,6 +363,14 @@ impl NativeTextJoinedStorage {
         &self,
     ) -> Result<Option<([u8; 32], V2PendingJoinContextData)>, AppError> {
         self.index.selected_pending_join_data()
+    }
+
+    /// Public identity and reserved port stored by the original native
+    /// Pending. Opening these historical facts starts no transport actor.
+    pub fn recovered_join_transport_data(
+        &self,
+    ) -> Result<Option<(catcoms_rt::PeerId, u16)>, AppError> {
+        self.index.recovered_join_transport_data()
     }
 }
 

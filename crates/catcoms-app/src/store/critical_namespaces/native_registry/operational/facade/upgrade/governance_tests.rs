@@ -659,6 +659,7 @@ fn governed_joined_pin_pending_replays_the_same_private_request_and_index_insert
             NativeTextJoinedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy())
                 .unwrap();
         let (actual, context) = joined.pending_join_data().unwrap().unwrap();
+        assert_eq!(joined.recovered_join_transport_data().unwrap(), None);
         assert!(joined.first_join_request_data().is_err());
         assert_eq!(actual, expected);
         assert_ne!(context.original_pending, [0; 32]);

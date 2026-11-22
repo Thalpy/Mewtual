@@ -148,6 +148,16 @@ impl Physical {
             .recovered_join_outcome_data()
     }
 
+    pub(super) fn recovered_join_transport_data(
+        &self,
+    ) -> Result<Option<(catcoms_rt::PeerId, u16)>, AppError> {
+        self.handler.require()?;
+        self.handler.require_idle_cached()?;
+        self.current()?
+            .checked_store()?
+            .recovered_join_transport_data()
+    }
+
     pub(super) fn copy_selected_governing_proof(
         &self,
         pending: Option<&crate::store::persistence::governance_layout::joined::JoinedPendingIo>,
@@ -1016,6 +1026,8 @@ pub(in crate::store::critical_namespaces::native_registry) struct JoinedConnecti
     pub(in crate::store::critical_namespaces::native_registry) authentication:
         AuthenticationNegative,
     pub(in crate::store::critical_namespaces::native_registry) work: SourceWork,
+    pub(in crate::store::critical_namespaces::native_registry) local_transport:
+        (catcoms_rt::PeerId, u16),
     pub(in crate::store::critical_namespaces::native_registry) fee: CatalogReadReservation,
 }
 
@@ -1069,11 +1081,16 @@ impl MetadataWork {
             NativeTextJoinedStorage::require_invite_bytes(request, invite)?;
             let authentication = self.authentication_negative()?;
             let work = self.physical.capture_source().ok_or_else(refused)?;
+            let local_transport = pending.native_transport_data()?;
+            if pending.request_data(store)? != request {
+                return Err(refused());
+            }
             Ok(JoinedConnectionPreparation {
                 request: Zeroizing::new(request.to_vec()),
                 mount,
                 authentication,
                 work,
+                local_transport,
                 fee,
             })
         })

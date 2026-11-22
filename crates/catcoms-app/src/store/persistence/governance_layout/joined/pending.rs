@@ -5,7 +5,7 @@ use catcoms_replication::chat::join_bindings::{GenesisAnchorBindingData, SignedI
 use catcoms_replication::chat::owner_header::OwnerHeaderId;
 use catcoms_sync::{DirectJoinLimits, PreparedV2JoinRequest, MAX_V2_FIRST_JOIN_DELIVERY_BYTES};
 use critical_namespaces::joined_pin::pending::{
-    PreparedPinnedPending, RecoveredPinnedPending, MAX_FRAME,
+    JoinedTransportReservation, PreparedPinnedPending, RecoveredPinnedPending, MAX_FRAME,
 };
 
 const PENDING_NAME: &str = "chat-critical-namespaces.joined-pending.bin";
@@ -28,6 +28,7 @@ fn original_pending_id(
     layout: CurrentLayoutData,
     selected_index: &[u8],
     request: &[u8],
+    transport: Option<(catcoms_rt::PeerId, u16, [u8; 32])>,
 ) -> [u8; 32] {
     let key = Zeroizing::new(blake3::derive_key(SOURCE_ID_DOMAIN, key));
     let mut source_id = blake3::Hasher::new_keyed(&key);
@@ -35,6 +36,11 @@ fn original_pending_id(
     source_id.update(&layout.root);
     source_id.update(blake3::hash(selected_index).as_bytes());
     source_id.update(blake3::hash(request).as_bytes());
+    if let Some((_, port, identity)) = transport {
+        source_id.update(b"/native-tcp/v2\0");
+        source_id.update(&identity);
+        source_id.update(&port.to_be_bytes());
+    }
     *source_id.finalize().as_bytes()
 }
 
@@ -121,7 +127,13 @@ pub(super) fn select(
     let (before, after) = pending.index_frames();
     let (request, context) = pending.pending_data();
     if context.original_pending
-        != original_pending_id(key, layout, before, request.request_bytes_data())
+        != original_pending_id(
+            key,
+            layout,
+            before,
+            request.request_bytes_data(),
+            pending.transport_data()?,
+        )
     {
         return Err(denied());
     }
@@ -225,6 +237,13 @@ pub(in crate::store) struct AcceptedFirstJoin<'a> {
     pub(in crate::store) anchor: &'a GenesisAnchorBindingData,
     pub(in crate::store) token: [u8; 32],
     pub(in crate::store) now_ms: u64,
+    pub(in crate::store) transport: AcceptedJoinTransport,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::store) enum AcceptedJoinTransport {
+    External,
+    Native,
 }
 
 #[cfg(test)]
@@ -254,6 +273,11 @@ impl ServerStore {
         require_live()?;
         if let Some(original) = pending.as_ref() {
             original.require_original_join_intent(binding, accepted.token)?;
+            if original.transport_data()?.is_some()
+                != (accepted.transport == AcceptedJoinTransport::Native)
+            {
+                return Err(denied());
+            }
         } else {
             if binding.expired_at_data(accepted.now_ms)
                 || self.selected_pending_join_data()?.is_some()
@@ -279,7 +303,12 @@ impl ServerStore {
                 first_join_limits()?,
             )?;
             require_live()?;
-            *pending = Some(self.prepare_joined_pending(source, binding, rng)?);
+            let transport = match accepted.transport {
+                AcceptedJoinTransport::External => None,
+                AcceptedJoinTransport::Native => Some(JoinedTransportReservation::generate(rng)?),
+            };
+            require_live()?;
+            *pending = Some(self.prepare_joined_pending(source, binding, transport, rng)?);
         }
         let original = pending.as_mut().ok_or_else(denied)?;
         if original.request_data(self).is_err() {
@@ -300,6 +329,7 @@ impl ServerStore {
         &self,
         source: PreparedV2JoinRequest,
         invite: &SignedInviteBindingData,
+        transport: Option<JoinedTransportReservation>,
         rng: &mut impl CryptoRngCore,
     ) -> Result<JoinedPendingIo, AppError> {
         require_pending_names(self, None)?;
@@ -337,6 +367,10 @@ impl ServerStore {
             layout,
             &selected.selected.1,
             source.request_bytes_data(),
+            transport
+                .as_ref()
+                .map(JoinedTransportReservation::identity_data)
+                .transpose()?,
         );
         let mut prepared = PreparedPinnedPending::prepare(
             source,
@@ -344,7 +378,7 @@ impl ServerStore {
             invite,
             &key,
             layout,
-            source_id,
+            (source_id, transport),
             rng,
         )?;
         let exact = Zeroizing::new(prepared.seal(&key, rng)?.to_vec());
@@ -368,6 +402,23 @@ impl ServerStore {
         };
         output.require_catalog(self)?;
         Ok(output)
+    }
+
+    pub(in crate::store) fn recovered_join_transport_data(
+        &self,
+    ) -> Result<Option<(catcoms_rt::PeerId, u16)>, AppError> {
+        self.validate_mounted_governance_layout()?;
+        let slot = self.joined_pin_index.lock().map_err(|_| denied())?;
+        let selected = slot.as_ref().ok_or_else(denied)?;
+        selected.require(self)?;
+        let transport = selected
+            .pending
+            .as_ref()
+            .map(|pending| pending._pending.transport_data())
+            .transpose()?
+            .flatten();
+        selected.require(self)?;
+        Ok(transport.map(|(peer, port, _)| (peer, port)))
     }
 
     pub(in crate::store) fn selected_pending_join_data(
@@ -500,6 +551,18 @@ impl ServerStore {
 }
 
 impl JoinedPendingIo {
+    pub(in crate::store) fn native_transport_data(
+        &self,
+    ) -> Result<(catcoms_rt::PeerId, u16), AppError> {
+        self.transport_data()?
+            .map(|(peer, port, _)| (peer, port))
+            .ok_or_else(denied)
+    }
+
+    fn transport_data(&self) -> Result<Option<(catcoms_rt::PeerId, u16, [u8; 32])>, AppError> {
+        self.prepared.transport_data()
+    }
+
     pub(in crate::store) fn require_original_join_intent(
         &self,
         invite: &SignedInviteBindingData,

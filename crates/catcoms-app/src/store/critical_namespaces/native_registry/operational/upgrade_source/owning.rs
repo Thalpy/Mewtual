@@ -352,7 +352,7 @@ impl Store {
         let physical = Arc::get_mut(&mut self.physical).ok_or_else(refused)?;
         physical
             .joined_pending_store()?
-            .prepare_joined_pending(source, invite, rng)
+            .prepare_joined_pending(source, invite, None, rng)
     }
 
     pub(in crate::store::critical_namespaces::native_registry) fn stage_joined_pending(
@@ -416,6 +416,12 @@ impl Store {
     ) -> Result<Option<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64)>, AppError>
     {
         self.physical.recovered_join_outcome_data()
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn recovered_join_transport_data(
+        &self,
+    ) -> Result<Option<(catcoms_rt::PeerId, u16)>, AppError> {
+        self.physical.recovered_join_transport_data()
     }
 
     pub(in crate::store::critical_namespaces::native_registry) fn copy_selected_governing_proof(

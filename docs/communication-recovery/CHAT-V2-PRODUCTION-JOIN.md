@@ -227,7 +227,14 @@ including when the index was selected on disk before a late file check refused
 the result. This App operation returns the selected request commitment and pin
 context. A second capture carries the covered request to the signed peer on an
 already authenticated connection or through one explicitly approved direct IP.
-It releases the metadata slot before contacting the peer. The actor checks the
+The mounted request selects a revision-two Pending that encrypts a fresh local
+transport seed and its derived TCP port. The Pending identity binds the public
+transport commitment and port in addition to the exact request and predecessor
+pin index. The warm and cold read paths return the same public reservation.
+Revision-one requests keep their current read path. Starting the actual TCP
+actor from that reservation remains a separate owning step.
+The connection capture releases the metadata slot before contacting the peer.
+The actor checks the
 original invocation and UI generation, and the mounted worker checks the files
 again before covering Welcome. The transport used to receive that Welcome can
 move with its original closed graph into the same mounted collection. This
