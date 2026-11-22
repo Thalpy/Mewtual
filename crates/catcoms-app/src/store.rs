@@ -5732,6 +5732,8 @@ pub struct ServerStore {
         std::sync::Mutex<Option<critical_namespaces::governance_layout::MountedGovernanceLayout>>,
     joined_pin_selection:
         std::sync::Mutex<Option<persistence::governance_layout::joined::ColdJoinedSelection>>,
+    joined_pin_index:
+        std::sync::Mutex<Option<persistence::governance_layout::joined::SelectedPinIndex>>,
     // Namespace5 marker + held member-outbox parent, installed only by the concrete configured
     // handler. Its presence is mount DATA, never a member-source or save permission.
     member_outbox_layout: std::sync::Mutex<
@@ -5968,6 +5970,7 @@ impl ServerStore {
             governance_layout_policy,
             governance_layout: Default::default(),
             joined_pin_selection: Default::default(),
+            joined_pin_index: Default::default(),
             member_outbox_layout: Default::default(),
             member_outbox_mount: Default::default(),
             current_layout: Default::default(),

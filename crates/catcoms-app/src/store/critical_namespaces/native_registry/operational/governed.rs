@@ -78,4 +78,12 @@ impl NativeTextJoinedStorage {
     pub fn row_count_data(&self) -> Result<usize, AppError> {
         self.index.native_row_count_data()
     }
+
+    /// Historical pin context from the current mounted index.
+    pub fn joined_pin_context_data(
+        &self,
+        anchor: &catcoms_replication::chat::join_bindings::GenesisAnchorBindingData,
+    ) -> Result<Option<catcoms_sync::V2PendingJoinContextData>, AppError> {
+        self.index.selected_joined_pin_context_data(anchor)
+    }
 }

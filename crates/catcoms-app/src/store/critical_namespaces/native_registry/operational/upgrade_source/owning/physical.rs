@@ -68,6 +68,15 @@ pub(super) const METADATA: usize = 8
     + 512;
 
 impl Physical {
+    pub(super) fn selected_joined_pin_context_data(
+        &self,
+        anchor: &catcoms_replication::chat::join_bindings::GenesisAnchorBindingData,
+    ) -> Result<Option<catcoms_sync::V2PendingJoinContextData>, AppError> {
+        self.current()?
+            .checked_store()?
+            .selected_joined_pin_context_data(anchor)
+    }
+
     pub(super) fn stage_joined_pin_layout(
         &mut self,
         declaration: &mut Option<

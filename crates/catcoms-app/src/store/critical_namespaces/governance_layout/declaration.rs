@@ -24,12 +24,16 @@ fn summary(
 }
 
 impl ServerStore {
-    pub(in crate::store) fn parse_joined_pin_catalog(&self, plain: &[u8]) -> Result<(), AppError> {
+    pub(in crate::store) fn parse_joined_pin_catalog(
+        &self,
+        plain: &[u8],
+    ) -> Result<archive_current_namespace_codec::CurrentLayoutData, AppError> {
         if !self.uses_joined_pin_layout() {
             return Err(refused());
         }
-        self.parse_configured_join_catalog(plain)?;
-        Ok(())
+        self.parse_configured_join_catalog(plain)?
+            .current_layout
+            .ok_or_else(refused)
     }
 
     pub(in crate::store) fn prepare_governance_layout_declaration(

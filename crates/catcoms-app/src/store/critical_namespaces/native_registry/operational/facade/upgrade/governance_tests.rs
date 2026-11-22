@@ -188,6 +188,7 @@ fn governed_joined_pin_catalog_inserts_only_six_over_actual_governed_native() {
     let reopened = seed.validate(&key, layout, original_leaves).unwrap();
     assert_eq!(reopened.original, selected);
     assert_eq!(reopened.candidate, prepared.candidate.as_slice());
+    assert_eq!(reopened.initial_index, prepared.initial_index.as_slice());
     let reopened_plain =
         crate::store::unseal(&key, &crate::store::unframe(reopened.candidate).unwrap()).unwrap();
     assert_eq!(reopened_plain, successor.as_slice());
@@ -261,6 +262,11 @@ fn governed_joined_pin_stage_holds_its_first_claim_and_older_openers_preserve_it
     // A positive baseline confirms the refusal came from declaration custody.
     fs::remove_file(&claim).unwrap();
     fs::remove_file(&stage).unwrap();
+    fs::remove_file(
+        dir.path()
+            .join(crate::store::persistence::governance_layout::joined::INDEX_NAME),
+    )
+    .unwrap();
     let old = NativeTextGovernedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy())
         .unwrap();
     assert_eq!(old.row_count_data().unwrap(), 0);
@@ -268,6 +274,17 @@ fn governed_joined_pin_stage_holds_its_first_claim_and_older_openers_preserve_it
 
 #[test]
 fn governed_joined_pin_cold_open_recovers_the_original_catalog_after_each_covered_cut() {
+    use crate::store::persistence::governance_layout::joined::INDEX_NAME;
+    use catcoms_replication::chat::join_bindings::GenesisAnchorBindingData;
+    let absent_pin = GenesisAnchorBindingData {
+        group: vec![176; 16],
+        founder: [177; 32],
+        profile: [178; 32],
+        admission: [179; 32],
+        tenure: [180; 32],
+        header: [181; 32],
+        state: [182; 32],
+    };
     for cut in 0..3 {
         let dir = tempfile::tempdir().unwrap();
         let mut rng = ChaCha20Rng::seed_from_u64(0xc450 + cut);
@@ -277,6 +294,7 @@ fn governed_joined_pin_cold_open_recovers_the_original_catalog_after_each_covere
         let current = dir.path().join(Slot::Current.name());
         let claim = dir.path().join(governance::GOVERNANCE_SEED);
         let stage = dir.path().join(Slot::Stage.name());
+        let index_path = dir.path().join(INDEX_NAME);
         let key = store.keys.db_key().unwrap();
         let domain = store.chat_vault_domain().unwrap();
         drop(plan);
@@ -286,6 +304,7 @@ fn governed_joined_pin_cold_open_recovers_the_original_catalog_after_each_covere
         prepared.stage_joined_pin_layout(&mut rng).unwrap();
         prepared.stage_joined_pin_layout(&mut NeverRng).unwrap();
         let expected = fs::read(&stage).unwrap();
+        let expected_index = fs::read(&index_path).unwrap();
         let native = leaves(dir.path());
         drop(prepared);
 
@@ -316,20 +335,44 @@ fn governed_joined_pin_cold_open_recovers_the_original_catalog_after_each_covere
         if cut == 1 {
             // This models interruption during stage completion.
             fs::write(&stage, &expected[..expected.len() / 2]).unwrap();
+            fs::write(&index_path, &expected_index[..expected_index.len() / 2]).unwrap();
         }
         if cut == 2 {
             // This models a lost return after rename and before seed retirement.
             fs::rename(&stage, &current).unwrap();
+            fs::remove_file(&index_path).unwrap();
+            let seed = fs::read(&claim).unwrap();
+            assert!(NativeTextJoinedStorage::open(
+                dir.path(),
+                SECRET,
+                &mut NeverRng,
+                current_policy()
+            )
+            .is_err());
+            assert_eq!(fs::read(&claim).unwrap(), seed);
+            assert_eq!(fs::read(&current).unwrap(), expected);
+            fs::write(&index_path, &expected_index).unwrap();
         }
         let cold =
             NativeTextJoinedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy())
                 .unwrap_or_else(|error| panic!("joined declaration cut {cut}: {error}"));
         assert_eq!(cold.row_count_data().unwrap(), 0);
         assert_eq!(fs::read(&current).unwrap(), expected);
+        assert_eq!(fs::read(&index_path).unwrap(), expected_index);
         assert_eq!(native, leaves(dir.path()));
         assert!(!claim.exists() && !stage.exists());
         let plain = crate::store::unseal(&key, &crate::store::unframe(&expected).unwrap()).unwrap();
         catalog::parse_joined_native_registry_layout(&plain, &domain, true).unwrap();
+        assert!(cold.joined_pin_context_data(&absent_pin).unwrap().is_none());
+        if cut == 0 {
+            let displaced_index = dir.path().join("held-joined-pin-index");
+            fs::rename(&index_path, &displaced_index).unwrap();
+            fs::write(&index_path, &expected_index).unwrap();
+            assert!(cold.joined_pin_context_data(&absent_pin).is_err());
+            fs::remove_file(&index_path).unwrap();
+            fs::rename(&displaced_index, &index_path).unwrap();
+            assert!(cold.joined_pin_context_data(&absent_pin).unwrap().is_none());
+        }
         drop(cold);
         assert!(NativeTextGovernedStorage::open(
             dir.path(),

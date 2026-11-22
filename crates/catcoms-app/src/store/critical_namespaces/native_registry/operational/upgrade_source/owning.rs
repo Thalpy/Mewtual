@@ -317,6 +317,13 @@ impl std::fmt::Debug for Store {
     }
 }
 impl Store {
+    pub(in crate::store::critical_namespaces::native_registry) fn selected_joined_pin_context_data(
+        &self,
+        anchor: &catcoms_replication::chat::join_bindings::GenesisAnchorBindingData,
+    ) -> Result<Option<catcoms_sync::V2PendingJoinContextData>, AppError> {
+        self.physical.selected_joined_pin_context_data(anchor)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn stage_joined_pin_layout(
         &mut self,
         declaration: &mut Option<

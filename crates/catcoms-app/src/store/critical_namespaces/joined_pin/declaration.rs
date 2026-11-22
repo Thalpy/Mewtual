@@ -1,13 +1,14 @@
 //! Encrypted restart record for the one-time joined-pin catalog declaration.
 use super::*;
 use crate::store::critical_namespaces::{governance_layout, pending_join_codec};
+use index::{JoinedPinIndex, INITIAL_FRAME};
 
-const TAG: &[u8] = b"catcoms/private-chat-v2-joined-pin-declaration/v1\0";
-const KEY_DOMAIN: &str = "catcoms/private-chat-v2-joined-pin-declaration-key/v1";
-const VERSION: u16 = 1;
+const TAG: &[u8] = b"catcoms/private-chat-v2-joined-pin-declaration/v2\0";
+const KEY_DOMAIN: &str = "catcoms/private-chat-v2-joined-pin-declaration-key/v2";
+const VERSION: u16 = 2;
 const CATALOG: usize = pending_join_codec::MAX_CATALOG_FRAMED;
-const OVERHEAD: usize = 4 + TAG.len() + 2 + 6 * 36 + 2 * 4;
-pub(in crate::store) const MAX_SEED_FRAME: usize = OVERHEAD + 2 * CATALOG + 40;
+const OVERHEAD: usize = 4 + TAG.len() + 2 + 6 * 36 + 3 * 4;
+pub(in crate::store) const MAX_SEED_FRAME: usize = OVERHEAD + 2 * CATALOG + INITIAL_FRAME + 40;
 
 /// Exact fixed leaves that must stay selected throughout the declaration.
 /// These commitments have to be paired with the physical owner's handles.
@@ -59,11 +60,13 @@ impl DeclarationLeaves {
 pub(in crate::store) struct OpenedDeclaration<'a> {
     pub(in crate::store) original: &'a [u8],
     pub(in crate::store) candidate: &'a [u8],
+    pub(in crate::store) initial_index: &'a [u8],
 }
 
 pub(in crate::store) struct PreparedDeclaration {
     pub(in crate::store) candidate: Zeroizing<Vec<u8>>,
     pub(in crate::store) seed: Zeroizing<Vec<u8>>,
+    pub(in crate::store) initial_index: Zeroizing<Vec<u8>>,
 }
 
 pub(in crate::store) struct AuthenticatedSeed(Zeroizing<Vec<u8>>);
@@ -84,11 +87,14 @@ impl PreparedDeclaration {
             return Err(refused());
         }
         let candidate = Zeroizing::new(frame(&seal(key, &next, rng)?));
+        let initial_index = JoinedPinIndex::seal_initial(key, layout, rng)?;
         let checked = open_catalog(key, &candidate)?;
         if checked.as_slice() != next.as_slice() {
             return Err(refused());
         }
-        let mut e = Encoder::with_capacity(OVERHEAD + original.len() + candidate.len());
+        let mut e = Encoder::with_capacity(
+            OVERHEAD + original.len() + candidate.len() + initial_index.len(),
+        );
         let invalid = |_| refused();
         e.put_bytes(TAG).map_err(invalid)?;
         e.put_u16(VERSION);
@@ -100,10 +106,15 @@ impl PreparedDeclaration {
         }
         e.put_bytes(original).map_err(invalid)?;
         e.put_bytes(&candidate).map_err(invalid)?;
+        e.put_bytes(&initial_index).map_err(invalid)?;
         let plain = Zeroizing::new(e.finish());
         let key = Zeroizing::new(blake3::derive_key(KEY_DOMAIN, key));
         let seed = Zeroizing::new(frame(&seal(&key, &plain, rng)?));
-        Ok(Self { candidate, seed })
+        Ok(Self {
+            candidate,
+            seed,
+            initial_index,
+        })
     }
 }
 
@@ -137,6 +148,7 @@ impl AuthenticatedSeed {
         }
         let original = d.get_bytes().map_err(invalid)?;
         let candidate = d.get_bytes().map_err(invalid)?;
+        let initial_index = d.get_bytes().map_err(invalid)?;
         d.finish().map_err(invalid)?;
         let old = open_catalog(key, original)?;
         let new = open_catalog(key, candidate)?;
@@ -146,9 +158,15 @@ impl AuthenticatedSeed {
             return Err(refused());
         }
         namespace::verify_declaration(&old, &new, &layout.vault)?;
+        if initial_index.len() != INITIAL_FRAME
+            || !JoinedPinIndex::open(key, layout, initial_index)?.is_empty()
+        {
+            return Err(refused());
+        }
         Ok(OpenedDeclaration {
             original,
             candidate,
+            initial_index,
         })
     }
 }

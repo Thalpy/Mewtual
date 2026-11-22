@@ -188,13 +188,16 @@ ciphertext and `V2GroupPinId`; resealing identical anchor plaintext changes the
 stable outbox context and is forbidden.
 
 The startup declaration prepares a seed over the exact predecessor and
-candidate catalogs and their governing, outbox and native files. Its staging
-path holds the original claim and stage and preserves them on refusal.
+candidate catalogs, their governing, outbox and native files, and the first
+empty pin index. Its staging path holds those original files and preserves
+them on refusal.
 The explicit joined storage opener classifies this declaration before the
 older inspectors and carries the same selected file through their checks.
 It can finish an authenticated interrupted declaration or open an already
-selected joined catalog. It currently accepts settled catalogs. The pin index,
-joined pending-JOIN recovery and native runtime installation remain open.
+selected joined catalog. The mounted index preserves the first pin ciphertext
+for each group and checks the held index when reading pin context. It
+currently accepts settled catalogs. First pin insertion still needs the
+joined pending-JOIN transaction and native runtime installation.
 Unknown/ambiguous remnants are preserved and refused, never cleared as debris.
 Predecessor tests must use a real prior binary with positive open controls.
 
