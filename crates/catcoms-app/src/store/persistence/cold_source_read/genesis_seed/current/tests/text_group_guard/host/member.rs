@@ -453,25 +453,37 @@ fn founder_lane_state_excludes_the_member_lane_before_any_key_call() {
 
 #[test]
 fn a_crash_left_founder_wal_keeps_the_member_lane_closed_until_it_is_gone() {
-    let mut f = promoted(0, 0x7fa35);
-    let dispatches = member_sign_dispatches_for_test();
-    let body = create("member beside an uncertain founder transaction", None);
-    for name in ["text.wal", "text.wal.stage.v1"] {
-        // An uncertain founder transaction (for example a retained A) may still recover.
-        std::fs::write(f.target.join(name), b"crash-left founder work").unwrap();
-        assert!(f
-            .host
+    for warm in [false, true] {
+        let mut f = promoted(0, if warm { 0x7fd40 } else { 0x7fa35 });
+        if warm {
+            f.send(
+                [0x50; 32],
+                &create("member before the fence", None),
+                &[],
+                &[],
+            );
+        }
+        let dispatches = member_sign_dispatches_for_test();
+        let body = create("member beside an uncertain founder transaction", None);
+        for name in ["text.wal", "text.wal.stage.v1"] {
+            // Any unresolved founder WAL or Add fence must be preserved.
+            let path = f.target.join(name);
+            let marked = b"crash-left founder work";
+            std::fs::write(&path, marked).unwrap();
+            assert!(f
+                .host
+                .retry_sign_member_request(&f.layout, plain([0x52; 32], &body))
+                .is_err());
+            assert_eq!(member_sign_dispatches_for_test(), dispatches);
+            assert_eq!(std::fs::read(&path).unwrap().as_slice(), marked);
+            std::fs::remove_file(path).unwrap();
+        }
+        // The original request can sign when the uncertain work is gone.
+        f.host
             .retry_sign_member_request(&f.layout, plain([0x52; 32], &body))
-            .is_err());
-        assert_eq!(member_sign_dispatches_for_test(), dispatches);
-        std::fs::remove_file(f.target.join(name)).unwrap();
+            .unwrap();
+        assert_eq!(member_sign_dispatches_for_test(), dispatches + 1);
     }
-    // With the founder work gone, the same request now authors (nothing was drawn or
-    // retired by the refused attempts).
-    f.host
-        .retry_sign_member_request(&f.layout, plain([0x52; 32], &body))
-        .unwrap();
-    assert_eq!(member_sign_dispatches_for_test(), dispatches + 1);
 }
 
 #[test]

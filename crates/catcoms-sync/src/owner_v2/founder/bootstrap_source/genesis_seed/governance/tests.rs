@@ -400,12 +400,14 @@ fn raw_header_survives_late_lock_and_exact_retry_never_reenters_key() {
     node.execute_add_data_native(request.data()).unwrap();
     node.prepare_admission_data(g.verifier.replay_data())
         .unwrap();
+    assert!(node.raw_admission_signature_data().is_err());
     let generation = native.generation.clone();
     hook(TestCut::RawCached, move || {
         generation.store(8, SeqCst);
     });
     node.sign_admission_native().unwrap();
-    let raw = node.pending.as_ref().unwrap().raw.unwrap();
+    let raw = *node.raw_admission_signature_data().unwrap();
+    assert!(node.signed_admission_data().is_err());
     // Would panic if this retry reached the original private key entry again.
     hook(TestCut::HeaderEntered, || {
         panic!("cached raw must bypass the key")
@@ -414,9 +416,11 @@ fn raw_header_survives_late_lock_and_exact_retry_never_reenters_key() {
     TEST_CUT.with(|slot| {
         slot.borrow_mut().take();
     });
-    assert_eq!(node.pending.as_ref().unwrap().raw, Some(raw));
+    assert_eq!(node.raw_admission_signature_data().unwrap(), &raw);
     node.materialize_admission_data().unwrap();
-    assert!(node.signed_admission_data().unwrap().verify());
+    let signed = node.signed_admission_data().unwrap();
+    assert!(signed.verify());
+    assert_eq!(signed.signature(), &raw);
     assert!(node.require_sdk_current_data().is_ok()); // Native lock is a distinct negative.
     assert!(node
         .pending
@@ -451,7 +455,7 @@ fn panic_after_header_entry_does_not_repeat_key_or_lose_completed_sdk_result() {
     }))
     .is_err());
     assert!(node.sign_admission_native().is_err());
-    assert!(node.pending.as_ref().unwrap().raw.is_none());
+    assert!(node.raw_admission_signature_data().is_err());
     assert!(node.materialize_admission_data().is_err());
     assert_eq!(node.completed_add_data().unwrap().after_epoch_data(), 1);
     drop(node);

@@ -502,6 +502,15 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
         Ok(())
     }
 
+    /// Borrow the exact cached key result for Root's RawHeader record. This
+    /// remains available after a lost reply, before or after materialization.
+    pub fn raw_admission_signature_data(&self) -> Result<&[u8; 64], SyncError> {
+        self.pending
+            .as_ref()
+            .and_then(|p| p.raw.as_ref())
+            .ok_or_else(unavailable)
+    }
+
     /// Deterministic materialization outside writers. It never calls the key,
     /// including after a lost signing reply or a late cancellation.
     pub fn materialize_admission_data(&mut self) -> Result<(), SyncError> {

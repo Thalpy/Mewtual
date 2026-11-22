@@ -6,6 +6,8 @@ use super::*;
 use catcoms_sync::V2JoinRequestPacketData;
 use catcoms_wire::Encoder;
 
+pub(in crate::store::persistence::v2_text) mod held;
+
 const ROLE: &[u8] = b"catcoms/private-chat-text-governed-add-fence/v2\0";
 const REQUEST_DOMAIN: &str = "catcoms/private-chat-text-governed-add-request/v2";
 const FENCE_VERSION: u16 = 2;
@@ -87,6 +89,17 @@ impl GovernedAddFenceData {
         };
         d.finish().map_err(|_| refused())?;
         Ok(result)
+    }
+
+    fn require_parent(
+        self,
+        context: TextContextIdData,
+        parent: TextHeadIdData,
+    ) -> Result<(), AppError> {
+        if self.context != context || self.parent != parent {
+            return Err(refused());
+        }
+        Ok(())
     }
 
     fn wal_key(key: &[u8; 32]) -> Zeroizing<[u8; 32]> {

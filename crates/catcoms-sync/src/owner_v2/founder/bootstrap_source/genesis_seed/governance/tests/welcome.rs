@@ -39,14 +39,15 @@ fn v2_join_request_and_welcome_complete_with_actual_add() {
     node.sign_admission_native().unwrap();
     node.materialize_admission_data().unwrap();
     node.prepare_welcome_data().unwrap();
+    assert!(node.raw_welcome_signature_data().is_err());
+    assert!(node.join_response_data().is_err());
     node.sign_welcome_native().unwrap();
+    let raw = *node.raw_welcome_signature_data().unwrap();
+    assert!(node.join_response_data().is_err());
     node.materialize_welcome_data().unwrap();
     let completed = node.completed_add_data().unwrap();
-    let response = V2JoinResponseData {
-        binding: node.signed_welcome_data().unwrap(),
-        welcome: completed.welcome_data(),
-        sealed_routing: completed.sealed_routing_transfer_data().unwrap(),
-    };
+    let response = node.join_response_data().unwrap();
+    assert!(response.binding.encode().ends_with(&raw));
     let response_wire = response.encode_packet_data().unwrap();
     assert!(V2JoinResponsePacketData::decode(&response_wire[..response_wire.len() - 1]).is_err());
     let response_packet = V2JoinResponsePacketData::decode(&response_wire).unwrap();
@@ -120,6 +121,7 @@ fn welcome_is_derived_only_from_same_request_actual_outputs_and_signed_add() {
     begin(&mut node, &native, &count, request.data());
     assert!(node.prepare_welcome_data().is_err());
     assert!(node.sign_welcome_native().is_err());
+    assert!(node.raw_welcome_signature_data().is_err());
     node.execute_add_data_native(request.data()).unwrap();
     node.prepare_admission_data(g.verifier.replay_data())
         .unwrap();
@@ -218,6 +220,8 @@ fn interrupted_welcome_entry_without_raw_is_terminal_but_keeps_actual_add_and_in
     .is_err());
     assert!(node.sign_welcome_native().is_err());
     assert!(node.materialize_welcome_data().is_err());
+    assert!(node.raw_welcome_signature_data().is_err());
+    assert!(node.join_response_data().is_err());
     assert_eq!(node.unsigned_welcome_data().unwrap().1, frozen);
     assert!(node.completed_add_data().is_ok());
     assert_eq!(count.load(SeqCst), 1);
@@ -250,6 +254,8 @@ fn cached_welcome_raw_survives_lost_reply_lock_and_materializes_without_reenteri
         node.sign_welcome_native()
     }))
     .is_err());
+    let raw = *node.raw_welcome_signature_data().unwrap();
+    assert!(node.join_response_data().is_err());
     hook(TestCut::WelcomeEntered, || {
         panic!("cached raw must not reenter")
     });
@@ -261,6 +267,8 @@ fn cached_welcome_raw_survives_lost_reply_lock_and_materializes_without_reenteri
     node.sign_welcome_native().unwrap();
     node.materialize_welcome_data().unwrap();
     assert_eq!(node.signed_welcome_data().unwrap().encode(), bytes);
+    assert!(bytes.ends_with(&raw));
+    assert_eq!(node.raw_welcome_signature_data().unwrap(), &raw);
     TEST_CUT.with(|slot| {
         slot.borrow_mut().take();
     });

@@ -94,6 +94,9 @@ fn governed_add_fence_preserves_old_wal_authentication_and_refusal() {
         request: [20; 32],
     };
     let raw = data.seal_data(&KEY, &mut rng).unwrap();
+    if let Some(path) = std::env::var_os("MEWTUAL_GOVERNED_ADD_FENCE_FIXTURE") {
+        std::fs::write(path, raw.as_slice()).unwrap();
+    }
     assert!(matches!(
         inspect_seed_stage_mac_data(&KEY, &raw).unwrap(),
         TextControlMacInspectionData::Authenticated

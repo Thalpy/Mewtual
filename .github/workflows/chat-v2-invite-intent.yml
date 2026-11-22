@@ -6,11 +6,15 @@ on:
       - '.github/workflows/chat-v2-invite-intent.yml'
       - '.github/scripts/check-chat-v2-invite-intent.py'
       - '.github/scripts/check-chat-v2-member-save.py'
+      - '.github/predecessor/governed_add_fence_control.rs'
+      - '.github/predecessor/governed_add_fence_owner.rs'
       - 'crates/catcoms-app/src/store/native_text_invite.rs'
       - 'crates/catcoms-app/src/store/native_text_invite/**'
       - 'crates/catcoms-app/src/store/persistence/v2_text/control.rs'
       - 'crates/catcoms-app/src/store/persistence/v2_text/control/**'
+      - 'crates/catcoms-app/src/store/persistence/v2_text/capture/founder_anchor.rs'
       - 'crates/catcoms-app/src/store/persistence/v2_text/transaction/recovery/source.rs'
+      - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/tests/text_group_guard/host/member.rs'
       - 'crates/catcoms-net/src/seeded_identity.rs'
       - 'crates/catcoms-mls/src/policy.rs'
       - 'crates/catcoms-mls/src/group.rs'
@@ -75,7 +79,11 @@ jobs:
         run: python .github/scripts/check-chat-v2-invite-intent.py join-request
       - name: Check exact V2 join response frame accounting
         run: python .github/scripts/check-chat-v2-invite-intent.py join-response
-      - name: Check genuine MLS Add and Welcome against the verified V2 prefix
+      - name: Check the cached governing Header after native lock
+        run: python .github/scripts/check-chat-v2-invite-intent.py governed-header
+      - name: Check interrupted governing Header signing
+        run: python .github/scripts/check-chat-v2-invite-intent.py interrupted-header
+      - name: Check real MLS Add, exact Welcome, and native lifecycle regressions
         run: python .github/scripts/check-chat-v2-invite-intent.py join-welcome
       - name: Check invitation journal format and physical-prefix controls
         run: python .github/scripts/check-chat-v2-invite-intent.py journal
@@ -83,6 +91,9 @@ jobs:
         run: python .github/scripts/check-chat-v2-invite-intent.py add-fence
       - name: Check the existing authenticated scratch controls
         run: python .github/scripts/check-chat-v2-invite-intent.py control-scratch
+      - name: Check that an initialized member lane refuses a WAL or stage
+        if: runner.os == 'Windows'
+        run: python .github/scripts/check-chat-v2-invite-intent.py warm-member-fence
       - name: Check native invitation ownership, signing and durable retries
         run: python .github/scripts/check-chat-v2-invite-intent.py native
       - name: Check invitation packet framing and bound bodies
@@ -94,6 +105,8 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: bash scripts/check-store-raw-fs.sh
+      - name: Check the pinned predecessor against the original governed Add fence
+        run: python .github/scripts/check-chat-v2-invite-intent.py add-fence-predecessor
       - uses: actions/upload-artifact@v4
         if: always()
         with:

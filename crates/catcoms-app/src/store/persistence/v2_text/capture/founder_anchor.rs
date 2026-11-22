@@ -164,11 +164,26 @@ impl SelectedV2TextHead {
             header: e.header,
             state: public.header.spec().state,
         };
-        // A crash-left founder WAL or WAL stage means an uncertain founder transaction (for
-        // example a retained A for some token) may still be recovered later. The member token
-        // namespace must not open beside it, or one request could be authored in both. Only
-        // a proven NotFound is absence; any other result, including an IO error, refuses.
-        // The founder lane cannot later create one on this host: lane exclusivity forbids it.
+        let result = V2TextFounderAnchorData {
+            anchor,
+            _resources: self.resources.clone(),
+        };
+        // Last: the SAME frames are still the selected O under this guard.
+        self.validate_idle_genesis_member_under_current_guard(guard)?;
+        Ok(result)
+    }
+
+    /// Reprove the selected genesis parent and its WAL absences even if the
+    /// caller already has a warm verifier. An existing founder attempt or a
+    /// governed Add fence excludes new genesis-lane key work.
+    pub(in crate::store) fn validate_idle_genesis_member_under_current_guard(
+        &self,
+        guard: &V2TextCurrentGroupGuard<'_, '_>,
+    ) -> Result<(), AppError> {
+        if self.head.generation != 1 || self.head.pending != TextPendingData::None {
+            return Err(refused());
+        }
+        self.validate_under_current_guard(guard)?;
         let (target, _, _) = guard.target_directory_data();
         for name in ["text.wal", "text.wal.stage.v1"] {
             match std::fs::symlink_metadata(fixed_child(target, name)?) {
@@ -176,12 +191,6 @@ impl SelectedV2TextHead {
                 _ => return Err(refused()),
             }
         }
-        let result = V2TextFounderAnchorData {
-            anchor,
-            _resources: self.resources.clone(),
-        };
-        // Last: the SAME frames are still the selected O under this guard.
-        self.validate_under_current_guard(guard)?;
-        Ok(result)
+        guard.validate_source_only()
     }
 }

@@ -426,11 +426,11 @@ impl V2MemberLane {
         store.with_v2_text_current(owner, |current| {
             let guard = store.lock_v2_text_current_group(current, &resources)?;
             self.domain.require_current_source(current)?;
-            selected.validate_under_current_guard(&guard)?;
             guard.require_governed_native_invite_parent()?;
+            selected.validate_idle_genesis_member_under_current_guard(&guard)?;
             let result = work(&guard)?;
-            selected.validate_under_current_guard(&guard)?;
             guard.require_governed_native_invite_parent()?;
+            selected.validate_idle_genesis_member_under_current_guard(&guard)?;
             self.domain.require_current_source(current)?;
             Ok(result)
         })
@@ -856,7 +856,7 @@ impl V2MemberLane {
                 domain.require_current_source(admission)?;
                 // IO-bearing proof that the SAME generation-1 O is still selected, and the
                 // node's full (SDK-consulting) source check: both BEFORE Core admission.
-                selected.validate_under_current_guard(&guard)?;
+                selected.validate_idle_genesis_member_under_current_guard(&guard)?;
                 let signer = shared
                     .ordinary_member_signer_data(store)
                     .map_err(|_| refused())?;

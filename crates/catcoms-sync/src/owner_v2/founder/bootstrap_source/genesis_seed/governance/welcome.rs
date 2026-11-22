@@ -2,6 +2,7 @@
 //! release: Root must cover its intent before entry and the whole response /
 //! installed transition before final publication under actual native guards.
 use super::*;
+use crate::V2JoinResponseData;
 use catcoms_replication::chat::join_bindings::{
     JoinPayloadKindData, SignedWelcomeBindingData, WelcomeBindingSpecData,
 };
@@ -133,6 +134,15 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
         Ok(())
     }
 
+    /// Borrow the exact cached key result for Root's RawWelcome record before
+    /// fallible materialization. Source or native closure cannot erase it.
+    pub fn raw_welcome_signature_data(&self) -> Result<&[u8; 64], SyncError> {
+        self.pending
+            .as_ref()
+            .and_then(|p| p.welcome.as_ref()?.raw.as_ref())
+            .ok_or_else(unavailable)
+    }
+
     /// Outside writers, reconstruct and verify using ONLY retained raw64.
     /// Even an error/unwind leaves that raw and the spent key entry owned.
     pub fn materialize_welcome_data(&mut self) -> Result<(), SyncError> {
@@ -165,6 +175,21 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
             .and_then(|p| p.welcome.as_ref())
             .and_then(|w| w.signed.as_ref())
             .ok_or_else(unavailable)
+    }
+
+    /// Exact response components from this pending Add's materialized binding
+    /// and original SDK completion. Root may seal these for the covering
+    /// transaction. Any publication still requires a separately selected head.
+    pub fn join_response_data(&self) -> Result<V2JoinResponseData<'_>, SyncError> {
+        let binding = self.signed_welcome_data()?;
+        let result = self.completed_add_data()?;
+        Ok(V2JoinResponseData {
+            binding,
+            welcome: result.welcome_data(),
+            sealed_routing: result
+                .sealed_routing_transfer_data()
+                .map_err(|_| unavailable())?,
+        })
     }
 
     /// Simulate a post-key materializer fault without exposing a production

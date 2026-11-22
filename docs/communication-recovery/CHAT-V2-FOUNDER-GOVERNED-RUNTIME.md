@@ -210,6 +210,13 @@ mint `SavedGovernedAdd`. The immutable dependency graph is:
 `Outcome` → `RawHeader` → governing record → `WelcomeIntent` → `RawWelcome`
 → exact response → `Archive2` → `Head2`.
 
+The founder owner lends its exact cached RawHeader and RawWelcome signatures
+before materialization, including after a lost reply or a late native lock.
+The response view is available after materialization and borrows both bodies
+from the same completed MLS Cell. These loans give Root the original bytes
+for the immutable records. Saving and response release still require their
+own covering checks.
+
 The private snapshot encoding is noncanonical. Freeze the original Cell bytes
 once; equal epochs/authenticators do not authorize substituting another Cell
 or a later encoding. Keep archive1/head1 strict and introduce an explicit,
@@ -252,8 +259,8 @@ The reviewed group-work fence is a complete unsupported-version frame under
 the OLD WAL KDF/tag at `text.wal.stage.v1`, held continuously through SDK work
 until covered head2 itself makes old owning readers refuse. Old owning
 promotion/workspace/recovery paths preserve and refuse its authentic MAC.
-Historical metadata/DATA readers are not universally blocked. Actual held-file
-covering checks and pinned predecessor acceptance are still outstanding.
+Historical metadata readers may still open. Actual fence creation and covering
+barriers are still outstanding.
 
 The fence codec uses the existing outer WAL tag and key with logical version 2
 and a separate governed Add role. Its four fixed-width commitments cover the
@@ -265,6 +272,25 @@ known-key MAC test, with their separate size caps. A successful MAC alone
 creates neither a held file nor a reservation receipt. The codec regressions
 compare the old envelope decoder and the new parser and exercise exact request,
 parent and context replacement, torn frames and authenticated wrong roles.
+
+A separate read owner reserves its buffers and physical lease before Current.
+It captures the fixed stage under the governed parent, authenticates outside
+writers, then rechecks the same file handle, exact bytes, named directory and
+original Current. The file test covers both in-place mutation and replacement
+with identical bytes. The reader does not create or repair a fence.
+
+Genesis member signing now reproves both founder WAL absences at the key
+edge, even if its verifier is already warm. The invitation journal writer
+repeats the same absence checks. The existing final member-save edge is
+IO-free. Before covering a fence, the Add owner still has to exclude pending
+requests and detached member saves under their actual ownership boundaries.
+
+Focused CI gives the old binary at `3d3bce63` the exact fixture emitted by
+the new codec. The predecessor must authenticate the MAC, refuse the new WAL
+version and still open an ordinary V1 frame. Its Windows member owner must
+also preserve the stage and selected head before first signing, then sign
+the same request after that test fixture removes the stage. The separate
+current-branch regression covers an already-initialized member verifier.
 
 ## Evidence and limits
 
