@@ -17,6 +17,50 @@ use std::{fs, path::Path, sync::atomic::Ordering};
 struct NeverRng;
 
 #[test]
+fn governed_joined_pin_warm_selection_keeps_the_original_mount_and_stage() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc464);
+    let mut plan = original(dir.path(), &mut rng).prepare_governance().unwrap();
+    plan.retry(&mut rng).unwrap();
+    drop(plan.into_vault().unwrap());
+    let mut governed =
+        NativeTextGovernedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy())
+            .unwrap();
+    governed.stage_joined_pin_layout(&mut rng).unwrap();
+    let stage = dir.path().join(Slot::Stage.name());
+    let current = dir.path().join(Slot::Current.name());
+    let old_current = fs::read(&current).unwrap();
+    let exact_stage = fs::read(&stage).unwrap();
+    let parked = stage.with_extension("held-stage");
+    let (source, saved) = (stage.clone(), parked.clone());
+    let copy = exact_stage.clone();
+    governance::set_stage_selection_hook_for_test(Box::new(move || {
+        fs::rename(&source, &saved).unwrap();
+        fs::write(&source, copy).unwrap();
+    }));
+    let governed = match governed.into_joined(&mut NeverRng) {
+        Ok(_) => panic!("warm selector adopted an equal replacement"),
+        Err((original, _)) => original,
+    };
+    assert_eq!(fs::read(&current).unwrap(), old_current);
+    assert!(catcoms_storage::acquire_vault_session(dir.path()).is_err());
+    fs::remove_file(&stage).unwrap();
+    fs::rename(&parked, &stage).unwrap();
+    let joined = governed.into_joined(&mut NeverRng).unwrap();
+    assert_eq!(joined.row_count_data().unwrap(), 0);
+    assert_eq!(fs::read(&current).unwrap(), exact_stage);
+    assert!(catcoms_storage::acquire_vault_session(dir.path()).is_err());
+    drop(joined);
+    assert_eq!(
+        NativeTextJoinedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy())
+            .unwrap()
+            .row_count_data()
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
 #[ignore = "hosted predecessor harness supplies an isolated fixture root"]
 fn joined_pin_write_predecessor_fixtures() {
     let root = std::path::PathBuf::from(std::env::var_os("MEWTUAL_JOINED_PIN_FIXTURES").unwrap());

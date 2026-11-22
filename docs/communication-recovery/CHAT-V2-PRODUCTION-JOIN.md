@@ -194,7 +194,11 @@ them on refusal.
 The explicit joined storage opener classifies this declaration before the
 older inspectors and carries the same selected file through their checks.
 It can finish an authenticated interrupted declaration or open an already
-selected joined catalog. The mounted index preserves the first pin ciphertext
+selected joined catalog. The warm governed owner can also promote the original
+held declaration and move directly into joined-aware storage on the same vault
+session. Its parser switch happens inside that exclusive owner. An equal-byte
+replacement of the held Stage refuses, and retry takes the original file.
+The mounted index preserves the first pin ciphertext
 for each group and checks the held index when reading pin context. The first
 pending-JOIN record covers the private request and the one exact index
 insertion. The original warm owner can select the insert and release the

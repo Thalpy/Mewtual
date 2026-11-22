@@ -610,6 +610,48 @@ impl V2CurrentLayoutStore {
     ) -> Result<(), AppError> {
         receiver.advance(&mut self.store, &mut self.governance, rng)
     }
+
+    /// Select namespace6 on this exclusive and still-unexposed physical owner.
+    /// The saved warm declaration precedes the parser switch on every attempt.
+    pub(in crate::store::critical_namespaces) fn advance_native_joined_pin(
+        &mut self,
+        declaration: &mut Option<
+            crate::store::persistence::governance_layout::joined::JoinedPinDeclaration,
+        >,
+        handler: super::native_registry::preparation::NativeRegistryHandler,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        if !handler.uses_joined_pin_layout()
+            || self.governance.as_ref().is_none_or(|g| !g.is_live_cached())
+        {
+            return Err(refused());
+        }
+        if !self.store.uses_joined_pin_layout() {
+            if declaration.is_none() {
+                *declaration = Some(self.checked_store()?.prepare_joined_pin_declaration(rng)?);
+            }
+            declaration
+                .as_mut()
+                .ok_or_else(refused)?
+                .stage(self.checked_store()?)?;
+            let current = self
+                .store
+                .current_layout_policy
+                .as_mut()
+                .ok_or_else(refused)?;
+            let governance = self
+                .store
+                .governance_layout_policy
+                .as_mut()
+                .ok_or_else(refused)?;
+            current.native_registry = Some(handler.clone());
+            governance.current.native_registry = Some(handler);
+        }
+        let declaration = declaration.as_ref().ok_or_else(refused)?;
+        let selected = self.store.select_warm_joined_pin_catalog(declaration)?;
+        self.store
+            .install_warm_joined_pin_selection(declaration, selected)
+    }
     /// Closed owning index3 handoff only. The controller cannot extract Store
     /// or submit a callback: this concrete edge owns the catalog critical
     /// section and repeats its original physical and affine-claim proofs.

@@ -132,6 +132,20 @@ impl ServerStore {
     pub(in crate::store) fn select_joined_pin_catalog(
         &self,
     ) -> Result<ColdJoinedSelection, AppError> {
+        self.select_joined_pin_catalog_with(None)
+    }
+
+    pub(in crate::store) fn select_warm_joined_pin_catalog(
+        &self,
+        declaration: &JoinedPinDeclaration,
+    ) -> Result<ColdJoinedSelection, AppError> {
+        self.select_joined_pin_catalog_with(Some(declaration))
+    }
+
+    fn select_joined_pin_catalog_with(
+        &self,
+        warm: Option<&JoinedPinDeclaration>,
+    ) -> Result<ColdJoinedSelection, AppError> {
         let policy = self.governance_layout_policy.as_ref().ok_or_else(denied)?;
         if !self.uses_joined_pin_layout() || policy.native_pool.is_none() {
             return Err(denied());
@@ -145,6 +159,9 @@ impl ServerStore {
             .try_reserve(governance::codec::DECLARATION_FEE)?;
         let index_fee = policy.current.archive.pending.pool.try_reserve(INDEX_FEE)?;
         let inventory = self.read_governance_inventory(&fee)?;
+        if let Some(warm) = warm {
+            warm.require_inventory(self, &inventory)?;
+        }
         let current_path = fixed(self, false, critical_namespaces::Slot::Current.name())?;
         let stage_path = fixed(self, false, critical_namespaces::Slot::Stage.name())?;
         let seed_path = fixed(self, false, governance::GOVERNANCE_SEED)?;
@@ -153,155 +170,172 @@ impl ServerStore {
         let (current, raw) = inventory.current.ok_or_else(denied)?;
         let key = Zeroizing::new(self.keys.db_key()?);
         let directory = inventory.directory;
-        let (current, bytes, original_leaves, index) =
-            if let Some((seed, raw_seed)) = inventory.seed {
-                let seed_id = session_id(&seed).map_err(io)?;
-                let seed_data = AuthenticatedSeed::open(&key, &raw_seed)?;
-                let marker = inventory.marker.ok_or_else(denied)?;
-                let marker_id = session_id(&marker.0).map_err(io)?;
-                let native = NativeGovernanceInventory::capture(
-                    self,
-                    policy.native_pool.as_ref().ok_or_else(denied)?,
-                )?;
-                let layout = native.layout(self)?;
-                let leaves = DeclarationLeaves::from_frames(
-                    &marker.1,
-                    native.member_marker(),
-                    native.marker(),
-                    native.index(),
-                )?;
-                let expected = seed_data.validate(&key, layout, leaves)?;
-                let native = verify_joined_pin_parent(self, native, expected.original, &marker.1)?;
-                let current_id = session_id(&current).map_err(io)?;
-                let before_selection = || {
-                    self.require_governance_directory_matches_root_if_mounted(&directory)?;
-                    native.require(self)?;
-                    exact_held(&marker_path, &marker.0, marker_id, &marker.1)?;
-                    exact_held(&seed_path, &seed, seed_id, &raw_seed)?;
-                    exact_held(&current_path, &current, current_id, &raw)
-                };
-                let candidate_bytes = Zeroizing::new(expected.candidate.to_vec());
-                let promote = raw.as_slice() == expected.original;
-                if !promote && (raw.as_slice() != expected.candidate || inventory.stage.is_some()) {
-                    return Err(denied());
+        let (current, bytes, original_leaves, index) = if let Some((seed, raw_seed)) =
+            inventory.seed
+        {
+            let seed_id = session_id(&seed).map_err(io)?;
+            let seed_data = AuthenticatedSeed::open(&key, &raw_seed)?;
+            let marker = inventory.marker.ok_or_else(denied)?;
+            let marker_id = session_id(&marker.0).map_err(io)?;
+            let native = NativeGovernanceInventory::capture(
+                self,
+                policy.native_pool.as_ref().ok_or_else(denied)?,
+            )?;
+            let layout = native.layout(self)?;
+            let leaves = DeclarationLeaves::from_frames(
+                &marker.1,
+                native.member_marker(),
+                native.marker(),
+                native.index(),
+            )?;
+            let expected = seed_data.validate(&key, layout, leaves)?;
+            let native = verify_joined_pin_parent(self, native, expected.original, &marker.1)?;
+            let current_id = session_id(&current).map_err(io)?;
+            let before_selection = || {
+                self.require_governance_directory_matches_root_if_mounted(&directory)?;
+                native.require(self)?;
+                exact_held(&marker_path, &marker.0, marker_id, &marker.1)?;
+                exact_held(&seed_path, &seed, seed_id, &raw_seed)?;
+                exact_held(&current_path, &current, current_id, &raw)
+            };
+            let candidate_bytes = Zeroizing::new(expected.candidate.to_vec());
+            let promote = raw.as_slice() == expected.original;
+            if !promote && (raw.as_slice() != expected.candidate || inventory.stage.is_some()) {
+                return Err(denied());
+            }
+            // The index preceded any promotion. Only an authenticated seed on
+            // the old catalog can create or complete its initial empty frame.
+            let mut index_file = match read(&index_path, expected.initial_index.len())? {
+                Some((file, prefix)) if expected.initial_index.starts_with(&prefix) => {
+                    Some(CreatedStage {
+                        identity: Some(session_id(&file).map_err(io)?),
+                        file,
+                    })
                 }
-                // The index preceded any promotion. Only an authenticated seed on
-                // the old catalog can create or complete its initial empty frame.
-                let mut index_file = match read(&index_path, expected.initial_index.len())? {
-                    Some((file, prefix)) if expected.initial_index.starts_with(&prefix) => {
-                        Some(CreatedStage {
-                            identity: Some(session_id(&file).map_err(io)?),
-                            file,
-                        })
-                    }
-                    Some(_) => return Err(denied()),
-                    None => None,
-                };
-                let stage = inventory.stage;
-                if stage
-                    .as_ref()
-                    .is_some_and(|(_, raw)| !expected.candidate.starts_with(raw))
+                Some(_) => return Err(denied()),
+                None => None,
+            };
+            if let Some(warm) = warm {
+                if index_file.as_ref().and_then(|file| file.identity)
+                    != warm.index.as_ref().and_then(|file| file.identity)
                 {
                     return Err(denied());
                 }
+            }
+            let stage = inventory.stage;
+            if stage
+                .as_ref()
+                .is_some_and(|(_, raw)| !expected.candidate.starts_with(raw))
+            {
+                return Err(denied());
+            }
+            before_selection()?;
+            if promote && index_file.is_none() {
+                ensure_native_claim(&index_path, &mut index_file)?;
+            }
+            if index_file.is_none() {
+                return Err(denied());
+            }
+            ensure(
+                &index_path,
+                expected.initial_index,
+                &mut index_file,
+                if promote {
+                    ArchiveOutputMode::SeedRepair
+                } else {
+                    ArchiveOutputMode::SavedExact
+                },
+                #[cfg(test)]
+                0,
+                #[cfg(test)]
+                0,
+            )?;
+            sync_directory(&self.dir).map_err(io)?;
+            pending::require_pending_names(self, None)?;
+            let index = SelectedPinIndex::open(
+                self,
+                &key,
+                layout,
+                Some(index_file.as_ref().ok_or_else(denied)?),
+                index_fee,
+            )?;
+            if index.selected.1.as_slice() != expected.initial_index {
+                return Err(denied());
+            }
+            let selected = if promote {
+                // The complete seed authorizes this single fixed stage, up to
+                // its exact prefix. A stage seen at inventory keeps its handle.
+                let mut stage = match stage {
+                    Some((file, _)) => Some(CreatedStage {
+                        identity: Some(session_id(&file).map_err(io)?),
+                        file,
+                    }),
+                    None => None,
+                };
                 before_selection()?;
-                if promote && index_file.is_none() {
-                    ensure_native_claim(&index_path, &mut index_file)?;
-                }
-                if index_file.is_none() {
-                    return Err(denied());
+                index.require(self)?;
+                if stage.is_none() {
+                    ensure_legacy_stage_fence(&stage_path, &mut stage, expected.candidate)?;
                 }
                 ensure(
-                    &index_path,
-                    expected.initial_index,
-                    &mut index_file,
-                    if promote {
-                        ArchiveOutputMode::SeedRepair
-                    } else {
-                        ArchiveOutputMode::SavedExact
-                    },
+                    &stage_path,
+                    expected.candidate,
+                    &mut stage,
+                    ArchiveOutputMode::SeedRepair,
                     #[cfg(test)]
                     0,
                     #[cfg(test)]
                     0,
                 )?;
                 sync_directory(&self.dir).map_err(io)?;
-                pending::require_pending_names(self, None)?;
-                let index = SelectedPinIndex::open(
-                    self,
-                    &key,
-                    layout,
-                    Some(index_file.as_ref().ok_or_else(denied)?),
-                    index_fee,
-                )?;
-                if index.selected.1.as_slice() != expected.initial_index {
-                    return Err(denied());
-                }
-                let selected = if promote {
-                    // The complete seed authorizes this single fixed stage, up to
-                    // its exact prefix. A stage seen at inventory keeps its handle.
-                    let mut stage = match stage {
-                        Some((file, _)) => Some(CreatedStage {
-                            identity: Some(session_id(&file).map_err(io)?),
-                            file,
-                        }),
-                        None => None,
-                    };
-                    before_selection()?;
-                    index.require(self)?;
-                    if stage.is_none() {
-                        ensure_legacy_stage_fence(&stage_path, &mut stage, expected.candidate)?;
-                    }
-                    ensure(
-                        &stage_path,
-                        expected.candidate,
-                        &mut stage,
-                        ArchiveOutputMode::SeedRepair,
-                        #[cfg(test)]
-                        0,
-                        #[cfg(test)]
-                        0,
-                    )?;
-                    sync_directory(&self.dir).map_err(io)?;
-                    #[cfg(test)]
-                    governance::before_stage_selection_for_test();
-                    before_selection()?;
-                    let stage = stage.ok_or_else(denied)?;
-                    exact_retained(&stage_path, &stage, expected.candidate)?;
-                    held(&current_path, &current, current_id)?;
-                    fs::rename(&stage_path, &current_path).map_err(io)?;
-                    stage.file
-                } else {
-                    before_selection()?;
-                    absent(&stage_path)?;
-                    current
-                };
-                let durable =
-                    |error: std::io::Error| AppError::CommittedButNotDurable(error.to_string());
-                selected.sync_all().map_err(durable)?;
-                sync_directory(&self.dir).map_err(durable)?;
-                absent(&stage_path)?;
-                index.require(self)?;
-                native.require(self)?;
-                exact_held(&marker_path, &marker.0, marker_id, &marker.1)?;
-                exact_held(
-                    &current_path,
-                    &selected,
-                    session_id(&selected).map_err(io)?,
-                    &candidate_bytes,
-                )?;
-                exact_held(&seed_path, &seed, seed_id, &raw_seed)?;
-                fs::remove_file(&seed_path).map_err(durable)?;
-                drop(seed);
-                sync_directory(&self.dir).map_err(durable)?;
-                (selected, candidate_bytes, Some((marker, native)), index)
+                #[cfg(test)]
+                governance::before_stage_selection_for_test();
+                before_selection()?;
+                let stage = stage.ok_or_else(denied)?;
+                exact_retained(&stage_path, &stage, expected.candidate)?;
+                held(&current_path, &current, current_id)?;
+                fs::rename(&stage_path, &current_path).map_err(io)?;
+                stage.file
             } else {
-                if inventory.stage.is_some() {
+                before_selection()?;
+                absent(&stage_path)?;
+                current
+            };
+            let durable =
+                |error: std::io::Error| AppError::CommittedButNotDurable(error.to_string());
+            selected.sync_all().map_err(durable)?;
+            sync_directory(&self.dir).map_err(durable)?;
+            absent(&stage_path)?;
+            index.require(self)?;
+            native.require(self)?;
+            exact_held(&marker_path, &marker.0, marker_id, &marker.1)?;
+            exact_held(
+                &current_path,
+                &selected,
+                session_id(&selected).map_err(io)?,
+                &candidate_bytes,
+            )?;
+            exact_held(&seed_path, &seed, seed_id, &raw_seed)?;
+            fs::remove_file(&seed_path).map_err(durable)?;
+            drop(seed);
+            sync_directory(&self.dir).map_err(durable)?;
+            (selected, candidate_bytes, Some((marker, native)), index)
+        } else {
+            if inventory.stage.is_some() {
+                return Err(denied());
+            }
+            let plain = Zeroizing::new(unseal(&key, &unframe(&raw)?)?);
+            let layout = self.parse_joined_pin_catalog(&plain)?;
+            let index = if let Some(warm) = warm {
+                pending::require_pending_names(self, None)?;
+                let expected = warm.index.as_ref().ok_or_else(denied)?;
+                let index = SelectedPinIndex::open(self, &key, layout, Some(expected), index_fee)?;
+                if index.selected.1 != warm.prepared.initial_index {
                     return Err(denied());
                 }
-                let plain = Zeroizing::new(unseal(&key, &unframe(&raw)?)?);
-                let layout = self.parse_joined_pin_catalog(&plain)?;
-                let index = pending::select(
+                index
+            } else {
+                pending::select(
                     self,
                     &key,
                     layout,
@@ -309,9 +343,10 @@ impl ServerStore {
                     (&current, &raw),
                     index_fee,
                     None,
-                )?;
-                (current, raw, None, index)
+                )?
             };
+            (current, raw, None, index)
+        };
         let value = ColdJoinedSelection {
             current,
             bytes,
@@ -321,7 +356,49 @@ impl ServerStore {
             _fee: fee,
         };
         value.require(self)?;
+        if let Some(warm) = warm {
+            let durable =
+                |error: std::io::Error| AppError::CommittedButNotDurable(error.to_string());
+            value.current.sync_all().map_err(durable)?;
+            sync_directory(&self.dir).map_err(durable)?;
+            warm.require_promoted(self)?;
+        }
         Ok(value)
+    }
+
+    pub(in crate::store) fn install_warm_joined_pin_selection(
+        &self,
+        declaration: &JoinedPinDeclaration,
+        selected: ColdJoinedSelection,
+    ) -> Result<(), AppError> {
+        use critical_namespaces::pending_join::Settle;
+        let opened = self.inspect_pending_join_catalog()?;
+        let file = opened.current.as_ref().ok_or_else(denied)?;
+        if !matches!(opened.settle, Settle::None)
+            || opened.selected.framed != *blake3::hash(&selected.bytes).as_bytes()
+            || session_id(file).map_err(io)? != session_id(&selected.current).map_err(io)?
+            || selected.index.pending.is_some()
+        {
+            return Err(denied());
+        }
+        opened.validate_original(self)?;
+        let mut catalog = self.pending_join_catalog.lock().map_err(|_| denied())?;
+        let catalog = catalog.as_mut().ok_or_else(denied)?;
+        let mut index = self.joined_pin_index.lock().map_err(|_| denied())?;
+        if catalog.pending.is_some()
+            || catalog.networks.iter().any(Option::is_some)
+            || catalog.current.framed != *blake3::hash(&declaration.original.1).as_bytes()
+            || index.is_some()
+        {
+            return Err(denied());
+        }
+        // This constructor still owns the whole original physical Store.
+        // Both metadata guards precede the last real files and mount checks.
+        selected.require(self)?;
+        declaration.require_promoted(self)?;
+        catalog.current = opened.selected;
+        *index = Some(selected.index);
+        Ok(())
     }
 
     pub(in crate::store) fn retain_joined_pin_selection(
@@ -440,6 +517,81 @@ impl ServerStore {
 }
 
 impl JoinedPinDeclaration {
+    fn require_inventory(
+        &self,
+        store: &ServerStore,
+        inventory: &GovernanceInventory,
+    ) -> Result<(), AppError> {
+        store.require_governance_directory_matches_root(&self.directory)?;
+        self.native.require(store)?;
+        let current = inventory.current.as_ref().ok_or_else(denied)?;
+        let stage = self.stage.as_ref().ok_or_else(denied)?;
+        let index_path = fixed(store, false, INDEX_NAME)?;
+        exact_retained(
+            &index_path,
+            self.index.as_ref().ok_or_else(denied)?,
+            &self.prepared.initial_index,
+        )?;
+        let marker = inventory.marker.as_ref().ok_or_else(denied)?;
+        if marker.1 != self.marker.1
+            || session_id(&marker.0).map_err(io)? != session_id(&self.marker.0).map_err(io)?
+        {
+            return Err(denied());
+        }
+        if let Some(seed) = &inventory.seed {
+            if seed.1 != self.prepared.seed
+                || Some(session_id(&seed.0).map_err(io)?)
+                    != self.seed.as_ref().and_then(|file| file.identity)
+            {
+                return Err(denied());
+            }
+        }
+        match &inventory.stage {
+            Some(captured) if inventory.seed.is_some() => {
+                if current.1 != self.original.1
+                    || session_id(&current.0).map_err(io)?
+                        != session_id(&self.original.0).map_err(io)?
+                    || captured.1 != self.prepared.candidate
+                    || Some(session_id(&captured.0).map_err(io)?) != stage.identity
+                {
+                    return Err(denied());
+                }
+            }
+            None if current.1 == self.prepared.candidate
+                && Some(session_id(&current.0).map_err(io)?) == stage.identity => {}
+            _ => return Err(denied()),
+        }
+        Ok(())
+    }
+
+    pub(in crate::store) fn require_promoted(&self, store: &ServerStore) -> Result<(), AppError> {
+        store.require_governance_directory_matches_root(&self.directory)?;
+        self.native.require(store)?;
+        absent(&fixed(store, false, governance::GOVERNANCE_SEED)?)?;
+        absent(&fixed(
+            store,
+            false,
+            critical_namespaces::Slot::Stage.name(),
+        )?)?;
+        pending::require_pending_names(store, None)?;
+        exact_held(
+            &fixed(store, true, governance::GOVERNANCE_MARKER)?,
+            &self.marker.0,
+            session_id(&self.marker.0).map_err(io)?,
+            &self.marker.1,
+        )?;
+        exact_retained(
+            &fixed(store, false, INDEX_NAME)?,
+            self.index.as_ref().ok_or_else(denied)?,
+            &self.prepared.initial_index,
+        )?;
+        exact_retained(
+            &fixed(store, false, critical_namespaces::Slot::Current.name())?,
+            self.stage.as_ref().ok_or_else(denied)?,
+            &self.prepared.candidate,
+        )
+    }
+
     fn require_original(&self, store: &ServerStore) -> Result<(), AppError> {
         store.require_governance_directory_matches_root(&self.directory)?;
         self.native.require_initial_catalog(store)?;

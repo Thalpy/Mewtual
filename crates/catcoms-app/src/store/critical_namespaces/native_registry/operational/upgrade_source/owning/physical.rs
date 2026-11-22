@@ -160,6 +160,29 @@ impl Physical {
         declaration.as_mut().ok_or_else(refused)?.stage(store)
     }
 
+    pub(super) fn advance_joined_pin_layout(
+        &mut self,
+        declaration: &mut Option<
+            crate::store::persistence::governance_layout::joined::JoinedPinDeclaration,
+        >,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        self.cell.get_mut().map_err(|_| refused())?.require_idle()?;
+        self.handler.require()?;
+        self.handler.require_idle_cached()?;
+        let joined = self.handler.clone().with_joined_pin_layout();
+        self.current
+            .as_mut()
+            .ok_or_else(refused)?
+            .advance_native_joined_pin(
+                declaration,
+                NativeRegistryHandler::GovernedLifecycle(joined.clone()),
+                rng,
+            )?;
+        self.handler = joined;
+        Ok(())
+    }
+
     pub(super) fn require_governance_completion(
         &self,
         receiver: &crate::store::critical_namespaces::governance_layout::native::Startup,

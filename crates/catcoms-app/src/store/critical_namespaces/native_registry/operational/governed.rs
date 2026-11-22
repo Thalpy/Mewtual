@@ -101,6 +101,25 @@ impl NativeTextGovernedStorage {
         self.index
             .stage_joined_pin_layout(&mut self.joined_declaration, rng)
     }
+
+    /// Promote the declared original on this same physical owner. A refusal
+    /// retains the original continuation, including a possibly promoted file.
+    pub fn into_joined(
+        mut self,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<NativeTextJoinedStorage, (Self, AppError)> {
+        if let Err(error) = self
+            .index
+            .advance_joined_pin_layout(&mut self.joined_declaration, rng)
+        {
+            return Err((self, error));
+        }
+        drop(self.joined_declaration.take());
+        Ok(NativeTextJoinedStorage {
+            pending: None,
+            index: self.index,
+        })
+    }
 }
 
 /// Explicit custody of the joined-pin catalog and its existing native leaves.

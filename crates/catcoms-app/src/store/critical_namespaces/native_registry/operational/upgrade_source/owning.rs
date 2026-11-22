@@ -424,6 +424,17 @@ impl Store {
         physical.stage_joined_pin_layout(declaration, rng)
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn advance_joined_pin_layout(
+        &mut self,
+        declaration: &mut Option<
+            crate::store::persistence::governance_layout::joined::JoinedPinDeclaration,
+        >,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        let physical = Arc::get_mut(&mut self.physical).ok_or_else(refused)?;
+        physical.advance_joined_pin_layout(declaration, rng)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn require_governance_completion(
         &self,
         receiver: &crate::store::critical_namespaces::governance_layout::native::Startup,
