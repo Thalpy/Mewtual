@@ -20,7 +20,8 @@ pub use invite::NativeTextInvitePublication;
 mod join;
 pub use join::{
     NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,
-    NativeTextJoinedRequestPreparation, NativeTextJoinedSelectionPreparation,
+    NativeTextJoinedRequestPreparation, NativeTextJoinedRowSelection,
+    NativeTextJoinedSelectionPreparation,
 };
 mod member;
 mod network;

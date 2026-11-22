@@ -4,12 +4,49 @@
 //! of native guard scopes. Native founding must supply a real Root selection.
 use super::*;
 use catcoms_app::store::{
-    CriticalCatalogReadPool, NativeTextRuntimeSelection, NativeTextVaultAuthenticationCheck,
-    NativeUiInvocationBudget, NativeUiInvocationMetadata,
+    CriticalCatalogReadPool, NativeTextJoinedRowSelection, NativeTextRuntimeSelection,
+    NativeTextVaultAuthenticationCheck, NativeUiInvocationBudget, NativeUiInvocationMetadata,
 };
 
 pub(super) const NATIVE_ROWS: usize = 2;
-pub(super) type NativeSelection = NativeTextRuntimeSelection<catcoms_net::MeshService, OsCryptoRng>;
+type FounderSelection = NativeTextRuntimeSelection<catcoms_net::MeshService, OsCryptoRng>;
+
+#[derive(Clone)]
+pub(super) enum NativeSelection {
+    Founder(FounderSelection),
+    Joined(NativeTextJoinedRowSelection),
+}
+
+impl NativeSelection {
+    pub(super) fn founder(&self) -> Option<&FounderSelection> {
+        match self {
+            Self::Founder(original) => Some(original),
+            Self::Joined(_) => None,
+        }
+    }
+
+    pub(super) fn id_data(&self) -> u64 {
+        match self {
+            Self::Founder(original) => original.id_data(),
+            Self::Joined(original) => original.id_data(),
+        }
+    }
+
+    pub(super) fn same_original(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Founder(a), Self::Founder(b)) => a.same_original(b),
+            (Self::Joined(a), Self::Joined(b)) => a.same_original(b),
+            _ => false,
+        }
+    }
+
+    fn close_original_cached(&self) {
+        match self {
+            Self::Founder(original) => original.close_original_cached(),
+            Self::Joined(original) => original.close_original_cached(),
+        }
+    }
+}
 
 enum Row {
     Legacy(Box<ServerEntry>),

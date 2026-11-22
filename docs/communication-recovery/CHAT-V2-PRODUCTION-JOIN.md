@@ -253,8 +253,10 @@ and state, and epoch. The native registry uses a distinct completed-joined row
 tag. It appends only from the original parked node with the held Current,
 joined-pin index, Pending, Entry and Outcome. The CAS rechecks those files
 before selection. A cold opener proves the same registered facts before
-recovering a staged row or consuming an already selected row. The desktop Join
-command still needs runtime and joined-member save dispatch.
+recovering a staged row or consuming an already selected row. The gated
+desktop Join command publishes that row from the same mounted Source. A retry
+after registration observes that original row without dialing or entering
+Welcome again. Ordinary joined-member saves still need their own Source lane.
 The explicit cold native storage owner can reopen that selected row with a TCP
 actor built from its same covered seed and port. It attaches the independently
 restored private graph after matching its receipt and governing replay. The
@@ -330,8 +332,11 @@ authority. A later authenticated unlock can attach a fresh receiver for exact
 retries. Legacy invitation commands are refused in the gated native mode
 before any Legacy handler or transport work. Gated native preview verifies the
 signed invite metadata, and the founder can mint its first covered invitation
-through the native desktop command. Certified dialing and native joiner
-installation remain open.
+through the native desktop command. The joiner reviews the invite and explicitly
+approves a numeric IP address for the founder. The native scheduler uses the
+signed port and peer identity, and the desktop publishes the closed joined node
+only after covering Welcome and selecting the registered row. The first invite
+profile carries no certified address, rendezvous, or switchboard routes.
 
 Unknown/ambiguous remnants are preserved and refused, never cleared as debris.
 The `joined-predecessor` CI scope builds the pinned governed reader from

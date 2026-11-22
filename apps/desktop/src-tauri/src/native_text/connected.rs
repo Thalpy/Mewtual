@@ -76,7 +76,10 @@ impl Source {
         payment: &mut Option<NativeUiInvocationMetadata>,
     ) -> Option<Self> {
         let data = row.data();
-        if payment.is_none() || !target.same_original(&data.target) {
+        if payment.is_none()
+            || data.selection.founder().is_none()
+            || !target.same_original(&data.target)
+        {
             return None;
         }
         let scope = row.scope(account)?;

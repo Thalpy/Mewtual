@@ -172,7 +172,7 @@ jobs:
               raise RuntimeError('native UI retirement exceeded its deadline')
           guard['validate'](''.join(summaries), code, 4)
           PY
-      - name: Check native joined-vault reopen, founder JoinRequest dispatch, and mode isolation
+      - name: Check native joined-vault reopen, desktop Join, and mode isolation
         if: github.event_name == 'workflow_dispatch' && inputs.scope == 'native-join'
         shell: bash
         run: |
@@ -192,7 +192,7 @@ jobs:
           )
           if timed_out:
               raise RuntimeError('native join dispatch exceeded its deadline')
-          guard['validate'](''.join(summaries), code, 4)
+          guard['validate'](''.join(summaries), code, 5)
           PY
       # Collect the separate compile gate even if a native test fails, without masking it.
       - name: Check the native workspace

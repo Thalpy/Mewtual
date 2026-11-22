@@ -17,6 +17,7 @@ mod founding;
 mod history;
 mod invite_mint;
 mod invite_preview;
+mod joining;
 mod listing;
 pub(super) mod retirement;
 mod sending;
@@ -243,12 +244,7 @@ fn router<R: tauri::Runtime>(
     spawn: impl Fn(Task) + Send + Sync + 'static,
 ) -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'static {
     move |invoke| {
-        if enabled
-            && matches!(
-                invoke.message.command(),
-                "join_server" | "get_invite" | "send_dm_invite"
-            )
-        {
+        if enabled && matches!(invoke.message.command(), "get_invite" | "send_dm_invite") {
             invoke
                 .resolver
                 .reject("Invitations are unavailable in this Chat V2 checkpoint.");
@@ -256,6 +252,9 @@ fn router<R: tauri::Runtime>(
         }
         if enabled && invoke.message.command() == "preview_invite" {
             return invite_preview::route(invoke, &spawn);
+        }
+        if enabled && invoke.message.command() == "join_server" {
+            return joining::route(invoke, &spawn);
         }
         if enabled && invoke.message.command() == "mint_invite_fresh" {
             return invite_mint::route(invoke, &spawn);

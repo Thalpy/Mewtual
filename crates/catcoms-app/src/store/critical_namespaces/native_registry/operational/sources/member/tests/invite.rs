@@ -338,6 +338,11 @@ async fn mounted_join_fixture(recover_stage: bool) {
         let mut after = rng.clone();
         let row = register(&mut rng).unwrap();
         assert_eq!(row.id, 1);
+        let view = inspect().select_registered(&fresh).unwrap();
+        assert!(view.is_from_original_vault_cached(&vault));
+        assert_eq!(view.id_data(), row.id);
+        assert_eq!(view.name_data(), "Original Room");
+        assert!(view.same_original(&inspect().select_registered(&fresh).unwrap()));
         assert_eq!(register(&mut rng).unwrap(), row);
         assert_eq!(rng.next_u64(), after.next_u64());
         assert_eq!(std::fs::read(&index).unwrap(), saved_stage);
@@ -431,6 +436,17 @@ async fn mounted_join_fixture(recover_stage: bool) {
         .inspect_registration(&invite, token, &fresh)
         .unwrap();
     assert_eq!(recovered, Some(registration));
+    let recovered_row =
+        || mounted_sources.capture_joined_selection(command(&mounted_vault, &budget));
+    let selection = recovered_row().select_registered(&fresh).unwrap();
+    assert_eq!(selection.id_data(), 1);
+    assert_eq!(selection.name_data(), "Original Room");
+    assert_eq!(selection.request_data(), registration.request);
+    assert!(selection.is_from_original_vault_cached(&mounted_vault));
+    assert!(selection.same_original(&recovered_row().select_registered(&fresh).unwrap()));
+    selection.close_original_cached();
+    assert!(!selection.is_current_cached());
+    assert!(recovered_row().select_registered(&fresh).is_err());
 }
 
 #[derive(PartialEq, Eq)]

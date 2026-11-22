@@ -26,6 +26,7 @@ use catcoms_sync::{
     ClosedV2JoinedNode, NativeV2JoinKeyEntry, V2JoinedRuntimeInputs, V2PendingJoinContextData,
 };
 use std::{
+    sync::atomic::{AtomicBool, Ordering},
     sync::{OnceLock, Weak},
     time::Duration,
 };
@@ -62,6 +63,7 @@ pub(super) fn invoice<R: CryptoRngCore>() -> usize {
         + std::mem::size_of::<MountedJoin<R>>()
         + std::mem::size_of::<join_tcp::Transport>()
         + 2 * std::mem::size_of::<NativeChatKeyEnds>()
+        + std::mem::size_of::<JoinedRowSelection>() + 512 // bounded original row name and its handles
         + 4096 // original joined Source counter, cuts, and their Arc allocations
         + 6 * std::mem::size_of::<usize>()
 }
@@ -398,6 +400,7 @@ pub(super) struct MountedNode<R: CryptoRngCore> {
     node: Option<ClosedV2JoinedNode<catcoms_net::MeshService, R>>,
     registration: Option<Arc<JoinedRegistrationDependency>>,
     recovered: Option<NativeTextJoinedRegistrationData>,
+    selection: Option<NativeTextJoinedRowSelection>,
     _payment: CatalogReadReservation,
 }
 
@@ -449,6 +452,7 @@ impl<R: CryptoRngCore> NativeTextSources<catcoms_net::MeshService, R> {
             node: node.take(),
             registration: None,
             recovered: Some(receipt),
+            selection: None,
             _payment: payment,
         });
         Ok(())
@@ -534,6 +538,7 @@ impl<R: CryptoRngCore> NativeTextJoinedInstallation<R> {
                     node,
                     registration: None,
                     recovered: None,
+                    selection: None,
                     _payment: payment.take().unwrap(),
                 });
                 self.exchange.tcp.attached();
@@ -570,6 +575,57 @@ pub struct NativeTextJoinedSelectionPreparation<R: CryptoRngCore> {
     original: NativeTextJoinedRequestPreparation,
 }
 
+/// Paid original row association issued by the covered mounted runtime.
+/// It exposes data and an irreversible close fence while retaining no node.
+#[derive(Clone)]
+pub struct NativeTextJoinedRowSelection {
+    original: Arc<JoinedRowSelection>,
+}
+
+struct JoinedRowSelection {
+    row: NativeTextJoinedRegistryRowData,
+    name: String,
+    request: [u8; 32],
+    scope: Arc<Scope>,
+    retired: AtomicBool,
+    keys: Option<NativeChatSourceClose>,
+    _metadata: Arc<retirement::Control>,
+}
+
+impl std::fmt::Debug for NativeTextJoinedRowSelection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeTextJoinedRowSelection")
+            .finish_non_exhaustive()
+    }
+}
+
+impl NativeTextJoinedRowSelection {
+    pub fn id_data(&self) -> u64 {
+        self.original.row.id
+    }
+    pub fn name_data(&self) -> &str {
+        &self.original.name
+    }
+    pub fn request_data(&self) -> [u8; 32] {
+        self.original.request
+    }
+    pub fn same_original(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.original, &other.original)
+    }
+    pub fn is_current_cached(&self) -> bool {
+        self.original.scope.is_open() && !self.original.retired.load(Ordering::SeqCst)
+    }
+    pub fn is_from_original_vault_cached(&self, vault: &NativeTextVault) -> bool {
+        Arc::ptr_eq(&self.original.scope, &vault.sources.observe())
+    }
+    pub fn close_original_cached(&self) {
+        self.original.retired.store(true, Ordering::SeqCst);
+        if let Some(keys) = &self.original.keys {
+            keys.close();
+        }
+    }
+}
+
 impl<R: CryptoRngCore> std::fmt::Debug for NativeTextJoinedSelectionPreparation<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NativeTextJoinedSelectionPreparation")
@@ -591,6 +647,60 @@ impl<R: CryptoRngCore> NativeTextSources<catcoms_net::MeshService, R> {
 }
 
 impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
+    /// Observe the one original parked slot before choosing a retry phase.
+    /// Actual contact and registry writes still verify their exact inputs.
+    pub fn has_parked_runtime(self, negative: &RequestCancellation) -> Result<bool, AppError> {
+        self.original.require_current(negative)?;
+        let mounted = self.mounted.upgrade().ok_or_else(refused)?;
+        let slot = mounted.try_lock().map_err(|_| refused())?;
+        let parked = slot.as_ref().is_some_and(|runtime| runtime.node.is_some());
+        self.original.require_current(negative)?;
+        Ok(parked)
+    }
+
+    /// Borrow the same paid association only after proving the exact joined
+    /// row against its original parked, selected node and current UI.
+    pub fn select_registered(
+        self,
+        negative: &RequestCancellation,
+    ) -> Result<NativeTextJoinedRowSelection, AppError> {
+        self.original.require_current(negative)?;
+        let pending = self.original.pending.upgrade().ok_or_else(refused)?;
+        let _owner = pending.state.try_lock().map_err(|_| refused())?;
+        let mounted = self.mounted.upgrade().ok_or_else(refused)?;
+        let mut slot = mounted.try_lock().map_err(|_| refused())?;
+        let runtime = slot.as_mut().ok_or_else(refused)?;
+        let actual = runtime.node.as_ref().ok_or_else(refused)?;
+        let data = runtime
+            .recovered
+            .or_else(|| runtime.registration.as_ref().map(|proof| proof.data()))
+            .ok_or_else(refused)?;
+        if data.selected_data() != actual.selected_join_data().map_err(|_| refused())? {
+            return Err(refused());
+        }
+        let metadata = self.original.work.as_ref().ok_or_else(refused)?;
+        let (row, name) =
+            metadata.observe_registered_joined_row(data, runtime.registration.as_deref())?;
+        self.original.require_current(negative)?;
+        let selection = runtime
+            .selection
+            .get_or_insert_with(|| NativeTextJoinedRowSelection {
+                original: Arc::new(JoinedRowSelection {
+                    row,
+                    name,
+                    request: data.request,
+                    scope: self.original.scope.clone(),
+                    retired: AtomicBool::new(false),
+                    keys: pending.close.get().cloned(),
+                    _metadata: self.original._control.clone(),
+                }),
+            });
+        if selection.original.row != row || !selection.is_current_cached() {
+            return Err(refused());
+        }
+        Ok(selection.clone())
+    }
+
     /// Select the native metadata row for the exact parked original. This
     /// commits local registration while joined authoring remains closed.
     pub fn register(
@@ -605,23 +715,36 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         let (receipt, debt) = {
             let original = self.original.pending.upgrade().ok_or_else(refused)?;
             let pending = original.state.try_lock().map_err(|_| refused())?;
-            let pending = pending.io.as_ref().ok_or_else(refused)?;
-            pending.require_original_join_intent(invite.binding(), token)?;
             let mounted = self.mounted.upgrade().ok_or_else(refused)?;
             let mut slot = mounted.try_lock().map_err(|_| refused())?;
             let runtime = slot.as_mut().ok_or_else(refused)?;
             let node = runtime.node.as_ref().ok_or_else(refused)?;
             let selected = node.selected_join_data().map_err(|_| refused())?;
             let metadata = self.original.work.as_ref().ok_or_else(refused)?;
-            if runtime.registration.is_none() {
-                runtime.registration = Some(metadata.capture_join_registration(pending)?);
+            if let Some(recovered) = runtime.recovered {
+                if recovered.invocation != token
+                    || recovered.invite != invite.binding().id_data()
+                    || recovered.selected_data() != selected
+                {
+                    return Err(refused());
+                }
+                (
+                    metadata.observe_registered_joined_row(recovered, None)?.0,
+                    None,
+                )
+            } else {
+                let pending = pending.io.as_ref().ok_or_else(refused)?;
+                pending.require_original_join_intent(invite.binding(), token)?;
+                if runtime.registration.is_none() {
+                    runtime.registration = Some(metadata.capture_join_registration(pending)?);
+                }
+                let proof = runtime.registration.as_ref().ok_or_else(refused)?;
+                if proof.data().selected_data() != selected || proof.data().invocation != token {
+                    return Err(refused());
+                }
+                self.original.require_current(negative)?;
+                metadata.register_joined(name, proof, rng)?
             }
-            let proof = runtime.registration.as_ref().ok_or_else(refused)?;
-            if proof.data().selected_data() != selected || proof.data().invocation != token {
-                return Err(refused());
-            }
-            self.original.require_current(negative)?;
-            metadata.register_joined(name, proof, rng)?
         };
         drop(debt);
         self.original.require_current(negative)?;

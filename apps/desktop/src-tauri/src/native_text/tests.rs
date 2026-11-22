@@ -1035,7 +1035,11 @@ async fn native_text_connected_join_keeps_legacy_invitation_handlers_outside_nat
             let tauri::ipc::InvokeResponse::Err(error) = reply.await.unwrap() else {
                 panic!("invitation IPC reached a worker");
             };
-            let expected = if enabled && matches!(command, "preview_invite" | "mint_invite_fresh") {
+            let expected = if enabled
+                && matches!(
+                    command,
+                    "join_server" | "preview_invite" | "mint_invite_fresh"
+                ) {
                 listing::STALE
             } else if enabled {
                 "Invitations are unavailable in this Chat V2 checkpoint."
@@ -1125,7 +1129,8 @@ async fn native_text_connected_join_retries_original_welcome_after_authenticated
         found_value(preview.await.unwrap()),
         serde_json::json!({
             "direct_routes": 0, "rendezvous_routes": 0, "switchboards": 0,
-            "expires_at_ms": expires, "communication_mode": "peer_to_peer"
+            "expires_at_ms": expires, "communication_mode": "peer_to_peer",
+            "approved_host_required": true
         })
     );
     let trailing = preview_request(&main, format!("{hex}00"));
@@ -1199,6 +1204,91 @@ async fn native_text_connected_join_retries_original_welcome_after_authenticated
         .await
         .unwrap();
     drop(close);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_connected_join_gated_route_publishes_one_original_joined_row() {
+    let root = tempfile::tempdir().unwrap();
+    let (founder, founder_window, founder_queue) = app(root.path().join("founder"), None, true);
+    let (joiner, joiner_window, joiner_queue) = app(root.path().join("joiner"), None, true);
+    unlock_current(&founder, &founder_window, &founder_queue).await;
+    unlock_current(&joiner, &joiner_window, &joiner_queue).await;
+    let found = found_request(&founder_window, 1, "Founder group");
+    run(&founder_queue).await;
+    let found = found_value(found.await.unwrap());
+    let minted = invite_command(
+        &founder_window,
+        "mint_invite_fresh",
+        serde_json::json!({ "server": found["server"] }),
+    );
+    run(&founder_queue).await;
+    let code = found_value(minted.await.unwrap());
+    let preview = preview_request(&joiner_window, code.as_str().unwrap().to_owned());
+    run(&joiner_queue).await;
+    let preview = found_value(preview.await.unwrap());
+    assert_eq!(preview["approved_host_required"], true);
+    assert_eq!(preview["direct_routes"], 0);
+    let join = |host, display| {
+        invite_command(
+            &joiner_window,
+            "join_server",
+            serde_json::json!({
+                "inviteHex": code, "approvedHost": host, "displayName": display,
+                "serverName": "My joined group", "isDm": false, "allowSwitchboards": false,
+            }),
+        )
+    };
+    refused(join("localhost", "Member").await.unwrap());
+    refused(join("0.0.0.0", "Member").await.unwrap());
+    assert!(joiner_queue.lock().unwrap().is_empty());
+    let original = join("127.0.0.1", "Member");
+    tokio::time::timeout(Duration::from_secs(30), run(&joiner_queue))
+        .await
+        .expect("the native Join completes over the founder TCP actor");
+    let original = found_value(original.await.unwrap());
+    assert_eq!(original["backend"], "text-v2");
+    assert_eq!(original["name"], "My joined group");
+    assert_eq!(original["display_name"], "Member");
+    assert_eq!(original["channel"], found["channel"]);
+    let id = original["server"].as_u64().unwrap();
+    let state = joiner.state::<AppState>();
+    let instance = state
+        .servers
+        .lock()
+        .await
+        .native(&id)
+        .unwrap()
+        .data()
+        .instance;
+
+    // The saved native row can be reported after the actual founder retires.
+    let locked = snapshot_request(&founder_window, None);
+    run(&founder_queue).await;
+    assert!(snapshot_result(locked.await.unwrap())["continuity_error"].is_null());
+    let retry = join("127.0.0.1", "Member");
+    run(&joiner_queue).await;
+    assert_eq!(found_value(retry.await.unwrap()), original);
+    let changed = join("127.0.0.1", "Changed member");
+    run(&joiner_queue).await;
+    refused(changed.await.unwrap());
+    assert_eq!(
+        state
+            .servers
+            .lock()
+            .await
+            .native(&id)
+            .unwrap()
+            .data()
+            .instance,
+        instance
+    );
+    let listed = resume_request(&joiner_window);
+    run(&joiner_queue).await;
+    let listed = found_value(listed.await.unwrap());
+    assert_eq!(listed["servers"].as_array().unwrap(), &[original]);
+    let locked = snapshot_request(&joiner_window, None);
+    run(&joiner_queue).await;
+    assert!(snapshot_result(locked.await.unwrap())["continuity_error"].is_null());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

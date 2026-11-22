@@ -346,11 +346,12 @@ async fn execute(state: &AppState, invocation: &Invocation) -> Result<Output, St
         })?;
     }
     let preparation = capture(state, invocation).await?;
-    let selection =
+    let selection = server_table::NativeSelection::Founder(
         tauri::async_runtime::spawn_blocking(move || preparation.finish()?.select_stored_runtime())
             .await
             .map_err(|_| SUPERSEDED)?
-            .map_err(|_| SUPERSEDED)?;
+            .map_err(|_| SUPERSEDED)?,
+    );
     let row_policy = { state.servers.lock().await.native_budget() };
     let credit = row_policy.prepare().map_err(|_| BUSY)?;
     let instance = state.next_server_instance.fetch_add(1, Ordering::Relaxed);

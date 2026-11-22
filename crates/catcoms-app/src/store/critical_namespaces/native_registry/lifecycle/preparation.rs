@@ -209,6 +209,14 @@ pub(in crate::store::critical_namespaces::native_registry) fn require_registered
     inventory: &crate::store::persistence::native_registry::lifecycle::upgrade::UpgradeInventory,
     original: crate::store::NativeTextJoinedRegistrationData,
 ) -> Result<(), AppError> {
+    observe_registered_native_join(store, inventory, original).map(|_| ())
+}
+
+pub(in crate::store::critical_namespaces::native_registry) fn observe_registered_native_join(
+    store: &crate::store::ServerStore,
+    inventory: &crate::store::persistence::native_registry::lifecycle::upgrade::UpgradeInventory,
+    original: crate::store::NativeTextJoinedRegistrationData,
+) -> Result<(crate::store::NativeTextJoinedRegistryRowData, String), AppError> {
     if inventory.index_stage().is_some()
         || inventory.catalog_stage().is_some()
         || inventory.seed().is_some()
@@ -217,8 +225,9 @@ pub(in crate::store::critical_namespaces::native_registry) fn require_registered
         return Err(refused());
     }
     let (index, _) = decode_selected_data(store, inventory)?;
-    super::joined::require_original(&index, original)?;
-    inventory.require(store)
+    let row = super::joined::require_original(&index, original)?;
+    inventory.require(store)?;
+    Ok((super::joined::receipt(row), row.name.clone()))
 }
 
 /// Internal paid decoder for the retained normal3 cell/inspector. The full

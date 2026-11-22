@@ -1085,6 +1085,36 @@ pub(in crate::store::critical_namespaces::native_registry) struct JoinedConnecti
 }
 
 impl MetadataWork {
+    pub(in crate::store::critical_namespaces::native_registry) fn observe_registered_joined_row(
+        &self,
+        data: crate::store::NativeTextJoinedRegistrationData,
+        warm: Option<
+            &crate::store::persistence::governance_layout::joined::JoinedRegistrationDependency,
+        >,
+    ) -> Result<(crate::store::NativeTextJoinedRegistryRowData, String), AppError> {
+        self.with_joined_store(|store| {
+            let inventory = UpgradeInventory::capture(
+                store,
+                self.physical.handler.debit(),
+                self.physical.handler.pool(),
+            )?;
+            let result =
+                super::super::super::super::lifecycle::preparation::observe_registered_native_join(
+                    store, &inventory, data,
+                )?;
+            if let Some(warm) = warm {
+                if warm.data() != data {
+                    return Err(refused());
+                }
+                warm.require(store)?;
+            } else if store.recovered_join_registration_data()? != Some(data) {
+                return Err(refused());
+            }
+            inventory.require(store)?;
+            Ok(result)
+        })
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn require_recovered_joined(
         &self,
         receipt: crate::store::NativeTextJoinedRegistrationData,

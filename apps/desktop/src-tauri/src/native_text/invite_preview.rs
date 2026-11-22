@@ -21,8 +21,15 @@ struct Payment {
     _permit: OwnedSemaphorePermit,
 }
 
+#[derive(serde::Serialize)]
+struct NativePreview {
+    #[serde(flatten)]
+    metadata: InvitePreview,
+    approved_host_required: bool,
+}
+
 impl Work {
-    fn verify(self) -> Result<InvitePreview, &'static str> {
+    fn verify(self) -> Result<NativePreview, &'static str> {
         let mut bytes = Zeroizing::new(vec![0; self.hex.len() / 2]);
         hex::decode_to_slice(self.hex.as_bytes(), &mut bytes).map_err(|_| INVALID)?;
         let packet = NativeTextInvitePacketData::decode(&bytes).map_err(|_| INVALID)?;
@@ -30,12 +37,15 @@ impl Work {
         if binding.expired_at_data(SystemClock.now_ms()) {
             return Err("This Chat V2 invite has expired.");
         }
-        Ok(InvitePreview {
-            direct_routes: 0,
-            rendezvous_routes: 0,
-            switchboards: 0,
-            expires_at_ms: binding.spec_data().expires_at_ms,
-            communication_mode: group_policy::mode_name(catcoms_mls::GroupMode::PeerToPeer),
+        Ok(NativePreview {
+            metadata: InvitePreview {
+                direct_routes: 0,
+                rendezvous_routes: 0,
+                switchboards: 0,
+                expires_at_ms: binding.spec_data().expires_at_ms,
+                communication_mode: group_policy::mode_name(catcoms_mls::GroupMode::PeerToPeer),
+            },
+            approved_host_required: true,
         })
     }
 }
@@ -130,7 +140,7 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
             return;
         }
         match result {
-            Ok(preview) if preview.expires_at_ms > SystemClock.now_ms() => {
+            Ok(preview) if preview.metadata.expires_at_ms > SystemClock.now_ms() => {
                 resolver.resolve(preview)
             }
             Ok(_) => resolver.reject("This Chat V2 invite has expired."),

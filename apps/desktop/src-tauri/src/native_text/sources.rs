@@ -57,6 +57,24 @@ pub(super) struct Controller {
     pub(super) boot: Arc<boot_lifetime::Control>,
 }
 impl Controller {
+    pub(super) fn capture_join(
+        &self,
+        store: &Option<MountedVault>,
+        capture: impl FnOnce(&Sources, &NativeTextVault) -> Result<(), &'static str>,
+    ) -> Result<(), &'static str> {
+        let record = self.record.try_lock().map_err(|_| listing::STALE)?;
+        if record.phase != Phase::Live || self.boot.is_closed_cached() {
+            return Err(listing::STALE);
+        }
+        record.require_pair(store)?;
+        let sources = record.sources.as_ref().ok_or(listing::STALE)?;
+        let vault = store
+            .as_ref()
+            .and_then(MountedVault::as_text_v2)
+            .ok_or(listing::STALE)?;
+        capture(sources, vault)
+    }
+
     pub(super) fn capture_ui_add_retirement(
         &self,
         store: &Option<MountedVault>,
@@ -112,7 +130,10 @@ impl Controller {
         let command = vault
             .bind_native_source_command(ui)
             .map_err(|_| "The chat session changed. Retry with the same message.")?;
-        *output = Some(sources.capture_member(row, command, budget.take().unwrap()));
+        let founder = row
+            .founder()
+            .ok_or("This Chat V2 row has no founder operation.")?;
+        *output = Some(sources.capture_member(founder, command, budget.take().unwrap()));
         Ok(())
     }
     /// Capture one finite founder job from the SAME original mounted pair.

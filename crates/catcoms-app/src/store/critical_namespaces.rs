@@ -65,6 +65,7 @@ pub use member_outbox_layout::V2MemberOutboxPolicy;
 pub use native_registry::NativeTextInvitePublication;
 pub use native_registry::NativeTextJoinedRegistryRowData;
 pub use native_registry::NativeTextJoinedRequestPreparation;
+pub use native_registry::NativeTextJoinedRowSelection;
 pub use native_registry::NativeTextJoinedRuntime;
 pub use native_registry::NativeTextJoinedSelectionPreparation;
 pub use native_registry::NativeTextJoinedVaultUpgrade;

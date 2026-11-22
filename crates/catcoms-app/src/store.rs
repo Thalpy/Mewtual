@@ -57,6 +57,7 @@ pub use critical_namespaces::NativeTextInvitePublication;
 pub use critical_namespaces::NativeTextJoinedRegistrationData;
 pub use critical_namespaces::NativeTextJoinedRegistryRowData;
 pub use critical_namespaces::NativeTextJoinedRequestPreparation;
+pub use critical_namespaces::NativeTextJoinedRowSelection;
 pub use critical_namespaces::NativeTextJoinedRuntime;
 pub use critical_namespaces::NativeTextJoinedSelectionPreparation;
 pub use critical_namespaces::NativeTextJoinedVaultUpgrade;

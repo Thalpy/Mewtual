@@ -92,7 +92,7 @@ fn binding(original: NativeTextJoinedRegistrationData) -> ([u8; 32], Backend) {
     (identity, Backend::Joined { birth, binding })
 }
 
-fn receipt(row: &Row) -> NativeTextJoinedRegistryRowData {
+pub(super) fn receipt(row: &Row) -> NativeTextJoinedRegistryRowData {
     NativeTextJoinedRegistryRowData {
         id: row.id,
         identity: row.identity,
@@ -114,13 +114,14 @@ pub(super) fn has_native_row(index: &Index) -> bool {
 pub(super) fn require_original(
     index: &Index,
     original: NativeTextJoinedRegistrationData,
-) -> Result<(), AppError> {
+) -> Result<&Row, AppError> {
     let mut rows = native_rows(index);
-    match_row(rows.next().ok_or_else(refused)?, original)?;
+    let row = rows.next().ok_or_else(refused)?;
+    match_row(row, original)?;
     if rows.next().is_some() {
         return Err(refused());
     }
-    Ok(())
+    Ok(row)
 }
 
 fn match_row(row: &Row, original: NativeTextJoinedRegistrationData) -> Result<(), AppError> {

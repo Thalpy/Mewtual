@@ -2625,12 +2625,14 @@
     typeof localStorage !== "undefined" ? (localStorage.getItem("catcoms.rendezvous") ?? "") : ""
   );
   let joinInvite = $state(""); // pasted invite (joiner)
+  let approvedJoinHost = $state("");
   type InvitePreview = {
     direct_routes: number;
     rendezvous_routes: number;
     switchboards: number;
     expires_at_ms: number;
     communication_mode: CommunicationMode;
+    approved_host_required?: boolean;
   };
   let joinPreview = $state<InvitePreview | null>(null);
   let joinPreviewCode = $state("");
@@ -2660,6 +2662,7 @@
   function resetJoinAttempt() {
     joinPreview = null;
     joinPreviewCode = "";
+    approvedJoinHost = "";
     joinSwitchboardConsent = true;
     joinSteps = [];
     joinError = "";
@@ -7097,8 +7100,50 @@
     }
   }
 
+  async function joinNative() {
+    if (busy || locked || uiSessionRetired || !uiStateReady || windowCloseInFlight) return;
+    const session = uiStateLoadGeneration;
+    const generation = viewGeneration;
+    const invite = joinInvite.trim();
+    const current = () => session === uiStateLoadGeneration && sessionContinuationCurrent(generation, viewGeneration, locked);
+    if (!invite) return;
+    busy = true;
+    joinError = "";
+    try {
+      if (joinPreviewCode !== invite || !joinPreview?.approved_host_required) {
+        const preview = await invoke<InvitePreview>("preview_invite", { inviteHex: invite });
+        if (current() && joinInvite.trim() === invite) {
+          if (!preview.approved_host_required) throw new Error("Enter a Chat V2 invitation.");
+          joinPreview = preview;
+          joinPreviewCode = invite;
+        }
+        return;
+      }
+      const approvedHost = approvedJoinHost.trim();
+      if (!approvedHost) return;
+      const route = studioExit.begin();
+      const row = await invoke<unknown>("join_server", {
+        inviteHex: invite, approvedHost, displayName: displayName.trim(),
+        isDm: false, allowSwitchboards: false, serverName: joinServerName.trim() || "New group",
+      });
+      if (!current() || joinInvite.trim() !== invite) return;
+      const restored = decodeRestoredChatSession({ backend: "text-v2", servers: [row] });
+      if (restored?.backend !== "text-v2" || restored.servers.length !== 1) throw new Error("The joined group could not be opened.");
+      installNativeServer(restored.servers[0]);
+      showAdd = false;
+      joinInvite = "";
+      joinServerName = "";
+      resetJoinAttempt();
+      await switchServer(restored.servers[0].server, () => {}, route);
+    } catch (failure) {
+      if (current()) joinError = errorText(failure);
+    } finally {
+      if (!locked && session === uiStateLoadGeneration) busy = false;
+    }
+  }
+
   async function join() {
-    if(chatBackend==="text-v2")return;
+    if (chatBackend === "text-v2") return;
     busy = true;
     error = "";
     joinReplyReady = null;
@@ -27467,13 +27512,24 @@
       <p class="muted small">Loading encrypted preferences before servers can fetch shared content.</p>
     </div>
   {:else if chatBackend === "text-v2" && (servers.length === 0 || showAdd) && !showSettings}
-    <section class="start gate" aria-label="Create a local group">
+    <section class="start gate" aria-label="Find or create a group">
       {@render brandMark("your vault is ready")}
-      <h2>Create a local group</h2>
-      <p class="muted small">Messages are saved on this device. Joining and shared history are not available yet.</p>
+      <h2>Find or create a group</h2>
       <label class="field"><span>Your name</span><input bind:value={displayName} /></label>
+      <h3>Create a group</h3>
       <label class="field"><span>Group name</span><input bind:value={newServerName} placeholder="Optional" /></label>
       <button onclick={found} disabled={busy || nativeRetryGeneration !== null || !displayName.trim()}>{busy ? "Creating…" : "Create group"}</button>
+      <h3>Join with an invite</h3>
+      <label class="field"><span>Chat V2 invite</span><textarea bind:value={joinInvite} oninput={resetJoinAttempt} rows="3" disabled={busy}></textarea></label>
+      {#if joinPreview?.approved_host_required}
+        <p class="muted small">This invite expires {fmtTime(joinPreview.expires_at_ms)}. The founder can see your IP address when you connect.</p>
+        <label class="field"><span>Founder’s IP address</span><input bind:value={approvedJoinHost} maxlength="45" autocomplete="off" disabled={busy} /></label>
+        <label class="field"><span>Group name</span><input bind:value={joinServerName} placeholder="Optional" disabled={busy} /></label>
+      {/if}
+      <button onclick={joinNative} disabled={busy || !joinInvite.trim() || (!!joinPreview && (!approvedJoinHost.trim() || !displayName.trim()))}>
+        {joinPreview ? "Join directly" : "Review invite"}
+      </button>
+      {#if joinError}<p role="status">{joinError}</p>{/if}
       {#if servers.length}<button class="ghost" onclick={() => showAdd=false}>Back to saved messages</button>{/if}
       {#if error}<p role="status">{error}</p>{/if}
     </section>
