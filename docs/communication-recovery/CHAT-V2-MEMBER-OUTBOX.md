@@ -356,6 +356,11 @@ scope, Core Admission and selected MLS fence are checked at the original driver'
 handoff. `Duplicate`, revocation and transport errors leave the debt open. A real
 `Submitted` result can be checkpointed through a fresh capture of the same registered row.
 
+The mounted source can look up an exact local dependency by ActionId after its debt
+has settled. The action, ordinal and request-token indices must name the same immutable
+original. The current catch-up preparation also checks the channel and Admission.
+Opening a peer request and returning the sealed response still need transport wiring.
+
 After removal and rejoin under A2, A1's receipts stay readable (attributed to A1), A1's
 unsent entries are settled as `Held` (kept in the audit for the separately authorised
 moderation path), and A2 cannot take over A1's tokens.

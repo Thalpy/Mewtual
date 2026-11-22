@@ -74,6 +74,30 @@ fn member_history_keeps_settled_originals_and_a_fixed_prefix_across_appends_and_
         MemberEntryStatus::Settled(DispositionCode::Submitted)
     );
     assert_eq!(page.items()[2].status(), MemberEntryStatus::Pending);
+    for (original, disposition) in [
+        (&first, MemberEntryStatus::Settled(DispositionCode::Held)),
+        (
+            &second,
+            MemberEntryStatus::Settled(DispositionCode::Submitted),
+        ),
+        (&third, MemberEntryStatus::Pending),
+    ] {
+        let found = owner
+            .lookup_action_original(&KEY, original.id(), fx.pay(MEMBER_OUTBOX_LOOKUP_FEE))
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.original_bytes(), original.encode());
+        assert_eq!(found.status(), disposition);
+        assert_eq!(found.receipt().action, original.id());
+    }
+    assert!(owner
+        .lookup_action_original(
+            &KEY,
+            ActionId::from_bytes([255; 32]),
+            fx.pay(MEMBER_OUTBOX_LOOKUP_FEE)
+        )
+        .unwrap()
+        .is_none());
     assert_eq!(
         namespace_files(&owner),
         before,
@@ -121,10 +145,14 @@ fn member_history_rejects_foreign_keys_accounts_and_short_payments_without_mutat
     let mut fx = Fixture::new(183);
     let owner = fx.open();
     let signed = fx.sign("private retained original", 1);
+    let action = signed.id();
     let (owner, _) = fx.save(owner, token(1), signed, admission(0xa1));
     let before = namespace_files(&owner);
     assert!(owner
         .history_page(&[0xff; 32], 0, None, 1, fx.pay(MEMBER_OUTBOX_HISTORY_FEE))
+        .is_err());
+    assert!(owner
+        .lookup_action_original(&[0xff; 32], action, fx.pay(MEMBER_OUTBOX_LOOKUP_FEE))
         .is_err());
     let foreign = CriticalCatalogReadPool::new(MEMBER_OUTBOX_HISTORY_FEE).unwrap();
     assert!(owner

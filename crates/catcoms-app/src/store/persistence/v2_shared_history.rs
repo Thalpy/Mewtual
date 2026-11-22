@@ -28,11 +28,22 @@ const VERSION: u16 = 1;
 const MAX_MANIFEST: usize = 4 + TAG.len() + 2 + 36 * (4 + MAX_ACTION_CHUNKS) + 2;
 const MAX_MANIFEST_FRAME: usize =
     MAX_MANIFEST + MAX_PRIVATE_CHAT_PAGE_FRAME_BYTES - MAX_PRIVATE_CHAT_PAGE_PLAIN_BYTES;
+const BUNDLE_TAG: &[u8] = b"catcoms/private-chat-v2-shared-history-bundle/v1\0";
+pub(in crate::store) const MAX_SHARED_HISTORY_BUNDLE: usize = 4
+    + BUNDLE_TAG.len()
+    + 2
+    + 36
+    + 4
+    + MAX_MANIFEST_FRAME
+    + 2
+    + MAX_ACTION_CHUNKS * (36 + 4 + MAX_PRIVATE_CHAT_PAGE_FRAME_BYTES);
 
 /// In addition to the caller's original decrypted frame or the cold owner's
 /// independently paid IO buffers. Includes retained and overlapping pages.
-pub(in crate::store) const SHARED_HISTORY_RECORD_FEE: usize =
-    3 * MAX_ACTION_BYTES + (MAX_ACTION_CHUNKS + 4) * MAX_PRIVATE_CHAT_PAGE_FRAME_BYTES + 16 * 1024;
+pub(in crate::store) const SHARED_HISTORY_RECORD_FEE: usize = 3 * MAX_ACTION_BYTES
+    + (MAX_ACTION_CHUNKS + 4) * MAX_PRIVATE_CHAT_PAGE_FRAME_BYTES
+    + MAX_SHARED_HISTORY_BUNDLE
+    + 16 * 1024;
 
 /// Stable member history address on this vault. The current Header, epoch,
 /// receiver device and sender Admission are outside this namespace identity.
@@ -116,6 +127,67 @@ impl PreparedSharedHistoryRecord {
             chunks,
         })
     }
+
+    /// Whole record to stage for an atomic publish. Its manifest's expected
+    /// ciphertext ID still comes from separate selected storage metadata.
+    pub(in crate::store) fn encode_bundle(&self) -> Result<Zeroizing<Vec<u8>>, AppError> {
+        let mut out = Encoder::with_capacity(MAX_SHARED_HISTORY_BUNDLE);
+        wire(out.put_bytes(BUNDLE_TAG))?;
+        out.put_u16(VERSION);
+        wire(out.put_bytes(self.manifest.id().as_bytes()))?;
+        wire(out.put_bytes(self.manifest.as_bytes()))?;
+        out.put_u16(self.chunks.len() as u16);
+        for chunk in &self.chunks {
+            wire(out.put_bytes(chunk.id().as_bytes()))?;
+            wire(out.put_bytes(chunk.as_bytes()))?;
+        }
+        Ok(Zeroizing::new(out.finish()))
+    }
+}
+
+/// Parse the whole staged frame before copying a page. The caller supplies
+/// the actual selected tuple. Framing alone can never validate a selector.
+pub(in crate::store) fn open_shared_history_bundle(
+    scope: &SharedHistoryScope,
+    key: &[u8; 32],
+    expected: (ActionId, PrivateChatPageId),
+    bytes: &[u8],
+) -> Result<(OwnerFactId, AssembledActionOriginal), AppError> {
+    if bytes.len() > MAX_SHARED_HISTORY_BUNDLE {
+        return Err(refused());
+    }
+    let mut input = Decoder::new(bytes);
+    if wire(input.get_bytes())? != BUNDLE_TAG
+        || wire(input.get_u16())? != VERSION
+        || digest(&mut input)? != *expected.1.as_bytes()
+    {
+        return Err(refused());
+    }
+    let manifest = wire(input.get_bytes())?;
+    let count = usize::from(wire(input.get_u16())?);
+    if manifest.len() > MAX_MANIFEST_FRAME || !(1..=MAX_ACTION_CHUNKS).contains(&count) {
+        return Err(refused());
+    }
+    let mut frames = Vec::with_capacity(count);
+    for _ in 0..count {
+        let id = PrivateChatPageId::from_bytes(digest(&mut input)?);
+        let frame = wire(input.get_bytes())?;
+        if frame.len() > MAX_PRIVATE_CHAT_PAGE_FRAME_BYTES {
+            return Err(refused());
+        }
+        frames.push((id, frame));
+    }
+    wire(input.finish())?;
+    let mut frames = frames.into_iter();
+    let recovered =
+        open_shared_history_record(scope, key, expected, manifest, |want| match frames.next() {
+            Some((id, frame)) if id == want => Ok(Zeroizing::new(frame.to_vec())),
+            _ => Err(refused()),
+        })?;
+    if frames.next().is_some() {
+        return Err(refused());
+    }
+    Ok(recovered)
 }
 
 /// Cold reads start with the exact manifest selected by the vault and check
@@ -240,6 +312,24 @@ mod tests {
         .unwrap();
         let expected = (first.action, first.manifest.id());
         assert!(first.chunks.len() > 1);
+        let mut bundle = first.encode_bundle().unwrap();
+        let (selected, bundled) =
+            open_shared_history_bundle(&scope, &key, expected, &bundle).unwrap();
+        assert_eq!(selected, admission);
+        assert_eq!(bundled.original_bytes(), original);
+        assert!(
+            open_shared_history_bundle(&scope, &key, expected, &bundle[..bundle.len() - 1])
+                .is_err()
+        );
+        bundle.push(0);
+        assert!(open_shared_history_bundle(&scope, &key, expected, &bundle).is_err());
+        assert!(open_shared_history_bundle(
+            &scope,
+            &key,
+            expected,
+            &other.encode_bundle().unwrap()
+        )
+        .is_err());
         let read = |id| {
             first
                 .chunks

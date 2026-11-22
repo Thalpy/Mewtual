@@ -674,6 +674,48 @@ impl MemberOutbox {
         })))
     }
 
+    /// Exact causal dependency lookup by semantic ID, including settled debt.
+    /// All three authenticated indices must select the same signed original.
+    pub(in crate::store) fn lookup_action_original(
+        &self,
+        key: &[u8; 32],
+        action: ActionId,
+        payment: CatalogReadReservation,
+    ) -> Result<Option<MemberSavedOriginal>, MemberOutboxError> {
+        require_payment(&payment, &self.pool, MEMBER_OUTBOX_LOOKUP_FEE)?;
+        let head = self.clean()?;
+        let mut nodes = DiskNodes { ns: &self.ns, key };
+        let action_row = match lookup(
+            self.context.id,
+            head.data.root,
+            RowKey::action(action),
+            &mut nodes,
+        )? {
+            Some(RowValue::Action(row)) => row,
+            None => return Ok(None),
+            Some(_) => return Err(refused().into()),
+        };
+        let (entry_id, entry) = self.debt_entry(key, head, action_row.ordinal)?;
+        let (token_row, _) = self
+            .token_row(key, head, entry.token)?
+            .ok_or_else(refused)?;
+        if token_row.entry != entry_id
+            || entry.action != action
+            || entry.original != action_row.original
+        {
+            return Err(refused().into());
+        }
+        let receipt = receipt_of(&self.context, entry.token, &token_row, &entry);
+        let status = self.status_of(key, head, entry.ordinal)?;
+        let original = read_original(&self.ns, key, &self.context, &entry)?;
+        Ok(Some(MemberSavedOriginal {
+            receipt,
+            status,
+            original,
+            _payment: payment,
+        }))
+    }
+
     /// The token's row and its entry, cross-checked against each other.
     pub(super) fn token_row(
         &self,

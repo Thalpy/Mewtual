@@ -729,9 +729,9 @@ async fn mounted_join_fixture(recover_stage: bool) {
             let prepared_history = recovered_row()
                 .prepare_shared_history_record(&ledger, &received, &live, &mut history_rng)
                 .unwrap();
-            assert_eq!(prepared_history.record.action, action);
-            assert!(!prepared_history.record.chunks.is_empty());
-            assert!(!prepared_history.record.manifest.as_bytes().is_empty());
+            assert_eq!(prepared_history.action, action);
+            assert_ne!(*prepared_history.manifest.as_bytes(), [0; 32]);
+            assert!(!prepared_history.bundle.is_empty());
             let result = ledger.prepare_message_projection(action).unwrap();
             assert!(result.with_publication(|view| matches!(
                 view, GuardedProjection::Visible { text, certainty: ProjectionCertainty::Provisional, .. }
@@ -742,6 +742,11 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 .unwrap();
             assert_eq!(front, ordinal + 1);
             assert_ne!(std::fs::read(&head_path).unwrap(), head);
+            let recovered_original = recovered_row()
+                .read_member_dependency(&selection, channel, action, &live, &mut history_rng)
+                .unwrap().expect("settled parents remain readable by exact ActionId");
+            assert_eq!(recovered_original.receipt().action, action);
+            assert!(recovered_row().read_member_dependency(&selection, channel + 1, action, &live, &mut history_rng).is_err());
             retire.send_replace(true);
             assert!(result.with_publication(|_| panic!("retired original view escaped")).is_err());
             assert!(!received.is_for_original_row_cached(&selection));

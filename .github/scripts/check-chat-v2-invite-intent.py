@@ -49,6 +49,7 @@ COHORTS = {
     "member-receive-native": ("catcoms-net", "native_member_gossip_uses_one_original_topic_and_revokes_handed_off_frames", 1),
     "member-transport-selection": ("catcoms-sync", "stale_join_and_same_epoch_mismatch_cannot_replace_a_consumed_newer_selection", 1),
     "member-shared-history-record": ("catcoms-app", "shared_history_reopens_exact_signed_chunks_and_refuses_foreign_manifests", 1),
+    "member-action-history": ("catcoms-app", "member_history_keeps_settled_originals_and_a_fixed_prefix_across_appends_and_reopen", 1),
     "selected-history": ("catcoms-replication", "selected_history_archive_page_", 2),
     "add-source-close": ("catcoms-sync", "governed_add_whole_source_retirement_", 1),
     "add-ui-lock": ("catcoms-sync", "governed_add_ui_retirement_", 1),

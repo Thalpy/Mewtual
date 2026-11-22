@@ -1,6 +1,6 @@
 //! Bind ciphertext from the original native actor to the actual registered row.
 use super::*;
-use crate::store::persistence::v2_member_outbox::member_outbox_key;
+use crate::store::persistence::v2_member_outbox::{member_outbox_key, MemberSavedOriginal};
 use crate::store::persistence::v2_shared_history::{
     PreparedSharedHistoryRecord, SharedHistoryScope, SHARED_HISTORY_RECORD_FEE,
 };
@@ -115,7 +115,10 @@ struct ReceiverSource<'a, R: CryptoRngCore> {
 
 pub(in crate::store::critical_namespaces::native_registry) struct NativeTextJoinedSharedHistoryRecord
 {
-    pub(in crate::store::critical_namespaces::native_registry) record: PreparedSharedHistoryRecord,
+    pub(in crate::store::critical_namespaces::native_registry) action: ActionId,
+    pub(in crate::store::critical_namespaces::native_registry) manifest:
+        catcoms_storage::private_chat_page::PrivateChatPageId,
+    pub(in crate::store::critical_namespaces::native_registry) bundle: Zeroizing<Vec<u8>>,
     _fee: CatalogReadReservation,
 }
 
@@ -356,6 +359,48 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         })
     }
 
+    /// Find one exact selected own original for dependency catch-up. A
+    /// request handler still needs a distinct current sealed response and
+    /// the original requesting peer's authenticated scope.
+    pub(in crate::store::critical_namespaces::native_registry) fn read_member_dependency(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        channel: u128,
+        action: ActionId,
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Option<MemberSavedOriginal>, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        self.with_member_receiver(selection, caller, |source| {
+            let store = source.store;
+            let mount = store
+                .member_outbox_mount()
+                .map_err(|_| Refusal::Unavailable)?;
+            let key = member_outbox_key(store).map_err(|_| Refusal::Unavailable)?;
+            let context = source
+                .registration
+                .member_outbox_context_data()
+                .map_err(|_| Refusal::Failed)?;
+            let saved = mount
+                .lookup_existing_action(store, context, &key, action, rng)
+                .map_err(|_| Refusal::Failed)?;
+            if saved.as_ref().is_some_and(|saved| {
+                saved.action().spec().realm.channel() != channel
+                    || saved.receipt().admission != source.registration.selected_data().1
+            }) {
+                return Err(Refusal::Stale);
+            }
+            if !source
+                .node
+                .observe_member_publication(source.prefix)
+                .is_ok_and(|original| original.is_current_cached())
+            {
+                return Err(Refusal::Stale);
+            }
+            Ok(saved)
+        })
+    }
+
     /// Freeze the exact admitted original into paid archive pages. Preparing
     /// these pages does not select them in the vault's shared history.
     pub(in crate::store::critical_namespaces::native_registry) fn prepare_shared_history_record(
@@ -399,12 +444,18 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 rng,
             )
             .map_err(|_| Refusal::Failed)?;
+            let bundle = record.encode_bundle().map_err(|_| Refusal::Failed)?;
             if ledger.signal.is_cancelled()
                 || !original.is_for_original_row_cached(&ledger.selection)
             {
                 return Err(Refusal::Stale);
             }
-            Ok(NativeTextJoinedSharedHistoryRecord { record, _fee: fee })
+            Ok(NativeTextJoinedSharedHistoryRecord {
+                action: record.action,
+                manifest: record.manifest.id(),
+                bundle,
+                _fee: fee,
+            })
         })
     }
 

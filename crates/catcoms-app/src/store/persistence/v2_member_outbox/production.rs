@@ -33,8 +33,8 @@ use super::data::{
 use super::engine::{
     MemberDebtBatch, MemberLookup, MemberOutbox, MemberOutboxError, MemberOutboxOpen,
     MemberOutboxParentDirectory, MemberOutboxQuota, MemberOutboxRefusal, MemberOutboxRegistry,
-    MEMBER_OUTBOX_CHECKPOINT_FEE, MEMBER_OUTBOX_DEBT_FEE, MEMBER_OUTBOX_LOOKUP_FEE,
-    MEMBER_OUTBOX_OWNER_FEE, MEMBER_OUTBOX_RECOVERY_FEE,
+    MemberSavedOriginal, MEMBER_OUTBOX_CHECKPOINT_FEE, MEMBER_OUTBOX_DEBT_FEE,
+    MEMBER_OUTBOX_LOOKUP_FEE, MEMBER_OUTBOX_OWNER_FEE, MEMBER_OUTBOX_RECOVERY_FEE,
 };
 use super::transaction::{MemberCheckpointSaved, PreparedMemberAppend};
 use crate::store::critical_namespaces::member_outbox_layout::{
@@ -424,6 +424,27 @@ impl MemberOutboxMount {
                 .debt_batch(key, current, 1, payment)
         })?;
         Ok(batch.filter(|batch| !batch.items().is_empty()))
+    }
+
+    pub(in crate::store) fn lookup_existing_action(
+        &self,
+        store: &ServerStore,
+        context: MemberOutboxContextData,
+        key: &[u8; 32],
+        action: ActionId,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<Option<MemberSavedOriginal>, MemberOutboxError> {
+        let payment = self
+            .pay(MEMBER_OUTBOX_LOOKUP_FEE)
+            .map_err(|_| MemberOutboxRefusal::Payment)?;
+        self.with_existing_outbox(store, context, key, rng, |state, _| {
+            state
+                .owner
+                .as_ref()
+                .ok_or(MemberOutboxRefusal::Incomplete)?
+                .lookup_action_original(key, action, payment)
+        })
+        .map(Option::flatten)
     }
 
     pub(in crate::store) fn checkpoint_publication_debt(
