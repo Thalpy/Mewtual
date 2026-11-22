@@ -22,6 +22,8 @@ tauri-build = { version = "2.7.4", features = [] }
 serde_json = "1"
 
 [dependencies]
+# Derive the one stable first-invitation token for the original native row.
+blake3 = "1"
 # Disabled native handoff codec. These exact versions already exist in this lockfile;
 # explicit edges account for their newly reachable local-channel use independently of MLS.
 aes-gcm = "=0.10.3"
@@ -103,11 +105,6 @@ tauri-plugin-process = "2"
 rfd = { version = "0.16", default-features = false, features = ["common-controls-v6", "gtk3"] }
 
 [dev-dependencies]
-# The TCP fixture compares the complete signed Control7 object's production
-# BLAKE3 hash without decoding/authenticating it a second time. Diagnostic only;
-# Root's exact authenticated Support observation remains the positive oracle.
-# This crate/version already exists transitively in the native lock graph.
-blake3 = "1"
 # Exercise the actual IPC argument/handler/serialization path with MockRuntime;
 # this empty Tauri feature only exposes its test helpers, not a shipped command.
 tauri = { version = "2.12.5", features = ["test"] }
