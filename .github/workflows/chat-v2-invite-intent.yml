@@ -10,6 +10,10 @@ on:
       - '.github/predecessor/governed_add_fence_owner.rs'
       - 'crates/catcoms-app/src/store/native_text_invite.rs'
       - 'crates/catcoms-app/src/store.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/joined_pin.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/joined_pin/**'
+      - 'crates/catcoms-app/src/store/critical_namespaces/pending_join_codec.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/pending_join/producer.rs'
       - 'crates/catcoms-app/src/store/native_text_invite/**'
       - 'crates/catcoms-app/src/store/persistence/v2_text/control.rs'
       - 'crates/catcoms-app/src/store/persistence/v2_text/control/**'
@@ -160,6 +164,8 @@ jobs:
         run: python .github/scripts/check-chat-v2-invite-intent.py add-archive
       - name: Check the Head2 selector and legacy readers
         run: python .github/scripts/check-chat-v2-invite-intent.py add-head2
+      - name: Check joined pin root and original ciphertext custody
+        run: python .github/scripts/check-chat-v2-invite-intent.py joined-pin
       - name: Check the original native Source retirement barriers
         run: python .github/scripts/check-chat-v2-invite-intent.py source-retirement
       - name: Check the existing authenticated scratch controls

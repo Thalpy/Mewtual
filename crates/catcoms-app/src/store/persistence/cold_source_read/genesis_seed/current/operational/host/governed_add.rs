@@ -12,7 +12,9 @@ use crate::store::ServerStore;
 use catcoms_mls::persist::text_current_add::{
     TextCurrentAddAdmission, TextCurrentAddLimits, TextCurrentAddReservation,
 };
-use catcoms_sync::{V2JoinRequestPacketData, MAX_V2_JOIN_REQUEST_PACKET_BYTES};
+use catcoms_sync::{
+    owner_v2::V2InstalledFounderAddData, V2JoinRequestPacketData, MAX_V2_JOIN_REQUEST_PACKET_BYTES,
+};
 
 pub(super) struct PendingGovernedAdd {
     // Physical write handles drain before the associated selected capture.
@@ -20,12 +22,31 @@ pub(super) struct PendingGovernedAdd {
     pub(super) parent: PreparedV2TextParentCapture,
     pub(super) sdk: Option<TextCurrentAddAdmission>,
     core: Option<catcoms_replication::chat::V2GeneralCandidate>,
-    pub(super) installed: Option<TextHeadIdData>,
+    pub(super) installed: Option<(TextHeadIdData, V2InstalledFounderAddData)>,
     request: Vec<u8>,
     fee: CatalogReadReservation,
 }
 
 impl PendingGovernedAdd {
+    pub(super) fn require_selected_member_head(
+        &mut self,
+        guard: &crate::store::critical_namespaces::current_layout::V2TextCurrentGroupGuard<'_, '_>,
+        replay: &catcoms_replication::chat::owner_state::transition::ReplayMath,
+    ) -> Result<(), AppError> {
+        let (head, installed) = self.installed.ok_or_else(refused)?;
+        if replay.header().id() != installed.header
+            || replay.header().spec().state != installed.state
+            || replay.mls_epoch_data() != installed.epoch
+        {
+            return Err(refused());
+        }
+        self.fence.require_selected_head2(
+            guard,
+            self.parent.selected_data().ok_or_else(refused)?,
+            head,
+        )
+    }
+
     pub(super) fn prepare(
         store: &ServerStore,
         owner: &super::super::owner::V2TextOwnerRef<'_>,
@@ -114,7 +135,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         let store = layout.checked_store()?;
         let p = self.governed_add.as_mut().ok_or_else(refused)?;
         p.require_request(store, packet)?;
-        let head = p.installed.ok_or_else(refused)?;
+        let (head, _) = p.installed.ok_or_else(refused)?;
         let selected = p.parent.selected_data().ok_or_else(refused)?;
         let owner = self.owner.borrow_current()?;
         let require_live = || {
@@ -144,7 +165,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         let store = layout.checked_store()?;
         let p = self.governed_add.as_mut().ok_or_else(refused)?;
         p.require_request(store, packet)?;
-        if let Some(head) = p.installed {
+        if let Some((head, _)) = p.installed {
             let selected = p.parent.selected_data().ok_or_else(refused)?;
             let owner = self.owner.borrow_current()?;
             return store.with_v2_text_current(&owner, |admission| {
@@ -183,9 +204,8 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             let guard = store.lock_v2_text_current_group(admission, p.parent.resources())?;
             require_live()?;
             install.check_host_selection_data(verifier, p.core.as_ref().ok_or_else(refused)?)?;
-            let head = p
-                .fence
-                .select_head2(&guard, selected, install.expected_data())?;
+            let fingerprint = install.expected_data();
+            let head = p.fence.select_head2(&guard, selected, fingerprint)?;
             #[cfg(test)]
             AFTER_GOVERNED_HEAD_SAVE.with(|hook| {
                 let hook = hook.borrow_mut().take();
@@ -195,7 +215,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             });
             require_live()?;
             install.finish_host_selected(verifier, &mut p.core)?;
-            p.installed = Some(head);
+            p.installed = Some((head, fingerprint));
             Ok(head)
         });
         if p.installed.is_some() {

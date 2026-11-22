@@ -51,6 +51,14 @@ checks. The native fixture covered the immutable archive and staged Head2
 under the original Current. The old head remained selected at this revision.
 [Archive and Head2 CI](https://github.com/Thalpy/Mewtual/actions/runs/45033964346).
 
+At `89c6514f`, Linux and Windows passed the complete focused Add
+persistence workflow. The actual native founder job selected Head2 and
+returned the original Welcome. The integration tests also resumed after
+cancellation immediately after the durable head save, verified the selected
+archive independently, and restored its closed MLS graph. Replacing the
+held Head2 file with an equal-byte copy failed the recovery reproof.
+[Native Add and recovery CI](https://github.com/Thalpy/Mewtual/actions/runs/45036371225).
+
 ## Invitation and join branch CI (22 November 2026)
 
 Both hosted workflows passed on Linux and Windows at

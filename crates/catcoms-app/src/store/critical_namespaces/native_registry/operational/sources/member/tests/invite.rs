@@ -177,6 +177,31 @@ async fn native_governed_add_fixture(case: JoinCase) {
             saved.packet_bytes_data().as_ptr(),
             retry.packet_bytes_data().as_ptr()
         );
+        let message = body("founder message after governed Add");
+        let request = || V2MemberSignRequest {
+            token: [0xe8; 32],
+            ..sign_request(&message)
+        };
+        let head = only_named(directory.path(), "text.add.response.v2").with_file_name("head.bin");
+        let parked_head = head.with_extension("test-parked");
+        std::fs::rename(&head, &parked_head).unwrap();
+        std::fs::copy(&parked_head, &head).unwrap();
+        assert!(prepare(&owner, &row, &vault, &budget)
+            .prepare_member_save(request(), &negative)
+            .is_err());
+        std::fs::remove_file(&head).unwrap();
+        std::fs::rename(&parked_head, &head).unwrap();
+        assert_eq!(
+            prepare(&owner, &row, &vault, &budget).prepare_member_save(request(), &negative),
+            Ok(V2MemberSaveOutcome::Ready),
+        );
+        let pending = super::admission::final_preparation(&owner, &row, &vault, &budget);
+        let commit = Arc::new(tokio::sync::Mutex::new(()));
+        let (custody, _) = super::admission::custody(&commit, &negative).await;
+        assert_eq!(
+            pending.try_admit(custody).unwrap().run(),
+            crate::store::MemberSaveJobReport::SavedLocal
+        );
         let mut close = owner.prepare_retirement().unwrap();
         close.try_retire().unwrap();
         assert_eq!(saved.packet_bytes_data(), retry.packet_bytes_data());

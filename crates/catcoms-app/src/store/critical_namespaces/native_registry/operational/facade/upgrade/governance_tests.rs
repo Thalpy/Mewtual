@@ -132,6 +132,44 @@ fn native_governance_same_owner_warm_constructor_and_cold_metadata_roundtrip() {
 }
 
 #[test]
+fn governed_joined_pin_catalog_inserts_only_six_over_actual_governed_native() {
+    use crate::store::critical_namespaces::joined_pin::namespace;
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc409);
+    let mut plan = original(dir.path(), &mut rng).prepare_governance().unwrap();
+    plan.retry(&mut rng).unwrap();
+    let store = actual(&plan);
+    let selected = fs::read(dir.path().join(Slot::Current.name())).unwrap();
+    let plain = crate::store::unseal(
+        &store.keys.db_key().unwrap(),
+        &crate::store::unframe(&selected).unwrap(),
+    )
+    .unwrap();
+    let domain = store.chat_vault_domain().unwrap();
+    let prior = catalog::parse_governed_native_registry_layout(&plain, &domain, true).unwrap();
+    assert!(catalog::parse_joined_native_registry_layout(&plain, &domain, true).is_err());
+    let successor = namespace::prepare_declaration(&plain, &domain).unwrap();
+    namespace::verify_declaration(&plain, &successor, &domain).unwrap();
+    assert!(catalog::parse_governed_native_registry_layout(&successor, &domain, true).is_err());
+    assert!(namespace::prepare_declaration(&successor, &domain).is_err());
+    let joined = catalog::parse_joined_native_registry_layout(&successor, &domain, true).unwrap();
+    assert!(joined.joined_pin_payload.is_some());
+    assert_eq!(joined.generation, prior.generation + 1);
+    assert_eq!(joined.parent, Some(prior.digest));
+    assert_eq!(joined.governance_payload, prior.governance_payload);
+    assert_eq!(joined.member_outbox_payload, prior.member_outbox_payload);
+    assert_eq!(
+        joined.native_registry_payload,
+        prior.native_registry_payload
+    );
+    assert!(catalog::successor(&prior.summary([0; 32]), &joined.summary([1; 32])).is_err());
+    assert_eq!(
+        fs::read(dir.path().join(Slot::Current.name())).unwrap(),
+        selected
+    );
+}
+
+#[test]
 fn native_governance_warm_faults_retry_exact_outputs_without_randomness() {
     for point in [240, 229, 231, 232, 233, 234, 235, 236, 237, 238, 239] {
         let dir = tempfile::tempdir().unwrap();

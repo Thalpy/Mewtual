@@ -144,13 +144,20 @@ reuses the original response. Rejecting a different request still requires
 the original nonce fence. Network delivery and the joined native owner
 remain required for production.
 
+The warm founder continues to use its existing ordinary-member lane after
+installation. Before signing a new action it checks the selected Head2,
+the exact archive and the same verifier's governing Header and epoch.
+
 ## Namespace6 and original pin custody
 
 The [combined governance/native constructor](CHAT-V2-GOVERNED-NATIVE-STORAGE.md)
 implements the startup-only Selected3 handoff before group or Source creation.
 The combined handler requires namespaces 4, 5 and 7. The ordinary native3
-handler still refuses governance4. The joined namespace6 pin and its
-pending-JOIN recovery grammar remain open.
+handler still refuses governance4. Namespace6 now has a separate joined-pin
+record and declaration grammar. The record binds the first signed invite and
+pending join to the vault and root. Exact ciphertext identity keeps the
+original pin stable across rejoin. The combined catalog parser preserves
+namespace6 bytes in existing JOIN rewrites.
 
 Namespace6 needs its own critical handler and versioned authenticated format.
 Founder `GroupPinData` and pending Legacy `CapturedOwnerProfilePin` are different
@@ -161,12 +168,10 @@ stable group pin. On same-Profile rejoin/reopen, reuse the SAME original pin
 ciphertext and `V2GroupPinId`; resealing identical anchor plaintext changes the
 stable outbox context and is forbidden.
 
-Freeze the critical catalog declaration, first-declaration fence/claim/seed,
-pin-index records and pending-JOIN grammar together before writing them. The
-combined configured opener must handle governance4, member outbox5, joined pin6
-and native registry7 before any old inspector/cleaner runs. The present native
-v3 `CURRENT_LAYOUT` parser does not provide that composition. Preserve all
-unrelated namespace bytes in sorted declarations and every JOIN rewrite.
+The physical first-declaration fence, claim and seed, pin index and joined
+pending-JOIN recovery still need their owning paths. Those paths must select
+the joined-aware opener for governance4, member outbox5, joined pin6 and native
+registry7 before any prior inspector runs.
 Unknown/ambiguous remnants are preserved and refused, never cleared as debris.
 Predecessor tests must use a real prior binary with positive open controls.
 

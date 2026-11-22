@@ -762,6 +762,7 @@ impl V2MemberLane {
         &mut self,
         store: &ServerStore,
         owner: &mut V2TextOwnedCurrent<T, R>,
+        governed_add: Option<&mut super::governed_add::PendingGovernedAdd>,
         request: &V2MemberSignRequest<'_>,
         mut access: FounderAccess<'_>,
     ) -> Result<(), AppError> {
@@ -858,8 +859,11 @@ impl V2MemberLane {
         }
 
         if !pending.has_cached_raw() {
-            let selected = capture.selected_data().ok_or_else(refused)?;
-            let resources = capture.resources().clone();
+            let installed = governed_add.filter(|add| add.installed.is_some());
+            let resources = installed
+                .as_ref()
+                .map_or_else(|| capture.resources(), |add| add.parent.resources())
+                .clone();
             let shared: &V2TextOwnedCurrent<T, R> = owner;
             let owner_ref = shared.borrow_current()?;
             let PendingMemberRequest {
@@ -875,9 +879,14 @@ impl V2MemberLane {
             let result = store.with_v2_text_current(&owner_ref, |admission| {
                 let guard = store.lock_v2_text_current_group(admission, &resources)?;
                 domain.require_current_source(admission)?;
-                // IO-bearing proof that the SAME generation-1 O is still selected, and the
-                // node's full (SDK-consulting) source check: both BEFORE Core admission.
-                selected.validate_idle_genesis_member_under_current_guard(&guard)?;
+                if let Some(installed) = installed {
+                    installed.require_selected_member_head(&guard, verifier.replay_data())?;
+                } else {
+                    capture
+                        .selected_data()
+                        .ok_or_else(refused)?
+                        .validate_idle_genesis_member_under_current_guard(&guard)?;
+                }
                 let signer = shared
                     .ordinary_member_signer_data(store)
                     .map_err(|_| refused())?;
@@ -1038,7 +1047,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
     /// Refuses (never authors) when: the host has not completed its empty promotion, founder
     /// Create state exists on this host, another token is pending, the token was abandoned
     /// or forgotten (or remains in the positive saved cache), negative-retirement capacity
-    /// is exhausted, the selected O is no longer generation 1, or the source/lock
+    /// is exhausted, the original selected head cannot be reproved, or the source/lock
     /// closed. A completed original stays retrievable after lock (historical DATA).
     #[cfg(all(test, windows))]
     pub(in crate::store) fn retry_sign_member_request(
@@ -1073,7 +1082,13 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         }
         let store = layout.checked_store()?;
         if let Some(lane) = self.member.as_deref_mut() {
-            return lane.retry_request(store, &mut self.owner, &request, access);
+            return lane.retry_request(
+                store,
+                &mut self.owner,
+                self.governed_add.as_deref_mut(),
+                &request,
+                access,
+            );
         }
         // A NEW lane is installed only once its anchor is bound and its verifier exists. If
         // it fails earlier (for example the anchor refuses beside a crash-left founder WAL),
@@ -1085,7 +1100,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
             let observer = self.observer.as_ref().ok_or_else(refused)?;
             V2MemberLane::prepare(store, &owner, observer)?
         };
-        let result = lane.retry_request(store, &mut self.owner, &request, access);
+        let result = lane.retry_request(store, &mut self.owner, None, &request, access);
         if lane.verifier.is_some() {
             self.member = Some(Box::new(lane));
         }

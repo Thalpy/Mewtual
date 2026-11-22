@@ -18,6 +18,7 @@ use catcoms_mls::persist::{
     text_current_add::TextCurrentAddLimits, TextCurrentSdkGraphReservation,
     TextCurrentSdkRestoreAdmission, TextCurrentSdkRestoreLimits,
 };
+use catcoms_replication::chat::owner_state::transition::REPLAY_MATH_PRIVATE_INVOICE;
 use catcoms_storage::{kept::SessionId, VaultPhysicalWorkLease};
 use catcoms_sync::owner_v2::{PreparedV2FounderRecoveredAdd, V2InstalledFounderAddData};
 use std::path::PathBuf;
@@ -59,6 +60,7 @@ impl HeldGovernedArchiveRead {
         const BYTES: usize = 6 * (MAX_BYTES + 1)
             + 2 * MAX_TEXT_PATH
             + 256 * 1024
+            + REPLAY_MATH_PRIVATE_INVOICE
             + 4 * std::mem::size_of::<HeldGovernedArchiveRead>();
         let resources = V2TextReadResources::prepare_paid(store, source)?;
         let pool = &store

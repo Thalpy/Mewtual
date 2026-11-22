@@ -870,6 +870,9 @@ fn archive_suffix_length(current: &codec::Parsed<'_>) -> Result<usize, AppError>
         (Some(_), Some(payload)) => 12usize.checked_add(payload.len()).ok_or_else(refused)?,
         _ => return Err(refused()),
     };
+    let joined_pin = current.joined_pin_payload.map_or(Ok(0), |payload| {
+        12usize.checked_add(payload.len()).ok_or_else(refused)
+    })?;
     let native_registry = match (
         current.native_registry_version,
         current.native_registry_payload,
@@ -882,6 +885,7 @@ fn archive_suffix_length(current: &codec::Parsed<'_>) -> Result<usize, AppError>
         .checked_add(current_layout)
         .and_then(|n| n.checked_add(governance))
         .and_then(|n| n.checked_add(member_outbox))
+        .and_then(|n| n.checked_add(joined_pin))
         .and_then(|n| n.checked_add(native_registry))
         .ok_or_else(refused)
 }
@@ -893,6 +897,7 @@ pub(super) fn preserved_entry_count(current: &codec::Parsed<'_>) -> u32 {
         + u32::from(current.current_layout.is_some())
         + u32::from(current.governance.is_some())
         + u32::from(current.member_outbox.is_some())
+        + u32::from(current.joined_pin_payload.is_some())
         + u32::from(current.native_registry_payload.is_some())
 }
 
@@ -937,6 +942,11 @@ fn append_original_archive(
     if let Some(payload) = current.member_outbox_payload {
         output.put_u32(super::super::member_outbox_namespace_codec::NAMESPACE_ID);
         output.put_u32(super::super::member_outbox_namespace_codec::NAMESPACE_VERSION);
+        output.put_bytes(payload).map_err(|_| refused())?;
+    }
+    if let Some(payload) = current.joined_pin_payload {
+        output.put_u32(super::super::joined_pin::namespace::ID);
+        output.put_u32(super::super::joined_pin::namespace::VERSION);
         output.put_bytes(payload).map_err(|_| refused())?;
     }
     if let Some(payload) = current.native_registry_payload {

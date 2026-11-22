@@ -8,6 +8,7 @@ use crate::store::persistence::v2_text::{
 use catcoms_replication::chat::{
     owner_header::SignedOwnerHeader,
     owner_profile::{AdmissionBody, AdmissionOrigin},
+    owner_state::transition::{ReplayBody, ReplayMath},
 };
 use catcoms_sync::{owner_v2::V2GenesisSeedData, V2JoinResponsePacketData};
 
@@ -81,13 +82,16 @@ fn authenticate_selected(
     if before_epoch != 0 || after_epoch != labels.epoch {
         return Err(refused());
     }
-    outcome::require_archive_fingerprint(
+    let admitted_at = outcome::verify_archive_fingerprint(
         frames.entry,
         &outcome,
         before_epoch,
         after_epoch,
         &labels.authenticator,
     )?;
+    if input.invite.expired_at_data(admitted_at) {
+        return Err(refused());
+    }
     let raw_header = header_signing::AddSigningParent::from_outcome(frames.outcome)?.open_raw(
         key,
         frames.header_attempt,
@@ -100,14 +104,17 @@ fn authenticate_selected(
         &raw_header,
         bodies,
     )?;
-    if header.id() != labels.header
-        || header.spec().state != labels.state
-        || header.spec().parent != trusted.header.id()
-        || Some(header.spec().sequence) != original.sequence.checked_add(1)
-        || header.spec().issuer != original.issuer
-    {
+    if header.id() != labels.header || header.spec().state != labels.state {
         return Err(refused());
     }
+    ReplayMath::from_genesis(
+        trusted.profile,
+        trusted.admission,
+        trusted.header,
+        trusted.state,
+    )
+    .and_then(|prior| prior.derive_successor(&header, ReplayBody::Admission(&admission), bodies[2]))
+    .map_err(|_| refused())?;
     let spec = welcome_intent::open_data(key, frames.governing, frames.welcome_intent)?;
     let payloads = outcome::welcome_bodies(frames.entry, &outcome)?;
     welcome_intent::require_original_binding(

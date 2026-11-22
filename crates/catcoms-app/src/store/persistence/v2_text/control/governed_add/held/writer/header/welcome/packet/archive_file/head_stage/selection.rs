@@ -20,6 +20,9 @@ impl PreparedGovernedAddFence {
         self.held
             .resources
             .require_same_original(selected.resources())?;
+        self.held
+            .resources
+            .require_same_original(guard.resources())?;
         guard.require_governed_native_invite_parent()?;
         guard.require_text_control_io_quiescent()?;
         let parent = selected.physical_query_data();
@@ -92,8 +95,12 @@ impl PreparedGovernedAddFence {
         self.held
             .resources
             .require_same_original(selected.resources())?;
+        self.held
+            .resources
+            .require_same_original(guard.resources())?;
         guard.require_governed_native_invite_parent()?;
         guard.require_text_control_io_quiescent()?;
+        require_absences(&self.other_paths)?;
         let parent = selected.physical_query_data();
         let (target, directory, id) = guard.target_directory_data();
         if parent.target != target || parent.target_id != id {

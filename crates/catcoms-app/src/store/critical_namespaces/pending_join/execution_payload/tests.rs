@@ -182,6 +182,7 @@ fn summary(
         governance_payload_digest: None,
         member_outbox: None,
         member_outbox_payload_digest: None,
+        joined_pin_payload_digest: None,
         native_registry_payload_digest: None,
     }
 }
