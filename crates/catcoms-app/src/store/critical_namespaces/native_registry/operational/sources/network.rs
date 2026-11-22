@@ -52,15 +52,6 @@ pub(super) struct Reservation {
     io: Option<crate::store::persistence::native_registry::network::NetworkIo>,
 }
 impl Reservation {
-    #[cfg(test)]
-    pub(super) fn loopback_dial_address_for_test(&self) -> String {
-        format!(
-            "/ip4/127.0.0.1/tcp/{}/p2p/{}",
-            self.port,
-            self.actual_peer.as_deref().unwrap()
-        )
-    }
-
     /// Canonical public reservation DATA, not a reachable contact. Wildcard
     /// listening and configured advertise/relay/rendezvous strings prove no
     /// external address or relay reservation, so this initial profile encodes

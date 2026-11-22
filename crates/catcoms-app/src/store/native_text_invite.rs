@@ -42,6 +42,8 @@ pub struct NativeTextInvitePacketData<'a> {
     policy: &'a [u8],
     reservation: &'a [u8],
     peer: catcoms_rt::PeerId,
+    peer_address_id: &'a str,
+    tcp_port: u16,
 }
 
 impl std::fmt::Debug for NativeTextInvitePacketData<'_> {
@@ -68,12 +70,14 @@ impl<'a> NativeTextInvitePacketData<'a> {
             return Err(ChatError::Bound);
         }
         let binding = SignedInviteBindingData::decode(binding)?;
-        let peer = check_parts(&binding, policy, reservation)?;
+        let (peer, peer_address_id, tcp_port) = check_parts(&binding, policy, reservation)?;
         Ok(Self {
             binding,
             policy,
             reservation,
             peer,
+            peer_address_id,
+            tcp_port,
         })
     }
 
@@ -93,13 +97,21 @@ impl<'a> NativeTextInvitePacketData<'a> {
     pub fn connected_peer_data(&self) -> catcoms_rt::PeerId {
         self.peer
     }
+
+    pub(super) fn direct_address_data(&self, host: std::net::IpAddr) -> String {
+        let family = if host.is_ipv4() { "ip4" } else { "ip6" };
+        format!(
+            "/{family}/{host}/tcp/{}/p2p/{}",
+            self.tcp_port, self.peer_address_id
+        )
+    }
 }
 
-fn check_parts(
+fn check_parts<'a>(
     binding: &SignedInviteBindingData,
     policy: &[u8],
-    reservation: &[u8],
-) -> Result<catcoms_rt::PeerId, ChatError> {
+    reservation: &'a [u8],
+) -> Result<(catcoms_rt::PeerId, &'a str, u16), ChatError> {
     if policy.len() > MAX_POLICY || reservation.len() > MAX_ROUTING {
         return Err(ChatError::Bound);
     }
@@ -117,7 +129,10 @@ fn check_parts(
     check_reservation(reservation, &anchor.group)
 }
 
-fn check_reservation(bytes: &[u8], group: &[u8]) -> Result<catcoms_rt::PeerId, ChatError> {
+fn check_reservation<'a>(
+    bytes: &'a [u8],
+    group: &[u8],
+) -> Result<(catcoms_rt::PeerId, &'a str, u16), ChatError> {
     let mut d = Decoder::new(bytes);
     if d.get_bytes()? != RESERVATION || d.get_u16()? != VERSION {
         return Err(ChatError::Malformed);
@@ -129,15 +144,19 @@ fn check_reservation(bytes: &[u8], group: &[u8]) -> Result<catcoms_rt::PeerId, C
         .get_bytes()?
         .try_into()
         .map_err(|_| ChatError::Malformed)?;
-    let peer = d.get_bytes()?;
+    let peer = d.get_str()?;
     let commitment = d.get_bytes()?;
-    if d.get_u16()? != TCP_RESERVATION || d.get_u16()? == 0 || d.get_u32()? != 0 {
+    let kind = d.get_u16()?;
+    let port = d.get_u16()?;
+    if kind != TCP_RESERVATION || port == 0 || d.get_u32()? != 0 {
         return Err(ChatError::Malformed);
     }
     d.finish()?;
-    SeededTransportIdentityData::authenticated_peer_data(key, peer, commitment)
-        .map_err(|_| ChatError::Malformed)?
-        .ok_or(ChatError::Scope)
+    let identity =
+        SeededTransportIdentityData::authenticated_peer_data(key, peer.as_bytes(), commitment)
+            .map_err(|_| ChatError::Malformed)?
+            .ok_or(ChatError::Scope)?;
+    Ok((identity, peer, port))
 }
 
 pub(super) fn encode_reservation(

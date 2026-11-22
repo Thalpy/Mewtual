@@ -247,6 +247,11 @@ returns the original public proof from the covered delivery under a separate
 buffer credit. The addressed member catch-up transport is still pending.
 The joined storage owner can exchange the exact selected JoinRequest on an
 already authenticated connection to the peer named by the signed invite.
+For an explicitly approved direct IP, the trusted App caller can connect first
+using the signed TCP port and complete peer identity from the covered invite.
+One scheduler permit follows the exact dial into the transport, where stale
+caller, vault or invocation ownership refuses submission. The caller waits for
+the expected peer's authenticated handshake before exchanging the request.
 An independently reopened Pending with no Welcome files can resend the exact
 original request over the same connected protocol. It verifies the reply
 against that request and the original held files before returning delivery data.

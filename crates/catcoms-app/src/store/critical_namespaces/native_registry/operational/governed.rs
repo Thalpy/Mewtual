@@ -15,6 +15,7 @@ use catcoms_sync::{
     PreparedV2JoinRequest, V2JoinRequestPacketData, V2PendingJoinContextData,
     MAX_V2_FIRST_JOIN_DELIVERY_BYTES, MAX_V2_JOIN_REQUEST_PACKET_BYTES,
 };
+mod contact;
 mod runtime;
 pub use runtime::NativeTextJoinedRuntime;
 

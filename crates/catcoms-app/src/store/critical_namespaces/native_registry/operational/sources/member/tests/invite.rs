@@ -277,28 +277,28 @@ async fn native_governed_add_fixture(case: JoinCase) {
             capture().open_connected_join_requests(negative.clone()),
             Err(V2MemberSaveRefusal::Busy)
         ));
-        let address = {
-            let cell = row.original.runtime.upgrade().unwrap();
-            let state = cell.state.lock().unwrap();
-            state
-                .body
-                .as_ref()
-                .unwrap()
-                .network
-                .as_ref()
-                .unwrap()
-                .loopback_dial_address_for_test()
-        };
         tokio::task::yield_now().await;
-        tokio::time::timeout(std::time::Duration::from_secs(8), async {
-            client.dial(address.parse().unwrap()).await.unwrap();
-            client
-                .wait_for_peer_connected(invite.connected_peer_data())
-                .await
-                .unwrap();
-        })
-        .await
-        .unwrap();
+        let scheduler = catcoms_discovery::EndpointDialScheduler::new(Default::default());
+        assert!(joined
+            .connect_accepted_invite_host(
+                &invite,
+                std::net::Ipv4Addr::UNSPECIFIED.into(),
+                &client,
+                &scheduler,
+                negative.clone(),
+            )
+            .await
+            .is_err());
+        joined
+            .connect_accepted_invite_host(
+                &invite,
+                std::net::Ipv4Addr::LOCALHOST.into(),
+                &client,
+                &scheduler,
+                negative.clone(),
+            )
+            .await
+            .unwrap();
         let serve = async {
             let Some(TransportEvent::Request {
                 data,
@@ -329,6 +329,16 @@ async fn native_governed_add_fixture(case: JoinCase) {
                 NativeTextJoinedStorage::open(join_dir, SECRET, &mut join_rng, current_policy())
                     .unwrap();
             assert_eq!(cold.pending_join_data().unwrap().unwrap().0, identity);
+            let (client, _) = catcoms_net::MeshService::new_tcp(None, &[]).unwrap();
+            cold.connect_accepted_invite_host(
+                &invite,
+                std::net::Ipv4Addr::LOCALHOST.into(),
+                &client,
+                &scheduler,
+                negative.clone(),
+            )
+            .await
+            .unwrap();
             let entry = join_dir.join(entry_name);
             std::fs::write(&entry, [1]).unwrap();
             assert!(tokio::time::timeout(
