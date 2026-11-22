@@ -23,6 +23,9 @@ fn complete_original_welcome(native_joiner: bool) {
         text_current_add::TextCurrentAddLimits, TextCurrentSdkGraphReservation,
         TextCurrentSdkRestoreAdmission, TextCurrentSdkRestoreLimits,
     };
+    use catcoms_replication::chat::{
+        ActionDraft, ActionSpec, Body, ChatLedger, LedgerLimits, ProjectionGroupView, Realm,
+    };
     use rand_core::SeedableRng;
     struct Paid(TextCurrentSdkRestoreLimits);
     impl TextCurrentSdkGraphReservation for Paid {
@@ -167,6 +170,9 @@ fn complete_original_welcome(native_joiner: bool) {
     // Only the genuine resulting Add advances the fixture's verified prefix.
     let header = node.signed_admission_data().unwrap();
     let (admission, output) = node.unsigned_admission_data().unwrap();
+    let joined_realm = Realm::new(&fixture.invite.spec_data().anchor.group, 42).unwrap();
+    let joined_labels = admission.ordinary_labels(&joined_realm).unwrap();
+    let joined_signer = admission.spec().subject;
     let genesis = node.genesis_data();
     let proof = V2FirstAddProofData::encode(
         genesis.profile,
@@ -485,6 +491,51 @@ fn complete_original_welcome(native_joiner: bool) {
         .take_closed_recovered_node(&prefix, &mut unused)
         .is_err());
     assert!(unused.is_some());
+
+    let member_plan = |selected: &crate::PreparedV2JoinedPrefix, group: &ProjectionGroupView| {
+        let mut ledger = ChatLedger::new(
+            joined_realm.clone(),
+            LedgerLimits {
+                max_actions: 8,
+                max_action_bytes: 4096,
+            },
+        )
+        .unwrap();
+        let mut view = ledger.begin_projection_view_in(group).unwrap();
+        assert!(view.try_ready());
+        let draft = ActionDraft::new(
+            ActionSpec {
+                realm: joined_realm.clone(),
+                basis: joined_labels.basis,
+                grant: joined_labels.grant,
+                nonce: [109; 16],
+                presented_ms: now,
+                parents: vec![],
+                body: Body::Create {
+                    text: "Joined member draft".into(),
+                    reply_to: None,
+                },
+            },
+            joined_signer,
+        )
+        .unwrap();
+        let plan = selected.prepare_member_plan(&draft, &[], &view).unwrap();
+        (ledger, view, draft, plan)
+    };
+    let (_warm_ledger, _warm_channel, warm_draft, warm_plan) =
+        member_plan(&warm_prefix, &warm_view);
+    let (_cold_ledger, _cold_channel, cold_draft, cold_plan) = member_plan(&prefix, &member_view);
+    assert_eq!(warm_draft.action_id_data(), cold_draft.action_id_data());
+    assert_eq!(warm_plan.admission_id_data(), cold_plan.admission_id_data());
+    assert!(joined_node.admit_member_save(&cold_plan).is_err());
+    assert!(cold_node.admit_member_save(&warm_plan).is_err());
+    let original = joined_node.admit_member_save(&warm_plan).unwrap();
+    assert!(joined_node.admit_member_save(&warm_plan).is_err());
+    drop(original);
+    drop(cold_node.admit_member_save(&cold_plan).unwrap());
+    drop(warm_view.revoker().close());
+    assert!(joined_node.admit_member_save(&warm_plan).is_err());
+    drop(cold_node.admit_member_save(&cold_plan).unwrap());
 }
 
 #[test]

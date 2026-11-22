@@ -8,8 +8,9 @@ use catcoms_replication::chat::{
         AdmissionBody, AdmissionOrigin, SignedOwnerProfile, MAX_ADMISSION_BYTES, MAX_PROFILE_BYTES,
     },
     owner_state::transition::{ReplayBody, ReplayMath},
-    FounderGenesisAnchorData, ProjectionGroupView, V2GeneralCandidate, V2GeneralExpectation,
-    V2GeneralPrefixVerifier, V2GeneralRetiredData, V2HostSelectionExpectation,
+    ActionDraft, FounderGenesisAnchorData, ProjectionGroupView, ProjectionView,
+    V2AuthenticatedAdmission, V2GeneralCandidate, V2GeneralExpectation, V2GeneralPrefixVerifier,
+    V2GeneralRetiredData, V2HostSelectionExpectation, V2OrdinaryDependency, V2OrdinarySigningPlan,
     V2PreparedSelectedHistoryData, V2ProjectionOrigin,
 };
 use std::sync::{Arc, Weak};
@@ -208,7 +209,7 @@ impl PreparedV2JoinedPrefix {
         &self,
         original: &Arc<()>,
         join: SelectedJoinData<'_>,
-    ) -> Result<(), SyncError> {
+    ) -> Result<V2AuthenticatedAdmission, SyncError> {
         let reject = |_| SyncError::JoinRejected;
         if self
             .source_origin
@@ -244,11 +245,31 @@ impl PreparedV2JoinedPrefix {
         {
             return Err(SyncError::JoinRejected);
         }
-        Ok(())
+        Ok(admission)
     }
 
     pub fn own_admission_data(&self) -> OwnerFactId {
         self.own
+    }
+
+    /// Use the same selected Core verifier and original own Admission to plan
+    /// an ordinary action. The Join candidate must already have been selected.
+    pub fn prepare_member_plan(
+        &self,
+        draft: &ActionDraft,
+        dependencies: &[V2OrdinaryDependency<'_>],
+        view: &ProjectionView,
+    ) -> Result<V2OrdinarySigningPlan, SyncError> {
+        if self.candidate.is_some() {
+            return Err(SyncError::JoinRejected);
+        }
+        let admission = self
+            .verifier
+            .admission(self.own)
+            .map_err(|_| SyncError::JoinRejected)?;
+        self.verifier
+            .prepare_ordinary_signing_plan(draft, &admission, dependencies, view)
+            .map_err(|_| SyncError::JoinRejected)
     }
 
     pub fn pending_history_data(&self) -> Option<&V2PreparedSelectedHistoryData> {

@@ -376,7 +376,7 @@ impl RecoveredV2JoinedOutcome {
         {
             return Err(SyncError::JoinRejected);
         }
-        prefix.require_join_selection(
+        let admission = prefix.require_join_selection(
             original,
             SelectedJoinData {
                 anchor: self
@@ -405,7 +405,7 @@ impl RecoveredV2JoinedOutcome {
         ClosedV2JoinedNode::from_exact_recovered_graph(
             node,
             self.head,
-            prefix.own_admission_data(),
+            admission,
             self.epoch,
             self.authenticator,
         )

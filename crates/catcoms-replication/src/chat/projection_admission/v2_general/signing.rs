@@ -176,6 +176,23 @@ impl V2OrdinarySigningPlan {
     pub fn require_open_data(&self) -> Result<(), ChatError> {
         self.facts.live()
     }
+
+    /// Check the plan against the actual selected Admission owner at a host
+    /// save fence. Neither matching CIDs nor a newly replayed verifier can
+    /// substitute for the plan's original Admission lifetime.
+    pub fn require_original_selected_admission(
+        &self,
+        admission: &V2AuthenticatedAdmission,
+    ) -> Result<(), ChatError> {
+        if !self
+            .facts
+            .open_origin
+            .same_original(&admission.core.open_origin)
+        {
+            return Err(ChatError::Scope);
+        }
+        self.facts.live()
+    }
     pub fn observe_original(&self) -> OriginalV2OrdinarySigningPlanObservation {
         OriginalV2OrdinarySigningPlanObservation {
             identity: Arc::downgrade(&self.identity),

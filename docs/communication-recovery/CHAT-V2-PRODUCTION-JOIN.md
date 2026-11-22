@@ -386,6 +386,13 @@ known-parent witness from decoded IDs. A cache cap is not a lifetime-message cap
 missing/corrupt/busy backing is not authenticated absence. Neutral or multiple
 MLS changes need an explicit reviewed rule; current refusal is not completion.
 
+The closed node retains its actual Core Admission from the selected prefix.
+Its final save fence admits a plan only when that plan belongs to the original
+Admission and its original Core group and channel remain live. Warm and cold
+plans can have equal action and Admission IDs and still belong to different
+incarnations. The native writer still needs to use this fence when issuing the
+save-source end for its exact prepared outbox action.
+
 The actual joined fence orders every transition/removal against final issuance.
 An admission that wins retains its original end through IO; removal that wins
 prevents issuance. A1 saved/uncertain originals stay historical across A2 rejoin;
