@@ -11,6 +11,8 @@ use catcoms_rt::CryptoRngCore;
 use catcoms_wire::Decoder;
 use zeroize::Zeroizing;
 
+pub(super) mod governed_add;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::store) enum TextControlKindData {
     Head,
@@ -33,7 +35,7 @@ impl TextControlKindData {
             Self::Wal => 2 * 1024 * 1024,
         }
     }
-    fn domains(self) -> (&'static [u8], &'static str, &'static [u8]) {
+    const fn domains(self) -> (&'static [u8], &'static str, &'static [u8]) {
         macro_rules! names {
             ($name:literal) => {
                 (
@@ -176,6 +178,18 @@ pub(super) fn inspect_seed_stage_mac_data(
     raw: &[u8],
 ) -> Result<TextControlMacInspectionData, AppError> {
     if raw.len() > TextControlKindData::Seed.plain_cap() + 40 {
+        return Err(refused());
+    }
+    inspect_known_control_mac_data(key, raw)
+}
+
+/// Shared with old WAL-stage recovery. Authenticate before interpreting any
+/// tag or version, and keep unknown or foreign successful MACs out of scratch.
+pub(super) fn inspect_known_control_mac_data(
+    key: &[u8; 32],
+    raw: &[u8],
+) -> Result<TextControlMacInspectionData, AppError> {
+    if raw.len() > TextControlKindData::Wal.plain_cap() + 40 {
         return Err(refused());
     }
     // Recognize this OTHER public envelope only to refuse/preserve it. No private-page

@@ -6,6 +6,8 @@ import sys
 COHORTS = {
     "bindings": ("catcoms-replication", "chat::join_bindings::tests::", 15),
     "journal": ("catcoms-app", "unsigned_invite_journal_", 4),
+    "add-fence": ("catcoms-app", "governed_add_fence_", 2),
+    "control-scratch": ("catcoms-app", "v2_text::control::tests::scratch::", 3),
     "native": ("catcoms-app", "native_runtime_invite_", 15),
     "packet": ("catcoms-app", "native_invite_packet_", 3),
     "join-request": ("catcoms-sync", "prepared_direct_join::v2::tests::", 3),

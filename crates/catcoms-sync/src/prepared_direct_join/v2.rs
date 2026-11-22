@@ -26,6 +26,7 @@ pub struct V2JoinRequestPacketData<'a> {
     invite: SignedInviteBindingData,
     request: SignedJoinRequestBindingData,
     key_package: &'a [u8],
+    packet: &'a [u8],
 }
 
 impl<'a> V2JoinRequestPacketData<'a> {
@@ -58,7 +59,13 @@ impl<'a> V2JoinRequestPacketData<'a> {
             invite,
             request,
             key_package,
+            packet: bytes,
         })
+    }
+
+    /// The complete authenticated wire representation, including both signatures.
+    pub fn packet_bytes_data(&self) -> &'a [u8] {
+        self.packet
     }
 
     pub fn founder_add_data(&self) -> V2FounderAddRequestData<'_> {

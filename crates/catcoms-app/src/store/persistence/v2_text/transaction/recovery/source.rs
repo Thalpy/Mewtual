@@ -1,6 +1,9 @@
 //! Readonly classification from actual held controls. Presence is never inferred from a
 //! parser/decryption/read error. Large WAL bytes and crypto are outside all host writers.
 use super::*;
+use crate::store::persistence::v2_text::control::{
+    inspect_known_control_mac_data, TextControlMacInspectionData,
+};
 use catcoms_storage::kept::{session_at, SessionAt};
 use std::fs;
 
@@ -191,34 +194,10 @@ impl CapturedV2TextRetainRecovery {
 /// Plaintexts drain sequentially; unknown future KDF authenticity cannot be detected, so
 /// a future writer must reserve a refusal/version change before changing stage.v1 meaning.
 fn preserve_authenticated_stage(key: &[u8; 32], raw: &[u8]) -> Result<(), AppError> {
-    const PAGE: &[u8] = b"catcoms/private-chat-sealed-page/v1\0";
-    if raw.len() >= 4 + PAGE.len()
-        && raw[..4] == (PAGE.len() as u32).to_be_bytes()
-        && &raw[4..4 + PAGE.len()] == PAGE
-    {
-        return Err(refused());
+    match inspect_known_control_mac_data(key, raw)? {
+        TextControlMacInspectionData::Authenticated => Err(refused()),
+        TextControlMacInspectionData::Unauthenticated => Ok(()),
     }
-    if raw.len() < 40 {
-        return Ok(());
-    }
-    let sealed = crate::store::unframe(raw)?;
-    for domain in [
-        "catcoms/private-chat-text-head-key/v1",
-        "catcoms/private-chat-text-archive-key/v1",
-        "catcoms/private-chat-text-retain-key/v1",
-        "catcoms/private-chat-text-intent-key/v1",
-        "catcoms/private-chat-text-signature-key/v1",
-        "catcoms/private-chat-text-publication-key/v1",
-        "catcoms/private-chat-text-seed-key/v1",
-        "catcoms/private-chat-text-wal-key/v1",
-    ] {
-        let derived = Zeroizing::new(blake3::derive_key(domain, key));
-        if let Ok(plain) = catcoms_crypto::unseal(&derived, &sealed) {
-            drop(Zeroizing::new(plain));
-            return Err(refused());
-        }
-    }
-    Ok(())
 }
 
 fn require_metadata(path: &Path, native: SessionId, len: usize) -> Result<(), AppError> {

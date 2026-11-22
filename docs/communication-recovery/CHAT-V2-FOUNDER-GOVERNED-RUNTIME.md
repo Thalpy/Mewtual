@@ -255,6 +255,17 @@ promotion/workspace/recovery paths preserve and refuse its authentic MAC.
 Historical metadata/DATA readers are not universally blocked. Actual held-file
 covering checks and pinned predecessor acceptance are still outstanding.
 
+The fence codec uses the existing outer WAL tag and key with logical version 2
+and a separate governed Add role. Its four fixed-width commitments cover the
+original storage context, the exact selected Head ciphertext, the invitation
+ID, and the complete authenticated JoinRequest wire frame. That last digest
+includes both signed bindings and the exact KeyPackage. The ordinary WAL
+decoder still requires version 1. Seed and WAL scratch checks share the existing
+known-key MAC test, with their separate size caps. A successful MAC alone
+creates neither a held file nor a reservation receipt. The codec regressions
+compare the old envelope decoder and the new parser and exercise exact request,
+parent and context replacement, torn frames and authenticated wrong roles.
+
 ## Evidence and limits
 
 Thirteen real-MLS focused cases passed locally, including two Adds and
