@@ -236,7 +236,7 @@ impl PreparedGovernedAddFence {
 
     /// Bind the actual SDK outcome to this original warm entry outside all
     /// writers. Keep the first prepared frame through any late refusal.
-    pub(in crate::store::persistence::v2_text) fn prepare_outcome(
+    pub(in crate::store) fn prepare_outcome(
         &mut self,
         store: &ServerStore,
         source: &GenesisSourceDataRef<'_>,
@@ -286,7 +286,7 @@ impl PreparedGovernedAddFence {
 
     /// Cover the outcome using only this writer's actual held Entry and exact
     /// presealed bytes. A retry cannot reseal or adopt another file.
-    pub(in crate::store::persistence::v2_text) fn cover_outcome(
+    pub(in crate::store) fn cover_outcome(
         &mut self,
         guard: &V2TextCurrentGroupGuard<'_, '_>,
         selected: &SelectedV2TextHead,
@@ -325,7 +325,7 @@ impl PreparedGovernedAddFence {
         self.require_covered_outcome(guard, selected)
     }
 
-    pub(in crate::store::persistence::v2_text) fn require_covered_outcome(
+    pub(in crate::store) fn require_covered_outcome(
         &mut self,
         guard: &V2TextCurrentGroupGuard<'_, '_>,
         selected: &SelectedV2TextHead,

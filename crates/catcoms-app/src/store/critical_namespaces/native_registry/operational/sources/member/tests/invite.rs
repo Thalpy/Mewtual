@@ -109,7 +109,26 @@ async fn native_runtime_invite_join_request_requires_the_actual_signed_journal()
     // Cover the fixed fence on the actual original governed Current. The
     // native fixture has already reconciled its one existing member lane.
     let packet = check().unwrap();
-    let mut job = prepare(&owner, &row, &vault, &budget);
+    let preparation = owner.capture_member(
+        &row,
+        command(&vault, &budget),
+        owner.policy.prepare_member().unwrap(),
+    );
+    let (cell, (keys, cuts)) = preparation
+        .prepare_using_issuer(|source, command| {
+            use catcoms_rt::NativeChatKeyPurpose as Purpose;
+            let cut = |purpose| source.prepare_cut(command, purpose).map_err(|_| refused());
+            Ok((
+                NativeFounderKeys::prepare(source, command)?,
+                [
+                    cut(Purpose::AddSdk)?,
+                    cut(Purpose::GoverningHeader)?,
+                    cut(Purpose::JoinWelcome)?,
+                ],
+            ))
+        })
+        .unwrap();
+    let mut job = preparation.finish_prepared((cell, keys)).unwrap();
     let runtime = job.inner.loan.body.as_mut().unwrap();
     let driver = runtime.driver.as_mut().unwrap();
     let route = runtime
@@ -127,6 +146,17 @@ async fn native_runtime_invite_join_request_requires_the_actual_signed_journal()
             &job.inner.keys,
             runtime.rng.as_mut().unwrap(),
             &negative,
+            cuts,
+            |present| {
+                let outcome = only_named(directory.path(), "text.add.sdk-entry.v2")
+                    .with_file_name("text.add.outcome.v2");
+                if present {
+                    std::fs::write(&outcome, vec![3; 4096]).unwrap();
+                } else {
+                    assert_eq!(std::fs::read(&outcome).unwrap(), vec![3; 4096]);
+                    std::fs::remove_file(&outcome).unwrap();
+                }
+            },
         )
         .unwrap();
     job.inner.loan.recorded = true;
@@ -137,11 +167,16 @@ async fn native_runtime_invite_join_request_requires_the_actual_signed_journal()
     let entry = only_named(directory.path(), "text.add.sdk-entry.v2");
     let entry_bytes = std::fs::read(&entry).unwrap();
     assert!(entry_bytes.len() > 40);
+    let outcome = only_named(directory.path(), "text.add.outcome.v2");
+    let outcome_bytes = std::fs::read(&outcome).unwrap();
+    assert!(outcome_bytes.len() > 40);
     assert!(check().is_err());
     let parked_fence = fence.with_extension("held");
     let parked_entry = entry.with_extension("held");
+    let parked_outcome = outcome.with_extension("held");
     std::fs::rename(&fence, &parked_fence).unwrap();
     std::fs::rename(&entry, &parked_entry).unwrap();
+    std::fs::rename(&outcome, &parked_outcome).unwrap();
     assert!(check().is_ok());
     let orphan = fence.with_file_name("text.add.outcome.v2");
     std::fs::write(&orphan, b"incomplete held outcome").unwrap();
@@ -151,8 +186,10 @@ async fn native_runtime_invite_join_request_requires_the_actual_signed_journal()
     assert!(check().is_ok());
     std::fs::rename(&parked_fence, &fence).unwrap();
     std::fs::rename(&parked_entry, &entry).unwrap();
+    std::fs::rename(&parked_outcome, &outcome).unwrap();
     assert_eq!(std::fs::read(fence).unwrap(), frozen);
     assert_eq!(std::fs::read(entry).unwrap(), entry_bytes);
+    assert_eq!(std::fs::read(outcome).unwrap(), outcome_bytes);
 }
 
 #[tokio::test]

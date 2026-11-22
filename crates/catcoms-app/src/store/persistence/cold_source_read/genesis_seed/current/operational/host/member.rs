@@ -388,6 +388,14 @@ pub(super) struct V2MemberLane {
 }
 
 impl V2MemberLane {
+    #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(super) fn governed_add_replay_for_test(
+        &self,
+    ) -> Result<&catcoms_replication::chat::owner_state::transition::ReplayMath, AppError> {
+        self.require_quiescent_for_add()?;
+        Ok(self.verifier.as_ref().ok_or_else(refused)?.replay_data())
+    }
+
     pub(super) fn require_quiescent_for_add(&self) -> Result<(), AppError> {
         if self.request.is_some() {
             return Err(refused());

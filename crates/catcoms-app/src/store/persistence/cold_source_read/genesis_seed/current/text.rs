@@ -6,6 +6,31 @@
 use super::UnexposedV2GenesisCurrent;
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> UnexposedV2GenesisCurrent<T, R> {
+    #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn governed_node_for_test(
+        &mut self,
+        store: &crate::store::ServerStore,
+    ) -> Result<&mut catcoms_sync::owner_v2::PreparedV2FounderGovernanceNode<T, R>, crate::AppError>
+    {
+        self.require_text_original_data(store)
+            .map_err(|_| crate::store::critical_namespaces::refused())?;
+        self.governed_text_node_mut()
+            .ok_or_else(crate::store::critical_namespaces::refused)
+    }
+
+    #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn governed_outcome_for_test(
+        &self,
+        store: &crate::store::ServerStore,
+    ) -> Result<catcoms_sync::owner_v2::V2FounderAddOutcomeData<'_>, crate::AppError> {
+        self.require_text_original_data(store)
+            .map_err(|_| crate::store::critical_namespaces::refused())?;
+        self.governed_text_node()
+            .ok_or_else(crate::store::critical_namespaces::refused)?
+            .outcome_data()
+            .map_err(crate::AppError::from)
+    }
+
     pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn prepare_governed_text_node(
         &mut self,
         store: &crate::store::ServerStore,

@@ -117,6 +117,28 @@ impl<T, R> V2TextOwnedCurrent<T, R> {
 }
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurrent<T, R> {
+    #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(super) fn governed_node_for_test(
+        &mut self,
+        store: &ServerStore,
+    ) -> Result<&mut catcoms_sync::owner_v2::PreparedV2FounderGovernanceNode<T, R>, AppError> {
+        match &mut self.core {
+            OwnedCurrent::Warm(current) => current.governed_node_for_test(store),
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
+    #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(super) fn governed_outcome_for_test(
+        &self,
+        store: &ServerStore,
+    ) -> Result<catcoms_sync::owner_v2::V2FounderAddOutcomeData<'_>, AppError> {
+        match &self.core {
+            OwnedCurrent::Warm(current) => current.governed_outcome_for_test(store),
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
     pub(super) fn prepare_governed_node(&mut self, store: &ServerStore) -> Result<(), AppError> {
         match &mut self.core {
             OwnedCurrent::Warm(current) => current.prepare_governed_text_node(store),

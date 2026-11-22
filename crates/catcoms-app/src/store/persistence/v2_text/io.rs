@@ -92,9 +92,11 @@ pub(super) fn archive_child(base: &Path, id: &[u8; 32]) -> Result<PathBuf, AppEr
 }
 
 pub(super) fn require_named(path: &Path, object: &OpenedTextControl) -> Result<(), AppError> {
-    if session_id(&object.file).map_err(io)? != object.id
-        || !matches!(session_at(path, object.id), SessionAt::Ours)
-    {
+    require_named_file(path, &object.file, object.id)
+}
+
+fn require_named_file(path: &Path, file: &File, id: SessionId) -> Result<(), AppError> {
+    if session_id(file).map_err(io)? != id || !matches!(session_at(path, id), SessionAt::Ours) {
         return Err(refused());
     }
     Ok(())
@@ -107,11 +109,43 @@ pub(super) fn read_control(path: &Path, maximum: usize) -> Result<OpenedTextCont
     if maximum == 0 || maximum > 2 * 1024 * 1024 + 40 {
         return Err(refused());
     }
+    let (mut file, id, length) = open_control_file(path, maximum)?;
+    let mut frame = Zeroizing::new(vec![0; length + 1]);
+    read_control_frame(&mut file, &mut frame, length)?;
+    let object = OpenedTextControl { file, id, frame };
+    require_named(path, &object)?;
+    Ok(object)
+}
+
+/// A separately paid, already allocated buffer lends its own bound. The caller
+/// reserves it before entering Current and retains it on a partial read error.
+pub(super) fn read_control_into(
+    path: &Path,
+    maximum: usize,
+    frame: &mut Option<Zeroizing<Vec<u8>>>,
+) -> Result<OpenedTextControl, AppError> {
+    let (mut file, id, length) = open_control_file(path, maximum)?;
+    let bytes = frame.as_mut().ok_or_else(refused)?;
+    let required = length.checked_add(1).ok_or_else(refused)?;
+    if bytes.capacity() < required {
+        return Err(refused());
+    }
+    bytes.resize(required, 0);
+    read_control_frame(&mut file, bytes, length)?;
+    require_named_file(path, &file, id)?;
+    Ok(OpenedTextControl {
+        file,
+        id,
+        frame: frame.take().ok_or_else(refused)?,
+    })
+}
+
+fn open_control_file(path: &Path, maximum: usize) -> Result<(File, SessionId, usize), AppError> {
     let metadata = fs::symlink_metadata(path).map_err(io)?;
     if !regular(&metadata) || metadata.len() == 0 || metadata.len() > maximum as u64 {
         return Err(refused());
     }
-    let mut file = File::open(path).map_err(io)?;
+    let file = File::open(path).map_err(io)?;
     let metadata = file.metadata().map_err(io)?;
     let length = usize::try_from(metadata.len()).map_err(|_| refused())?;
     if !regular(&metadata) || length == 0 || length > maximum {
@@ -121,10 +155,12 @@ pub(super) fn read_control(path: &Path, maximum: usize) -> Result<OpenedTextCont
     if !matches!(session_at(path, id), SessionAt::Ours) {
         return Err(refused());
     }
-    let capacity = length.checked_add(1).ok_or_else(refused)?;
-    let mut frame = Zeroizing::new(vec![0; capacity]);
+    Ok((file, id, length))
+}
+
+fn read_control_frame(file: &mut File, frame: &mut Vec<u8>, length: usize) -> Result<(), AppError> {
     let mut used = 0;
-    while used < capacity {
+    while used < frame.len() {
         match file.read(&mut frame[used..]) {
             Ok(0) => break,
             Ok(n) => used += n,
@@ -136,9 +172,7 @@ pub(super) fn read_control(path: &Path, maximum: usize) -> Result<OpenedTextCont
         return Err(refused());
     }
     frame.truncate(used);
-    let object = OpenedTextControl { file, id, frame };
-    require_named(path, &object)?;
-    Ok(object)
+    Ok(())
 }
 
 #[cfg(test)]

@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 const STAGE: &str = "text.wal.stage.v1";
 const FILE_COMPARE_BYTES: usize = 8192;
 
+mod outcome_read;
 mod writer;
 #[cfg(all(test, any(windows, target_os = "linux")))]
 pub(in crate::store) use writer::PreparedGovernedAddFence;
@@ -34,6 +35,7 @@ pub(in crate::store) struct HeldGovernedAddFence {
     outcome_path: PathBuf,
     original: Option<OpenedTextControl>,
     entry: Option<ObservedSdkEntry>,
+    outcome: Option<outcome_read::ObservedOutcome>,
     expected: GovernedAddFenceData,
     authenticated: bool,
     resources: V2TextReadResources,
@@ -98,6 +100,7 @@ impl HeldGovernedAddFence {
             outcome_path,
             original: None,
             entry: None,
+            outcome: None,
             expected,
             authenticated: false,
             resources,

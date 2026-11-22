@@ -252,8 +252,18 @@ that exact sealed frame for `text.add.outcome.v2`. It creates the file only
 once, checks the held file's prefix in bounded chunks, and covers the file and
 directory before rechecking the original Entry and Current. An orphan outcome
 blocks a reservation-only recovery classification. The native Host still has
-to invoke the writer before Header signing. Recovery must verify the governing
-record and restored SDK state before selection.
+to invoke the writer before Header signing. An independent reader prepays its
+own bounded buffer, authenticates the exact Entry and Outcome outside Current,
+then checks the same named file or observed absence under fresh Current. Its
+result is historical data. Recovery must verify the governing record and restored
+SDK state before selection.
+
+The native regression runs one real Add on the original warm runtime with all
+three cuts issued by its actual native source. It covers and independently reads
+the original snapshot, checks that an earlier absence expires when a file appears,
+and verifies that malformed bytes stay in place on refusal. The test retires its closed native
+key custody outside the writers. Production still needs the owning dispatcher
+and recovery lifecycle before this path can handle incoming requests.
 
 Final installation must preflight the exclusive SDK pair outside writers,
 then validate the real covering receipt/Current/native source through stable

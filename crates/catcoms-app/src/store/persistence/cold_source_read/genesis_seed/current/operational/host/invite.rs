@@ -225,6 +225,8 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         keys: &NativeFounderKeys,
         rng: &mut impl catcoms_rt::CryptoRngCore,
         negative: &RequestCancellation,
+        [sdk_cut, header_cut, welcome_cut]: [catcoms_rt::NativeChatPreparedKeyCut; 3],
+        mut inject_outcome: impl FnMut(bool),
     ) -> Result<(), AppError> {
         use crate::store::persistence::v2_text::{
             GovernedAddRecoveryState, PreparedGovernedAddFence,
@@ -266,17 +268,18 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             assert!(fence.require_covered_sdk_entry(&guard, selected).is_err());
             Ok(())
         })?;
-        let read_fence = |fence: &PreparedGovernedAddFence| {
-            let mut reader =
-                fence.prepare_recovery_read_for_test(store, owner.source(), selected)?;
-            store.with_v2_text_current(&owner, |admission| {
-                let guard = store.lock_v2_text_current_group(admission, &resources)?;
-                reader.capture(&guard, selected)
-            })?;
-            reader.authenticate(store, owner.source())?;
-            Ok::<_, AppError>(reader)
-        };
-        let mut before_entry = read_fence(&fence)?;
+        let read_fence =
+            |fence: &PreparedGovernedAddFence, owner: &super::super::owner::V2TextOwnerRef<'_>| {
+                let mut reader =
+                    fence.prepare_recovery_read_for_test(store, owner.source(), selected)?;
+                store.with_v2_text_current(owner, |admission| {
+                    let guard = store.lock_v2_text_current_group(admission, &resources)?;
+                    reader.capture(&guard, selected)
+                })?;
+                reader.authenticate(store, owner.source())?;
+                Ok::<_, AppError>(reader)
+            };
+        let mut before_entry = read_fence(&fence, &owner)?;
         store.with_v2_text_current(&owner, |admission| {
             let guard = store.lock_v2_text_current_group(admission, &resources)?;
             assert_eq!(
@@ -293,7 +296,8 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
                 fence.cover_sdk_entry(&guard, selected)
             })?;
         }
-        let mut after_entry = read_fence(&fence)?;
+        let mut after_entry = read_fence(&fence, &owner)?;
+        after_entry.prepare_outcome_read(store, owner.source())?;
         store.with_v2_text_current(&owner, |admission| {
             let guard = store.lock_v2_text_current_group(admission, &resources)?;
             assert!(before_entry
@@ -303,8 +307,86 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
                 after_entry.require_recovery_state(&guard, selected)?,
                 GovernedAddRecoveryState::PossiblyEntered
             );
+            after_entry.capture_outcome(&guard, selected)
+        })?;
+        after_entry.authenticate_outcome(store, owner.source())?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            assert!(after_entry
+                .require_outcome_current(&guard, selected)?
+                .is_none());
             Ok(())
-        })
+        })?;
+        inject_outcome(true);
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            assert!(after_entry
+                .require_outcome_current(&guard, selected)
+                .is_err());
+            Ok(())
+        })?;
+        let mut with_outcome = read_fence(&fence, &owner)?;
+        with_outcome.prepare_outcome_read(store, owner.source())?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            with_outcome.capture_outcome(&guard, selected)
+        })?;
+        assert!(with_outcome
+            .authenticate_outcome(store, owner.source())
+            .is_err());
+        inject_outcome(false);
+
+        self.require_member_quiescent_for_add(layout)?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            keys.preflight(&self.origin)?;
+            fence.require_covered_sdk_entry(&guard, selected)
+        })?;
+        let replay = self
+            .member
+            .as_ref()
+            .ok_or_else(refused)?
+            .governed_add_replay_for_test()?;
+        let node = self.owner.governed_node_for_test(store)?;
+        node.prepare_add_data(
+            packet.founder_add_data(),
+            keys.original.clone(),
+            sdk_admission,
+            sdk_cut,
+            header_cut,
+            welcome_cut,
+        )
+        .map_err(|_| refused())?;
+        node.execute_add_data_native(packet.founder_add_data())?;
+        node.prepare_admission_data(replay)?;
+        drop(node.retire_closed_add_native_data()?);
+
+        let owner = self.owner.borrow_current()?;
+        let outcome = self.owner.governed_outcome_for_test(store)?;
+        fence.prepare_outcome(store, owner.source(), selected, packet, &outcome, rng)?;
+        for _ in 0..2 {
+            store.with_v2_text_current(&owner, |admission| {
+                let guard = store.lock_v2_text_current_group(admission, &resources)?;
+                keys.preflight(&self.origin)?;
+                fence.cover_outcome(&guard, selected)
+            })?;
+        }
+        let mut verified = read_fence(&fence, &owner)?;
+        verified.prepare_outcome_read(store, owner.source())?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            verified.capture_outcome(&guard, selected)
+        })?;
+        verified.authenticate_outcome(store, owner.source())?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            let plaintext = verified
+                .require_outcome_current(&guard, selected)?
+                .ok_or_else(refused)?;
+            assert!(plaintext.ends_with(outcome.result_data().secret_snapshot_data()));
+            Ok(())
+        })?;
+        Ok(())
     }
 
     fn read_native_invite<U>(

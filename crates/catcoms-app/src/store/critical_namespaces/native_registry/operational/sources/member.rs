@@ -124,6 +124,16 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
     /// Finish outside ALL native/Root guards. Fresh covered-row lookup precedes
     /// taking an Entry pin; every such pin leaves before the runtime writer.
     fn prepare_keys(&self) -> Result<MemberKeys<T, R>, V2MemberSaveRefusal> {
+        self.prepare_using_issuer(NativeFounderKeys::prepare)
+    }
+
+    fn prepare_using_issuer<K>(
+        &self,
+        prepare: impl FnOnce(
+            &NativeChatSourceOwner,
+            &catcoms_rt::NativeChatUiCommand,
+        ) -> Result<K, AppError>,
+    ) -> Result<(Arc<RuntimeCell<T, R>>, K), V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Error;
         self.require_current()?;
         self.budget
@@ -154,8 +164,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
                 .cloned()
                 .ok_or(Error::Unavailable)?
         }; // original book/guard leave before issuer preparation
-        let keys =
-            NativeFounderKeys::prepare(&selected.owner, &self.command.as_ref().unwrap().ui.command);
+        let keys = prepare(&selected.owner, &self.command.as_ref().unwrap().ui.command);
         let cell = selected.runtime.clone();
         drop(selected); // no issuer enters either runtime writer or SDK/IO
         let keys = keys.map_err(|_| Error::Unavailable)?;
@@ -165,9 +174,16 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
 
     /// Borrow the genuine whole runtime only after original lookup and issuer
     /// preparation have completed outside all native and Root guards.
-    pub fn finish(mut self) -> Result<NativeTextMemberJob<T, R>, V2MemberSaveRefusal> {
+    pub fn finish(self) -> Result<NativeTextMemberJob<T, R>, V2MemberSaveRefusal> {
+        let prepared = self.prepare_keys()?;
+        self.finish_prepared(prepared)
+    }
+
+    fn finish_prepared(
+        mut self,
+        (cell, keys): MemberKeys<T, R>,
+    ) -> Result<NativeTextMemberJob<T, R>, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Error;
-        let (cell, keys) = self.prepare_keys()?;
         let body = {
             let mut state = cell.state.try_lock().map_err(|_| Error::Busy)?;
             if state.retiring || !self.scope.is_open() {
