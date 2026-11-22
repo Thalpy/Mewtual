@@ -159,7 +159,7 @@ impl RecoveredV2PendingJoinSource {
             completed: None,
             sealed_source: None,
             sealed_outcome: None,
-            initial_prefix_prepared: false,
+            initial_prefix_origin: None,
         };
         original.validate_retained_package_data()?;
         Ok(Self {

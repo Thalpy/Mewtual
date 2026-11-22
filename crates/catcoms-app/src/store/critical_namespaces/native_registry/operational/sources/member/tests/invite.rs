@@ -47,11 +47,18 @@ async fn native_runtime_invite_returns_only_the_original_installed_join_response
     native_governed_add_fixture(JoinCase::NativeResponse).await;
 }
 
+#[tokio::test]
+async fn native_runtime_invite_returns_only_the_original_installed_join_response_into_one_joined_runtime(
+) {
+    native_governed_add_fixture(JoinCase::WarmRuntime).await;
+}
+
 #[derive(PartialEq, Eq)]
 enum JoinCase {
     Staged,
     InterruptedInstall,
     NativeResponse,
+    WarmRuntime,
 }
 
 async fn native_governed_add_fixture(case: JoinCase) {
@@ -68,6 +75,7 @@ async fn native_governed_add_fixture(case: JoinCase) {
         JoinCase::Staged => 0xe710,
         JoinCase::InterruptedInstall => 0xe717,
         JoinCase::NativeResponse => 0xe718,
+        JoinCase::WarmRuntime => 0xe719,
     };
     let (owner, row) = activate(
         prepared_mesh_founder_with_clock(&vault, &budget, seed, Box::new(catcoms_rt::SystemClock)),
@@ -92,7 +100,8 @@ async fn native_governed_add_fixture(case: JoinCase) {
         )
         .unwrap(),
     );
-    let join_directory = (case == JoinCase::NativeResponse).then(|| tempfile::tempdir().unwrap());
+    let native_joiner = matches!(case, JoinCase::NativeResponse | JoinCase::WarmRuntime);
+    let join_directory = native_joiner.then(|| tempfile::tempdir().unwrap());
     let mut join_rng = rand_chacha::ChaCha20Rng::seed_from_u64(0xe715);
     let mut joined_storage = join_directory.as_ref().map(|join_dir| {
         drop(selected_governed(join_dir.path()));
@@ -195,7 +204,7 @@ async fn native_governed_add_fixture(case: JoinCase) {
             )
             .accept_join_request(wire, &negative)
     };
-    if case == JoinCase::NativeResponse {
+    if native_joiner {
         let expected_request = packet.founder_add_data().request.id_data();
         let original_request = bytes.to_vec();
         let joined = joined_storage.as_mut().unwrap();
@@ -268,6 +277,62 @@ async fn native_governed_add_fixture(case: JoinCase) {
                 .serve_connected_join_request(proto, &data, responder, negative.clone())
                 .unwrap();
         };
+        if case == JoinCase::WarmRuntime {
+            let mut runtime = joined_storage
+                .take()
+                .unwrap()
+                .bind_first_join_runtime(client, join_rng, Box::new(catcoms_rt::SystemClock))
+                .ok()
+                .unwrap();
+            let (canceled, retired) = tokio::sync::watch::channel(true);
+            assert!(runtime
+                .complete_first_join(&invite, RequestCancellation::new(retired, None))
+                .await
+                .is_err());
+            drop(canceled);
+            let (completed, ()) = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                tokio::join!(
+                    runtime.complete_first_join(&invite, negative.clone()),
+                    serve
+                )
+            })
+            .await
+            .unwrap();
+            let (head, own, epoch) = completed.unwrap();
+            assert_eq!(epoch, 1);
+            drop(requests);
+            let saved = accept(&original_request).unwrap();
+            let packet =
+                catcoms_sync::V2JoinResponsePacketData::decode(saved.packet_bytes_data()).unwrap();
+            assert_eq!(
+                packet.response_data().binding.spec_data().admission,
+                *own.as_bytes()
+            );
+            assert_eq!(
+                packet.response_data().binding.spec_data().add_header,
+                *head.as_bytes()
+            );
+            assert_eq!(
+                runtime
+                    .complete_first_join(&invite, negative.clone())
+                    .await
+                    .unwrap(),
+                (head, own, epoch)
+            );
+            drop(runtime);
+            let cold = NativeTextJoinedStorage::open(
+                join_dir,
+                SECRET,
+                &mut rand_chacha::ChaCha20Rng::seed_from_u64(0xe720),
+                current_policy(),
+            )
+            .unwrap();
+            assert_eq!(
+                cold.recovered_join_outcome_data().unwrap(),
+                Some((head, epoch))
+            );
+            return;
+        }
         let (joined_result, ()) = tokio::time::timeout(std::time::Duration::from_secs(8), async {
             tokio::join!(
                 joined.exchange_first_join(&invite, &client, negative.clone(), &mut join_rng),

@@ -34,7 +34,7 @@ COHORTS = {
     "joined-native-exchange": (
         "catcoms-app",
         "native_runtime_invite_returns_only_the_original_installed_join_response",
-        1,
+        2,
     ),
     "joined-wire": ("catcoms-net", "new_service_rejects_oversized_headers_before_body_read_or_allocation", 1),
     "joined-wire-ingress": ("catcoms-net", "native_join_transport_dispatch_preserves_original_epoch_and_ordinary_stream", 1),
@@ -43,7 +43,7 @@ COHORTS = {
     "source-retirement": ("catcoms-app", "operational::sources::retirement::tests::", 11),
     "control-scratch": ("catcoms-app", "v2_text::control::tests::scratch::", 3),
     "warm-member-fence": ("catcoms-app", "a_crash_left_founder_wal_keeps_the_member_lane_closed_until_it_is_gone", 1),
-    "native": ("catcoms-app", "native_runtime_invite_", 17),
+    "native": ("catcoms-app", "native_runtime_invite_", 18),
     "packet": ("catcoms-app", "native_invite_packet_", 3),
     "join-request": ("catcoms-sync", "prepared_direct_join::v2::tests::", 3),
     "joined-pending": ("catcoms-sync", "v2_pending_join_keeps_the_original_", 1),

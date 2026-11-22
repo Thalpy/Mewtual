@@ -59,12 +59,12 @@ impl PreparedV2JoinRequest {
         group: &ProjectionGroupView,
         origin: V2ProjectionOrigin,
     ) -> Result<(PreparedV2JoinedPrefix, V2HostSelectionExpectation), SyncError> {
-        if self.sealed_outcome.is_none() || self.initial_prefix_prepared {
+        if self.sealed_outcome.is_none() || self.initial_prefix_origin.is_some() {
             return Err(SyncError::JoinRejected);
         }
         let graph = self.completed.as_ref().ok_or(SyncError::JoinRejected)?;
         graph.validate_initial_state_data()?;
-        validate_delivery_data(&self.request, self.limits, delivery)?;
+        self.validate_first_join_delivery_data(delivery)?;
         let packet = V2JoinRequestPacketData::decode(&self.request)?;
         let delivery = V2FirstJoinDeliveryData::decode(delivery)?;
         let (response, proof) = delivery.data();
@@ -75,9 +75,11 @@ impl PreparedV2JoinRequest {
             OwnerHeaderId::from_bytes(response.binding.spec_data().add_header),
             graph.state,
         );
-        let prepared =
+        let mut prepared =
             proof.prepare_joined_prefix(&packet.invite.spec_data().anchor, group, origin)?;
-        self.initial_prefix_prepared = true;
+        let original = std::sync::Arc::new(());
+        prepared.bind_warm_origin(&original);
+        self.initial_prefix_origin = Some(original);
         Ok((prepared, selection))
     }
 

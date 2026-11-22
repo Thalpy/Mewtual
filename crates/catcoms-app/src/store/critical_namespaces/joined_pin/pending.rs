@@ -57,6 +57,21 @@ impl PreparedPinnedPending {
             .map_err(|_| refused())
     }
 
+    pub(in crate::store) fn take_closed_warm_node<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
+        &mut self,
+        prefix: &catcoms_sync::PreparedV2JoinedPrefix,
+        transport: T,
+        rng: R,
+        clock: Box<dyn catcoms_rt::Clock + Send>,
+    ) -> Result<catcoms_sync::ClosedV2JoinedNode<T, R>, AppError> {
+        self.source
+            .take_closed_warm_node(prefix, transport, rng, clock)
+            .map_err(|_| refused())
+    }
+
     pub(in crate::store) fn validate_delivery_data(&self, delivery: &[u8]) -> Result<(), AppError> {
         self.source
             .validate_first_join_delivery_data(delivery)

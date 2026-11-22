@@ -4,12 +4,15 @@ use catcoms_replication::chat::{
     cold_records::{encode_header_row, HeaderRow, MAX_HEADER_ROW_BYTES},
     owner_facts::OwnerFactId,
     owner_header::{OwnerHeaderId, OwnerStateCommitment, OwnerTenureId, SignedOwnerHeader},
-    owner_profile::{AdmissionBody, SignedOwnerProfile, MAX_ADMISSION_BYTES, MAX_PROFILE_BYTES},
+    owner_profile::{
+        AdmissionBody, AdmissionOrigin, SignedOwnerProfile, MAX_ADMISSION_BYTES, MAX_PROFILE_BYTES,
+    },
     owner_state::transition::{ReplayBody, ReplayMath},
     FounderGenesisAnchorData, ProjectionGroupView, V2GeneralCandidate, V2GeneralExpectation,
     V2GeneralPrefixVerifier, V2GeneralRetiredData, V2HostSelectionExpectation,
     V2PreparedSelectedHistoryData, V2ProjectionOrigin,
 };
+use std::sync::{Arc, Weak};
 
 const TAG: &[u8] = b"mewtual/chat/first-add-proof/v2\0";
 const DELIVERY_TAG: &[u8] = b"mewtual/chat/first-join-delivery/v2\0";
@@ -166,6 +169,7 @@ impl<'a> V2FirstAddProofData<'a> {
             verifier,
             candidate: Some(candidate),
             own: own.admission_id(),
+            warm_origin: None,
         })
     }
 }
@@ -176,9 +180,60 @@ pub struct PreparedV2JoinedPrefix {
     verifier: V2GeneralPrefixVerifier,
     candidate: Option<V2GeneralCandidate>,
     own: OwnerFactId,
+    warm_origin: Option<Weak<()>>,
 }
 
 impl PreparedV2JoinedPrefix {
+    pub(super) fn bind_warm_origin(&mut self, original: &Arc<()>) {
+        self.warm_origin = Some(Arc::downgrade(original));
+    }
+
+    pub(super) fn require_warm_selection(
+        &self,
+        original: &Arc<()>,
+        anchor: [u8; 32],
+        welcome: &catcoms_replication::chat::join_bindings::SignedWelcomeBindingData,
+        state: OwnerStateCommitment,
+        facts: &crate::owner_v2::V2JoinFacts,
+    ) -> Result<(), SyncError> {
+        let reject = |_| SyncError::JoinRejected;
+        if self
+            .warm_origin
+            .as_ref()
+            .is_none_or(|other| !std::ptr::eq(other.as_ptr(), Arc::as_ptr(original)))
+        {
+            return Err(SyncError::JoinRejected);
+        }
+        self.verifier
+            .require_join_genesis_data(anchor)
+            .map_err(reject)?;
+        let replay = self.selected_replay_data().ok_or(SyncError::JoinRejected)?;
+        let admission = self.verifier.admission(self.own).map_err(reject)?;
+        let spec = admission.admission_data().spec();
+        let AdmissionOrigin::Add {
+            key_package,
+            credential,
+            after_epoch,
+            ..
+        } = spec.origin
+        else {
+            return Err(SyncError::JoinRejected);
+        };
+        if !admission.is_open_data()
+            || spec.subject != *facts.signer_data()
+            || key_package != *facts.key_package_data()
+            || credential != *facts.credential_data()
+            || after_epoch != facts.join_epoch_data()
+            || replay.mls_epoch_data() != facts.join_epoch_data()
+            || replay.header().spec().state != state
+            || replay.header().id().as_bytes() != &welcome.spec_data().add_header
+            || self.own.as_bytes() != &welcome.spec_data().admission
+        {
+            return Err(SyncError::JoinRejected);
+        }
+        Ok(())
+    }
+
     pub fn own_admission_data(&self) -> OwnerFactId {
         self.own
     }

@@ -13,6 +13,8 @@ use catcoms_sync::{
     PreparedV2JoinRequest, V2JoinRequestPacketData, V2PendingJoinContextData,
     MAX_V2_FIRST_JOIN_DELIVERY_BYTES, MAX_V2_JOIN_REQUEST_PACKET_BYTES,
 };
+mod runtime;
+pub use runtime::NativeTextJoinedRuntime;
 
 pub(in crate::store::critical_namespaces::native_registry) const JOIN_PROTOCOL: ProtocolId =
     ProtocolId("/catcoms/rr/1");
@@ -199,11 +201,7 @@ impl NativeTextJoinedStorage {
         negative: RequestCancellation,
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
-        let request = self.first_join_request_data()?;
-        let packet = V2JoinRequestPacketData::decode(request).map_err(|_| refused())?;
-        if packet.founder_add_data().invite.encode() != invite.binding().encode() {
-            return Err(refused());
-        }
+        let request = self.require_exact_invite(invite)?;
         let target = invite.connected_peer_data();
         let connection = transport.connection_lease(target).ok_or_else(refused)?;
         let (mount, fee) = self.index.joined_exchange_resources(
@@ -237,6 +235,18 @@ impl NativeTextJoinedStorage {
             return Err(refused());
         }
         self.finish_first_join(&delivery, rng)
+    }
+
+    fn require_exact_invite(
+        &self,
+        invite: &crate::store::NativeTextInvitePacketData<'_>,
+    ) -> Result<&[u8], AppError> {
+        let request = self.first_join_request_data()?;
+        let packet = V2JoinRequestPacketData::decode(request).map_err(|_| refused())?;
+        if packet.founder_add_data().invite.encode() != invite.binding().encode() {
+            return Err(refused());
+        }
+        Ok(request)
     }
 
     /// Historical outcome installed by the cold storage opener.

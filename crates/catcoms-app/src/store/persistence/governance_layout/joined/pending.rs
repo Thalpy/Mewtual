@@ -497,4 +497,23 @@ impl JoinedPendingIo {
         }
         Ok(data)
     }
+
+    pub(in crate::store) fn attach_warm_node<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
+        &mut self,
+        store: &ServerStore,
+        inputs: &mut Option<JoinedRuntimeInputs<T, R>>,
+        output: &mut Option<catcoms_sync::ClosedV2JoinedNode<T, R>>,
+    ) -> Result<(), AppError> {
+        self.request_data(store)?;
+        let welcome = self.welcome.as_ref().ok_or_else(denied)?;
+        welcome.require_outcome(store)?;
+        if output.is_none() {
+            *output = Some(welcome.attach_node(&mut self.prepared, inputs)?);
+        }
+        self.request_data(store)?;
+        welcome.require_outcome(store)
+    }
 }

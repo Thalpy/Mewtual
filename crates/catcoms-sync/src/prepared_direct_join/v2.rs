@@ -14,11 +14,13 @@ pub use pending_source::{
     RecoveredV2JoinedOutcome, RecoveredV2PendingJoinSource, SealedV2JoinedOutcome,
     SealedV2PendingJoinSource, V2PendingJoinContextData,
 };
+mod warm_runtime;
 mod welcome;
 pub use first_add_proof::{
     PreparedV2JoinedPrefix, V2AdmissionStepData, V2FirstAddProofData, V2FirstJoinDeliveryData,
     MAX_V2_FIRST_ADD_PROOF_BYTES, MAX_V2_FIRST_JOIN_DELIVERY_BYTES,
 };
+pub use warm_runtime::ClosedV2JoinedNode;
 pub use welcome::{
     CompletedV2JoinCandidate, V2JoinResponseData, V2JoinResponsePacketData,
     MAX_V2_JOIN_RESPONSE_PACKET_BYTES,
@@ -105,7 +107,7 @@ pub struct PreparedV2JoinRequest {
     completed: Option<CompletedV2JoinCandidate>,
     sealed_source: Option<SealedV2PendingJoinSource>,
     sealed_outcome: Option<SealedV2JoinedOutcome>,
-    initial_prefix_prepared: bool,
+    initial_prefix_origin: Option<std::sync::Arc<()>>,
 }
 
 impl PreparedV2JoinRequest {
@@ -182,7 +184,7 @@ impl PreparedV2JoinRequest {
             completed: None,
             sealed_source: None,
             sealed_outcome: None,
-            initial_prefix_prepared: false,
+            initial_prefix_origin: None,
         })
     }
 

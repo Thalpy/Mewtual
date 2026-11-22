@@ -364,6 +364,26 @@ fn v2_join_request_and_welcome_complete_with_actual_add() {
     assert!(prepared
         .seal_joined_outcome(&vault_key, other, &mut journal_rng)
         .is_err());
+    let hub = catcoms_rt::Hub::new();
+    let peer = |id| hub.join(catcoms_rt::PeerId::from_u64(id));
+    let rng = || rand_chacha::ChaCha20Rng::seed_from_u64(108);
+    let clock = || Box::new(ManualClock::new(now));
+    assert!(
+        prepared
+            .take_closed_warm_node(&prefix, peer(11), rng(), clock())
+            .is_err(),
+        "the independently restored prefix has the same bytes but no warm origin"
+    );
+    let joined_node = prepared
+        .take_closed_warm_node(&warm_prefix, peer(12), rng(), clock())
+        .unwrap();
+    assert_eq!(
+        joined_node.selected_join_data().unwrap(),
+        (header_id, prefix.own_admission_data(), 1)
+    );
+    assert!(prepared
+        .take_closed_warm_node(&warm_prefix, peer(13), rng(), clock())
+        .is_err());
 }
 
 #[test]

@@ -130,8 +130,8 @@ fn check_payload_bounds(welcome: &[u8], sealed_routing: &[u8]) -> Result<(), Syn
 pub struct CompletedV2JoinCandidate {
     pub(super) device: MlsDevice,
     pub(super) group: ServerGroup,
-    facts: V2JoinFacts,
-    policy: GroupPolicy,
+    pub(super) facts: V2JoinFacts,
+    pub(super) policy: GroupPolicy,
     pub(super) routing_secret: Zeroizing<[u8; 32]>,
     pub(super) file_key: Zeroizing<[u8; 32]>,
     pub(super) response_binding: Vec<u8>,

@@ -207,8 +207,13 @@ cold graph prepare Core's initial selected-history candidate from the same
 signed delivery. Each advances only after the mounted storage rechecks the
 original pin and outcome, and retains the retired parent for fork evidence.
 A possible entry with no outcome stays
-historical. Other pending-JOIN transitions and native runtime installation
-remain open.
+historical. An owning warm join can move the actual private Welcome graph and
+its original transport into one closed joined node after selected history and
+the physical files agree. It takes the original node's join facts and sets the
+joined fence against the actual own Add. The mounted runtime retains the Core
+selection and retired parent. A cold or equivalent separately rebuilt prefix
+cannot supply fresh join facts. Native registry installation, cold operational
+activation and ordinary-member save admission remain open.
 The joined storage owner can exchange the exact selected JoinRequest on an
 already authenticated connection to the peer named by the signed invite.
 It keeps the original connection and vault cancellation through response

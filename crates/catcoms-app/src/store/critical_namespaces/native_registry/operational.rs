@@ -12,7 +12,7 @@ mod cell;
 pub(super) mod data;
 mod facade;
 mod governed;
-pub use governed::{NativeTextGovernedStorage, NativeTextJoinedStorage};
+pub use governed::{NativeTextGovernedStorage, NativeTextJoinedRuntime, NativeTextJoinedStorage};
 mod history_response;
 pub use history_response::{NativeTextHistoryResponseBudget, NativeTextHistoryResponseCredit};
 mod interlock;

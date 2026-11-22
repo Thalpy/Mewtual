@@ -134,6 +134,20 @@ impl WarmWelcome {
     ) -> Option<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64)> {
         self.selection.as_ref().and_then(JoinedCore::outcome_data)
     }
+
+    pub(super) fn attach_node<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore>(
+        &self,
+        pending: &mut PreparedPinnedPending,
+        inputs: &mut Option<JoinedRuntimeInputs<T, R>>,
+    ) -> Result<catcoms_sync::ClosedV2JoinedNode<T, R>, AppError> {
+        let selection = self
+            .selection
+            .as_ref()
+            .filter(|selected| selected.retired.is_some())
+            .ok_or_else(denied)?;
+        let (transport, rng, clock) = inputs.take().ok_or_else(denied)?;
+        pending.take_closed_warm_node(&selection.core, transport, rng, clock)
+    }
 }
 
 fn write_held(
