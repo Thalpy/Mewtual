@@ -142,12 +142,9 @@ async fn mounted_join_request_uses_the_original_native_command_and_retains_its_p
     assert!(capture()
         .cover(&invite, anchor, [62; 32], after, &negative, &mut rng)
         .is_err());
-    assert_eq!(
-        capture()
-            .cover(&invite, anchor, token, after, &negative, &mut rng)
-            .unwrap(),
-        selected,
-    );
+    assert!(capture()
+        .cover(&invite, anchor, token, after, &negative, &mut rng)
+        .is_ok_and(|original| original == selected));
     assert_eq!(rng.next_u64(), retry_rng.next_u64());
     assert_eq!(std::fs::read(&path).unwrap(), ciphertext);
 
@@ -160,7 +157,7 @@ async fn mounted_join_request_uses_the_original_native_command_and_retains_its_p
     let cold =
         crate::store::NativeTextJoinedStorage::open(dir.path(), SECRET, &mut rng, current_policy())
             .unwrap();
-    assert_eq!(cold.pending_join_data().unwrap(), Some(selected));
+    assert!(cold.pending_join_data().unwrap() == Some(selected));
     assert_eq!(std::fs::read(&path).unwrap(), ciphertext);
 }
 
