@@ -532,6 +532,15 @@ impl NativeChatPreparedKeyCut {
     pub fn is_cancelled(&self) -> bool {
         !self.ui.current() || !self.source.counter.open()
     }
+
+    /// Observe the same paid session and source through a queued effect.
+    /// This observation cannot enter a primitive or keep either owner open.
+    pub fn observe_current(&self) -> NativeChatKeyCurrentCheck {
+        NativeChatKeyCurrentCheck {
+            ui: self.ui.clone(),
+            source: self.source.clone(),
+        }
+    }
     /// Non-admitting check for cached native progress before IO/bookkeeping.
     /// Actual primitive entry MUST still call `enter` after physical/Core
     /// proofs. An already-entered cut may check cached DATA, but grants no new
@@ -655,6 +664,36 @@ impl NativeChatKeyEnds {
 impl Default for NativeChatKeyEnds {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Negative observation of the exact session and source of a prepared cut.
+pub struct NativeChatKeyCurrentCheck {
+    ui: Arc<UiSession>,
+    source: Arc<Source>,
+}
+
+impl NativeChatKeyCurrentCheck {
+    pub fn is_current(&self) -> bool {
+        self.ui.current() && self.source.counter.open()
+    }
+
+    /// Wait for the original retirement outside all guards. The synchronous
+    /// negative applies at effect admission even while retirement drains.
+    pub async fn wait_for_retirement(&self) {
+        if !self.is_current() {
+            return;
+        }
+        let ui = NativeChatKeyDrain {
+            original: self.ui.counter.clone(),
+        };
+        let source = NativeChatKeyDrain {
+            original: self.source.counter.clone(),
+        };
+        tokio::select! {
+            _ = ui.wait() => {},
+            _ = source.wait() => {},
+        }
     }
 }
 

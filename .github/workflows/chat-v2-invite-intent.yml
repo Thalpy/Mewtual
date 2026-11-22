@@ -67,6 +67,7 @@ on:
       - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/member_save.rs'
       - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/invite.rs'
       - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/member.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/member/connected.rs'
       - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/member/tests.rs'
       - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/member/tests/invite.rs'
       - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/network/tests.rs'

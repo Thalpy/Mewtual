@@ -230,7 +230,7 @@ async fn native_governed_add_fixture(case: JoinCase) {
         let entry_name = "chat-critical-namespaces.joined-welcome-entry.bin";
         let outcome_name = "chat-critical-namespaces.joined-welcome-outcome.bin";
         assert!(find_named(join_dir, entry_name).is_empty());
-        use catcoms_rt::{Hub, MeshTransport, PeerId, TransportEvent};
+        use catcoms_rt::{Hub, MeshTransport, PeerId, Responder, TransportEvent};
         let hub = Hub::new();
         let client = hub.join(PeerId::from_u64(0x9e));
         assert!(joined
@@ -248,17 +248,22 @@ async fn native_governed_add_fixture(case: JoinCase) {
             else {
                 panic!("connected exact JoinRequest");
             };
-            let response = owner
-                .capture_member(
+            let capture = || {
+                owner.capture_member(
                     &row,
                     command(&vault, &budget),
                     owner.policy.prepare_member().unwrap(),
                 )
-                .accept_connected_join_request(proto, &data, &negative)
+            };
+            let (abandoned, receiver) = Responder::channel();
+            drop(receiver);
+            assert!(matches!(
+                capture().serve_connected_join_request(proto, &data, abandoned, negative.clone()),
+                Err(V2MemberSaveRefusal::Cancelled)
+            ));
+            capture()
+                .serve_connected_join_request(proto, &data, responder, negative.clone())
                 .unwrap();
-            let bytes = response.encode_delivery_data().unwrap();
-            assert_eq!(bytes, delivery);
-            responder.try_respond(bytes::Bytes::from(bytes)).unwrap();
         };
         let (joined_result, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             tokio::join!(

@@ -2,17 +2,19 @@
 //! finite work drops all book/Entry issuer pins before its runtime writer/IO.
 use super::*;
 use crate::store::{V2MemberSaveOutcome, V2MemberSaveRefusal, V2MemberSignRequest};
-use catcoms_rt::RequestCancellation;
+use catcoms_rt::{NativeChatPreparedKeyCut, RequestCancellation};
 mod history;
 pub use history::{
     NativeTextMemberHistoryItem, NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus,
 };
 use std::sync::Weak;
 mod admission;
+mod connected;
 pub use admission::{
     NativeTextMemberAdmissionFailure, NativeTextMemberFinalPreparation, NativeTextMemberSaveJob,
 };
 type MemberKeys<T, R> = (Arc<RuntimeCell<T, R>>, NativeFounderKeys);
+type JoinKeys<T, R> = (MemberKeys<T, R>, [NativeChatPreparedKeyCut; 3]);
 
 /// Independent per-invocation payment. Configuration is not a source selector
 /// or native credential; the exact policy account is checked again at capture.
@@ -186,13 +188,19 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
         bytes: &[u8],
         negative: &RequestCancellation,
     ) -> Result<crate::store::NativeTextSavedJoinResponse, V2MemberSaveRefusal> {
-        use catcoms_rt::NativeChatKeyPurpose as Purpose;
         use V2MemberSaveRefusal as Error;
         if negative.is_cancelled() {
             return Err(Error::Cancelled);
         }
         let packet =
             catcoms_sync::V2JoinRequestPacketData::decode(bytes).map_err(|_| Error::Failed)?;
+        let (keys, cuts) = self.prepare_join_keys()?;
+        self.finish_prepared(keys)?
+            .run_join_request(&packet, cuts, negative)
+    }
+
+    fn prepare_join_keys(&self) -> Result<JoinKeys<T, R>, V2MemberSaveRefusal> {
+        use catcoms_rt::NativeChatKeyPurpose as Purpose;
         let (cell, (keys, cuts)) = self.prepare_using_issuer(|source, command| {
             let cut = |purpose| source.prepare_cut(command, purpose).map_err(|_| refused());
             Ok((
@@ -204,27 +212,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
                 ],
             ))
         })?;
-        self.finish_prepared((cell, keys))?
-            .run_join_request(&packet, cuts, negative)
-    }
-
-    /// The connected service has its own byte class before the native SDK and
-    /// uses exactly the same signed request and covering transaction.
-    pub fn accept_connected_join_request(
-        self,
-        proto: catcoms_rt::ProtocolId,
-        wire: &[u8],
-        negative: &RequestCancellation,
-    ) -> Result<crate::store::NativeTextSavedJoinResponse, V2MemberSaveRefusal> {
-        if proto != crate::store::critical_namespaces::native_registry::operational::governed::JOIN_PROTOCOL
-            || wire.len() > catcoms_rt::CHAT_V2_JOIN_REQUEST_MAX_BYTES
-        {
-            return Err(V2MemberSaveRefusal::Failed);
-        }
-        let body = wire
-            .strip_prefix(&[catcoms_rt::CHAT_V2_JOIN_KIND])
-            .ok_or(V2MemberSaveRefusal::Failed)?;
-        self.accept_join_request(body, negative)
+        Ok(((cell, keys), cuts))
     }
 
     fn finish_prepared(
