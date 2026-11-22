@@ -85,11 +85,13 @@ on:
       - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/member/tests/admission.rs'
       - 'crates/catcoms-replication/src/chat/join_bindings/**'
       - 'crates/catcoms-replication/src/chat/join_bindings.rs'
+      - 'crates/catcoms-replication/src/chat/cold_selected_history.rs'
+      - 'crates/catcoms-replication/src/chat/projection_admission/v2_general/tests/selected_history.rs'
       - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/tests/text_group_guard/query/workspace/retain_admission/intent_admission/raw_admission/accepted_admission/retirement/worker.rs'
   workflow_dispatch:
     inputs:
       scope:
-        description: Focused invitation, governed Add, joined storage, or predecessor checks
+        description: Focused invitation, governed Add, joined storage, selected history, or predecessor checks
         type: choice
         default: invitation
         options:
@@ -97,6 +99,7 @@ on:
           - governed-add
           - joined-storage
           - joined-predecessor
+          - selected-history
 
 permissions:
   contents: read
@@ -113,7 +116,7 @@ env:
 
 jobs:
   invitation:
-    if: inputs.scope != 'joined-storage' && inputs.scope != 'joined-predecessor'
+    if: inputs.scope != 'joined-storage' && inputs.scope != 'joined-predecessor' && inputs.scope != 'selected-history'
     name: Invitation intent (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
@@ -133,6 +136,9 @@ jobs:
       - name: Check original join binding codecs
         if: inputs.scope != 'governed-add'
         run: python .github/scripts/check-chat-v2-invite-intent.py bindings
+      - name: Check governing selected-history page and proof geometry
+        if: inputs.scope != 'governed-add'
+        run: python .github/scripts/check-chat-v2-invite-intent.py selected-history
       - name: Check the retained V2 JoinRequest and private KeyPackage
         if: inputs.scope != 'governed-add'
         run: python .github/scripts/check-chat-v2-invite-intent.py join-request
@@ -215,7 +221,7 @@ jobs:
           if-no-files-found: error
 
   joined-storage:
-    if: inputs.scope == 'joined-storage' || inputs.scope == 'joined-predecessor'
+    if: inputs.scope == 'joined-storage' || inputs.scope == 'joined-predecessor' || inputs.scope == 'selected-history'
     name: Joined pin storage (${{ matrix.os }}, ${{ inputs.scope }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
@@ -232,6 +238,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Check governing selected-history page and proof geometry
+        if: inputs.scope == 'selected-history' || inputs.scope == 'joined-storage'
+        run: python .github/scripts/check-chat-v2-invite-intent.py selected-history
       - name: Check real MLS Welcome, original joined outcome, and Core replay
         if: inputs.scope == 'joined-storage'
         run: python .github/scripts/check-chat-v2-invite-intent.py join-welcome

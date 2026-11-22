@@ -127,6 +127,95 @@ fn rejected(error: ChatError) -> V2ArchivedHeaderRefusal {
     V2ArchivedHeaderRefusal::Rejected(error)
 }
 
+#[test]
+fn selected_history_archive_page_covers_original_core_carries_and_proof_reads() {
+    use crate::chat::cold_selected_history::{
+        encode_selected_history_node_page, SelectedHistoryNodePage,
+    };
+
+    let mut fixture = Fixture::new();
+    let mut archive = Archive::default();
+    let mut pages = Vec::new();
+    let vault = [80; 32];
+    let mut next_ordinal = 0;
+    for sequence in 0..9 {
+        let (header, body, image) = append_input(&fixture, sequence);
+        let mut candidate = Some(
+            fixture
+                .verifier
+                .derive_successor(&header, ReplayBody::Append(&body), &image)
+                .unwrap(),
+        );
+        let append = candidate.as_ref().unwrap().selected_history_append_data();
+        let frame = encode_selected_history_node_page(&vault, append).unwrap();
+        let parsed = SelectedHistoryNodePage::decode(&frame).unwrap();
+        assert_eq!(parsed.first_ordinal_data(), next_ordinal);
+        assert!(parsed.hash_at_ordinal_data(u128::MAX).is_none());
+        parsed.verify_exact_append_data(&vault, append).unwrap();
+        assert_eq!(
+            parsed.verify_exact_append_data(&[81; 32], append),
+            Err(ChatError::Scope)
+        );
+        for node in append.created_nodes_data() {
+            assert_eq!(
+                parsed.hash_at_ordinal_data(next_ordinal),
+                Some(node.hash_data())
+            );
+            next_ordinal += 1;
+        }
+        assert!(parsed.hash_at_ordinal_data(next_ordinal).is_none());
+        let mut altered = frame.to_vec();
+        *altered.last_mut().unwrap() ^= 1;
+        assert_eq!(
+            SelectedHistoryNodePage::decode(&altered)
+                .unwrap()
+                .verify_exact_append_data(&vault, append),
+            Err(ChatError::Dependency)
+        );
+        altered.push(0);
+        assert!(SelectedHistoryNodePage::decode(&altered).is_err());
+        assert!(SelectedHistoryNodePage::decode(&frame[..frame.len() - 1]).is_err());
+        let expected =
+            V2HostSelectionExpectation::from_trusted_host(header.id(), header.spec().state);
+        let retired = fixture
+            .verifier
+            .advance_host_selected(&expected, &mut candidate)
+            .unwrap();
+        archive.retain(&retired, &header);
+        drop(retired);
+        pages.push(frame);
+    }
+    let tip = fixture.verifier.selected_history_tip_data();
+    let index = 2;
+    let read = |ordinal| {
+        pages
+            .iter()
+            .find_map(|bytes| {
+                SelectedHistoryNodePage::decode(bytes)
+                    .unwrap()
+                    .hash_at_ordinal_data(ordinal)
+            })
+            .unwrap()
+    };
+    let siblings: Vec<_> = inclusion_ranges(tip.count, index)
+        .unwrap()
+        .ranges()
+        .iter()
+        .map(|range| {
+            let mut nodes = range
+                .complete_nodes_right_to_left()
+                .map(|node| read(node.creation_ordinal().unwrap()));
+            let right = nodes.next().unwrap();
+            nodes.fold(right, |right, left| tip.node_hash_data(left, right))
+        })
+        .collect();
+    let proof = archive.proof(tip, index, &siblings);
+    assert!(fixture
+        .verifier
+        .observe_proven_archived_header(proof, &archive.records[index as usize].1)
+        .is_ok());
+}
+
 /// Independent recursive reference: explicitly encode domains and recurse over leaf
 /// slices, rather than reuse the production frontier, proof verifier or fold helper.
 fn reference_root(

@@ -38,6 +38,7 @@ COHORTS = {
     ),
     "joined-wire": ("catcoms-net", "new_service_rejects_oversized_headers_before_body_read_or_allocation", 1),
     "joined-wire-ingress": ("catcoms-net", "native_join_transport_dispatch_preserves_original_epoch_and_ordinary_stream", 1),
+    "selected-history": ("catcoms-replication", "selected_history_archive_page_", 2),
     "add-source-close": ("catcoms-sync", "governed_add_whole_source_retirement_", 1),
     "add-ui-lock": ("catcoms-sync", "governed_add_ui_retirement_", 1),
     "source-retirement": ("catcoms-app", "operational::sources::retirement::tests::", 11),
