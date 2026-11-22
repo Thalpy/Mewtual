@@ -93,8 +93,11 @@ The general member wire envelope uses a domain-separated channel exporter under 
 selected group, Profile, governing Header, epoch and channel. It wraps the exact signed
 action and claimed Admission in authenticated padding. Exporting this key leaves the MLS
 application sender ratchet unchanged. Receivers still need the original selected Core
-prefix to validate the claimed Admission before projection. The transport scheduler,
-receiver and durable submission checkpoint still need to consume this envelope.
+prefix to validate the claimed Admission before projection. The joined runtime derives the
+blinded topic from the distinct MLS metadata exporter and checks the original selected
+verifier before sealing or opening the envelope. The receiver issues a provisional token
+only for the actual current Admission, exact channel view and validated dependencies.
+The transport scheduler, receiver and durable checkpoint still need to consume this data.
 Original audit chunks and request receipts remain retained after scheduling debt clears.
 Removal changes active view, never deletes the audit. Unproven late removed actions stay
 Held pending the separately authorized moderation path; ordinary concurrent edits resolve

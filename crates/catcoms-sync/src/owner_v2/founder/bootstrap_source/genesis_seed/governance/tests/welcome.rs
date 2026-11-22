@@ -526,7 +526,7 @@ fn complete_original_welcome(native_joiner: bool) {
     };
     let (_warm_ledger, _warm_channel, warm_draft, warm_plan) =
         member_plan(&warm_prefix, &warm_view, (now, [109; 16]));
-    let (_cold_ledger, _cold_channel, cold_draft, cold_plan) =
+    let (_cold_ledger, cold_channel, cold_draft, cold_plan) =
         member_plan(&prefix, &member_view, (now, [109; 16]));
     assert_eq!(warm_draft.action_id_data(), cold_draft.action_id_data());
     assert_eq!(warm_plan.admission_id_data(), cold_plan.admission_id_data());
@@ -580,6 +580,34 @@ fn complete_original_welcome(native_joiner: bool) {
             .unwrap();
         assert!(action.verify());
         assert_eq!(action.id(), draft.action_id_data());
+        let admission = warm_prefix.own_admission_data();
+        let raw = action.encode();
+        assert!(joined_node
+            .seal_selected_member_envelope(&prefix, 42, admission, &raw)
+            .is_err());
+        let wire = joined_node
+            .seal_selected_member_envelope(&warm_prefix, 42, admission, &raw)
+            .unwrap();
+        assert!(cold_node
+            .open_selected_member_envelope(&warm_prefix, 42, &wire)
+            .is_err());
+        assert_eq!(
+            joined_node
+                .selected_member_topic_data(&warm_prefix, 42)
+                .unwrap(),
+            cold_node.selected_member_topic_data(&prefix, 42).unwrap()
+        );
+        let opened = cold_node
+            .open_selected_member_envelope(&prefix, 42, &wire)
+            .unwrap();
+        assert_eq!(opened.original_data(), raw);
+        let verifier = prefix.selected_member_verifier().unwrap();
+        assert!(opened
+            .provisional_authority(verifier, &[], &cold_channel)
+            .is_ok());
+        assert!(opened
+            .provisional_authority(verifier, &[], &_warm_channel)
+            .is_err());
         drop(ends);
         let mut retry_ends = catcoms_rt::NativeChatKeyEnds::new();
         drop(

@@ -51,8 +51,8 @@ pub(crate) use joined_source::JoinFactsSlot;
 pub use joined_source::V2JoinFacts;
 pub use member::{V2MemberDraftInputs, V2MemberSignRefusal};
 pub use member_envelope::{
-    open_v2_member_envelope_data, seal_v2_member_envelope_data, OpenedV2MemberEnvelopeData,
-    V2MemberEnvelopeScopeData, MAX_V2_MEMBER_TRANSPORT_BYTES,
+    open_v2_member_envelope_data, seal_v2_member_envelope_data, v2_member_envelope_topic_data,
+    OpenedV2MemberEnvelopeData, V2MemberEnvelopeScopeData, MAX_V2_MEMBER_TRANSPORT_BYTES,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) const V2_JOIN_ROUTING_DOMAIN: &[u8] = b"mewtual/chat/join-routing-plain/v2\0";

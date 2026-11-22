@@ -55,6 +55,11 @@ fn member_envelope_uses_the_real_mls_group_and_exact_signed_original() {
     let frame =
         seal_v2_member_envelope_data(&bob_group, &bob, &scope, admission, &original, &mut rng)
             .unwrap();
+    let topic = v2_member_envelope_topic_data(&alice_group, &alice, &scope).unwrap();
+    assert_eq!(
+        topic,
+        v2_member_envelope_topic_data(&bob_group, &bob, &scope).unwrap()
+    );
     let retry =
         seal_v2_member_envelope_data(&bob_group, &bob, &scope, admission, &original, &mut rng)
             .unwrap();
@@ -109,6 +114,10 @@ fn member_envelope_uses_the_real_mls_group_and_exact_signed_original() {
         ..scope
     };
     assert!(current.epoch > scope.epoch);
+    assert_ne!(
+        topic,
+        v2_member_envelope_topic_data(&alice_group, &alice, &current).unwrap()
+    );
     assert!(open_v2_member_envelope_data(&alice_group, &alice, &scope, &frame).is_err());
     assert!(open_v2_member_envelope_data(&alice_group, &alice, &current, &frame).is_err());
 }

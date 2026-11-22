@@ -3,9 +3,10 @@ use crate::SyncError;
 use catcoms_crypto::{seal, unseal, SealedBlob};
 use catcoms_mls::{MlsDevice, ServerGroup};
 use catcoms_replication::chat::{
-    owner_facts::OwnerFactId, owner_header::OwnerHeaderId, SignedAction, MAX_ACTION_BYTES,
+    owner_facts::OwnerFactId, owner_header::OwnerHeaderId, ProjectionAdmissionToken,
+    ProjectionView, SignedAction, V2GeneralPrefixVerifier, V2OrdinaryDependency, MAX_ACTION_BYTES,
 };
-use catcoms_rt::CryptoRngCore;
+use catcoms_rt::{CryptoRngCore, Topic};
 use catcoms_storage::pad::{self, OP_PAD_CEILING, OP_PAD_FLOOR, PAD_FOOTER_BYTES};
 use catcoms_wire::{Decoder, DocType, Encoder};
 use zeroize::Zeroizing;
@@ -13,6 +14,7 @@ use zeroize::Zeroizing;
 const SEALED_TAG: &[u8] = b"mewtual/chat/member-transport/v2\0";
 const ORIGINAL_TAG: &[u8] = b"mewtual/chat/member-transport-original/v2\0";
 const KEY: &str = "mewtual/chat/member-transport-key/v2";
+const TOPIC: &str = "mewtual/chat/member-transport-topic/v2";
 const VERSION: u16 = 2;
 const MAX_PLAIN: usize = 4 + ORIGINAL_TAG.len() + 2 + 4 + 32 + 4 + MAX_ACTION_BYTES;
 const MAX_CIPHER: usize = MAX_PLAIN.next_power_of_two() + PAD_FOOTER_BYTES + 16;
@@ -35,9 +37,32 @@ pub struct V2MemberEnvelopeScopeData {
     pub channel: u128,
 }
 
+impl V2MemberEnvelopeScopeData {
+    pub fn for_selected_prefix(
+        verifier: &V2GeneralPrefixVerifier,
+        channel: u128,
+    ) -> Result<Self, SyncError> {
+        let current = verifier.replay_data();
+        Ok(Self {
+            group: current
+                .profile()
+                .spec()
+                .group
+                .as_slice()
+                .try_into()
+                .map_err(|_| SyncError::Malformed)?,
+            profile: current.profile().id(),
+            governing: current.header().id(),
+            epoch: current.mls_epoch_data(),
+            channel,
+        })
+    }
+}
+
 /// An exact authenticated original and its claimed Admission. The receiving
 /// member still needs Core verification against its own selected prefix.
 pub struct OpenedV2MemberEnvelopeData {
+    scope: V2MemberEnvelopeScopeData,
     admission: OwnerFactId,
     action: SignedAction,
     original: Zeroizing<Vec<u8>>,
@@ -55,13 +80,34 @@ impl OpenedV2MemberEnvelopeData {
     pub fn original_data(&self) -> &[u8] {
         &self.original
     }
+
+    /// Authorize the exact ordinary action against the receiver's current
+    /// verified Core prefix, actual Admission and minimal dependencies.
+    pub fn provisional_authority(
+        &self,
+        verifier: &V2GeneralPrefixVerifier,
+        dependencies: &[V2OrdinaryDependency<'_>],
+        view: &ProjectionView,
+    ) -> Result<ProjectionAdmissionToken, SyncError> {
+        if self.scope
+            != V2MemberEnvelopeScopeData::for_selected_prefix(verifier, self.scope.channel)?
+        {
+            return Err(SyncError::Malformed);
+        }
+        let admission = verifier
+            .admission(self.admission)
+            .map_err(|_| SyncError::Malformed)?;
+        verifier
+            .provisional_action(&self.action, &admission, dependencies, view)
+            .map_err(|_| SyncError::Malformed)
+    }
 }
 
-fn key(
+fn require_group(
     group: &ServerGroup,
     device: &MlsDevice,
     scope: &V2MemberEnvelopeScopeData,
-) -> Result<Zeroizing<[u8; 32]>, SyncError> {
+) -> Result<(), SyncError> {
     if !group.is_active()
         || group.epoch() != scope.epoch
         || group.group_id().as_slice() != scope.group.as_slice()
@@ -71,16 +117,45 @@ fn key(
     {
         return Err(SyncError::Malformed);
     }
-    // This MLS exporter does not advance an application sender ratchet.
-    let base = Zeroizing::new(group.channel_secret(device, DocType::Channel, scope.channel)?);
-    let mut hash = blake3::Hasher::new_derive_key(KEY);
-    hash.update(base.as_ref());
+    Ok(())
+}
+
+fn domain_hash(
+    domain: &'static str,
+    base: &[u8; 32],
+    scope: &V2MemberEnvelopeScopeData,
+) -> [u8; 32] {
+    let mut hash = blake3::Hasher::new_derive_key(domain);
+    hash.update(base);
     hash.update(&scope.group);
     hash.update(scope.profile.as_bytes());
     hash.update(scope.governing.as_bytes());
     hash.update(&scope.epoch.to_be_bytes());
     hash.update(&scope.channel.to_be_bytes());
-    Ok(Zeroizing::new(*hash.finalize().as_bytes()))
+    *hash.finalize().as_bytes()
+}
+
+fn key(
+    group: &ServerGroup,
+    device: &MlsDevice,
+    scope: &V2MemberEnvelopeScopeData,
+) -> Result<Zeroizing<[u8; 32]>, SyncError> {
+    require_group(group, device, scope)?;
+    // This MLS exporter does not advance an application sender ratchet.
+    let base = Zeroizing::new(group.channel_secret(device, DocType::Channel, scope.channel)?);
+    Ok(Zeroizing::new(domain_hash(KEY, &base, scope)))
+}
+
+/// Blinded topic from the distinct MLS metadata exporter. A topic value is
+/// routing DATA and grants no payload decryption or publication admission.
+pub fn v2_member_envelope_topic_data(
+    group: &ServerGroup,
+    device: &MlsDevice,
+    scope: &V2MemberEnvelopeScopeData,
+) -> Result<Topic, SyncError> {
+    require_group(group, device, scope)?;
+    let base = Zeroizing::new(group.metadata_secret(device, DocType::Channel, scope.channel)?);
+    Ok(Topic::new(domain_hash(TOPIC, &base, scope).to_vec()))
 }
 
 fn checked_action(
@@ -180,6 +255,7 @@ pub fn open_v2_member_envelope_data(
     wire_data(input.finish())?;
     let action = checked_action(original, scope, admission)?;
     Ok(OpenedV2MemberEnvelopeData {
+        scope: *scope,
         admission,
         action,
         original: Zeroizing::new(original.to_vec()),

@@ -4,12 +4,15 @@ use super::*;
 
 pub type V2JoinedRuntimeInputs<T, R> = (T, R, Box<dyn Clock + Send>);
 use crate::owner_v2::{
-    JoinFactsSlot, JoinedFenceNode, V2JoinFacts, V2JoinedFenceAdmission, V2JoinedSourceFence,
-    V2MemberDraftInputs, V2MemberSignRefusal,
+    open_v2_member_envelope_data, seal_v2_member_envelope_data, v2_member_envelope_topic_data,
+    JoinFactsSlot, JoinedFenceNode, OpenedV2MemberEnvelopeData, V2JoinFacts,
+    V2JoinedFenceAdmission, V2JoinedSourceFence, V2MemberDraftInputs, V2MemberEnvelopeScopeData,
+    V2MemberSignRefusal,
 };
 use catcoms_replication::chat::{
     join_bindings::SignedWelcomeBindingData, owner_facts::OwnerFactId, owner_header::OwnerHeaderId,
-    ActionDraft, V2AuthenticatedAdmission, V2OrdinarySigningGuard, V2OrdinarySigningPlan,
+    ActionDraft, V2AuthenticatedAdmission, V2GeneralPrefixVerifier, V2OrdinarySigningGuard,
+    V2OrdinarySigningPlan,
 };
 
 /// Owns the original verified group, device, routing and runtime. Only a
@@ -105,14 +108,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
         original: &NativeChatSourceObservation,
         cut: &NativeChatPreparedKeyCut,
     ) -> Result<(), SyncError> {
-        let expected = prefix
-            .selected_member_verifier()?
-            .admission(self.admission_id)
-            .map_err(|_| SyncError::JoinRejected)?;
-        if !self.was_recovered_data() || !self.admission.same_original(&expected) {
+        if !self.was_recovered_data() {
             return Err(SyncError::JoinRejected);
         }
-        self.selected_join_data()?;
+        self.member_prefix(prefix)?;
         cut.preflight(original, NativeChatKeyPurpose::MemberAction)
             .map_err(|_| SyncError::JoinRejected)?;
         if let Some(bound) = self.native_origin.as_ref() {
@@ -123,6 +122,67 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
         }
         self.native_origin = Some(original.clone());
         Ok(())
+    }
+
+    fn member_prefix<'a>(
+        &self,
+        prefix: &'a PreparedV2JoinedPrefix,
+    ) -> Result<&'a V2GeneralPrefixVerifier, SyncError> {
+        let verifier = prefix.selected_member_verifier()?;
+        let expected = verifier
+            .admission(self.admission_id)
+            .map_err(|_| SyncError::JoinRejected)?;
+        if !self.admission.same_original(&expected) {
+            return Err(SyncError::JoinRejected);
+        }
+        self.selected_join_data()?;
+        Ok(verifier)
+    }
+
+    pub fn selected_member_topic_data(
+        &self,
+        prefix: &PreparedV2JoinedPrefix,
+        channel: u128,
+    ) -> Result<catcoms_rt::Topic, SyncError> {
+        let scope =
+            V2MemberEnvelopeScopeData::for_selected_prefix(self.member_prefix(prefix)?, channel)?;
+        v2_member_envelope_topic_data(&self.node.group, &self.node.device, &scope)
+    }
+
+    /// Current encrypted attempt for the host's exact saved own Admission.
+    /// App still owns durable debt and must separately authorize the transport.
+    pub fn seal_selected_member_envelope(
+        &mut self,
+        prefix: &PreparedV2JoinedPrefix,
+        channel: u128,
+        admission: OwnerFactId,
+        original: &[u8],
+    ) -> Result<Vec<u8>, SyncError> {
+        if admission != self.admission_id {
+            return Err(SyncError::JoinRejected);
+        }
+        let scope =
+            V2MemberEnvelopeScopeData::for_selected_prefix(self.member_prefix(prefix)?, channel)?;
+        let node = &mut *self.node;
+        seal_v2_member_envelope_data(
+            &node.group,
+            &node.device,
+            &scope,
+            admission,
+            original,
+            &mut node.rng,
+        )
+    }
+
+    pub fn open_selected_member_envelope(
+        &self,
+        prefix: &PreparedV2JoinedPrefix,
+        channel: u128,
+        wire: &[u8],
+    ) -> Result<OpenedV2MemberEnvelopeData, SyncError> {
+        let scope =
+            V2MemberEnvelopeScopeData::for_selected_prefix(self.member_prefix(prefix)?, channel)?;
+        open_v2_member_envelope_data(&self.node.group, &self.node.device, &scope, wire)
     }
 
     /// Sign using this warm native joiner's original device and Source. The
