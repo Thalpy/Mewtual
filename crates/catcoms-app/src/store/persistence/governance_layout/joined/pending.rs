@@ -758,7 +758,7 @@ impl JoinedPendingIo {
         delivery: &[u8],
         rng: &mut impl CryptoRngCore,
         negative: Option<&catcoms_rt::RequestCancellation>,
-        key: Option<NativeV2JoinKeyEntry<'_>>,
+        key_entry: Option<NativeV2JoinKeyEntry<'_>>,
     ) -> Result<(), AppError> {
         let require_current = || {
             if negative.is_some_and(catcoms_rt::RequestCancellation::is_cancelled) {
@@ -800,7 +800,7 @@ impl JoinedPendingIo {
             &key,
             rng,
             negative,
-            key,
+            key_entry,
         )?;
         self.request_data(store)?;
         require_current()?;
