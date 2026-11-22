@@ -328,7 +328,10 @@ impl HeldGovernedAddFence {
     }
 }
 
-fn require_exact_held(path: &Path, original: &mut OpenedTextControl) -> Result<(), AppError> {
+pub(super) fn require_exact_held(
+    path: &Path,
+    original: &mut OpenedTextControl,
+) -> Result<(), AppError> {
     require_named(path, original)?;
     if read_matching_prefix(&mut original.file, &original.frame)? != original.frame.len() {
         return Err(refused());

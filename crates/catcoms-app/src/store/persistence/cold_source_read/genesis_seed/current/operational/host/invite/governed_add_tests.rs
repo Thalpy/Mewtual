@@ -11,6 +11,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         keys: &NativeFounderKeys,
         rng: &mut impl catcoms_rt::CryptoRngCore,
         negative: &RequestCancellation,
+        mut replace_head: impl FnMut(bool),
     ) -> Result<(), AppError> {
         let (sender, receiver) = tokio::sync::watch::channel(false);
         let interrupted = RequestCancellation::new(receiver, None);
@@ -36,6 +37,52 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             self.install_governed_add(layout, packet, routing_plan, keys, rng, negative)?,
             installed
         );
+        let saved = self.saved_governed_response(layout, packet, keys, negative)?;
+        let store = layout.checked_store()?;
+        let owner = self.owner.borrow_current()?;
+        let mut reader = crate::store::persistence::v2_text::HeldGovernedArchiveRead::prepare(
+            store,
+            owner.source(),
+        )?;
+        let resources = reader.resources().clone();
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            reader.capture_head(&guard)
+        })?;
+        reader.authenticate_head(store, owner.source())?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            reader.capture_archive(&guard)
+        })?;
+        reader.authenticate_archive(store, owner.source())?;
+        let restored = reader.prepare_restored_sdk(store, owner.source())?;
+        replace_head(true);
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            assert!(reader.require_current(&guard).is_err());
+            Ok(())
+        })?;
+        replace_head(false);
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            let recovered = reader.require_current(&guard)?;
+            assert_eq!(recovered.request.as_slice(), packet.packet_bytes_data());
+            assert_eq!(recovered.response.as_slice(), saved.packet_bytes_data());
+            assert_eq!(
+                recovered.header.spec().parent,
+                owner.source().data().header.id()
+            );
+            assert_eq!(
+                recovered.admission.spec().subject,
+                packet.founder_add_data().request.spec_data().joiner
+            );
+            assert_eq!(recovered.parent.generation, 1);
+            assert_eq!(restored.fingerprint_data().header, recovered.header.id());
+            assert_eq!(restored.fingerprint_data().epoch, 1);
+            assert!(!recovered.snapshot_data()?.is_empty());
+            assert!(!recovered.image_data()?.is_empty());
+            Ok(())
+        })?;
         Ok(())
     }
 

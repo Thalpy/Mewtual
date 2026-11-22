@@ -217,6 +217,24 @@ pub(super) fn welcome_bodies<'a>(entry: &[u8], plain: &'a [u8]) -> Result<[&'a [
     Ok([fields.bodies[1], fields.bodies[3]])
 }
 
+pub(super) fn require_archive_fingerprint(
+    entry: &[u8],
+    plain: &[u8],
+    before: u64,
+    after: u64,
+    authenticator: &[u8; 32],
+) -> Result<(), AppError> {
+    let fields = decode_outcome_fields(plain, entry_digest(entry)?)?;
+    if (fields.before, fields.after, fields.authenticator) != (before, after, authenticator) {
+        return Err(refused());
+    }
+    Ok(())
+}
+
+pub(super) fn archive_snapshot<'a>(entry: &[u8], plain: &'a [u8]) -> Result<&'a [u8], AppError> {
+    Ok(decode_outcome_fields(plain, entry_digest(entry)?)?.bodies[7])
+}
+
 fn decode_outcome_fields(plain: &[u8], parent: [u8; 32]) -> Result<OutcomeFields<'_>, AppError> {
     let mut d = Decoder::new(plain);
     if field(&mut d, TAG.len())? != TAG

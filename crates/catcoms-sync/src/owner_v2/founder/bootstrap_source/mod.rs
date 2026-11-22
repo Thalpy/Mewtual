@@ -12,11 +12,11 @@ mod genesis_seed;
 #[cfg(not(target_arch = "wasm32"))]
 pub use genesis_seed::{
     PreparedV2FounderAddInstall, PreparedV2FounderGovernanceNode, PreparedV2FounderInviteData,
-    RetiredV2FounderAddInstall, RetiredV2FounderAddNativeCustody, V2FounderAddNativeStage,
-    V2FounderAddOutcomeData, V2FounderAddPreparationRefusal, V2FounderAddRequestData,
-    V2FounderAddSigning, V2FounderGovernanceNegative, V2FounderInviteRequestData,
-    V2InstalledFounderAddData, FOUNDER_GOVERNANCE_DATA_BYTES, FOUNDER_INVITE_DATA_BYTES,
-    MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES, MAX_FOUNDER_INVITE_LIFETIME_MS,
+    PreparedV2FounderRecoveredAdd, RetiredV2FounderAddInstall, RetiredV2FounderAddNativeCustody,
+    V2FounderAddNativeStage, V2FounderAddOutcomeData, V2FounderAddPreparationRefusal,
+    V2FounderAddRequestData, V2FounderAddSigning, V2FounderGovernanceNegative,
+    V2FounderInviteRequestData, V2InstalledFounderAddData, FOUNDER_GOVERNANCE_DATA_BYTES,
+    FOUNDER_INVITE_DATA_BYTES, MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES, MAX_FOUNDER_INVITE_LIFETIME_MS,
 };
 mod s0;
 pub use codec::{

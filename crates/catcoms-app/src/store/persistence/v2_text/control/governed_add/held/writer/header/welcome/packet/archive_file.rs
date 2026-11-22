@@ -70,7 +70,10 @@ impl PreparedGovernedAddFence {
                 return Err(refused());
             }
         } else {
+            let parent = selected.physical_query_data();
             let frames = GovernedArchiveFrames {
+                parent_head: parent.head_frame,
+                parent_archive: parent.archive_frame,
                 fence: &self
                     .held
                     .original
@@ -106,7 +109,7 @@ impl PreparedGovernedAddFence {
             let key = Zeroizing::new(store.keys.db_key()?);
             let frame = archive::seal_data(&key, labels, &frames, rng)?;
             let id = archive::id_data(&frame);
-            let path = archive_child(selected.physical_query_data().target, id.as_bytes())?;
+            let path = archive_child(parent.target, id.as_bytes())?;
             response.archive = Some(PreparedArchive {
                 record: PreparedSmallControl::new(frame),
                 path,

@@ -7,6 +7,7 @@ use catcoms_sync::V2JoinRequestPacketData;
 use catcoms_wire::Encoder;
 
 mod archive;
+pub(in crate::store) use archive::recovery::HeldGovernedArchiveRead;
 mod governing_record;
 mod header_signing;
 pub(in crate::store::persistence::v2_text) mod held;

@@ -4,16 +4,21 @@ use super::header_signing::{ATTEMPT_BYTES, RAW_BYTES, WELCOME_ATTEMPT_BYTES, WEL
 use super::outcome::{MAX_FRAME, MIN_FRAME};
 use super::sdk_entry::ENTRY_BYTES;
 use super::*;
+use crate::store::persistence::v2_text::{archive::MAX_ARCHIVE_PLAIN, head::MAX_TEXT_HEAD_FRAME};
 use catcoms_replication::chat::{
     cold_manifest::ArchiveHeadId,
     owner_header::{OwnerHeaderId, OwnerStateCommitment},
 };
 
+pub(super) mod recovery;
+
 const TAG: &[u8] = b"catcoms/private-chat-text-governed-add-archive/v2\0";
 const KEY_DOMAIN: &str = "catcoms/private-chat-text-governed-add-archive-key/v2";
 const ID_DOMAIN: &str = "catcoms/private-chat-text-governed-add-archive-id/v2";
 const VERSION: u16 = 2;
-const BODY_CAPS: [(usize, usize); 11] = [
+const BODY_CAPS: [(usize, usize); 13] = [
+    (41, MAX_TEXT_HEAD_FRAME),
+    (41, MAX_ARCHIVE_PLAIN + 40),
     (FRAME_BYTES, FRAME_BYTES),
     (request::MIN_BYTES, request::MAX_BYTES),
     (ENTRY_BYTES, ENTRY_BYTES),
@@ -49,6 +54,8 @@ pub(super) struct GovernedArchiveLabels {
 }
 
 pub(super) struct GovernedArchiveFrames<'a> {
+    pub(super) parent_head: &'a [u8],
+    pub(super) parent_archive: &'a [u8],
     pub(super) fence: &'a [u8],
     pub(super) request: &'a [u8],
     pub(super) entry: &'a [u8],
@@ -65,6 +72,8 @@ pub(super) struct GovernedArchiveFrames<'a> {
 impl<'a> GovernedArchiveFrames<'a> {
     fn ordered(&self) -> [&'a [u8]; BODY_CAPS.len()] {
         [
+            self.parent_head,
+            self.parent_archive,
             self.fence,
             self.request,
             self.entry,
@@ -173,11 +182,13 @@ pub(super) fn decode_data(
     if labels.epoch == 0 {
         return Err(refused());
     }
-    let [fence, request, entry, outcome, header_attempt, raw_header, governing, welcome_intent, welcome_attempt, raw_welcome, response] =
+    let [parent_head, parent_archive, fence, request, entry, outcome, header_attempt, raw_header, governing, welcome_intent, welcome_attempt, raw_welcome, response] =
         frames;
     Ok((
         labels,
         GovernedArchiveFrames {
+            parent_head,
+            parent_archive,
             fence,
             request,
             entry,

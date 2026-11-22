@@ -48,6 +48,7 @@ pub(in crate::store) use control::governed_add::held::{
     GovernedAddHeaderRecoveryState, GovernedAddRecoveryState, GovernedAddWelcomeRecoveryState,
     HeldGovernedAddFence,
 };
+pub(in crate::store) use control::governed_add::HeldGovernedArchiveRead;
 pub(in crate::store) use head::{TextPendingData, TextRootData};
 #[cfg(all(test, windows))]
 pub(in crate::store) use ordinary_data::{

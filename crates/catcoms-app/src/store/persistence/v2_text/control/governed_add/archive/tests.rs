@@ -14,9 +14,11 @@ fn governed_add_archive_retains_the_exact_original_records_and_parent() {
         authenticator: [6; 32],
     };
     let records = BODY_CAPS.map(|(least, _)| vec![0x7a; least]);
-    let [fence, request, entry, outcome, header_attempt, raw_header, governing, welcome_intent, welcome_attempt, raw_welcome, response] =
+    let [parent_head, parent_archive, fence, request, entry, outcome, header_attempt, raw_header, governing, welcome_intent, welcome_attempt, raw_welcome, response] =
         records.each_ref().map(Vec::as_slice);
     let frames = GovernedArchiveFrames {
+        parent_head,
+        parent_archive,
         fence,
         request,
         entry,

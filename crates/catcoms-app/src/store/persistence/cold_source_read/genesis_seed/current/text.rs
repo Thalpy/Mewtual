@@ -13,7 +13,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> UnexposedV2Gene
     pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn derive_governed_core_selection(
         &self,
         store: &crate::store::ServerStore,
-        verifier: &catcoms_replication::chat::V2GeneralPrefixVerifier,
+        verifier: &mut catcoms_replication::chat::V2GeneralPrefixVerifier,
     ) -> Result<catcoms_replication::chat::V2GeneralCandidate, crate::AppError> {
         use crate::store::critical_namespaces::refused;
         use catcoms_replication::chat::owner_state::transition::ReplayBody;

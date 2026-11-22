@@ -289,6 +289,14 @@ Head and archive to the governing Header, state and completed SDK fingerprint.
 The Host covers it under the original Current before returning its file ID.
 This format leaves the ordinary archive caps unchanged and keeps the original
 records available after later retirement of the fixed Add journal.
+The archive also retains the exact old Head and archive frames. An
+independent recovery reader checks the original source context, both parent
+frames, every sealed Add record, and the signed request and response. It
+reproves the same selected Head2 and archive files under fresh Current before
+returning historical data. The bounded provider loader independently verifies
+the restored group's epoch, authenticator, founder device and exact active
+roster. Reinstalling a recovered SDK graph and its replayed Core state remains
+a separate recovery step.
 
 The Host stages `text.add.head-stage.v2` against that exact archive. The
 selector uses the established Head envelope with a new version. Prior

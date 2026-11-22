@@ -345,6 +345,8 @@ async fn native_governed_add_fixture(case: JoinCase) {
     assert_eq!(std::fs::read(&head_stage).unwrap(), head_stage_bytes);
 
     if case == JoinCase::InterruptedInstall {
+        let head = head_stage.with_file_name("head.bin");
+        let original_head = head.with_extension("test-parked");
         let mut job = prepare(&owner, &row, &vault, &budget);
         let runtime = job.inner.loan.body.as_mut().unwrap();
         runtime
@@ -359,6 +361,15 @@ async fn native_governed_add_fixture(case: JoinCase) {
                 &job.inner.keys,
                 runtime.rng.as_mut().unwrap(),
                 &negative,
+                |replace| {
+                    if replace {
+                        std::fs::rename(&head, &original_head).unwrap();
+                        std::fs::write(&head, &head_stage_bytes).unwrap();
+                    } else {
+                        std::fs::remove_file(&head).unwrap();
+                        std::fs::rename(&original_head, &head).unwrap();
+                    }
+                },
             )
             .unwrap();
         job.inner.loan.recorded = true;

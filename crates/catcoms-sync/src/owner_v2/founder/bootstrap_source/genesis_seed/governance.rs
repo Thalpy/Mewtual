@@ -23,6 +23,8 @@ mod request;
 use request::FrozenAddRequest;
 mod installation;
 pub use installation::{PreparedV2FounderAddInstall, RetiredV2FounderAddInstall};
+mod recover;
+pub use recover::PreparedV2FounderRecoveredAdd;
 mod welcome;
 pub use request::{V2FounderAddRequestData, MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES};
 use welcome::PreparedWelcome;

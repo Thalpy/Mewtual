@@ -120,7 +120,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurr
     pub(super) fn derive_governed_core_selection(
         &self,
         store: &ServerStore,
-        verifier: &catcoms_replication::chat::V2GeneralPrefixVerifier,
+        verifier: &mut catcoms_replication::chat::V2GeneralPrefixVerifier,
     ) -> Result<catcoms_replication::chat::V2GeneralCandidate, AppError> {
         match &self.core {
             OwnedCurrent::Warm(current) => current.derive_governed_core_selection(store, verifier),
