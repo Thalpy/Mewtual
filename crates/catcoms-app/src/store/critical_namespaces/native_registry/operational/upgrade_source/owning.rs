@@ -12,6 +12,7 @@ enum ColdOpening {
 use crate::store::critical_namespaces::{
     native_registry::preparation::NativeRegistryHandler, pending_join_codec as grammar,
 };
+use crate::store::persistence::governance_layout::joined::{AcceptedFirstJoin, JoinedPendingIo};
 use crate::store::persistence::native_registry::lifecycle::upgrade::{UpgradeInventory, UpgradeIo};
 use crate::store::{ServerStore, V2CurrentLayoutStore};
 use catcoms_crypto::unseal;
@@ -324,6 +325,22 @@ impl std::fmt::Debug for Store {
     }
 }
 impl Store {
+    pub(in crate::store::critical_namespaces::native_registry) fn cover_accepted_first_join(
+        &mut self,
+        pending: &mut Option<JoinedPendingIo>,
+        accepted: AcceptedFirstJoin<'_>,
+        require_caller: impl Fn() -> Result<(), AppError>,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<([u8; 32], catcoms_sync::V2PendingJoinContextData), AppError> {
+        let physical = Arc::get_mut(&mut self.physical).ok_or_else(refused)?;
+        physical.joined_pending_store()?.cover_accepted_first_join(
+            pending,
+            accepted,
+            require_caller,
+            rng,
+        )
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn prepare_joined_pending(
         &mut self,
         source: catcoms_sync::PreparedV2JoinRequest,

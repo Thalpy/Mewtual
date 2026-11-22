@@ -16,9 +16,9 @@ use critical_namespaces::{
 pub(in crate::store) const INDEX_NAME: &str = "chat-critical-namespaces.joined-pin.index";
 const INDEX_FEE: usize = 12 * MAX_INDEX_FRAME + 512 * 1024;
 mod pending;
+pub(in crate::store) use pending::{AcceptedFirstJoin, JoinedPendingIo};
 #[cfg(test)]
-pub(in crate::store) use pending::BEFORE_WELCOME_SDK;
-pub(in crate::store) use pending::{first_join_limits, JoinedPendingIo};
+pub(in crate::store) use pending::{AFTER_PIN_INDEX_SELECT, BEFORE_WELCOME_SDK};
 
 /// Kept by the unique native startup continuation before any Source is exposed.
 /// The existing governance seed name is the predecessor-visible first claim.

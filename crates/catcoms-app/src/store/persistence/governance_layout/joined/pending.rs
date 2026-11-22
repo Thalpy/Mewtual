@@ -1,7 +1,7 @@
 //! Exact covered native Pending and first index insertion. Covering these
 //! files grants historical request custody. Welcome has its own entry fence.
 use super::*;
-use catcoms_replication::chat::join_bindings::SignedInviteBindingData;
+use catcoms_replication::chat::join_bindings::{GenesisAnchorBindingData, SignedInviteBindingData};
 use catcoms_replication::chat::owner_header::OwnerHeaderId;
 use catcoms_sync::{DirectJoinLimits, PreparedV2JoinRequest, MAX_V2_FIRST_JOIN_DELIVERY_BYTES};
 use critical_namespaces::joined_pin::pending::{
@@ -14,7 +14,7 @@ const SOURCE_FEE: usize = 12 * MAX_FRAME + 4 * 1024 * 1024;
 const SOURCE_ID_DOMAIN: &str = "catcoms/private-chat-v2-native-pending-source-id/v1";
 mod welcome;
 
-pub(in crate::store) fn first_join_limits() -> Result<DirectJoinLimits, AppError> {
+fn first_join_limits() -> Result<DirectJoinLimits, AppError> {
     DirectJoinLimits::new(
         512 * 1024,
         2 * 1024 * 1024,
@@ -211,6 +211,7 @@ pub(in crate::store) struct JoinedPendingIo {
     prepared: PreparedPinnedPending,
     exact: Zeroizing<Vec<u8>>,
     pending: Option<CreatedStage>,
+    staged: bool,
     stage: Option<CreatedStage>,
     directory: GovernanceDirectoryCapture,
     catalog: OpenedArchiveObject,
@@ -219,7 +220,82 @@ pub(in crate::store) struct JoinedPendingIo {
     _catalog_fee: CatalogReadReservation,
 }
 
+pub(in crate::store) struct AcceptedFirstJoin<'a> {
+    pub(in crate::store) invite: &'a crate::store::NativeTextInvitePacketData<'a>,
+    pub(in crate::store) anchor: &'a GenesisAnchorBindingData,
+    pub(in crate::store) token: [u8; 32],
+    pub(in crate::store) now_ms: u64,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    pub(in crate::store) static AFTER_PIN_INDEX_SELECT: std::cell::Cell<Option<Box<dyn FnOnce()>>> = const { std::cell::Cell::new(None) };
+}
+
 impl ServerStore {
+    pub(in crate::store) fn cover_accepted_first_join(
+        &self,
+        pending: &mut Option<JoinedPendingIo>,
+        accepted: AcceptedFirstJoin<'_>,
+        require_caller: impl Fn() -> Result<(), AppError>,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<([u8; 32], catcoms_sync::V2PendingJoinContextData), AppError> {
+        let binding = accepted.invite.binding();
+        if accepted.token == [0; 32] || accepted.anchor != &binding.spec_data().anchor {
+            return Err(denied());
+        }
+        let mount = self.chat_mount.observer();
+        let require_live = || {
+            if mount.is_cancelled() {
+                return Err(denied());
+            }
+            require_caller()
+        };
+        require_live()?;
+        if let Some(original) = pending.as_ref() {
+            original.require_original_join_intent(binding, accepted.token)?;
+        } else {
+            if binding.expired_at_data(accepted.now_ms)
+                || self.selected_pending_join_data()?.is_some()
+                || self
+                    .selected_joined_pin_context_data(accepted.anchor)?
+                    .is_some()
+            {
+                return Err(denied());
+            }
+            // Temporary device, KeyPackage and provider snapshot overlap. A
+            // sealed Pending retains its separate persistent payment.
+            const PREPARATION_BYTES: usize = 16 * 1024 * 1024;
+            let policy = self.governance_layout_policy.as_ref().ok_or_else(denied)?;
+            let pool = &policy.current.archive.pending.pool;
+            let _fee = pool.try_reserve(PREPARATION_BYTES)?;
+            require_live()?;
+            let source = PreparedV2JoinRequest::prepare(
+                catcoms_mls::MlsDevice::generate()?,
+                accepted.anchor,
+                binding,
+                accepted.token,
+                accepted.now_ms,
+                first_join_limits()?,
+            )?;
+            require_live()?;
+            *pending = Some(self.prepare_joined_pending(source, binding, rng)?);
+        }
+        let original = pending.as_mut().ok_or_else(denied)?;
+        if original.request_data(self).is_err() {
+            require_live()?;
+            original.stage(self)?;
+            require_live()?;
+            original.install(self)?;
+        }
+        let selected = self.selected_pending_join_data()?.ok_or_else(denied)?;
+        if blake3::hash(original.request_data(self)?).as_bytes() != &selected.0 {
+            return Err(denied());
+        }
+        require_live()?;
+        Ok(selected)
+    }
+
     pub(in crate::store) fn prepare_joined_pending(
         &self,
         source: PreparedV2JoinRequest,
@@ -282,6 +358,7 @@ impl ServerStore {
             prepared,
             exact,
             pending: None,
+            staged: false,
             stage: None,
             directory: inventory.directory,
             catalog,
@@ -460,6 +537,13 @@ impl JoinedPendingIo {
         store.validate_mounted_governance_layout()?;
         self.require_catalog(store)?;
         let path = fixed(store, false, PENDING_NAME)?;
+        if self.staged {
+            return exact_retained(
+                &path,
+                self.pending.as_ref().ok_or_else(denied)?,
+                &self.exact,
+            );
+        }
         let slot = store.joined_pin_index.lock().map_err(|_| denied())?;
         let selected = slot.as_ref().ok_or_else(denied)?;
         let key = Zeroizing::new(store.keys.db_key()?);
@@ -493,10 +577,15 @@ impl JoinedPendingIo {
             &path,
             self.pending.as_ref().ok_or_else(denied)?,
             &self.exact,
-        )
+        )?;
+        self.staged = true;
+        Ok(())
     }
 
     pub(in crate::store) fn install(&mut self, store: &ServerStore) -> Result<(), AppError> {
+        if !self.staged {
+            return Err(denied());
+        }
         store.validate_mounted_governance_layout()?;
         self.require_catalog(store)?;
         let claim = self.pending.as_ref().ok_or_else(denied)?;
@@ -519,6 +608,12 @@ impl JoinedPendingIo {
                 stage: &mut self.stage,
             }),
         )?;
+        #[cfg(test)]
+        AFTER_PIN_INDEX_SELECT.with(|slot| {
+            if let Some(hook) = slot.take() {
+                hook();
+            }
+        });
         self.require_catalog(store)?;
         *slot = Some(selected);
         Ok(())

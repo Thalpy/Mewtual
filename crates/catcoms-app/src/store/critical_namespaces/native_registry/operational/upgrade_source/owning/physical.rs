@@ -1010,6 +1010,30 @@ impl AuthenticationNegative {
     }
 }
 impl MetadataWork {
+    pub(in crate::store::critical_namespaces::native_registry) fn cover_accepted_first_join(
+        &self,
+        pending: &mut Option<JoinedPendingIo>,
+        accepted: AcceptedFirstJoin<'_>,
+        require_caller: impl Fn() -> Result<(), AppError>,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<([u8; 32], catcoms_sync::V2PendingJoinContextData), AppError> {
+        let cell = self.physical.cell.try_lock().map_err(|_| refused())?;
+        cell.require_idle()?;
+        let require_current = || {
+            self.physical.handler.require()?;
+            self.physical.handler.require_idle_cached()?;
+            if !self.physical.handler.uses_joined_pin_layout() {
+                return Err(refused());
+            }
+            require_caller()
+        };
+        require_current()?;
+        self.physical
+            .current()?
+            .checked_store()?
+            .cover_accepted_first_join(pending, accepted, require_current, rng)
+    }
+
     /// Outside every guard, after original-pool validation. Capture the SAME
     /// mount while this work still retains the physical Store. No file reads.
     pub(in crate::store::critical_namespaces::native_registry) fn authentication_negative(

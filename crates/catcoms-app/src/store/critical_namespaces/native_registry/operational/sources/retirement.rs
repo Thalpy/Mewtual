@@ -72,6 +72,7 @@ pub(super) fn invoice<T: MeshTransport, R: CryptoRngCore>() -> usize {
         + 2 * std::mem::size_of::<NativeTextSourceRetirementPreparation<T, R>>()
         + std::mem::size_of::<Control>()
         + ui_add_retirement::invoice::<T, R>()
+        + join::invoice()
         // The Weak book can outlive Sources. Its real allocation header and
         // Mutex/Vec metadata stay covered by the capture's Control fee tail.
         + std::mem::size_of::<SourceBook<T, R>>() + 2 * std::mem::size_of::<usize>()

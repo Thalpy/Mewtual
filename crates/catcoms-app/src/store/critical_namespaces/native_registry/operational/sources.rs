@@ -17,6 +17,8 @@ use zeroize::Zeroizing;
 mod capture;
 mod invite;
 pub use invite::NativeTextInvitePublication;
+mod join;
+pub use join::NativeTextJoinedRequestPreparation;
 mod member;
 mod network;
 pub use member::{
@@ -130,6 +132,7 @@ pub struct NativeTextSourceCommand {
 pub struct NativeTextSources<T: MeshTransport, R: CryptoRngCore> {
     scope: Arc<Scope>,
     entries: Arc<SourceBook<T, R>>,
+    pending_join: Arc<join::PendingJoin>,
     policy: NativeTextSourcePolicy,
     // Original physical custody and control payment remain until entries leave.
     work: SourceWork,
@@ -535,6 +538,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSourcePreparation<T, R> {
             return Err(Box::new(self));
         }
         let entries = Arc::new(Mutex::new(Vec::with_capacity(self.budget.policy.maximum)));
+        let pending_join = Arc::new(Mutex::new(None));
         if self.scope.claim_once().is_err() {
             return Err(Box::new(self));
         }
@@ -549,6 +553,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSourcePreparation<T, R> {
         Ok(NativeTextSources {
             scope,
             entries,
+            pending_join,
             policy: budget.policy,
             work: work.expect("checked original source work"),
             retirement: Arc::new(retirement::Control::new(budget.metadata)),

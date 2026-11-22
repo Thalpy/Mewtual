@@ -62,6 +62,7 @@ pub use governance_layout::{
 };
 pub use member_outbox_layout::V2MemberOutboxPolicy;
 pub use native_registry::NativeTextInvitePublication;
+pub use native_registry::NativeTextJoinedRequestPreparation;
 pub use native_registry::NativeTextJoinedRuntime;
 pub use native_registry::NativeTextJoinedVaultUpgrade;
 pub use native_registry::{

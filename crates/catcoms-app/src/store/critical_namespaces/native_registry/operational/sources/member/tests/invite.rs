@@ -59,6 +59,111 @@ async fn native_runtime_invite_returns_only_the_original_installed_join_response
     native_governed_add_fixture(JoinCase::ColdPending).await;
 }
 
+#[tokio::test]
+async fn mounted_join_request_uses_the_original_native_command_and_retains_its_pending() {
+    use super::super::super::tests::{selected_joined, sources};
+    use crate::store::critical_namespaces::native_registry::preparation::tests::{
+        current_policy, SECRET,
+    };
+    use rand_core::{RngCore, SeedableRng};
+
+    let founder_dir = tempfile::tempdir().unwrap();
+    let (founder, founder_budget) = selected_governed(founder_dir.path());
+    let (owner, row) = activate(
+        prepared_mesh_founder_with_clock(
+            &founder,
+            &founder_budget,
+            0xe723,
+            Box::new(catcoms_rt::SystemClock),
+        ),
+        &founder,
+        &founder_budget,
+    );
+    let (sender, receiver) = tokio::sync::watch::channel(false);
+    let negative = RequestCancellation::new(receiver, None);
+    let saved = prepare(&owner, &row, &founder, &founder_budget)
+        .save_invite([58; 32], 60_000, &negative)
+        .unwrap();
+    let invite =
+        crate::store::NativeTextInvitePacketData::decode(saved.packet_bytes_data()).unwrap();
+    let anchor = &invite.binding().spec_data().anchor;
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, budget) = selected_joined(dir.path());
+    let original = sources(&vault);
+    let capture = || original.capture_join_request(command(&vault, &budget));
+    let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(0xe724);
+    let now = saved.expires_at_ms() - 1;
+    let token = [61; 32];
+    let path = dir
+        .path()
+        .join("chat-critical-namespaces.joined-pending.bin");
+
+    assert!(original
+        .capture_join_request(command(&founder, &founder_budget))
+        .cover(&invite, anchor, token, now, &negative, &mut rng)
+        .is_err());
+    let held = capture();
+    assert!(capture()
+        .cover(&invite, anchor, token, now, &negative, &mut rng)
+        .is_err());
+    let mut foreign = anchor.clone();
+    foreign.state[0] ^= 1;
+    assert!(held
+        .cover(&invite, &foreign, token, now, &negative, &mut rng)
+        .is_err());
+    assert!(!path.exists());
+
+    let current = dir
+        .path()
+        .join(crate::store::critical_namespaces::Slot::Current.name());
+    let parked = dir.path().join("original-before-mounted-join-reply");
+    let catalog = std::fs::read(&current).unwrap();
+    let (file, saved_file) = (current.clone(), parked.clone());
+    crate::store::persistence::governance_layout::joined::AFTER_PIN_INDEX_SELECT.with(|hook| {
+        hook.set(Some(Box::new(move || {
+            std::fs::rename(&file, saved_file).unwrap();
+            std::fs::write(file, catalog).unwrap();
+        })));
+    });
+    assert!(capture()
+        .cover(&invite, anchor, token, now, &negative, &mut rng)
+        .is_err());
+    assert!(parked.is_file());
+    assert!(path.is_file());
+    let ciphertext = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&current).unwrap();
+    std::fs::rename(parked, current).unwrap();
+
+    let mut retry_rng = rng.clone();
+    let selected = capture()
+        .cover(&invite, anchor, token, now, &negative, &mut rng)
+        .unwrap();
+    let after = saved.expires_at_ms();
+    assert!(capture()
+        .cover(&invite, anchor, [62; 32], after, &negative, &mut rng)
+        .is_err());
+    assert_eq!(
+        capture()
+            .cover(&invite, anchor, token, after, &negative, &mut rng)
+            .unwrap(),
+        selected,
+    );
+    assert_eq!(rng.next_u64(), retry_rng.next_u64());
+    assert_eq!(std::fs::read(&path).unwrap(), ciphertext);
+
+    sender.send(true).unwrap();
+    assert!(capture()
+        .cover(&invite, anchor, token, after, &negative, &mut rng)
+        .is_err());
+    drop(original);
+    drop(vault);
+    let cold =
+        crate::store::NativeTextJoinedStorage::open(dir.path(), SECRET, &mut rng, current_policy())
+            .unwrap();
+    assert_eq!(cold.pending_join_data().unwrap(), Some(selected));
+    assert_eq!(std::fs::read(&path).unwrap(), ciphertext);
+}
+
 #[derive(PartialEq, Eq)]
 enum JoinCase {
     Staged,

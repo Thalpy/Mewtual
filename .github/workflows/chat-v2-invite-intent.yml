@@ -254,6 +254,9 @@ jobs:
       - name: Check retirement of an approved native join dial
         if: inputs.scope == 'joined-storage' || inputs.scope == 'native-contact'
         run: python .github/scripts/check-chat-v2-invite-intent.py joined-contact
+      - name: Check that the mounted native command covers and retains the original request
+        if: inputs.scope == 'joined-storage' || inputs.scope == 'native-contact'
+        run: python .github/scripts/check-chat-v2-invite-intent.py mounted-join-request
       - name: Check Chat V2 request and response bounds before allocation
         if: inputs.scope == 'joined-storage'
         run: python .github/scripts/check-chat-v2-invite-intent.py joined-wire

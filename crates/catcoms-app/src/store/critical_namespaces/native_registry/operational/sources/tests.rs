@@ -105,6 +105,19 @@ fn selected_configured(
 pub(in crate::store::critical_namespaces::native_registry::operational) fn selected_governed(
     path: &std::path::Path,
 ) -> (NativeTextVault, NativeUiInvocationBudget) {
+    selected_governed_or_joined(path, false)
+}
+
+pub(super) fn selected_joined(
+    path: &std::path::Path,
+) -> (NativeTextVault, NativeUiInvocationBudget) {
+    selected_governed_or_joined(path, true)
+}
+
+fn selected_governed_or_joined(
+    path: &std::path::Path,
+    joined: bool,
+) -> (NativeTextVault, NativeUiInvocationBudget) {
     use crate::store::critical_namespaces::native_registry::preparation::tests::{
         current_policy, SECRET,
     };
@@ -153,7 +166,14 @@ pub(in crate::store::critical_namespaces::native_registry::operational) fn selec
     upgrade.retry(&mut rng).unwrap();
     let mut governance = upgrade.prepare_governance().unwrap();
     governance.retry(&mut rng).unwrap();
-    (governance.into_vault().unwrap(), budget)
+    let vault = if joined {
+        let mut joined = governance.prepare_joined_vault().unwrap();
+        joined.retry(&mut rng).unwrap();
+        joined.into_vault().ok().unwrap()
+    } else {
+        governance.into_vault().unwrap()
+    };
+    (vault, budget)
 }
 
 #[test]

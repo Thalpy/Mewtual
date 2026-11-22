@@ -220,7 +220,13 @@ nonempty index refuses cold opening when its original Pending file is missing.
 Restoring the original file preserves the selected pin and request. The warm
 store can create and cover a first request directly from the caller's accepted
 signed invite. It checks the anchor and mounted pin before creating the MLS
-device, then retains the same request on an exact retry. The warm
+device, then retains the same request on an exact retry. The mounted native
+Source collection can perform that transaction under its original UI command
+and single metadata slot. It keeps the warm Pending when publication fails,
+including when the index was selected on disk before a late file check refused
+the result. This App operation returns the selected request commitment and pin
+context. The desktop Join command and connection handoff remain to be wired.
+The warm
 owner verifies the delivery before covering possible Welcome entry, then
 seals and covers the exact successful outcome. New outcome records also retain
 the node page for the original Core candidate under the same Entry commitment.
