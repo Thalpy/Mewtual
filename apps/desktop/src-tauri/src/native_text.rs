@@ -244,6 +244,21 @@ fn router<R: tauri::Runtime>(
         if enabled
             && matches!(
                 invoke.message.command(),
+                "join_server"
+                    | "preview_invite"
+                    | "get_invite"
+                    | "mint_invite_fresh"
+                    | "send_dm_invite"
+            )
+        {
+            invoke
+                .resolver
+                .reject("Invitations are unavailable in this Chat V2 checkpoint.");
+            return true;
+        }
+        if enabled
+            && matches!(
+                invoke.message.command(),
                 "lock_session" | "close_vault_window"
             )
         {

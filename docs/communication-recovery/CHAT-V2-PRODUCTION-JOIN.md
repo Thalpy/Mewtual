@@ -232,7 +232,9 @@ desktop path attaches after native founder publication and authenticated
 unlock. Each connected request recaptures the original row and generation
 before any founder work. Lock revokes the old receiver and any retained reply
 authority. A later authenticated unlock can attach a fresh receiver for exact
-retries. Certified dialing and native joiner installation remain open.
+retries. Legacy invitation commands are refused in the gated native mode
+before any Legacy handler or transport work. Certified dialing, renderer
+invitation commands and native joiner installation remain open.
 
 Unknown/ambiguous remnants are preserved and refused, never cleared as debris.
 The `joined-predecessor` CI scope builds the pinned governed reader from

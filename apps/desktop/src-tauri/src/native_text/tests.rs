@@ -1008,6 +1008,45 @@ async fn native_text_found_router_installs_two_original_rows_retries_and_release
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_connected_join_keeps_legacy_invitation_handlers_outside_native_mode() {
+    for enabled in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("vault");
+        let (_app, main, queue) = self::app(path.clone(), None, enabled);
+        for command in [
+            "join_server",
+            "preview_invite",
+            "get_invite",
+            "mint_invite_fresh",
+            "send_dm_invite",
+        ] {
+            let (send, reply) = oneshot::channel();
+            let mut request = request(&main, "1", SECRET);
+            request.cmd = command.into();
+            request.body = InvokeBody::Json(serde_json::json!({}));
+            let view: &tauri::Webview<MockRuntime> = main.as_ref();
+            view.clone().on_message(
+                request,
+                Box::new(move |_, _, result, _, _| {
+                    let _ = send.send(result);
+                }),
+            );
+            let tauri::ipc::InvokeResponse::Err(error) = reply.await.unwrap() else {
+                panic!("invitation IPC reached a worker");
+            };
+            let expected = if enabled {
+                "Invitations are unavailable in this Chat V2 checkpoint."
+            } else {
+                "existing backend"
+            };
+            assert_eq!(error.0, serde_json::json!(expected), "{command}");
+            assert!(queue.lock().unwrap().is_empty());
+        }
+        assert!(!path.exists());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_text_connected_join_retries_original_welcome_after_authenticated_unlock() {
     use catcoms_rt::{MeshTransport, ProtocolId, TransportError, CHAT_V2_JOIN_KIND};
     use catcoms_sync::{DirectJoinLimits, PreparedV2JoinRequest};

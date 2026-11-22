@@ -69,6 +69,18 @@ They covered the namespace 6 declaration and cold reopen, the original pin
 index, warm selection of the first private JoinRequest, and cold replay of
 that same request and pin insertion. [Joined storage CI](https://github.com/Thalpy/Mewtual/actions/runs/45043452277).
 
+At `7fa87585`, Windows and Linux passed the real TCP exchange between the
+mounted founder and an independent joiner vault. The founder completed the
+first Add from the original request received by the native ingress, and the
+joiner retained and reopened the exact signed delivery and private result.
+The focused transport checks also covered header-first size limits and
+retirement of the original listener. [Two-vault and transport CI](https://github.com/Thalpy/Mewtual/actions/runs/45049624283).
+
+At `67c6ca68`, Windows and Linux passed the focused native desktop test
+through the gated router. It sent the real signed request over TCP, confirmed
+the native founder refused it during lock, and received the byte-identical
+saved Welcome after re-unlock. [Desktop dispatcher CI](https://github.com/Thalpy/Mewtual/actions/runs/45050190682).
+
 ## Invitation and join branch CI (22 November 2026)
 
 Both hosted workflows passed on Linux and Windows at
