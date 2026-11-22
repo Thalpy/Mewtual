@@ -169,7 +169,7 @@ impl<'a> V2FirstAddProofData<'a> {
             verifier,
             candidate: Some(candidate),
             own: own.admission_id(),
-            warm_origin: None,
+            source_origin: None,
         })
     }
 }
@@ -180,32 +180,39 @@ pub struct PreparedV2JoinedPrefix {
     verifier: V2GeneralPrefixVerifier,
     candidate: Option<V2GeneralCandidate>,
     own: OwnerFactId,
-    warm_origin: Option<Weak<()>>,
+    source_origin: Option<Weak<()>>,
+}
+
+pub(super) struct SelectedJoinData<'a> {
+    pub anchor: [u8; 32],
+    pub welcome: &'a catcoms_replication::chat::join_bindings::SignedWelcomeBindingData,
+    pub state: OwnerStateCommitment,
+    pub signer: &'a [u8; 32],
+    pub key_package: &'a [u8; 32],
+    pub credential: &'a [u8; 32],
+    pub epoch: u64,
 }
 
 impl PreparedV2JoinedPrefix {
-    pub(super) fn bind_warm_origin(&mut self, original: &Arc<()>) {
-        self.warm_origin = Some(Arc::downgrade(original));
+    pub(super) fn bind_source_origin(&mut self, original: &Arc<()>) {
+        self.source_origin = Some(Arc::downgrade(original));
     }
 
-    pub(super) fn require_warm_selection(
+    pub(super) fn require_join_selection(
         &self,
         original: &Arc<()>,
-        anchor: [u8; 32],
-        welcome: &catcoms_replication::chat::join_bindings::SignedWelcomeBindingData,
-        state: OwnerStateCommitment,
-        facts: &crate::owner_v2::V2JoinFacts,
+        join: SelectedJoinData<'_>,
     ) -> Result<(), SyncError> {
         let reject = |_| SyncError::JoinRejected;
         if self
-            .warm_origin
+            .source_origin
             .as_ref()
             .is_none_or(|other| !std::ptr::eq(other.as_ptr(), Arc::as_ptr(original)))
         {
             return Err(SyncError::JoinRejected);
         }
         self.verifier
-            .require_join_genesis_data(anchor)
+            .require_join_genesis_data(join.anchor)
             .map_err(reject)?;
         let replay = self.selected_replay_data().ok_or(SyncError::JoinRejected)?;
         let admission = self.verifier.admission(self.own).map_err(reject)?;
@@ -220,14 +227,14 @@ impl PreparedV2JoinedPrefix {
             return Err(SyncError::JoinRejected);
         };
         if !admission.is_open_data()
-            || spec.subject != *facts.signer_data()
-            || key_package != *facts.key_package_data()
-            || credential != *facts.credential_data()
-            || after_epoch != facts.join_epoch_data()
-            || replay.mls_epoch_data() != facts.join_epoch_data()
-            || replay.header().spec().state != state
-            || replay.header().id().as_bytes() != &welcome.spec_data().add_header
-            || self.own.as_bytes() != &welcome.spec_data().admission
+            || &spec.subject != join.signer
+            || &key_package != join.key_package
+            || &credential != join.credential
+            || after_epoch != join.epoch
+            || replay.mls_epoch_data() != join.epoch
+            || replay.header().spec().state != join.state
+            || replay.header().id().as_bytes() != &join.welcome.spec_data().add_header
+            || self.own.as_bytes() != &join.welcome.spec_data().admission
         {
             return Err(SyncError::JoinRejected);
         }

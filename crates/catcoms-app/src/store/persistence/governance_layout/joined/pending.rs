@@ -323,6 +323,34 @@ impl ServerStore {
         index.require(self)?;
         Ok(result)
     }
+
+    /// Exclusive access keeps the original held index and Welcome outside
+    /// mutex guards during runtime assembly.
+    pub(in crate::store) fn attach_recovered_joined_node<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
+        &mut self,
+        inputs: &mut Option<JoinedRuntimeInputs<T, R>>,
+        output: &mut Option<catcoms_sync::ClosedV2JoinedNode<T, R>>,
+    ) -> Result<(), AppError> {
+        let original = self.recovered_join_outcome_data()?.ok_or_else(denied)?;
+        if output.is_none() {
+            let welcome = self
+                .joined_pin_index
+                .get_mut()
+                .map_err(|_| denied())?
+                .as_mut()
+                .and_then(|index| index.pending.as_mut())
+                .and_then(|pending| pending.welcome.as_mut())
+                .ok_or_else(denied)?;
+            *output = Some(welcome.attach_node(inputs)?);
+        }
+        if self.recovered_join_outcome_data()? != Some(original) {
+            return Err(denied());
+        }
+        Ok(())
+    }
 }
 
 impl JoinedPendingIo {

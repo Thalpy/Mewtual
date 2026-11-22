@@ -393,6 +393,20 @@ impl Store {
         self.physical.recovered_join_outcome_data()
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn attach_recovered_joined_node<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
+        &mut self,
+        inputs: &mut Option<
+            crate::store::persistence::governance_layout::joined::JoinedRuntimeInputs<T, R>,
+        >,
+        output: &mut Option<catcoms_sync::ClosedV2JoinedNode<T, R>>,
+    ) -> Result<(), AppError> {
+        let physical = Arc::get_mut(&mut self.physical).ok_or_else(refused)?;
+        physical.attach_recovered_joined_node(inputs, output)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn warm_join_outcome_data(
         &self,
         pending: &crate::store::persistence::governance_layout::joined::JoinedPendingIo,

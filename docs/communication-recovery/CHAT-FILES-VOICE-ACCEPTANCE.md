@@ -86,6 +86,11 @@ the head-generated governed control, refused both joined-pin fixtures and left
 their bytes and identities unchanged. The current joined reader then opened
 both. [Pinned joined-pin predecessor CI](https://github.com/Thalpy/Mewtual/actions/runs/45053208398).
 
+At `2ba4de26`, Linux and Windows passed the two connected TCP fixtures,
+including the original warm graph paired with its selected Core prefix and
+one closed runtime. The same matrix passed the transport limits and receiver
+retirement cases. [Warm joined runtime CI](https://github.com/Thalpy/Mewtual/actions/runs/45054233586).
+
 ## Invitation and join branch CI (22 November 2026)
 
 Both hosted workflows passed on Linux and Windows at

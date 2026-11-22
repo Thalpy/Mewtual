@@ -652,6 +652,19 @@ impl V2CurrentLayoutStore {
         self.store
             .install_warm_joined_pin_selection(declaration, selected)
     }
+    pub(in crate::store::critical_namespaces) fn attach_recovered_joined_node<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
+        &mut self,
+        inputs: &mut Option<
+            crate::store::persistence::governance_layout::joined::JoinedRuntimeInputs<T, R>,
+        >,
+        output: &mut Option<catcoms_sync::ClosedV2JoinedNode<T, R>>,
+    ) -> Result<(), AppError> {
+        self.checked_store()?;
+        self.store.attach_recovered_joined_node(inputs, output)
+    }
     /// Closed owning index3 handoff only. The controller cannot extract Store
     /// or submit a callback: this concrete edge owns the catalog critical
     /// section and repeats its original physical and affine-claim proofs.

@@ -363,6 +363,31 @@ async fn native_governed_add_fixture(case: JoinCase) {
                 cold.recovered_join_outcome_data().unwrap(),
                 Some((head, epoch))
             );
+            let (transport, _) = catcoms_net::MeshService::new_tcp(None, &[]).unwrap();
+            let mut restored = cold
+                .bind_recovered_join_runtime(
+                    transport,
+                    rand_chacha::ChaCha20Rng::seed_from_u64(0xe721),
+                    Box::new(catcoms_rt::SystemClock),
+                )
+                .ok()
+                .unwrap();
+            assert_eq!(
+                restored.complete_recovery(&negative).unwrap(),
+                (head, own, epoch)
+            );
+            let outcome = only_named(join_dir, outcome_name);
+            let parked = outcome.with_extension("original-cold-outcome");
+            let original_outcome = std::fs::read(&outcome).unwrap();
+            std::fs::rename(&outcome, &parked).unwrap();
+            std::fs::write(&outcome, original_outcome).unwrap();
+            assert!(restored.complete_recovery(&negative).is_err());
+            std::fs::remove_file(&outcome).unwrap();
+            std::fs::rename(&parked, &outcome).unwrap();
+            assert_eq!(
+                restored.complete_recovery(&negative).unwrap(),
+                (head, own, epoch)
+            );
             return;
         }
         let (joined_result, ()) = tokio::time::timeout(std::time::Duration::from_secs(8), async {

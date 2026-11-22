@@ -1,4 +1,5 @@
 //! The completed private Join graph, tied to the same sealed request.
+use super::super::first_add_proof::SelectedJoinData;
 use super::super::welcome::{matches_welcome_roster, open_routing};
 use super::*;
 use catcoms_mls::persist::{
@@ -78,7 +79,7 @@ impl PreparedV2JoinRequest {
         let mut prepared =
             proof.prepare_joined_prefix(&packet.invite.spec_data().anchor, group, origin)?;
         let original = std::sync::Arc::new(());
-        prepared.bind_warm_origin(&original);
+        prepared.bind_source_origin(&original);
         self.initial_prefix_origin = Some(original);
         Ok((prepared, selection))
     }
@@ -166,16 +167,26 @@ fn seal_outcome(
 /// Independently authenticated historical state. No Welcome entry or live
 /// source is granted by opening the encrypted journal record.
 pub struct RecoveredV2JoinedOutcome {
-    _device: MlsDevice,
-    _group: ServerGroup,
-    _routing_secret: Zeroizing<[u8; 32]>,
-    _file_key: Zeroizing<[u8; 32]>,
+    graph: Option<Box<RecoveredJoinGraph>>,
     head: OwnerHeaderId,
     state: OwnerStateCommitment,
     epoch: u64,
     accepted: GenesisAnchorBindingData,
+    authenticator: [u8; 32],
+    signer: [u8; 32],
+    key_package: [u8; 32],
+    credential: [u8; 32],
+    welcome: Vec<u8>,
     delivery: [u8; 32],
-    prefix_prepared: bool,
+    prefix_origin: Option<std::sync::Arc<()>>,
+}
+
+struct RecoveredJoinGraph {
+    device: MlsDevice,
+    group: ServerGroup,
+    routing_secret: Zeroizing<[u8; 32]>,
+    file_key: Zeroizing<[u8; 32]>,
+    policy: GroupPolicy,
 }
 
 impl RecoveredV2JoinedOutcome {
@@ -284,16 +295,24 @@ impl RecoveredV2JoinedOutcome {
             return Err(SyncError::JoinRejected);
         }
         Ok(Self {
-            _device: device,
-            _group: group,
-            _routing_secret: routing_secret,
-            _file_key: file_key,
+            graph: Some(Box::new(RecoveredJoinGraph {
+                device,
+                group,
+                routing_secret,
+                file_key,
+                policy: verified_policy,
+            })),
             head: header.id(),
             state: header.spec().state,
             epoch,
             accepted: anchor.clone(),
+            authenticator: *authenticator,
+            signer: request.joiner,
+            key_package: request.key_package_reference,
+            credential: request.credential,
+            welcome: response.binding.encode(),
             delivery: *blake3::hash(delivery_bytes).as_bytes(),
-            prefix_prepared: false,
+            prefix_origin: None,
         })
     }
 
@@ -322,7 +341,7 @@ impl RecoveredV2JoinedOutcome {
         group: &ProjectionGroupView,
         origin: V2ProjectionOrigin,
     ) -> Result<PreparedV2JoinedPrefix, SyncError> {
-        if self.prefix_prepared
+        if self.prefix_origin.is_some()
             || delivery.len() > MAX_V2_FIRST_JOIN_DELIVERY_BYTES
             || blake3::hash(delivery).as_bytes() != &self.delivery
         {
@@ -330,8 +349,66 @@ impl RecoveredV2JoinedOutcome {
         }
         let delivery = V2FirstJoinDeliveryData::decode(delivery)?;
         let (_, proof) = delivery.data();
-        let prepared = proof.prepare_joined_prefix(&self.accepted, group, origin)?;
-        self.prefix_prepared = true;
+        let mut prepared = proof.prepare_joined_prefix(&self.accepted, group, origin)?;
+        let original = std::sync::Arc::new(());
+        prepared.bind_source_origin(&original);
+        self.prefix_origin = Some(original);
         Ok(prepared)
+    }
+
+    /// Move this same recovered graph after the host has proved its selected
+    /// storage. Its own original Core prefix must already be selected.
+    pub fn take_closed_recovered_node<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        prefix: &PreparedV2JoinedPrefix,
+        transport: T,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+    ) -> Result<ClosedV2JoinedNode<T, R>, SyncError> {
+        let original = self.prefix_origin.as_ref().ok_or(SyncError::JoinRejected)?;
+        let graph = self.graph.as_ref().ok_or(SyncError::JoinRejected)?;
+        let welcome = catcoms_replication::chat::join_bindings::SignedWelcomeBindingData::decode(
+            &self.welcome,
+        )
+        .map_err(|_| SyncError::JoinRejected)?;
+        if graph.group.epoch() != self.epoch
+            || graph.group.epoch_authenticator_id() != self.authenticator
+            || !graph.device.retained_ed25519_key_matches(&self.signer)
+            || graph.group.own_credential_digest(&graph.device)? != self.credential
+        {
+            return Err(SyncError::JoinRejected);
+        }
+        prefix.require_join_selection(
+            original,
+            SelectedJoinData {
+                anchor: self
+                    .accepted
+                    .commitment_data()
+                    .map_err(|_| SyncError::JoinRejected)?,
+                welcome: &welcome,
+                state: self.state,
+                signer: &self.signer,
+                key_package: &self.key_package,
+                credential: &self.credential,
+                epoch: self.epoch,
+            },
+        )?;
+        let graph = self.graph.take().ok_or(SyncError::JoinRejected)?;
+        let routing = RoutingState {
+            label: 0,
+            secrets: vec![(0, graph.routing_secret)],
+            policy: Some(graph.policy),
+            ..RoutingState::default()
+        };
+        let mut node =
+            ChannelSync::new_joined(transport, graph.group, graph.device, rng, clock, routing);
+        node.file_wrap_key = graph.file_key;
+        ClosedV2JoinedNode::from_exact_recovered_graph(
+            node,
+            self.head,
+            prefix.own_admission_data(),
+            self.epoch,
+            self.authenticator,
+        )
     }
 }

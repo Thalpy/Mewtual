@@ -386,8 +386,23 @@ fn v2_join_request_and_welcome_complete_with_actual_add() {
         joined_node.selected_join_data().unwrap(),
         (header_id, prefix.own_admission_data(), 1)
     );
+    assert!(!joined_node.was_recovered_data());
     assert!(prepared
         .take_closed_warm_node(&warm_prefix, peer(13), rng(), clock())
+        .is_err());
+    assert!(recovered
+        .take_closed_recovered_node(&warm_prefix, peer(14), rng(), clock())
+        .is_err());
+    let cold_node = recovered
+        .take_closed_recovered_node(&prefix, peer(15), rng(), clock())
+        .unwrap();
+    assert!(cold_node.was_recovered_data());
+    assert_eq!(
+        cold_node.selected_join_data().unwrap(),
+        joined_node.selected_join_data().unwrap()
+    );
+    assert!(recovered
+        .take_closed_recovered_node(&prefix, peer(16), rng(), clock())
         .is_err());
 }
 

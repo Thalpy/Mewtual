@@ -217,16 +217,19 @@ historical. An owning warm join can move the actual private Welcome graph and
 its original transport into one closed joined node after selected history and
 the physical files agree. It takes the original node's join facts and sets the
 joined fence against the actual own Add. The mounted runtime retains the Core
-selection and retired parent. A cold or equivalent separately rebuilt prefix
-cannot supply fresh join facts. Native registry installation, cold operational
-activation and ordinary-member save admission remain open.
+selection and retired parent. A separate cold attachment can move the
+independently restored graph into a closed node, using its own original
+verified prefix and exact held pin and outcome files. It never re-enters
+Welcome or creates fresh join facts. Native registry installation, restoring
+the original native transport and ordinary-member save admission remain open.
 The joined storage owner can exchange the exact selected JoinRequest on an
 already authenticated connection to the peer named by the signed invite.
 It keeps the original connection and vault cancellation through response
 receipt and rechecks that authority before covering or entering the Welcome.
 Revocation after covering Entry and before SDK entry leaves no Outcome.
 A fresh authorization can retry the same covered Entry. The connected
-fixture uses loopback TCP and the actual native founder responder. The request kind selects separate transport size
+fixture uses loopback TCP and the actual native founder responder. The request
+kind selects separate transport size
 limits before the decoder allocates either body. The founder stops upon
 loss of the original response waiter. The queued reply retains the original
 native session and Source checks and pays for its transport copies through

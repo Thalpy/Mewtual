@@ -1,19 +1,25 @@
 //! Move the actual private Welcome into one closed joined node.
+use super::first_add_proof::SelectedJoinData;
 use super::*;
-use crate::owner_v2::{V2JoinFacts, V2JoinedSourceFence};
+use crate::owner_v2::{JoinFactsSlot, JoinedFenceNode, V2JoinFacts, V2JoinedSourceFence};
 use catcoms_replication::chat::{
     join_bindings::SignedWelcomeBindingData, owner_facts::OwnerFactId, owner_header::OwnerHeaderId,
 };
 
-/// Owns the original verified group, device, routing, runtime and once-taken
-/// join facts. The mounted source still owns durable selection and native
-/// admission. There is no legacy actor conversion or SDK extraction.
+/// Owns the original verified group, device, routing and runtime. Only a
+/// warm completed Welcome owns fresh facts. The mounted source still owns
+/// durable selection and native admission.
 pub struct ClosedV2JoinedNode<T: MeshTransport, R: CryptoRngCore> {
     node: Box<ChannelSync<T, R>>,
-    facts: V2JoinFacts,
+    origin: JoinedOrigin,
     fence: V2JoinedSourceFence,
     head: OwnerHeaderId,
     admission: OwnerFactId,
+}
+
+enum JoinedOrigin {
+    Warm(V2JoinFacts),
+    Recovered(u64),
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
@@ -30,11 +36,45 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
         self.fence
             .require_authorized(self.admission.as_bytes())
             .map_err(|_| SyncError::JoinRejected)?;
-        let epoch = self.facts.join_epoch_data();
+        let epoch = match &self.origin {
+            JoinedOrigin::Warm(facts) => facts.join_epoch_data(),
+            JoinedOrigin::Recovered(epoch) => *epoch,
+        };
         if self.node.epoch() != epoch {
             return Err(SyncError::JoinRejected);
         }
         Ok((self.head, self.admission, epoch))
+    }
+
+    pub fn was_recovered_data(&self) -> bool {
+        matches!(self.origin, JoinedOrigin::Recovered(_))
+    }
+
+    pub(super) fn from_exact_recovered_graph(
+        mut node: ChannelSync<T, R>,
+        head: OwnerHeaderId,
+        admission: OwnerFactId,
+        epoch: u64,
+        authenticator: [u8; 32],
+    ) -> Result<Self, SyncError> {
+        if node.epoch() != epoch || node.group.epoch_authenticator_id() != authenticator {
+            return Err(SyncError::JoinRejected);
+        }
+        // The independently proved restored graph supplies the settlement.
+        // There is no post-Welcome handoff or fresh join fact to take.
+        node.v2_fence = JoinedFenceNode::for_join(&node.group);
+        node.v2_join_facts = JoinFactsSlot::TakenByJoinedSource;
+        let fence = node.v2_fence.handle().ok_or(SyncError::JoinRejected)?;
+        fence
+            .install_selected(epoch, authenticator, *admission.as_bytes())
+            .map_err(|_| SyncError::JoinRejected)?;
+        Ok(Self {
+            node: Box::new(node),
+            origin: JoinedOrigin::Recovered(epoch),
+            fence,
+            head,
+            admission,
+        })
     }
 }
 
@@ -58,12 +98,18 @@ impl PreparedV2JoinRequest {
         let packet = V2JoinRequestPacketData::decode(&self.request)?;
         let welcome = SignedWelcomeBindingData::decode(&graph.response_binding)
             .map_err(|_| SyncError::JoinRejected)?;
-        prefix.require_warm_selection(
+        let facts = graph.facts_data();
+        prefix.require_join_selection(
             original,
-            packet.request.spec_data().anchor,
-            &welcome,
-            graph.state,
-            graph.facts_data(),
+            SelectedJoinData {
+                anchor: packet.request.spec_data().anchor,
+                welcome: &welcome,
+                state: graph.state,
+                signer: facts.signer_data(),
+                key_package: facts.key_package_data(),
+                credential: facts.credential_data(),
+                epoch: facts.join_epoch_data(),
+            },
         )?;
 
         let graph = self.completed.take().ok_or(SyncError::JoinRejected)?;
@@ -91,7 +137,7 @@ impl PreparedV2JoinRequest {
             .map_err(|_| SyncError::JoinRejected)?;
         Ok(ClosedV2JoinedNode {
             node: Box::new(node),
-            facts,
+            origin: JoinedOrigin::Warm(facts),
             fence,
             head: OwnerHeaderId::from_bytes(welcome.spec_data().add_header),
             admission,

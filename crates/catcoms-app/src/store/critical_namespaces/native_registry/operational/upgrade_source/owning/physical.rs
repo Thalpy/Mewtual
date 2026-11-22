@@ -87,6 +87,28 @@ impl Physical {
         pending.request_data(self.current()?.checked_store()?)
     }
 
+    pub(super) fn attach_recovered_joined_node<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
+        &mut self,
+        inputs: &mut Option<
+            crate::store::persistence::governance_layout::joined::JoinedRuntimeInputs<T, R>,
+        >,
+        output: &mut Option<catcoms_sync::ClosedV2JoinedNode<T, R>>,
+    ) -> Result<(), AppError> {
+        self.cell.get_mut().map_err(|_| refused())?.require_idle()?;
+        self.handler.require()?;
+        self.handler.require_idle_cached()?;
+        if !self.handler.uses_joined_pin_layout() {
+            return Err(refused());
+        }
+        self.current
+            .as_mut()
+            .ok_or_else(refused)?
+            .attach_recovered_joined_node(inputs, output)
+    }
+
     pub(super) fn joined_exchange_resources(
         &self,
         byte_count: usize,

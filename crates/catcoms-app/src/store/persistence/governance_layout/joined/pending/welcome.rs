@@ -183,7 +183,7 @@ pub(super) struct RecoveredWelcome {
 
 struct ClosedOutcome {
     file: OpenedArchiveObject,
-    _graph: RecoveredV2JoinedOutcome,
+    graph: RecoveredV2JoinedOutcome,
     selection: JoinedCore,
 }
 
@@ -285,13 +285,29 @@ impl ClosedOutcome {
         })?;
         Ok(Self {
             file,
-            _graph: graph,
+            graph,
             selection,
         })
     }
 }
 
 impl RecoveredWelcome {
+    pub(super) fn attach_node<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore>(
+        &mut self,
+        inputs: &mut Option<JoinedRuntimeInputs<T, R>>,
+    ) -> Result<catcoms_sync::ClosedV2JoinedNode<T, R>, AppError> {
+        let outcome = self
+            .outcome
+            .as_mut()
+            .filter(|outcome| outcome.selection.retired.is_some())
+            .ok_or_else(denied)?;
+        let (transport, rng, clock) = inputs.take().ok_or_else(denied)?;
+        outcome
+            .graph
+            .take_closed_recovered_node(&outcome.selection.core, transport, rng, clock)
+            .map_err(|_| denied())
+    }
+
     pub(super) fn require(&self, store: &ServerStore) -> Result<(), AppError> {
         let (file, bytes) = &self.entry;
         exact_held(
