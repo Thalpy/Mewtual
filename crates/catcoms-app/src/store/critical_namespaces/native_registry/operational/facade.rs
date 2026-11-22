@@ -6,6 +6,7 @@ use super::native_ui::{
 use super::*;
 pub(super) mod upgrade;
 use std::sync::atomic::{AtomicBool, AtomicU64};
+pub use upgrade::NativeTextJoinedVaultUpgrade;
 pub use upgrade::{
     NativeTextGovernanceUpgrade, NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal,
 };

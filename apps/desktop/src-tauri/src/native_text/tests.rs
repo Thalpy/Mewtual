@@ -1060,8 +1060,12 @@ async fn native_text_connected_join_retries_original_welcome_after_authenticated
     }
 
     let root = tempfile::tempdir().unwrap();
-    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    let path = root.path().join("vault");
+    let (app, main, queue) = app(path.clone(), None, true);
     unlock_current(&app, &main, &queue).await;
+    assert!(path
+        .join("chat-critical-namespaces.joined-pin.index")
+        .is_file());
     let found = found_request(&main, 1, "Connected founder");
     run(&queue).await;
     let id = found_value(found.await.unwrap())["server"]

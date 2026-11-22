@@ -198,6 +198,8 @@ selected joined catalog. The warm governed owner can also promote the original
 held declaration and move directly into joined-aware storage on the same vault
 session. Its parser switch happens inside that exclusive owner. An equal-byte
 replacement of the held Stage refuses, and retry takes the original file.
+Fresh gated desktop startup moves that same original owner through the
+joined declaration before publishing the native vault and its source collection.
 The mounted index preserves the first pin ciphertext
 for each group and checks the held index when reading pin context. The first
 pending-JOIN record covers the private request and the one exact index

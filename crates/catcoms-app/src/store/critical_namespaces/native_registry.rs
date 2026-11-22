@@ -21,6 +21,7 @@ pub(in crate::store::critical_namespaces) mod operational;
 pub(in crate::store) mod preparation;
 
 pub use operational::NativeTextJoinedRuntime;
+pub use operational::NativeTextJoinedVaultUpgrade;
 pub use operational::{
     NativeCreationStateData, NativeCreationStatusData, NativeIndexPolicy, NativeIndexStore,
     NativeIndexUpgrade, NativeTextCreationBudget, NativeTextCreationInputs, NativeTextCreationJob,

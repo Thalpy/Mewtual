@@ -435,6 +435,13 @@ impl Store {
         physical.advance_joined_pin_layout(declaration, rng)
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn require_joined_pin_layout(
+        &self,
+        declaration: &crate::store::persistence::governance_layout::joined::JoinedPinDeclaration,
+    ) -> Result<(), AppError> {
+        self.physical.require_joined_pin_layout(declaration)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn require_governance_completion(
         &self,
         receiver: &crate::store::critical_namespaces::governance_layout::native::Startup,

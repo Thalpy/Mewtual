@@ -5,8 +5,9 @@ use super::*;
 use catcoms_app::store::{
     ArchiveBootstrapCatalogPolicy, CanonicalFilenameInventoryPolicy, CriticalCatalogReadPool,
     NativeIndexPolicy, NativeIndexStore, NativeIndexUpgrade, NativeRegistryInstallation,
-    NativeRegistryPolicy, NativeRegistryStore, NativeTextGovernanceUpgrade, NativeTextVaultUpgrade,
-    V2CurrentLayoutPolicy, V2MemberOutboxPolicy,
+    NativeRegistryPolicy, NativeRegistryStore, NativeTextGovernanceUpgrade,
+    NativeTextJoinedVaultUpgrade, NativeTextVaultUpgrade, V2CurrentLayoutPolicy,
+    V2MemberOutboxPolicy,
 };
 
 pub(super) enum Bootstrap {
@@ -17,6 +18,7 @@ pub(super) enum Bootstrap {
     Index2(NativeIndexStore),
     Upgrading3(Box<NativeTextVaultUpgrade>),
     Governing(Box<NativeTextGovernanceUpgrade>),
+    Joining(Box<NativeTextJoinedVaultUpgrade>),
     Ready(super::sources::ReadyBundle),
     Mounted,
     /// Initial preparation/unwind cannot safely reconstruct warm custody. Keep
@@ -168,6 +170,19 @@ impl Bootstrap {
                         *self = Self::Governing(original);
                         return Err(FAILED.into());
                     }
+                    match (*original).prepare_joined_vault() {
+                        Ok(original) => *self = Self::Joining(Box::new(original)),
+                        Err(original) => {
+                            *self = Self::Governing(Box::new(original));
+                            return Err(FAILED.into());
+                        }
+                    }
+                }
+                Self::Joining(mut original) => {
+                    if original.retry(&mut rng).is_err() {
+                        *self = Self::Joining(original);
+                        return Err(FAILED.into());
+                    }
                     match (*original).into_vault() {
                         Ok(owner) => {
                             *self = Self::Ready(super::sources::ReadyBundle::new(
@@ -176,7 +191,7 @@ impl Bootstrap {
                             )?)
                         }
                         Err(original) => {
-                            *self = Self::Governing(Box::new(original));
+                            *self = Self::Joining(Box::new(original));
                             return Err(FAILED.into());
                         }
                     }

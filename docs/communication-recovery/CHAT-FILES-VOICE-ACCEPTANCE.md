@@ -81,6 +81,11 @@ through the gated router. It sent the real signed request over TCP, confirmed
 the native founder refused it during lock, and received the byte-identical
 saved Welcome after re-unlock. [Desktop dispatcher CI](https://github.com/Thalpy/Mewtual/actions/runs/45050190682).
 
+At `201e8692`, both platforms built the actual `e0ff1033` reader. It opened
+the head-generated governed control, refused both joined-pin fixtures and left
+their bytes and identities unchanged. The current joined reader then opened
+both. [Pinned joined-pin predecessor CI](https://github.com/Thalpy/Mewtual/actions/runs/45053208398).
+
 ## Invitation and join branch CI (22 November 2026)
 
 Both hosted workflows passed on Linux and Windows at

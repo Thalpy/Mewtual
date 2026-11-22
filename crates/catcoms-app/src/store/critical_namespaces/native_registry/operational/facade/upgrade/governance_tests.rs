@@ -17,6 +17,34 @@ use std::{fs, path::Path, sync::atomic::Ordering};
 struct NeverRng;
 
 #[test]
+fn governed_joined_pin_native_factory_proves_the_selected_catalog_before_exposure() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc465);
+    let mut governed = original(dir.path(), &mut rng).prepare_governance().unwrap();
+    governed.retry(&mut rng).unwrap();
+    let joined = governed.prepare_joined_vault().unwrap();
+    let mut joined = match joined.into_vault() {
+        Ok(_) => panic!("unselected joined catalog escaped the factory"),
+        Err(joined) => joined,
+    };
+    joined.retry(&mut rng).unwrap();
+    let current = dir.path().join(Slot::Current.name());
+    let parked = current.with_extension("held-current");
+    let raw = fs::read(&current).unwrap();
+    fs::rename(&current, &parked).unwrap();
+    fs::write(&current, &raw).unwrap();
+    let mut joined = match joined.into_vault() {
+        Ok(_) => panic!("factory adopted an equal-byte replacement"),
+        Err(original) => original,
+    };
+    fs::remove_file(&current).unwrap();
+    fs::rename(&parked, &current).unwrap();
+    joined.retry(&mut NeverRng).unwrap();
+    let mounted = joined.into_vault().ok().unwrap();
+    assert_eq!(mounted.row_count_data().unwrap(), 0);
+}
+
+#[test]
 fn governed_joined_pin_warm_selection_keeps_the_original_mount_and_stage() {
     let dir = tempfile::tempdir().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(0xc464);

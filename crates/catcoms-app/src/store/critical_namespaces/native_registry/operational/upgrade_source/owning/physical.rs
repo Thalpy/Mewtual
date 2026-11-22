@@ -183,6 +183,19 @@ impl Physical {
         Ok(())
     }
 
+    pub(super) fn require_joined_pin_layout(
+        &self,
+        declaration: &crate::store::persistence::governance_layout::joined::JoinedPinDeclaration,
+    ) -> Result<(), AppError> {
+        self.handler.require()?;
+        self.handler.require_idle_cached()?;
+        let store = self.current()?.checked_store()?;
+        if !self.handler.uses_joined_pin_layout() || !store.uses_joined_pin_layout() {
+            return Err(refused());
+        }
+        declaration.require_promoted(store)
+    }
+
     pub(super) fn require_governance_completion(
         &self,
         receiver: &crate::store::critical_namespaces::governance_layout::native::Startup,

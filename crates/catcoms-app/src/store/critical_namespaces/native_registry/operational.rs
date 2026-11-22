@@ -39,6 +39,7 @@ mod work_retirement;
 pub use work_retirement::{NativeTextWorkRetirement, NativeTextWorkRetirementPreparation};
 mod upgrade;
 pub(in crate::store::critical_namespaces) mod upgrade_source;
+pub use facade::NativeTextJoinedVaultUpgrade;
 pub use facade::{
     NativeTextGovernanceUpgrade, NativeTextVault, NativeTextVaultAuthentication,
     NativeTextVaultAuthenticationCheck, NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal,
