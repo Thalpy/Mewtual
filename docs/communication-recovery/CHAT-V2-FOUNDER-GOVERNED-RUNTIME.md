@@ -274,8 +274,14 @@ signature against the same intent and signer before covering
 the original Current. The read-only recovery path checks the exact request,
 governing record, and Outcome before authenticating the Welcome intent. It
 classifies possible key entry separately from a verified cached signature.
-Fresh Current rechecks the held files and observed absences. Response coverage
-and Head2 selection remain separate steps.
+Fresh Current rechecks the held files and observed absences.
+
+After RawWelcome coverage the Host materializes the original response and
+covers `text.add.response.v2`. It links the exact RawWelcome ciphertext to
+the original signature, SDK Welcome, and sealed routing bytes. The reader
+reserves its own buffer and compares the recovered packet with the verified
+Welcome intent, signature and Outcome. Head2 selection and response release
+still require separate proofs.
 
 `text.add.governing.v2` binds the exact Raw Header to the signed Admission
 and state image. The reader checks the existing public history encoding and

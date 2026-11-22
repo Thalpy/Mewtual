@@ -7,6 +7,7 @@ use super::header_signing::{
     WELCOME_RAW_BYTES, WELCOME_RAW_NAME,
 };
 use super::outcome::OUTCOME_NAME;
+use super::response;
 use super::sdk_entry::{GovernedAddSdkEntryData, ENTRY_BYTES, SDK_ENTRY_NAME};
 use super::welcome_intent;
 use super::*;
@@ -68,13 +69,15 @@ struct WelcomeControlPaths {
     intent: PathBuf,
     attempt: PathBuf,
     raw: PathBuf,
+    response: PathBuf,
 }
 
 impl WelcomeControlPaths {
     fn require_absent(&self) -> Result<(), AppError> {
         require_absent(&self.intent)?;
         require_absent(&self.attempt)?;
-        require_absent(&self.raw)
+        require_absent(&self.raw)?;
+        require_absent(&self.response)
     }
 }
 
@@ -86,7 +89,7 @@ pub(in crate::store) enum GovernedAddRecoveryState {
     PossiblyEntered,
 }
 
-const FENCE_READ_BYTES: usize = 9 * MAX_TEXT_PATH
+const FENCE_READ_BYTES: usize = 10 * MAX_TEXT_PATH
     + 6 * FRAME_BYTES
     + 6 * ENTRY_BYTES
     + 6 * (ATTEMPT_BYTES + RAW_BYTES + WELCOME_ATTEMPT_BYTES + WELCOME_RAW_BYTES)
@@ -131,6 +134,7 @@ impl HeldGovernedAddFence {
             intent: fixed_child(target, welcome_intent::NAME)?,
             attempt: fixed_child(target, WELCOME_ATTEMPT_NAME)?,
             raw: fixed_child(target, WELCOME_RAW_NAME)?,
+            response: fixed_child(target, response::NAME)?,
         };
         resources.require_bound_original_negative(store, source)?;
         Ok(Self {

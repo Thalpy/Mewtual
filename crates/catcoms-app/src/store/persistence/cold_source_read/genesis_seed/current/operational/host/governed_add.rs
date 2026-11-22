@@ -77,6 +77,41 @@ impl PendingGovernedAdd {
 }
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextHost<T, R> {
+    pub(super) fn cover_governed_response(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        packet: &V2JoinRequestPacketData<'_>,
+        routing_plan: &[u8],
+        keys: &NativeFounderKeys,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+        negative: &catcoms_rt::RequestCancellation,
+    ) -> Result<(), AppError> {
+        self.sign_governed_welcome(layout, packet, routing_plan, keys, rng, negative)?;
+        let store = layout.checked_store()?;
+        let preimage = self.owner.freeze_governed_welcome(store)?;
+        self.owner.materialize_governed_response(store)?;
+        let owner = self.owner.borrow_current()?;
+        let outcome = self.owner.governed_outcome_data(store)?;
+        let response = self.owner.governed_response_data(store)?;
+        let p = self.governed_add.as_mut().ok_or_else(refused)?;
+        let selected = p.parent.selected_data().ok_or_else(refused)?;
+        p.fence
+            .prepare_response(store, owner.source(), &preimage, &outcome, &response, rng)?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, p.parent.resources())?;
+            keys.preflight(&self.origin)?;
+            if negative.is_cancelled() {
+                return Err(refused());
+            }
+            p.fence.cover_response(&guard, selected)?;
+            keys.preflight(&self.origin)?;
+            if negative.is_cancelled() {
+                return Err(refused());
+            }
+            Ok(())
+        })
+    }
+
     pub(super) fn sign_governed_welcome(
         &mut self,
         layout: &V2CurrentLayoutStore,

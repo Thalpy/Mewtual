@@ -196,6 +196,7 @@ impl SelectedV2TextHead {
             "text.add.welcome-intent.v2",
             "text.add.welcome-attempt.v2",
             "text.add.raw-welcome.v2",
+            "text.add.response.v2",
         ] {
             match std::fs::symlink_metadata(fixed_child(target, name)?) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

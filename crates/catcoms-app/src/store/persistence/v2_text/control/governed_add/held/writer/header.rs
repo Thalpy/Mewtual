@@ -150,9 +150,9 @@ impl PreparedGovernedAddFence {
         if !raw.covered {
             require_absent(&self.held.governing_path)?;
             self.held.welcome_paths.require_absent()?;
+            raw.cover(&self.held.raw_header_path, RAW_BYTES, guard)?;
+            self.require_covered_outcome(guard, selected)?;
         }
-        raw.cover(&self.held.raw_header_path, RAW_BYTES, guard)?;
-        self.require_covered_outcome(guard, selected)?;
         let header = self.header.as_mut().ok_or_else(refused)?;
         header
             .attempt

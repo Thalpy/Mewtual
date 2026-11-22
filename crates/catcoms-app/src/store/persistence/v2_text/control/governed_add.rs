@@ -10,6 +10,7 @@ mod governing_record;
 mod header_signing;
 pub(in crate::store::persistence::v2_text) mod held;
 mod outcome;
+mod response;
 mod sdk_entry;
 mod welcome_intent;
 

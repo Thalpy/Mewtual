@@ -2,10 +2,13 @@
 use super::*;
 use catcoms_replication::chat::join_bindings::WelcomeBindingSpecData;
 
+mod packet;
+
 pub(super) struct PreparedWelcomeSigning {
     parent: AddSigningParent,
     attempt: PreparedSmallControl,
     raw: Option<([u8; 64], PreparedSmallControl)>,
+    response: Option<packet::PreparedResponse>,
     unexpected_raw: bool,
 }
 
@@ -96,13 +99,14 @@ impl PreparedGovernedAddFence {
         if !welcome.covered {
             require_absent(&self.held.welcome_paths.attempt)?;
             require_absent(&self.held.welcome_paths.raw)?;
+            require_absent(&self.held.welcome_paths.response)?;
+            welcome.cover(
+                &self.held.welcome_paths.intent,
+                welcome_intent::MAX_BYTES,
+                guard,
+            )?;
+            self.cover_governing_record(guard, selected)?;
         }
-        welcome.cover(
-            &self.held.welcome_paths.intent,
-            welcome_intent::MAX_BYTES,
-            guard,
-        )?;
-        self.cover_governing_record(guard, selected)?;
         let (_, welcome) = self
             .header
             .as_mut()
@@ -137,6 +141,7 @@ impl PreparedGovernedAddFence {
                 parent,
                 attempt,
                 raw: None,
+                response: None,
                 unexpected_raw: false,
             });
         }
@@ -159,6 +164,7 @@ impl PreparedGovernedAddFence {
             return Err(refused());
         }
         self.cover_welcome_intent(guard, selected)?;
+        require_absent(&self.held.welcome_paths.response)?;
         let stage = self
             .header
             .as_mut()
@@ -180,6 +186,7 @@ impl PreparedGovernedAddFence {
             .attempt
             .require_covered(&self.held.welcome_paths.attempt)?;
         stage.require_raw_absent(&self.held.welcome_paths.raw)?;
+        require_absent(&self.held.welcome_paths.response)?;
         guard.validate_source_only()
     }
 
@@ -255,8 +262,11 @@ impl PreparedGovernedAddFence {
             .attempt
             .require_covered(&self.held.welcome_paths.attempt)?;
         let (_, raw) = stage.raw.as_mut().ok_or_else(refused)?;
-        raw.cover(&self.held.welcome_paths.raw, WELCOME_RAW_BYTES, guard)?;
-        self.cover_welcome_intent(guard, selected)?;
+        if !raw.covered {
+            require_absent(&self.held.welcome_paths.response)?;
+            raw.cover(&self.held.welcome_paths.raw, WELCOME_RAW_BYTES, guard)?;
+            self.cover_welcome_intent(guard, selected)?;
+        }
         let stage = self
             .header
             .as_mut()

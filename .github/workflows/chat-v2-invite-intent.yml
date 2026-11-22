@@ -133,6 +133,8 @@ jobs:
         run: python .github/scripts/check-chat-v2-invite-intent.py add-welcome-intent
       - name: Check the separate Welcome key-attempt and Raw records
         run: python .github/scripts/check-chat-v2-invite-intent.py add-welcome-signing
+      - name: Check that the private response binds the original Raw and both payloads
+        run: python .github/scripts/check-chat-v2-invite-intent.py add-response
       - name: Check the original native Source retirement barriers
         run: python .github/scripts/check-chat-v2-invite-intent.py source-retirement
       - name: Check the existing authenticated scratch controls

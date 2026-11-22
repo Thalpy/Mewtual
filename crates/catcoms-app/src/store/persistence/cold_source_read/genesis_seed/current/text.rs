@@ -10,6 +10,33 @@ use catcoms_rt::{NativeChatPreparedKeyCut, NativeChatSourceObservation};
 use catcoms_sync::owner_v2::{V2FounderAddOutcomeData, V2FounderAddRequestData};
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> UnexposedV2GenesisCurrent<T, R> {
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn materialize_governed_response(
+        &mut self,
+        store: &crate::store::ServerStore,
+    ) -> Result<(), crate::AppError> {
+        use crate::store::critical_namespaces::refused;
+        self.require_text_original_data(store)
+            .map_err(|_| refused())?;
+        self.governed_text_node_mut()
+            .ok_or_else(refused)?
+            .materialize_welcome_data()?;
+        self.require_text_original_data(store)
+            .map_err(|_| refused())
+    }
+
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn governed_response_data(
+        &self,
+        store: &crate::store::ServerStore,
+    ) -> Result<catcoms_sync::V2JoinResponseData<'_>, crate::AppError> {
+        use crate::store::critical_namespaces::refused;
+        self.require_text_original_data(store)
+            .map_err(|_| refused())?;
+        Ok(self
+            .governed_text_node()
+            .ok_or_else(refused)?
+            .join_response_data()?)
+    }
+
     pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn cached_governed_welcome_raw(
         &self,
         store: &crate::store::ServerStore,

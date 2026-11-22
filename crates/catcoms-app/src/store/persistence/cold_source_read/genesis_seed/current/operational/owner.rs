@@ -117,6 +117,26 @@ impl<T, R> V2TextOwnedCurrent<T, R> {
 }
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurrent<T, R> {
+    pub(super) fn materialize_governed_response(
+        &mut self,
+        store: &ServerStore,
+    ) -> Result<(), AppError> {
+        match &mut self.core {
+            OwnedCurrent::Warm(current) => current.materialize_governed_response(store),
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
+    pub(super) fn governed_response_data(
+        &self,
+        store: &ServerStore,
+    ) -> Result<catcoms_sync::V2JoinResponseData<'_>, AppError> {
+        match &self.core {
+            OwnedCurrent::Warm(current) => current.governed_response_data(store),
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
     pub(super) fn cached_governed_welcome_raw(
         &self,
         store: &ServerStore,

@@ -76,13 +76,13 @@ impl PreparedGovernedAddFence {
             .ok_or_else(refused)?;
         if !governing.covered {
             self.held.welcome_paths.require_absent()?;
+            governing.cover(
+                &self.held.governing_path,
+                governing_record::MAX_BYTES,
+                guard,
+            )?;
+            self.cover_raw_header(guard, selected)?;
         }
-        governing.cover(
-            &self.held.governing_path,
-            governing_record::MAX_BYTES,
-            guard,
-        )?;
-        self.cover_raw_header(guard, selected)?;
         let (_, governing) = self
             .header
             .as_mut()

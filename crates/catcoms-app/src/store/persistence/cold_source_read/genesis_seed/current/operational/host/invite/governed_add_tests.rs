@@ -17,7 +17,8 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
     ) -> Result<(), AppError> {
         use crate::store::persistence::v2_text::{
             GovernedAddHeaderRecoveryState, GovernedAddRecoveryState,
-            GovernedAddWelcomeRecoveryState, PreparedGovernedAddFence, SelectedV2TextHead,
+            GovernedAddWelcomeRecoveryState, HeldGovernedAddFence, PreparedGovernedAddFence,
+            SelectedV2TextHead,
         };
         self.reserve_governed_add(layout, packet, routing_plan, keys, rng, negative)?;
         assert!(self
@@ -357,6 +358,44 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             assert_eq!(
                 exact.require_welcome_current(&guard, selected)?,
                 GovernedAddWelcomeRecoveryState::SignatureRecovered(welcome_raw)
+            );
+            Ok(())
+        })?;
+        drop(attempt_only);
+        let read_response = |reader: &mut HeldGovernedAddFence,
+                             owner: &V2TextOwnerRef<'_>,
+                             selected: &SelectedV2TextHead| {
+            reader.prepare_response_read(store, owner.source())?;
+            store.with_v2_text_current(owner, |admission| {
+                let guard = store.lock_v2_text_current_group(admission, &resources)?;
+                reader.capture_response(&guard, selected)
+            })?;
+            reader.authenticate_response(store, owner.source())
+        };
+        read_response(&mut exact, &owner, selected)?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            assert!(exact.require_response_current(&guard, selected)?.is_none());
+            Ok(())
+        })?;
+        for _ in 0..2 {
+            self.cover_governed_response(layout, packet, routing_plan, keys, rng, negative)?;
+        }
+        let p = self.governed_add.as_ref().ok_or_else(refused)?;
+        let owner = self.owner.borrow_current()?;
+        let selected = p.parent.selected_data().ok_or_else(refused)?;
+        let response_bytes = self
+            .owner
+            .governed_response_data(store)?
+            .encode_packet_data()?;
+        let mut response = read_welcome(&p.fence, &owner, selected)?;
+        read_response(&mut response, &owner, selected)?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            assert!(exact.require_response_current(&guard, selected).is_err());
+            assert_eq!(
+                response.require_response_current(&guard, selected)?,
+                Some(response_bytes.as_slice())
             );
             Ok(())
         })?;

@@ -3,6 +3,8 @@ use super::*;
 use crate::store::persistence::v2_text::control::governed_add::outcome::welcome_bodies;
 use catcoms_replication::chat::owner_profile::AdmissionBody;
 
+mod packet;
+
 #[derive(Default)]
 pub(super) struct ObservedWelcome {
     intent: Option<OpenedTextControl>,
@@ -10,6 +12,7 @@ pub(super) struct ObservedWelcome {
     raw: Option<OpenedTextControl>,
     complete_capture: bool,
     state: Option<GovernedAddWelcomeRecoveryState>,
+    response: Option<packet::ObservedResponse>,
 }
 
 /// Historical classification for this exact request, after fresh Current and
@@ -54,6 +57,9 @@ impl HeldGovernedAddFence {
         observed.intent = read_stage(&self.welcome_paths.intent, welcome_intent::MAX_BYTES)?;
         observed.attempt = read_stage(&self.welcome_paths.attempt, WELCOME_ATTEMPT_BYTES)?;
         observed.raw = read_stage(&self.welcome_paths.raw, WELCOME_RAW_BYTES)?;
+        if observed.raw.is_none() {
+            require_absent(&self.welcome_paths.response)?;
+        }
         guard.validate_source_only()?;
         observed.complete_capture = true;
         Ok(())
@@ -151,6 +157,9 @@ impl HeldGovernedAddFence {
         require_stage(&self.welcome_paths.intent, observed.intent.as_mut())?;
         require_stage(&self.welcome_paths.attempt, observed.attempt.as_mut())?;
         require_stage(&self.welcome_paths.raw, observed.raw.as_mut())?;
+        if observed.raw.is_none() {
+            require_absent(&self.welcome_paths.response)?;
+        }
         let (target, directory, id) = guard.target_directory_data();
         crate::store::persistence::v2_genesis_activation::require_directory_name(
             target, directory, id,
