@@ -2,8 +2,9 @@
 //! part of retry equality; equal payload bytes across operations are not hits.
 use super::{
     data::{Change, Index},
-    founder, refresh, rename, *,
+    founder, joined, refresh, rename, *,
 };
+use crate::store::persistence::governance_layout::joined::JoinedRegistrationDependency;
 
 #[derive(PartialEq, Eq)]
 pub(super) enum Request {
@@ -12,6 +13,7 @@ pub(super) enum Request {
     FounderBirth(founder::Pending),
     FounderActivate(founder::Activate),
     NativeFounderActivate(founder::Activate),
+    RegisterJoined(joined::Register),
 }
 #[derive(Clone, Copy)]
 pub(super) enum Input<'a> {
@@ -22,6 +24,10 @@ pub(super) enum Input<'a> {
     NativeFounderActivate(
         &'a founder::Activate,
         &'a std::sync::Arc<crate::store::persistence::native_registry::network::NetworkDependency>,
+    ),
+    RegisterJoined(
+        &'a joined::Register,
+        &'a std::sync::Arc<JoinedRegistrationDependency>,
     ),
 }
 // Exactly one frozen request payload in the same existing control invoice,
@@ -37,6 +43,7 @@ const _: () = assert!(founder::MAX_NETWORK_FRAME <= super::super::data::MAX_INVI
 pub(super) enum Outcome {
     Metadata(rename::Metadata),
     Creation(crate::store::NativeCreationStatusData),
+    JoinedRegistration(joined::NativeTextJoinedRegistryRowData),
 }
 pub(super) enum Plan {
     NoChange(Outcome),
@@ -66,6 +73,7 @@ const _: () = assert!(super::super::data::MAX_NAME <= RETAINED_PAYLOAD);
 impl<'a> Input<'a> {
     pub(super) fn require_bounded(self) -> Result<(), AppError> {
         match self {
+            Self::RegisterJoined(r, _) => return r.require_bounded(),
             Self::FounderBirth(r) => return r.require_bounded(),
             Self::FounderActivate(r) => {
                 if r.birth.kind != super::data::BirthKind::Founder {
@@ -84,7 +92,10 @@ impl<'a> Input<'a> {
         let fits = match self {
             Self::Rename(r) => r.name.len() <= super::super::data::MAX_NAME,
             Self::Refresh(r) => r.invite.len() <= super::super::data::MAX_INVITE,
-            Self::FounderBirth(_) | Self::FounderActivate(_) | Self::NativeFounderActivate(..) => {
+            Self::FounderBirth(_)
+            | Self::FounderActivate(_)
+            | Self::NativeFounderActivate(..)
+            | Self::RegisterJoined(..) => {
                 unreachable!()
             }
         };
@@ -101,6 +112,7 @@ impl<'a> Input<'a> {
             (Self::FounderBirth(a), Request::FounderBirth(b)) => a == b,
             (Self::FounderActivate(a), Request::FounderActivate(b)) => a == b,
             (Self::NativeFounderActivate(a, _), Request::NativeFounderActivate(b)) => a == b,
+            (Self::RegisterJoined(a, _), Request::RegisterJoined(b)) => a == b,
             _ => false,
         }
     }
@@ -111,6 +123,7 @@ impl<'a> Input<'a> {
             Self::FounderBirth(r) => Request::FounderBirth(r.clone()),
             Self::FounderActivate(r) => Request::FounderActivate(r.clone()),
             Self::NativeFounderActivate(r, _) => Request::NativeFounderActivate(r.clone()),
+            Self::RegisterJoined(r, _) => Request::RegisterJoined(r.clone()),
         }
     }
     pub(super) fn kind(self) -> Change {
@@ -119,6 +132,7 @@ impl<'a> Input<'a> {
             Self::Refresh(_) => Change::RefreshLegacyInvite,
             Self::FounderBirth(_) => Change::Birth,
             Self::FounderActivate(_) | Self::NativeFounderActivate(..) => Change::Activate,
+            Self::RegisterJoined(..) => Change::RegisterNativeJoined,
         }
     }
     pub(super) fn prepare(self, selected: Index, parent: [u8; 32]) -> Result<Plan, AppError> {
@@ -128,6 +142,7 @@ impl<'a> Input<'a> {
             Self::FounderBirth(r) => r.prepare(selected, parent),
             Self::FounderActivate(r) => r.prepare(selected, parent),
             Self::NativeFounderActivate(r, _) => r.prepare(selected, parent),
+            Self::RegisterJoined(r, _) => r.prepare(selected, parent),
         }
     }
     pub(super) fn network(
@@ -137,6 +152,15 @@ impl<'a> Input<'a> {
     > {
         match self {
             Self::NativeFounderActivate(_, proof) => Some(proof),
+            _ => None,
+        }
+    }
+
+    pub(super) fn joined_dependency(
+        self,
+    ) -> Option<&'a std::sync::Arc<JoinedRegistrationDependency>> {
+        match self {
+            Self::RegisterJoined(_, proof) => Some(proof),
             _ => None,
         }
     }

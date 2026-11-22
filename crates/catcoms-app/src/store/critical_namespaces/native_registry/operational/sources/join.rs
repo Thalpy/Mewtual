@@ -9,9 +9,11 @@ use super::super::upgrade_source::owning::{
 };
 use super::*;
 use crate::store::persistence::governance_layout::joined::{
-    AcceptedFirstJoin, AcceptedJoinTransport, JoinedPendingIo,
+    AcceptedFirstJoin, AcceptedJoinTransport, JoinedPendingIo, JoinedRegistrationDependency,
 };
-use crate::store::{NativeTextInvitePacketData, NativeTextJoinedRegistrationData};
+use crate::store::{
+    NativeTextInvitePacketData, NativeTextJoinedRegistrationData, NativeTextJoinedRegistryRowData,
+};
 use catcoms_replication::chat::join_bindings::GenesisAnchorBindingData;
 use catcoms_replication::chat::owner_facts::OwnerFactId;
 use catcoms_replication::chat::owner_header::OwnerHeaderId;
@@ -396,6 +398,7 @@ impl NativeTextJoinedDelivery {
 
 pub(super) struct MountedNode<R: CryptoRngCore> {
     node: Option<ClosedV2JoinedNode<catcoms_net::MeshService, R>>,
+    registration: Option<Arc<JoinedRegistrationDependency>>,
     _payment: CatalogReadReservation,
 }
 
@@ -495,6 +498,7 @@ impl<R: CryptoRngCore> NativeTextJoinedInstallation<R> {
             if node.is_some() {
                 *slot = Some(MountedNode {
                     node,
+                    registration: None,
                     _payment: payment.take().unwrap(),
                 });
                 self.exchange.tcp.attached();
@@ -552,6 +556,43 @@ impl<R: CryptoRngCore> NativeTextSources<catcoms_net::MeshService, R> {
 }
 
 impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
+    /// Select the native metadata row for the exact parked original. This
+    /// commits local registration while joined authoring remains closed.
+    pub fn register(
+        self,
+        invite: &NativeTextInvitePacketData<'_>,
+        token: [u8; 32],
+        name: String,
+        negative: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<NativeTextJoinedRegistryRowData, AppError> {
+        self.original.require_current(negative)?;
+        let (receipt, debt) = {
+            let original = self.original.pending.upgrade().ok_or_else(refused)?;
+            let pending = original.state.try_lock().map_err(|_| refused())?;
+            let pending = pending.io.as_ref().ok_or_else(refused)?;
+            pending.require_original_join_intent(invite.binding(), token)?;
+            let mounted = self.mounted.upgrade().ok_or_else(refused)?;
+            let mut slot = mounted.try_lock().map_err(|_| refused())?;
+            let runtime = slot.as_mut().ok_or_else(refused)?;
+            let node = runtime.node.as_ref().ok_or_else(refused)?;
+            let selected = node.selected_join_data().map_err(|_| refused())?;
+            let metadata = self.original.work.as_ref().ok_or_else(refused)?;
+            if runtime.registration.is_none() {
+                runtime.registration = Some(metadata.capture_join_registration(pending)?);
+            }
+            let proof = runtime.registration.as_ref().ok_or_else(refused)?;
+            if proof.data().selected_data() != selected || proof.data().invocation != token {
+                return Err(refused());
+            }
+            self.original.require_current(negative)?;
+            metadata.register_joined(name, proof, rng)?
+        };
+        drop(debt);
+        self.original.require_current(negative)?;
+        Ok(receipt)
+    }
+
     /// Reprove the original invite/request, mounted files and closed node
     /// after a lost reply. The original founder connection may have retired.
     pub fn inspect(

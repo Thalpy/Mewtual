@@ -146,7 +146,7 @@ impl Activate {
     }
 }
 
-fn successor(selected: &Index, parent: [u8; 32]) -> Result<Index, AppError> {
+pub(super) fn successor(selected: &Index, parent: [u8; 32]) -> Result<Index, AppError> {
     let mut candidate = Index::decode_data(&selected.encode_data()?, selected.capability)?;
     candidate.generation = selected.generation.checked_add(1).ok_or_else(refused)?;
     candidate.parent = Some(parent);

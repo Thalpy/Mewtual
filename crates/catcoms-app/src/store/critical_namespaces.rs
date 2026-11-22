@@ -63,6 +63,7 @@ pub use governance_layout::{
 pub use joined_pin::pending::NativeTextJoinedRegistrationData;
 pub use member_outbox_layout::V2MemberOutboxPolicy;
 pub use native_registry::NativeTextInvitePublication;
+pub use native_registry::NativeTextJoinedRegistryRowData;
 pub use native_registry::NativeTextJoinedRequestPreparation;
 pub use native_registry::NativeTextJoinedRuntime;
 pub use native_registry::NativeTextJoinedSelectionPreparation;

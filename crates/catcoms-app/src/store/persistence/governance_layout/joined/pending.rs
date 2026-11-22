@@ -15,7 +15,9 @@ const PENDING_NAME: &str = "chat-critical-namespaces.joined-pending.bin";
 const INDEX_STAGE: &str = "chat-critical-namespaces.joined-pin.stage";
 const SOURCE_FEE: usize = 12 * MAX_FRAME + 4 * 1024 * 1024;
 const SOURCE_ID_DOMAIN: &str = "catcoms/private-chat-v2-native-pending-source-id/v1";
+mod registration;
 mod welcome;
+pub(in crate::store) use registration::JoinedRegistrationDependency;
 
 fn first_join_limits() -> Result<DirectJoinLimits, AppError> {
     DirectJoinLimits::new(

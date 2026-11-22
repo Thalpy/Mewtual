@@ -22,6 +22,8 @@ pub(in crate::store::critical_namespaces::native_registry) enum BirthKind {
     /// Actual native founder: activation/cold operational DATA require the
     /// original immutable native network dependency. Old1/2/3 retain meaning.
     NativeFounder,
+    /// Actual completed native joined source and separately held Welcome.
+    NativeJoined,
 }
 impl BirthKind {
     pub(super) fn is_founder(self) -> bool {
@@ -162,6 +164,7 @@ pub(super) struct Index {
 pub(super) enum Change {
     Birth,
     Activate,
+    RegisterNativeJoined,
     Abandon,
     Retire,
     Rename,
@@ -180,6 +183,7 @@ impl Index {
             return Err(refused());
         }
         let mut previous = None;
+        let mut native_joined = false;
         let mut identities = Vec::with_capacity(self.rows.len());
         let mut invocations = Vec::with_capacity(self.rows.len());
         for row in &self.rows {
@@ -228,6 +232,13 @@ impl Index {
                 if birth.kind.is_founder() != birth.join_context.is_none() {
                     return Err(refused());
                 }
+                if birth.kind == BirthKind::NativeJoined {
+                    if native_joined || row.is_dm || !matches!(row.backend, Backend::Joined { .. })
+                    {
+                        return Err(refused());
+                    }
+                    native_joined = true;
+                }
                 invocations.push(birth.invocation);
             }
             match &row.backend {
@@ -258,13 +269,14 @@ impl Index {
                 }
                 Backend::Joined { birth, binding }
                 | Backend::RetiredJoined { birth, binding, .. } => {
-                    if birth.kind != BirthKind::Joined
+                    if !matches!(birth.kind, BirthKind::Joined | BirthKind::NativeJoined)
                         || birth.signer != binding.signer
                         || birth.join_context != Some(binding.join_context)
                         || binding.vault != self.capability.original.vault
                         || binding.layout != self.capability.original.root
                         || binding.group.is_empty()
                         || binding.group.len() > 256
+                        || (birth.kind == BirthKind::NativeJoined && binding.group.len() != 16)
                     {
                         return Err(refused());
                     }
@@ -312,11 +324,16 @@ impl Index {
                 || self.last_issued_id.checked_add(1) != Some(added.id)
                 || next.last_issued_id != added.id
                 || added.metadata_revision != 0
-                || !matches!(added.backend, Backend::Pending { .. })
             {
                 return Err(refused());
             }
-            return Ok(Change::Birth);
+            return match &added.backend {
+                Backend::Pending { .. } => Ok(Change::Birth),
+                Backend::Joined { birth, .. } if birth.kind == BirthKind::NativeJoined => {
+                    Ok(Change::RegisterNativeJoined)
+                }
+                _ => Err(refused()),
+            };
         }
         if next.rows.len() != self.rows.len() || next.last_issued_id != self.last_issued_id {
             return Err(refused());

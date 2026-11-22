@@ -61,6 +61,15 @@ async fn native_runtime_invite_returns_only_the_original_installed_join_response
 
 #[tokio::test]
 async fn mounted_join_request_uses_the_original_native_command_and_retains_its_pending() {
+    mounted_join_fixture(false).await;
+}
+
+#[tokio::test]
+async fn mounted_join_request_cold_recovers_the_exact_registry_stage_only_with_its_welcome() {
+    mounted_join_fixture(true).await;
+}
+
+async fn mounted_join_fixture(recover_stage: bool) {
     use super::super::super::tests::{policy, selected_joined};
     use crate::store::critical_namespaces::native_registry::preparation::tests::{
         current_policy, SECRET,
@@ -73,7 +82,7 @@ async fn mounted_join_request_uses_the_original_native_command_and_retains_its_p
         prepared_mesh_founder_with_clock(
             &founder,
             &founder_budget,
-            0xe723,
+            if recover_stage { 0xe725 } else { 0xe723 },
             Box::new(catcoms_rt::SystemClock),
         ),
         &founder,
@@ -96,7 +105,8 @@ async fn mounted_join_request_uses_the_original_native_command_and_retains_its_p
         .finish()
         .unwrap();
     let capture = || original.capture_join_request(command(&vault, &budget));
-    let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(0xe724);
+    let mut rng =
+        rand_chacha::ChaCha20Rng::seed_from_u64(if recover_stage { 0xe726 } else { 0xe724 });
     let now = saved.expires_at_ms() - 1;
     let token = [61; 32];
     let path = dir
@@ -271,6 +281,43 @@ async fn mounted_join_request_uses_the_original_native_command_and_retains_its_p
         inspect().inspect(&invite, token, &fresh).unwrap(),
         Some((head, own_add, epoch))
     );
+    let index = only_named(dir.path(), "native-registry.bin");
+    let stage = index.with_extension("stage");
+    let prior_index = std::fs::read(&index).unwrap();
+    let outcome_path = dir
+        .path()
+        .join("chat-critical-namespaces.joined-welcome-outcome.bin");
+    let parked = outcome_path.with_extension("held-original-at-index-selection");
+    let (file, held) = (outcome_path.clone(), parked.clone());
+    let raw = std::fs::read(&outcome_path).unwrap();
+    use crate::store::persistence::native_registry::operational::{
+        before_target_proof, RenameTarget,
+    };
+    before_target_proof(
+        RenameTarget::Index,
+        Box::new(move || {
+            std::fs::rename(&file, held).unwrap();
+            std::fs::write(file, raw).unwrap();
+        }),
+    );
+    let register = |rng: &mut rand_chacha::ChaCha20Rng| {
+        inspect().register(&invite, token, "Original Room".into(), &fresh, rng)
+    };
+    assert!(register(&mut rng).is_err());
+    assert!(parked.is_file());
+    let saved_stage = std::fs::read(&stage).unwrap();
+    assert_eq!(std::fs::read(&index).unwrap(), prior_index);
+    std::fs::remove_file(&outcome_path).unwrap();
+    std::fs::rename(&parked, &outcome_path).unwrap();
+    if !recover_stage {
+        let mut after = rng.clone();
+        let row = register(&mut rng).unwrap();
+        assert_eq!(row.id, 1);
+        assert_eq!(register(&mut rng).unwrap(), row);
+        assert_eq!(rng.next_u64(), after.next_u64());
+        assert_eq!(std::fs::read(&index).unwrap(), saved_stage);
+        assert!(!stage.exists());
+    }
     let registration = inspect()
         .inspect_registration(&invite, token, &fresh)
         .unwrap()
@@ -316,9 +363,25 @@ async fn mounted_join_request_uses_the_original_native_command_and_retains_its_p
     drop(retirement);
     drop(original);
     drop(vault);
+    if recover_stage {
+        std::fs::rename(&outcome_path, &parked).unwrap();
+        assert!(crate::store::NativeTextJoinedStorage::open(
+            dir.path(),
+            SECRET,
+            &mut rng,
+            current_policy()
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&index).unwrap(), prior_index);
+        assert_eq!(std::fs::read(&stage).unwrap(), saved_stage);
+        std::fs::rename(&parked, &outcome_path).unwrap();
+    }
     let cold =
         crate::store::NativeTextJoinedStorage::open(dir.path(), SECRET, &mut rng, current_policy())
             .unwrap();
+    assert_eq!(cold.row_count_data().unwrap(), 1);
+    assert_eq!(std::fs::read(&index).unwrap(), saved_stage);
+    assert!(!stage.exists());
     assert!(cold.pending_join_data().unwrap() == Some(selected));
     assert_eq!(cold.recovered_join_outcome_data().unwrap(), Some(outcome));
     assert_eq!(

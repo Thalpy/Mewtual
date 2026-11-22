@@ -345,7 +345,7 @@ fn lifecycle3_founder_wal_preserves_valid_unsupported_joined_and_legacy_stages()
                         origin: LegacyOrigin::Admitted(birth),
                         invite: "future invite".into(),
                     },
-                    BirthKind::Founder | BirthKind::NativeFounder => {
+                    BirthKind::Founder | BirthKind::NativeFounder | BirthKind::NativeJoined => {
                         unreachable!("this control exercises joined and legacy-join kinds only")
                     }
                 };
@@ -369,9 +369,10 @@ fn lifecycle3_founder_wal_preserves_valid_unsupported_joined_and_legacy_stages()
                     .unwrap(),
                 expected
             );
-            assert!(
-                wal::verify_warm_metadata(store, &inventory, &candidate, &frame, expected).is_err()
-            );
+            assert!(wal::verify_warm_metadata(
+                store, &inventory, &candidate, &frame, expected, None
+            )
+            .is_err());
             drop(inventory);
             fs::write(file(dir.path(), stage_name), &frame).unwrap();
             let before = fs::read(file(dir.path(), index_name)).unwrap();

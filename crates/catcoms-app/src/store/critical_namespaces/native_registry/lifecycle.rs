@@ -11,6 +11,7 @@ mod codec;
 mod data;
 pub(super) mod founder;
 mod inspection;
+pub(super) mod joined;
 mod metadata;
 mod migration;
 mod network;

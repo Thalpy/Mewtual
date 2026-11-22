@@ -455,6 +455,13 @@ impl crate::store::ServerStore {
     pub(in crate::store) fn inspect_and_repair_native_registry_declaration(
         &self,
     ) -> Result<(), AppError> {
+        self.inspect_and_repair_native_registry_with_joined(None)
+    }
+
+    pub(in crate::store) fn inspect_and_repair_native_registry_with_joined(
+        &self,
+        joined: Option<&crate::store::persistence::governance_layout::joined::ColdJoinedSelection>,
+    ) -> Result<(), AppError> {
         let handler = self
             .current_layout_policy
             .as_ref()
@@ -467,7 +474,7 @@ impl crate::store::ServerStore {
             return handler.inspect_storage(self);
         }
         if let Some(handler) = handler.lifecycle() {
-            return handler.inspect_storage(self);
+            return handler.inspect_storage(self, joined);
         }
         crate::store::persistence::native_registry::operational::refuse_upgrade_debt(self)?;
         let present = crate::store::persistence::native_registry::native_artifacts_present(self)?;

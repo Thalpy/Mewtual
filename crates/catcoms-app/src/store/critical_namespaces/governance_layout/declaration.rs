@@ -210,7 +210,7 @@ impl ServerStore {
             // Seed4 repair/abort finished above. Hold native3's actual final
             // catalog and leaves through the COMMON Current/JOIN opener; its
             // one observation is consumed only by open_native afterward.
-            self.inspect_and_repair_native_registry_declaration()?;
+            self.inspect_and_repair_native_registry_with_joined(joined.as_ref())?;
         }
         self.open_current_layout_catalog_gate(actual, passphrase, rng)?;
         if let Some(captured) = captured {

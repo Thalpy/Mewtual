@@ -19,8 +19,9 @@ use catcoms_sync::{
 use critical_namespaces::joined_pin::pending::SelectedJoinData;
 use critical_namespaces::joined_pin::welcome as codec;
 
-const ENTRY: &str = "chat-critical-namespaces.joined-welcome-entry.bin";
-const OUTCOME: &str = "chat-critical-namespaces.joined-welcome-outcome.bin";
+pub(super) const ENTRY: &str = "chat-critical-namespaces.joined-welcome-entry.bin";
+pub(super) const OUTCOME: &str = "chat-critical-namespaces.joined-welcome-outcome.bin";
+type RegistrationFiles<'a> = ((&'a File, &'a [u8]), (&'a File, &'a [u8]));
 const FRAME_FEE: usize = 12 * (codec::ENTRY_FRAME + codec::OUTCOME_FRAME) + 4 * 1024 * 1024;
 
 fn paid_frames(store: &ServerStore) -> Result<CatalogReadReservation, AppError> {
@@ -44,6 +45,14 @@ pub(super) struct WarmWelcome {
 }
 
 impl WarmWelcome {
+    pub(super) fn registration_files(&self) -> Result<RegistrationFiles<'_>, AppError> {
+        let entry = self.held_entry.as_ref().ok_or_else(denied)?;
+        let outcome = self.held_outcome.as_ref().ok_or_else(denied)?;
+        Ok((
+            (&entry.file, &self.entry),
+            (&outcome.file, self.outcome.as_ref().ok_or_else(denied)?),
+        ))
+    }
     pub(super) fn prepare(
         store: &ServerStore,
         required: &PreparedPinnedPending,
@@ -376,6 +385,25 @@ impl ClosedOutcome {
 }
 
 impl RecoveredWelcome {
+    /// Checked by the cold graph restore and the independently derived Core
+    /// candidate before startup selects it. This grants no live source.
+    pub(super) fn registration_candidate_data(&self) -> Option<SelectedJoinData> {
+        let original = self.outcome.as_ref()?;
+        Some(SelectedJoinData {
+            governing_add: original.graph.governing_head_data(),
+            own_admission: original.selection.core.own_admission_data(),
+            state: *original.graph.governing_state_data().as_bytes(),
+            epoch: original.graph.epoch_data(),
+        })
+    }
+
+    pub(super) fn registration_files(&self) -> Result<RegistrationFiles<'_>, AppError> {
+        let outcome = self.outcome.as_ref().ok_or_else(denied)?;
+        Ok((
+            (&self.entry.0, &self.entry.1),
+            (&outcome.file.0, &outcome.file.1),
+        ))
+    }
     pub(super) fn copy_selected_governing_proof(
         &self,
         headers: (OwnerHeaderId, OwnerHeaderId),

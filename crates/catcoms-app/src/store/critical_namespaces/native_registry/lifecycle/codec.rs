@@ -45,6 +45,7 @@ fn read_birth(input: &mut Decoder<'_>) -> Result<Birth, AppError> {
         2 => BirthKind::Joined,
         3 => BirthKind::LegacyJoin,
         4 => BirthKind::NativeFounder,
+        5 => BirthKind::NativeJoined,
         _ => return Err(refused()),
     };
     Ok(Birth {
@@ -66,6 +67,7 @@ fn put_birth(output: &mut Encoder, value: &Birth) -> Result<(), AppError> {
         BirthKind::Joined => 2,
         BirthKind::LegacyJoin => 3,
         BirthKind::NativeFounder => 4,
+        BirthKind::NativeJoined => 5,
     });
     for field in [value.invocation, value.request, value.signer, value.network] {
         output.put_bytes(&field).map_err(|_| refused())?;
@@ -229,6 +231,7 @@ impl Index {
                         BirthKind::LegacyJoin => {
                             1 + birth_length(birth) + 4 + original::MAX_INVITE + 36
                         }
+                        BirthKind::NativeJoined => return Err(refused()),
                     };
                     payload.max(final_state)
                 }
@@ -494,6 +497,7 @@ mod native_birth_tests {
             (BirthKind::Joined, 2),
             (BirthKind::LegacyJoin, 3),
             (BirthKind::NativeFounder, 4),
+            (BirthKind::NativeJoined, 5),
         ] {
             let birth = Birth {
                 kind,

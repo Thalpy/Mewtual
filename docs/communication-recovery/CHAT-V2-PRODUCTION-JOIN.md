@@ -249,8 +249,12 @@ renewing or requiring the founder connection. Warm inspection and cold replay
 derive the same registration facts from the selected private Pending, its
 transport commitment, signed request and selected Add. These include the
 actual joiner signer, pinned Profile and root, own Admission, governing Header
-and state, and epoch. The desktop Join
-command still requires a selected native registry row and joined authoring.
+and state, and epoch. The native registry uses a distinct completed-joined row
+tag. It appends only from the original parked node with the held Current,
+joined-pin index, Pending, Entry and Outcome. The CAS rechecks those files
+before selection. A cold opener proves the same registered facts before
+recovering a staged row or consuming an already selected row. The desktop Join
+command still needs runtime and joined-member save dispatch.
 
 The warm owner verifies the delivery before covering possible Welcome entry, then
 seals and covers the exact successful outcome. New outcome records also retain

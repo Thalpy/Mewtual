@@ -20,6 +20,7 @@ pub(in crate::store) const NATIVE_INDEX3_FULL_FEE: usize = lifecycle::preparatio
 pub(in crate::store::critical_namespaces) mod operational;
 pub(in crate::store) mod preparation;
 
+pub use lifecycle::joined::NativeTextJoinedRegistryRowData;
 pub use operational::NativeTextInvitePublication;
 pub use operational::NativeTextJoinedRequestPreparation;
 pub use operational::NativeTextJoinedRuntime;

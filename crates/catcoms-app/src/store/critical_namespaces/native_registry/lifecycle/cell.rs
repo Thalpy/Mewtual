@@ -1,7 +1,7 @@
 //! One normal3 transaction retained inside the affine selected owner. The
 //! mutex is still held across actual IO: exclusive Rust borrowing alone would
 //! not poison the state when a file effect unwinds. Poison requires cold open.
-use super::{admission, founder, metadata, preparation, refresh, rename, wal, *};
+use super::{admission, founder, joined, metadata, preparation, refresh, rename, wal, *};
 use crate::store::{
     critical_namespaces::native_registry::preparation::NativeRegistryHandler,
     persistence::native_registry::lifecycle::upgrade::{index::IndexCommitIo, UpgradeInventory},
@@ -203,6 +203,35 @@ pub(in crate::store::critical_namespaces::native_registry) fn activate_native_fo
     )
     .map(creation_result)
 }
+
+pub(in crate::store::critical_namespaces::native_registry) fn register_joined(
+    cell: &Mutex<Cell>,
+    current: &V2CurrentLayoutStore,
+    handler: &admission::Handler,
+    request: &joined::Register,
+    original: &std::sync::Arc<
+        crate::store::persistence::governance_layout::joined::JoinedRegistrationDependency,
+    >,
+    rng: &mut impl CryptoRngCore,
+) -> Result<
+    (
+        joined::NativeTextJoinedRegistryRowData,
+        Option<CompletedDebt>,
+    ),
+    AppError,
+> {
+    let (result, debt) = change_metadata(
+        cell,
+        current,
+        handler,
+        metadata::Input::RegisterJoined(request, original),
+        rng,
+    )?;
+    let metadata::Outcome::JoinedRegistration(result) = result else {
+        unreachable!("joined registration result")
+    };
+    Ok((result, debt))
+}
 fn creation_result(
     (result, debt): (metadata::Outcome, Option<CompletedDebt>),
 ) -> (
@@ -227,8 +256,17 @@ fn change_metadata(
     let mut cell = cell.try_lock().map_err(|_| refused())?;
     handler.require()?;
     let store = current.checked_store()?;
+    if let metadata::Input::RegisterJoined(request, proof) = request {
+        if !handler.uses_joined_pin_layout() || request.original != proof.data() {
+            return Err(refused());
+        }
+        proof.require(store)?;
+    }
     if let Some(pending) = &cell.pending {
         pending.io.require_network_identity(request.network())?;
+        pending
+            .io
+            .require_joined_identity(request.joined_dependency())?;
         if !request.matches(&pending.request) {
             return Err(refused());
         }
@@ -271,14 +309,23 @@ fn change_metadata(
             if let Some(network) = request.network() {
                 network.require(store)?;
             }
+            if let Some(joined) = request.joined_dependency() {
+                joined.require(store)?;
+            }
             return Ok((result, None));
         };
         let key = Zeroizing::new(store.keys.db_key()?);
         let derived = Zeroizing::new(blake3::derive_key(preparation::INDEX_KEY, key.as_slice()));
         let plain = Zeroizing::new(candidate.encode_data()?);
         let frame = Zeroizing::new(crate::store::frame(&seal(&derived, &plain, rng)?));
-        let proof =
-            wal::verify_warm_metadata(store, &inventory, &candidate, &frame, request.kind())?;
+        let proof = wal::verify_warm_metadata(
+            store,
+            &inventory,
+            &candidate,
+            &frame,
+            request.kind(),
+            request.joined_dependency(),
+        )?;
         let mut io = IndexCommitIo::prepare(store, inventory, proof, &frame)?;
         if let Some(network) = request.network() {
             io.attach_native_network(store, network.clone())?;

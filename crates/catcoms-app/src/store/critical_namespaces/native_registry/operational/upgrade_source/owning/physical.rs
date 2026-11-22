@@ -1172,6 +1172,45 @@ impl MetadataWork {
         })
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn capture_join_registration(
+        &self,
+        pending: &JoinedPendingIo,
+    ) -> Result<
+        Arc<crate::store::persistence::governance_layout::joined::JoinedRegistrationDependency>,
+        AppError,
+    > {
+        self.with_joined_store(|store| pending.capture_registration_dependency(store))
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn register_joined(
+        &self,
+        name: String,
+        original: &Arc<
+            crate::store::persistence::governance_layout::joined::JoinedRegistrationDependency,
+        >,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<
+        (
+            crate::store::NativeTextJoinedRegistryRowData,
+            Option<cell::CompletedDebt>,
+        ),
+        AppError,
+    > {
+        use crate::store::critical_namespaces::native_registry::lifecycle::joined;
+        let request = joined::Register {
+            name,
+            original: original.data(),
+        };
+        cell::register_joined(
+            &self.physical.cell,
+            self.physical.current()?,
+            &self.physical.handler,
+            &request,
+            original,
+            rng,
+        )
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn attach_join_node<
         R: catcoms_rt::CryptoRngCore,
     >(
