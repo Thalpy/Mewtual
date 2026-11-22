@@ -126,13 +126,14 @@ fn check_payload_bounds(welcome: &[u8], sealed_routing: &[u8]) -> Result<(), Syn
 /// An actual private selected-KP Welcome result, kept with the original
 /// request. Durable joined pin, scope, source, and installation are separate.
 pub struct CompletedV2JoinCandidate {
-    device: MlsDevice,
-    group: ServerGroup,
+    pub(super) device: MlsDevice,
+    pub(super) group: ServerGroup,
     facts: V2JoinFacts,
     policy: GroupPolicy,
-    _routing_secret: Zeroizing<[u8; 32]>,
-    _file_key: Zeroizing<[u8; 32]>,
-    response_binding: Vec<u8>,
+    pub(super) routing_secret: Zeroizing<[u8; 32]>,
+    pub(super) file_key: Zeroizing<[u8; 32]>,
+    pub(super) response_binding: Vec<u8>,
+    pub(super) state: catcoms_replication::chat::owner_header::OwnerStateCommitment,
 }
 
 impl CompletedV2JoinCandidate {
@@ -337,9 +338,10 @@ impl PreparedV2JoinRequest {
                 group,
                 facts,
                 policy,
-                _routing_secret: routing_secret,
-                _file_key: file_key,
+                routing_secret,
+                file_key,
                 response_binding,
+                state: header.spec().state,
             });
         } else if self
             .completed

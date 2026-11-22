@@ -8,6 +8,9 @@ const MAX_MASTER: usize = 512 * 1024;
 const MAX_PLAIN: usize =
     4 + TAG.len() + 2 + 4 * 36 + 8 + MAX_V2_JOIN_REQUEST_PACKET_BYTES + MAX_MASTER;
 
+mod joined_outcome;
+pub use joined_outcome::SealedV2JoinedOutcome;
+
 /// The actual journal and pin owner supplies these exact immutable labels.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct V2PendingJoinContextData {
@@ -153,6 +156,7 @@ impl RecoveredV2PendingJoinSource {
             welcome_entered: false,
             completed: None,
             sealed_source: None,
+            sealed_outcome: None,
         };
         original.validate_retained_package_data()?;
         Ok(Self { original })

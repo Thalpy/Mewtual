@@ -8,6 +8,7 @@ fn v2_join_request_and_welcome_complete_with_actual_add() {
         DirectJoinLimits, PreparedV2JoinRequest, V2JoinRequestPacketData, V2JoinResponseData,
         V2JoinResponsePacketData,
     };
+    use rand_core::SeedableRng;
     // MLS itself places a lifetime on the live KeyPackage. Use the same
     // current clock for the founder fixture, then keep it fixed through Add.
     let now = catcoms_rt::Clock::now_ms(&catcoms_rt::SystemClock);
@@ -47,6 +48,20 @@ fn v2_join_request_and_welcome_complete_with_actual_add() {
         DirectJoinLimits::new(RAW, RAW, 256 * 1024).unwrap(),
     )
     .unwrap();
+    let pending = crate::V2PendingJoinContextData {
+        vault: [101; 32],
+        root: [102; 32],
+        original_pending: [103; 32],
+        pin: [104; 32],
+    };
+    let vault_key = [105; 32];
+    let mut journal_rng = rand_chacha::ChaCha20Rng::seed_from_u64(106);
+    assert!(prepared
+        .seal_joined_outcome(&vault_key, pending, &mut journal_rng)
+        .is_err());
+    prepared
+        .seal_pending_source(&vault_key, pending, &mut journal_rng)
+        .unwrap();
     let wire = prepared.request_bytes_data().to_vec();
     let packet = V2JoinRequestPacketData::decode(&wire).unwrap();
     let request = packet.founder_add_data();
@@ -181,6 +196,21 @@ fn v2_join_request_and_welcome_complete_with_actual_add() {
     assert_eq!(original, retry as *const _);
     prepared.validate_retained_package_data().unwrap();
     assert_eq!(prepared.request_bytes_data(), &wire[..]);
+    let sealed = prepared
+        .seal_joined_outcome(&vault_key, pending, &mut journal_rng)
+        .unwrap();
+    let original = sealed.encrypted_parts().1.as_ptr();
+    let retry = prepared
+        .seal_joined_outcome(&vault_key, pending, &mut journal_rng)
+        .unwrap();
+    assert_eq!(retry.encrypted_parts().1.as_ptr(), original);
+    let other = crate::V2PendingJoinContextData {
+        pin: [107; 32],
+        ..pending
+    };
+    assert!(prepared
+        .seal_joined_outcome(&vault_key, other, &mut journal_rng)
+        .is_err());
 }
 
 #[test]

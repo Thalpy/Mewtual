@@ -154,6 +154,9 @@ against the original pending join and joined pin. Reopening authenticates
 that pairing and checks that the retained provider owns the same package.
 An owning journal must still prove whether Welcome entry was possible before
 resuming SDK work.
+A successful Welcome's private graph, policy, routing secrets and verified
+binding can be sealed to that same original request for later native
+installation. The completed outcome reuses its original ciphertext on retry.
 
 The warm founder continues to use its existing ordinary-member lane after
 installation. Before signing a new action it checks the selected Head2,

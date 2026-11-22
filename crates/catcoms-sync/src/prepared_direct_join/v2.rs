@@ -11,7 +11,8 @@ use catcoms_wire::Encoder;
 mod first_add_proof;
 mod pending_source;
 pub use pending_source::{
-    RecoveredV2PendingJoinSource, SealedV2PendingJoinSource, V2PendingJoinContextData,
+    RecoveredV2PendingJoinSource, SealedV2JoinedOutcome, SealedV2PendingJoinSource,
+    V2PendingJoinContextData,
 };
 mod welcome;
 pub use first_add_proof::{
@@ -103,6 +104,7 @@ pub struct PreparedV2JoinRequest {
     welcome_entered: bool,
     completed: Option<CompletedV2JoinCandidate>,
     sealed_source: Option<SealedV2PendingJoinSource>,
+    sealed_outcome: Option<SealedV2JoinedOutcome>,
 }
 
 impl PreparedV2JoinRequest {
@@ -178,6 +180,7 @@ impl PreparedV2JoinRequest {
             welcome_entered: false,
             completed: None,
             sealed_source: None,
+            sealed_outcome: None,
         })
     }
 

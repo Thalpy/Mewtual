@@ -46,8 +46,14 @@ impl<'a> V2FirstAddProofData<'a> {
             encode_header_row(genesis.header, genesis.image).map_err(|_| SyncError::Malformed)?;
         let admission = add.admission.encode();
         let next = encode_header_row(add.header, add.image).map_err(|_| SyncError::Malformed)?;
-        let fields = [encoded_profile, founder, original, admission, next];
-        let length = FRAME_OVERHEAD + fields.iter().map(Vec::len).sum::<usize>();
+        let fields = [
+            encoded_profile.as_slice(),
+            founder.as_slice(),
+            original.as_slice(),
+            admission.as_slice(),
+            next.as_slice(),
+        ];
+        let length = FRAME_OVERHEAD + fields.iter().map(|field| field.len()).sum::<usize>();
         if length > MAX_V2_FIRST_ADD_PROOF_BYTES {
             return Err(SyncError::Malformed);
         }
@@ -55,7 +61,7 @@ impl<'a> V2FirstAddProofData<'a> {
         e.put_bytes(TAG).map_err(|_| SyncError::Malformed)?;
         e.put_u16(VERSION);
         for field in fields {
-            e.put_bytes(&field).map_err(|_| SyncError::Malformed)?;
+            e.put_bytes(field).map_err(|_| SyncError::Malformed)?;
         }
         Ok(e.finish())
     }
