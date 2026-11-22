@@ -215,7 +215,11 @@ native founder responder. The request kind selects separate transport size
 limits before the decoder allocates either body. The founder stops upon
 loss of the original response waiter. The queued reply retains the original
 native session and Source checks and pays for its transport copies through
-the lower send. Certified dialing and desktop dispatch remain open.
+the lower send. Native TCP has a separate single-subscriber JoinRequest queue
+for the original native session. Queue and reply ownership still follow the
+ordinary transport budgets and authenticated connection. The native receiver
+can retire without consuming the mesh's other events. Certified dialing and
+desktop registration of the receiver remain open.
 
 Unknown/ambiguous remnants are preserved and refused, never cleared as debris.
 Predecessor tests must use a real prior binary with positive open controls.

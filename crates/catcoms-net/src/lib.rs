@@ -119,6 +119,8 @@ use tokio::task::JoinHandle;
 
 mod connection_leases;
 mod event_dispatch;
+mod native_chat_join;
+pub use native_chat_join::{NativeChatJoinIngress, NativeChatJoinRequests};
 mod publication;
 
 /// Max request/response frame size.
@@ -3630,6 +3632,7 @@ struct Actor {
     enable_port_mapping: bool,
     cmd_rx: mpsc::Receiver<Command>,
     event_tx: mpsc::Sender<TransportEvent>,
+    native_chat_join: Option<Arc<native_chat_join::Slot>>,
     delivery: event_dispatch::Dispatcher,
     delivery_budget: Arc<event_dispatch::Budget>,
     inbound_req: HashMap<InboundRequestId, InboundRequest>,
@@ -5329,35 +5332,43 @@ impl Actor {
                     else {
                         return;
                     };
-                    let Some(credit) = self.delivery_budget.charge_request(
-                        request.len(),
-                        from,
-                        request.first().copied(),
-                    ) else {
+                    let kind = request.first().copied();
+                    let (join_slot, service) = if kind == Some(CHAT_V2_JOIN_KIND) {
+                        let Some((permit, authority)) = self
+                            .native_chat_join
+                            .as_deref()
+                            .and_then(native_chat_join::try_reserve)
+                        else {
+                            return;
+                        };
+                        (Some(permit), Some(authority))
+                    } else {
+                        (None, None)
+                    };
+                    let Some(credit) =
+                        self.delivery_budget
+                            .charge_request(request.len(), from, kind)
+                    else {
                         tracing::trace!(?from, kind = ?request.first(), bytes = request.len(),
                             "inbound request refused before application delivery");
                         return;
                     };
                     let (authority, terminal) =
-                        event_dispatch::IngressAuthority::new(ingress.clone());
+                        event_dispatch::IngressAuthority::new(ingress.clone(), service);
                     let (responder, rx) = Responder::channel_owned(
                         credit.clone(),
                         authority.clone(),
                         self.delivery_budget.clone(),
                     );
-                    if !self.delivery.queue(
-                        TransportEvent::Request {
-                            from,
-                            proto: ProtocolId(RR_PROTOCOL),
-                            data: event_dispatch::charged_bytes(
-                                Bytes::from(request),
-                                credit.clone(),
-                            ),
-                            responder,
-                        },
+                    let event = TransportEvent::Request {
                         from,
-                        ingress,
-                    ) {
+                        proto: ProtocolId(RR_PROTOCOL),
+                        data: event_dispatch::charged_bytes(Bytes::from(request), credit.clone()),
+                        responder,
+                    };
+                    if let Some(permit) = join_slot {
+                        drop(permit.send(event));
+                    } else if !self.delivery.queue(event, from, ingress) {
                         return;
                     }
                     self.inbound_req.insert(
@@ -5713,6 +5724,7 @@ pub struct MeshService {
     /// cancellation until the queued command is drained. No unbounded admission waiters.
     publish_once_slots: Arc<Semaphore>,
     event_rx: Mutex<mpsc::Receiver<TransportEvent>>,
+    native_chat_join: Option<NativeChatJoinIngress>,
     #[cfg(test)]
     test_event_tx: mpsc::Sender<TransportEvent>,
     #[cfg(test)]
@@ -5771,6 +5783,12 @@ impl MeshService {
         let local = to_peer(swarm.local_peer_id());
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(256);
+        let join_slot = native
+            .as_ref()
+            .map(|_| Arc::new(native_chat_join::Slot::default()));
+        let native_chat_join = join_slot
+            .as_ref()
+            .map(|slot| NativeChatJoinIngress(Arc::downgrade(slot)));
         #[cfg(test)]
         let test_event_tx = event_tx.clone();
         #[cfg(test)]
@@ -5808,6 +5826,7 @@ impl MeshService {
             enable_port_mapping,
             cmd_rx,
             event_tx,
+            native_chat_join: join_slot,
             delivery: event_dispatch::Dispatcher::default(),
             delivery_budget: delivery_budget.clone(),
             inbound_req: HashMap::new(),
@@ -5880,6 +5899,7 @@ impl MeshService {
             cmd_tx,
             publish_once_slots: Arc::new(Semaphore::new(publication::MAX_IN_FLIGHT)),
             event_rx: Mutex::new(event_rx),
+            native_chat_join,
             #[cfg(test)]
             test_event_tx,
             #[cfg(test)]
@@ -5900,6 +5920,12 @@ impl MeshService {
             discovered_rx: Mutex::new(discovered_rx),
             registered_rx: Mutex::new(registered_rx),
         }
+    }
+
+    /// Observe the original native-only JoinRequest lane. Ordinary transports
+    /// have no lane and drop this request kind before application delivery.
+    pub fn native_chat_join_ingress(&self) -> Option<NativeChatJoinIngress> {
+        self.native_chat_join.clone()
     }
 
     /// Read the current connected-peer/path table without consuming the ordered transport event
