@@ -216,7 +216,13 @@ pub(in crate::store::critical_namespaces::native_registry) fn observe_registered
     store: &crate::store::ServerStore,
     inventory: &crate::store::persistence::native_registry::lifecycle::upgrade::UpgradeInventory,
     original: crate::store::NativeTextJoinedRegistrationData,
-) -> Result<(crate::store::NativeTextJoinedRegistryRowData, String), AppError> {
+) -> Result<
+    (
+        crate::store::NativeTextJoinedRegistryRowData,
+        super::joined::LocalNames,
+    ),
+    AppError,
+> {
     if inventory.index_stage().is_some()
         || inventory.catalog_stage().is_some()
         || inventory.seed().is_some()
@@ -227,7 +233,7 @@ pub(in crate::store::critical_namespaces::native_registry) fn observe_registered
     let (index, _) = decode_selected_data(store, inventory)?;
     let row = super::joined::require_original(&index, original)?;
     inventory.require(store)?;
-    Ok((super::joined::receipt(row), row.name.clone()))
+    Ok((super::joined::receipt(row), super::joined::local_names(row)))
 }
 
 /// Internal paid decoder for the retained normal3 cell/inspector. The full

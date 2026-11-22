@@ -282,6 +282,7 @@ async fn complete(
                 &invite,
                 Invocation::token(&invite),
                 original.name.clone(),
+                original.display.clone(),
                 &original.account,
                 &mut OsCryptoRng,
             )
@@ -313,9 +314,14 @@ async fn publish<R: tauri::Runtime>(
     let request = original.request_data();
     let channel = channel_id("general");
     let label = original.name_data();
+    let display = original.display_name_data().unwrap_or("me");
+    if display != invocation.display {
+        resolver.reject("The invitation already has a registered display name.");
+        return;
+    }
     let response = serde_json::json!({"backend":"text-v2", "server":id,
         "context":hex::encode(request), "channel":channel.to_string(),
-        "name":label, "display_name":invocation.display.as_str(), "is_dm":false})
+        "name":label, "display_name":display, "is_dm":false})
     .to_string();
     let budget = state.servers.lock().await.native_budget();
     let built = budget
@@ -329,7 +335,7 @@ async fn publish<R: tauri::Runtime>(
                     target: invocation.target.clone(),
                     request,
                     name: label,
-                    display_name: &invocation.display,
+                    display_name: display,
                     is_dm: false,
                     channel,
                 },

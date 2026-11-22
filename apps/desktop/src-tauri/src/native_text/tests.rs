@@ -1314,10 +1314,7 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     let restored = found_value(unlocked.await.unwrap());
     let restored = restored["servers"].as_array().unwrap();
     assert_eq!(restored.len(), 1);
-    for field in ["backend", "server", "context", "channel", "name", "is_dm"] {
-        assert_eq!(restored[0][field], original[field]);
-    }
-    assert_eq!(restored[0]["display_name"], "me");
+    assert_eq!(restored[0], original);
     assert_eq!(
         std::fs::read(joiner_path.join("chat-critical-namespaces.joined-pin.index")).unwrap(),
         saved_pins

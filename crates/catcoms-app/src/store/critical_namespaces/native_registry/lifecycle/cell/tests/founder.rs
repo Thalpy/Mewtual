@@ -339,13 +339,17 @@ fn lifecycle3_founder_wal_preserves_valid_unsupported_joined_and_legacy_stages()
                             initial_governing_tip: [86; 32],
                             initial_current_basis: [87; 32],
                             joined_epoch: 1,
+                            local_display: None,
                         },
                     },
                     BirthKind::LegacyJoin => Backend::Legacy {
                         origin: LegacyOrigin::Admitted(birth),
                         invite: "future invite".into(),
                     },
-                    BirthKind::Founder | BirthKind::NativeFounder | BirthKind::NativeJoined => {
+                    BirthKind::Founder
+                    | BirthKind::NativeFounder
+                    | BirthKind::NativeJoined
+                    | BirthKind::NativeJoinedNamed => {
                         unreachable!("this control exercises joined and legacy-join kinds only")
                     }
                 };

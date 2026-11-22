@@ -1101,7 +1101,13 @@ impl MetadataWork {
         warm: Option<
             &crate::store::persistence::governance_layout::joined::JoinedRegistrationDependency,
         >,
-    ) -> Result<(crate::store::NativeTextJoinedRegistryRowData, String), AppError> {
+    ) -> Result<
+        (
+            crate::store::NativeTextJoinedRegistryRowData,
+            super::super::super::super::lifecycle::joined::LocalNames,
+        ),
+        AppError,
+    > {
         self.with_joined_store(|store| {
             let inventory = UpgradeInventory::capture(
                 store,
@@ -1275,6 +1281,7 @@ impl MetadataWork {
     pub(in crate::store::critical_namespaces::native_registry) fn register_joined(
         &self,
         name: String,
+        display: String,
         original: &Arc<
             crate::store::persistence::governance_layout::joined::JoinedRegistrationDependency,
         >,
@@ -1289,6 +1296,7 @@ impl MetadataWork {
         use crate::store::critical_namespaces::native_registry::lifecycle::joined;
         let request = joined::Register {
             name,
+            display,
             original: original.data(),
         };
         cell::register_joined(

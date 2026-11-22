@@ -1,4 +1,5 @@
 //! Affine capture for the first accepted request on a mounted native vault.
+use super::super::super::lifecycle::joined::LocalNames;
 use super::super::governed::{
     connect_approved_host, receive_connected_join, ConnectedJoinDelivery, JoinFramePayment,
     NativeTextJoinedStorage,
@@ -584,7 +585,7 @@ pub struct NativeTextJoinedRowSelection {
 
 struct JoinedRowSelection {
     row: NativeTextJoinedRegistryRowData,
-    name: String,
+    names: LocalNames,
     request: [u8; 32],
     scope: Arc<Scope>,
     retired: AtomicBool,
@@ -604,7 +605,10 @@ impl NativeTextJoinedRowSelection {
         self.original.row.id
     }
     pub fn name_data(&self) -> &str {
-        &self.original.name
+        &self.original.names.group
+    }
+    pub fn display_name_data(&self) -> Option<&str> {
+        self.original.names.display.as_deref()
     }
     pub fn request_data(&self) -> [u8; 32] {
         self.original.request
@@ -686,7 +690,7 @@ impl<R: CryptoRngCore> MountedNode<R> {
         &self,
         metadata: &MetadataWork,
         data: NativeTextJoinedRegistrationData,
-    ) -> Result<(NativeTextJoinedRegistryRowData, String), AppError> {
+    ) -> Result<(NativeTextJoinedRegistryRowData, LocalNames), AppError> {
         let actual = self.node.as_ref().ok_or_else(refused)?;
         if data.selected_data() != actual.selected_join_data().map_err(|_| refused())? {
             return Err(refused());
@@ -697,7 +701,7 @@ impl<R: CryptoRngCore> MountedNode<R> {
     fn select(
         &mut self,
         row: NativeTextJoinedRegistryRowData,
-        name: String,
+        names: LocalNames,
         request: [u8; 32],
         scope: &Arc<Scope>,
         keys: Option<NativeChatSourceClose>,
@@ -708,7 +712,7 @@ impl<R: CryptoRngCore> MountedNode<R> {
             .get_or_insert_with(|| NativeTextJoinedRowSelection {
                 original: Arc::new(JoinedRowSelection {
                     row,
-                    name,
+                    names,
                     request,
                     scope: scope.clone(),
                     retired: AtomicBool::new(false),
@@ -774,6 +778,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         invite: &NativeTextInvitePacketData<'_>,
         token: [u8; 32],
         name: String,
+        display: String,
         negative: &RequestCancellation,
         rng: &mut impl CryptoRngCore,
     ) -> Result<NativeTextJoinedRegistryRowData, AppError> {
@@ -809,7 +814,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                     return Err(refused());
                 }
                 self.original.require_current(negative)?;
-                metadata.register_joined(name, proof, rng)?
+                metadata.register_joined(name, display, proof, rng)?
             }
         };
         drop(debt);

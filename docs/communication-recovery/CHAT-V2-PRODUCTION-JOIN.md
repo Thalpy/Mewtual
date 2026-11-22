@@ -266,8 +266,8 @@ The cold runtime can move the same physical vault, actor and closed graph into
 a fresh native UI and Sources pair. Fresh authenticated inspection checks the
 original registered row without another Welcome. Desktop startup installs that
 pair and its prepared row together. The row keeps its registered group name,
-numeric ID and request context. The cold row currently uses the local default
-display label because the first joined registry receipt records no display name.
+numeric ID, request context and local display label. The older joined row tag
+remains readable and uses the default local display label on cold reopen.
 
 The warm owner verifies the delivery before covering possible Welcome entry, then
 seals and covers the exact successful outcome. New outcome records also retain

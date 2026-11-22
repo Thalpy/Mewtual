@@ -14,16 +14,26 @@ pub struct NativeTextJoinedRegistryRowData {
     pub identity: [u8; 32],
 }
 
+pub(in crate::store::critical_namespaces::native_registry) struct LocalNames {
+    pub(in crate::store::critical_namespaces::native_registry) group: String,
+    pub(in crate::store::critical_namespaces::native_registry) display: Option<String>,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub(in crate::store::critical_namespaces::native_registry) struct Register {
     pub(in crate::store::critical_namespaces::native_registry) name: String,
+    pub(in crate::store::critical_namespaces::native_registry) display: String,
     pub(in crate::store::critical_namespaces::native_registry) original:
         NativeTextJoinedRegistrationData,
 }
 
 impl Register {
     pub(super) fn require_bounded(&self) -> Result<(), AppError> {
-        if self.name.is_empty() || self.name.len() > super::super::data::MAX_NAME {
+        if self.name.trim().is_empty()
+            || self.name.len() > super::super::data::MAX_NAME
+            || self.display.trim().is_empty()
+            || self.display.len() > super::super::data::MAX_NAME
+        {
             return Err(refused());
         }
         Ok(())
@@ -41,7 +51,7 @@ impl Register {
         let mut candidate = successor(&selected, parent)?;
         let id = selected.last_issued_id.checked_add(1).ok_or_else(refused)?;
         candidate.last_issued_id = id;
-        let (identity, backend) = binding(original);
+        let (identity, backend) = binding(original, Some(self.display.clone()));
         candidate.rows.push(Row {
             id,
             identity,
@@ -63,12 +73,19 @@ impl Register {
     }
 }
 
-fn binding(original: NativeTextJoinedRegistrationData) -> ([u8; 32], Backend) {
+fn binding(
+    original: NativeTextJoinedRegistrationData,
+    display: Option<String>,
+) -> ([u8; 32], Backend) {
     let context = original.context;
     let selected = original.selected;
     let identity = blake3::derive_key("catcoms/native-joined-row/v2", &context.original_pending);
     let birth = Birth {
-        kind: BirthKind::NativeJoined,
+        kind: if display.is_some() {
+            BirthKind::NativeJoinedNamed
+        } else {
+            BirthKind::NativeJoined
+        },
         invocation: original.invocation,
         request: original.request,
         signer: original.signer,
@@ -88,6 +105,7 @@ fn binding(original: NativeTextJoinedRegistrationData) -> ([u8; 32], Backend) {
         initial_governing_tip: *selected.governing_add.as_bytes(),
         initial_current_basis: selected.state,
         joined_epoch: selected.epoch,
+        local_display: display,
     };
     (identity, Backend::Joined { birth, binding })
 }
@@ -103,7 +121,7 @@ fn native_rows(index: &Index) -> impl Iterator<Item = &Row> {
     index.rows.iter().filter(|row| {
         row.backend
             .birth()
-            .is_some_and(|birth| birth.kind == BirthKind::NativeJoined)
+            .is_some_and(|birth| birth.kind.is_native_joined())
     })
 }
 
@@ -125,9 +143,23 @@ pub(super) fn require_original(
 }
 
 fn match_row(row: &Row, original: NativeTextJoinedRegistrationData) -> Result<(), AppError> {
-    let (identity, backend) = binding(original);
+    let (identity, backend) = binding(original, local_display(row).map(str::to_owned));
     if row.identity != identity || row.backend != backend || row.is_dm {
         return Err(refused());
     }
     Ok(())
+}
+
+pub(super) fn local_names(row: &Row) -> LocalNames {
+    LocalNames {
+        group: row.name.clone(),
+        display: local_display(row).map(str::to_owned),
+    }
+}
+
+fn local_display(row: &Row) -> Option<&str> {
+    match &row.backend {
+        Backend::Joined { binding, .. } => binding.local_display.as_deref(),
+        _ => None,
+    }
 }

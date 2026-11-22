@@ -24,10 +24,15 @@ pub(in crate::store::critical_namespaces::native_registry) enum BirthKind {
     NativeFounder,
     /// Actual completed native joined source and separately held Welcome.
     NativeJoined,
+    /// The same completed source with its locally chosen display label.
+    NativeJoinedNamed,
 }
 impl BirthKind {
     pub(super) fn is_founder(self) -> bool {
         matches!(self, Self::Founder | Self::NativeFounder)
+    }
+    pub(super) fn is_native_joined(self) -> bool {
+        matches!(self, Self::NativeJoined | Self::NativeJoinedNamed)
     }
 }
 
@@ -70,6 +75,7 @@ pub(super) struct JoinedBinding {
     // Original own-Add epoch, not the running node's current epoch. Later
     // membership transitions need the independently replayed live source.
     pub(super) joined_epoch: u64,
+    pub(super) local_display: Option<String>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -232,7 +238,7 @@ impl Index {
                 if birth.kind.is_founder() != birth.join_context.is_none() {
                     return Err(refused());
                 }
-                if birth.kind == BirthKind::NativeJoined {
+                if birth.kind.is_native_joined() {
                     if native_joined || row.is_dm || !matches!(row.backend, Backend::Joined { .. })
                     {
                         return Err(refused());
@@ -269,14 +275,19 @@ impl Index {
                 }
                 Backend::Joined { birth, binding }
                 | Backend::RetiredJoined { birth, binding, .. } => {
-                    if !matches!(birth.kind, BirthKind::Joined | BirthKind::NativeJoined)
+                    if (birth.kind != BirthKind::Joined && !birth.kind.is_native_joined())
                         || birth.signer != binding.signer
                         || birth.join_context != Some(binding.join_context)
                         || binding.vault != self.capability.original.vault
                         || binding.layout != self.capability.original.root
                         || binding.group.is_empty()
                         || binding.group.len() > 256
-                        || (birth.kind == BirthKind::NativeJoined && binding.group.len() != 16)
+                        || (birth.kind.is_native_joined() && binding.group.len() != 16)
+                        || (birth.kind == BirthKind::NativeJoinedNamed)
+                            != binding.local_display.is_some()
+                        || binding.local_display.as_ref().is_some_and(|value| {
+                            value.trim().is_empty() || value.len() > original::MAX_NAME
+                        })
                     {
                         return Err(refused());
                     }
@@ -329,7 +340,7 @@ impl Index {
             }
             return match &added.backend {
                 Backend::Pending { .. } => Ok(Change::Birth),
-                Backend::Joined { birth, .. } if birth.kind == BirthKind::NativeJoined => {
+                Backend::Joined { birth, .. } if birth.kind.is_native_joined() => {
                     Ok(Change::RegisterNativeJoined)
                 }
                 _ => Err(refused()),

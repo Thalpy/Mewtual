@@ -67,7 +67,7 @@ impl ReadyBundle {
                 target: authentication,
                 request: selected.request_data(),
                 name: selected.name_data(),
-                display_name: "me",
+                display_name: selected.display_name_data().unwrap_or("me"),
                 is_dm: false,
                 channel: channel_id("general"),
             },
