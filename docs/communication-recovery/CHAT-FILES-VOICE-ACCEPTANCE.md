@@ -35,8 +35,9 @@ passed all four original-runtime lock and retirement cases on both platforms.
 [App CI](https://github.com/Thalpy/Mewtual/actions/runs/45028313884) ·
 [Desktop lock CI](https://github.com/Thalpy/Mewtual/actions/runs/45028313513).
 
-At `f08b7282`, Linux passed the focused workflow, including actual Host SDK
-execution and Header signing, plus the pinned predecessor check.
+At `f08b7282`, Linux and Windows passed the native invitation cohort through
+actual Host SDK execution and Header signing. Linux also passed the pinned
+predecessor check.
 [Warm Host CI](https://github.com/Thalpy/Mewtual/actions/runs/45029874030).
 
 ## Invitation and join branch CI (22 November 2026)

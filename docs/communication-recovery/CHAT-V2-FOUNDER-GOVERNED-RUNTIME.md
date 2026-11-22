@@ -271,7 +271,11 @@ routing transfer. `text.add.welcome-attempt.v2` binds that exact sealed intent
 with a dedicated signing domain. The Host verifies the cached native
 signature against the same intent and signer before covering
 `text.add.raw-welcome.v2` against the original attempt. Each advance rechecks
-the original Current. The response and Head2 still require separate coverage.
+the original Current. The read-only recovery path checks the exact request,
+governing record, and Outcome before authenticating the Welcome intent. It
+classifies possible key entry separately from a verified cached signature.
+Fresh Current rechecks the held files and observed absences. Response coverage
+and Head2 selection remain separate steps.
 
 `text.add.governing.v2` binds the exact Raw Header to the signed Admission
 and state image. The reader checks the existing public history encoding and

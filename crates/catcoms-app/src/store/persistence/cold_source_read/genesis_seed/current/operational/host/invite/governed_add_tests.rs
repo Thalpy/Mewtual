@@ -16,8 +16,8 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         mut inject: impl FnMut(&str, bool),
     ) -> Result<(), AppError> {
         use crate::store::persistence::v2_text::{
-            GovernedAddHeaderRecoveryState, GovernedAddRecoveryState, PreparedGovernedAddFence,
-            SelectedV2TextHead,
+            GovernedAddHeaderRecoveryState, GovernedAddRecoveryState,
+            GovernedAddWelcomeRecoveryState, PreparedGovernedAddFence, SelectedV2TextHead,
         };
         self.reserve_governed_add(layout, packet, routing_plan, keys, rng, negative)?;
         assert!(self
@@ -232,6 +232,20 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             Ok::<_, AppError>(reader)
         };
         let mut before_record = read_record(fence, &owner, selected)?;
+        let read_welcome = |fence: &PreparedGovernedAddFence,
+                            owner: &V2TextOwnerRef<'_>,
+                            selected: &SelectedV2TextHead| {
+            let mut reader = read_record(fence, owner, selected)?;
+            store.with_v2_text_current(owner, |admission| {
+                let guard = store.lock_v2_text_current_group(admission, &resources)?;
+                reader.capture_welcome(&guard, selected)
+            })?;
+            assert!(reader
+                .authenticate_welcome(store, owner.source(), replacement)
+                .is_err());
+            reader.authenticate_welcome(store, owner.source(), packet)?;
+            Ok::<_, AppError>(reader)
+        };
         store.with_v2_text_current(&owner, |admission| {
             let guard = store.lock_v2_text_current_group(admission, &resources)?;
             assert!(before_record
@@ -266,6 +280,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             );
             Ok(())
         })?;
+        drop((before_record, saved_record, fresh, verified));
 
         let mut changed = self.owner.freeze_governed_welcome(store)?;
         *changed.last_mut().unwrap() ^= 1;
@@ -276,9 +291,35 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             .fence
             .prepare_welcome_intent(store, owner.source(), packet, &outcome, &changed, rng)
             .is_err());
+        let selected = p.parent.selected_data().ok_or_else(refused)?;
+        let mut before_intent = read_welcome(&p.fence, &owner, selected)?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            assert_eq!(
+                before_intent.require_welcome_current(&guard, selected)?,
+                GovernedAddWelcomeRecoveryState::GoverningOnly
+            );
+            Ok(())
+        })?;
         for _ in 0..2 {
             self.cover_governed_welcome_intent(layout, packet, routing_plan, keys, rng, negative)?;
         }
+        let p = self.governed_add.as_ref().ok_or_else(refused)?;
+        let owner = self.owner.borrow_current()?;
+        let selected = p.parent.selected_data().ok_or_else(refused)?;
+        let mut intent_only = read_welcome(&p.fence, &owner, selected)?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            assert!(before_intent
+                .require_welcome_current(&guard, selected)
+                .is_err());
+            assert_eq!(
+                intent_only.require_welcome_current(&guard, selected)?,
+                GovernedAddWelcomeRecoveryState::IntentCovered
+            );
+            Ok(())
+        })?;
+        drop(before_intent);
         self.sign_governed_welcome(layout, packet, routing_plan, keys, rng, negative)?;
         let welcome_raw = self
             .owner
@@ -289,6 +330,36 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             self.owner.cached_governed_welcome_raw(store)?,
             Some(welcome_raw)
         );
+        let p = self.governed_add.as_ref().ok_or_else(refused)?;
+        let owner = self.owner.borrow_current()?;
+        let selected = p.parent.selected_data().ok_or_else(refused)?;
+        inject("text.add.raw-welcome.v2", true);
+        let mut attempt_only = read_welcome(&p.fence, &owner, selected)?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            assert!(intent_only
+                .require_welcome_current(&guard, selected)
+                .is_err());
+            assert_eq!(
+                attempt_only.require_welcome_current(&guard, selected)?,
+                GovernedAddWelcomeRecoveryState::PossiblyEntered
+            );
+            Ok(())
+        })?;
+        drop(intent_only);
+        inject("text.add.raw-welcome.v2", false);
+        let mut exact = read_welcome(&p.fence, &owner, selected)?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            assert!(attempt_only
+                .require_welcome_current(&guard, selected)
+                .is_err());
+            assert_eq!(
+                exact.require_welcome_current(&guard, selected)?,
+                GovernedAddWelcomeRecoveryState::SignatureRecovered(welcome_raw)
+            );
+            Ok(())
+        })?;
         Ok(())
     }
 }

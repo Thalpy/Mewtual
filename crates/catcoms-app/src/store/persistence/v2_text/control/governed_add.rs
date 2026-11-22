@@ -107,6 +107,13 @@ impl GovernedAddFenceData {
         Ok(())
     }
 
+    fn require_packet(self, packet: &V2JoinRequestPacketData<'_>) -> Result<(), AppError> {
+        if self != Self::for_request(self.context, self.parent, packet) {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
     fn wal_key(key: &[u8; 32]) -> Zeroizing<[u8; 32]> {
         Zeroizing::new(blake3::derive_key(
             TextControlKindData::Wal.domains().1,

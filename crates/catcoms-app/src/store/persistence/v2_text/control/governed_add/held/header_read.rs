@@ -4,6 +4,7 @@ use super::super::outcome::header_signing_bytes;
 use super::*;
 
 mod governing;
+pub(in crate::store) use governing::GovernedAddWelcomeRecoveryState;
 use governing::ObservedGoverning;
 
 pub(super) struct ObservedHeader {

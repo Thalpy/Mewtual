@@ -3,7 +3,8 @@
 //! complete a partial write, enter MLS, or return a covering save receipt.
 use super::governing_record;
 use super::header_signing::{
-    ATTEMPT_BYTES, ATTEMPT_NAME, RAW_BYTES, RAW_NAME, WELCOME_ATTEMPT_NAME, WELCOME_RAW_NAME,
+    ATTEMPT_BYTES, ATTEMPT_NAME, RAW_BYTES, RAW_NAME, WELCOME_ATTEMPT_BYTES, WELCOME_ATTEMPT_NAME,
+    WELCOME_RAW_BYTES, WELCOME_RAW_NAME,
 };
 use super::outcome::OUTCOME_NAME;
 use super::sdk_entry::{GovernedAddSdkEntryData, ENTRY_BYTES, SDK_ENTRY_NAME};
@@ -28,7 +29,9 @@ const FILE_COMPARE_BYTES: usize = 8192;
 
 mod header_read;
 mod outcome_read;
-pub(in crate::store) use header_read::GovernedAddHeaderRecoveryState;
+pub(in crate::store) use header_read::{
+    GovernedAddHeaderRecoveryState, GovernedAddWelcomeRecoveryState,
+};
 mod writer;
 pub(in crate::store) use writer::PreparedGovernedAddFence;
 
@@ -86,7 +89,7 @@ pub(in crate::store) enum GovernedAddRecoveryState {
 const FENCE_READ_BYTES: usize = 9 * MAX_TEXT_PATH
     + 6 * FRAME_BYTES
     + 6 * ENTRY_BYTES
-    + 6 * (ATTEMPT_BYTES + RAW_BYTES)
+    + 6 * (ATTEMPT_BYTES + RAW_BYTES + WELCOME_ATTEMPT_BYTES + WELCOME_RAW_BYTES)
     + 10 * governing_record::MAX_BYTES
     + 8 * welcome_intent::MAX_BYTES
     + FILE_COMPARE_BYTES

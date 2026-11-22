@@ -1,6 +1,6 @@
 //! Physical coverage of the original Add's Welcome intent and key stages.
 use super::*;
-use catcoms_replication::chat::join_bindings::{JoinPayloadKindData, WelcomeBindingSpecData};
+use catcoms_replication::chat::join_bindings::WelcomeBindingSpecData;
 
 pub(super) struct PreparedWelcomeSigning {
     parent: AddSigningParent,
@@ -22,6 +22,7 @@ impl PreparedGovernedAddFence {
         self.held
             .resources
             .require_bound_original_negative(store, source)?;
+        self.held.expected.require_packet(packet)?;
         let header = self.header.as_mut().ok_or_else(refused)?;
         let (id, record) = header
             .governing
@@ -40,33 +41,18 @@ impl PreparedGovernedAddFence {
         outcome.require_request_data(input)?;
         let spec =
             WelcomeBindingSpecData::decode_signing_bytes_data(preimage).map_err(|_| refused())?;
-        let request = input.request.spec_data();
-        let invite = input.invite.spec_data();
         let result = outcome.result_data();
         let sealed = result
             .sealed_routing_transfer_data()
             .map_err(|_| refused())?;
-        if spec.invite != input.invite.id_data()
-            || spec.anchor != request.anchor
-            || spec.request_binding != input.request.id_data()
-            || spec.key_package_wire != request.key_package_wire
-            || spec.key_package_reference != request.key_package_reference
-            || spec.admitter != source.data().context.spec_data().signer
-            || spec.add_header != *id.as_bytes()
-            || spec.admission != *outcome.admission_data().admission_id().as_bytes()
-            || spec.policy != invite.policy
-            || spec.public_routing_plan != invite.public_routing_plan
-            || spec.welcome
-                != JoinPayloadKindData::Welcome
-                    .commitment_data(result.welcome_data())
-                    .map_err(|_| refused())?
-            || spec.sealed_routing_transfer
-                != JoinPayloadKindData::RoutingTransfer
-                    .commitment_data(sealed)
-                    .map_err(|_| refused())?
-        {
-            return Err(refused());
-        }
+        welcome_intent::require_original_binding(
+            &spec,
+            packet,
+            source.data().context.spec_data().signer,
+            *id,
+            outcome.admission_data().admission_id(),
+            [result.welcome_data(), sealed],
+        )?;
 
         let digest = *blake3::hash(preimage).as_bytes();
         if let Some((original, _)) = &header.welcome {

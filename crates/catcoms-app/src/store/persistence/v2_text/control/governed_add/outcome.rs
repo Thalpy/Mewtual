@@ -212,6 +212,11 @@ pub(super) fn governing_bodies<'a>(
     Ok([fields.bodies[4], fields.bodies[5], fields.bodies[6]])
 }
 
+pub(super) fn welcome_bodies<'a>(entry: &[u8], plain: &'a [u8]) -> Result<[&'a [u8]; 2], AppError> {
+    let fields = decode_outcome_fields(plain, entry_digest(entry)?)?;
+    Ok([fields.bodies[1], fields.bodies[3]])
+}
+
 fn decode_outcome_fields(plain: &[u8], parent: [u8; 32]) -> Result<OutcomeFields<'_>, AppError> {
     let mut d = Decoder::new(plain);
     if field(&mut d, TAG.len())? != TAG

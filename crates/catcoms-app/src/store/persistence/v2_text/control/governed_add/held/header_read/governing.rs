@@ -3,10 +3,15 @@ use super::super::super::outcome::governing_bodies;
 use super::*;
 use catcoms_replication::chat::owner_header::SignedOwnerHeader;
 
+mod welcome;
+pub(in crate::store) use welcome::GovernedAddWelcomeRecoveryState;
+use welcome::ObservedWelcome;
+
 pub(super) struct ObservedGoverning {
     original: Option<OpenedTextControl>,
     verified: bool,
     header: Option<SignedOwnerHeader>,
+    welcome: Option<ObservedWelcome>,
 }
 
 impl HeldGovernedAddFence {
@@ -33,6 +38,7 @@ impl HeldGovernedAddFence {
             original,
             verified: false,
             header: None,
+            welcome: None,
         });
         guard.validate_source_only()
     }

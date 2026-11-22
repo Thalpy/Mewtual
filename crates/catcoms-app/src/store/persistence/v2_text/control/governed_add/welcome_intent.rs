@@ -1,6 +1,10 @@
 //! The original unsigned Welcome preimage, bound to the exact governing row.
 use super::*;
-use catcoms_replication::chat::join_bindings::{WelcomeBindingSpecData, MAX_JOIN_BINDING_BYTES};
+use catcoms_replication::chat::{
+    join_bindings::{JoinPayloadKindData, WelcomeBindingSpecData, MAX_JOIN_BINDING_BYTES},
+    owner_facts::OwnerFactId,
+    owner_header::OwnerHeaderId,
+};
 
 pub(super) const NAME: &str = "text.add.welcome-intent.v2";
 
@@ -17,6 +21,41 @@ fn parent(frame: &[u8]) -> Result<[u8; 32], AppError> {
         return Err(refused());
     }
     Ok(blake3::derive_key(PARENT_DOMAIN, frame))
+}
+
+pub(super) fn require_original_binding(
+    spec: &WelcomeBindingSpecData,
+    packet: &V2JoinRequestPacketData<'_>,
+    signer: [u8; 32],
+    header: OwnerHeaderId,
+    admission: OwnerFactId,
+    [welcome, routing]: [&[u8]; 2],
+) -> Result<(), AppError> {
+    let input = packet.founder_add_data();
+    let request = input.request.spec_data();
+    let invite = input.invite.spec_data();
+    if spec.invite != input.invite.id_data()
+        || spec.anchor != request.anchor
+        || spec.request_binding != input.request.id_data()
+        || spec.key_package_wire != request.key_package_wire
+        || spec.key_package_reference != request.key_package_reference
+        || spec.admitter != signer
+        || spec.add_header != *header.as_bytes()
+        || spec.admission != *admission.as_bytes()
+        || spec.policy != invite.policy
+        || spec.public_routing_plan != invite.public_routing_plan
+        || spec.welcome
+            != JoinPayloadKindData::Welcome
+                .commitment_data(welcome)
+                .map_err(|_| refused())?
+        || spec.sealed_routing_transfer
+            != JoinPayloadKindData::RoutingTransfer
+                .commitment_data(routing)
+                .map_err(|_| refused())?
+    {
+        return Err(refused());
+    }
+    Ok(())
 }
 
 pub(super) fn seal_data(
