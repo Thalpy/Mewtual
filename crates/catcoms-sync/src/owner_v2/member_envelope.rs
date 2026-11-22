@@ -57,6 +57,17 @@ impl V2MemberPublicationObservation {
     pub fn is_current_cached(&self) -> bool {
         self.member.is_live_cached() && self.fence.is_current_cached()
     }
+
+    /// Retire the exact mesh operation with the native caller, Core group or
+    /// selected MLS fence. Preserve the original caller and its paid custody.
+    pub fn constrain(self, caller: RequestCancellation) -> RequestCancellation {
+        let authority = Arc::new(MemberTransportAuthority {
+            caller: caller.clone(),
+            observation: self,
+            retired: AtomicBool::new(false),
+        });
+        caller.with_authority(authority)
+    }
 }
 
 impl PreparedV2MemberSubmission {
@@ -73,34 +84,29 @@ impl PreparedV2MemberSubmission {
             wire,
             observation,
         } = self;
-        let authority = Arc::new(MemberSubmissionAuthority {
-            caller: caller.clone(),
-            observation,
-            retired: AtomicBool::new(false),
-        });
-        if !authority.authorized() {
+        let checked = observation.constrain(caller);
+        if checked.is_cancelled() {
             return Err(catcoms_rt::PublishOnceError::Revoked.into());
         }
-        let checked = caller.with_authority(authority);
         Ok(transport.submit(topic, wire, checked).await?)
     }
 }
 
-struct MemberSubmissionAuthority {
+struct MemberTransportAuthority {
     caller: RequestCancellation,
     observation: V2MemberPublicationObservation,
     retired: AtomicBool,
 }
 
-impl std::fmt::Debug for MemberSubmissionAuthority {
+impl std::fmt::Debug for MemberTransportAuthority {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MemberSubmissionAuthority")
+        f.debug_struct("MemberTransportAuthority")
             .finish_non_exhaustive()
     }
 }
 
 #[async_trait::async_trait]
-impl RequestAuthority for MemberSubmissionAuthority {
+impl RequestAuthority for MemberTransportAuthority {
     fn authorized(&self) -> bool {
         if self.retired.load(Ordering::Acquire) {
             return false;
@@ -197,6 +203,10 @@ pub struct SelectedV2MemberEnvelope {
 }
 
 impl SelectedV2MemberEnvelope {
+    pub fn is_current_cached(&self) -> bool {
+        self.observation.is_current_cached()
+    }
+
     pub fn original_data(&self) -> &[u8] {
         self.opened.original_data()
     }
@@ -265,7 +275,7 @@ impl SelectedV2MemberEnvelope {
         verifier: &V2GeneralPrefixVerifier,
     ) -> Result<V2AuthenticatedAdmission, ChatError> {
         let scope = &self.opened.scope;
-        if !self.observation.is_current_cached()
+        if !self.is_current_cached()
             || !self
                 .recipient
                 .same_original(&verifier.admission(self.recipient_id)?)

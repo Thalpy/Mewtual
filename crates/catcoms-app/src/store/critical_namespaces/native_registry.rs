@@ -52,8 +52,9 @@ pub use operational::{
 };
 pub use operational::{NativeTextJoinedMemberFinalPreparation, NativeTextJoinedMemberSaveJob};
 pub use operational::{
-    NativeTextJoinedMemberPublication, NativeTextJoinedMemberPublicationReceipt,
-    NativeTextJoinedSelectionPreparation,
+    NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberPublication,
+    NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
+    NativeTextJoinedReceivedOriginal, NativeTextJoinedSelectionPreparation,
 };
 pub use preparation::{
     NativeRegistryInstallation, NativeRegistryPolicy, NativeRegistryPreparationPolicy,

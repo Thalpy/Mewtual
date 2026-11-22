@@ -43,6 +43,11 @@ mod publication;
 pub use publication::{
     NativeTextJoinedMemberPublication, NativeTextJoinedMemberPublicationReceipt,
 };
+mod receive;
+pub use receive::{
+    NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberReceiver,
+    NativeTextJoinedReceivedOriginal,
+};
 
 #[derive(Default)]
 pub(super) struct PendingJoin {

@@ -94,7 +94,9 @@ action and claimed Admission in authenticated padding. Exporting this key leaves
 application sender ratchet unchanged. Receivers still need the original selected Core
 prefix to validate the claimed Admission before projection. The joined runtime derives the
 blinded topic from the distinct MLS metadata exporter and checks the actual selected
-verifier and received topic before opening the envelope. The receiver can import into an
+verifier and received topic before opening the envelope. The mounted row can subscribe on
+its original native mesh and open bounded frames from that same live registration. The
+driver reports receive pressure so a caller can recover missing originals. The receiver can import into an
 original channel ledger with exact dependencies. The resulting effect is provisional and
 requires the receiver's actual view and current sender Admission. An original opened by
 one source cannot be applied through another source with equal cryptographic bytes.

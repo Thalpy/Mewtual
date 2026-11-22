@@ -96,8 +96,9 @@ pub use native_registry::{
 };
 pub use native_registry::{NativeTextJoinedMemberFinalPreparation, NativeTextJoinedMemberSaveJob};
 pub use native_registry::{
-    NativeTextJoinedMemberPublication, NativeTextJoinedMemberPublicationReceipt,
-    NativeTextJoinedSelectionPreparation,
+    NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberPublication,
+    NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
+    NativeTextJoinedReceivedOriginal, NativeTextJoinedSelectionPreparation,
 };
 pub(super) mod read_pool;
 pub use read_pool::CriticalCatalogReadPool;

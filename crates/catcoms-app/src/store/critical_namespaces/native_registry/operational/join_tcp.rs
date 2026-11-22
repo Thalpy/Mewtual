@@ -1,7 +1,7 @@
 //! The original reserved TCP actor temporarily belongs to one invitation job.
 use super::sources::NativeTextSourceRetirementRefusal;
 use super::*;
-use catcoms_net::{MeshService, NativeTcpPreparation};
+use catcoms_net::{MeshService, NativeChatMemberIngress, NativeTcpPreparation};
 use catcoms_rt::{MeshTransport, PeerId};
 use std::sync::Mutex;
 use zeroize::Zeroizing;
@@ -15,6 +15,7 @@ pub(super) struct Transport {
 struct Attempt {
     original: NativeTcpPreparation,
     state: State,
+    members: Option<NativeChatMemberIngress>,
 }
 
 enum State {
@@ -75,10 +76,12 @@ impl Transport {
             *slot = Some(Attempt {
                 original,
                 state: State::Starting,
+                members: None,
             });
             let attempt = slot.as_mut().expect("original TCP attempt");
             match attempt.original.build(key, &listen, &[]) {
                 Ok((service, _, _)) if service.local_peer() == peer => {
+                    attempt.members = service.native_chat_member_ingress();
                     attempt.state = State::Idle(Box::new(service));
                 }
                 Ok(_) => return Err(refused()),
@@ -101,6 +104,16 @@ impl Transport {
             original: self.clone(),
             attached: false,
         })
+    }
+
+    pub(super) fn capture_member_ingress(&self) -> Result<NativeChatMemberIngress, AppError> {
+        self.attempt
+            .try_lock()
+            .map_err(|_| refused())?
+            .as_ref()
+            .filter(|attempt| matches!(attempt.state, State::Attached | State::Loaned))
+            .and_then(|attempt| attempt.members.clone())
+            .ok_or_else(refused)
     }
 
     pub(super) fn try_retire(&self) -> Result<bool, NativeTextSourceRetirementRefusal> {

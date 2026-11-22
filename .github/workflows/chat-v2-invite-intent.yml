@@ -35,6 +35,10 @@ on:
       - 'crates/catcoms-net/src/seeded_identity.rs'
       - 'crates/catcoms-net/src/bytes_codec_tests.rs'
       - 'crates/catcoms-net/src/lib.rs'
+      - 'crates/catcoms-net/src/native_chat_members.rs'
+      - 'crates/catcoms-net/src/publication/**'
+      - 'crates/catcoms-sync/src/owner_v2/member_envelope.rs'
+      - 'crates/catcoms-replication/src/chat/projection_admission/v2_general/ordinary.rs'
       - 'crates/catcoms-rt/src/transport.rs'
       - 'crates/catcoms-mls/src/policy.rs'
       - 'crates/catcoms-mls/src/group.rs'
@@ -282,6 +286,9 @@ jobs:
       - name: Check ordinary receiver dependency ordering and provisional projection
         if: inputs.scope == 'joined-member'
         run: python .github/scripts/check-chat-v2-invite-intent.py member-receive-dependencies
+      - name: Check bounded native member ingress over real TCP
+        if: inputs.scope == 'joined-member'
+        run: python .github/scripts/check-chat-v2-invite-intent.py member-receive-native
       - name: Check Chat V2 request and response bounds before allocation
         if: inputs.scope == 'joined-storage'
         run: python .github/scripts/check-chat-v2-invite-intent.py joined-wire

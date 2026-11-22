@@ -20,10 +20,11 @@ pub use invite::NativeTextInvitePublication;
 mod join;
 pub use join::{
     NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,
-    NativeTextJoinedMemberFinalPreparation, NativeTextJoinedMemberPublication,
-    NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberSaveJob,
-    NativeTextJoinedRequestPreparation, NativeTextJoinedRowSelection,
-    NativeTextJoinedSelectionPreparation,
+    NativeTextJoinedMemberFinalPreparation, NativeTextJoinedMemberIngressPreparation,
+    NativeTextJoinedMemberPublication, NativeTextJoinedMemberPublicationReceipt,
+    NativeTextJoinedMemberReceiver, NativeTextJoinedMemberSaveJob,
+    NativeTextJoinedReceivedOriginal, NativeTextJoinedRequestPreparation,
+    NativeTextJoinedRowSelection, NativeTextJoinedSelectionPreparation,
 };
 mod member;
 mod network;

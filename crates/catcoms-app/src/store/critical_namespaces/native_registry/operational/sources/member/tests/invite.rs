@@ -546,6 +546,30 @@ async fn mounted_join_fixture(recover_stage: bool) {
         original_member_outbox
     );
     let mut history_rng = catcoms_rt::OsCryptoRng;
+    let (retire_receiver, signal) = tokio::sync::watch::channel(false);
+    let prepare_receiver = recovered_row()
+        .prepare_member_ingress(
+            &selection,
+            request().channel,
+            RequestCancellation::new(signal, None),
+        )
+        .unwrap();
+    assert_eq!(
+        recovered_row()
+            .lookup_saved_member(&selection, &request(), &fresh, &mut history_rng)
+            .unwrap(),
+        saved,
+        "the pending ingress must release native metadata before any queue or socket work"
+    );
+    let mut receiver = prepare_receiver.open().await.unwrap();
+    retire_receiver.send_replace(true);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), receiver.next())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    drop(receiver);
     assert_eq!(
         recovered_row()
             .lookup_saved_member(&selection, &request(), &fresh, &mut history_rng)

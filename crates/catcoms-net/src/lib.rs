@@ -121,6 +121,11 @@ mod connection_leases;
 mod event_dispatch;
 mod native_chat_join;
 pub use native_chat_join::{NativeChatJoinIngress, NativeChatJoinRequests};
+mod native_chat_members;
+pub use native_chat_members::{
+    NativeChatMemberFrame, NativeChatMemberFrameObservation, NativeChatMemberGossip,
+    NativeChatMemberGossipError, NativeChatMemberGossipEvent, NativeChatMemberIngress,
+};
 mod publication;
 
 /// Max request/response frame size.
@@ -1328,6 +1333,10 @@ enum Command {
     },
     Subscribe(Topic),
     Unsubscribe(Topic),
+    OpenNativeChatMemberGossip {
+        registration: native_chat_members::Registration,
+        reply: oneshot::Sender<Result<(), NativeChatMemberGossipError>>,
+    },
     Publish(Topic, Bytes),
     /// Separate from legacy retrying publication. Owns its capacity until the driver handles it,
     /// even when its waiting caller disappears. Never enters `pending_publish`.
@@ -3633,6 +3642,7 @@ struct Actor {
     cmd_rx: mpsc::Receiver<Command>,
     event_tx: mpsc::Sender<TransportEvent>,
     native_chat_join: Option<Arc<native_chat_join::Slot>>,
+    native_member_gossip: Option<native_chat_members::Registration>,
     delivery: event_dispatch::Dispatcher,
     delivery_budget: Arc<event_dispatch::Budget>,
     inbound_req: HashMap<InboundRequestId, InboundRequest>,
@@ -3852,7 +3862,17 @@ impl Actor {
             {
                 break;
             }
+            let member_gossip = self
+                .native_member_gossip
+                .as_ref()
+                .map(|r| r.original.clone());
             tokio::select! {
+                _ = async {
+                    match member_gossip {
+                        Some(original) => original.retired().await,
+                        None => std::future::pending().await,
+                    }
+                } => self.retire_native_member_gossip(),
                 maybe_cmd = self.cmd_rx.recv() => {
                     match maybe_cmd {
                         Some(cmd) => {
@@ -4309,6 +4329,49 @@ impl Actor {
         )
     }
 
+    fn retire_native_member_gossip(&mut self) {
+        if let Some(original) = self.native_member_gossip.take() {
+            self.swarm
+                .behaviour_mut()
+                .gossipsub
+                .unsubscribe(&to_ident(&original.topic));
+        }
+    }
+
+    fn open_native_member_gossip(
+        &mut self,
+        registration: native_chat_members::Registration,
+        reply: oneshot::Sender<Result<(), NativeChatMemberGossipError>>,
+    ) {
+        use NativeChatMemberGossipError as Error;
+        if self.native_stop.is_none() {
+            let _ = reply.send(Err(Error::Closed));
+            return;
+        }
+        if reply.is_closed() || !registration.original.is_current_cached() {
+            let _ = reply.send(Err(Error::Revoked));
+            return;
+        }
+        if self.native_member_gossip.is_some() {
+            let _ = reply.send(Err(Error::Busy));
+            return;
+        }
+        if !matches!(
+            self.swarm
+                .behaviour_mut()
+                .gossipsub
+                .subscribe(&to_ident(&registration.topic)),
+            Ok(true)
+        ) {
+            let _ = reply.send(Err(Error::Subscribe));
+            return;
+        }
+        self.native_member_gossip = Some(registration);
+        if reply.send(Ok(())).is_err() {
+            self.retire_native_member_gossip();
+        }
+    }
+
     fn handle_command(&mut self, cmd: Command) {
         match cmd {
             #[cfg(test)]
@@ -4331,6 +4394,13 @@ impl Actor {
                     .subscribe(&to_ident(&topic));
             }
             Command::Unsubscribe(topic) => {
+                if self
+                    .native_member_gossip
+                    .as_ref()
+                    .is_some_and(|registered| registered.topic == topic)
+                {
+                    return;
+                }
                 tracing::debug!(topic = %hex::encode(topic.as_bytes()), "unsubscribe");
                 let _ = self
                     .swarm
@@ -4338,6 +4408,10 @@ impl Actor {
                     .gossipsub
                     .unsubscribe(&to_ident(&topic));
             }
+            Command::OpenNativeChatMemberGossip {
+                registration,
+                reply,
+            } => self.open_native_member_gossip(registration, reply),
             Command::Publish(topic, data) => {
                 self.publish_or_hold(topic, data, PublishAttempt::First);
             }
@@ -5293,6 +5367,16 @@ impl Actor {
                 let topic = from_topic_hash(&message.topic);
                 tracing::trace!(bytes = message.data.len(), "gossip received");
                 let carrier = to_peer(&propagation_source);
+                if let Some(registered) = self
+                    .native_member_gossip
+                    .as_ref()
+                    .filter(|r| r.topic == topic)
+                {
+                    let connection =
+                        connection_leases::current(&self.connection_leases.table, carrier);
+                    registered.deliver(from, message.data, connection, &self.delivery_budget);
+                    return;
+                }
                 if let (Some(ingress), Some(credit)) = (
                     connection_leases::current(&self.connection_leases.table, carrier),
                     self.delivery_budget.charge(message.data.len(), None),
@@ -5725,6 +5809,7 @@ pub struct MeshService {
     publish_once_slots: Arc<Semaphore>,
     event_rx: Mutex<mpsc::Receiver<TransportEvent>>,
     native_chat_join: Option<NativeChatJoinIngress>,
+    native_member_gossip_slot: Option<Arc<Semaphore>>,
     #[cfg(test)]
     test_event_tx: mpsc::Sender<TransportEvent>,
     #[cfg(test)]
@@ -5789,6 +5874,7 @@ impl MeshService {
         let native_chat_join = join_slot
             .as_ref()
             .map(|slot| NativeChatJoinIngress(Arc::downgrade(slot)));
+        let native_member_gossip_slot = native.as_ref().map(|_| Arc::new(Semaphore::new(1)));
         #[cfg(test)]
         let test_event_tx = event_tx.clone();
         #[cfg(test)]
@@ -5827,6 +5913,7 @@ impl MeshService {
             cmd_rx,
             event_tx,
             native_chat_join: join_slot,
+            native_member_gossip: None,
             delivery: event_dispatch::Dispatcher::default(),
             delivery_budget: delivery_budget.clone(),
             inbound_req: HashMap::new(),
@@ -5900,6 +5987,7 @@ impl MeshService {
             publish_once_slots: Arc::new(Semaphore::new(publication::MAX_IN_FLIGHT)),
             event_rx: Mutex::new(event_rx),
             native_chat_join,
+            native_member_gossip_slot,
             #[cfg(test)]
             test_event_tx,
             #[cfg(test)]
@@ -5926,6 +6014,14 @@ impl MeshService {
     /// have no lane and drop this request kind before application delivery.
     pub fn native_chat_join_ingress(&self) -> Option<NativeChatJoinIngress> {
         self.native_chat_join.clone()
+    }
+
+    /// Capture only the original native actor's bounded ordinary gossip lane.
+    pub fn native_chat_member_ingress(&self) -> Option<NativeChatMemberIngress> {
+        Some(NativeChatMemberIngress {
+            commands: self.cmd_tx.downgrade(),
+            slot: Arc::downgrade(self.native_member_gossip_slot.as_ref()?),
+        })
     }
 
     /// Read the current connected-peer/path table without consuming the ordered transport event
