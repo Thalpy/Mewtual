@@ -18,7 +18,8 @@ use crate::store::{ServerStore, V2CurrentLayoutStore};
 use catcoms_crypto::unseal;
 mod physical;
 pub(in crate::store::critical_namespaces::native_registry) use physical::{
-    AuthenticationNegative, MetadataWork, SourceWork, UiWork, WorkDrain,
+    AuthenticationNegative, JoinedConnectionPreparation, MetadataWork, SourceWork, UiWork,
+    WorkDrain,
 };
 
 #[cfg(test)]

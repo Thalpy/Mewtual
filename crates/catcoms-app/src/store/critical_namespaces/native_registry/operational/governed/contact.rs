@@ -64,9 +64,9 @@ impl NativeTextJoinedStorage {
         approved_host: IpAddr,
         transport: &catcoms_net::MeshService,
         scheduler: &EndpointDialScheduler,
-        mut caller: RequestCancellation,
+        caller: RequestCancellation,
     ) -> Result<(), AppError> {
-        let (mut mount, fee) = self
+        let (mount, fee) = self
             .index
             .joined_exchange_resources(4 * MAX_V2_JOIN_REQUEST_PACKET_BYTES + 8192)?;
         let payment = Arc::new(JoinFramePayment { _fee: fee });
@@ -80,67 +80,95 @@ impl NativeTextJoinedStorage {
                 MAX_V2_JOIN_REQUEST_PACKET_BYTES
             }));
         self.require_contact_request(invite, &mut recovered)?;
-        let peer = invite.connected_peer_data();
-        let address = invite.direct_address_data(approved_host);
-        let route = parse_peer_dial_route(&address, peer.as_bytes()).ok_or_else(refused)?;
-        if catcoms_net::addr_is_undialable(&address.parse().map_err(|_| refused())?) {
-            return Err(refused());
-        }
-        if transport
-            .connection_lease(peer)
-            .is_some_and(|connection| connection.is_live())
-        {
-            return if caller.is_cancelled() || mount.is_cancelled() {
-                Err(refused())
-            } else {
-                Ok(())
-            };
-        }
-        let group = &invite.binding().spec_data().anchor.group;
-        let mut permits = scheduler.reserve_permits(group, &[route.endpoint]);
-        let permit = permits.pop().ok_or_else(refused)?;
-        // Owning the publisher keeps the queued actor command live only for
-        // this invocation. A timeout or a dropped invocation revokes it.
-        let (_invocation, live) = tokio::sync::watch::channel(false);
-        let dial = JoinDial {
-            permit,
-            caller: caller.clone(),
-            mount: mount.clone(),
-            invocation: live,
-            _payment: payment.clone(),
-        };
-        let connect = async {
-            if transport
-                .dial_permit(Box::new(dial))
-                .await
-                .map_err(|_| refused())?
-                == DialSubmission::FailedAfterCommit
-            {
-                return Err(refused());
-            }
-            transport
-                .wait_for_peer_connected(peer)
-                .await
-                .map(|_| ())
-                .map_err(|_| refused())
-        };
-        tokio::select! {
-            biased;
-            _ = caller.cancelled() => return Err(refused()),
-            _ = mount.cancelled() => return Err(refused()),
-            result = tokio::time::timeout(Duration::from_secs(10), connect) => result.map_err(|_| refused())??,
-        }
+        connect_approved_host(
+            invite,
+            approved_host,
+            transport,
+            scheduler,
+            caller.clone(),
+            mount.clone(),
+            payment.clone(),
+        )
+        .await?;
         self.require_contact_request(invite, &mut recovered)?;
-        if caller.is_cancelled()
-            || mount.is_cancelled()
-            || transport
-                .connection_lease(peer)
-                .is_none_or(|connection| !connection.is_live())
-        {
+        if caller.is_cancelled() || mount.is_cancelled() {
             return Err(refused());
         }
         Ok(())
     }
+}
+
+pub(in super::super) async fn connect_approved_host(
+    invite: &crate::store::NativeTextInvitePacketData<'_>,
+    approved_host: IpAddr,
+    transport: &catcoms_net::MeshService,
+    scheduler: &EndpointDialScheduler,
+    mut caller: RequestCancellation,
+    mut mount: RequestCancellation,
+    payment: Arc<JoinFramePayment>,
+) -> Result<(), AppError> {
+    if caller.is_cancelled() || mount.is_cancelled() {
+        return Err(refused());
+    }
+    let peer = invite.connected_peer_data();
+    let address = invite.direct_address_data(approved_host);
+    let route = parse_peer_dial_route(&address, peer.as_bytes()).ok_or_else(refused)?;
+    if catcoms_net::addr_is_undialable(&address.parse().map_err(|_| refused())?) {
+        return Err(refused());
+    }
+    if transport
+        .connection_lease(peer)
+        .is_some_and(|connection| connection.is_live())
+    {
+        return if caller.is_cancelled() || mount.is_cancelled() {
+            Err(refused())
+        } else {
+            Ok(())
+        };
+    }
+    let group = &invite.binding().spec_data().anchor.group;
+    let mut permits = scheduler.reserve_permits(group, &[route.endpoint]);
+    let permit = permits.pop().ok_or_else(refused)?;
+    // Owning the publisher keeps the queued actor command live only for
+    // this invocation. A timeout or a dropped invocation revokes it.
+    let (_invocation, live) = tokio::sync::watch::channel(false);
+    let dial = JoinDial {
+        permit,
+        caller: caller.clone(),
+        mount: mount.clone(),
+        invocation: live,
+        _payment: payment.clone(),
+    };
+    let connect = async {
+        if transport
+            .dial_permit(Box::new(dial))
+            .await
+            .map_err(|_| refused())?
+            == DialSubmission::FailedAfterCommit
+        {
+            return Err(refused());
+        }
+        transport
+            .wait_for_peer_connected(peer)
+            .await
+            .map(|_| ())
+            .map_err(|_| refused())
+    };
+    tokio::select! {
+        biased;
+        _ = caller.cancelled() => return Err(refused()),
+        _ = mount.cancelled() => return Err(refused()),
+        result = tokio::time::timeout(Duration::from_secs(10), connect) => result.map_err(|_| refused())??,
+    }
+    if caller.is_cancelled()
+        || mount.is_cancelled()
+        || transport
+            .connection_lease(peer)
+            .is_none_or(|connection| !connection.is_live())
+    {
+        return Err(refused());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

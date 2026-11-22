@@ -459,8 +459,33 @@ pub struct UiCapture {
     _invocation: Arc<Fee>,
 }
 impl UiCapture {
+    /// Remove all positive command custody before forwarding an actor fence.
+    pub(super) fn into_effect_negative(self) -> UiEffectNegative {
+        UiEffectNegative {
+            current: self.current,
+            record: self.record,
+            _invocation: self._invocation,
+        }
+    }
+
     /// Cached negatives only. The owning concrete factory still has to check
     /// this capture against its original facade and source collection.
+    pub(super) fn is_current_cached(&self) -> bool {
+        !self
+            .record
+            .retiring
+            .load(std::sync::atomic::Ordering::SeqCst)
+            && self.current.is_current()
+    }
+}
+
+pub(super) struct UiEffectNegative {
+    current: NativeChatUiCurrentCheck,
+    record: Arc<RetirementRecord>,
+    _invocation: Arc<Fee>,
+}
+
+impl UiEffectNegative {
     pub(super) fn is_current_cached(&self) -> bool {
         !self
             .record

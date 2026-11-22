@@ -1009,7 +1009,36 @@ impl AuthenticationNegative {
         self.gate.is_live_cached() && self.mount.is_live_cached()
     }
 }
+pub(in crate::store::critical_namespaces::native_registry) struct JoinedConnectionPreparation {
+    pub(in crate::store::critical_namespaces::native_registry) request: Zeroizing<Vec<u8>>,
+    pub(in crate::store::critical_namespaces::native_registry) mount:
+        catcoms_rt::RequestCancellation,
+    pub(in crate::store::critical_namespaces::native_registry) authentication:
+        AuthenticationNegative,
+    pub(in crate::store::critical_namespaces::native_registry) work: SourceWork,
+    pub(in crate::store::critical_namespaces::native_registry) fee: CatalogReadReservation,
+}
+
 impl MetadataWork {
+    fn with_joined_store<T>(
+        &self,
+        run: impl FnOnce(&ServerStore) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        let cell = self.physical.cell.try_lock().map_err(|_| refused())?;
+        cell.require_idle()?;
+        self.require_joined_store()?;
+        run(self.physical.current()?.checked_store()?)
+    }
+
+    fn require_joined_store(&self) -> Result<(), AppError> {
+        self.physical.handler.require()?;
+        self.physical.handler.require_idle_cached()?;
+        if !self.physical.handler.uses_joined_pin_layout() {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn cover_accepted_first_join(
         &self,
         pending: &mut Option<JoinedPendingIo>,
@@ -1017,21 +1046,54 @@ impl MetadataWork {
         require_caller: impl Fn() -> Result<(), AppError>,
         rng: &mut impl CryptoRngCore,
     ) -> Result<([u8; 32], catcoms_sync::V2PendingJoinContextData), AppError> {
-        let cell = self.physical.cell.try_lock().map_err(|_| refused())?;
-        cell.require_idle()?;
         let require_current = || {
-            self.physical.handler.require()?;
-            self.physical.handler.require_idle_cached()?;
-            if !self.physical.handler.uses_joined_pin_layout() {
-                return Err(refused());
-            }
+            self.require_joined_store()?;
             require_caller()
         };
-        require_current()?;
-        self.physical
-            .current()?
-            .checked_store()?
-            .cover_accepted_first_join(pending, accepted, require_current, rng)
+        self.with_joined_store(|store| {
+            store.cover_accepted_first_join(pending, accepted, require_current, rng)
+        })
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn prepare_join_connection(
+        &self,
+        pending: &JoinedPendingIo,
+        invite: &crate::store::NativeTextInvitePacketData<'_>,
+    ) -> Result<JoinedConnectionPreparation, AppError> {
+        use super::super::super::governed::{connected_join_invoice, NativeTextJoinedStorage};
+        self.with_joined_store(|store| {
+            let request = pending.request_data(store)?;
+            let (mount, fee) = self
+                .physical
+                .joined_exchange_resources(connected_join_invoice(request.len()))?;
+            NativeTextJoinedStorage::require_invite_bytes(request, invite)?;
+            let authentication = self.authentication_negative()?;
+            let work = self.physical.capture_source().ok_or_else(refused)?;
+            Ok(JoinedConnectionPreparation {
+                request: Zeroizing::new(request.to_vec()),
+                mount,
+                authentication,
+                work,
+                fee,
+            })
+        })
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn cover_join_delivery(
+        &self,
+        pending: &mut JoinedPendingIo,
+        request: &[u8],
+        delivery: &[u8],
+        negative: &catcoms_rt::RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64), AppError> {
+        self.with_joined_store(|store| {
+            if negative.is_cancelled() || pending.request_data(store)? != request {
+                return Err(refused());
+            }
+            pending.finish_welcome(store, delivery, rng, Some(negative))?;
+            pending.warm_outcome_data(store)?.ok_or_else(refused)
+        })
     }
 
     /// Outside every guard, after original-pool validation. Capture the SAME

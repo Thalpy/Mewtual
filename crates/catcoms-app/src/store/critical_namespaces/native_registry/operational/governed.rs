@@ -17,6 +17,7 @@ use catcoms_sync::{
 };
 mod contact;
 mod runtime;
+pub(super) use contact::connect_approved_host;
 pub use runtime::NativeTextJoinedRuntime;
 
 pub(in crate::store::critical_namespaces::native_registry) const JOIN_PROTOCOL: ProtocolId =
@@ -31,13 +32,13 @@ struct JoinConnectionAuthority {
     caller: RequestCancellation,
 }
 
-struct JoinFramePayment {
-    _fee: CatalogReadReservation,
+pub(super) struct JoinFramePayment {
+    pub(super) _fee: CatalogReadReservation,
 }
 
-struct ConnectedJoinDelivery {
-    bytes: bytes::Bytes,
-    scope: RequestCancellation,
+pub(super) struct ConnectedJoinDelivery {
+    pub(super) bytes: bytes::Bytes,
+    pub(super) scope: RequestCancellation,
 }
 
 impl AsRef<[u8]> for ConnectedJoinDelivery {
@@ -314,42 +315,18 @@ impl NativeTextJoinedStorage {
         transport: &impl MeshTransport,
         negative: RequestCancellation,
     ) -> Result<ConnectedJoinDelivery, AppError> {
-        let target = invite.connected_peer_data();
-        let connection = transport.connection_lease(target).ok_or_else(refused)?;
-        let (mount, fee) = self.index.joined_exchange_resources(
-            4 * (request.len() + 1 + CHAT_V2_JOIN_RESPONSE_MAX_BYTES) + 4096,
-        )?;
-        let fee = Arc::new(JoinFramePayment { _fee: fee });
-        let authority = Arc::new(JoinConnectionAuthority {
-            connection,
+        let (mount, fee) = self
+            .index
+            .joined_exchange_resources(connected_join_invoice(request.len()))?;
+        receive_connected_join(
+            request,
+            invite.connected_peer_data(),
+            transport,
+            negative,
             mount,
-            caller: negative.clone(),
-        });
-        if !authority.authorized() {
-            return Err(refused());
-        }
-        let negative = negative
-            .with_authority(authority.clone())
-            .retain_custody(fee.clone());
-        let mut wire = Vec::with_capacity(1 + request.len());
-        wire.push(CHAT_V2_JOIN_KIND);
-        wire.extend_from_slice(request);
-        let delivery = transport
-            .request_connected_cancellable(
-                target,
-                JOIN_PROTOCOL,
-                bytes::Bytes::from(wire),
-                negative.clone(),
-            )
-            .await
-            .map_err(|_| refused())?;
-        if !authority.authorized() || delivery.len() > MAX_V2_FIRST_JOIN_DELIVERY_BYTES {
-            return Err(refused());
-        }
-        Ok(ConnectedJoinDelivery {
-            bytes: delivery,
-            scope: negative,
-        })
+            Arc::new(JoinFramePayment { _fee: fee }),
+        )
+        .await
     }
 
     fn require_exact_invite(
@@ -361,7 +338,7 @@ impl NativeTextJoinedStorage {
         Ok(request)
     }
 
-    fn require_invite_bytes(
+    pub(super) fn require_invite_bytes(
         request: &[u8],
         invite: &crate::store::NativeTextInvitePacketData<'_>,
     ) -> Result<(), AppError> {
@@ -386,4 +363,49 @@ impl NativeTextJoinedStorage {
     ) -> Result<Option<([u8; 32], V2PendingJoinContextData)>, AppError> {
         self.index.selected_pending_join_data()
     }
+}
+
+pub(super) fn connected_join_invoice(request_bytes: usize) -> usize {
+    4 * (request_bytes + 1 + CHAT_V2_JOIN_RESPONSE_MAX_BYTES) + 4096
+}
+
+pub(super) async fn receive_connected_join(
+    request: &[u8],
+    target: catcoms_rt::PeerId,
+    transport: &impl MeshTransport,
+    negative: RequestCancellation,
+    mount: RequestCancellation,
+    fee: Arc<JoinFramePayment>,
+) -> Result<ConnectedJoinDelivery, AppError> {
+    let connection = transport.connection_lease(target).ok_or_else(refused)?;
+    let authority = Arc::new(JoinConnectionAuthority {
+        connection,
+        mount,
+        caller: negative.clone(),
+    });
+    if !authority.authorized() {
+        return Err(refused());
+    }
+    let negative = negative
+        .with_authority(authority.clone())
+        .retain_custody(fee);
+    let mut wire = Vec::with_capacity(1 + request.len());
+    wire.push(CHAT_V2_JOIN_KIND);
+    wire.extend_from_slice(request);
+    let delivery = transport
+        .request_connected_cancellable(
+            target,
+            JOIN_PROTOCOL,
+            bytes::Bytes::from(wire),
+            negative.clone(),
+        )
+        .await
+        .map_err(|_| refused())?;
+    if !authority.authorized() || delivery.len() > MAX_V2_FIRST_JOIN_DELIVERY_BYTES {
+        return Err(refused());
+    }
+    Ok(ConnectedJoinDelivery {
+        bytes: delivery,
+        scope: negative,
+    })
 }

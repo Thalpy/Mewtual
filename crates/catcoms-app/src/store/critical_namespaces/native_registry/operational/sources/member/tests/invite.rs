@@ -148,6 +148,78 @@ async fn mounted_join_request_uses_the_original_native_command_and_retains_its_p
     assert_eq!(rng.next_u64(), retry_rng.next_u64());
     assert_eq!(std::fs::read(&path).unwrap(), ciphertext);
 
+    let (client, _) = catcoms_net::MeshService::new_tcp(None, &[]).unwrap();
+    assert!(capture()
+        .prepare_exchange(&invite, negative.clone())
+        .unwrap()
+        .receive(&client)
+        .await
+        .is_err());
+    let founder_capture = || {
+        owner.capture_member(
+            &row,
+            command(&founder, &founder_budget),
+            owner.policy.prepare_member().unwrap(),
+        )
+    };
+    let mut requests = founder_capture()
+        .open_connected_join_requests(negative.clone())
+        .unwrap();
+    let mut serve = async || {
+        let Some(catcoms_rt::TransportEvent::Request {
+            data,
+            responder,
+            proto,
+            ..
+        }) = requests.next().await
+        else {
+            panic!("expected the original mounted request");
+        };
+        assert_eq!(blake3::hash(&data[1..]).as_bytes(), &selected.0);
+        founder_capture()
+            .serve_connected_join_request(proto, &data, responder, negative.clone())
+            .unwrap();
+    };
+    let (revocation, signal) = tokio::sync::watch::channel(false);
+    let revoked = capture()
+        .prepare_exchange(&invite, RequestCancellation::new(signal, None))
+        .unwrap();
+    assert!(capture()
+        .cover(&invite, anchor, token, after, &negative, &mut rng)
+        .is_ok_and(|original| original == selected));
+    let scheduler = catcoms_discovery::EndpointDialScheduler::new(Default::default());
+    revoked
+        .connect_approved_host(
+            &invite,
+            std::net::Ipv4Addr::LOCALHOST.into(),
+            &client,
+            &scheduler,
+        )
+        .await
+        .unwrap();
+    let mut receive = async |original: crate::store::NativeTextJoinedExchange| {
+        let (delivery, ()) = tokio::join!(original.receive(&client), serve());
+        delivery.unwrap()
+    };
+    let delivery = tokio::time::timeout(std::time::Duration::from_secs(10), receive(revoked))
+        .await
+        .unwrap();
+    revocation.send(true).unwrap();
+    assert!(delivery.cover(&mut rng).is_err());
+    assert!(find_named(
+        dir.path(),
+        "chat-critical-namespaces.joined-welcome-entry.bin"
+    )
+    .is_empty());
+
+    let exact = capture()
+        .prepare_exchange(&invite, negative.clone())
+        .unwrap();
+    let delivery = tokio::time::timeout(std::time::Duration::from_secs(10), receive(exact))
+        .await
+        .unwrap();
+    let outcome = delivery.cover(&mut rng).unwrap();
+
     sender.send(true).unwrap();
     assert!(capture()
         .cover(&invite, anchor, token, after, &negative, &mut rng)
@@ -158,6 +230,7 @@ async fn mounted_join_request_uses_the_original_native_command_and_retains_its_p
         crate::store::NativeTextJoinedStorage::open(dir.path(), SECRET, &mut rng, current_policy())
             .unwrap();
     assert!(cold.pending_join_data().unwrap() == Some(selected));
+    assert_eq!(cold.recovered_join_outcome_data().unwrap(), Some(outcome));
     assert_eq!(std::fs::read(&path).unwrap(), ciphertext);
 }
 

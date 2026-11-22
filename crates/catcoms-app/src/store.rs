@@ -91,6 +91,7 @@ pub use critical_namespaces::{
     ReturnedArchiveFounderPlanning, ReturnedCheckpointJoinActivation, V2CurrentLayoutPolicy,
     V2CurrentLayoutStore, V2GovernanceLayoutPolicy, V2GovernanceLayoutStore, V2MemberOutboxPolicy,
 };
+pub use critical_namespaces::{NativeTextJoinedDelivery, NativeTextJoinedExchange};
 pub(crate) use mounted::LegacyStoreCustody;
 pub use mounted::{MountedLeaseRefusal, MountedLeaseRefusalKind, MountedVault};
 pub use native_text_invite::{

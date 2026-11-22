@@ -225,9 +225,14 @@ Source collection can perform that transaction under its original UI command
 and single metadata slot. It keeps the warm Pending when publication fails,
 including when the index was selected on disk before a late file check refused
 the result. This App operation returns the selected request commitment and pin
-context. The desktop Join command and connection handoff remain to be wired.
-The warm
-owner verifies the delivery before covering possible Welcome entry, then
+context. A second capture carries the covered request to the signed peer on an
+already authenticated connection or through one explicitly approved direct IP.
+It releases the metadata slot before contacting the peer. The actor checks the
+original invocation and UI generation, and the mounted worker checks the files
+again before covering Welcome. The desktop Join command still needs to wire
+this handoff to the canonical joined Source installation.
+
+The warm owner verifies the delivery before covering possible Welcome entry, then
 seals and covers the exact successful outcome. New outcome records also retain
 the node page for the original Core candidate under the same Entry commitment.
 Core selection follows coverage. Cold opening reconstructs that candidate from

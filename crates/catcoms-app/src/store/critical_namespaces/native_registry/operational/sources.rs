@@ -18,7 +18,9 @@ mod capture;
 mod invite;
 pub use invite::NativeTextInvitePublication;
 mod join;
-pub use join::NativeTextJoinedRequestPreparation;
+pub use join::{
+    NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedRequestPreparation,
+};
 mod member;
 mod network;
 pub use member::{
