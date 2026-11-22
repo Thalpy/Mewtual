@@ -147,6 +147,11 @@ declare -A allowed=(
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|write_governance_layout_declaration|selected.sync_all().map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|write_governance_layout_declaration|fs::remove_file(&seed_path).map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|install_governance_layout_marker|original.marker.sync_all().map_err(io)?;']=1
+  # Explicit joined-pin startup only. The authenticated seed identifies both whole catalogs and
+  # the actual governing/outbox/native leaves. The same stage is kept through the rename.
+  ['crates/catcoms-app/src/store/persistence/governance_layout/joined.rs|select_joined_pin_catalog|fs::rename(&stage_path, &current_path).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout/joined.rs|select_joined_pin_catalog|selected.sync_all().map_err(durable)?;']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout/joined.rs|select_joined_pin_catalog|fs::remove_file(&seed_path).map_err(durable)?;']=1
   # Namespace5 (member outbox layout) declaration: the same reviewed protocol as namespace4,
   # with its own fixed seed/marker names. A zero-byte claim of the fixed seed name comes
   # first (no content, so older readers may ignore it), then the empty legacy stage fence

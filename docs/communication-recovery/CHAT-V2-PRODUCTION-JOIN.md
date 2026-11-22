@@ -187,13 +187,14 @@ stable group pin. On same-Profile rejoin/reopen, reuse the SAME original pin
 ciphertext and `V2GroupPinId`; resealing identical anchor plaintext changes the
 stable outbox context and is forbidden.
 
-The startup declaration now prepares a seed over the exact predecessor and
+The startup declaration prepares a seed over the exact predecessor and
 candidate catalogs and their governing, outbox and native files. Its staging
 path holds the original claim and stage and preserves them on refusal.
-Catalog promotion, the joined-aware opener, the pin index and joined
-pending-JOIN recovery still need their owning paths. The joined-aware opener
-must select governance4, member outbox5, joined pin6 and native registry7
-before any prior inspector runs.
+The explicit joined storage opener classifies this declaration before the
+older inspectors and carries the same selected file through their checks.
+It can finish an authenticated interrupted declaration or open an already
+selected joined catalog. It currently accepts settled catalogs. The pin index,
+joined pending-JOIN recovery and native runtime installation remain open.
 Unknown/ambiguous remnants are preserved and refused, never cleared as debris.
 Predecessor tests must use a real prior binary with positive open controls.
 

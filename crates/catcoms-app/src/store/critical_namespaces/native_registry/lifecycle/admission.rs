@@ -34,6 +34,7 @@ pub(in crate::store) struct Handler {
     pub(super) cold: Arc<std::sync::Mutex<Option<super::inspection::Observation>>>,
     gate: Arc<Gate>,
     payment: Arc<Payment>,
+    joined_pin_layout: bool,
 }
 impl Handler {
     pub(in crate::store::critical_namespaces::native_registry) fn payment_tail(
@@ -72,7 +73,18 @@ impl Handler {
             cold: Arc::new(std::sync::Mutex::new(None)),
             gate,
             payment,
+            joined_pin_layout: false,
         })
+    }
+    pub(in crate::store::critical_namespaces::native_registry) fn with_joined_pin_layout(
+        mut self,
+    ) -> Self {
+        self.joined_pin_layout = true;
+        self
+    }
+
+    pub(in crate::store) fn uses_joined_pin_layout(&self) -> bool {
+        self.joined_pin_layout
     }
     pub(in crate::store) fn require(&self) -> Result<(), AppError> {
         self.payment

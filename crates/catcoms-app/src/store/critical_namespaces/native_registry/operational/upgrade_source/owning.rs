@@ -317,6 +317,17 @@ impl std::fmt::Debug for Store {
     }
 }
 impl Store {
+    pub(in crate::store::critical_namespaces::native_registry) fn stage_joined_pin_layout(
+        &mut self,
+        declaration: &mut Option<
+            crate::store::persistence::governance_layout::joined::JoinedPinDeclaration,
+        >,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        let physical = Arc::get_mut(&mut self.physical).ok_or_else(refused)?;
+        physical.stage_joined_pin_layout(declaration, rng)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn require_governance_completion(
         &self,
         receiver: &crate::store::critical_namespaces::governance_layout::native::Startup,
@@ -333,8 +344,29 @@ impl Store {
         dir: impl AsRef<std::path::Path>,
         passphrase: &[u8],
         rng: &mut impl CryptoRngCore,
+        current: crate::store::V2CurrentLayoutPolicy,
+        policy: Policy,
+    ) -> Result<Self, AppError> {
+        Self::open_governed_family(dir, passphrase, rng, current, policy, false)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn open_joined(
+        dir: impl AsRef<std::path::Path>,
+        passphrase: &[u8],
+        rng: &mut impl CryptoRngCore,
+        current: crate::store::V2CurrentLayoutPolicy,
+        policy: Policy,
+    ) -> Result<Self, AppError> {
+        Self::open_governed_family(dir, passphrase, rng, current, policy, true)
+    }
+
+    fn open_governed_family(
+        dir: impl AsRef<std::path::Path>,
+        passphrase: &[u8],
+        rng: &mut impl CryptoRngCore,
         mut current: crate::store::V2CurrentLayoutPolicy,
         policy: Policy,
+        joined: bool,
     ) -> Result<Self, AppError> {
         if policy.pool.same_account(&current.archive.pending.pool)
             || current
@@ -344,7 +376,10 @@ impl Store {
         {
             return Err(refused());
         }
-        let handler = lifecycle_admission::Handler::from_reserved(&policy, policy.reserve()?)?;
+        let mut handler = lifecycle_admission::Handler::from_reserved(&policy, policy.reserve()?)?;
+        if joined {
+            handler = handler.with_joined_pin_layout();
+        }
         let physical = physical::Physical::allocate(handler.clone());
         current.native_registry = Some(NativeRegistryHandler::GovernanceOpening(handler.clone()));
         let governance = crate::store::V2GovernanceLayoutPolicy::for_native(current)?;

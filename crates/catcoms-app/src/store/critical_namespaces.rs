@@ -68,7 +68,7 @@ pub use native_registry::{
     NativeTextCreationInputs, NativeTextCreationJob, NativeTextCreationPreparation,
     NativeTextCreationProgress, NativeTextCreationRefusal, NativeTextCreationRequest,
     NativeTextCreationSettings, NativeTextGovernanceUpgrade, NativeTextGovernedStorage,
-    NativeTextHistoryResponseBudget, NativeTextHistoryResponseCredit,
+    NativeTextHistoryResponseBudget, NativeTextHistoryResponseCredit, NativeTextJoinedStorage,
     NativeTextMemberAdmissionFailure, NativeTextMemberBudget, NativeTextMemberFinalPreparation,
     NativeTextMemberHistoryItem, NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus,
     NativeTextMemberJob, NativeTextMemberPreparation, NativeTextMemberSaveJob,

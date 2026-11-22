@@ -67,7 +67,7 @@ pub use critical_namespaces::{
     NativeTextCreationInputs, NativeTextCreationJob, NativeTextCreationPreparation,
     NativeTextCreationProgress, NativeTextCreationRefusal, NativeTextCreationRequest,
     NativeTextCreationSettings, NativeTextGovernanceUpgrade, NativeTextGovernedStorage,
-    NativeTextHistoryResponseBudget, NativeTextHistoryResponseCredit,
+    NativeTextHistoryResponseBudget, NativeTextHistoryResponseCredit, NativeTextJoinedStorage,
     NativeTextMemberAdmissionFailure, NativeTextMemberBudget, NativeTextMemberFinalPreparation,
     NativeTextMemberHistoryItem, NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus,
     NativeTextMemberJob, NativeTextMemberPreparation, NativeTextMemberSaveJob,
@@ -5730,6 +5730,8 @@ pub struct ServerStore {
         Option<critical_namespaces::governance_layout::V2GovernanceLayoutPolicy>,
     governance_layout:
         std::sync::Mutex<Option<critical_namespaces::governance_layout::MountedGovernanceLayout>>,
+    joined_pin_selection:
+        std::sync::Mutex<Option<persistence::governance_layout::joined::ColdJoinedSelection>>,
     // Namespace5 marker + held member-outbox parent, installed only by the concrete configured
     // handler. Its presence is mount DATA, never a member-source or save permission.
     member_outbox_layout: std::sync::Mutex<
@@ -5965,6 +5967,7 @@ impl ServerStore {
             current_layout_policy,
             governance_layout_policy,
             governance_layout: Default::default(),
+            joined_pin_selection: Default::default(),
             member_outbox_layout: Default::default(),
             member_outbox_mount: Default::default(),
             current_layout: Default::default(),

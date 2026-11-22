@@ -8,7 +8,7 @@ use crate::store::critical_namespaces::{
 };
 use crate::store::{
     NativeIndexPolicy, NativeIndexUpgrade, NativeRegistryInstallation, NativeRegistryPolicy,
-    NativeTextGovernedStorage,
+    NativeTextGovernedStorage, NativeTextJoinedStorage,
 };
 use rand_chacha::ChaCha20Rng;
 use rand_core::{CryptoRng, RngCore, SeedableRng};
@@ -264,6 +264,85 @@ fn governed_joined_pin_stage_holds_its_first_claim_and_older_openers_preserve_it
     let old = NativeTextGovernedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy())
         .unwrap();
     assert_eq!(old.row_count_data().unwrap(), 0);
+}
+
+#[test]
+fn governed_joined_pin_cold_open_recovers_the_original_catalog_after_each_covered_cut() {
+    for cut in 0..3 {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0xc450 + cut);
+        let mut plan = original(dir.path(), &mut rng).prepare_governance().unwrap();
+        plan.retry(&mut rng).unwrap();
+        let store = actual(&plan);
+        let current = dir.path().join(Slot::Current.name());
+        let claim = dir.path().join(governance::GOVERNANCE_SEED);
+        let stage = dir.path().join(Slot::Stage.name());
+        let key = store.keys.db_key().unwrap();
+        let domain = store.chat_vault_domain().unwrap();
+        drop(plan);
+        let mut prepared =
+            NativeTextGovernedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy())
+                .unwrap();
+        prepared.stage_joined_pin_layout(&mut rng).unwrap();
+        prepared.stage_joined_pin_layout(&mut NeverRng).unwrap();
+        let expected = fs::read(&stage).unwrap();
+        let native = leaves(dir.path());
+        drop(prepared);
+
+        if cut == 0 {
+            let held_stage = dir.path().join("original-stage-at-selection");
+            let capture = stage.clone();
+            let moved = held_stage.clone();
+            let bytes = expected.clone();
+            governance::set_stage_selection_hook_for_test(Box::new(move || {
+                fs::rename(&capture, &moved).unwrap();
+                fs::write(&capture, bytes).unwrap();
+            }));
+            let old_current = fs::read(&current).unwrap();
+            let old_claim = fs::read(&claim).unwrap();
+            assert!(NativeTextJoinedStorage::open(
+                dir.path(),
+                SECRET,
+                &mut NeverRng,
+                current_policy()
+            )
+            .is_err());
+            assert_eq!(fs::read(&current).unwrap(), old_current);
+            assert_eq!(fs::read(&claim).unwrap(), old_claim);
+            assert_eq!(fs::read(&stage).unwrap(), expected);
+            fs::remove_file(&stage).unwrap();
+            fs::rename(&held_stage, &stage).unwrap();
+        }
+        if cut == 1 {
+            // This models interruption during stage completion.
+            fs::write(&stage, &expected[..expected.len() / 2]).unwrap();
+        }
+        if cut == 2 {
+            // This models a lost return after rename and before seed retirement.
+            fs::rename(&stage, &current).unwrap();
+        }
+        let cold =
+            NativeTextJoinedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy())
+                .unwrap_or_else(|error| panic!("joined declaration cut {cut}: {error}"));
+        assert_eq!(cold.row_count_data().unwrap(), 0);
+        assert_eq!(fs::read(&current).unwrap(), expected);
+        assert_eq!(native, leaves(dir.path()));
+        assert!(!claim.exists() && !stage.exists());
+        let plain = crate::store::unseal(&key, &crate::store::unframe(&expected).unwrap()).unwrap();
+        catalog::parse_joined_native_registry_layout(&plain, &domain, true).unwrap();
+        drop(cold);
+        assert!(NativeTextGovernedStorage::open(
+            dir.path(),
+            SECRET,
+            &mut NeverRng,
+            current_policy()
+        )
+        .is_err());
+        let cold =
+            NativeTextJoinedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy())
+                .unwrap();
+        assert_eq!(cold.row_count_data().unwrap(), 0);
+    }
 }
 
 #[test]

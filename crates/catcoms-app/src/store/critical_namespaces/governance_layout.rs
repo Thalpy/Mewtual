@@ -449,7 +449,8 @@ impl NativeColdTail {
     ) -> Result<(), AppError> {
         match self {
             Self::Observed => {
-                super::native_registry::lifecycle::finish_governed_cold_observation(store)
+                super::native_registry::lifecycle::finish_governed_cold_observation(store)?;
+                store.finish_joined_pin_selection()
             }
             Self::Declared { declaration, fee } => {
                 let policy = store
