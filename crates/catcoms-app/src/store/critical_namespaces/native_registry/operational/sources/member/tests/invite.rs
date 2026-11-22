@@ -341,6 +341,11 @@ async fn mounted_join_fixture(recover_stage: bool) {
     assert_eq!(std::fs::read(&index).unwrap(), prior_index);
     std::fs::remove_file(&outcome_path).unwrap();
     std::fs::rename(&registration_parked, &outcome_path).unwrap();
+    let original_member_outbox = *registration
+        .member_outbox_context_data()
+        .unwrap()
+        .id()
+        .as_bytes();
     if !recover_stage {
         let mut after = rng.clone();
         let row = register(&mut rng).unwrap();
@@ -350,6 +355,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
         assert_eq!(view.id_data(), row.id);
         assert_eq!(view.name_data(), "Original Room");
         assert_eq!(view.display_name_data(), Some("Original Member"));
+        assert_eq!(view.member_outbox_context_id_data(), original_member_outbox);
         assert!(view.same_original(&inspect().select_registered(&fresh).unwrap()));
         assert_eq!(register(&mut rng).unwrap(), row);
         assert_eq!(rng.next_u64(), after.next_u64());
@@ -451,6 +457,10 @@ async fn mounted_join_fixture(recover_stage: bool) {
     assert_eq!(selection.name_data(), "Original Room");
     assert_eq!(selection.display_name_data(), Some("Original Member"));
     assert_eq!(selection.request_data(), registration.request);
+    assert_eq!(
+        selection.member_outbox_context_id_data(),
+        original_member_outbox
+    );
     assert!(selection.is_from_original_vault_cached(&mounted_vault));
     assert!(selection.same_original(&recovered_row().select_registered(&fresh).unwrap()));
     selection.close_original_cached();

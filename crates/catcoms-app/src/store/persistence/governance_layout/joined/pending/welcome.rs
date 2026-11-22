@@ -321,12 +321,29 @@ impl JoinedCore {
 
     fn selected_data(&self) -> Option<SelectedJoinData> {
         let replay = self.core.selected_replay_data()?;
-        Some(SelectedJoinData {
-            governing_add: replay.header().id(),
+        Some(self.selection_data(
+            replay.header().id(),
+            *replay.header().spec().state.as_bytes(),
+            replay.mls_epoch_data(),
+        ))
+    }
+
+    fn selection_data(
+        &self,
+        governing_add: OwnerHeaderId,
+        state: [u8; 32],
+        epoch: u64,
+    ) -> SelectedJoinData {
+        let profile = self.core.initial_profile_data();
+        SelectedJoinData {
+            governing_add,
             own_admission: self.core.own_admission_data(),
-            state: *replay.header().spec().state.as_bytes(),
-            epoch: replay.mls_epoch_data(),
-        })
+            state,
+            epoch,
+            profile: profile.id(),
+            initial_tenure: profile.tenure(),
+            profile_creation: profile.spec().creation,
+        }
     }
 
     fn copy_selected_governing_proof(
@@ -389,12 +406,11 @@ impl RecoveredWelcome {
     /// candidate before startup selects it. This grants no live source.
     pub(super) fn registration_candidate_data(&self) -> Option<SelectedJoinData> {
         let original = self.outcome.as_ref()?;
-        Some(SelectedJoinData {
-            governing_add: original.graph.governing_head_data(),
-            own_admission: original.selection.core.own_admission_data(),
-            state: *original.graph.governing_state_data().as_bytes(),
-            epoch: original.graph.epoch_data(),
-        })
+        Some(original.selection.selection_data(
+            original.graph.governing_head_data(),
+            *original.graph.governing_state_data().as_bytes(),
+            original.graph.epoch_data(),
+        ))
     }
 
     pub(super) fn registration_files(&self) -> Result<RegistrationFiles<'_>, AppError> {

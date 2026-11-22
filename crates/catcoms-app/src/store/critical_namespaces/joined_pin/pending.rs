@@ -1,7 +1,13 @@
 //! Authenticated first-pin and private JoinRequest transaction.
 //! The mounted owner covers this exact output before any request can leave.
 use super::*;
-use catcoms_replication::chat::{owner_facts::OwnerFactId, owner_header::OwnerHeaderId};
+use crate::store::persistence::v2_member_outbox::{
+    MemberOutboxContextData, MemberOutboxContextSpec,
+};
+use catcoms_replication::chat::{
+    owner_facts::OwnerFactId,
+    owner_header::{OwnerHeaderId, OwnerTenureId},
+};
 use catcoms_sync::{
     DirectJoinLimits, NativeV2JoinKeyEntry, PreparedV2JoinRequest, RecoveredV2PendingJoinSource,
     SealedV2PendingJoinSource, V2JoinRequestPacketData, V2PendingJoinContextData,
@@ -39,6 +45,9 @@ pub(in crate::store) struct SelectedJoinData {
     pub(in crate::store) own_admission: OwnerFactId,
     pub(in crate::store) state: [u8; 32],
     pub(in crate::store) epoch: u64,
+    pub(in crate::store) profile: OwnerFactId,
+    pub(in crate::store) initial_tenure: OwnerTenureId,
+    pub(in crate::store) profile_creation: [u8; 32],
 }
 
 impl std::fmt::Debug for NativeTextJoinedRegistrationData {
@@ -59,6 +68,9 @@ impl NativeTextJoinedRegistrationData {
         let original = packet.founder_add_data();
         let anchor = &original.invite.spec_data().anchor;
         let spec = original.request.spec_data();
+        if selected.profile.as_bytes() != &anchor.profile {
+            return Err(refused());
+        }
         Ok(Self {
             context,
             group: anchor.group.as_slice().try_into().map_err(|_| refused())?,
@@ -82,6 +94,21 @@ impl NativeTextJoinedRegistrationData {
 
     pub fn transport_data(&self) -> (catcoms_rt::PeerId, u16) {
         (self.transport.0, self.transport.1)
+    }
+
+    pub(in crate::store) fn member_outbox_context_data(
+        &self,
+    ) -> Result<MemberOutboxContextData, AppError> {
+        MemberOutboxContextData::from_spec(MemberOutboxContextSpec {
+            vault: self.context.vault,
+            layout: self.context.root,
+            pin: self.context.pin,
+            profile: self.selected.profile,
+            tenure: self.selected.initial_tenure,
+            group_nonce: self.selected.profile_creation,
+            device: self.signer,
+            group: &self.group,
+        })
     }
 }
 

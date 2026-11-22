@@ -252,6 +252,12 @@ impl PreparedV2JoinedPrefix {
         self.own
     }
 
+    /// The authenticated root Profile is shared by genesis and its first Add.
+    /// This is stable context DATA and can be read before selecting the Add.
+    pub fn initial_profile_data(&self) -> &SignedOwnerProfile {
+        self.verifier.replay_data().profile()
+    }
+
     /// Use the same selected Core verifier and original own Admission to plan
     /// an ordinary action. The Join candidate must already have been selected.
     pub fn prepare_member_plan(

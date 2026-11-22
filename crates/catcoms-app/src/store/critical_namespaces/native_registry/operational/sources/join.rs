@@ -13,6 +13,7 @@ use super::*;
 use crate::store::persistence::governance_layout::joined::{
     AcceptedFirstJoin, AcceptedJoinTransport, JoinedPendingIo, JoinedRegistrationDependency,
 };
+use crate::store::persistence::v2_member_outbox::MemberOutboxContextId;
 use crate::store::{
     NativeTextInvitePacketData, NativeTextJoinedRegistrationData, NativeTextJoinedRegistryRowData,
 };
@@ -587,6 +588,7 @@ struct JoinedRowSelection {
     row: NativeTextJoinedRegistryRowData,
     names: LocalNames,
     request: [u8; 32],
+    member_outbox: MemberOutboxContextId,
     scope: Arc<Scope>,
     retired: AtomicBool,
     keys: Option<NativeChatSourceClose>,
@@ -612,6 +614,11 @@ impl NativeTextJoinedRowSelection {
     }
     pub fn request_data(&self) -> [u8; 32] {
         self.original.request
+    }
+
+    /// Stable outbox identity derived from the original joined pin and Profile.
+    pub fn member_outbox_context_id_data(&self) -> [u8; 32] {
+        *self.original.member_outbox.as_bytes()
     }
     pub fn same_original(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.original, &other.original)
@@ -681,7 +688,7 @@ impl<R: CryptoRngCore> NativeTextSources<catcoms_net::MeshService, R> {
         if !authentication.is_for_original_vault(vault) {
             return Err(refused());
         }
-        runtime.select(row, name, data.request, &self.scope, None, &self.retirement)
+        runtime.select(row, name, data, &self.scope, None, &self.retirement)
     }
 }
 
@@ -702,18 +709,20 @@ impl<R: CryptoRngCore> MountedNode<R> {
         &mut self,
         row: NativeTextJoinedRegistryRowData,
         names: LocalNames,
-        request: [u8; 32],
+        data: NativeTextJoinedRegistrationData,
         scope: &Arc<Scope>,
         keys: Option<NativeChatSourceClose>,
         control: &Arc<retirement::Control>,
     ) -> Result<NativeTextJoinedRowSelection, AppError> {
+        let member_outbox = data.member_outbox_context_data()?.id();
         let selection = self
             .selection
             .get_or_insert_with(|| NativeTextJoinedRowSelection {
                 original: Arc::new(JoinedRowSelection {
                     row,
                     names,
-                    request,
+                    request: data.request,
+                    member_outbox,
                     scope: scope.clone(),
                     retired: AtomicBool::new(false),
                     keys,
@@ -721,7 +730,8 @@ impl<R: CryptoRngCore> MountedNode<R> {
                 }),
             });
         if selection.original.row != row
-            || selection.original.request != request
+            || selection.original.request != data.request
+            || selection.original.member_outbox != member_outbox
             || !selection.is_current_cached()
         {
             return Err(refused());
@@ -764,7 +774,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         runtime.select(
             row,
             name,
-            data.request,
+            data,
             &self.original.scope,
             pending.close.get().cloned(),
             &self.original._control,

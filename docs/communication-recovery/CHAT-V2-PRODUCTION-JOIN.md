@@ -393,6 +393,11 @@ plans can have equal action and Admission IDs and still belong to different
 incarnations. The native writer still needs to use this fence when issuing the
 save-source end for its exact prepared outbox action.
 
+The mounted joined row derives the existing member outbox context from its
+exact original pin, selected Profile, initial tenure and full device key.
+The warm receipt and independently verified cold receipt derive the same
+context. The current epoch and Admission are separate from that identity.
+
 The actual joined fence orders every transition/removal against final issuance.
 An admission that wins retains its original end through IO; removal that wins
 prevents issuance. A1 saved/uncertain originals stay historical across A2 rejoin;
