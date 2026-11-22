@@ -5,13 +5,17 @@ use catcoms_mls::persist::{
     text_current_add::TextCurrentAddLimits, TextCurrentSdkGraphReservation,
     TextCurrentSdkRestoreAdmission, TextCurrentSdkRestoreLimits,
 };
+use catcoms_replication::chat::owner_header::OwnerHeaderId;
 use catcoms_replication::chat::{
     cold_selected_history::{encode_selected_history_node_page, SelectedHistoryNodePage},
     owner_state::transition::REPLAY_MATH_PRIVATE_INVOICE,
     ProjectionGroup, ProjectionGroupView, V2GeneralPrefixVerifier, V2GeneralRetiredData,
     V2HostSelectionExpectation, V2OriginNegative, V2ProjectionOrigin,
 };
-use catcoms_sync::{PreparedV2JoinedPrefix, RecoveredV2JoinedOutcome, V2PendingJoinContextData};
+use catcoms_sync::{
+    PreparedV2JoinedPrefix, RecoveredV2JoinedOutcome, V2FirstJoinDeliveryData,
+    V2PendingJoinContextData, MAX_V2_FIRST_ADD_PROOF_BYTES,
+};
 use critical_namespaces::joined_pin::welcome as codec;
 
 const ENTRY: &str = "chat-critical-namespaces.joined-welcome-entry.bin";
@@ -101,6 +105,7 @@ impl WarmWelcome {
                 self.selection = Some(Box::new(JoinedCore::prepare(
                     store,
                     &group,
+                    &self.delivery,
                     |view, origin| required.prepare_initial_prefix(&self.delivery, view, origin),
                 )?));
             }
@@ -149,6 +154,17 @@ impl WarmWelcome {
         &self,
     ) -> Option<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64)> {
         self.selection.as_deref().and_then(JoinedCore::outcome_data)
+    }
+
+    pub(super) fn copy_selected_governing_proof(
+        &self,
+        headers: (OwnerHeaderId, OwnerHeaderId),
+        output: &mut Vec<u8>,
+    ) -> Result<(), AppError> {
+        self.selection
+            .as_ref()
+            .ok_or_else(denied)?
+            .copy_selected_governing_proof(headers, output)
     }
 
     pub(super) fn attach_node<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore>(
@@ -205,6 +221,8 @@ struct JoinedCore {
     core: PreparedV2JoinedPrefix,
     expected: V2HostSelectionExpectation,
     retired: Option<V2GeneralRetiredData>,
+    public_headers: (OwnerHeaderId, OwnerHeaderId),
+    public_proof: Zeroizing<Vec<u8>>,
     _view: ProjectionGroupView,
     _group: ProjectionGroup,
     _fee: CatalogReadReservation,
@@ -227,6 +245,7 @@ impl JoinedCore {
     fn prepare(
         store: &ServerStore,
         group: &[u8],
+        delivery: &[u8],
         prepare: impl FnOnce(
             &ProjectionGroupView,
             V2ProjectionOrigin,
@@ -236,7 +255,8 @@ impl JoinedCore {
         const CORE_FEE: usize = 2 * REPLAY_MATH_PRIVATE_INVOICE
             + V2GeneralPrefixVerifier::metadata_layout_bytes()
             + ProjectionGroup::initial_metadata_layout_bytes()
-            + 4 * std::mem::size_of::<JoinedCore>();
+            + 4 * std::mem::size_of::<JoinedCore>()
+            + 2 * MAX_V2_FIRST_ADD_PROOF_BYTES;
         let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
         let fee = policy.current.archive.pending.pool.try_reserve(CORE_FEE)?;
         let mut group = ProjectionGroup::new(group).map_err(|_| denied())?;
@@ -247,11 +267,18 @@ impl JoinedCore {
         let origin = V2ProjectionOrigin::new(Arc::new(ProjectionMount(
             store.chat_mount.capture_cached_physical_negative(),
         )));
+        let decoded = V2FirstJoinDeliveryData::decode(delivery).map_err(|_| denied())?;
+        let (proof, bytes) = decoded.governing_proof_data();
+        let public_headers = proof.header_ids_data();
+        let public_proof = Zeroizing::new(bytes.to_vec());
+        drop(decoded);
         let (core, expected) = prepare(&view, origin)?;
         Ok(Self {
             core,
             expected,
             retired: None,
+            public_headers,
+            public_proof,
             _view: view,
             _group: group,
             _fee: fee,
@@ -275,6 +302,25 @@ impl JoinedCore {
         let replay = self.core.selected_replay_data()?;
         Some((replay.header().id(), replay.mls_epoch_data()))
     }
+
+    fn copy_selected_governing_proof(
+        &self,
+        headers: (OwnerHeaderId, OwnerHeaderId),
+        output: &mut Vec<u8>,
+    ) -> Result<(), AppError> {
+        let original = self.retired.as_ref().ok_or_else(denied)?;
+        let selected = self.core.selected_replay_data().ok_or_else(denied)?;
+        if self.public_headers != headers
+            || original.parent_data().header().id() != headers.0
+            || selected.header().id() != headers.1
+            || !output.is_empty()
+            || output.capacity() < self.public_proof.len()
+        {
+            return Err(denied());
+        }
+        output.extend_from_slice(&self.public_proof);
+        Ok(())
+    }
 }
 
 impl ClosedOutcome {
@@ -290,7 +336,7 @@ impl ClosedOutcome {
             graph.governing_head_data(),
             graph.governing_state_data(),
         );
-        let selection = JoinedCore::prepare(store, &group, |view, origin| {
+        let selection = JoinedCore::prepare(store, &group, delivery, |view, origin| {
             Ok((
                 graph
                     .prepare_initial_prefix(delivery, view, origin)
@@ -313,6 +359,18 @@ impl ClosedOutcome {
 }
 
 impl RecoveredWelcome {
+    pub(super) fn copy_selected_governing_proof(
+        &self,
+        headers: (OwnerHeaderId, OwnerHeaderId),
+        output: &mut Vec<u8>,
+    ) -> Result<(), AppError> {
+        self.outcome
+            .as_ref()
+            .ok_or_else(denied)?
+            .selection
+            .copy_selected_governing_proof(headers, output)
+    }
+
     pub(super) fn attach_node<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore>(
         &mut self,
         inputs: &mut Option<JoinedRuntimeInputs<T, R>>,

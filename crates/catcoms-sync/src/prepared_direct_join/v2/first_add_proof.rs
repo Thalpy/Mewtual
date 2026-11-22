@@ -130,6 +130,12 @@ impl<'a> V2FirstAddProofData<'a> {
         self.bytes
     }
 
+    /// Original decoded header labels for an independently selected first
+    /// record. Decoding alone establishes no selected history.
+    pub fn header_ids_data(&self) -> (OwnerHeaderId, OwnerHeaderId) {
+        (self.genesis.header().id(), self.add.header().id())
+    }
+
     pub(super) fn add_image_data(&self) -> &[u8] {
         self.add.image()
     }
@@ -278,6 +284,7 @@ impl fmt::Debug for V2FirstAddProofData<'_> {
 pub struct V2FirstJoinDeliveryData<'a> {
     response: V2JoinResponsePacketData<'a>,
     proof: V2FirstAddProofData<'a>,
+    proof_bytes: &'a [u8],
 }
 
 impl<'a> V2FirstJoinDeliveryData<'a> {
@@ -311,20 +318,27 @@ impl<'a> V2FirstJoinDeliveryData<'a> {
             return Err(SyncError::Malformed);
         }
         let response = d.get_bytes().map_err(malformed)?;
-        let proof = d.get_bytes().map_err(malformed)?;
+        let proof_bytes = d.get_bytes().map_err(malformed)?;
         d.finish().map_err(malformed)?;
         if response.len() > MAX_V2_JOIN_RESPONSE_PACKET_BYTES
-            || proof.len() > MAX_V2_FIRST_ADD_PROOF_BYTES
+            || proof_bytes.len() > MAX_V2_FIRST_ADD_PROOF_BYTES
         {
             return Err(SyncError::Malformed);
         }
         Ok(Self {
             response: V2JoinResponsePacketData::decode(response)?,
-            proof: V2FirstAddProofData::decode(proof)?,
+            proof: V2FirstAddProofData::decode(proof_bytes)?,
+            proof_bytes,
         })
     }
 
     pub(super) fn data(&self) -> (V2JoinResponseData<'_>, &V2FirstAddProofData<'a>) {
         (self.response.response_data(), &self.proof)
+    }
+
+    /// Original public proof bytes. The private Welcome/route transfer and
+    /// transport admission are outside this representation.
+    pub fn governing_proof_data(&self) -> (&V2FirstAddProofData<'a>, &'a [u8]) {
+        (&self.proof, self.proof_bytes)
     }
 }

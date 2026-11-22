@@ -2,6 +2,7 @@
 //! files grants historical request custody. Welcome has its own entry fence.
 use super::*;
 use catcoms_replication::chat::join_bindings::SignedInviteBindingData;
+use catcoms_replication::chat::owner_header::OwnerHeaderId;
 use catcoms_sync::{DirectJoinLimits, PreparedV2JoinRequest, MAX_V2_FIRST_JOIN_DELIVERY_BYTES};
 use critical_namespaces::joined_pin::pending::{
     PreparedPinnedPending, RecoveredPinnedPending, MAX_FRAME,
@@ -324,6 +325,24 @@ impl ServerStore {
         Ok(result)
     }
 
+    pub(in crate::store) fn copy_recovered_governing_proof(
+        &self,
+        headers: (OwnerHeaderId, OwnerHeaderId),
+        output: &mut Vec<u8>,
+    ) -> Result<(), AppError> {
+        self.validate_mounted_governance_layout()?;
+        let slot = self.joined_pin_index.lock().map_err(|_| denied())?;
+        let selected = slot.as_ref().ok_or_else(denied)?;
+        selected.require(self)?;
+        selected
+            .pending
+            .as_ref()
+            .and_then(|pending| pending.welcome.as_ref())
+            .ok_or_else(denied)?
+            .copy_selected_governing_proof(headers, output)?;
+        selected.require(self)
+    }
+
     /// Exclusive access keeps the original held index and Welcome outside
     /// mutex guards during runtime assembly.
     pub(in crate::store) fn attach_recovered_joined_node<
@@ -541,6 +560,20 @@ impl JoinedPendingIo {
             welcome.require_outcome(store)?;
         }
         Ok(data)
+    }
+
+    pub(in crate::store) fn copy_selected_governing_proof(
+        &self,
+        store: &ServerStore,
+        headers: (OwnerHeaderId, OwnerHeaderId),
+        output: &mut Vec<u8>,
+    ) -> Result<(), AppError> {
+        self.request_data(store)?;
+        let welcome = self.welcome.as_ref().ok_or_else(denied)?;
+        welcome.require_outcome(store)?;
+        welcome.copy_selected_governing_proof(headers, output)?;
+        self.request_data(store)?;
+        welcome.require_outcome(store)
     }
 
     pub(in crate::store) fn attach_warm_node<

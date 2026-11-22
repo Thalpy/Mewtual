@@ -400,6 +400,19 @@ impl Store {
         self.physical.recovered_join_outcome_data()
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn copy_selected_governing_proof(
+        &self,
+        pending: Option<&crate::store::persistence::governance_layout::joined::JoinedPendingIo>,
+        headers: (
+            catcoms_replication::chat::owner_header::OwnerHeaderId,
+            catcoms_replication::chat::owner_header::OwnerHeaderId,
+        ),
+        output: &mut Vec<u8>,
+    ) -> Result<(), AppError> {
+        self.physical
+            .copy_selected_governing_proof(pending, headers, output)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn attach_recovered_joined_node<
         T: catcoms_rt::MeshTransport,
         R: catcoms_rt::CryptoRngCore,

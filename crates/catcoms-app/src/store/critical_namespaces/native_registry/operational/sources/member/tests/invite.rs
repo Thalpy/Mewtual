@@ -336,6 +336,18 @@ async fn native_governed_add_fixture(case: JoinCase) {
             let saved = accept(&original_request).unwrap();
             let packet =
                 catcoms_sync::V2JoinResponsePacketData::decode(saved.packet_bytes_data()).unwrap();
+            let expected_proof = saved.governing_proof_bytes_data();
+            let genesis = OwnerHeaderId::from_bytes(invite.binding().spec_data().anchor.header);
+            assert_eq!(
+                runtime
+                    .first_selected_governing_proof(genesis, head, &negative)
+                    .unwrap()
+                    .as_ref(),
+                expected_proof
+            );
+            assert!(runtime
+                .first_selected_governing_proof(head, head, &negative)
+                .is_err());
             assert_eq!(
                 packet.response_data().binding.spec_data().admission,
                 *own.as_bytes()
@@ -376,6 +388,13 @@ async fn native_governed_add_fixture(case: JoinCase) {
                 restored.complete_recovery(&negative).unwrap(),
                 (head, own, epoch)
             );
+            assert_eq!(
+                restored
+                    .first_selected_governing_proof(genesis, head, &negative)
+                    .unwrap()
+                    .as_ref(),
+                expected_proof
+            );
             let outcome = only_named(join_dir, outcome_name);
             let parked = outcome.with_extension("original-cold-outcome");
             let original_outcome = std::fs::read(&outcome).unwrap();
@@ -394,6 +413,9 @@ async fn native_governed_add_fixture(case: JoinCase) {
             std::fs::rename(&current, &held_current).unwrap();
             std::fs::write(&current, original_current).unwrap();
             assert!(restored.complete_recovery(&negative).is_err());
+            assert!(restored
+                .first_selected_governing_proof(genesis, head, &negative)
+                .is_err());
             std::fs::remove_file(&current).unwrap();
             std::fs::rename(&held_current, &current).unwrap();
             assert_eq!(

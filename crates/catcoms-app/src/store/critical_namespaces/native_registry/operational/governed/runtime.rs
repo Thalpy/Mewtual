@@ -2,7 +2,19 @@
 use super::*;
 use crate::store::persistence::governance_layout::joined::JoinedRuntimeInputs;
 use catcoms_replication::chat::{owner_facts::OwnerFactId, owner_header::OwnerHeaderId};
-use catcoms_sync::ClosedV2JoinedNode;
+use catcoms_sync::{ClosedV2JoinedNode, MAX_V2_FIRST_ADD_PROOF_BYTES};
+use zeroize::Zeroizing;
+
+struct PaidGoverningProof {
+    bytes: Zeroizing<Vec<u8>>,
+    _fee: CatalogReadReservation,
+}
+
+impl AsRef<[u8]> for PaidGoverningProof {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
 
 pub struct NativeTextJoinedRuntime<T: MeshTransport, R: CryptoRngCore> {
     node: Option<ClosedV2JoinedNode<T, R>>,
@@ -70,6 +82,40 @@ impl NativeTextJoinedStorage {
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> NativeTextJoinedRuntime<T, R> {
+    /// Read the original signed governing proof from an attached first join.
+    /// The exact parent and selected child identify this bounded history read.
+    /// The returned historical data keeps its own credit through all clones.
+    pub fn first_selected_governing_proof(
+        &self,
+        parent: OwnerHeaderId,
+        child: OwnerHeaderId,
+        negative: &RequestCancellation,
+    ) -> Result<bytes::Bytes, AppError> {
+        let node = self.node.as_ref().ok_or_else(refused)?;
+        if negative.is_cancelled() || node.selected_join_data().map_err(|_| refused())?.0 != child {
+            return Err(refused());
+        }
+        let (mount, fee) = self.storage.index.joined_exchange_resources(
+            MAX_V2_FIRST_ADD_PROOF_BYTES + 4 * std::mem::size_of::<PaidGoverningProof>(),
+        )?;
+        let mut bytes = Zeroizing::new(Vec::with_capacity(MAX_V2_FIRST_ADD_PROOF_BYTES));
+        self.storage.index.copy_selected_governing_proof(
+            self.storage.pending.as_ref(),
+            (parent, child),
+            &mut bytes,
+        )?;
+        if negative.is_cancelled()
+            || mount.is_cancelled()
+            || node.selected_join_data().map_err(|_| refused())?.0 != child
+        {
+            return Err(refused());
+        }
+        Ok(bytes::Bytes::from_owner(PaidGoverningProof {
+            bytes,
+            _fee: fee,
+        }))
+    }
+
     /// Attach the closed restored graph once, then reprove its original held
     /// files on every exact retry. Native Source admission remains separate.
     pub fn complete_recovery(

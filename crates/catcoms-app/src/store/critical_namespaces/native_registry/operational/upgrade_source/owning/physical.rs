@@ -148,6 +148,24 @@ impl Physical {
             .recovered_join_outcome_data()
     }
 
+    pub(super) fn copy_selected_governing_proof(
+        &self,
+        pending: Option<&crate::store::persistence::governance_layout::joined::JoinedPendingIo>,
+        headers: (
+            catcoms_replication::chat::owner_header::OwnerHeaderId,
+            catcoms_replication::chat::owner_header::OwnerHeaderId,
+        ),
+        output: &mut Vec<u8>,
+    ) -> Result<(), AppError> {
+        self.handler.require()?;
+        self.handler.require_idle_cached()?;
+        let store = self.current()?.checked_store()?;
+        match pending {
+            Some(pending) => pending.copy_selected_governing_proof(store, headers, output),
+            None => store.copy_recovered_governing_proof(headers, output),
+        }
+    }
+
     pub(super) fn selected_pending_join_data(
         &self,
     ) -> Result<Option<([u8; 32], catcoms_sync::V2PendingJoinContextData)>, AppError> {

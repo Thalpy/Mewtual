@@ -236,6 +236,10 @@ verified prefix and held catalog, pin and outcome files. Equal-byte replacements
 of those files refuse, including after the closed node is attached. Cold attachment never re-enters
 Welcome or creates fresh join facts. Native registry installation, restoring
 the original native transport and ordinary-member save admission remain open.
+Warm and recovered nodes can read the same original signed first governing
+proof by its genesis and selected Add Header IDs. This bounded archive read
+returns the original public proof from the covered delivery under a separate
+buffer credit. The addressed member catch-up transport is still pending.
 The joined storage owner can exchange the exact selected JoinRequest on an
 already authenticated connection to the peer named by the signed invite.
 It keeps the original connection and vault cancellation through response
