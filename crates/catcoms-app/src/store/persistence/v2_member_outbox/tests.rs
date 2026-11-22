@@ -593,11 +593,14 @@ fn admission_must_name_the_exact_prepared_facts_and_returns_everything_when_refu
     let second = fx.prepare(&owner, token(2), two, admission(0xa1)).unwrap();
     let wrong =
         MemberOutboxSaveAdmission::durability_only_for_test(second.admission_facts(), fx.lease());
-    let refused = *first.admit(owner, wrong).unwrap_err();
-    assert!(matches!(refused.refusal, MemberOutboxRefusal::Stale));
-    assert_eq!(refused.owner.head_data_for_test(), HeadData::initial());
+    let first = Box::new(first);
+    let allocation = &*first as *const _;
+    let (owner, first, refused) = first.admit_boxed(owner, wrong).unwrap_err();
+    assert!(std::ptr::eq(allocation, &*first));
+    assert_eq!(owner.head_data_for_test(), HeadData::initial());
+    drop(refused);
     // Nothing was written; the same prepared append still admits under its own facts.
-    let run = fx.run(refused.owner, refused.prepared);
+    let run = fx.run(owner, *first);
     assert!(matches!(run.outcome, MemberAppendOutcome::Saved(_)));
     // The other prepared append started from a parent that is no longer selected.
     let facts = second.admission_facts();

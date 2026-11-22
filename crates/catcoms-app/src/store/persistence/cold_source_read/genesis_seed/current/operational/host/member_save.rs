@@ -49,11 +49,11 @@ use crate::store::critical_namespaces::read_pool::{
 };
 use crate::store::critical_namespaces::refused;
 use crate::store::persistence::v2_member_outbox::{
-    canonical_member_parents, member_outbox_key, AdmittedMemberCommit, MemberCommitRun,
-    MemberContextCell, MemberContextState, MemberLookup, MemberOriginalCustody, MemberOutbox,
-    MemberOutboxContextData, MemberOutboxContextId, MemberOutboxContextSpec, MemberOutboxError,
-    MemberOutboxMount, MemberOutboxRefusal, MemberOutboxSaveAdmission, MemberReceiptData,
-    MemberRequestData, MemberRequestToken, MemberSignedOriginal, RefusedMemberAppendAdmission,
+    canonical_member_parents, member_outbox_key, AdmittedMemberCommit, MemberAppendAdmissionFacts,
+    MemberCommitRun, MemberContextCell, MemberContextState, MemberLookup, MemberOriginalCustody,
+    MemberOutbox, MemberOutboxContextData, MemberOutboxContextId, MemberOutboxContextSpec,
+    MemberOutboxError, MemberOutboxMount, MemberOutboxRefusal, MemberOutboxSaveAdmission,
+    MemberReceiptData, MemberRequestData, MemberRequestToken, MemberSignedOriginal,
     ReturnedMemberOriginal, MEMBER_OUTBOX_APPEND_FEE, MEMBER_OUTBOX_LOOKUP_FEE,
 };
 use crate::store::persistence::V2TextOwnerRef;
@@ -61,8 +61,9 @@ use crate::store::ServerStore;
 use crate::AppError;
 use catcoms_replication::chat::{ActionId, ActionSpec};
 use catcoms_rt::{CryptoRngCore, MeshTransport, RequestCancellation};
+use catcoms_storage::VaultPhysicalWorkLease;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, TryLockError};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 mod history;
 
@@ -614,52 +615,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
             drop(source);
             return Err((native, V2MemberSaveRefusal::Cancelled));
         }
-        // Everything below was pre-checked; a refusal here still returns everything whole.
-        let Some(outbox) = state.owner.take() else {
-            return Err((native, V2MemberSaveRefusal::Stale));
-        };
-        let prepared = match state.custody.take() {
-            Some(MemberOriginalCustody::Prepared(prepared)) => prepared,
-            other => {
-                state.custody = other;
-                state.owner = Some(outbox);
-                return Err((native, V2MemberSaveRefusal::Stale));
-            }
-        };
-        let admission = MemberOutboxSaveAdmission::at_member_save_final_edge(facts, lease);
-        match (*prepared).admit(outbox, admission) {
-            Ok(admitted) => {
-                let (original, commit) = admitted.into_commit();
-                state.custody = Some(MemberOriginalCustody::Running {
-                    token: facts.token,
-                    original,
-                });
-                drop(guard);
-                Ok(MemberSaveJob {
-                    commit: Some(commit),
-                    cell,
-                    token: facts.token,
-                    started: false,
-                    finished: false,
-                    _source: source,
-                    _native: native,
-                })
-            }
-            Err(refused) => {
-                let RefusedMemberAppendAdmission {
-                    owner: outbox,
-                    prepared,
-                    admission,
-                    ..
-                } = *refused;
-                state.owner = Some(outbox);
-                state.custody = Some(MemberOriginalCustody::Prepared(Box::new(prepared)));
-                drop(guard);
-                drop(admission);
-                drop(source);
-                Err((native, V2MemberSaveRefusal::Stale))
-            }
-        }
+        MemberSaveJob::admit_from_cell(&cell, guard, facts, lease, source, native)
     }
 
     /// Settle the cell's earlier custody without signing. Custody stays IN the cell across
@@ -960,6 +916,59 @@ impl std::fmt::Debug for MemberSaveJob {
 }
 
 impl MemberSaveJob {
+    /// Move the exact presealed append into the common worker after the host
+    /// has issued its source end and checked the native final edge.
+    fn admit_from_cell(
+        cell: &Arc<MemberContextCell>,
+        mut guard: MutexGuard<'_, MemberContextState>,
+        facts: MemberAppendAdmissionFacts,
+        lease: VaultPhysicalWorkLease,
+        source: V2MemberSaveSourceEnd,
+        native: MemberSaveNativeAdmission,
+    ) -> Result<Self, (MemberSaveNativeAdmission, V2MemberSaveRefusal)> {
+        let Some(outbox) = guard.owner.take() else {
+            drop(guard);
+            return Err((native, V2MemberSaveRefusal::Stale));
+        };
+        let prepared = match guard.custody.take() {
+            Some(MemberOriginalCustody::Prepared(prepared)) => prepared,
+            other => {
+                guard.custody = other;
+                guard.owner = Some(outbox);
+                drop(guard);
+                return Err((native, V2MemberSaveRefusal::Stale));
+            }
+        };
+        let admission = MemberOutboxSaveAdmission::at_member_save_final_edge(facts, lease);
+        match prepared.admit_boxed(outbox, admission) {
+            Ok(admitted) => {
+                let (original, commit) = admitted.into_commit();
+                guard.custody = Some(MemberOriginalCustody::Running {
+                    token: facts.token,
+                    original,
+                });
+                drop(guard);
+                Ok(Self {
+                    commit: Some(commit),
+                    cell: cell.clone(),
+                    token: facts.token,
+                    started: false,
+                    finished: false,
+                    _source: source,
+                    _native: native,
+                })
+            }
+            Err((outbox, prepared, admission)) => {
+                guard.owner = Some(outbox);
+                guard.custody = Some(MemberOriginalCustody::Prepared(prepared));
+                drop(guard);
+                drop(admission);
+                drop(source);
+                Err((native, V2MemberSaveRefusal::Stale))
+            }
+        }
+    }
+
     /// Run the commit to completion (or to a crash-equivalent failure). The outcome and the
     /// owner are deposited in the Store's cell BEFORE the source end and the native custody
     /// are released, so a lock that waited for this job finds the settled state.

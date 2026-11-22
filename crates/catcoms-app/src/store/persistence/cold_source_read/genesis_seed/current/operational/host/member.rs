@@ -327,6 +327,66 @@ impl PendingMemberRequest {
             .pool;
         self.fee.validate(pool, V2_MEMBER_REQUEST_BYTES)
     }
+
+    fn prepare_draft(
+        &mut self,
+        group: &[u8],
+        signer: [u8; 32],
+        own: &V2AuthenticatedAdmission,
+    ) -> Result<(), AppError> {
+        if own.admission_data().spec().subject != signer {
+            return Err(refused());
+        }
+        let (presented_ms, nonce) = self.inputs.drawn_data().ok_or_else(refused)?;
+        let realm = Realm::new(group, self.channel).map_err(|_| refused())?;
+        let labels = own
+            .admission_data()
+            .ordinary_labels(&realm)
+            .map_err(|_| refused())?;
+        let spec = ActionSpec {
+            realm,
+            basis: labels.basis,
+            grant: labels.grant,
+            nonce,
+            presented_ms,
+            parents: self.parents.clone(),
+            body: self.body.clone(),
+        };
+        self.draft = Some(ActionDraft::new(spec, signer).map_err(|_| refused())?);
+        Ok(())
+    }
+
+    fn prepare_plan(
+        &mut self,
+        verifier: &V2GeneralPrefixVerifier,
+        own: &V2AuthenticatedAdmission,
+        dependencies: &[V2MemberDependency<'_>],
+        view: &ProjectionView,
+    ) -> Result<(), AppError> {
+        let draft = self.draft.as_ref().ok_or_else(refused)?;
+        // Resolve each dependency's Admission in this verifier before Core
+        // checks the real signature, delegation and exact minimal set.
+        let mut resolved = Vec::with_capacity(dependencies.len());
+        for dependency in dependencies {
+            resolved.push((
+                dependency.action,
+                verifier
+                    .admission(dependency.admission)
+                    .map_err(|_| refused())?,
+            ));
+        }
+        resolved.sort_by_cached_key(|(action, _)| action.id());
+        let dependencies: Vec<_> = resolved
+            .iter()
+            .map(|(action, admission)| V2OrdinaryDependency::new(action, admission))
+            .collect();
+        let plan = verifier
+            .prepare_ordinary_signing_plan(draft, own, &dependencies, view)
+            .map_err(|_| refused())?;
+        self.original = Some(plan.observe_original());
+        self.plan = Some(plan);
+        Ok(())
+    }
 }
 
 /// One channel's ledger bound to THIS lane's own group view. The ledger stays empty here
@@ -342,9 +402,7 @@ struct MemberChannel {
 /// then channel views, then the verifier (whose Drop closes this lane's own group), then the
 /// anchor/capture, the save-source lifecycle, the member-role domain, and the lane fee LAST.
 pub(super) struct V2MemberLane {
-    request: Option<Box<PendingMemberRequest>>,
-    finished: VecDeque<[u8; 32]>,
-    retired_unsaved: Vec<[u8; 32]>,
+    requests: MemberRequests,
     channels: Vec<MemberChannel>,
     verifier: Option<V2GeneralPrefixVerifier>,
     bound: Option<BoundV2TextFounderAnchor>,
@@ -364,6 +422,14 @@ pub(super) struct V2MemberLane {
     fee: CatalogReadReservation,
 }
 
+/// Request custody for a single ordinary-member source. It retains the exact
+/// signed original or its loan and never obtains a key, a new Source or IO.
+struct MemberRequests {
+    request: Option<Box<PendingMemberRequest>>,
+    finished: VecDeque<[u8; 32]>,
+    retired_unsaved: Vec<[u8; 32]>,
+}
+
 impl V2MemberLane {
     pub(super) fn governed_add_verifier(
         &mut self,
@@ -380,7 +446,7 @@ impl V2MemberLane {
     }
 
     pub(super) fn require_quiescent_for_add(&self) -> Result<(), AppError> {
-        if self.request.is_some() {
+        if self.requests.request.is_some() {
             return Err(refused());
         }
         self.save_source.require_open_idle()
@@ -462,9 +528,7 @@ impl V2MemberLane {
         let mut group = Vec::with_capacity(group_ref.len());
         group.extend_from_slice(group_ref);
         Ok(Self {
-            request: None,
-            finished: VecDeque::with_capacity(MAX_FINISHED_TOKENS),
-            retired_unsaved: Vec::with_capacity(MAX_UNSAVED_RETIREMENTS),
+            requests: MemberRequests::new(),
             channels: Vec::with_capacity(MAX_MEMBER_CHANNELS),
             verifier: None,
             bound: None,
@@ -488,7 +552,7 @@ impl V2MemberLane {
             .pool;
         self.fee.validate(pool, V2_MEMBER_LANE_BYTES)?;
         self.domain.validate_accounts(store)?;
-        if let Some(request) = self.request.as_deref() {
+        if let Some(request) = self.requests.request.as_deref() {
             request.validate_accounts(store)?;
         }
         Ok(())
@@ -550,16 +614,7 @@ impl V2MemberLane {
         if self.outbox_context != Some(context) {
             return Err(refused());
         }
-        let pending = self
-            .request
-            .as_deref()
-            .filter(|pending| pending.token == token)
-            .ok_or_else(refused)?;
-        if !matches!(pending.signed, SignedState::Lent(lent) if lent == action)
-            || pending.historical_admission() != Some(admission)
-        {
-            return Err(refused());
-        }
+        self.requests.require_lent(token, action, admission)?;
         self.domain.validate_negative()?;
         // The serialized lifecycle re-checks the same negative under its own lock.
         self.save_source.issue()
@@ -579,24 +634,7 @@ impl V2MemberLane {
         saved: ActionId,
         spec: Option<&ActionSpec>,
     ) -> Result<Option<bool>, AppError> {
-        let Some(pending) = self
-            .request
-            .as_deref_mut()
-            .filter(|pending| pending.token == token)
-        else {
-            return Ok(None);
-        };
-        pending.complete_cached();
-        if !matches!(pending.signed, SignedState::Lent(_)) {
-            let spec = spec.ok_or_else(refused)?;
-            if pending.channel != spec.realm.channel()
-                || pending.body != spec.body
-                || pending.parents != spec.parents
-            {
-                return Err(refused());
-            }
-        }
-        self.finish(token, FinishMode::SavedHit(saved)).map(Some)
+        self.requests.reconcile_saved(token, saved, spec)
     }
 
     /// Whether this lane's member source can still admit anything: the member domain's
@@ -620,15 +658,13 @@ impl V2MemberLane {
         signer: [u8; 32],
     ) -> Result<(), AppError> {
         let action = original.action();
-        if let Some(pending) = self.request.as_deref() {
+        if let Some(pending) = self.requests.request.as_deref() {
             return match pending.signed {
                 SignedState::Lent(lent) if pending.token == token && lent == action.id() => Ok(()),
                 _ => Err(refused()),
             };
         }
-        if self.finished.contains(&token)
-            || self.retired_unsaved.contains(&token)
-            || self.retired_unsaved.len() == MAX_UNSAVED_RETIREMENTS
+        if !self.requests.may_start(token)
             || action.signer() != &signer
             || action.spec().realm.group() != self.group.as_slice()
             || original.admission() != self.admission
@@ -637,7 +673,7 @@ impl V2MemberLane {
             return Err(refused());
         }
         self.validate_accounts(store)?;
-        self.request = Some(Box::new(PendingMemberRequest::adopt(
+        self.requests.request = Some(Box::new(PendingMemberRequest::adopt(
             store, token, original,
         )?));
         Ok(())
@@ -711,30 +747,6 @@ impl V2MemberLane {
         Ok(self.channels.len() - 1)
     }
 
-    /// Pure DATA completion plus exact-retry classification, with no positive gate.
-    /// `Ok(true)`: this same request already holds (or lent) its completed original.
-    fn retry_completed(&mut self, request: &V2MemberSignRequest<'_>) -> Result<bool, AppError> {
-        // Every call, including retries of an existing request, bounds the borrowed input
-        // before any comparison, copy or dependency resolution.
-        require_request_shape(request)?;
-        let Some(pending) = self.request.as_deref_mut() else {
-            if self.finished.contains(&request.token)
-                || self.retired_unsaved.contains(&request.token)
-                || self.retired_unsaved.len() == MAX_UNSAVED_RETIREMENTS
-            {
-                return Err(refused());
-            }
-            return Ok(false);
-        };
-        pending.complete_cached();
-        if pending.token != request.token {
-            // One pending request per lane: a different token waits for this one to finish.
-            return Err(refused());
-        }
-        pending.require_same_request(request)?;
-        Ok(!matches!(pending.signed, SignedState::Pending))
-    }
-
     fn retry_request<T: MeshTransport, R: CryptoRngCore>(
         &mut self,
         store: &ServerStore,
@@ -743,22 +755,25 @@ impl V2MemberLane {
         request: &V2MemberSignRequest<'_>,
         mut access: FounderAccess<'_>,
     ) -> Result<(), AppError> {
-        if self.retry_completed(request)? {
+        if self.requests.retry_completed(request)? {
             return Ok(());
         }
         self.validate_accounts(store)?;
-        if self.request.is_none() {
-            self.request = Some(Box::new(PendingMemberRequest::prepare(store, request)?));
-        }
+        self.requests.ensure_pending(store, request)?;
         {
             let owner_ref = owner.borrow_current()?;
             self.retry_verifier(store, &owner_ref)?;
         }
-        let channel = self.request.as_deref().ok_or_else(refused)?.channel;
+        let channel = self
+            .requests
+            .request
+            .as_deref()
+            .ok_or_else(refused)?
+            .channel;
         let channel_index = self.ensure_channel(channel)?;
 
         let Self {
-            request: slot,
+            requests,
             channels,
             verifier,
             capture,
@@ -767,7 +782,7 @@ impl V2MemberLane {
             admission,
             ..
         } = self;
-        let pending = slot.as_deref_mut().ok_or_else(refused)?;
+        let pending = requests.request.as_deref_mut().ok_or_else(refused)?;
         let verifier = verifier.as_ref().ok_or_else(refused)?;
 
         // ONE Clock read and ONE nonce through the original node's own seams. No owner loan
@@ -778,61 +793,20 @@ impl V2MemberLane {
                 .map_err(|_| refused())?;
         }
         if pending.draft.is_none() {
-            let (presented_ms, nonce) = pending.inputs.drawn_data().ok_or_else(refused)?;
             let signer = owner
                 .ordinary_member_signer_data(store)
                 .map_err(|_| refused())?;
             let own = verifier.admission(*admission).map_err(|_| refused())?;
-            if own.admission_data().spec().subject != signer {
-                return Err(refused());
-            }
-            let realm = Realm::new(group, pending.channel).map_err(|_| refused())?;
-            let labels = own
-                .admission_data()
-                .ordinary_labels(&realm)
-                .map_err(|_| refused())?;
-            let spec = ActionSpec {
-                realm,
-                basis: labels.basis,
-                grant: labels.grant,
-                nonce,
-                presented_ms,
-                parents: pending.parents.clone(),
-                body: pending.body.clone(),
-            };
-            pending.draft = Some(ActionDraft::new(spec, signer).map_err(|_| refused())?);
+            pending.prepare_draft(group, signer, &own)?;
         }
         if pending.plan.is_none() {
-            let draft = pending.draft.as_ref().ok_or_else(refused)?;
             let own = verifier.admission(*admission).map_err(|_| refused())?;
-            // Resolve every dependency's Admission in THIS verifier; Core checks each real
-            // signature/delegation and the exact minimal set. Order = Core's sorted set.
-            let mut resolved: Vec<(&SignedAction, V2AuthenticatedAdmission)> =
-                Vec::with_capacity(request.dependencies.len());
-            for dependency in request.dependencies {
-                resolved.push((
-                    dependency.action,
-                    verifier
-                        .admission(dependency.admission)
-                        .map_err(|_| refused())?,
-                ));
-            }
-            // `SignedAction::id` re-encodes and hashes; compute each key once.
-            resolved.sort_by_cached_key(|(action, _)| action.id());
-            let dependencies: Vec<V2OrdinaryDependency<'_>> = resolved
-                .iter()
-                .map(|(action, admission)| V2OrdinaryDependency::new(action, admission))
-                .collect();
-            let plan = verifier
-                .prepare_ordinary_signing_plan(
-                    draft,
-                    &own,
-                    &dependencies,
-                    &channels[channel_index].view,
-                )
-                .map_err(|_| refused())?;
-            pending.original = Some(plan.observe_original());
-            pending.plan = Some(plan);
+            pending.prepare_plan(
+                verifier,
+                &own,
+                request.dependencies,
+                &channels[channel_index].view,
+            )?;
         }
 
         if !pending.has_cached_raw() {
@@ -900,6 +874,93 @@ impl V2MemberLane {
             return Err(refused());
         }
         Ok(())
+    }
+}
+
+impl MemberRequests {
+    fn new() -> Self {
+        Self {
+            request: None,
+            finished: VecDeque::with_capacity(MAX_FINISHED_TOKENS),
+            retired_unsaved: Vec::with_capacity(MAX_UNSAVED_RETIREMENTS),
+        }
+    }
+
+    fn may_start(&self, token: [u8; 32]) -> bool {
+        !self.finished.contains(&token)
+            && !self.retired_unsaved.contains(&token)
+            && self.retired_unsaved.len() < MAX_UNSAVED_RETIREMENTS
+    }
+
+    fn ensure_pending(
+        &mut self,
+        store: &ServerStore,
+        request: &V2MemberSignRequest<'_>,
+    ) -> Result<(), AppError> {
+        if self.request.is_none() {
+            self.request = Some(Box::new(PendingMemberRequest::prepare(store, request)?));
+        }
+        Ok(())
+    }
+
+    /// Pure DATA completion and exact retry. Bounds every call before reading
+    /// retained data. An occupied slot belongs to its one original request.
+    fn retry_completed(&mut self, request: &V2MemberSignRequest<'_>) -> Result<bool, AppError> {
+        require_request_shape(request)?;
+        let Some(pending) = self.request.as_deref_mut() else {
+            return self
+                .may_start(request.token)
+                .then_some(false)
+                .ok_or_else(refused);
+        };
+        pending.complete_cached();
+        pending.require_same_request(request)?;
+        Ok(!matches!(pending.signed, SignedState::Pending))
+    }
+
+    fn require_lent(
+        &self,
+        token: [u8; 32],
+        action: ActionId,
+        admission: OwnerFactId,
+    ) -> Result<&PendingMemberRequest, AppError> {
+        let pending = self
+            .request
+            .as_deref()
+            .filter(|pending| pending.token == token)
+            .ok_or_else(refused)?;
+        if !matches!(pending.signed, SignedState::Lent(lent) if lent == action)
+            || pending.historical_admission() != Some(admission)
+        {
+            return Err(refused());
+        }
+        Ok(pending)
+    }
+
+    fn reconcile_saved(
+        &mut self,
+        token: [u8; 32],
+        saved: ActionId,
+        spec: Option<&ActionSpec>,
+    ) -> Result<Option<bool>, AppError> {
+        let Some(pending) = self
+            .request
+            .as_deref_mut()
+            .filter(|pending| pending.token == token)
+        else {
+            return Ok(None);
+        };
+        pending.complete_cached();
+        if !matches!(pending.signed, SignedState::Lent(_)) {
+            let spec = spec.ok_or_else(refused)?;
+            if pending.channel != spec.realm.channel()
+                || pending.body != spec.body
+                || pending.parents != spec.parents
+            {
+                return Err(refused());
+            }
+        }
+        self.finish(token, FinishMode::SavedHit(saved)).map(Some)
     }
 
     fn take_signed(&mut self, token: [u8; 32]) -> Result<MemberSignedOriginal, AppError> {
@@ -1045,7 +1106,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         require_request_shape(&request)?;
         // Pure DATA completion and exact retry BEFORE any positive gate.
         if let Some(lane) = self.member.as_deref_mut() {
-            if lane.retry_completed(&request)? {
+            if lane.requests.retry_completed(&request)? {
                 return Ok(());
             }
         }
@@ -1093,6 +1154,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         self.member
             .as_deref_mut()
             .ok_or_else(refused)?
+            .requests
             .take_signed(token)
     }
 
@@ -1108,7 +1170,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         value: MemberSignedOriginal,
     ) -> Result<(), (MemberSignedOriginal, AppError)> {
         match self.member.as_deref_mut() {
-            Some(lane) => lane.restore_signed(token, value),
+            Some(lane) => lane.requests.restore_signed(token, value),
             None => Err((value, refused())),
         }
     }
@@ -1128,6 +1190,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         self.member
             .as_deref_mut()
             .ok_or_else(refused)?
+            .requests
             .finish(token, FinishMode::Saved(saved_action))
     }
 
@@ -1154,6 +1217,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         self.member
             .as_deref_mut()
             .ok_or_else(refused)?
+            .requests
             .finish(token, FinishMode::Abandon)
             .map(|_| ())
     }
@@ -1168,6 +1232,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         self.member
             .as_deref_mut()
             .ok_or_else(refused)?
+            .requests
             .finish(token, FinishMode::ForgetLent)
             .map(|_| ())
     }
