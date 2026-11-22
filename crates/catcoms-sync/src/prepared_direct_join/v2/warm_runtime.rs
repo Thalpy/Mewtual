@@ -9,7 +9,7 @@ use catcoms_replication::chat::{
 /// join facts. The mounted source still owns durable selection and native
 /// admission. There is no legacy actor conversion or SDK extraction.
 pub struct ClosedV2JoinedNode<T: MeshTransport, R: CryptoRngCore> {
-    node: ChannelSync<T, R>,
+    node: Box<ChannelSync<T, R>>,
     facts: V2JoinFacts,
     fence: V2JoinedSourceFence,
     head: OwnerHeaderId,
@@ -20,7 +20,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
     /// Initial runtime wrapper overlap, excluding existing private MLS graph,
     /// transport and clock backing funded by the caller.
     pub fn allocation_bytes() -> usize {
-        3 * std::mem::size_of::<Self>() + std::mem::size_of::<T>() + 64 * 1024
+        3 * std::mem::size_of::<ChannelSync<T, R>>()
+            + std::mem::size_of::<Self>()
+            + std::mem::size_of::<T>()
+            + 64 * 1024
     }
 
     pub fn selected_join_data(&self) -> Result<(OwnerHeaderId, OwnerFactId, u64), SyncError> {
@@ -87,7 +90,7 @@ impl PreparedV2JoinRequest {
             )
             .map_err(|_| SyncError::JoinRejected)?;
         Ok(ClosedV2JoinedNode {
-            node,
+            node: Box::new(node),
             facts,
             fence,
             head: OwnerHeaderId::from_bytes(welcome.spec_data().add_header),

@@ -33,7 +33,7 @@ pub(super) struct WarmWelcome {
     outcome: Option<Zeroizing<Vec<u8>>>,
     held_entry: Option<CreatedStage>,
     held_outcome: Option<CreatedStage>,
-    selection: Option<JoinedCore>,
+    selection: Option<Box<JoinedCore>>,
     _fee: CatalogReadReservation,
 }
 
@@ -118,9 +118,11 @@ impl WarmWelcome {
         if self.selection.is_none() {
             self.require_outcome(store)?;
             let group = pending.group_data()?;
-            self.selection = Some(JoinedCore::prepare(store, &group, |view, origin| {
-                pending.prepare_initial_prefix(&self.delivery, view, origin)
-            })?);
+            self.selection = Some(Box::new(JoinedCore::prepare(
+                store,
+                &group,
+                |view, origin| pending.prepare_initial_prefix(&self.delivery, view, origin),
+            )?));
         }
         Ok(())
     }
@@ -132,7 +134,7 @@ impl WarmWelcome {
     pub(super) fn outcome_data(
         &self,
     ) -> Option<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64)> {
-        self.selection.as_ref().and_then(JoinedCore::outcome_data)
+        self.selection.as_deref().and_then(JoinedCore::outcome_data)
     }
 
     pub(super) fn attach_node<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore>(
