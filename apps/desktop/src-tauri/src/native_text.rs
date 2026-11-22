@@ -15,6 +15,7 @@ mod connected;
 pub(super) mod continuity;
 mod founding;
 mod history;
+mod invite_mint;
 mod invite_preview;
 mod listing;
 pub(super) mod retirement;
@@ -245,7 +246,7 @@ fn router<R: tauri::Runtime>(
         if enabled
             && matches!(
                 invoke.message.command(),
-                "join_server" | "get_invite" | "mint_invite_fresh" | "send_dm_invite"
+                "join_server" | "get_invite" | "send_dm_invite"
             )
         {
             invoke
@@ -255,6 +256,9 @@ fn router<R: tauri::Runtime>(
         }
         if enabled && invoke.message.command() == "preview_invite" {
             return invite_preview::route(invoke, &spawn);
+        }
+        if enabled && invoke.message.command() == "mint_invite_fresh" {
+            return invite_mint::route(invoke, &spawn);
         }
         if enabled
             && matches!(

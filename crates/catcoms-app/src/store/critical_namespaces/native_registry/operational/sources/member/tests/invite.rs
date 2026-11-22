@@ -1276,12 +1276,35 @@ async fn native_runtime_invite_lost_reply_after_cover_retries_without_rewriting_
     );
     let path = only_named(directory.path(), "invite.intent.v1");
     let frame = std::fs::read(&path).unwrap();
-    let (_sender, receiver) = tokio::sync::watch::channel(false);
+    let (sender, receiver) = tokio::sync::watch::channel(false);
     let fresh = RequestCancellation::new(receiver, None);
     assert!(prepare(&owner, &row, &vault, &budget)
         .prepare_invite_intent([51; 32], 60_000, &fresh)
         .is_ok());
     assert_eq!(std::fs::read(path).unwrap(), frame);
+    let publication = prepare(&owner, &row, &vault, &budget)
+        .prepare_invite_publication([51; 32], 60_000, fresh.clone())
+        .unwrap();
+    assert!(publication.is_current_cached());
+    let exact = publication.packet_bytes_data().to_vec();
+    assert!(matches!(
+        owner
+            .capture_member(
+                &row,
+                command(&vault, &budget),
+                owner.policy.prepare_member().unwrap()
+            )
+            .finish(),
+        Err(V2MemberSaveRefusal::Busy)
+    ));
+    sender.send_replace(true);
+    assert!(!publication.is_current_cached());
+    drop(publication);
+    let (_sender, receiver) = tokio::sync::watch::channel(false);
+    let retried = prepare(&owner, &row, &vault, &budget)
+        .prepare_invite_publication([51; 32], 60_000, RequestCancellation::new(receiver, None))
+        .unwrap();
+    assert_eq!(retried.packet_bytes_data(), exact.as_slice());
 }
 
 #[tokio::test]

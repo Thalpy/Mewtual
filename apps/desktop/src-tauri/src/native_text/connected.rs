@@ -5,7 +5,7 @@ use catcoms_rt::{RequestCancellation, TransportEvent};
 
 type Preparation = NativeTextMemberPreparation<catcoms_net::MeshService, OsCryptoRng>;
 
-struct Source {
+pub(super) struct Source {
     generation: u64,
     target: Arc<NativeTextVaultAuthenticationCheck>,
     selection: server_table::NativeSelection,
@@ -45,21 +45,7 @@ pub(super) async fn start_current<R: tauri::Runtime>(
         };
         for (((_, row), slot), payment) in table.native_iter().zip(&mut sources).zip(&mut payments)
         {
-            let data = row.data();
-            if payment.is_none() || !target.same_original(&data.target) {
-                continue;
-            }
-            let Some(scope) = row.scope(account.clone()) else {
-                continue;
-            };
-            *slot = Some(Source {
-                generation,
-                target: target.clone(),
-                selection: data.selection.clone(),
-                instance: data.instance,
-                scope,
-                _payment: payment.take().unwrap(),
-            });
+            *slot = Source::for_row(generation, target, row, account.clone(), payment);
         }
     }
     for source in sources.into_iter().flatten() {
@@ -82,7 +68,52 @@ pub(super) async fn start_current<R: tauri::Runtime>(
 }
 
 impl Source {
-    async fn capture(&self, state: &AppState) -> Option<Preparation> {
+    pub(super) fn for_row(
+        generation: u64,
+        target: &Arc<NativeTextVaultAuthenticationCheck>,
+        row: &server_table::NativeRow,
+        account: RequestCancellation,
+        payment: &mut Option<NativeUiInvocationMetadata>,
+    ) -> Option<Self> {
+        let data = row.data();
+        if payment.is_none() || !target.same_original(&data.target) {
+            return None;
+        }
+        let scope = row.scope(account)?;
+        Some(Self {
+            generation,
+            target: target.clone(),
+            selection: data.selection.clone(),
+            instance: data.instance,
+            scope,
+            _payment: payment.take()?,
+        })
+    }
+
+    pub(super) fn negative(&self) -> RequestCancellation {
+        self.scope.clone()
+    }
+
+    pub(super) fn still_installed(
+        &self,
+        state: &AppState,
+        store: &Option<MountedVault>,
+        table: &server_table::ServerTable,
+    ) -> bool {
+        self.generation == state.ui_session_generation.load(Ordering::SeqCst)
+            && !ui_session_closed(state)
+            && !self.scope.is_cancelled()
+            && !state.native_text.sources.is_closing_cached()
+            && store
+                .as_ref()
+                .and_then(MountedVault::as_text_v2)
+                .is_some_and(|vault| self.target.is_for_original_vault(vault))
+            && table
+                .native(&self.selection.id_data())
+                .is_some_and(|row| row.matches(&self.selection, self.instance, &self.target))
+    }
+
+    pub(super) async fn capture(&self, state: &AppState) -> Option<Preparation> {
         if self.scope.is_cancelled() {
             return None;
         }
@@ -99,12 +130,7 @@ impl Source {
                 .ok()?;
             let store = state.store.lock().await;
             let table = state.servers.lock().await;
-            let vault = store.as_ref().and_then(MountedVault::as_text_v2)?;
-            let row = table.native(&self.selection.id_data())?;
-            if self.scope.is_cancelled()
-                || !self.target.is_for_original_vault(vault)
-                || !row.matches(&self.selection, self.instance, &self.target)
-            {
+            if !self.still_installed(state, &store, &table) {
                 return None;
             }
             state

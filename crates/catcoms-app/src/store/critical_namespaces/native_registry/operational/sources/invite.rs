@@ -16,6 +16,37 @@ enum InviteOperation {
     Inspect,
 }
 
+/// One covered invitation beside the original exclusive runtime loan. Keep
+/// the whole owner outside native guards and use an immediate final check.
+pub struct NativeTextInvitePublication<T: MeshTransport, R: CryptoRngCore> {
+    saved: NativeTextSavedInvite,
+    job: member::NativeTextMemberJob<T, R>,
+    negative: RequestCancellation,
+}
+
+impl<T: MeshTransport, R: CryptoRngCore> std::fmt::Debug for NativeTextInvitePublication<T, R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeTextInvitePublication")
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T: MeshTransport, R: CryptoRngCore> NativeTextInvitePublication<T, R> {
+    pub fn packet_bytes_data(&self) -> &[u8] {
+        self.saved.packet_bytes_data()
+    }
+
+    pub fn expires_at_ms_data(&self) -> u64 {
+        self.saved.expires_at_ms()
+    }
+
+    /// The host also checks the actual mounted vault, row and user session
+    /// through its own synchronous resolver edge.
+    pub fn is_current_cached(&self) -> bool {
+        !self.negative.is_cancelled() && self.job.inner.require_current().is_ok()
+    }
+}
+
 #[cfg(test)]
 std::thread_local! {
     pub(super) static AFTER_COVER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
@@ -68,7 +99,7 @@ impl<T: MeshTransport, R: CryptoRngCore> member::NativeTextMemberJob<T, R> {
     ///
     /// Returns the covered unsigned preimage hash and expiry as historical data.
     pub fn prepare_invite_intent(
-        self,
+        mut self,
         token: [u8; 32],
         lifetime_ms: u64,
         negative: &RequestCancellation,
@@ -82,7 +113,7 @@ impl<T: MeshTransport, R: CryptoRngCore> member::NativeTextMemberJob<T, R> {
     /// Saves the signature for the same original token, settings and route.
     /// An exact retry uses the retained signature after any late failure.
     pub fn save_invite(
-        self,
+        mut self,
         token: [u8; 32],
         lifetime_ms: u64,
         negative: &RequestCancellation,
@@ -93,10 +124,30 @@ impl<T: MeshTransport, R: CryptoRngCore> member::NativeTextMemberJob<T, R> {
         }
     }
 
+    /// Retain the same original member loan through native publication so a
+    /// concurrent Add cannot change the founder's selected head after saving.
+    pub fn prepare_invite_publication(
+        mut self,
+        token: [u8; 32],
+        lifetime_ms: u64,
+        negative: RequestCancellation,
+    ) -> Result<NativeTextInvitePublication<T, R>, V2MemberSaveRefusal> {
+        let InviteResult::Saved(saved) =
+            self.run_invite(token, lifetime_ms, &negative, InviteOperation::Save)?
+        else {
+            return Err(V2MemberSaveRefusal::Failed);
+        };
+        Ok(NativeTextInvitePublication {
+            saved,
+            job: self,
+            negative,
+        })
+    }
+
     /// Inspect only the original fixed records for this exact request. Even
     /// a complete signature here is data, with no save or publication receipt.
     pub fn inspect_invite(
-        self,
+        mut self,
         token: [u8; 32],
         lifetime_ms: u64,
         negative: &RequestCancellation,
@@ -146,7 +197,7 @@ impl<T: MeshTransport, R: CryptoRngCore> member::NativeTextMemberJob<T, R> {
     }
 
     fn run_invite(
-        mut self,
+        &mut self,
         token: [u8; 32],
         lifetime_ms: u64,
         negative: &RequestCancellation,

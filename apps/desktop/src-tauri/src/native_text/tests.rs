@@ -1035,7 +1035,7 @@ async fn native_text_connected_join_keeps_legacy_invitation_handlers_outside_nat
             let tauri::ipc::InvokeResponse::Err(error) = reply.await.unwrap() else {
                 panic!("invitation IPC reached a worker");
             };
-            let expected = if enabled && command == "preview_invite" {
+            let expected = if enabled && matches!(command, "preview_invite" | "mint_invite_fresh") {
                 listing::STALE
             } else if enabled {
                 "Invitations are unavailable in this Chat V2 checkpoint."
@@ -1050,10 +1050,22 @@ async fn native_text_connected_join_keeps_legacy_invitation_handlers_outside_nat
 }
 
 fn preview_request(window: &tauri::WebviewWindow<MockRuntime>, hex: String) -> Reply {
+    invite_command(
+        window,
+        "preview_invite",
+        serde_json::json!({ "inviteHex": hex }),
+    )
+}
+
+fn invite_command(
+    window: &tauri::WebviewWindow<MockRuntime>,
+    command: &str,
+    body: serde_json::Value,
+) -> Reply {
     let (send, reply) = oneshot::channel();
     let mut invocation = request(window, "1", SECRET);
-    invocation.cmd = "preview_invite".into();
-    invocation.body = InvokeBody::Json(serde_json::json!({ "inviteHex": hex }));
+    invocation.cmd = command.into();
+    invocation.body = InvokeBody::Json(body);
     let view: &tauri::Webview<MockRuntime> = window.as_ref();
     view.clone().on_message(
         invocation,
@@ -1090,49 +1102,30 @@ async fn native_text_connected_join_retries_original_welcome_after_authenticated
         .as_u64()
         .unwrap();
     let state = app.state::<AppState>();
-    let generation = state.ui_session_generation.load(Ordering::SeqCst);
-    let target = state.native_text.ui_state.original_target().unwrap();
-    let scope = keep_session::current(&state, generation).unwrap();
-    let mut ui = Some(
-        founding::ui_capture(&state, generation, &target)
-            .await
-            .unwrap(),
-    );
-    let mut budget = Some(state.native_text.sources.policy().prepare_member().unwrap());
-    let mut prepared = None;
-    {
-        let _commit = require_ui_session_generation(&state, generation)
-            .await
-            .unwrap();
-        let store = state.store.lock().await;
-        let table = state.servers.lock().await;
-        let selection = &table.native(&id).unwrap().data().selection;
-        state
-            .native_text
-            .sources
-            .capture_member(&store, &mut ui, selection, &mut budget, &mut prepared)
-            .unwrap();
-    }
-    let saved = tauri::async_runtime::spawn_blocking(move || {
-        prepared
-            .unwrap()
-            .finish()
-            .unwrap()
-            .save_invite([71; 32], 60_000, &scope)
-    })
-    .await
-    .unwrap()
-    .unwrap();
-    let invite =
-        catcoms_app::store::NativeTextInvitePacketData::decode(saved.packet_bytes_data()).unwrap();
-    let hex = hex::encode(saved.packet_bytes_data());
+    let mint = || {
+        invite_command(
+            &main,
+            "mint_invite_fresh",
+            serde_json::json!({ "server": id }),
+        )
+    };
+    let first = mint();
+    run(&queue).await;
+    let original_code = found_value(first.await.unwrap());
+    let retry = mint();
+    run(&queue).await;
+    assert_eq!(found_value(retry.await.unwrap()), original_code);
+    let hex = original_code.as_str().unwrap().to_owned();
+    let packet = hex::decode(&hex).unwrap();
+    let invite = catcoms_app::store::NativeTextInvitePacketData::decode(&packet).unwrap();
+    let expires = invite.binding().spec_data().expires_at_ms;
     let preview = preview_request(&main, hex.clone());
     run(&queue).await;
     assert_eq!(
         found_value(preview.await.unwrap()),
         serde_json::json!({
             "direct_routes": 0, "rendezvous_routes": 0, "switchboards": 0,
-            "expires_at_ms": saved.expires_at_ms(), "communication_mode": "peer_to_peer"
+            "expires_at_ms": expires, "communication_mode": "peer_to_peer"
         })
     );
     let trailing = preview_request(&main, format!("{hex}00"));
@@ -1149,7 +1142,7 @@ async fn native_text_connected_join_retries_original_welcome_after_authenticated
         &invite.binding().spec_data().anchor,
         invite.binding(),
         [72; 32],
-        saved.expires_at_ms() - 1,
+        expires - 1,
         DirectJoinLimits::new(512 * 1024, 512 * 1024, 64 * 1024).unwrap(),
     )
     .unwrap();
@@ -1196,6 +1189,7 @@ async fn native_text_connected_join_retries_original_welcome_after_authenticated
     assert!(snapshot_result(locked.await.unwrap())["continuity_error"].is_null());
     run(&queue).await;
     refused(stale_preview.await.unwrap());
+    refused(mint().await.unwrap());
     assert!(matches!(send().await, Err(TransportError::NoResponse)));
     unlock_current(&app, &main, &queue).await;
     assert_eq!(send().await.unwrap(), original);

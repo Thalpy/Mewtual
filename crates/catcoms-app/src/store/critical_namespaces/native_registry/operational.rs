@@ -25,14 +25,14 @@ mod sources;
 pub use sources::{
     NativeTextCreationBudget, NativeTextCreationInputs, NativeTextCreationJob,
     NativeTextCreationPreparation, NativeTextCreationProgress, NativeTextCreationRefusal,
-    NativeTextCreationRequest, NativeTextCreationSettings, NativeTextMemberAdmissionFailure,
-    NativeTextMemberBudget, NativeTextMemberFinalPreparation, NativeTextMemberHistoryItem,
-    NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus, NativeTextMemberJob,
-    NativeTextMemberPreparation, NativeTextMemberSaveJob, NativeTextRuntimeSelection,
-    NativeTextSourceBudget, NativeTextSourceCommand, NativeTextSourcePolicy,
-    NativeTextSourcePreparation, NativeTextSourceRetirement, NativeTextSourceRetirementPreparation,
-    NativeTextSourceRetirementRefusal, NativeTextSourceRetirementStatus, NativeTextSources,
-    NativeTextUiAddRetirement,
+    NativeTextCreationRequest, NativeTextCreationSettings, NativeTextInvitePublication,
+    NativeTextMemberAdmissionFailure, NativeTextMemberBudget, NativeTextMemberFinalPreparation,
+    NativeTextMemberHistoryItem, NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus,
+    NativeTextMemberJob, NativeTextMemberPreparation, NativeTextMemberSaveJob,
+    NativeTextRuntimeSelection, NativeTextSourceBudget, NativeTextSourceCommand,
+    NativeTextSourcePolicy, NativeTextSourcePreparation, NativeTextSourceRetirement,
+    NativeTextSourceRetirementPreparation, NativeTextSourceRetirementRefusal,
+    NativeTextSourceRetirementStatus, NativeTextSources, NativeTextUiAddRetirement,
 };
 mod ui_state;
 mod work_retirement;

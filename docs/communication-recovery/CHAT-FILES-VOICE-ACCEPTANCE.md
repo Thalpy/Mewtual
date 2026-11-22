@@ -104,6 +104,19 @@ Both platforms also passed the focused joined-storage matrix at that revision,
 including the same-mount startup handoff, replacement refusals, original
 Welcome replay, and connected two-vault cases. [Joined storage CI](https://github.com/Thalpy/Mewtual/actions/runs/45058685095).
 
+At `154726ef`, both platforms passed joined storage checks that prepared the
+exact covered request from an independently accepted invite anchor, retained
+the first governing proof across restart, and preserved the original inputs
+when a foreign prefix claimed the joined runtime.
+[Accepted request and proof CI](https://github.com/Thalpy/Mewtual/actions/runs/45060639850).
+
+At `f385da6b`, Windows and Linux passed three connected two-vault cases using
+an explicitly approved IP and the invite's signed original peer identity and
+TCP port. A cold Pending vault contacted the founder again and recovered its
+original Welcome with SDK entry still closed. Both platforms also passed the
+native dial permit refund after cancellation.
+[Approved direct contact CI](https://github.com/Thalpy/Mewtual/actions/runs/45061846794).
+
 ## Invitation and join branch CI (22 November 2026)
 
 Both hosted workflows passed on Linux and Windows at

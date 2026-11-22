@@ -16,6 +16,7 @@ use std::sync::Mutex;
 use zeroize::Zeroizing;
 mod capture;
 mod invite;
+pub use invite::NativeTextInvitePublication;
 mod member;
 mod network;
 pub use member::{
@@ -444,6 +445,9 @@ fn runtime_invoice<T: MeshTransport, R: CryptoRngCore>() -> Option<usize> {
         selection::invoice::<T, R>(),
         member::invoice::<T, R>(),
         8 * 1024, // finite original invite routing-plan scratch and return overlap
+        // The publication envelope moves the existing, already-paid job.
+        2 * (std::mem::size_of::<NativeTextInvitePublication<T, R>>()
+            - std::mem::size_of::<NativeTextMemberJob<T, R>>()),
         2 * std::mem::size_of::<Entry<T, R>>(),
         // Original frame + Pending copy + retained activation dependency,
         // with bounded ciphertext/plaintext validation and reread overlap.

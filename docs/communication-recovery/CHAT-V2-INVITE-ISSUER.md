@@ -2,9 +2,10 @@
 
 The warm native runtime covers the original intent, signing attempt and
 signature before returning `NativeTextSavedInvite` with a verified invitation
-packet for trusted Rust. Chat V2 remains off. Cold recovery, the desktop
-invitation command, certified contacts and usable joins remain open. The
-Linux and Windows hosted checks passed at `3d3bce63`.
+packet for trusted Rust. The gated desktop command now publishes that same
+first invitation from the mounted founder. Chat V2 remains off while desktop
+join and restart recovery are completed. The initial issuer checks passed
+on Linux and Windows at `3d3bce63`.
 [Source-pinned results](CHAT-FILES-VOICE-ACCEPTANCE.md#invitation-and-join-branch-ci-22-november-2026).
 
 ## Initial durable intent profile
@@ -150,7 +151,12 @@ routes for this packet profile. Its scope is authenticated metadata.
 
 ## Remaining publication and admission
 
-Desktop mint and join still need a publication check and certified contacts.
+The gated desktop mint publishes the first covered invite while holding the
+original founder runtime loan. The resolver checks the authenticated window,
+vault, original row, session generation and expiry. Exact retries give the same
+first packet. Issuing another invitation for that context requires a versioned
+retention policy. Desktop join still needs its native runtime installation and
+contact selection.
 Cold operational restore must supply its own exact Current and original source
 proofs before it can use the read-only recovery step below. Broader writers
 need per-context serialization, and a versioned retention policy is required

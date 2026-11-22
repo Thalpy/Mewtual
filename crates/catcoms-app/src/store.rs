@@ -53,6 +53,7 @@ mod critical_namespaces;
 mod governance_open;
 mod mounted;
 mod native_text_invite;
+pub use critical_namespaces::NativeTextInvitePublication;
 pub use critical_namespaces::NativeTextJoinedRuntime;
 pub use critical_namespaces::NativeTextJoinedVaultUpgrade;
 pub use critical_namespaces::{
