@@ -1008,6 +1008,123 @@ async fn native_text_found_router_installs_two_original_rows_retries_and_release
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_connected_join_retries_original_welcome_after_authenticated_unlock() {
+    use catcoms_rt::{MeshTransport, ProtocolId, TransportError, CHAT_V2_JOIN_KIND};
+    use catcoms_sync::{DirectJoinLimits, PreparedV2JoinRequest};
+
+    fn read_field<'a>(wire: &mut &'a [u8]) -> &'a [u8] {
+        let bytes = *wire;
+        let size = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+        let (field, rest) = bytes[4..].split_at(size);
+        *wire = rest;
+        field
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let found = found_request(&main, 1, "Connected founder");
+    run(&queue).await;
+    let id = found_value(found.await.unwrap())["server"]
+        .as_u64()
+        .unwrap();
+    let state = app.state::<AppState>();
+    let generation = state.ui_session_generation.load(Ordering::SeqCst);
+    let target = state.native_text.ui_state.original_target().unwrap();
+    let scope = keep_session::current(&state, generation).unwrap();
+    let mut ui = Some(
+        founding::ui_capture(&state, generation, &target)
+            .await
+            .unwrap(),
+    );
+    let mut budget = Some(state.native_text.sources.policy().prepare_member().unwrap());
+    let mut prepared = None;
+    {
+        let _commit = require_ui_session_generation(&state, generation)
+            .await
+            .unwrap();
+        let store = state.store.lock().await;
+        let table = state.servers.lock().await;
+        let selection = &table.native(&id).unwrap().data().selection;
+        state
+            .native_text
+            .sources
+            .capture_member(&store, &mut ui, selection, &mut budget, &mut prepared)
+            .unwrap();
+    }
+    let saved = tauri::async_runtime::spawn_blocking(move || {
+        prepared
+            .unwrap()
+            .finish()
+            .unwrap()
+            .save_invite([71; 32], 60_000, &scope)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let invite =
+        catcoms_app::store::NativeTextInvitePacketData::decode(saved.packet_bytes_data()).unwrap();
+    let request = PreparedV2JoinRequest::prepare(
+        catcoms_mls::MlsDevice::generate().unwrap(),
+        &invite.binding().spec_data().anchor,
+        invite.binding(),
+        [72; 32],
+        saved.expires_at_ms() - 1,
+        DirectJoinLimits::new(512 * 1024, 512 * 1024, 64 * 1024).unwrap(),
+    )
+    .unwrap();
+    let mut wire = vec![CHAT_V2_JOIN_KIND];
+    wire.extend_from_slice(request.request_bytes_data());
+    let wire = bytes::Bytes::from(wire);
+
+    // The in-process test knows this exact original node listens on loopback.
+    // Read the already authenticated reservation solely to address that fixture.
+    let mut route = invite.reservation_bytes();
+    read_field(&mut route);
+    route = &route[2..];
+    read_field(&mut route);
+    read_field(&mut route);
+    let peer = std::str::from_utf8(read_field(&mut route)).unwrap();
+    read_field(&mut route);
+    let port = u16::from_be_bytes(route[2..4].try_into().unwrap());
+    let (client, _) = catcoms_net::MeshService::new_tcp(None, &[]).unwrap();
+    client
+        .dial(
+            format!("/ip4/127.0.0.1/tcp/{port}/p2p/{peer}")
+                .parse()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let peer = invite.connected_peer_data();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        client.wait_for_peer_connected(peer),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let send = || client.request_connected(peer, ProtocolId("/catcoms/rr/1"), wire.clone());
+    let original = send().await.unwrap();
+    request
+        .validate_first_join_delivery_data(&original)
+        .unwrap();
+
+    let locked = snapshot_request(&main, None);
+    run(&queue).await;
+    assert!(snapshot_result(locked.await.unwrap())["continuity_error"].is_null());
+    assert!(matches!(send().await, Err(TransportError::NoResponse)));
+    unlock_current(&app, &main, &queue).await;
+    assert_eq!(send().await.unwrap(), original);
+
+    let close = register_vault_close(&state).await.unwrap();
+    sources::close_server_rows(&state, &SystemClock)
+        .await
+        .unwrap();
+    drop(close);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_text_found_final_publication_cannot_cross_actual_whole_close() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("vault");

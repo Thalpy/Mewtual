@@ -11,6 +11,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 mod boot;
 mod boot_lifetime;
+mod connected;
 pub(super) mod continuity;
 mod founding;
 mod history;
@@ -327,17 +328,21 @@ fn router<R: tauri::Runtime>(
             let mut notice = None;
             let mut original_error = false;
             let mut result = match execute(&state, &captured, directory, &mut notice).await {
-                Ok(authentication) => match state
-                    .native_text
-                    .listing
-                    .prepare(&state.native_text.ui_budget)
-                {
-                    Ok(payment) => {
-                        listing::snapshot(&state, captured.generation, authentication, payment)
-                            .await
+                Ok(authentication) => {
+                    connected::start_current(&app, &state, captured.generation, &authentication)
+                        .await;
+                    match state
+                        .native_text
+                        .listing
+                        .prepare(&state.native_text.ui_budget)
+                    {
+                        Ok(payment) => {
+                            listing::snapshot(&state, captured.generation, authentication, payment)
+                                .await
+                        }
+                        Err(error) => Err(error),
                     }
-                    Err(error) => Err(error),
-                },
+                }
                 Err(error) => {
                     original_error = true;
                     Err(error)

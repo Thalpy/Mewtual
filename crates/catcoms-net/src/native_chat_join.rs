@@ -52,8 +52,22 @@ impl NativeChatJoinIngress {
         }
         let slot = self.0.upgrade()?;
         let mut held = slot.try_lock().ok()?;
-        if held.as_ref().is_some_and(|old| !old.queue.is_closed()) {
-            return None;
+        let original = held.as_ref().and_then(|old| old.epoch.upgrade());
+        if let Some(original) = &original {
+            // A newer authenticated generation may attach while an older
+            // handler is still draining. Call its authority outside the slot
+            // guard and then reprove that no racing attachment replaced it.
+            drop(held);
+            if original.authorized() {
+                return None;
+            }
+            held = slot.try_lock().ok()?;
+            if held
+                .as_ref()
+                .is_some_and(|old| !std::ptr::eq(old.epoch.as_ptr(), Arc::as_ptr(original)))
+            {
+                return None;
+            }
         }
         let (queue, events) = mpsc::channel(1);
         let (owner, lifetime) = watch::channel(());
@@ -120,21 +134,27 @@ mod tests {
     use super::*;
     use crate::{keypair_from_seed, MeshService, NativeTcpPreparation, RR_PROTOCOL};
     use bytes::Bytes;
-    use catcoms_rt::{MeshTransport, ProtocolId, TransportError, CHAT_V2_JOIN_KIND};
+    use catcoms_rt::{
+        MeshTransport, ProtocolId, RequestCancellation, TransportError, CHAT_V2_JOIN_KIND,
+    };
     use std::future::Future;
     use std::time::Duration;
 
     #[derive(Debug)]
-    struct Current;
+    struct Current(Option<RequestCancellation>);
 
     #[async_trait::async_trait]
     impl RequestAuthority for Current {
         fn authorized(&self) -> bool {
-            true
+            self.0.as_ref().is_none_or(|scope| !scope.is_cancelled())
         }
 
         async fn revoked(&self) {
-            std::future::pending::<()>().await;
+            if let Some(mut scope) = self.0.clone() {
+                scope.cancelled().await;
+            } else {
+                std::future::pending::<()>().await;
+            }
         }
     }
 
@@ -176,8 +196,13 @@ mod tests {
         ));
 
         let ingress = server.native_chat_join_ingress().unwrap();
-        let mut original = ingress.try_attach(Arc::new(Current)).unwrap();
-        assert!(ingress.try_attach(Arc::new(Current)).is_none());
+        let (retire, active) = watch::channel(false);
+        let mut original = ingress
+            .try_attach(Arc::new(Current(Some(RequestCancellation::new(
+                active, None,
+            )))))
+            .unwrap();
+        assert!(ingress.try_attach(Arc::new(Current(None))).is_none());
         let wait = async {
             let Some(TransportEvent::Request {
                 from: source,
@@ -190,16 +215,19 @@ mod tests {
             };
             assert_eq!(source, from);
             assert_eq!(data.as_ref(), &[CHAT_V2_JOIN_KIND, 7]);
-            drop(original);
+            retire.send_replace(true);
+            let current = ingress.try_attach(Arc::new(Current(None))).unwrap();
             assert!(!responder.is_current());
             assert!(responder
                 .try_respond(Bytes::from_static(b"old Welcome"))
                 .is_err());
+            assert!(original.next().await.is_none());
+            current
         };
-        let (retired, ()) = bounded(async { tokio::join!(join(), wait) }).await;
+        let (retired, mut current) = bounded(async { tokio::join!(join(), wait) }).await;
         assert!(matches!(retired, Err(TransportError::NoResponse)));
+        drop(original);
 
-        let mut current = ingress.try_attach(Arc::new(Current)).unwrap();
         let serve = async {
             let Some(TransportEvent::Request { responder, .. }) = current.next().await else {
                 panic!("replacement native ingress request");
@@ -232,9 +260,9 @@ mod tests {
             client.request_connected(peer, ProtocolId(RR_PROTOCOL), Bytes::from_static(&[45]));
         let (response, ()) = bounded(async { tokio::join!(ordinary, serve_ordinary) }).await;
         assert_eq!(response.unwrap().as_ref(), b"ordinary");
-        let mut final_receiver = ingress.try_attach(Arc::new(Current)).unwrap();
+        let mut final_receiver = ingress.try_attach(Arc::new(Current(None))).unwrap();
         drop(server);
         assert!(bounded(final_receiver.next()).await.is_none());
-        assert!(ingress.try_attach(Arc::new(Current)).is_none());
+        assert!(ingress.try_attach(Arc::new(Current(None))).is_none());
     }
 }

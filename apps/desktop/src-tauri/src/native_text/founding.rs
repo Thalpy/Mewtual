@@ -186,6 +186,10 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
         // Paid invocation and all owning results precede final commit in Drop
         // order, including an actual resolver panic or a lost IPC observer.
         let mut result = execute(&state, &captured).await;
+        if result.is_ok() {
+            super::connected::start_current(&app, &state, captured.generation, &captured.target)
+                .await;
+        }
         #[cfg(test)]
         {
             let edge = state.native_text.text_reply_edge.lock().unwrap().clone();
