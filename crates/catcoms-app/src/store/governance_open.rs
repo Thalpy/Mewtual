@@ -12,6 +12,15 @@ pub(super) struct CatalogPolicies {
         Option<critical_namespaces::governance_layout::V2GovernanceLayoutPolicy>,
 }
 
+impl CatalogPolicies {
+    pub(super) fn requires_existing_joined_vault(&self) -> bool {
+        self.current_layout_policy
+            .as_ref()
+            .and_then(|policy| policy.native_registry.as_ref())
+            .is_some_and(|handler| handler.uses_joined_pin_layout())
+    }
+}
+
 impl ServerStore {
     /// Only the new opaque private physical constructor calls this; no exposed
     /// Store is upgraded and no Source/Scope or generic SDK operation is issued.

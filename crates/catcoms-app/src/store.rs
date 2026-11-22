@@ -5911,7 +5911,11 @@ impl ServerStore {
     ) -> Result<Self, AppError> {
         let dir = dir.as_ref().to_path_buf();
         // Keep every existing opener's exclusion-before-KDF ordering unchanged.
-        let session = acquire_vault_session(&dir)?;
+        let session = if policies.requires_existing_joined_vault() {
+            VaultSessionGuard::acquire_existing(&dir)?
+        } else {
+            acquire_vault_session(&dir)?
+        };
         Self::open_catalog_in_session(dir, passphrase, rng, policies, session)
     }
 
@@ -5948,6 +5952,7 @@ impl ServerStore {
         policies: governance_open::CatalogPolicies,
         session: VaultSessionGuard,
     ) -> Result<Self, AppError> {
+        let joined = policies.requires_existing_joined_vault();
         let governance_open::CatalogPolicies {
             catalog_read_pool,
             pending_join_policy,
@@ -5962,8 +5967,21 @@ impl ServerStore {
                 .is_some_and(|policy| policy.native_registry.is_some()),
         )?;
         owner_evidence::operations::refuse_orphaned_intent_before_vault_creation(&dir)?;
-        let (keys, format) = open_or_create_vault_classified(&dir, passphrase, rng)?.into_parts();
-        fs::create_dir_all(dir.join("servers")).map_err(|e| AppError::Io(e.to_string()))?;
+        let (keys, format) = if joined {
+            let servers = fs::symlink_metadata(dir.join("servers"))
+                .map_err(|e| AppError::Io(e.to_string()))?;
+            if !servers.is_dir() {
+                return Err(critical_namespaces::refused());
+            }
+            session
+                .open_existing_critical(&dir, passphrase)?
+                .into_parts()
+        } else {
+            let keys_and_format =
+                open_or_create_vault_classified(&dir, passphrase, rng)?.into_parts();
+            fs::create_dir_all(dir.join("servers")).map_err(|e| AppError::Io(e.to_string()))?;
+            keys_and_format
+        };
         let store = Self {
             catalog_read_pool,
             pending_join_policy,

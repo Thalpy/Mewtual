@@ -204,6 +204,11 @@ The factory rechecks the governed selection around joined declaration preparatio
 Warm promotion uses the exact native leaves already held by that declaration.
 An equal-byte replacement of a native leaf refuses promotion until the original
 is returned.
+On a process restart, gated desktop startup opens an idle joined-aware vault
+only through the existing-file cold path. It authenticates the critical wrapper
+under the original lifetime and wrapper locks, and requires the selected native
+registry and joined-pin index to be empty before installing Sources. Startup
+refuses nonempty vaults until the desktop can reconstruct their live sources.
 The mounted index preserves the first pin ciphertext
 for each group and checks the held index when reading pin context. The first
 pending-JOIN record covers the private request and the one exact index

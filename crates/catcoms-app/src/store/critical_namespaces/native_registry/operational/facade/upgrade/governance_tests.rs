@@ -532,6 +532,25 @@ fn governed_joined_pin_cold_open_recovers_the_original_catalog_after_each_covere
             NativeTextJoinedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy())
                 .unwrap();
         assert_eq!(cold.row_count_data().unwrap(), 0);
+        drop(cold);
+        if cut == 0 {
+            for name in ["vault.bin", ".vault.lock", ".vault.session.lock", "servers"] {
+                let required = dir.path().join(name);
+                let parked = dir.path().join("held-required-native-input");
+                fs::rename(&required, &parked).unwrap();
+                assert!(NativeTextJoinedStorage::open(
+                    dir.path(),
+                    SECRET,
+                    &mut NeverRng,
+                    current_policy()
+                )
+                .is_err());
+                assert!(!required.exists(), "cold open recreated {name}");
+                fs::rename(&parked, &required).unwrap();
+            }
+            assert_eq!(fs::read(&current).unwrap(), expected);
+            assert_eq!(fs::read(&index_path).unwrap(), expected_index);
+        }
     }
 }
 

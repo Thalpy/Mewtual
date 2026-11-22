@@ -45,6 +45,14 @@ pub use export::{
 };
 pub(crate) use persistence::directory_barrier;
 use persistence::{Transfer, DELETING, FORMAT, FORMAT_CHARGE, TRANSFERS};
+
+pub(crate) fn open_existing_regular(path: &Path, write: bool) -> std::io::Result<fs::File> {
+    match external::open_leaf(path, write)? {
+        external::Leaf::Opened(file, _) => Ok(file),
+        external::Leaf::Missing => Err(std::io::ErrorKind::NotFound.into()),
+        external::Leaf::Foreign => Err(std::io::ErrorKind::InvalidData.into()),
+    }
+}
 pub use record::{
     KeepAllowance, KeepPhase, KeepRetry, KeepRetryReceipt, KeepScope, KEEP_EXECUTION_SLICE_MS,
 };

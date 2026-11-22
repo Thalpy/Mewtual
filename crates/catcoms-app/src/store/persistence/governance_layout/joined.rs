@@ -434,9 +434,12 @@ impl ServerStore {
         Ok(())
     }
 
-    pub(in crate::store) fn finish_joined_pin_selection(&self) -> Result<(), AppError> {
+    pub(in crate::store) fn finish_joined_pin_selection(
+        &self,
+        require_idle: bool,
+    ) -> Result<(), AppError> {
         if !self.uses_joined_pin_layout() {
-            return Ok(());
+            return if require_idle { Err(denied()) } else { Ok(()) };
         }
         let mut selected = self
             .joined_pin_selection
@@ -445,6 +448,9 @@ impl ServerStore {
             .take()
             .ok_or_else(denied)?;
         selected.require(self)?;
+        if require_idle && (!selected.index.index.is_empty() || selected.index.pending.is_some()) {
+            return Err(denied());
+        }
         if let Some(pending) = selected.index.pending.as_mut() {
             pending.finish_core()?;
         }

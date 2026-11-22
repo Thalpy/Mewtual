@@ -128,6 +128,34 @@ const _: () = assert!(
 );
 
 impl NativeTextVault {
+    /// Open a previously selected joined-aware vault under fresh host admission.
+    /// The native source table may start empty only when the physical registry
+    /// and joined-pin selection both prove that there are no sources to restore.
+    pub fn open_idle_joined_from_trusted_host(
+        directory: &std::path::Path,
+        secret: &[u8],
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+        current: crate::store::V2CurrentLayoutPolicy,
+        (generation, authorized, requested): (Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicBool>),
+        budget: NativeUiInvocationBudget,
+    ) -> Result<Self, AppError> {
+        use super::super::lifecycle::preparation::{Policy, PREPARATION_FEE};
+        let policy = Policy::new(
+            CriticalCatalogReadPool::new(PREPARATION_FEE)?,
+            Policy::required_persistent_capacity(),
+        )?;
+        let ui = UiAdmissionOwner::new(generation, authorized, requested, budget)?;
+        let sources = super::source_admission::SourceAdmission::new(ui.observe_mount())?;
+        let index = super::upgrade_source::owning::Store::open_idle_joined(
+            directory, secret, rng, current, policy,
+        )?;
+        Ok(Self {
+            ui,
+            sources,
+            index: IndexOwner::Version3(index),
+        })
+    }
+
     /// Consume an original, uninstalled native index owner. This may allocate
     /// and fail; call outside guards before installation. Failure closes and
     /// destroys the consumed owner, never hands its raw Store to a legacy path.

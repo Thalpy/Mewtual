@@ -2,6 +2,13 @@
 //! installation share one original mount. No raw Current/Store escapes this
 //! controller, and an ambiguous attempt can only be retried or closed.
 use super::*;
+
+#[derive(Clone, Copy)]
+enum ColdOpening {
+    Governed,
+    Joined,
+    IdleJoined,
+}
 use crate::store::critical_namespaces::{
     native_registry::preparation::NativeRegistryHandler, pending_join_codec as grammar,
 };
@@ -477,7 +484,7 @@ impl Store {
         current: crate::store::V2CurrentLayoutPolicy,
         policy: Policy,
     ) -> Result<Self, AppError> {
-        Self::open_governed_family(dir, passphrase, rng, current, policy, false)
+        Self::open_governed_family(dir, passphrase, rng, current, policy, ColdOpening::Governed)
     }
 
     pub(in crate::store::critical_namespaces::native_registry) fn open_joined(
@@ -487,7 +494,24 @@ impl Store {
         current: crate::store::V2CurrentLayoutPolicy,
         policy: Policy,
     ) -> Result<Self, AppError> {
-        Self::open_governed_family(dir, passphrase, rng, current, policy, true)
+        Self::open_governed_family(dir, passphrase, rng, current, policy, ColdOpening::Joined)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn open_idle_joined(
+        dir: &std::path::Path,
+        passphrase: &[u8],
+        rng: &mut impl CryptoRngCore,
+        current: crate::store::V2CurrentLayoutPolicy,
+        policy: Policy,
+    ) -> Result<Self, AppError> {
+        Self::open_governed_family(
+            dir,
+            passphrase,
+            rng,
+            current,
+            policy,
+            ColdOpening::IdleJoined,
+        )
     }
 
     fn open_governed_family(
@@ -496,7 +520,7 @@ impl Store {
         rng: &mut impl CryptoRngCore,
         mut current: crate::store::V2CurrentLayoutPolicy,
         policy: Policy,
-        joined: bool,
+        opening: ColdOpening,
     ) -> Result<Self, AppError> {
         if policy.pool.same_account(&current.archive.pending.pool)
             || current
@@ -507,7 +531,7 @@ impl Store {
             return Err(refused());
         }
         let mut handler = lifecycle_admission::Handler::from_reserved(&policy, policy.reserve()?)?;
-        if joined {
+        if !matches!(opening, ColdOpening::Governed) {
             handler = handler.with_joined_pin_layout();
         }
         let physical = physical::Physical::allocate(handler.clone());
@@ -528,13 +552,20 @@ impl Store {
         Arc::get_mut(&mut value.physical)
             .expect("unexposed original governed physical")
             .install(current);
-        value.row_count_data()?;
+        let require_idle_joined = matches!(opening, ColdOpening::IdleJoined);
+        let count = value.row_count_data()?;
+        if require_idle_joined && count != 0 {
+            return Err(refused());
+        }
         #[cfg(test)]
         observe_edge(Edge::BeforeColdExposure);
         // No file read follows this same-held proof. Existing4 consumes its
         // original observation; fresh4 retains its overlapping declaration.
         // On failure the destination must close before the tail is destroyed.
-        if let Err(error) = value.physical.finish_governed_cold(&tail) {
+        if let Err(error) = value
+            .physical
+            .finish_governed_cold(&tail, require_idle_joined)
+        {
             drop(value);
             drop(tail);
             return Err(error);

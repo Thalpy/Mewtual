@@ -1,17 +1,18 @@
-//! One owned warm startup chain. This deliberately has no cold-format selector:
-//! an existing directory is refused without trying any legacy/native opener.
-//! Once a transaction exists, only that exact transaction may finish it.
+//! One owned warm startup chain and an explicit joined-aware cold opener
+//! for idle native vaults. Once a warm transaction exists, only that exact
+//! transaction may finish it.
 use super::*;
 use catcoms_app::store::{
     ArchiveBootstrapCatalogPolicy, CanonicalFilenameInventoryPolicy, CriticalCatalogReadPool,
     NativeIndexPolicy, NativeIndexStore, NativeIndexUpgrade, NativeRegistryInstallation,
     NativeRegistryPolicy, NativeRegistryStore, NativeTextGovernanceUpgrade,
-    NativeTextJoinedVaultUpgrade, NativeTextVaultUpgrade, V2CurrentLayoutPolicy,
+    NativeTextJoinedVaultUpgrade, NativeTextVault, NativeTextVaultUpgrade, V2CurrentLayoutPolicy,
     V2MemberOutboxPolicy,
 };
 
 pub(super) enum Bootstrap {
     Fresh,
+    Existing,
     Installing(Box<NativeRegistryInstallation>),
     Registry(NativeRegistryStore),
     Upgrading2(Box<NativeIndexUpgrade>),
@@ -21,8 +22,7 @@ pub(super) enum Bootstrap {
     Joining(Box<NativeTextJoinedVaultUpgrade>),
     Ready(super::sources::ReadyBundle),
     Mounted,
-    /// Initial preparation/unwind cannot safely reconstruct warm custody. Keep
-    /// every file and refuse; the eventual closed cold selector must handle it.
+    /// This process lost its original warm continuation during preparation.
     Failed,
 }
 
@@ -72,15 +72,17 @@ impl Bootstrap {
             let phase = std::mem::replace(self, Self::Failed);
             match phase {
                 Self::Fresh => {
-                    // This is a negative fresh-install restriction, not format
-                    // inference or native authority. Never inspect an existing
-                    // vault and then choose a different grammar from its files.
                     if let Some(parent) = directory.parent() {
                         std::fs::create_dir_all(parent).map_err(|_| FAILED)?;
                     }
-                    std::fs::create_dir(directory).map_err(|_| {
-                        "Existing vaults are not supported by this Chat V2 checkpoint."
-                    })?;
+                    match std::fs::create_dir(directory) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                            *self = Self::Existing;
+                            continue;
+                        }
+                        Err(_) => return Err(FAILED.into()),
+                    }
                     let current = current_policy().map_err(|_| FAILED)?;
                     let policy = NativeRegistryPolicy::new(
                         CriticalCatalogReadPool::new(NativeRegistryPolicy::required_capacity())
@@ -96,6 +98,26 @@ impl Bootstrap {
                     )
                     .map_err(|_| FAILED)?;
                     *self = Self::Installing(Box::new(original));
+                }
+                Self::Existing => {
+                    let result = (|| {
+                        let current = current_policy().map_err(|_| FAILED)?;
+                        let vault = NativeTextVault::open_idle_joined_from_trusted_host(
+                            directory, secret, &mut rng, current, atoms, budget,
+                        )
+                        .map_err(|_| "Could not unlock the existing Chat V2 vault.")?;
+                        super::sources::ReadyBundle::new(vault, &source_policy)
+                    })();
+                    return match result {
+                        Ok(ready) => {
+                            *self = Self::Ready(ready);
+                            Ok(())
+                        }
+                        Err(error) => {
+                            *self = Self::Existing;
+                            Err(error)
+                        }
+                    };
                 }
                 Self::Installing(mut original) => {
                     if original.retry().is_err() {

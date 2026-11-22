@@ -1168,6 +1168,69 @@ async fn native_text_connected_join_retries_original_welcome_after_authenticated
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_connected_join_cold_idle_unlock_requires_the_existing_vault() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("vault");
+    let (first, main, queue) = app(path.clone(), None, true);
+    unlock_current(&first, &main, &queue).await;
+    let pin_path = path.join("chat-critical-namespaces.joined-pin.index");
+    let vault_path = path.join("vault.bin");
+    let original = std::fs::read(&vault_path).unwrap();
+    let pin = std::fs::read(&pin_path).unwrap();
+    let identities = [&vault_path, &pin_path].map(|file| {
+        catcoms_storage::kept::session_id(&std::fs::File::open(file).unwrap()).unwrap()
+    });
+
+    let (second, main, queue) = app(path.clone(), None, true);
+    let contender = invoke(&main, "1", SECRET);
+    run(&queue).await;
+    refused(contender.await.unwrap());
+    {
+        let state = first.state::<AppState>();
+        let close = register_vault_close(&state).await.unwrap();
+        sources::close_server_rows(&state, &SystemClock)
+            .await
+            .unwrap();
+        drop(close);
+    }
+    drop(first);
+
+    let wrong = invoke(&main, "1", "a different secret");
+    run(&queue).await;
+    refused(wrong.await.unwrap());
+    let state = second.state::<AppState>();
+    assert_locked(&state).await;
+    assert!(state.store.lock().await.is_none());
+    unlock_current(&second, &main, &queue).await;
+    for (file, identity) in [&vault_path, &pin_path].into_iter().zip(identities) {
+        assert!(matches!(
+            catcoms_storage::kept::session_at(file, identity),
+            catcoms_storage::kept::SessionAt::Ours
+        ));
+    }
+    assert_eq!(std::fs::read(&vault_path).unwrap(), original);
+    assert_eq!(std::fs::read(&pin_path).unwrap(), pin);
+
+    let founded = found_request(&main, 1, "Founded after restart");
+    run(&queue).await;
+    assert!(found_value(founded.await.unwrap())["server"].is_u64());
+    let close = register_vault_close(&state).await.unwrap();
+    sources::close_server_rows(&state, &SystemClock)
+        .await
+        .unwrap();
+    drop(close);
+    let (third, main, queue) = app(path, None, true);
+    let has_row = invoke(&main, "1", SECRET);
+    run(&queue).await;
+    refused(has_row.await.unwrap());
+    let state = third.state::<AppState>();
+    assert_locked(&state).await;
+    assert!(state.store.lock().await.is_none());
+    assert_eq!(std::fs::read(&vault_path).unwrap(), original);
+    assert_eq!(std::fs::read(&pin_path).unwrap(), pin);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_text_found_final_publication_cannot_cross_actual_whole_close() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("vault");
@@ -1896,7 +1959,8 @@ async fn native_text_lost_reply_keeps_mount_and_foreign_wrapper_cannot_unlock_it
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn native_text_existing_directory_is_preserved_and_never_tried_as_another_format() {
+async fn native_text_connected_join_existing_directory_is_preserved_and_never_tried_as_another_format(
+) {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("vault");
     std::fs::create_dir(&path).unwrap();
@@ -1911,6 +1975,7 @@ async fn native_text_existing_directory_is_preserved_and_never_tried_as_another_
         assert_locked(&state).await;
         assert!(state.store.lock().await.is_none());
         assert!(!path.join("vault.bin").exists());
+        assert_eq!(std::fs::read_dir(&path).unwrap().count(), 1);
         assert_eq!(
             std::fs::read(path.join("unknown")).unwrap(),
             b"preserve exactly"

@@ -269,8 +269,9 @@ impl Physical {
     pub(super) fn finish_governed_cold(
         &self,
         tail: &crate::store::critical_namespaces::governance_layout::NativeColdTail,
+        require_idle_joined: bool,
     ) -> Result<(), AppError> {
-        tail.finish(self.current()?.checked_store()?)
+        tail.finish(self.current()?.checked_store()?, require_idle_joined)
     }
     #[cfg(test)]
     pub(super) fn handler_for_test(&self) -> lifecycle_admission::Handler {

@@ -4,6 +4,10 @@ Status: implementation under focused validation. Production selection remains
 off. This connects real native authentication to the opaque selected3 storage
 owner; it does not implement a working Chat V2 server or message send.
 
+This document records the original fresh-install checkpoint. The gated desktop
+now also has a cold opener for an authenticated, idle joined-aware vault. Its
+requirements and remaining restore work are in [Production join](CHAT-V2-PRODUCTION-JOIN.md).
+
 ## Native entry and authentication
 
 The outer synchronous Tauri router intercepts `unlock` only under trusted Rust
