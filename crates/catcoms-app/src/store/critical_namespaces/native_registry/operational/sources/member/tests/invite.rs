@@ -219,7 +219,14 @@ async fn native_governed_add_fixture(case: JoinCase) {
             prepare(&owner, &row, &vault, &budget).prepare_member_save(request(), &negative),
             Ok(V2MemberSaveOutcome::Ready),
         );
-        let pending = super::admission::final_preparation(&owner, &row, &vault, &budget);
+        let pending = owner
+            .capture_member(
+                &row,
+                command(&vault, &budget),
+                owner.policy.prepare_member().unwrap(),
+            )
+            .finish_admission([0xe8; 32])
+            .unwrap();
         let commit = Arc::new(tokio::sync::Mutex::new(()));
         let (custody, _) = super::admission::custody(&commit, &negative).await;
         assert_eq!(

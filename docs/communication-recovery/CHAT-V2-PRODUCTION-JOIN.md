@@ -149,6 +149,12 @@ first Add. The joiner compares it with the accepted anchor and replays the
 exact Admission and state before opening Welcome. A truncated or unrelated
 proof leaves the original private KeyPackage available for a valid retry.
 
+The private request owner can seal its exact KeyPackage provider and request
+against the original pending join and joined pin. Reopening authenticates
+that pairing and checks that the retained provider owns the same package.
+An owning journal must still prove whether Welcome entry was possible before
+resuming SDK work.
+
 The warm founder continues to use its existing ordinary-member lane after
 installation. Before signing a new action it checks the selected Head2,
 the exact archive and the same verifier's governing Header and epoch.

@@ -26,6 +26,19 @@ pub(super) struct JoinedAnchorPin {
     pub(super) anchor: GenesisAnchorBindingData,
     pub(super) accepted_invite: [u8; 32],
     pub(super) original_pending: [u8; 32],
+    layout: CurrentLayoutData,
+    id: V2GroupPinId,
+}
+
+impl JoinedAnchorPin {
+    pub(super) fn pending_context_data(&self) -> catcoms_sync::V2PendingJoinContextData {
+        catcoms_sync::V2PendingJoinContextData {
+            vault: self.layout.vault,
+            root: self.layout.root,
+            original_pending: self.original_pending,
+            pin: *self.id.as_bytes(),
+        }
+    }
 }
 
 fn require_accepted(
@@ -107,6 +120,8 @@ pub(super) fn open_original(
         accepted_invite: invite.id_data(),
         anchor: invite.spec_data().anchor.clone(),
         original_pending,
+        layout,
+        id: expected,
     })
 }
 

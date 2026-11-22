@@ -119,6 +119,8 @@ jobs:
       - name: Check the retained V2 JoinRequest and private KeyPackage
         if: inputs.scope != 'governed-add'
         run: python .github/scripts/check-chat-v2-invite-intent.py join-request
+      - name: Check the sealed pending JoinRequest and original joined pin
+        run: python .github/scripts/check-chat-v2-invite-intent.py joined-pending
       - name: Check the original-clock KeyPackage preflight before Add work
         if: inputs.scope != 'governed-add'
         run: python .github/scripts/check-chat-v2-invite-intent.py add-package-preflight

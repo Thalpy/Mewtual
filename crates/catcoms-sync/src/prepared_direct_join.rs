@@ -22,9 +22,10 @@ pub use network_exchange::{
 pub use sealed_source::{RecoveredDirectJoinSource, SealedDirectJoinSource};
 #[cfg(not(target_arch = "wasm32"))]
 pub use v2::{
-    CompletedV2JoinCandidate, PreparedV2JoinRequest, V2AdmissionStepData, V2FirstAddProofData,
-    V2FirstJoinDeliveryData, V2JoinRequestPacketData, V2JoinResponseData, V2JoinResponsePacketData,
-    MAX_V2_FIRST_ADD_PROOF_BYTES, MAX_V2_FIRST_JOIN_DELIVERY_BYTES,
+    CompletedV2JoinCandidate, PreparedV2JoinRequest, RecoveredV2PendingJoinSource,
+    SealedV2PendingJoinSource, V2AdmissionStepData, V2FirstAddProofData, V2FirstJoinDeliveryData,
+    V2JoinRequestPacketData, V2JoinResponseData, V2JoinResponsePacketData,
+    V2PendingJoinContextData, MAX_V2_FIRST_ADD_PROOF_BYTES, MAX_V2_FIRST_JOIN_DELIVERY_BYTES,
     MAX_V2_JOIN_REQUEST_PACKET_BYTES, MAX_V2_JOIN_RESPONSE_PACKET_BYTES,
 };
 

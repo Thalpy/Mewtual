@@ -39,6 +39,7 @@ COHORTS = {
     "native": ("catcoms-app", "native_runtime_invite_", 17),
     "packet": ("catcoms-app", "native_invite_packet_", 3),
     "join-request": ("catcoms-sync", "prepared_direct_join::v2::tests::", 3),
+    "joined-pending": ("catcoms-sync", "v2_pending_join_keeps_the_original_", 1),
     "join-response": ("catcoms-sync", "prepared_direct_join::v2::welcome::tests::", 1),
     "join-welcome": ("catcoms-sync", "governance::tests::welcome::", 6),
     "governed-header": ("catcoms-sync", "raw_header_survives_late_lock_and_exact_retry_never_reenters_key", 1),

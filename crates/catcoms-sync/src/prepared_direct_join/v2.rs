@@ -9,6 +9,10 @@ use catcoms_replication::chat::join_bindings::{
 use catcoms_replication::chat::ChatError;
 use catcoms_wire::Encoder;
 mod first_add_proof;
+mod pending_source;
+pub use pending_source::{
+    RecoveredV2PendingJoinSource, SealedV2PendingJoinSource, V2PendingJoinContextData,
+};
 mod welcome;
 pub use first_add_proof::{
     V2AdmissionStepData, V2FirstAddProofData, V2FirstJoinDeliveryData,
@@ -98,6 +102,7 @@ pub struct PreparedV2JoinRequest {
     limits: DirectJoinLimits,
     welcome_entered: bool,
     completed: Option<CompletedV2JoinCandidate>,
+    sealed_source: Option<SealedV2PendingJoinSource>,
 }
 
 impl PreparedV2JoinRequest {
@@ -172,6 +177,7 @@ impl PreparedV2JoinRequest {
             limits,
             welcome_entered: false,
             completed: None,
+            sealed_source: None,
         })
     }
 

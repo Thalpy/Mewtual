@@ -41,6 +41,10 @@ fn governed_joined_pin_keeps_the_original_anchor_ciphertext_and_pending_provenan
     assert_eq!(pin.anchor, anchor);
     assert_eq!(pin.accepted_invite, invite.id_data());
     assert_eq!(pin.original_pending, pending);
+    let bound = pin.pending_context_data();
+    assert_eq!(bound.pin, *id.as_bytes());
+    assert_eq!(bound.original_pending, pending);
+    assert_eq!(bound.root, layout.root);
     assert!(open_original(
         &key,
         CurrentLayoutData {
