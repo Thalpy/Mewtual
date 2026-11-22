@@ -241,7 +241,7 @@ impl<T, R> UnexposedV2GenesisCurrent<T, R> {
         self.activation.require_same_saved_head(head)?;
         Ok(GenesisCurrentOwnerRef {
             source: GenesisSourceDataRef {
-                seed: self.node.borrow_genesis_seed_data(),
+                seed: self.original_seed(),
                 resources: &self.resources,
             },
             task: &self.task,
@@ -275,6 +275,7 @@ impl<T, R> UnexposedV2GenesisCurrent<T, R> {
             seed_settlement,
             ..
         } = self;
+        let node = node.as_ref().ok_or_else(critical_namespaces::refused)?;
         let head = scope
             .saved_head()
             .ok_or_else(critical_namespaces::refused)?;

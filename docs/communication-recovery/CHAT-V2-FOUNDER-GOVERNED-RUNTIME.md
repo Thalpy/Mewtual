@@ -210,6 +210,12 @@ The regression saves and reconciles the same original member request before
 the Add preflight can succeed again. The future reservation writer must repeat
 the check at its covering edge.
 
+Sync can move the original warm node directly between Root's paid slots.
+It checks the source and destination first, then caches the governed owner
+without a fallible operation between the two moves. A refused or occupied
+destination leaves both owners in place. The new owner can lend the original
+genesis seed for Root's existing association check without exposing the SDK.
+
 An original physical Current guard must cover the exact request and parent,
 then the SAME SDK outcome, unsigned preimage, raw Header, governing history and
 response before selecting head2. A decoder or namespace4 descriptor cannot
@@ -296,6 +302,20 @@ frame is never rewritten on retry. The writer cannot clear a reservation or
 enter the SDK. Cold abort and entry-marker recovery need their own typed path.
 The native regression opens the actual original Current and covers the same
 file twice after the earlier member request has settled.
+
+The SDK-entry record has a separate key and tag and commits the complete
+encrypted fence. Resealing identical reservation labels produces a different
+binding. The record represents possible SDK entry once durably covered and
+cannot grant a fresh attempt. The warm writer covers it through its own held
+file before verifying the same original fence and Current again. The native
+fixture covers both records across the governed-node handoff. Production SDK
+dispatch and cold startup integration remain open.
+
+The read owner distinguishes a reservation with a proven absent SDK-entry
+record from one with a complete authenticated record. It repeats the exact
+file or absence check under fresh Current after authentication. A malformed,
+torn or foreign entry refuses. This status alone grants no cleanup or restart
+permission. The native fixture verifies both results through independent reads.
 
 Genesis member signing now reproves both founder WAL absences at the key
 edge, even if its verifier is already warm. The invitation journal writer

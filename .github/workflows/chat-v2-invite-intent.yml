@@ -31,6 +31,8 @@ on:
       - 'crates/catcoms-app/src/store/critical_namespaces/archive_bootstrap/founder_warm.rs'
       - 'crates/catcoms-app/src/store/critical_namespaces/archive_bootstrap/founder_native.rs'
       - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/owner.rs'
+      - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current.rs'
+      - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/settlement.rs'
       - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/text.rs'
       - 'crates/catcoms-sync/src/owner_v2/founder/bootstrap_source/genesis_seed/invite/**'
       - 'crates/catcoms-sync/src/owner_v2/founder/bootstrap_source/genesis_seed/invite.rs'
@@ -95,6 +97,8 @@ jobs:
         run: python .github/scripts/check-chat-v2-invite-intent.py journal
       - name: Check the governed Add fence and old WAL refusal
         run: python .github/scripts/check-chat-v2-invite-intent.py add-fence
+      - name: Check SDK entry binding to the exact covered fence
+        run: python .github/scripts/check-chat-v2-invite-intent.py add-sdk-entry
       - name: Check the existing authenticated scratch controls
         run: python .github/scripts/check-chat-v2-invite-intent.py control-scratch
       - name: Check that an initialized member lane refuses a WAL or stage

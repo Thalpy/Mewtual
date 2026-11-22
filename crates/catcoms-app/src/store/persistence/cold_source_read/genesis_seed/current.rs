@@ -17,7 +17,10 @@ use crate::store::critical_namespaces::{
 use crate::store::owner_evidence::canonical::v2_registration::PreparedV2WriterRegistration;
 use crate::store::persistence::v2_genesis_activation::PreparedV2GenesisActivation;
 use catcoms_rt::{Clock, MeshTransport};
-use catcoms_sync::owner_v2::{UnboundV2GenesisNode, V2GenesisRuntimeParts};
+use catcoms_sync::owner_v2::{
+    PreparedV2FounderGovernanceNode, UnboundV2GenesisNode, UnboundV2GenesisSeed,
+    V2GenesisRuntimeParts,
+};
 
 const WRAPPER_FEE: usize = 64 * 1024;
 
@@ -91,7 +94,8 @@ pub struct PreparedV2GenesisCurrent<T, R> {
 /// Actual saved genesis Current2 plus its SAME graph/runtime/resources. Still unexposed
 /// and unbound: there is intentionally no run, mutable SDK, raw node or Server extractor.
 pub struct UnexposedV2GenesisCurrent<T, R> {
-    node: UnboundV2GenesisNode<T, R>,
+    node: Option<UnboundV2GenesisNode<T, R>>,
+    governed: Option<Box<GovernedWarmNode<T, R>>>,
     resources: BootstrapGenesisResources,
     activation: PreparedV2GenesisActivation,
     task: PreparedV2GenesisGroupNamespace,
@@ -103,6 +107,11 @@ pub struct UnexposedV2GenesisCurrent<T, R> {
     >,
     // LAST; actual source/SDK/activation/task/writer payments remain independently retained.
     fee: CatalogReadReservation,
+}
+
+struct GovernedWarmNode<T, R> {
+    node: Option<PreparedV2FounderGovernanceNode<T, R>>,
+    _fee: CatalogReadReservation,
 }
 
 impl<T, R> Drop for PreparedV2GenesisCurrent<T, R> {
@@ -498,7 +507,8 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2GenesisCurrent<T, R> {
             unreachable!("validated node phase");
         };
         Ok(Some(UnexposedV2GenesisCurrent {
-            node,
+            node: Some(node),
+            governed: None,
             resources,
             activation: self.activation.take().expect("validated activation"),
             task: self.task.take().expect("validated task"),
@@ -553,9 +563,21 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2GenesisCurrent<T, R> {
 }
 
 impl<T, R> UnexposedV2GenesisCurrent<T, R> {
+    fn original_seed(&self) -> &UnboundV2GenesisSeed {
+        match (&self.node, &self.governed) {
+            (Some(node), None) => node.borrow_genesis_seed_data(),
+            (None, Some(governed)) => governed
+                .node
+                .as_ref()
+                .expect("governed owner retained before exposure")
+                .borrow_genesis_seed_data(),
+            _ => unreachable!("warm Current retains one node owner"),
+        }
+    }
+
     fn source(&self) -> GenesisSourceDataRef<'_> {
         GenesisSourceDataRef {
-            seed: self.node.borrow_genesis_seed_data(),
+            seed: self.original_seed(),
             resources: &self.resources,
         }
     }

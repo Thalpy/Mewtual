@@ -132,10 +132,7 @@ impl<T, R> UnboundV2GenesisNode<T, R> {
     /// decoded genesis DATA cannot become a live governor through this method.
     /// Refusal returns the unchanged whole node; success only moves fields.
     pub fn prepare_governance_data(self) -> Result<PreparedV2FounderGovernanceNode<T, R>, Self> {
-        if ordinary_create::source(&self).is_err()
-            || self._parts.body.warm.is_none()
-            || self._parts.body.fresh.is_none()
-        {
+        if !self.is_governance_ready_data() {
             return Err(self);
         }
         Ok(PreparedV2FounderGovernanceNode {
@@ -144,6 +141,36 @@ impl<T, R> UnboundV2GenesisNode<T, R> {
             node: self,
         })
     }
+
+    /// Future Root can supply its actual paid owner slots. Prove the original
+    /// warm node and the empty destination before taking anything, then cache
+    /// its governed owner with only infallible moves. Both slots survive a
+    /// refusal unchanged, including when the destination is already occupied.
+    pub fn prepare_governance_into_data(
+        original: &mut Option<Self>,
+        destination: &mut Option<PreparedV2FounderGovernanceNode<T, R>>,
+    ) -> Result<(), SyncError> {
+        if destination.is_some()
+            || !original
+                .as_ref()
+                .is_some_and(Self::is_governance_ready_data)
+        {
+            return Err(unavailable());
+        }
+        let node = original.take().expect("validated original warm node");
+        *destination = Some(PreparedV2FounderGovernanceNode {
+            pending: None,
+            installed: None,
+            node,
+        });
+        Ok(())
+    }
+
+    fn is_governance_ready_data(&self) -> bool {
+        self._parts.body.warm.is_some()
+            && self._parts.body.fresh.is_some()
+            && ordinary_create::source(self).is_ok()
+    }
 }
 
 impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
@@ -151,6 +178,12 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
     /// These historical labels do not describe the installed live SDK epoch.
     pub fn genesis_data(&self) -> V2GenesisSeedData<'_> {
         self.node.data()
+    }
+
+    /// Borrow the same retained original for Root's existing source check.
+    /// The caller still proves the covering parent and live Current separately.
+    pub fn borrow_genesis_seed_data(&self) -> &UnboundV2GenesisSeed {
+        self.node.borrow_genesis_seed_data()
     }
 
     pub fn installed_add_data(&self) -> Option<V2InstalledFounderAddData> {

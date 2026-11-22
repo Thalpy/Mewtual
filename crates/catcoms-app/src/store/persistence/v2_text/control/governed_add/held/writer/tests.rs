@@ -1,6 +1,7 @@
 use super::*;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
+use std::fs;
 
 fn sealed() -> (GovernedAddFenceData, Zeroizing<Vec<u8>>) {
     let data = GovernedAddFenceData {

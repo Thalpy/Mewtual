@@ -111,7 +111,7 @@ async fn native_runtime_invite_join_request_requires_the_actual_signed_journal()
     let packet = check().unwrap();
     let mut job = prepare(&owner, &row, &vault, &budget);
     let runtime = job.inner.loan.body.as_mut().unwrap();
-    let driver = runtime.driver.as_ref().unwrap();
+    let driver = runtime.driver.as_mut().unwrap();
     let route = runtime
         .network
         .as_ref()
@@ -134,8 +134,12 @@ async fn native_runtime_invite_join_request_requires_the_actual_signed_journal()
     let fence = only_named(directory.path(), "text.wal.stage.v1");
     let frozen = std::fs::read(&fence).unwrap();
     assert!(frozen.len() > 40);
+    let entry = only_named(directory.path(), "text.add.sdk-entry.v2");
+    let entry_bytes = std::fs::read(&entry).unwrap();
+    assert!(entry_bytes.len() > 40);
     assert!(check().is_err());
     assert_eq!(std::fs::read(fence).unwrap(), frozen);
+    assert_eq!(std::fs::read(entry).unwrap(), entry_bytes);
 }
 
 #[tokio::test]

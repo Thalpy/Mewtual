@@ -218,7 +218,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
 
     #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store) fn cover_governed_add_fence_for_test(
-        &self,
+        &mut self,
         layout: &V2CurrentLayoutStore,
         packet: &catcoms_sync::V2JoinRequestPacketData<'_>,
         routing_plan: &[u8],
@@ -226,7 +226,9 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         rng: &mut impl catcoms_rt::CryptoRngCore,
         negative: &RequestCancellation,
     ) -> Result<(), AppError> {
-        use crate::store::persistence::v2_text::PreparedGovernedAddFence;
+        use crate::store::persistence::v2_text::{
+            GovernedAddRecoveryState, PreparedGovernedAddFence,
+        };
         self.require_received_invite(
             layout,
             packet.founder_add_data().invite,
@@ -236,6 +238,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         )?;
         let store = layout.checked_store()?;
         let owner = self.owner.borrow_current()?;
+        let original_seed = owner.source().seed().observe_original_seed_data();
         let mut parent = PreparedV2TextParentCapture::prepare(store, owner.source())?;
         let resources = parent.resources().clone();
         store.with_v2_text_current(&owner, |admission| {
@@ -246,14 +249,60 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         let selected = parent.selected_data().ok_or_else(refused)?;
         let mut fence =
             PreparedGovernedAddFence::prepare(store, owner.source(), selected, packet, rng)?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            keys.preflight(&self.origin)?;
+            fence.cover(&guard, selected)
+        })?;
+        self.owner.prepare_governed_node(store)?;
+        let owner = self.owner.borrow_current()?;
+        original_seed.require_same_seed_data(owner.source().seed())?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            keys.preflight(&self.origin)?;
+            fence.cover(&guard, selected)?;
+            assert!(fence.require_covered_sdk_entry(&guard, selected).is_err());
+            Ok(())
+        })?;
+        let read_fence = |fence: &PreparedGovernedAddFence| {
+            let mut reader =
+                fence.prepare_recovery_read_for_test(store, owner.source(), selected)?;
+            store.with_v2_text_current(&owner, |admission| {
+                let guard = store.lock_v2_text_current_group(admission, &resources)?;
+                reader.capture(&guard, selected)
+            })?;
+            reader.authenticate(store, owner.source())?;
+            Ok::<_, AppError>(reader)
+        };
+        let mut before_entry = read_fence(&fence)?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            assert_eq!(
+                before_entry.require_recovery_state(&guard, selected)?,
+                GovernedAddRecoveryState::ReservationOnly
+            );
+            Ok(())
+        })?;
+        fence.prepare_sdk_entry(store, owner.source(), rng)?;
         for _ in 0..2 {
             store.with_v2_text_current(&owner, |admission| {
                 let guard = store.lock_v2_text_current_group(admission, &resources)?;
                 keys.preflight(&self.origin)?;
-                fence.cover(&guard, selected)
+                fence.cover_sdk_entry(&guard, selected)
             })?;
         }
-        Ok(())
+        let mut after_entry = read_fence(&fence)?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            assert!(before_entry
+                .require_recovery_state(&guard, selected)
+                .is_err());
+            assert_eq!(
+                after_entry.require_recovery_state(&guard, selected)?,
+                GovernedAddRecoveryState::PossiblyEntered
+            );
+            Ok(())
+        })
     }
 
     fn read_native_invite<U>(

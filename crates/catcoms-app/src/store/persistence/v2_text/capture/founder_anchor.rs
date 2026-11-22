@@ -185,7 +185,7 @@ impl SelectedV2TextHead {
         }
         self.validate_under_current_guard(guard)?;
         let (target, _, _) = guard.target_directory_data();
-        for name in ["text.wal", "text.wal.stage.v1"] {
+        for name in ["text.wal", "text.wal.stage.v1", "text.add.sdk-entry.v2"] {
             match std::fs::symlink_metadata(fixed_child(target, name)?) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 _ => return Err(refused()),

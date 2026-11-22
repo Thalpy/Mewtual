@@ -202,7 +202,7 @@ fn actual_current_keeps_same_source_and_node_across_retries_and_extraction() {
     let current = f.preparation.take_current(&f.layout).unwrap().unwrap();
     assert_eq!(current.data().source, original_id);
     original_sdk
-        .require_same_seed_data(current.node.borrow_genesis_seed_data())
+        .require_same_seed_data(current.original_seed())
         .unwrap();
     current.validate_original(&f.layout).unwrap();
     task.require_same_original(&current.task).unwrap();

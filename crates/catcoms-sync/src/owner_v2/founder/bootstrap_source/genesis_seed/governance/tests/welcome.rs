@@ -13,7 +13,28 @@ fn v2_join_request_and_welcome_complete_with_actual_add() {
     let now = catcoms_rt::Clock::now_ms(&catcoms_rt::SystemClock);
     let (original, _reservation, _opened, _old_fee) =
         prepared_node_with_clock(0xeb10, Box::new(ManualClock::new(now)));
-    let mut node = original.prepare_governance_data().unwrap();
+    let original_seed = original
+        .borrow_genesis_seed_data()
+        .observe_original_seed_data();
+    let mut original = Some(original);
+    let mut destination = None;
+    UnboundV2GenesisNode::prepare_governance_into_data(&mut original, &mut destination).unwrap();
+    assert!(original.is_none());
+    let (other, _other_reservation, _other_opened, _other_fee) = prepared_node(0xeb11);
+    let other_seed = other
+        .borrow_genesis_seed_data()
+        .observe_original_seed_data();
+    let mut other = Some(other);
+    assert!(
+        UnboundV2GenesisNode::prepare_governance_into_data(&mut other, &mut destination).is_err()
+    );
+    other_seed
+        .require_same_seed_data(other.as_ref().unwrap().borrow_genesis_seed_data())
+        .unwrap();
+    let mut node = destination.take().unwrap();
+    original_seed
+        .require_same_seed_data(node.borrow_genesis_seed_data())
+        .unwrap();
     let native = Native::new();
     let mut fixture = Request::new(&node, 75);
     fixture.change_invite(&node, |spec| spec.expires_at_ms = now + 60_000);

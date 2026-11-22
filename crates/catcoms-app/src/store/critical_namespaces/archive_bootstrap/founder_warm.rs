@@ -223,9 +223,9 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
 
     #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store) fn host_for_governed_add_test(
-        &self,
-    ) -> &crate::store::PreparedV2TextHost<T, R> {
-        self.host.as_ref().expect("promoted fixture host")
+        &mut self,
+    ) -> &mut crate::store::PreparedV2TextHost<T, R> {
+        self.host.as_deref_mut().expect("promoted fixture host")
     }
     /// Additional driver/Box/refusal storage only. Existing creator, source,
     /// source-read, restored SDK and Current fees remain independently live.

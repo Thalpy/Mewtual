@@ -4,7 +4,7 @@
 use super::*;
 use crate::store::persistence::v2_text::head::TextPendingData;
 use catcoms_storage::kept::session_id;
-use std::fs::{self, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::Write;
 
 /// File custody is cached immediately after creation and survives errors or
@@ -12,15 +12,26 @@ use std::io::Write;
 pub(in crate::store) struct PreparedGovernedAddFence {
     frozen: Option<Zeroizing<Vec<u8>>>,
     entered_create: bool,
-    held: HeldGovernedAddFence,
+    entry: Option<PreparedSdkEntry>,
     other_paths: [PathBuf; 3],
+    // The entry's File and path drain before the fence's physical lease.
+    held: HeldGovernedAddFence,
     _fee: CatalogReadReservation,
+}
+
+struct PreparedSdkEntry {
+    frozen: Option<Zeroizing<Vec<u8>>>,
+    entered_create: bool,
+    original: Option<OpenedTextControl>,
+    covered: bool,
 }
 
 const WRITER_BYTES: usize = 3 * MAX_TEXT_PATH
     + 6 * FRAME_BYTES
+    + 6 * ENTRY_BYTES
     + 4 * std::mem::size_of::<PreparedGovernedAddFence>()
     + 1024;
+const _: () = assert!(ENTRY_BYTES < FRAME_BYTES);
 
 impl PreparedGovernedAddFence {
     /// This must run before entering Current, under the caller's authenticated
@@ -66,6 +77,7 @@ impl PreparedGovernedAddFence {
             entered_create: false,
             held,
             other_paths,
+            entry: None,
             _fee: fee,
         })
     }
@@ -84,6 +96,7 @@ impl PreparedGovernedAddFence {
         require_absences(&self.other_paths)?;
 
         if !self.held.authenticated {
+            require_absent(&self.held.entry_path)?;
             ensure_original(
                 &self.held.path,
                 &mut self.frozen,
@@ -119,6 +132,103 @@ impl PreparedGovernedAddFence {
         )?;
         guard.validate_source_only()
     }
+
+    /// Cache one entry record outside writers. It commits the actual covered
+    /// fence ciphertext and cannot be moved to a resealed reservation.
+    pub(in crate::store) fn prepare_sdk_entry(
+        &mut self,
+        store: &ServerStore,
+        source: &GenesisSourceDataRef<'_>,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<(), AppError> {
+        self.held
+            .resources
+            .require_bound_original_negative(store, source)?;
+        if !self.held.authenticated {
+            return Err(refused());
+        }
+        if self.entry.is_some() {
+            return Ok(());
+        }
+        let raw = &self.held.original.as_ref().ok_or_else(refused)?.frame;
+        let data = GovernedAddSdkEntryData::from_fence_data(raw)?;
+        let key = Zeroizing::new(store.keys.db_key()?);
+        let frozen = data.seal_data(&key, rng)?;
+        self.entry = Some(PreparedSdkEntry {
+            frozen: Some(frozen),
+            entered_create: false,
+            original: None,
+            covered: false,
+        });
+        self.held
+            .resources
+            .require_bound_original_negative(store, source)
+    }
+
+    /// Record possible SDK entry before the actual SDK can run. A retry may
+    /// finish its held prefix only until it has covered the entry once.
+    pub(in crate::store) fn cover_sdk_entry(
+        &mut self,
+        guard: &V2TextCurrentGroupGuard<'_, '_>,
+        selected: &SelectedV2TextHead,
+    ) -> Result<(), AppError> {
+        self.require_covered(guard, selected)?;
+        guard.require_text_control_io_quiescent()?;
+        let (target, directory, id) = guard.target_directory_data();
+        let entry = self.entry.as_mut().ok_or_else(refused)?;
+        if !entry.covered {
+            ensure_original(
+                &self.held.entry_path,
+                &mut entry.frozen,
+                &mut entry.entered_create,
+                &mut entry.original,
+            )?;
+            crate::store::persistence::v2_genesis_activation::require_directory_name(
+                target, directory, id,
+            )?;
+            fill_original(
+                &self.held.entry_path,
+                entry.original.as_mut().ok_or_else(refused)?,
+            )?;
+            crate::store::persistence::sync_directory(target).map_err(io)?;
+            crate::store::persistence::v2_genesis_activation::require_directory_name(
+                target, directory, id,
+            )?;
+            entry.covered = true;
+        }
+        self.require_covered_sdk_entry(guard, selected)
+    }
+
+    pub(in crate::store) fn require_covered_sdk_entry(
+        &mut self,
+        guard: &V2TextCurrentGroupGuard<'_, '_>,
+        selected: &SelectedV2TextHead,
+    ) -> Result<(), AppError> {
+        self.require_covered(guard, selected)?;
+        let entry = self.entry.as_mut().ok_or_else(refused)?;
+        if !entry.covered {
+            return Err(refused());
+        }
+        require_exact_held(
+            &self.held.entry_path,
+            entry.original.as_mut().ok_or_else(refused)?,
+        )?;
+        let (target, directory, id) = guard.target_directory_data();
+        crate::store::persistence::v2_genesis_activation::require_directory_name(
+            target, directory, id,
+        )?;
+        guard.validate_source_only()
+    }
+
+    #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(in crate::store) fn prepare_recovery_read_for_test(
+        &self,
+        store: &ServerStore,
+        source: &GenesisSourceDataRef<'_>,
+        selected: &SelectedV2TextHead,
+    ) -> Result<HeldGovernedAddFence, AppError> {
+        HeldGovernedAddFence::prepare(store, source, selected, self.held.expected)
+    }
 }
 
 fn ensure_original(
@@ -130,7 +240,11 @@ fn ensure_original(
     if original.is_some() {
         return Ok(());
     }
-    if *entered || frozen.as_ref().is_none_or(|raw| raw.len() != FRAME_BYTES) {
+    if *entered
+        || frozen
+            .as_ref()
+            .is_none_or(|raw| raw.is_empty() || raw.len() > FRAME_BYTES)
+    {
         return Err(refused());
     }
     *entered = true;
@@ -152,7 +266,7 @@ fn fill_original(path: &Path, original: &mut OpenedTextControl) -> Result<(), Ap
     require_named(path, original)?;
     let prefix = read_matching_prefix(&mut original.file, &original.frame)?;
     require_named(path, original)?;
-    if prefix < FRAME_BYTES {
+    if prefix < original.frame.len() {
         original
             .file
             .seek(SeekFrom::Start(prefix as u64))
@@ -168,10 +282,7 @@ fn fill_original(path: &Path, original: &mut OpenedTextControl) -> Result<(), Ap
 
 fn require_absences(paths: &[PathBuf; 3]) -> Result<(), AppError> {
     for path in paths {
-        match fs::symlink_metadata(path) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            _ => return Err(refused()),
-        }
+        require_absent(path)?;
     }
     Ok(())
 }

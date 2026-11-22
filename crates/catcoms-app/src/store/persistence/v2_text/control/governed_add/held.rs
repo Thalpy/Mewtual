@@ -1,6 +1,7 @@
 //! Hold and revalidate the fixed governed reservation under actual Current.
 //! The read path authenticates an existing file. It cannot adopt an owner,
 //! complete a partial write, enter MLS, or return a covering save receipt.
+use super::sdk_entry::{GovernedAddSdkEntryData, ENTRY_BYTES, SDK_ENTRY_NAME};
 use super::*;
 use crate::store::critical_namespaces::current_layout::V2TextCurrentGroupGuard;
 use crate::store::critical_namespaces::read_pool::CatalogReadReservation;
@@ -12,6 +13,7 @@ use crate::store::persistence::v2_text::V2TextReadResources;
 use crate::store::persistence::GenesisSourceDataRef;
 use crate::store::ServerStore;
 use catcoms_storage::VaultPhysicalWorkLease;
+use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
@@ -24,9 +26,11 @@ pub(in crate::store) use writer::PreparedGovernedAddFence;
 /// An actual bounded, read-only File capture, tied to the exact selected
 /// parent through its read-resource association. All file and path custody
 /// leaves before the physical lease and the dedicated buffer reservation.
-pub(in crate::store::persistence::v2_text) struct HeldGovernedAddFence {
+pub(in crate::store) struct HeldGovernedAddFence {
     path: PathBuf,
+    entry_path: PathBuf,
     original: Option<OpenedTextControl>,
+    entry: Option<ObservedSdkEntry>,
     expected: GovernedAddFenceData,
     authenticated: bool,
     resources: V2TextReadResources,
@@ -36,8 +40,24 @@ pub(in crate::store::persistence::v2_text) struct HeldGovernedAddFence {
     _fee: CatalogReadReservation,
 }
 
-const FENCE_READ_BYTES: usize =
-    MAX_TEXT_PATH + 6 * FRAME_BYTES + 4 * std::mem::size_of::<HeldGovernedAddFence>() + 1024;
+enum ObservedSdkEntry {
+    Absent,
+    Present(OpenedTextControl),
+}
+
+/// Historical disk status for the exact reservation. Even ReservationOnly
+/// requires separate proofs of all downstream absences before disposal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::store) enum GovernedAddRecoveryState {
+    ReservationOnly,
+    PossiblyEntered,
+}
+
+const FENCE_READ_BYTES: usize = 2 * MAX_TEXT_PATH
+    + 6 * FRAME_BYTES
+    + 6 * ENTRY_BYTES
+    + 4 * std::mem::size_of::<HeldGovernedAddFence>()
+    + 1024;
 
 impl HeldGovernedAddFence {
     /// Prepare outside Current. Keep this whole receiver outside the writers
@@ -63,11 +83,15 @@ impl HeldGovernedAddFence {
         let fee = pool.try_reserve(FENCE_READ_BYTES)?;
         fee.validate(pool, FENCE_READ_BYTES)?;
         let lease = store._session.retain_for_physical_work();
-        let path = fixed_child(selected.physical_query_data().target, STAGE)?;
+        let target = selected.physical_query_data().target;
+        let path = fixed_child(target, STAGE)?;
+        let entry_path = fixed_child(target, SDK_ENTRY_NAME)?;
         resources.require_bound_original_negative(store, source)?;
         Ok(Self {
             path,
+            entry_path,
             original: None,
+            entry: None,
             expected,
             authenticated: false,
             resources,
@@ -76,7 +100,7 @@ impl HeldGovernedAddFence {
         })
     }
 
-    pub(in crate::store::persistence::v2_text) fn capture(
+    pub(in crate::store) fn capture(
         &mut self,
         guard: &V2TextCurrentGroupGuard<'_, '_>,
         selected: &SelectedV2TextHead,
@@ -86,12 +110,17 @@ impl HeldGovernedAddFence {
         }
         self.require_parent(guard, selected)?;
         self.original = Some(read_control(&self.path, FRAME_BYTES)?);
+        self.entry = Some(match fs::symlink_metadata(&self.entry_path) {
+            Ok(_) => ObservedSdkEntry::Present(read_control(&self.entry_path, ENTRY_BYTES)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => ObservedSdkEntry::Absent,
+            Err(error) => return Err(io(error)),
+        });
         guard.validate_source_only()
     }
 
     /// Outside Current. MAC success becomes usable only after a fresh check
     /// of the same original, named bytes and selected parent.
-    pub(in crate::store::persistence::v2_text) fn authenticate(
+    pub(in crate::store) fn authenticate(
         &mut self,
         store: &ServerStore,
         source: &GenesisSourceDataRef<'_>,
@@ -103,6 +132,10 @@ impl HeldGovernedAddFence {
         let data = GovernedAddFenceData::open_data(&key, &original.frame)?;
         if data != self.expected {
             return Err(refused());
+        }
+        if let ObservedSdkEntry::Present(entry) = self.entry.as_ref().ok_or_else(refused)? {
+            GovernedAddSdkEntryData::from_fence_data(&original.frame)?
+                .require_fence_data(&key, &entry.frame)?;
         }
         self.resources
             .require_bound_original_negative(store, source)?;
@@ -127,6 +160,30 @@ impl HeldGovernedAddFence {
         guard.validate_source_only()
     }
 
+    pub(in crate::store) fn require_recovery_state(
+        &mut self,
+        guard: &V2TextCurrentGroupGuard<'_, '_>,
+        selected: &SelectedV2TextHead,
+    ) -> Result<GovernedAddRecoveryState, AppError> {
+        self.require_current(guard, selected)?;
+        let state = match self.entry.as_mut().ok_or_else(refused)? {
+            ObservedSdkEntry::Absent => {
+                require_absent(&self.entry_path)?;
+                GovernedAddRecoveryState::ReservationOnly
+            }
+            ObservedSdkEntry::Present(entry) => {
+                require_exact_held(&self.entry_path, entry)?;
+                GovernedAddRecoveryState::PossiblyEntered
+            }
+        };
+        let (target, directory, id) = guard.target_directory_data();
+        crate::store::persistence::v2_genesis_activation::require_directory_name(
+            target, directory, id,
+        )?;
+        guard.validate_source_only()?;
+        Ok(state)
+    }
+
     fn require_parent(
         &self,
         guard: &V2TextCurrentGroupGuard<'_, '_>,
@@ -148,18 +205,18 @@ impl HeldGovernedAddFence {
 
 fn require_exact_held(path: &Path, original: &mut OpenedTextControl) -> Result<(), AppError> {
     require_named(path, original)?;
-    if read_matching_prefix(&mut original.file, &original.frame)? != FRAME_BYTES {
+    if read_matching_prefix(&mut original.file, &original.frame)? != original.frame.len() {
         return Err(refused());
     }
     require_named(path, original)
 }
 
 fn read_matching_prefix(file: &mut std::fs::File, expected: &[u8]) -> Result<usize, AppError> {
-    if expected.len() != FRAME_BYTES {
+    if expected.is_empty() || expected.len() > FRAME_BYTES {
         return Err(refused());
     }
     let metadata = file.metadata().map_err(io)?;
-    if !metadata.is_file() || metadata.len() > FRAME_BYTES as u64 {
+    if !metadata.is_file() || metadata.len() > expected.len() as u64 {
         return Err(refused());
     }
     let length = metadata.len() as usize;
@@ -183,6 +240,13 @@ fn read_matching_prefix(file: &mut std::fs::File, expected: &[u8]) -> Result<usi
 
 fn io(error: std::io::Error) -> AppError {
     AppError::Io(error.to_string())
+}
+
+fn require_absent(path: &Path) -> Result<(), AppError> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        _ => Err(refused()),
+    }
 }
 
 #[cfg(all(test, any(windows, target_os = "linux")))]

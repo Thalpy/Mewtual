@@ -6,6 +6,38 @@
 use super::UnexposedV2GenesisCurrent;
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> UnexposedV2GenesisCurrent<T, R> {
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn prepare_governed_text_node(
+        &mut self,
+        store: &crate::store::ServerStore,
+    ) -> Result<(), crate::AppError> {
+        use crate::store::critical_namespaces::refused;
+        use catcoms_sync::owner_v2::{UnboundV2GenesisNode, FOUNDER_GOVERNANCE_DATA_BYTES};
+        self.require_text_original_data(store)
+            .map_err(|_| refused())?;
+        if self.governed.is_some() {
+            return Ok(());
+        }
+        let pool = &store
+            .archive_bootstrap_policy
+            .as_ref()
+            .ok_or_else(refused)?
+            .pending
+            .pool;
+        let bytes = FOUNDER_GOVERNANCE_DATA_BYTES
+            .checked_add(4 * std::mem::size_of::<super::GovernedWarmNode<T, R>>())
+            .ok_or_else(refused)?;
+        let fee = pool.try_reserve(bytes)?;
+        fee.validate(pool, bytes)?;
+        let mut governed = Box::new(super::GovernedWarmNode {
+            node: None,
+            _fee: fee,
+        });
+        UnboundV2GenesisNode::prepare_governance_into_data(&mut self.node, &mut governed.node)?;
+        self.governed = Some(governed);
+        self.require_text_original_data(store)
+            .map_err(|_| refused())
+    }
+
     /// Warm-only original, never a node extracted from decoded cold metadata.
     /// No raw SDK/RNG loan escapes; the SAME node owns every retained draw.
     pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn prepare_text_invite_data(
@@ -18,7 +50,8 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> UnexposedV2Gene
         self.require_text_original_data(store)
             .map_err(|_| crate::store::critical_namespaces::refused())?;
         let result = self
-            .node
+            .genesis_text_node_mut()
+            .ok_or_else(crate::store::critical_namespaces::refused)?
             .prepare_invite_data(request, native, slot)
             .map_err(crate::AppError::from);
         self.require_text_original_data(store)
@@ -33,7 +66,8 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> UnexposedV2Gene
     ) -> Result<(), crate::AppError> {
         self.require_text_original_data(store)
             .map_err(|_| crate::store::critical_namespaces::refused())?;
-        self.node
+        self.genesis_text_node()
+            .ok_or_else(crate::store::critical_namespaces::refused)?
             .preflight_invite_signing_data(original)
             .map_err(crate::AppError::from)
     }
@@ -47,15 +81,43 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> UnexposedV2Gene
     ) -> Result<(), crate::AppError> {
         self.require_text_original_data(store)
             .map_err(|_| crate::store::critical_namespaces::refused())?;
-        self.node
+        self.genesis_text_node()
+            .ok_or_else(crate::store::critical_namespaces::refused)?
             .sign_invite_native_data(original, cut, ends)
             .map_err(crate::AppError::from)
     }
 }
 
 macro_rules! node_call_throughs {
-    ($ty:ident) => {
+    (@genesis $this:ident, warm) => {$this.node.as_ref()};
+    (@genesis $this:ident) => {Some(&$this.node)};
+    (@genesis_mut $this:ident, warm) => {$this.node.as_mut()};
+    (@genesis_mut $this:ident) => {Some(&mut $this.node)};
+    (@governed $this:ident, warm) => {$this.governed.as_ref().and_then(|owner| owner.node.as_ref())};
+    (@governed $this:ident) => {None};
+    (@governed_mut $this:ident, warm) => {$this.governed.as_mut().and_then(|owner| owner.node.as_mut())};
+    (@governed_mut $this:ident) => {None};
+    ($ty:ident $(, $mode:ident)?) => {
         impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> $ty<T, R> {
+            fn genesis_text_node(&self) -> Option<&catcoms_sync::owner_v2::UnboundV2GenesisNode<T, R>> {
+                node_call_throughs!(@genesis self $(, $mode)?)
+            }
+            fn genesis_text_node_mut(
+                &mut self,
+            ) -> Option<&mut catcoms_sync::owner_v2::UnboundV2GenesisNode<T, R>> {
+                node_call_throughs!(@genesis_mut self $(, $mode)?)
+            }
+            fn governed_text_node(
+                &self,
+            ) -> Option<&catcoms_sync::owner_v2::PreparedV2FounderGovernanceNode<T, R>> {
+                node_call_throughs!(@governed self $(, $mode)?)
+            }
+            fn governed_text_node_mut(
+                &mut self,
+            ) -> Option<&mut catcoms_sync::owner_v2::PreparedV2FounderGovernanceNode<T, R>> {
+                node_call_throughs!(@governed_mut self $(, $mode)?)
+            }
+
             fn require_text_original_data(
                 &self,
                 store: &crate::store::ServerStore,
@@ -78,7 +140,10 @@ macro_rules! node_call_throughs {
                 slot: &mut Option<catcoms_sync::owner_v2::PreparedV2CreateData>,
             ) -> Result<(), catcoms_sync::owner_v2::V2CreateRefusal> {
                 self.require_text_original_data(store)?;
-                let result = self.node.prepare_create_data(input, slot);
+                let node = self
+                    .genesis_text_node_mut()
+                    .ok_or(catcoms_sync::owner_v2::V2CreateRefusal::Source)?;
+                let result = node.prepare_create_data(input, slot);
                 self.require_text_original_data(store)?;
                 result
             }
@@ -94,7 +159,10 @@ macro_rules! node_call_throughs {
                 slot: &mut Option<catcoms_sync::owner_v2::PreparedV2AppendData>,
             ) -> Result<(), catcoms_sync::owner_v2::V2CreateRefusal> {
                 self.require_text_original_data(store)?;
-                let result = self.node.prepare_create_append_data(model, action, slot);
+                let node = self
+                    .genesis_text_node()
+                    .ok_or(catcoms_sync::owner_v2::V2CreateRefusal::Source)?;
+                let result = node.prepare_create_append_data(model, action, slot);
                 self.require_text_original_data(store)?;
                 result
             }
@@ -110,7 +178,10 @@ macro_rules! node_call_throughs {
             ) -> Result<catcoms_sync::owner_v2::V2AppendPlanObservation,
                         catcoms_sync::owner_v2::V2CreateRefusal> {
                 self.require_text_original_data(store)?;
-                let result = prepared.observe_plan_data(&self.node, model);
+                let node = self
+                    .genesis_text_node()
+                    .ok_or(catcoms_sync::owner_v2::V2CreateRefusal::Source)?;
+                let result = prepared.observe_plan_data(node, model);
                 self.require_text_original_data(store)?;
                 result
             }
@@ -126,7 +197,10 @@ macro_rules! node_call_throughs {
                 prepared: &mut catcoms_sync::owner_v2::PreparedV2AppendData,
             ) -> Result<(), catcoms_sync::owner_v2::V2CreateRefusal> {
                 self.require_text_original_data(store)?;
-                let result = self.node.sign_reserved_append_bytes_data(original_plan, prepared);
+                let node = self
+                    .genesis_text_node()
+                    .ok_or(catcoms_sync::owner_v2::V2CreateRefusal::Source)?;
+                let result = node.sign_reserved_append_bytes_data(original_plan, prepared);
                 self.require_text_original_data(store)?;
                 result
             }
@@ -141,7 +215,10 @@ macro_rules! node_call_throughs {
                 prepared: &mut catcoms_sync::owner_v2::PreparedV2AppendData,
             ) -> Result<(), catcoms_sync::owner_v2::V2CreateRefusal> {
                 self.require_text_original_data(store)?;
-                let result = self.node.materialize_signed_append_data(model, prepared);
+                let node = self
+                    .genesis_text_node()
+                    .ok_or(catcoms_sync::owner_v2::V2CreateRefusal::Source)?;
+                let result = node.materialize_signed_append_data(model, prepared);
                 self.require_text_original_data(store)?;
                 result
             }
@@ -157,7 +234,10 @@ macro_rules! node_call_throughs {
             ) -> Result<catcoms_sync::owner_v2::V2UnsignedAppendDataView<'a>,
                         catcoms_sync::owner_v2::V2CreateRefusal> {
                 self.require_text_original_data(store)?;
-                prepared.borrow_unsigned_data(&self.node, model)
+                let node = self
+                    .genesis_text_node()
+                    .ok_or(catcoms_sync::owner_v2::V2CreateRefusal::Source)?;
+                prepared.borrow_unsigned_data(node, model)
             }
 
             /// ORDINARY-member seams on the SAME original node. None reaches the founder
@@ -170,7 +250,12 @@ macro_rules! node_call_throughs {
                 use catcoms_sync::owner_v2::V2MemberSignRefusal;
                 self.require_text_original_data(store)
                     .map_err(|_| V2MemberSignRefusal::Source)?;
-                self.node.ordinary_member_signer_data()
+                if let Some(node) = self.governed_text_node() {
+                    return node.ordinary_member_signer_data();
+                }
+                self.genesis_text_node()
+                    .ok_or(V2MemberSignRefusal::Source)?
+                    .ordinary_member_signer_data()
             }
 
             /// Outside every writer: the request's one Clock/RNG draw through this node's
@@ -184,7 +269,13 @@ macro_rules! node_call_throughs {
                 use catcoms_sync::owner_v2::V2MemberSignRefusal;
                 self.require_text_original_data(store)
                     .map_err(|_| V2MemberSignRefusal::Source)?;
-                let result = self.node.draw_ordinary_draft_inputs(slot);
+                let result = if let Some(node) = self.governed_text_node_mut() {
+                    node.draw_ordinary_draft_inputs(slot)
+                } else {
+                    self.genesis_text_node_mut()
+                        .ok_or(V2MemberSignRefusal::Source)?
+                        .draw_ordinary_draft_inputs(slot)
+                };
                 self.require_text_original_data(store)
                     .map_err(|_| V2MemberSignRefusal::Source)?;
                 result
@@ -205,7 +296,9 @@ macro_rules! node_call_throughs {
                 catcoms_replication::chat::V2OrdinarySigningGuard<'a>,
                 catcoms_sync::owner_v2::V2MemberSignRefusal,
             > {
-                self.node.sign_ordinary_admitted(inputs, guard)
+                self.genesis_text_node()
+                    .ok_or(catcoms_sync::owner_v2::V2MemberSignRefusal::Source)?
+                    .sign_ordinary_admitted(inputs, guard)
             }
 
             /// Concrete native edge on the SAME family/node; caller retains
@@ -220,11 +313,16 @@ macro_rules! node_call_throughs {
                 ends: &mut catcoms_rt::NativeChatKeyEnds,
             ) -> Result<catcoms_replication::chat::V2OrdinarySigningGuard<'a>,
                 catcoms_sync::owner_v2::V2MemberSignRefusal> {
-                self.node.sign_ordinary_admitted_native(inputs, guard, original, cut, ends)
+                if let Some(node) = self.governed_text_node() {
+                    return node.sign_ordinary_admitted_native(inputs, guard, original, cut, ends);
+                }
+                self.genesis_text_node()
+                    .ok_or(catcoms_sync::owner_v2::V2MemberSignRefusal::Source)?
+                    .sign_ordinary_admitted_native(inputs, guard, original, cut, ends)
             }
         }
     };
 }
 
 pub(super) use node_call_throughs;
-node_call_throughs!(UnexposedV2GenesisCurrent);
+node_call_throughs!(UnexposedV2GenesisCurrent, warm);
