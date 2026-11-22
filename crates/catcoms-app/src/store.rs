@@ -56,6 +56,7 @@ mod native_text_invite;
 pub use critical_namespaces::NativeTextInvitePublication;
 pub use critical_namespaces::NativeTextJoinedRequestPreparation;
 pub use critical_namespaces::NativeTextJoinedRuntime;
+pub use critical_namespaces::NativeTextJoinedSelectionPreparation;
 pub use critical_namespaces::NativeTextJoinedVaultUpgrade;
 pub use critical_namespaces::{
     ActivatedCheckpointJoin, ArchiveBootstrapCatalogPolicy, ArchiveFounderBegin,

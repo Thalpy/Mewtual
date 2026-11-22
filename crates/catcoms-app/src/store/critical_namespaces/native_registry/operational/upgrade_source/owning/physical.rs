@@ -1149,6 +1149,18 @@ impl MetadataWork {
         })
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn observe_join_installation(
+        &self,
+        pending: &JoinedPendingIo,
+        invite: &crate::store::NativeTextInvitePacketData<'_>,
+        token: [u8; 32],
+    ) -> Result<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64), AppError> {
+        self.with_joined_store(|store| {
+            pending.require_original_join_intent(invite.binding(), token)?;
+            pending.warm_outcome_data(store)?.ok_or_else(refused)
+        })
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn attach_join_node<
         R: catcoms_rt::CryptoRngCore,
     >(

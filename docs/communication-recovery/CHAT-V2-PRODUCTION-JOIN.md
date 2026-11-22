@@ -242,7 +242,10 @@ worker checks the files again before covering Welcome. The transport used to rec
 move with its original closed graph into the same mounted collection. This
 handoff preserves the original runtime inputs on early refusal and keeps an
 already moved graph for an exact retry. Source retirement waits for admitted
-installation work before disposing of that closed node. The desktop Join
+installation work before disposing of that closed node. A new authenticated
+invocation can recover the parked node's exact selection after losing a reply.
+It reproves the original request token and the held Welcome files without
+renewing or requiring the founder connection. The desktop Join
 command still requires a selected native registry row and joined authoring.
 
 The warm owner verifies the delivery before covering possible Welcome entry, then

@@ -30,6 +30,7 @@ pub(super) fn invoice<R: CryptoRngCore>() -> usize {
         + 2 * std::mem::size_of::<NativeTextJoinedDelivery>()
         + std::mem::size_of::<PendingJoin>()
         + 2 * std::mem::size_of::<NativeTextJoinedInstallation<R>>()
+        + 2 * std::mem::size_of::<NativeTextJoinedSelectionPreparation<R>>()
         + std::mem::size_of::<MountedJoin<R>>()
         + std::mem::size_of::<Transport>()
         + 6 * std::mem::size_of::<usize>()
@@ -430,5 +431,66 @@ impl<R: CryptoRngCore> Drop for NativeTextJoinedInstallation<R> {
         if let Some((transport, _, _)) = self.inputs.take() {
             self.exchange.tcp.put(transport);
         }
+    }
+}
+
+/// Fresh native authorization to inspect an already parked joined runtime.
+pub struct NativeTextJoinedSelectionPreparation<R: CryptoRngCore> {
+    mounted: Weak<MountedJoin<R>>,
+    original: NativeTextJoinedRequestPreparation,
+}
+
+impl<R: CryptoRngCore> std::fmt::Debug for NativeTextJoinedSelectionPreparation<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeTextJoinedSelectionPreparation")
+            .finish_non_exhaustive()
+    }
+}
+
+impl<R: CryptoRngCore> NativeTextSources<catcoms_net::MeshService, R> {
+    /// Capture current native UI and original physical custody without IO.
+    pub fn capture_joined_selection(
+        &self,
+        command: NativeTextSourceCommand,
+    ) -> NativeTextJoinedSelectionPreparation<R> {
+        NativeTextJoinedSelectionPreparation {
+            mounted: Arc::downgrade(&self.mounted_join),
+            original: self.capture_join_request(command),
+        }
+    }
+}
+
+impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
+    /// Reprove the original invite/request, mounted files and closed node
+    /// after a lost reply. The original founder connection may have retired.
+    pub fn inspect(
+        self,
+        invite: &NativeTextInvitePacketData<'_>,
+        token: [u8; 32],
+        negative: &RequestCancellation,
+    ) -> Result<Option<(OwnerHeaderId, OwnerFactId, u64)>, AppError> {
+        self.original.require_current(negative)?;
+        let original = self.original.pending.upgrade().ok_or_else(refused)?;
+        let pending = original.try_lock().map_err(|_| refused())?;
+        let mounted = self.mounted.upgrade().ok_or_else(refused)?;
+        let slot = mounted.try_lock().map_err(|_| refused())?;
+        let result = if let Some(runtime) = slot.as_ref() {
+            let node = runtime.node.as_ref().ok_or_else(refused)?;
+            let (head, admission, epoch) = node.selected_join_data().map_err(|_| refused())?;
+            let metadata = self.original.work.as_ref().ok_or_else(refused)?;
+            if metadata.observe_join_installation(
+                pending.as_ref().ok_or_else(refused)?,
+                invite,
+                token,
+            )? != (head, epoch)
+            {
+                return Err(refused());
+            }
+            Some((head, admission, epoch))
+        } else {
+            None
+        };
+        self.original.require_current(negative)?;
+        Ok(result)
     }
 }

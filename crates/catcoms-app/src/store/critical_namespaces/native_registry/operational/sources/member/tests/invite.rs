@@ -263,6 +263,29 @@ async fn mounted_join_request_uses_the_original_native_command_and_retains_its_p
     let outcome = (head, epoch);
 
     sender.send(true).unwrap();
+    let inspect = || original.capture_joined_selection(command(&vault, &budget));
+    assert!(inspect().inspect(&invite, token, &negative).is_err());
+    let (_fresh_sender, fresh) = tokio::sync::watch::channel(false);
+    let fresh = RequestCancellation::new(fresh, None);
+    assert_eq!(
+        inspect().inspect(&invite, token, &fresh).unwrap(),
+        Some((head, own_add, epoch))
+    );
+    assert!(inspect().inspect(&invite, [62; 32], &fresh).is_err());
+    let file = dir
+        .path()
+        .join("chat-critical-namespaces.joined-welcome-outcome.bin");
+    let parked = file.with_extension("before-parked-join-inspection");
+    let contents = std::fs::read(&file).unwrap();
+    std::fs::rename(&file, &parked).unwrap();
+    std::fs::write(&file, &contents).unwrap();
+    assert!(inspect().inspect(&invite, token, &fresh).is_err());
+    std::fs::remove_file(&file).unwrap();
+    std::fs::rename(parked, file).unwrap();
+    assert_eq!(
+        inspect().inspect(&invite, token, &fresh).unwrap(),
+        Some((head, own_add, epoch))
+    );
     assert!(capture()
         .cover(&invite, anchor, token, after, &negative, &mut rng)
         .is_err());
