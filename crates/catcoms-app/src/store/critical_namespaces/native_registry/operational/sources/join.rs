@@ -644,6 +644,86 @@ impl<R: CryptoRngCore> NativeTextSources<catcoms_net::MeshService, R> {
             original: self.capture_join_request(command),
         }
     }
+
+    /// The trusted startup owner can prepare a single recovered row before
+    /// installing its reauthenticated vault and Sources pair. This proves
+    /// the registered closed graph and grants no command or signing authority.
+    pub fn prepare_recovered_joined_row(
+        &mut self,
+        vault: &NativeTextVault,
+        authentication: &crate::store::NativeTextVaultAuthenticationCheck,
+    ) -> Result<NativeTextJoinedRowSelection, AppError> {
+        if !self.scope.is_open()
+            || !Arc::ptr_eq(&self.scope, &vault.sources.observe())
+            || !authentication.is_for_original_vault(vault)
+        {
+            return Err(refused());
+        }
+        let metadata = self.work.metadata().ok_or_else(refused)?;
+        let slot = Arc::get_mut(&mut self.mounted_join)
+            .ok_or_else(refused)?
+            .get_mut()
+            .map_err(|_| refused())?;
+        let runtime = slot.as_mut().ok_or_else(refused)?;
+        let data = runtime.recovered.ok_or_else(refused)?;
+        if !runtime
+            .node
+            .as_ref()
+            .is_some_and(|node| node.was_recovered_data())
+        {
+            return Err(refused());
+        }
+        let (row, name) = runtime.observe_selected(&metadata, data)?;
+        if !authentication.is_for_original_vault(vault) {
+            return Err(refused());
+        }
+        runtime.select(row, name, data.request, &self.scope, None, &self.retirement)
+    }
+}
+
+impl<R: CryptoRngCore> MountedNode<R> {
+    fn observe_selected(
+        &self,
+        metadata: &MetadataWork,
+        data: NativeTextJoinedRegistrationData,
+    ) -> Result<(NativeTextJoinedRegistryRowData, String), AppError> {
+        let actual = self.node.as_ref().ok_or_else(refused)?;
+        if data.selected_data() != actual.selected_join_data().map_err(|_| refused())? {
+            return Err(refused());
+        }
+        metadata.observe_registered_joined_row(data, self.registration.as_deref())
+    }
+
+    fn select(
+        &mut self,
+        row: NativeTextJoinedRegistryRowData,
+        name: String,
+        request: [u8; 32],
+        scope: &Arc<Scope>,
+        keys: Option<NativeChatSourceClose>,
+        control: &Arc<retirement::Control>,
+    ) -> Result<NativeTextJoinedRowSelection, AppError> {
+        let selection = self
+            .selection
+            .get_or_insert_with(|| NativeTextJoinedRowSelection {
+                original: Arc::new(JoinedRowSelection {
+                    row,
+                    name,
+                    request,
+                    scope: scope.clone(),
+                    retired: AtomicBool::new(false),
+                    keys,
+                    _metadata: control.clone(),
+                }),
+            });
+        if selection.original.row != row
+            || selection.original.request != request
+            || !selection.is_current_cached()
+        {
+            return Err(refused());
+        }
+        Ok(selection.clone())
+    }
 }
 
 impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
@@ -670,35 +750,21 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         let mounted = self.mounted.upgrade().ok_or_else(refused)?;
         let mut slot = mounted.try_lock().map_err(|_| refused())?;
         let runtime = slot.as_mut().ok_or_else(refused)?;
-        let actual = runtime.node.as_ref().ok_or_else(refused)?;
         let data = runtime
             .recovered
             .or_else(|| runtime.registration.as_ref().map(|proof| proof.data()))
             .ok_or_else(refused)?;
-        if data.selected_data() != actual.selected_join_data().map_err(|_| refused())? {
-            return Err(refused());
-        }
         let metadata = self.original.work.as_ref().ok_or_else(refused)?;
-        let (row, name) =
-            metadata.observe_registered_joined_row(data, runtime.registration.as_deref())?;
+        let (row, name) = runtime.observe_selected(metadata, data)?;
         self.original.require_current(negative)?;
-        let selection = runtime
-            .selection
-            .get_or_insert_with(|| NativeTextJoinedRowSelection {
-                original: Arc::new(JoinedRowSelection {
-                    row,
-                    name,
-                    request: data.request,
-                    scope: self.original.scope.clone(),
-                    retired: AtomicBool::new(false),
-                    keys: pending.close.get().cloned(),
-                    _metadata: self.original._control.clone(),
-                }),
-            });
-        if selection.original.row != row || !selection.is_current_cached() {
-            return Err(refused());
-        }
-        Ok(selection.clone())
+        runtime.select(
+            row,
+            name,
+            data.request,
+            &self.original.scope,
+            pending.close.get().cloned(),
+            &self.original._control,
+        )
     }
 
     /// Select the native metadata row for the exact parked original. This

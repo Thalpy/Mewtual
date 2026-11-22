@@ -525,6 +525,17 @@ impl ServerStore {
         Ok(result)
     }
 
+    pub(in crate::store) fn require_empty_mounted_joined_pins(&self) -> Result<(), AppError> {
+        self.validate_mounted_governance_layout()?;
+        let slot = self.joined_pin_index.lock().map_err(|_| denied())?;
+        let index = slot.as_ref().ok_or_else(denied)?;
+        index.require(self)?;
+        if !index.index.is_empty() || index.pending.is_some() {
+            return Err(denied());
+        }
+        Ok(())
+    }
+
     pub(in crate::store) fn prepare_joined_pin_declaration(
         &self,
         rng: &mut dyn CryptoRngCore,

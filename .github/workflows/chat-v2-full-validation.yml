@@ -130,7 +130,7 @@ jobs:
         if: runner.os == 'Linux' && inputs.scope != 'native-lock' && inputs.scope != 'native-join'
         run: npm --prefix apps/desktop test
       - name: Check frontend types
-        if: runner.os == 'Linux' && inputs.scope != 'native-lock' && inputs.scope != 'native-join'
+        if: runner.os == 'Linux' && inputs.scope != 'native-lock'
         run: npm --prefix apps/desktop run check
       # Native builds consume real frontend assets; build them on both operating systems.
       - name: Build frontend assets

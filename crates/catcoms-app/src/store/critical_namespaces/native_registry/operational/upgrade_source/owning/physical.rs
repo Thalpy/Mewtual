@@ -168,6 +168,16 @@ impl Physical {
             .recovered_join_registration_data()
     }
 
+    pub(super) fn require_empty_mounted_joined_pins(&self) -> Result<(), AppError> {
+        let cell = self.cell.try_lock().map_err(|_| refused())?;
+        cell.require_idle()?;
+        self.handler.require()?;
+        self.handler.require_idle_cached()?;
+        self.current()?
+            .checked_store()?
+            .require_empty_mounted_joined_pins()
+    }
+
     pub(super) fn require_registered_native_join(
         &self,
         data: crate::store::NativeTextJoinedRegistrationData,

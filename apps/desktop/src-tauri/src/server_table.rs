@@ -88,6 +88,15 @@ pub(super) struct NativeRowData {
     _credit: NativeUiInvocationMetadata,
 }
 impl PreparedNativeRow {
+    pub(super) fn is_for_recovered_vault(
+        &self,
+        vault: &catcoms_app::store::NativeTextVault,
+    ) -> bool {
+        matches!(&self.data.selection, NativeSelection::Joined(original)
+            if original.is_current_cached() && original.is_from_original_vault_cached(vault))
+            && self.data.target.is_for_original_vault(vault)
+    }
+
     /// Called with already paid/frozen fields outside guards. No renderer DATA
     /// can construct selection or target; native must still authenticate their
     /// exact original relationship at final installation.

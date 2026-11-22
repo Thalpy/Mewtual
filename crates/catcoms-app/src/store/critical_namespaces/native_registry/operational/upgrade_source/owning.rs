@@ -8,6 +8,7 @@ enum ColdOpening {
     Governed,
     Joined,
     IdleJoined,
+    NativeStartup,
 }
 use crate::store::critical_namespaces::{
     native_registry::preparation::NativeRegistryHandler, pending_join_codec as grammar,
@@ -436,6 +437,12 @@ impl Store {
         self.physical.recovered_join_registration_data()
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn require_empty_mounted_joined_pins(
+        &self,
+    ) -> Result<(), AppError> {
+        self.physical.require_empty_mounted_joined_pins()
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn require_registered_native_join(
         &self,
         data: crate::store::NativeTextJoinedRegistrationData,
@@ -595,6 +602,23 @@ impl Store {
         )
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn open_native_startup(
+        dir: &std::path::Path,
+        passphrase: &[u8],
+        rng: &mut impl CryptoRngCore,
+        current: crate::store::V2CurrentLayoutPolicy,
+        policy: Policy,
+    ) -> Result<Self, AppError> {
+        Self::open_governed_family(
+            dir,
+            passphrase,
+            rng,
+            current,
+            policy,
+            ColdOpening::NativeStartup,
+        )
+    }
+
     fn open_governed_family(
         dir: impl AsRef<std::path::Path>,
         passphrase: &[u8],
@@ -633,11 +657,14 @@ impl Store {
         Arc::get_mut(&mut value.physical)
             .expect("unexposed original governed physical")
             .install(current);
-        let require_idle_joined = matches!(opening, ColdOpening::IdleJoined);
         let count = value.row_count_data()?;
-        if require_idle_joined && count != 0 {
-            return Err(refused());
-        }
+        let require_idle_joined = match (opening, count) {
+            (ColdOpening::IdleJoined | ColdOpening::NativeStartup, 0) => true,
+            (ColdOpening::NativeStartup, 1) | (ColdOpening::Governed | ColdOpening::Joined, _) => {
+                false
+            }
+            _ => return Err(refused()),
+        };
         #[cfg(test)]
         observe_edge(Edge::BeforeColdExposure);
         // No file read follows this same-held proof. Existing4 consumes its

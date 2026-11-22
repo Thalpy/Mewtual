@@ -205,11 +205,12 @@ Warm promotion uses the exact native leaves already held by that declaration,
 after retiring the predecessor's covered declaration and its read reservation.
 An equal-byte replacement of a native leaf refuses promotion until the original
 is returned.
-On a process restart, gated desktop startup opens an idle joined-aware vault
+On a process restart, gated desktop startup opens the original joined-aware vault
 only through the existing-file cold path. It authenticates the critical wrapper
 under the original lifetime and wrapper locks, and requires the selected native
-registry and joined-pin index to be empty before installing Sources. Startup
-refuses nonempty vaults until the desktop can reconstruct their live sources.
+registry and joined-pin index to be empty before installing empty Sources. It
+can also reopen exactly one selected native joined row. Startup preserves and
+refuses other nonempty states that lack a complete runtime factory.
 The mounted index preserves the first pin ciphertext
 for each group and checks the held index when reading pin context. The first
 pending-JOIN record covers the private request and the one exact index
@@ -263,8 +264,10 @@ restored private graph after matching its receipt and governing replay. The
 external transport constructor accepts the earlier external profile only.
 The cold runtime can move the same physical vault, actor and closed graph into
 a fresh native UI and Sources pair. Fresh authenticated inspection checks the
-original registered row without another Welcome. The desktop boot and server
-table still need to install that pair and publish its selected rows together.
+original registered row without another Welcome. Desktop startup installs that
+pair and its prepared row together. The row keeps its registered group name,
+numeric ID and request context. The cold row currently uses the local default
+display label because the first joined registry receipt records no display name.
 
 The warm owner verifies the delivery before covering possible Welcome entry, then
 seals and covers the exact successful outcome. New outcome records also retain

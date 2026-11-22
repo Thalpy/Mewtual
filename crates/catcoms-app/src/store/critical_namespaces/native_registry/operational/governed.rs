@@ -19,6 +19,7 @@ mod contact;
 mod runtime;
 pub(super) use contact::connect_approved_host;
 pub use runtime::NativeTextJoinedRuntime;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 
 pub(in crate::store::critical_namespaces::native_registry) const JOIN_PROTOCOL: ProtocolId =
     ProtocolId("/catcoms/rr/1");
@@ -147,25 +148,69 @@ pub struct NativeTextJoinedStorage {
 }
 
 impl NativeTextJoinedStorage {
+    fn opening_policy() -> Result<Policy, AppError> {
+        Policy::new(
+            CriticalCatalogReadPool::new(super::super::lifecycle::preparation::PREPARATION_FEE)?,
+            Policy::required_persistent_capacity(),
+        )
+    }
+
     pub fn open(
         dir: impl AsRef<std::path::Path>,
         secret: &[u8],
         rng: &mut impl CryptoRngCore,
         current: crate::store::V2CurrentLayoutPolicy,
     ) -> Result<Self, AppError> {
-        let policy = Policy::new(
-            CriticalCatalogReadPool::new(super::super::lifecycle::preparation::PREPARATION_FEE)?,
-            Policy::required_persistent_capacity(),
-        )?;
         Ok(Self {
             pending: None,
             recovered_tcp: None,
-            index: upgrade_source::owning::Store::open_joined(dir, secret, rng, current, policy)?,
+            index: upgrade_source::owning::Store::open_joined(
+                dir,
+                secret,
+                rng,
+                current,
+                Self::opening_policy()?,
+            )?,
+        })
+    }
+
+    /// Reopen once for native startup. The zero-row branch checks the original
+    /// joined catalog is empty before completing any pending Core selection.
+    pub fn open_for_native_startup(
+        directory: &std::path::Path,
+        secret: &[u8],
+        rng: &mut impl CryptoRngCore,
+        current: crate::store::V2CurrentLayoutPolicy,
+    ) -> Result<Self, AppError> {
+        Ok(Self {
+            pending: None,
+            recovered_tcp: None,
+            index: upgrade_source::owning::Store::open_native_startup(
+                directory,
+                secret,
+                rng,
+                current,
+                Self::opening_policy()?,
+            )?,
         })
     }
 
     pub fn row_count_data(&self) -> Result<usize, AppError> {
         self.index.native_row_count_data()
+    }
+
+    /// Mount the original cold selection as an empty native vault only if
+    /// both its registry and joined pin catalog are proven empty.
+    pub fn into_idle_native_vault(
+        self,
+        session: (Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicBool>),
+        budget: crate::store::NativeUiInvocationBudget,
+    ) -> Result<crate::store::NativeTextVault, AppError> {
+        if self.pending.is_some() || self.recovered_tcp.is_some() || self.row_count_data()? != 0 {
+            return Err(refused());
+        }
+        self.index.require_empty_mounted_joined_pins()?;
+        crate::store::NativeTextVault::from_recovered_joined_index(self.index, session, budget)
     }
 
     /// Historical pin context from the current mounted index.

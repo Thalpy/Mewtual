@@ -1210,7 +1210,8 @@ async fn native_text_connected_join_retries_original_welcome_after_authenticated
 async fn native_text_connected_join_gated_route_publishes_one_original_joined_row() {
     let root = tempfile::tempdir().unwrap();
     let (founder, founder_window, founder_queue) = app(root.path().join("founder"), None, true);
-    let (joiner, joiner_window, joiner_queue) = app(root.path().join("joiner"), None, true);
+    let joiner_path = root.path().join("joiner");
+    let (joiner, joiner_window, joiner_queue) = app(joiner_path.clone(), None, true);
     unlock_current(&founder, &founder_window, &founder_queue).await;
     unlock_current(&joiner, &joiner_window, &joiner_queue).await;
     let found = found_request(&founder_window, 1, "Founder group");
@@ -1285,10 +1286,47 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     let listed = resume_request(&joiner_window);
     run(&joiner_queue).await;
     let listed = found_value(listed.await.unwrap());
-    assert_eq!(listed["servers"].as_array().unwrap(), &[original]);
+    assert_eq!(
+        listed["servers"].as_array().unwrap(),
+        std::slice::from_ref(&original)
+    );
     let locked = snapshot_request(&joiner_window, None);
     run(&joiner_queue).await;
     assert!(snapshot_result(locked.await.unwrap())["continuity_error"].is_null());
+
+    let saved_pins =
+        std::fs::read(joiner_path.join("chat-critical-namespaces.joined-pin.index")).unwrap();
+    let close = register_vault_close(&state).await.unwrap();
+    sources::close_server_rows(&state, &SystemClock)
+        .await
+        .unwrap();
+    drop(close);
+    drop(joiner);
+    let (reopened, window, queue) = app(joiner_path.clone(), None, true);
+    let wrong = invoke(&window, "1", "different secret");
+    run(&queue).await;
+    refused(wrong.await.unwrap());
+    let state = reopened.state::<AppState>();
+    assert!(state.store.lock().await.is_none());
+    assert!(state.servers.lock().await.native(&id).is_none());
+    let unlocked = invoke(&window, "1", SECRET);
+    run(&queue).await;
+    let restored = found_value(unlocked.await.unwrap());
+    let restored = restored["servers"].as_array().unwrap();
+    assert_eq!(restored.len(), 1);
+    for field in ["backend", "server", "context", "channel", "name", "is_dm"] {
+        assert_eq!(restored[0][field], original[field]);
+    }
+    assert_eq!(restored[0]["display_name"], "me");
+    assert_eq!(
+        std::fs::read(joiner_path.join("chat-critical-namespaces.joined-pin.index")).unwrap(),
+        saved_pins
+    );
+    let close = register_vault_close(&state).await.unwrap();
+    sources::close_server_rows(&state, &SystemClock)
+        .await
+        .unwrap();
+    drop(close);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -6,8 +6,8 @@ use catcoms_app::store::{
     ArchiveBootstrapCatalogPolicy, CanonicalFilenameInventoryPolicy, CriticalCatalogReadPool,
     NativeIndexPolicy, NativeIndexStore, NativeIndexUpgrade, NativeRegistryInstallation,
     NativeRegistryPolicy, NativeRegistryStore, NativeTextGovernanceUpgrade,
-    NativeTextJoinedVaultUpgrade, NativeTextVault, NativeTextVaultUpgrade, V2CurrentLayoutPolicy,
-    V2MemberOutboxPolicy,
+    NativeTextJoinedStorage, NativeTextJoinedVaultUpgrade, NativeTextVaultUpgrade,
+    V2CurrentLayoutPolicy, V2MemberOutboxPolicy,
 };
 
 pub(super) enum Bootstrap {
@@ -27,6 +27,10 @@ pub(super) enum Bootstrap {
 }
 
 type Atoms = (Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicBool>);
+pub(super) struct NativeRowBudget {
+    pub(super) budget: NativeUiInvocationBudget,
+    pub(super) instance: u64,
+}
 const FAILED: &str = "Vault startup did not complete. Its files have been kept.";
 
 fn current_policy() -> Result<V2CurrentLayoutPolicy, catcoms_app::AppError> {
@@ -61,6 +65,7 @@ impl Bootstrap {
         atoms: Atoms,
         budget: NativeUiInvocationBudget,
         source_policy: catcoms_app::store::NativeTextSourcePolicy,
+        row: NativeRowBudget,
     ) -> Result<(), String> {
         if secret.is_empty() || secret.len() > MAX_SECRET {
             return Err("Enter a valid vault secret.".into());
@@ -102,11 +107,47 @@ impl Bootstrap {
                 Self::Existing => {
                     let result = (|| {
                         let current = current_policy().map_err(|_| FAILED)?;
-                        let vault = NativeTextVault::open_idle_joined_from_trusted_host(
-                            directory, secret, &mut rng, current, atoms, budget,
+                        const EXISTING: &str = "Could not unlock the existing Chat V2 vault.";
+                        let storage = NativeTextJoinedStorage::open_for_native_startup(
+                            directory, secret, &mut rng, current,
                         )
-                        .map_err(|_| "Could not unlock the existing Chat V2 vault.")?;
-                        super::sources::ReadyBundle::new(vault, &source_policy)
+                        .map_err(|_| EXISTING)?;
+                        match storage.row_count_data().map_err(|_| EXISTING)? {
+                            0 => {
+                                let vault = storage
+                                    .into_idle_native_vault(atoms, budget)
+                                    .map_err(|_| EXISTING)?;
+                                super::sources::ReadyBundle::new(vault, &source_policy)
+                            }
+                            1 => {
+                                let (_owner, signal) = tokio::sync::watch::channel(false);
+                                let negative = catcoms_rt::RequestCancellation::new(signal, None);
+                                let runtime = storage
+                                    .bind_recovered_native_runtime(
+                                        rng,
+                                        Box::new(SystemClock),
+                                        &negative,
+                                    )
+                                    .map_err(|_| EXISTING)?;
+                                let (vault, sources) = runtime
+                                    .into_recovered_native_sources(
+                                        atoms,
+                                        budget.clone(),
+                                        &source_policy,
+                                        &negative,
+                                    )
+                                    .map_err(|_| EXISTING)?;
+                                super::sources::ReadyBundle::recovered(
+                                    vault,
+                                    sources,
+                                    secret,
+                                    &budget,
+                                    &row.budget,
+                                    row.instance,
+                                )
+                            }
+                            _ => Err(EXISTING.into()),
+                        }
                     })();
                     return match result {
                         Ok(ready) => {

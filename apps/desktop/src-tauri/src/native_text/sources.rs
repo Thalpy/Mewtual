@@ -18,6 +18,7 @@ type RemovedPair = (Option<Sources>, Option<MountedVault>);
 /// Only this private constructor pairs a facade with the Sources issued by
 /// that SAME value. Neither field can come from renderer DATA or a raw Store.
 pub(super) struct ReadyBundle {
+    row: Option<server_table::PreparedNativeRow>,
     sources: Sources,
     vault: NativeTextVault,
 }
@@ -33,7 +34,50 @@ impl ReadyBundle {
             .capture_native_sources(budget)
             .finish()
             .map_err(|_| "Chat setup did not complete. Its files have been kept.")?;
-        Ok(Self { vault, sources })
+        Ok(Self {
+            row: None,
+            vault,
+            sources,
+        })
+    }
+
+    pub(super) fn recovered(
+        vault: NativeTextVault,
+        mut sources: Sources,
+        secret: &[u8],
+        ui_budget: &NativeUiInvocationBudget,
+        row_budget: &NativeUiInvocationBudget,
+        instance: u64,
+    ) -> Result<Self, String> {
+        const FAILED: &str = "Could not reopen the joined Chat V2 group.";
+        let credit = ui_budget.prepare().map_err(|_| FAILED)?;
+        let authentication = Arc::new(
+            vault
+                .prepare_native_authentication(credit)
+                .verify(secret)
+                .map_err(|_| FAILED)?,
+        );
+        let selected = sources
+            .prepare_recovered_joined_row(&vault, &authentication)
+            .map_err(|_| FAILED)?;
+        let row = server_table::PreparedNativeRow::new(
+            server_table::NativeRowSpec {
+                selection: server_table::NativeSelection::Joined(selected.clone()),
+                instance,
+                target: authentication,
+                request: selected.request_data(),
+                name: selected.name_data(),
+                display_name: "me",
+                is_dm: false,
+                channel: channel_id("general"),
+            },
+            row_budget.prepare().map_err(|_| FAILED)?,
+        )?;
+        Ok(Self {
+            row: Some(row),
+            sources,
+            vault,
+        })
     }
 }
 
@@ -256,6 +300,7 @@ impl Controller {
     pub(super) fn install(
         &self,
         store: &mut Option<MountedVault>,
+        table: &mut server_table::ServerTable,
         ready: &mut Option<ReadyBundle>,
         original: &Arc<boot_lifetime::Control>,
     ) -> Result<(), &'static str> {
@@ -272,7 +317,17 @@ impl Controller {
         {
             return Err("Vault startup was superseded.");
         }
-        let ReadyBundle { vault, sources } = ready.take().expect("validated original ready pair");
+        let original = ready.as_mut().expect("validated original ready pair");
+        if let Some(candidate) = &original.row {
+            if !candidate.is_for_recovered_vault(&original.vault)
+                || table.native_iter().next().is_some()
+            {
+                return Err("Vault startup was superseded.");
+            }
+            table.install_native(&mut original.row)?;
+        }
+        let ReadyBundle { vault, sources, .. } =
+            ready.take().expect("validated original ready pair");
         record.sources = Some(sources);
         *store = Some(MountedVault::TextV2(vault));
         record.ever_installed = true;
