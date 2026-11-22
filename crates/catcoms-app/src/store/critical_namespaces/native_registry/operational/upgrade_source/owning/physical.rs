@@ -1096,6 +1096,29 @@ impl MetadataWork {
         })
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn prepare_join_tcp(
+        &self,
+        pending: &JoinedPendingIo,
+    ) -> Result<(Zeroizing<[u8; 32]>, catcoms_net::NativeTcpPreparation), AppError> {
+        use super::super::super::governed::JoinFramePayment;
+        self.with_joined_store(|store| {
+            pending.request_data(store)?;
+            let seed = pending.native_transport_seed()?;
+            let (_, fee) = self
+                .physical
+                .joined_exchange_resources(catcoms_net::NATIVE_TCP_LIFETIME_BYTES)?;
+            let work = self.physical.capture_source().ok_or_else(refused)?;
+            pending.request_data(store)?;
+            Ok((
+                seed,
+                catcoms_net::NativeTcpPreparation::new(
+                    work,
+                    Arc::new(JoinFramePayment { _fee: fee }),
+                ),
+            ))
+        })
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn cover_join_delivery(
         &self,
         pending: &mut JoinedPendingIo,

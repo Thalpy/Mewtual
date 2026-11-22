@@ -67,6 +67,13 @@ pub(in crate::store) struct PreparedPinnedPending {
 }
 
 impl PreparedPinnedPending {
+    pub(in crate::store) fn native_transport_seed(&self) -> Result<Zeroizing<[u8; 32]>, AppError> {
+        self.transport
+            .as_ref()
+            .map(|original| original.seed.clone())
+            .ok_or_else(refused)
+    }
+
     pub(in crate::store) fn request_bytes_data(&self) -> &[u8] {
         self.source.request_bytes_data()
     }

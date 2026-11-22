@@ -231,12 +231,14 @@ The mounted request selects a revision-two Pending that encrypts a fresh local
 transport seed and its derived TCP port. The Pending identity binds the public
 transport commitment and port in addition to the exact request and predecessor
 pin index. The warm and cold read paths return the same public reservation.
-Revision-one requests keep their current read path. Starting the actual TCP
-actor from that reservation remains a separate owning step.
+Revision-one requests keep their current read path. The mounted owner starts
+one actual paid TCP actor from the covered seed and loans it to the original
+request invocation. Cancelling before installation returns that actor for the
+same request retry. The closed node takes that same actor at attachment, and
+whole retirement waits for its tasks and physical custody to drain.
 The connection capture releases the metadata slot before contacting the peer.
-The actor checks the
-original invocation and UI generation, and the mounted worker checks the files
-again before covering Welcome. The transport used to receive that Welcome can
+The actor checks the original invocation and UI generation, and the mounted
+worker checks the files again before covering Welcome. The transport used to receive that Welcome can
 move with its original closed graph into the same mounted collection. This
 handoff preserves the original runtime inputs on early refusal and keeps an
 already moved graph for an exact retry. Source retirement waits for admitted

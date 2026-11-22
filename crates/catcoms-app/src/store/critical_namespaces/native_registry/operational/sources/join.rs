@@ -19,6 +19,8 @@ use catcoms_rt::{Clock, PeerId, RequestAuthority, RequestCancellation};
 use catcoms_sync::{ClosedV2JoinedNode, V2JoinedRuntimeInputs, V2PendingJoinContextData};
 use std::{sync::Weak, time::Duration};
 use tokio::sync::watch;
+mod transport;
+pub(super) use transport::Transport;
 
 pub(super) type PendingJoin = Mutex<Option<JoinedPendingIo>>;
 pub(super) type MountedJoin<R> = Mutex<Option<MountedNode<R>>>;
@@ -29,7 +31,8 @@ pub(super) fn invoice<R: CryptoRngCore>() -> usize {
         + std::mem::size_of::<PendingJoin>()
         + 2 * std::mem::size_of::<NativeTextJoinedInstallation<R>>()
         + std::mem::size_of::<MountedJoin<R>>()
-        + 4 * std::mem::size_of::<usize>()
+        + std::mem::size_of::<Transport>()
+        + 6 * std::mem::size_of::<usize>()
 }
 
 /// An original UI command and finite metadata slot. Keep the entire capture
@@ -37,6 +40,7 @@ pub(super) fn invoice<R: CryptoRngCore>() -> usize {
 pub struct NativeTextJoinedRequestPreparation {
     scope: Arc<Scope>,
     pending: Weak<PendingJoin>,
+    tcp: Weak<Transport>,
     command: NativeTextSourceCommand,
     work: Option<MetadataWork>,
     end: Option<retirement::PreparationEnd>,
@@ -66,6 +70,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSources<T, R> {
         NativeTextJoinedRequestPreparation {
             scope: self.scope.clone(),
             pending: Arc::downgrade(&self.pending_join),
+            tcp: Arc::downgrade(&self.joined_tcp),
             command,
             work,
             end,
@@ -122,13 +127,19 @@ impl NativeTextJoinedRequestPreparation {
         caller: RequestCancellation,
     ) -> Result<NativeTextJoinedExchange, AppError> {
         self.require_current(&caller)?;
-        let prepared = {
+        let (prepared, tcp) = {
             let original = self.pending.upgrade().ok_or_else(refused)?;
             let pending = original.try_lock().map_err(|_| refused())?;
-            self.work
-                .as_ref()
-                .ok_or_else(refused)?
-                .prepare_join_connection(pending.as_ref().ok_or_else(refused)?, invite)?
+            let pending = pending.as_ref().ok_or_else(refused)?;
+            let metadata = self.work.as_ref().ok_or_else(refused)?;
+            let prepared = metadata.prepare_join_connection(pending, invite)?;
+            let tcp = self.tcp.upgrade().ok_or_else(refused)?.checkout(
+                metadata,
+                pending,
+                prepared.local_transport,
+                || self.require_current(&caller),
+            )?;
+            (prepared, tcp)
         };
         self.require_current(&caller)?;
         let JoinedConnectionPreparation {
@@ -152,6 +163,7 @@ impl NativeTextJoinedRequestPreparation {
             target: invite.connected_peer_data(),
             local_transport,
             signal: caller.with_authority(authority),
+            tcp,
             mount,
             work,
             pending: self.pending,
@@ -207,6 +219,7 @@ pub struct NativeTextJoinedExchange {
     request: Zeroizing<Vec<u8>>,
     target: PeerId,
     local_transport: (PeerId, u16),
+    tcp: transport::Loan,
     signal: RequestCancellation,
     mount: RequestCancellation,
     work: SourceWork,
@@ -233,14 +246,13 @@ impl NativeTextJoinedExchange {
         &self,
         invite: &NativeTextInvitePacketData<'_>,
         approved_host: std::net::IpAddr,
-        transport: &catcoms_net::MeshService,
         scheduler: &catcoms_discovery::EndpointDialScheduler,
     ) -> Result<(), AppError> {
         NativeTextJoinedStorage::require_invite_bytes(&self.request, invite)?;
         connect_approved_host(
             invite,
             approved_host,
-            transport,
+            self.tcp.borrow()?,
             scheduler,
             self.signal.clone(),
             self.mount.clone(),
@@ -251,14 +263,11 @@ impl NativeTextJoinedExchange {
 
     /// Use only the original invited transport identity. The actual network
     /// actor checks the same UI, mount and connection at request admission.
-    pub async fn receive(
-        self,
-        transport: catcoms_net::MeshService,
-    ) -> Result<NativeTextJoinedDelivery, AppError> {
+    pub async fn receive(self) -> Result<NativeTextJoinedDelivery, AppError> {
         let delivery = receive_connected_join(
             &self.request,
             self.target,
-            &transport,
+            self.tcp.borrow()?,
             self.signal.clone(),
             self.mount.clone(),
             self.payment.clone(),
@@ -267,7 +276,6 @@ impl NativeTextJoinedExchange {
         Ok(NativeTextJoinedDelivery {
             delivery,
             exchange: self,
-            transport,
         })
     }
 }
@@ -277,7 +285,6 @@ impl NativeTextJoinedExchange {
 pub struct NativeTextJoinedDelivery {
     delivery: ConnectedJoinDelivery,
     exchange: NativeTextJoinedExchange,
-    transport: catcoms_net::MeshService,
 }
 
 impl std::fmt::Debug for NativeTextJoinedDelivery {
@@ -348,12 +355,10 @@ impl<R: CryptoRngCore> NativeTextSources<catcoms_net::MeshService, R> {
         {
             return Err(refused());
         }
+        let transport = delivery.as_mut().ok_or_else(refused)?.exchange.tcp.take()?;
         let (rng, clock) = inputs.take().expect("checked original inputs");
-        let NativeTextJoinedDelivery {
-            delivery,
-            exchange,
-            transport,
-        } = delivery.take().expect("checked original delivery");
+        let NativeTextJoinedDelivery { delivery, exchange } =
+            delivery.take().expect("checked original delivery");
         Ok(NativeTextJoinedInstallation {
             inputs: Some((transport, rng, clock)),
             mounted: Arc::downgrade(&self.mounted_join),
@@ -400,6 +405,7 @@ impl<R: CryptoRngCore> NativeTextJoinedInstallation<R> {
                     node,
                     _payment: payment.take().unwrap(),
                 });
+                self.exchange.tcp.attached();
             }
             result?;
         }
@@ -416,5 +422,13 @@ impl<R: CryptoRngCore> NativeTextJoinedInstallation<R> {
             return Err(refused());
         }
         Ok((head, admission, epoch))
+    }
+}
+
+impl<R: CryptoRngCore> Drop for NativeTextJoinedInstallation<R> {
+    fn drop(&mut self) {
+        if let Some((transport, _, _)) = self.inputs.take() {
+            self.exchange.tcp.put(transport);
+        }
     }
 }

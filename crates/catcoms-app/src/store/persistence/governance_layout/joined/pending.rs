@@ -551,6 +551,10 @@ impl ServerStore {
 }
 
 impl JoinedPendingIo {
+    pub(in crate::store) fn native_transport_seed(&self) -> Result<Zeroizing<[u8; 32]>, AppError> {
+        self.prepared.native_transport_seed()
+    }
+
     pub(in crate::store) fn native_transport_data(
         &self,
     ) -> Result<(catcoms_rt::PeerId, u16), AppError> {

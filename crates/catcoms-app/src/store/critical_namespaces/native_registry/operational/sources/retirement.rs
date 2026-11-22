@@ -140,6 +140,7 @@ impl Drop for CaptureAck {
 pub struct NativeTextSourceRetirement<T: MeshTransport, R: CryptoRngCore> {
     rows: [Option<Row<T, R>>; MAX_SOURCES],
     mounted_join: Arc<join::MountedJoin<R>>,
+    joined_tcp: Arc<join::Transport>,
     // LAST: another worker cannot enter until all old cell/key pins are gone.
     _ack: CaptureAck,
 }
@@ -151,6 +152,7 @@ pub struct NativeTextSourceRetirementPreparation<T: MeshTransport, R: CryptoRngC
     #[cfg(test)]
     weak_drop_order: Option<WeakDropOrder>,
     mounted_join: Weak<join::MountedJoin<R>>,
+    joined_tcp: Weak<join::Transport>,
     // Slot acknowledgement follows real Weak/cell work. Busy has no slot but
     // still owns the unconditional fee-only tail below.
     ack: Option<CaptureAck>,
@@ -232,6 +234,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSources<T, R> {
             #[cfg(test)]
             weak_drop_order: None,
             mounted_join: Arc::downgrade(&self.mounted_join),
+            joined_tcp: Arc::downgrade(&self.joined_tcp),
             ack,
             _control: self.retirement.clone(),
         }
@@ -252,6 +255,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSourceRetirementPreparation<T
         let mut rows = std::array::from_fn(|_| None);
         let book = self.book.upgrade().ok_or(Error::Unknown)?;
         let mounted_join = self.mounted_join.upgrade().ok_or(Error::Unknown)?;
+        let joined_tcp = self.joined_tcp.upgrade().ok_or(Error::Unknown)?;
         {
             let entries = book.try_lock().map_err(|_| Error::Busy)?;
             for original in entries.iter() {
@@ -271,6 +275,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSourceRetirementPreparation<T
         Ok(NativeTextSourceRetirement {
             rows,
             mounted_join,
+            joined_tcp,
             _ack: ack,
         })
     }
@@ -300,6 +305,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSourceRetirement<T, R> {
                 Err(std::sync::TryLockError::Poisoned(_)) => return Err(Error::Unknown),
             };
             drop(closed);
+            pending = !self.joined_tcp.try_retire()?;
         }
         Ok(if pending {
             NativeTextSourceRetirementStatus::Pending

@@ -137,6 +137,7 @@ pub struct NativeTextSources<T: MeshTransport, R: CryptoRngCore> {
     entries: Arc<SourceBook<T, R>>,
     mounted_join: Arc<join::MountedJoin<R>>,
     pending_join: Arc<join::PendingJoin>,
+    joined_tcp: Arc<join::Transport>,
     policy: NativeTextSourcePolicy,
     // Original physical custody and control payment remain until entries leave.
     work: SourceWork,
@@ -544,6 +545,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSourcePreparation<T, R> {
         let entries = Arc::new(Mutex::new(Vec::with_capacity(self.budget.policy.maximum)));
         let pending_join = Arc::new(Mutex::new(None));
         let mounted_join = Arc::new(Mutex::new(None));
+        let joined_tcp = Arc::new(join::Transport::default());
         if self.scope.claim_once().is_err() {
             return Err(Box::new(self));
         }
@@ -560,6 +562,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSourcePreparation<T, R> {
             entries,
             mounted_join,
             pending_join,
+            joined_tcp,
             policy: budget.policy,
             work: work.expect("checked original source work"),
             retirement: Arc::new(retirement::Control::new(budget.metadata)),
