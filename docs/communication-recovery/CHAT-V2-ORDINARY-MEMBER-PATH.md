@@ -89,6 +89,12 @@ Publication reads bounded debt pages and reseals original bytes under a separate
 admitted current envelope. Persist any mutated sender state before export. Record local
 submission completion through its own durable checkpoint; a crash may resend the same
 signed original. A transport submission is not a peer durability receipt or certification.
+The general member wire envelope uses a domain-separated channel exporter under the
+selected group, Profile, governing Header, epoch and channel. It wraps the exact signed
+action and claimed Admission in authenticated padding. Exporting this key leaves the MLS
+application sender ratchet unchanged. Receivers still need the original selected Core
+prefix to validate the claimed Admission before projection. The transport scheduler,
+receiver and durable submission checkpoint still need to consume this envelope.
 Original audit chunks and request receipts remain retained after scheduling debt clears.
 Removal changes active view, never deletes the audit. Unproven late removed actions stay
 Held pending the separately authorized moderation path; ordinary concurrent edits resolve
