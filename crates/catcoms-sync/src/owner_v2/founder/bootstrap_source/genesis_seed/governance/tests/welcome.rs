@@ -325,6 +325,34 @@ fn v2_join_request_and_welcome_complete_with_actual_add() {
     let replay = prefix.selected_replay_data().unwrap();
     assert_eq!(replay.header().id(), header_id);
     assert_eq!(replay.mls_epoch_data(), 1);
+
+    let mut warm_group = ProjectionGroup::new(&fixture.invite.spec_data().anchor.group).unwrap();
+    let mut warm_view = warm_group.begin_view();
+    assert!(warm_view.try_ready());
+    let warm_origin = V2ProjectionOrigin::new(g.live.clone());
+    assert!(prepared
+        .prepare_initial_prefix(
+            &delivery[..delivery.len() - 1],
+            &warm_view,
+            warm_origin.clone()
+        )
+        .is_err());
+    let (mut warm_prefix, selected) = prepared
+        .prepare_initial_prefix(&delivery, &warm_view, warm_origin.clone())
+        .unwrap();
+    assert!(prepared
+        .prepare_initial_prefix(&delivery, &warm_view, warm_origin)
+        .is_err());
+    assert_eq!(
+        warm_prefix.own_admission_data(),
+        prefix.own_admission_data()
+    );
+    assert!(warm_prefix.finish_host_selected(&wrong).is_err());
+    let _warm_parent = warm_prefix.finish_host_selected(&selected).unwrap();
+    assert_eq!(
+        warm_prefix.selected_replay_data().unwrap().header().id(),
+        header_id
+    );
     let retry = prepared
         .seal_joined_outcome(&vault_key, pending, &mut journal_rng)
         .unwrap();

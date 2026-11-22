@@ -35,6 +35,28 @@ impl PreparedPinnedPending {
         self.context
     }
 
+    pub(in crate::store) fn group_data(&self) -> Result<Vec<u8>, AppError> {
+        let invite = SignedInviteBindingData::decode(&self.invite).map_err(|_| refused())?;
+        Ok(invite.spec_data().anchor.group.clone())
+    }
+
+    pub(in crate::store) fn prepare_initial_prefix(
+        &mut self,
+        delivery: &[u8],
+        group: &catcoms_replication::chat::ProjectionGroupView,
+        origin: catcoms_replication::chat::V2ProjectionOrigin,
+    ) -> Result<
+        (
+            catcoms_sync::PreparedV2JoinedPrefix,
+            catcoms_replication::chat::V2HostSelectionExpectation,
+        ),
+        AppError,
+    > {
+        self.source
+            .prepare_initial_prefix(delivery, group, origin)
+            .map_err(|_| refused())
+    }
+
     pub(in crate::store) fn validate_delivery_data(&self, delivery: &[u8]) -> Result<(), AppError> {
         self.source
             .validate_first_join_delivery_data(delivery)

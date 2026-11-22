@@ -105,6 +105,7 @@ pub struct PreparedV2JoinRequest {
     completed: Option<CompletedV2JoinCandidate>,
     sealed_source: Option<SealedV2PendingJoinSource>,
     sealed_outcome: Option<SealedV2JoinedOutcome>,
+    initial_prefix_prepared: bool,
 }
 
 impl PreparedV2JoinRequest {
@@ -181,6 +182,7 @@ impl PreparedV2JoinRequest {
             completed: None,
             sealed_source: None,
             sealed_outcome: None,
+            initial_prefix_prepared: false,
         })
     }
 

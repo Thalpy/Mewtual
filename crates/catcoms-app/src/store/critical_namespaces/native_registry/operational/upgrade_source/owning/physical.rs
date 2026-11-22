@@ -107,6 +107,16 @@ impl Physical {
         Ok((store.chat_mount.observer(), fee))
     }
 
+    pub(super) fn warm_join_outcome_data(
+        &self,
+        pending: &crate::store::persistence::governance_layout::joined::JoinedPendingIo,
+    ) -> Result<Option<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64)>, AppError>
+    {
+        self.handler.require()?;
+        self.handler.require_idle_cached()?;
+        pending.warm_outcome_data(self.current()?.checked_store()?)
+    }
+
     pub(super) fn recovered_join_outcome_data(
         &self,
     ) -> Result<Option<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64)>, AppError>

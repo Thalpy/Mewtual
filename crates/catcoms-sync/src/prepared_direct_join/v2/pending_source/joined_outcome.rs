@@ -8,7 +8,7 @@ use catcoms_replication::chat::{
     owner_header::{OwnerHeaderId, OwnerStateCommitment},
     owner_profile::AdmissionOrigin,
     owner_state::StateFrame,
-    ProjectionGroupView, V2ProjectionOrigin,
+    ProjectionGroupView, V2HostSelectionExpectation, V2ProjectionOrigin,
 };
 
 const TAG: &[u8] = b"catcoms/private-chat-v2-joined-outcome/v1\0";
@@ -50,6 +50,37 @@ pub(super) fn parent_data(source: &SealedV2PendingJoinSource) -> [u8; 32] {
 }
 
 impl PreparedV2JoinRequest {
+    /// Prepare the initial governing transition beside the real retained
+    /// Welcome graph. The mounted owner must still check the exact held
+    /// Pending, pin and successful Outcome before advancing it.
+    pub fn prepare_initial_prefix(
+        &mut self,
+        delivery: &[u8],
+        group: &ProjectionGroupView,
+        origin: V2ProjectionOrigin,
+    ) -> Result<(PreparedV2JoinedPrefix, V2HostSelectionExpectation), SyncError> {
+        if self.sealed_outcome.is_none() || self.initial_prefix_prepared {
+            return Err(SyncError::JoinRejected);
+        }
+        let graph = self.completed.as_ref().ok_or(SyncError::JoinRejected)?;
+        graph.validate_initial_state_data()?;
+        validate_delivery_data(&self.request, self.limits, delivery)?;
+        let packet = V2JoinRequestPacketData::decode(&self.request)?;
+        let delivery = V2FirstJoinDeliveryData::decode(delivery)?;
+        let (response, proof) = delivery.data();
+        if response.binding.encode() != graph.response_binding {
+            return Err(SyncError::JoinRejected);
+        }
+        let selection = V2HostSelectionExpectation::from_trusted_host(
+            OwnerHeaderId::from_bytes(response.binding.spec_data().add_header),
+            graph.state,
+        );
+        let prepared =
+            proof.prepare_joined_prefix(&packet.invite.spec_data().anchor, group, origin)?;
+        self.initial_prefix_prepared = true;
+        Ok((prepared, selection))
+    }
+
     /// Seal the exact original successful Welcome before joined-source
     /// installation. The host funds the independent snapshot and output
     /// buffers, and covers the returned frame under the mounted journal.

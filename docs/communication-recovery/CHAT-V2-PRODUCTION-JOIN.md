@@ -202,9 +202,11 @@ exact signed request bytes while keeping the private package. Cold opening
 can complete the same insertion and verify the original request. The warm
 owner verifies the delivery before covering possible Welcome entry, then
 seals and covers the exact successful outcome. Cold opening independently
-recovers that outcome and prepares Core's initial selected-history candidate
-from the same signed delivery. Core advances only after the mounted storage
-rechecks the original selection. A possible entry with no outcome stays
+recovers that outcome. Both the warm successful graph and the independent
+cold graph prepare Core's initial selected-history candidate from the same
+signed delivery. Each advances only after the mounted storage rechecks the
+original pin and outcome, and retains the retired parent for fork evidence.
+A possible entry with no outcome stays
 historical. Other pending-JOIN transitions and native runtime installation
 remain open.
 The joined storage owner can exchange the exact selected JoinRequest on an

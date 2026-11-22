@@ -180,6 +180,16 @@ impl NativeTextJoinedStorage {
             .finish_joined_pending(self.pending.as_mut().ok_or_else(refused)?, delivery, rng)
     }
 
+    /// The actual original warm selection after the complete covered Welcome.
+    /// Returns historical head and epoch data under the mounted pin and files.
+    pub fn warm_join_outcome_data(
+        &self,
+    ) -> Result<Option<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64)>, AppError>
+    {
+        self.index
+            .warm_join_outcome_data(self.pending.as_ref().ok_or_else(refused)?)
+    }
+
     /// Exchange the exact covered request with the invited peer over an
     /// existing authenticated connection, then cover the verified Welcome.
     pub async fn exchange_first_join(

@@ -33,6 +33,7 @@ pub(super) struct WarmWelcome {
     outcome: Option<Zeroizing<Vec<u8>>>,
     held_entry: Option<CreatedStage>,
     held_outcome: Option<CreatedStage>,
+    selection: Option<JoinedCore>,
     _fee: CatalogReadReservation,
 }
 
@@ -55,6 +56,7 @@ impl WarmWelcome {
             outcome: None,
             held_entry: None,
             held_outcome: None,
+            selection: None,
             _fee: fee,
         })
     }
@@ -107,6 +109,31 @@ impl WarmWelcome {
             self.outcome.as_ref().ok_or_else(denied)?,
         )
     }
+
+    pub(super) fn prepare_core(
+        &mut self,
+        store: &ServerStore,
+        pending: &mut PreparedPinnedPending,
+    ) -> Result<(), AppError> {
+        if self.selection.is_none() {
+            self.require_outcome(store)?;
+            let group = pending.group_data()?;
+            self.selection = Some(JoinedCore::prepare(store, &group, |view, origin| {
+                pending.prepare_initial_prefix(&self.delivery, view, origin)
+            })?);
+        }
+        Ok(())
+    }
+
+    pub(super) fn finish_core(&mut self) -> Result<(), AppError> {
+        self.selection.as_mut().ok_or_else(denied)?.finish()
+    }
+
+    pub(super) fn outcome_data(
+        &self,
+    ) -> Option<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64)> {
+        self.selection.as_ref().and_then(JoinedCore::outcome_data)
+    }
 }
 
 fn write_held(
@@ -139,8 +166,13 @@ pub(super) struct RecoveredWelcome {
 
 struct ClosedOutcome {
     file: OpenedArchiveObject,
-    graph: RecoveredV2JoinedOutcome,
+    _graph: RecoveredV2JoinedOutcome,
+    selection: JoinedCore,
+}
+
+struct JoinedCore {
     core: PreparedV2JoinedPrefix,
+    expected: V2HostSelectionExpectation,
     retired: Option<V2GeneralRetiredData>,
     _view: ProjectionGroupView,
     _group: ProjectionGroup,
@@ -160,20 +192,23 @@ impl V2OriginNegative for ProjectionMount {
     }
 }
 
-impl ClosedOutcome {
+impl JoinedCore {
     fn prepare(
         store: &ServerStore,
-        file: OpenedArchiveObject,
-        mut graph: RecoveredV2JoinedOutcome,
-        delivery: &[u8],
+        group: &[u8],
+        prepare: impl FnOnce(
+            &ProjectionGroupView,
+            V2ProjectionOrigin,
+        )
+            -> Result<(PreparedV2JoinedPrefix, V2HostSelectionExpectation), AppError>,
     ) -> Result<Self, AppError> {
         const CORE_FEE: usize = 2 * REPLAY_MATH_PRIVATE_INVOICE
             + V2GeneralPrefixVerifier::metadata_layout_bytes()
             + ProjectionGroup::initial_metadata_layout_bytes()
-            + 4 * std::mem::size_of::<ClosedOutcome>();
+            + 4 * std::mem::size_of::<JoinedCore>();
         let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
         let fee = policy.current.archive.pending.pool.try_reserve(CORE_FEE)?;
-        let mut group = ProjectionGroup::new(graph.group_data()).map_err(|_| denied())?;
+        let mut group = ProjectionGroup::new(group).map_err(|_| denied())?;
         let mut view = group.begin_view();
         if !view.try_ready() {
             return Err(denied());
@@ -181,17 +216,60 @@ impl ClosedOutcome {
         let origin = V2ProjectionOrigin::new(Arc::new(ProjectionMount(
             store.chat_mount.capture_cached_physical_negative(),
         )));
-        let core = graph
-            .prepare_initial_prefix(delivery, &view, origin)
-            .map_err(|_| denied())?;
+        let (core, expected) = prepare(&view, origin)?;
         Ok(Self {
-            file,
-            graph,
             core,
+            expected,
             retired: None,
             _view: view,
             _group: group,
             _fee: fee,
+        })
+    }
+
+    fn finish(&mut self) -> Result<(), AppError> {
+        if self.retired.is_none() {
+            self.retired = Some(
+                self.core
+                    .finish_host_selected(&self.expected)
+                    .map_err(|_| denied())?,
+            );
+        }
+        Ok(())
+    }
+
+    fn outcome_data(
+        &self,
+    ) -> Option<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64)> {
+        let replay = self.core.selected_replay_data()?;
+        Some((replay.header().id(), replay.mls_epoch_data()))
+    }
+}
+
+impl ClosedOutcome {
+    fn prepare(
+        store: &ServerStore,
+        file: OpenedArchiveObject,
+        mut graph: RecoveredV2JoinedOutcome,
+        delivery: &[u8],
+    ) -> Result<Self, AppError> {
+        let group = graph.group_data().to_vec();
+        let expected = V2HostSelectionExpectation::from_trusted_host(
+            graph.governing_head_data(),
+            graph.governing_state_data(),
+        );
+        let selection = JoinedCore::prepare(store, &group, |view, origin| {
+            Ok((
+                graph
+                    .prepare_initial_prefix(delivery, view, origin)
+                    .map_err(|_| denied())?,
+                expected,
+            ))
+        })?;
+        Ok(Self {
+            file,
+            _graph: graph,
+            selection,
         })
     }
 }
@@ -216,15 +294,7 @@ impl RecoveredWelcome {
 
     pub(super) fn finish_core(&mut self) -> Result<(), AppError> {
         if let Some(outcome) = self.outcome.as_mut() {
-            let selected = V2HostSelectionExpectation::from_trusted_host(
-                outcome.graph.governing_head_data(),
-                outcome.graph.governing_state_data(),
-            );
-            let retired = outcome
-                .core
-                .finish_host_selected(&selected)
-                .map_err(|_| denied())?;
-            outcome.retired = Some(retired);
+            outcome.selection.finish()?;
         }
         Ok(())
     }
@@ -232,10 +302,9 @@ impl RecoveredWelcome {
     pub(super) fn outcome_data(
         &self,
     ) -> Option<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64)> {
-        self.outcome.as_ref().and_then(|outcome| {
-            let replay = outcome.core.selected_replay_data()?;
-            Some((replay.header().id(), replay.mls_epoch_data()))
-        })
+        self.outcome
+            .as_ref()
+            .and_then(|outcome| outcome.selection.outcome_data())
     }
 }
 

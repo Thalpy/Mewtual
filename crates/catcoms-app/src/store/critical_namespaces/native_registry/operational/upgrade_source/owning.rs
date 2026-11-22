@@ -377,6 +377,14 @@ impl Store {
         self.physical.recovered_join_outcome_data()
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn warm_join_outcome_data(
+        &self,
+        pending: &crate::store::persistence::governance_layout::joined::JoinedPendingIo,
+    ) -> Result<Option<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64)>, AppError>
+    {
+        self.physical.warm_join_outcome_data(pending)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn selected_pending_join_data(
         &self,
     ) -> Result<Option<([u8; 32], catcoms_sync::V2PendingJoinContextData)>, AppError> {

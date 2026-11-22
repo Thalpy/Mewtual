@@ -204,6 +204,7 @@ async fn native_governed_add_fixture(case: JoinCase) {
         let entry_name = "chat-critical-namespaces.joined-welcome-entry.bin";
         let outcome_name = "chat-critical-namespaces.joined-welcome-outcome.bin";
         assert!(find_named(join_dir, entry_name).is_empty());
+        assert_eq!(joined.warm_join_outcome_data().unwrap(), None);
         use catcoms_rt::{Responder, TransportEvent};
         let (client, _) = catcoms_net::MeshService::new_tcp(None, &[]).unwrap();
         assert!(joined
@@ -314,6 +315,20 @@ async fn native_governed_add_fixture(case: JoinCase) {
         assert_eq!(std::fs::read(&outcome).unwrap(), exact_outcome);
         let add_header =
             OwnerHeaderId::from_bytes(decoded.response_data().binding.spec_data().add_header);
+        assert_eq!(
+            joined.warm_join_outcome_data().unwrap(),
+            Some((add_header, 1))
+        );
+        let parked_outcome = outcome.with_extension("held-original");
+        std::fs::rename(&outcome, &parked_outcome).unwrap();
+        std::fs::write(&outcome, &exact_outcome).unwrap();
+        assert!(joined.warm_join_outcome_data().is_err());
+        std::fs::remove_file(&outcome).unwrap();
+        std::fs::rename(&parked_outcome, &outcome).unwrap();
+        assert_eq!(
+            joined.warm_join_outcome_data().unwrap(),
+            Some((add_header, 1))
+        );
         drop(joined_storage.take());
         std::fs::remove_file(&outcome).unwrap();
         let ambiguous =

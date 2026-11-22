@@ -467,10 +467,34 @@ impl JoinedPendingIo {
             .as_mut()
             .ok_or_else(denied)?
             .cover_outcome(store)?;
+        self.welcome
+            .as_mut()
+            .ok_or_else(denied)?
+            .prepare_core(store, &mut self.prepared)?;
+        self.request_data(store)?;
+        let welcome = self.welcome.as_mut().ok_or_else(denied)?;
+        welcome.require_outcome(store)?;
+        welcome.finish_core()?;
         self.request_data(store)?;
         self.welcome
             .as_ref()
             .ok_or_else(denied)?
             .require_outcome(store)
+    }
+
+    pub(in crate::store) fn warm_outcome_data(
+        &self,
+        store: &ServerStore,
+    ) -> Result<Option<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64)>, AppError>
+    {
+        self.request_data(store)?;
+        let Some(welcome) = &self.welcome else {
+            return Ok(None);
+        };
+        let data = welcome.outcome_data();
+        if data.is_some() {
+            welcome.require_outcome(store)?;
+        }
+        Ok(data)
     }
 }
