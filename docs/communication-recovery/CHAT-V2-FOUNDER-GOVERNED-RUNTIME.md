@@ -293,7 +293,11 @@ records available after later retirement of the fixed Add journal.
 The Host stages `text.add.head-stage.v2` against that exact archive. The
 selector uses the established Head envelope with a new version. Prior
 readers recognize its MAC and refuse to interpret it as their operational
-head. The current staged writer keeps the original `head.bin` selected.
+head. Staging preserves the original selection. The Host's install path then
+checks the original Core candidate and SDK pair, replaces `head.bin`, and
+reproves the exact covered files. A late request cancellation leaves the
+original candidates available. An exact warm retry recognizes the same
+selected file and finishes installation without a second rename.
 
 `text.add.governing.v2` binds the exact Raw Header to the signed Admission
 and state image. The reader checks the existing public history encoding and

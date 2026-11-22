@@ -2,9 +2,12 @@
 use super::*;
 use selected_head::GovernedHeadData;
 
+mod selection;
+
 pub(super) struct PreparedHeadStage {
     id: TextHeadIdData,
     record: PreparedSmallControl,
+    selection_entered: bool,
 }
 
 impl PreparedGovernedAddFence {
@@ -40,6 +43,7 @@ impl PreparedGovernedAddFence {
             archive.head = Some(PreparedHeadStage {
                 id: TextHeadIdData::of_data(&frame),
                 record: PreparedSmallControl::new(frame),
+                selection_entered: false,
             });
         }
         self.held

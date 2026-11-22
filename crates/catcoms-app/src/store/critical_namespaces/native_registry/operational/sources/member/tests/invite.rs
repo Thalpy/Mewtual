@@ -34,6 +34,15 @@ fn only_named(root: &std::path::Path, name: &str) -> std::path::PathBuf {
 
 #[tokio::test]
 async fn native_runtime_invite_join_request_requires_the_actual_signed_journal() {
+    native_governed_add_fixture(false).await;
+}
+
+#[tokio::test]
+async fn native_runtime_invite_governed_add_resumes_install_after_a_lost_head_save_reply() {
+    native_governed_add_fixture(true).await;
+}
+
+async fn native_governed_add_fixture(install: bool) {
     use catcoms_sync::{DirectJoinLimits, PreparedV2JoinRequest};
     let directory = tempfile::tempdir().unwrap();
     let (vault, budget) = selected_governed(directory.path());
@@ -291,7 +300,37 @@ async fn native_runtime_invite_join_request_requires_the_actual_signed_journal()
     );
     assert_eq!(std::fs::read(raw_welcome).unwrap(), raw_welcome_bytes);
     assert_eq!(std::fs::read(response).unwrap(), response_bytes);
-    assert_eq!(std::fs::read(head_stage).unwrap(), head_stage_bytes);
+    assert_eq!(std::fs::read(&head_stage).unwrap(), head_stage_bytes);
+
+    if install {
+        let mut job = prepare(&owner, &row, &vault, &budget);
+        let runtime = job.inner.loan.body.as_mut().unwrap();
+        runtime
+            .driver
+            .as_mut()
+            .unwrap()
+            .host_for_governed_add_test()
+            .install_governed_add_for_test(
+                runtime.work.current_for_governed_add_test(),
+                &packet,
+                &route,
+                &job.inner.keys,
+                runtime.rng.as_mut().unwrap(),
+                &negative,
+            )
+            .unwrap();
+        job.inner.loan.recorded = true;
+        drop(job);
+        assert!(!head_stage.exists());
+        assert_eq!(
+            std::fs::read(head_stage.with_file_name("head.bin")).unwrap(),
+            head_stage_bytes
+        );
+        assert!(check().is_err());
+        let mut close = owner.prepare_retirement().unwrap();
+        close.try_retire().unwrap();
+        return;
+    }
 
     let key_work = {
         let entries = owner.entries.lock().unwrap();

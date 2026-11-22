@@ -388,6 +388,13 @@ pub(super) struct V2MemberLane {
 }
 
 impl V2MemberLane {
+    pub(super) fn governed_add_verifier(
+        &mut self,
+    ) -> Result<&mut V2GeneralPrefixVerifier, AppError> {
+        self.require_quiescent_for_add()?;
+        self.verifier.as_mut().ok_or_else(refused)
+    }
+
     pub(super) fn governed_add_replay(
         &self,
     ) -> Result<&catcoms_replication::chat::owner_state::transition::ReplayMath, AppError> {

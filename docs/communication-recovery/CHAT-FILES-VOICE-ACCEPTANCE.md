@@ -46,6 +46,11 @@ response and the original signed JoinRequest. It also checked stale absence
 observations through the actual original Current.
 [Add persistence CI](https://github.com/Thalpy/Mewtual/actions/runs/45032672855).
 
+At `7d512cb3`, Linux and Windows passed the archive and Head2 selector
+checks. The native fixture covered the immutable archive and staged Head2
+under the original Current. The old head remained selected at this revision.
+[Archive and Head2 CI](https://github.com/Thalpy/Mewtual/actions/runs/45033964346).
+
 ## Invitation and join branch CI (22 November 2026)
 
 Both hosted workflows passed on Linux and Windows at

@@ -92,6 +92,7 @@ impl PreparedGovernedAddFence {
             let bytes = 5 * frames.frame_bytes()?
                 + MAX_TEXT_PATH
                 + 6 * selected_head::FRAME_LEN
+                + 4 * crate::store::persistence::v2_text::head::MAX_TEXT_HEAD_FRAME
                 + 4 * std::mem::size_of::<PreparedArchive>()
                 + 4096;
             let pool = &store

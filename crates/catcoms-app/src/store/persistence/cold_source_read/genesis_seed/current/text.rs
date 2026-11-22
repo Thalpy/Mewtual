@@ -10,6 +10,35 @@ use catcoms_rt::{NativeChatPreparedKeyCut, NativeChatSourceObservation};
 use catcoms_sync::owner_v2::{V2FounderAddOutcomeData, V2FounderAddRequestData};
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> UnexposedV2GenesisCurrent<T, R> {
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn derive_governed_core_selection(
+        &self,
+        store: &crate::store::ServerStore,
+        verifier: &catcoms_replication::chat::V2GeneralPrefixVerifier,
+    ) -> Result<catcoms_replication::chat::V2GeneralCandidate, crate::AppError> {
+        use crate::store::critical_namespaces::refused;
+        use catcoms_replication::chat::owner_state::transition::ReplayBody;
+        self.require_text_original_data(store)
+            .map_err(|_| refused())?;
+        let node = self.governed_text_node().ok_or_else(refused)?;
+        let (body, unsigned) = node.unsigned_admission_data()?;
+        verifier
+            .derive_successor(
+                node.signed_admission_data()?,
+                ReplayBody::Admission(body),
+                unsigned.image_data(),
+            )
+            .map_err(|_| refused())
+    }
+
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn take_retired_governed_install(
+        &mut self,
+    ) -> Result<catcoms_sync::owner_v2::RetiredV2FounderAddInstall, crate::AppError> {
+        Ok(self
+            .governed_text_node_mut()
+            .ok_or_else(crate::store::critical_namespaces::refused)?
+            .take_retired_install_data()?)
+    }
+
     pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn materialize_governed_response(
         &mut self,
         store: &crate::store::ServerStore,

@@ -117,6 +117,26 @@ impl<T, R> V2TextOwnedCurrent<T, R> {
 }
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurrent<T, R> {
+    pub(super) fn derive_governed_core_selection(
+        &self,
+        store: &ServerStore,
+        verifier: &catcoms_replication::chat::V2GeneralPrefixVerifier,
+    ) -> Result<catcoms_replication::chat::V2GeneralCandidate, AppError> {
+        match &self.core {
+            OwnedCurrent::Warm(current) => current.derive_governed_core_selection(store, verifier),
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
+    pub(super) fn take_retired_governed_install(
+        &mut self,
+    ) -> Result<catcoms_sync::owner_v2::RetiredV2FounderAddInstall, AppError> {
+        match &mut self.core {
+            OwnedCurrent::Warm(current) => current.take_retired_governed_install(),
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
     pub(super) fn borrow_governed_install_parts(
         &mut self,
         store: &ServerStore,

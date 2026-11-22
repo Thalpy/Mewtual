@@ -19,6 +19,8 @@ pub(super) struct PendingGovernedAdd {
     pub(super) fence: PreparedGovernedAddFence,
     pub(super) parent: PreparedV2TextParentCapture,
     pub(super) sdk: Option<TextCurrentAddAdmission>,
+    core: Option<catcoms_replication::chat::V2GeneralCandidate>,
+    pub(super) installed: Option<TextHeadIdData>,
     request: Vec<u8>,
     fee: CatalogReadReservation,
 }
@@ -52,6 +54,8 @@ impl PendingGovernedAdd {
             fence,
             parent,
             sdk: Some(sdk),
+            core: None,
+            installed: None,
             request: frame.to_vec(),
             fee,
         })
@@ -79,6 +83,78 @@ impl PendingGovernedAdd {
 }
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextHost<T, R> {
+    pub(super) fn install_governed_add(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        packet: &V2JoinRequestPacketData<'_>,
+        routing_plan: &[u8],
+        keys: &NativeFounderKeys,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+        negative: &catcoms_rt::RequestCancellation,
+    ) -> Result<TextHeadIdData, AppError> {
+        let store = layout.checked_store()?;
+        let p = self.governed_add.as_mut().ok_or_else(refused)?;
+        p.require_request(store, packet)?;
+        if let Some(head) = p.installed {
+            let selected = p.parent.selected_data().ok_or_else(refused)?;
+            let owner = self.owner.borrow_current()?;
+            return store.with_v2_text_current(&owner, |admission| {
+                let guard = store.lock_v2_text_current_group(admission, p.parent.resources())?;
+                keys.preflight(&self.origin)?;
+                p.fence.require_selected_head2(&guard, selected, head)?;
+                keys.preflight(&self.origin)?;
+                if negative.is_cancelled() {
+                    return Err(refused());
+                }
+                Ok(head)
+            });
+        }
+        if !p.fence.head_selection_entered() {
+            self.stage_governed_head(layout, packet, routing_plan, keys, rng, negative)?;
+        }
+        let p = self.governed_add.as_mut().ok_or_else(refused)?;
+        let selected = p.parent.selected_data().ok_or_else(refused)?;
+        let verifier = self
+            .member
+            .as_mut()
+            .ok_or_else(refused)?
+            .governed_add_verifier()?;
+        if p.core.is_none() {
+            p.core = Some(self.owner.derive_governed_core_selection(store, verifier)?);
+        }
+        let (owner, install) = self.owner.borrow_governed_install_parts(store)?;
+        install.check_host_selection_data(verifier, p.core.as_ref().ok_or_else(refused)?)?;
+        let require_live = || {
+            if negative.is_cancelled() {
+                return Err(refused());
+            }
+            keys.preflight(&self.origin)
+        };
+        let result = store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, p.parent.resources())?;
+            require_live()?;
+            install.check_host_selection_data(verifier, p.core.as_ref().ok_or_else(refused)?)?;
+            let head = p
+                .fence
+                .select_head2(&guard, selected, install.expected_data())?;
+            #[cfg(test)]
+            AFTER_GOVERNED_HEAD_SAVE.with(|hook| {
+                let hook = hook.borrow_mut().take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            });
+            require_live()?;
+            install.finish_host_selected(verifier, &mut p.core)?;
+            p.installed = Some(head);
+            Ok(head)
+        });
+        if p.installed.is_some() {
+            drop(self.owner.take_retired_governed_install()?);
+        }
+        result
+    }
+
     pub(super) fn stage_governed_head(
         &mut self,
         layout: &V2CurrentLayoutStore,
@@ -418,6 +494,11 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
     ) -> Result<(), AppError> {
         self.owner.discard_add_for_closed_source(closed)
     }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    pub(super) static AFTER_GOVERNED_HEAD_SAVE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 struct GovernedAddSdkReservation {

@@ -107,6 +107,19 @@ impl PreparedV2FounderAddInstall<'_> {
         self.after
     }
 
+    pub fn check_host_selection_data(
+        &self,
+        verifier: &V2GeneralPrefixVerifier,
+        candidate: &V2GeneralCandidate,
+    ) -> Result<(), SyncError> {
+        self.negative.require_live_data()?;
+        let selected =
+            V2HostSelectionExpectation::from_trusted_host(self.after.header, self.after.state);
+        verifier
+            .check_host_selection_data(&selected, candidate)
+            .map_err(|_| unavailable())
+    }
+
     /// The Host calls this only after independently validating the covered
     /// head and native admission. A Core refusal retains the original Cell.
     pub fn finish_host_selected(

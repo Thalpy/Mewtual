@@ -526,6 +526,28 @@ impl V2GeneralPrefixVerifier {
             _claim: claim,
         })
     }
+    /// Check the exact candidate before the Host can enter its physical save.
+    /// Selection still repeats this check against the held live owner.
+    pub fn check_host_selection_data(
+        &self,
+        selected: &V2HostSelectionExpectation,
+        next: &V2GeneralCandidate,
+    ) -> Result<(), ChatError> {
+        self.live()?;
+        if !Arc::ptr_eq(&self.identity, &next.identity)
+            || next.parent != self.math.header().id()
+            || !selected.matches_data(next.step.next.header())
+            || next.history.old_tip_data() != self.history.tip()
+        {
+            return Err(ChatError::Scope);
+        }
+        match (&next.removed, &next.step.removal) {
+            (Some(admission), Some(cut)) if admission.core.body.id() == cut.admission => Ok(()),
+            (None, None) => Ok(()),
+            _ => Err(ChatError::Dependency),
+        }
+    }
+
     /// Consume only this exact candidate after a separate actual HOST selected-save proof.
     /// All fallible predicates precede take. Removal closes its original incarnation before
     /// return; every old owner/cut and explicit close debt returns whole for outside disposal.
@@ -536,25 +558,13 @@ impl V2GeneralPrefixVerifier {
     ) -> Result<V2GeneralRetiredData, ChatError> {
         self.live()?;
         let next = candidate.as_ref().ok_or(ChatError::Dependency)?;
-        if !Arc::ptr_eq(&self.identity, &next.identity)
-            || next.parent != self.math.header().id()
-            || !selected.matches_data(next.step.next.header())
-            || next.history.old_tip_data() != self.history.tip()
-        {
-            return Err(ChatError::Scope);
-        }
+        self.check_host_selection_data(selected, next)?;
         let closed = next.removed.as_ref().map(|a| V2AdmissionCloseCompletion {
             group: self.group.clone(),
             life: a.core.life.clone(),
             complete: false,
         });
-        let frozen_admission = match (&next.removed, &next.step.removal) {
-            (Some(admission), Some(cut)) if admission.core.body.id() == cut.admission => {
-                Some(admission.clone())
-            }
-            (None, None) => None,
-            _ => return Err(ChatError::Dependency),
-        };
+        let frozen_admission = next.removed.clone();
         self.live()?;
         let next = candidate.take().expect("checked same general candidate");
         // Every fallible predicate precedes take. Move the SAME original whole cut

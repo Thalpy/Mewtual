@@ -3,6 +3,42 @@ use super::super::super::owner::V2TextOwnerRef;
 use super::*;
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextHost<T, R> {
+    pub(in crate::store) fn install_governed_add_for_test(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        packet: &catcoms_sync::V2JoinRequestPacketData<'_>,
+        routing_plan: &[u8],
+        keys: &NativeFounderKeys,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+        negative: &RequestCancellation,
+    ) -> Result<(), AppError> {
+        let (sender, receiver) = tokio::sync::watch::channel(false);
+        let interrupted = RequestCancellation::new(receiver, None);
+        super::super::governed_add::AFTER_GOVERNED_HEAD_SAVE.with(|hook| {
+            hook.replace(Some(Box::new(move || {
+                sender.send_replace(true);
+            })));
+        });
+        assert!(self
+            .install_governed_add(layout, packet, routing_plan, keys, rng, &interrupted)
+            .is_err());
+        assert!(super::super::governed_add::AFTER_GOVERNED_HEAD_SAVE
+            .with(|hook| hook.borrow().is_none()));
+        assert!(self
+            .governed_add
+            .as_ref()
+            .ok_or_else(refused)?
+            .installed
+            .is_none());
+        let installed =
+            self.install_governed_add(layout, packet, routing_plan, keys, rng, negative)?;
+        assert_eq!(
+            self.install_governed_add(layout, packet, routing_plan, keys, rng, negative)?,
+            installed
+        );
+        Ok(())
+    }
+
     pub(in crate::store) fn cover_governed_add_fence_for_test(
         &mut self,
         layout: &V2CurrentLayoutStore,
