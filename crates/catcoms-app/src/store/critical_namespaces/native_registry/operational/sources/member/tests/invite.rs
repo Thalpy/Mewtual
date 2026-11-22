@@ -138,6 +138,19 @@ async fn native_runtime_invite_join_request_requires_the_actual_signed_journal()
     let entry_bytes = std::fs::read(&entry).unwrap();
     assert!(entry_bytes.len() > 40);
     assert!(check().is_err());
+    let parked_fence = fence.with_extension("held");
+    let parked_entry = entry.with_extension("held");
+    std::fs::rename(&fence, &parked_fence).unwrap();
+    std::fs::rename(&entry, &parked_entry).unwrap();
+    assert!(check().is_ok());
+    let orphan = fence.with_file_name("text.add.outcome.v2");
+    std::fs::write(&orphan, b"incomplete held outcome").unwrap();
+    assert!(check().is_err());
+    assert_eq!(std::fs::read(&orphan).unwrap(), b"incomplete held outcome");
+    std::fs::remove_file(&orphan).unwrap();
+    assert!(check().is_ok());
+    std::fs::rename(&parked_fence, &fence).unwrap();
+    std::fs::rename(&parked_entry, &entry).unwrap();
     assert_eq!(std::fs::read(fence).unwrap(), frozen);
     assert_eq!(std::fs::read(entry).unwrap(), entry_bytes);
 }

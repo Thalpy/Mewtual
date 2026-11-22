@@ -1,6 +1,7 @@
 //! Hold and revalidate the fixed governed reservation under actual Current.
 //! The read path authenticates an existing file. It cannot adopt an owner,
 //! complete a partial write, enter MLS, or return a covering save receipt.
+use super::outcome::OUTCOME_NAME;
 use super::sdk_entry::{GovernedAddSdkEntryData, ENTRY_BYTES, SDK_ENTRY_NAME};
 use super::*;
 use crate::store::critical_namespaces::current_layout::V2TextCurrentGroupGuard;
@@ -18,6 +19,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const STAGE: &str = "text.wal.stage.v1";
+const FILE_COMPARE_BYTES: usize = 8192;
 
 mod writer;
 #[cfg(all(test, any(windows, target_os = "linux")))]
@@ -29,6 +31,7 @@ pub(in crate::store) use writer::PreparedGovernedAddFence;
 pub(in crate::store) struct HeldGovernedAddFence {
     path: PathBuf,
     entry_path: PathBuf,
+    outcome_path: PathBuf,
     original: Option<OpenedTextControl>,
     entry: Option<ObservedSdkEntry>,
     expected: GovernedAddFenceData,
@@ -53,9 +56,10 @@ pub(in crate::store) enum GovernedAddRecoveryState {
     PossiblyEntered,
 }
 
-const FENCE_READ_BYTES: usize = 2 * MAX_TEXT_PATH
+const FENCE_READ_BYTES: usize = 3 * MAX_TEXT_PATH
     + 6 * FRAME_BYTES
     + 6 * ENTRY_BYTES
+    + FILE_COMPARE_BYTES
     + 4 * std::mem::size_of::<HeldGovernedAddFence>()
     + 1024;
 
@@ -86,10 +90,12 @@ impl HeldGovernedAddFence {
         let target = selected.physical_query_data().target;
         let path = fixed_child(target, STAGE)?;
         let entry_path = fixed_child(target, SDK_ENTRY_NAME)?;
+        let outcome_path = fixed_child(target, OUTCOME_NAME)?;
         resources.require_bound_original_negative(store, source)?;
         Ok(Self {
             path,
             entry_path,
+            outcome_path,
             original: None,
             entry: None,
             expected,
@@ -112,7 +118,10 @@ impl HeldGovernedAddFence {
         self.original = Some(read_control(&self.path, FRAME_BYTES)?);
         self.entry = Some(match fs::symlink_metadata(&self.entry_path) {
             Ok(_) => ObservedSdkEntry::Present(read_control(&self.entry_path, ENTRY_BYTES)?),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => ObservedSdkEntry::Absent,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                require_absent(&self.outcome_path)?;
+                ObservedSdkEntry::Absent
+            }
             Err(error) => return Err(io(error)),
         });
         guard.validate_source_only()
@@ -169,6 +178,7 @@ impl HeldGovernedAddFence {
         let state = match self.entry.as_mut().ok_or_else(refused)? {
             ObservedSdkEntry::Absent => {
                 require_absent(&self.entry_path)?;
+                require_absent(&self.outcome_path)?;
                 GovernedAddRecoveryState::ReservationOnly
             }
             ObservedSdkEntry::Present(entry) => {
@@ -212,7 +222,7 @@ fn require_exact_held(path: &Path, original: &mut OpenedTextControl) -> Result<(
 }
 
 fn read_matching_prefix(file: &mut std::fs::File, expected: &[u8]) -> Result<usize, AppError> {
-    if expected.is_empty() || expected.len() > FRAME_BYTES {
+    if expected.is_empty() {
         return Err(refused());
     }
     let metadata = file.metadata().map_err(io)?;
@@ -221,10 +231,15 @@ fn read_matching_prefix(file: &mut std::fs::File, expected: &[u8]) -> Result<usi
     }
     let length = metadata.len() as usize;
     file.seek(SeekFrom::Start(0)).map_err(io)?;
-    let mut frame = [0; FRAME_BYTES];
-    file.read_exact(&mut frame[..length]).map_err(io)?;
-    if frame[..length] != expected[..length] {
-        return Err(refused());
+    // A larger outcome uses the same EOF and held-file proof, with constant
+    // stack storage and no allocation under the Current writer.
+    let mut frame = [0; FILE_COMPARE_BYTES];
+    for expected_chunk in expected[..length].chunks(frame.len()) {
+        let chunk = &mut frame[..expected_chunk.len()];
+        file.read_exact(chunk).map_err(io)?;
+        if chunk != expected_chunk {
+            return Err(refused());
+        }
     }
     let mut trailer = [0];
     loop {

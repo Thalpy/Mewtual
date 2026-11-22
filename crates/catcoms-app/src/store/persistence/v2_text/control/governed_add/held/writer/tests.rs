@@ -24,7 +24,7 @@ fn governed_add_fence_continues_the_same_partial_file_and_ciphertext() {
     let mut candidate = Some(raw);
     let mut entered = false;
     let mut slot = None;
-    ensure_original(&path, &mut candidate, &mut entered, &mut slot).unwrap();
+    ensure_original(&path, &mut candidate, &mut entered, &mut slot, FRAME_BYTES).unwrap();
     let original = slot.as_mut().unwrap();
     let id = original.id;
     let prefix = FRAME_BYTES / 2;
@@ -34,7 +34,7 @@ fn governed_add_fence_continues_the_same_partial_file_and_ciphertext() {
         &original.frame[..prefix]
     );
 
-    ensure_original(&path, &mut candidate, &mut entered, &mut slot).unwrap();
+    ensure_original(&path, &mut candidate, &mut entered, &mut slot, FRAME_BYTES).unwrap();
     let same = slot.as_mut().unwrap();
     assert_eq!(same.id, id);
     fill_original(&path, same).unwrap();
@@ -57,7 +57,7 @@ fn governed_add_fence_never_adopts_equal_preexisting_or_recreates_an_uncertain_s
     let mut candidate = Some(raw);
     let mut entered = false;
     let mut slot = None;
-    assert!(ensure_original(&path, &mut candidate, &mut entered, &mut slot).is_err());
+    assert!(ensure_original(&path, &mut candidate, &mut entered, &mut slot, FRAME_BYTES).is_err());
     assert!(entered && slot.is_none());
     assert_eq!(
         fs::read(&path).unwrap().as_slice(),
@@ -65,6 +65,36 @@ fn governed_add_fence_never_adopts_equal_preexisting_or_recreates_an_uncertain_s
     );
 
     fs::remove_file(&path).unwrap();
-    assert!(ensure_original(&path, &mut candidate, &mut entered, &mut slot).is_err());
+    assert!(ensure_original(&path, &mut candidate, &mut entered, &mut slot, FRAME_BYTES).is_err());
     assert!(!path.exists());
+}
+
+#[test]
+fn governed_add_outcome_large_file_retries_only_its_exact_held_prefix() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join(OUTCOME_NAME);
+    let mut candidate = Some(Zeroizing::new(vec![0x36; 2 * 1024 * 1024 + 41]));
+    let mut entered = false;
+    let mut slot = None;
+    assert!(ensure_original(&path, &mut candidate, &mut entered, &mut slot, FRAME_BYTES).is_err());
+    assert!(!entered && !path.exists());
+    ensure_original(&path, &mut candidate, &mut entered, &mut slot, MAX_FRAME).unwrap();
+    let original = slot.as_mut().unwrap();
+    let prefix = original.frame.len() - 5;
+    original.file.write_all(&original.frame[..prefix]).unwrap();
+    let mut writer = OpenOptions::new().write(true).open(&path).unwrap();
+    writer.seek(SeekFrom::Start((prefix - 1) as u64)).unwrap();
+    writer.write_all(&[0x11]).unwrap();
+    assert!(fill_original(&path, original).is_err());
+    assert_eq!(writer.metadata().unwrap().len(), prefix as u64);
+    writer.seek(SeekFrom::Start((prefix - 1) as u64)).unwrap();
+    writer.write_all(&[0x36]).unwrap();
+    fill_original(&path, original).unwrap();
+    assert_eq!(
+        fs::read(&path).unwrap().as_slice(),
+        original.frame.as_slice()
+    );
+    writer.seek(SeekFrom::End(0)).unwrap();
+    writer.write_all(&[0]).unwrap();
+    assert!(require_exact_held(&path, original).is_err());
 }

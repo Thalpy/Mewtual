@@ -53,6 +53,7 @@ pub(super) fn fixed_child(base: &Path, leaf: &'static str) -> Result<PathBuf, Ap
             | "text.wal"
             | "text.wal.stage.v1"
             | "text.add.sdk-entry.v2"
+            | "text.add.outcome.v2"
             | "text.pages"
     ) {
         return Err(refused());

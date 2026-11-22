@@ -12,6 +12,7 @@ use catcoms_replication::chat::{
 };
 use catcoms_sync::owner_v2::V2FounderAddOutcomeData;
 
+pub(in crate::store::persistence::v2_text) const OUTCOME_NAME: &str = "text.add.outcome.v2";
 const TAG: &[u8] = b"catcoms/private-chat-text-governed-add-outcome/v2\0";
 const KEY_DOMAIN: &str = "catcoms/private-chat-text-governed-add-outcome-key/v2";
 const ENTRY_DOMAIN: &str = "catcoms/private-chat-text-governed-add-outcome-parent/v2";
@@ -38,6 +39,7 @@ const MAX_PLAIN: usize = HEADER_BYTES
     + MAX_HEADER_SEMANTIC_BYTES
     + MAX_STATE_BYTES
     + MAX_SNAPSHOT;
+pub(super) const MAX_FRAME: usize = MAX_PLAIN + 40;
 
 struct OutcomeFields<'a> {
     before: u64,
@@ -49,16 +51,17 @@ struct OutcomeFields<'a> {
 
 /// One presealed outcome for the original SDK completion. Its independent
 /// payment outlives the bytes, including across a late Current refusal.
-pub(in crate::store::persistence::v2_text) struct PreparedGovernedAddOutcome {
-    raw: Zeroizing<Vec<u8>>,
+pub(super) struct SealedGovernedAddOutcome {
+    parent: [u8; 32],
+    pub(super) raw: Option<Zeroizing<Vec<u8>>>,
     _fee: CatalogReadReservation,
 }
 
-impl PreparedGovernedAddOutcome {
+impl SealedGovernedAddOutcome {
     /// Outside writers, after the real SDK entry and Header intent are known.
     /// The caller supplies the original covered entry ciphertext and the joint
     /// outcome loan. No second snapshot encoding is generated here.
-    pub(in crate::store::persistence::v2_text) fn prepare(
+    pub(super) fn prepare(
         store: &ServerStore,
         entry: &[u8],
         outcome: &V2FounderAddOutcomeData<'_>,
@@ -109,11 +112,18 @@ impl PreparedGovernedAddOutcome {
         fields.bodies[4] = &admission;
         let key = Zeroizing::new(store.keys.db_key()?);
         let raw = seal_fields(&key, parent, &fields, rng)?;
-        Ok(Self { raw, _fee: fee })
+        Ok(Self {
+            parent,
+            raw: Some(raw),
+            _fee: fee,
+        })
     }
 
-    pub(in crate::store::persistence::v2_text) fn frame_data(&self) -> &[u8] {
-        &self.raw
+    pub(super) fn require_entry(&self, entry: &[u8]) -> Result<(), AppError> {
+        if self.parent != entry_digest(entry)? {
+            return Err(refused());
+        }
+        Ok(())
     }
 }
 
@@ -174,7 +184,7 @@ pub(in crate::store::persistence::v2_text) fn open_outcome_data(
     entry: &[u8],
     raw: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, AppError> {
-    if raw.len() <= HEADER_BYTES + 40 || raw.len() > MAX_PLAIN + 40 {
+    if raw.len() <= HEADER_BYTES + 40 || raw.len() > MAX_FRAME {
         return Err(refused());
     }
     let parent = entry_digest(entry)?;

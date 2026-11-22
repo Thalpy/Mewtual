@@ -240,9 +240,13 @@ The outcome codec binds the exact SDK-entry ciphertext and seals the original
 completed snapshot, Commit, Welcome, GroupInfo and routing transfer together
 with the unsigned governing bytes. Sync lends these values from one operation
 before Header signing. The outcome has its own field caps and memory payment.
-Its decoder checks framing and lineage. Recovery still has to verify the
-governing record and restored SDK state, and the native Host must cover the
-outcome file before signing.
+Its decoder checks framing and lineage. The warm reservation writer retains
+that exact sealed frame for `text.add.outcome.v2`. It creates the file only
+once, checks the held file's prefix in bounded chunks, and covers the file and
+directory before rechecking the original Entry and Current. An orphan outcome
+blocks a reservation-only recovery classification. The native Host still has
+to invoke the writer before Header signing. Recovery must verify the governing
+record and restored SDK state before selection.
 
 Final installation must preflight the exclusive SDK pair outside writers,
 then validate the real covering receipt/Current/native source through stable
