@@ -3,20 +3,34 @@ use super::super::header_signing::HeaderOutcomeCommitment;
 use super::super::outcome::header_signing_bytes;
 use super::*;
 
+mod governing;
+use governing::ObservedGoverning;
+
 pub(super) struct ObservedHeader {
     attempt: Option<OpenedTextControl>,
     raw: Option<OpenedTextControl>,
     complete_capture: bool,
     state: Option<GovernedAddHeaderRecoveryState>,
+    governing: Option<ObservedGoverning>,
 }
 
 /// Historical status only. A missing attempt is no authority to sign, and a
 /// present attempt means key entry cannot be ruled out after a restart.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::store) enum GovernedAddHeaderRecoveryState {
     OutcomeOnly,
     PossiblyEntered,
     SignatureRecovered([u8; 64]),
+}
+
+impl std::fmt::Debug for GovernedAddHeaderRecoveryState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::OutcomeOnly => "OutcomeOnly",
+            Self::PossiblyEntered => "PossiblyEntered",
+            Self::SignatureRecovered(_) => "SignatureRecovered",
+        })
+    }
 }
 
 impl HeldGovernedAddFence {
@@ -33,10 +47,14 @@ impl HeldGovernedAddFence {
             raw: None,
             complete_capture: false,
             state: None,
+            governing: None,
         });
         let header = self.header.as_mut().ok_or_else(refused)?;
         header.attempt = read_stage(&self.header_attempt_path, ATTEMPT_BYTES)?;
         header.raw = read_stage(&self.raw_header_path, RAW_BYTES)?;
+        if header.raw.is_none() {
+            require_absent(&self.governing_path)?;
+        }
         guard.validate_source_only()?;
         header.complete_capture = true;
         Ok(())
@@ -102,6 +120,9 @@ impl HeldGovernedAddFence {
         let state = header.state.ok_or_else(refused)?;
         require_stage(&self.header_attempt_path, header.attempt.as_mut())?;
         require_stage(&self.raw_header_path, header.raw.as_mut())?;
+        if header.raw.is_none() {
+            require_absent(&self.governing_path)?;
+        }
         let (target, directory, id) = guard.target_directory_data();
         crate::store::persistence::v2_genesis_activation::require_directory_name(
             target, directory, id,

@@ -182,8 +182,10 @@ async fn native_runtime_invite_join_request_requires_the_actual_signed_journal()
     assert!(outcome_bytes.len() > 40);
     let header_attempt = only_named(directory.path(), "text.add.header-attempt.v2");
     let raw_header = only_named(directory.path(), "text.add.raw-header.v2");
+    let governing = only_named(directory.path(), "text.add.governing.v2");
     let header_attempt_bytes = std::fs::read(&header_attempt).unwrap();
     let raw_header_bytes = std::fs::read(&raw_header).unwrap();
+    let governing_bytes = std::fs::read(&governing).unwrap();
     assert!(raw_header_bytes.len() > header_attempt_bytes.len());
     assert!(check().is_err());
     let parked_fence = fence.with_extension("held");
@@ -191,11 +193,13 @@ async fn native_runtime_invite_join_request_requires_the_actual_signed_journal()
     let parked_outcome = outcome.with_extension("held");
     let parked_header_attempt = header_attempt.with_extension("held");
     let parked_raw_header = raw_header.with_extension("held");
+    let parked_governing = governing.with_extension("held");
     std::fs::rename(&fence, &parked_fence).unwrap();
     std::fs::rename(&entry, &parked_entry).unwrap();
     std::fs::rename(&outcome, &parked_outcome).unwrap();
     std::fs::rename(&header_attempt, &parked_header_attempt).unwrap();
     std::fs::rename(&raw_header, &parked_raw_header).unwrap();
+    std::fs::rename(&governing, &parked_governing).unwrap();
     assert!(check().is_ok());
     let orphan = fence.with_file_name("text.add.outcome.v2");
     std::fs::write(&orphan, b"incomplete held outcome").unwrap();
@@ -208,11 +212,13 @@ async fn native_runtime_invite_join_request_requires_the_actual_signed_journal()
     std::fs::rename(&parked_outcome, &outcome).unwrap();
     std::fs::rename(&parked_header_attempt, &header_attempt).unwrap();
     std::fs::rename(&parked_raw_header, &raw_header).unwrap();
+    std::fs::rename(&parked_governing, &governing).unwrap();
     assert_eq!(std::fs::read(fence).unwrap(), frozen);
     assert_eq!(std::fs::read(entry).unwrap(), entry_bytes);
     assert_eq!(std::fs::read(outcome).unwrap(), outcome_bytes);
     assert_eq!(std::fs::read(header_attempt).unwrap(), header_attempt_bytes);
     assert_eq!(std::fs::read(raw_header).unwrap(), raw_header_bytes);
+    assert_eq!(std::fs::read(governing).unwrap(), governing_bytes);
 
     let key_work = {
         let entries = owner.entries.lock().unwrap();

@@ -192,6 +192,7 @@ impl SelectedV2TextHead {
             "text.add.outcome.v2",
             "text.add.header-attempt.v2",
             "text.add.raw-header.v2",
+            "text.add.governing.v2",
         ] {
             match std::fs::symlink_metadata(fixed_child(target, name)?) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

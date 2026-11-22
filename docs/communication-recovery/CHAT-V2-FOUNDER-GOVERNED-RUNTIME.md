@@ -265,6 +265,12 @@ signature over the original outcome's signing bytes with the current founder
 key. An attempt with no Raw remains possible entry. A later Raw invalidates
 an earlier absence observation. Neither state authorizes a reader to sign.
 
+`text.add.governing.v2` binds the exact Raw Header to the signed Admission
+and state image. The reader checks the existing public history encoding and
+compares every governing body with the original Outcome. It rejects a record
+without its Raw parent and rechecks the original file before handing back
+historical data. A later operation must still select this governing prefix.
+
 The native regression runs one real Add on the original warm runtime with all
 three cuts issued by its actual native source. It covers and independently reads
 the original snapshot, checks that an earlier absence expires when a file appears,

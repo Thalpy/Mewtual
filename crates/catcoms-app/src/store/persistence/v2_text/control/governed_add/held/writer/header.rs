@@ -2,12 +2,19 @@
 use super::super::super::header_signing::{HeaderOutcomeCommitment, ATTEMPT_BYTES, RAW_BYTES};
 use super::*;
 
-pub(super) const BUFFER_BYTES: usize = 6 * (ATTEMPT_BYTES + RAW_BYTES);
+mod governing;
+
+pub(super) const BUFFER_BYTES: usize =
+    6 * (ATTEMPT_BYTES + RAW_BYTES) + 10 * governing_record::MAX_BYTES;
 
 pub(super) struct PreparedHeaderSigning {
     outcome: HeaderOutcomeCommitment,
     attempt: PreparedSmallControl,
     raw: Option<([u8; 64], PreparedSmallControl)>,
+    governing: Option<(
+        catcoms_replication::chat::owner_header::OwnerHeaderId,
+        PreparedSmallControl,
+    )>,
     unexpected_raw: bool,
 }
 
@@ -37,6 +44,7 @@ impl PreparedGovernedAddFence {
                 outcome,
                 attempt: PreparedSmallControl::new(frozen),
                 raw: None,
+                governing: None,
                 unexpected_raw: false,
             });
         }
@@ -55,6 +63,7 @@ impl PreparedGovernedAddFence {
         self.require_covered_outcome(guard, selected)?;
         guard.require_text_control_io_quiescent()?;
         let header = self.header.as_mut().ok_or_else(refused)?;
+        require_absent(&self.held.governing_path)?;
         header.require_raw_absent(&self.held.raw_header_path)?;
         header
             .attempt
@@ -65,6 +74,7 @@ impl PreparedGovernedAddFence {
             .attempt
             .require_covered(&self.held.header_attempt_path)?;
         header.require_raw_absent(&self.held.raw_header_path)?;
+        require_absent(&self.held.governing_path)?;
         guard.validate_source_only()
     }
 
@@ -126,6 +136,9 @@ impl PreparedGovernedAddFence {
             .attempt
             .require_covered(&self.held.header_attempt_path)?;
         let (_, raw) = header.raw.as_mut().ok_or_else(refused)?;
+        if !raw.covered {
+            require_absent(&self.held.governing_path)?;
+        }
         raw.cover(&self.held.raw_header_path, RAW_BYTES, guard)?;
         self.require_covered_outcome(guard, selected)?;
         let header = self.header.as_mut().ok_or_else(refused)?;

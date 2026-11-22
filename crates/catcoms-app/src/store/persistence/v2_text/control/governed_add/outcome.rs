@@ -201,7 +201,15 @@ pub(super) fn header_signing_bytes<'a>(
     entry: &[u8],
     plain: &'a [u8],
 ) -> Result<&'a [u8], AppError> {
-    Ok(decode_outcome_fields(plain, entry_digest(entry)?)?.bodies[5])
+    Ok(governing_bodies(entry, plain)?[1])
+}
+
+pub(super) fn governing_bodies<'a>(
+    entry: &[u8],
+    plain: &'a [u8],
+) -> Result<[&'a [u8]; 3], AppError> {
+    let fields = decode_outcome_fields(plain, entry_digest(entry)?)?;
+    Ok([fields.bodies[4], fields.bodies[5], fields.bodies[6]])
 }
 
 fn decode_outcome_fields(plain: &[u8], parent: [u8; 32]) -> Result<OutcomeFields<'_>, AppError> {
