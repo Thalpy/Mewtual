@@ -2,9 +2,13 @@
 use super::*;
 use catcoms_replication::chat::{
     cold_records::{encode_header_row, HeaderRow, MAX_HEADER_ROW_BYTES},
-    owner_header::SignedOwnerHeader,
+    owner_facts::OwnerFactId,
+    owner_header::{OwnerHeaderId, OwnerStateCommitment, OwnerTenureId, SignedOwnerHeader},
     owner_profile::{AdmissionBody, SignedOwnerProfile, MAX_ADMISSION_BYTES, MAX_PROFILE_BYTES},
     owner_state::transition::{ReplayBody, ReplayMath},
+    FounderGenesisAnchorData, ProjectionGroupView, V2GeneralCandidate, V2GeneralExpectation,
+    V2GeneralPrefixVerifier, V2GeneralRetiredData, V2HostSelectionExpectation,
+    V2PreparedSelectedHistoryData, V2ProjectionOrigin,
 };
 
 const TAG: &[u8] = b"mewtual/chat/first-add-proof/v2\0";
@@ -125,6 +129,79 @@ impl<'a> V2FirstAddProofData<'a> {
 
     pub(super) fn add_image_data(&self) -> &[u8] {
         self.add.image()
+    }
+
+    pub(super) fn prepare_joined_prefix(
+        &self,
+        accepted: &GenesisAnchorBindingData,
+        group: &ProjectionGroupView,
+        origin: V2ProjectionOrigin,
+    ) -> Result<PreparedV2JoinedPrefix, SyncError> {
+        let (profile, own, add) = self.verified_admission(accepted)?;
+        let reject = |_| SyncError::JoinRejected;
+        let expected = V2GeneralExpectation::from_trusted_host(FounderGenesisAnchorData {
+            group: accepted.group.clone(),
+            founder: accepted.founder,
+            profile: OwnerFactId::from_bytes(accepted.profile),
+            admission: OwnerFactId::from_bytes(accepted.admission),
+            tenure: OwnerTenureId::from_bytes(accepted.tenure),
+            header: OwnerHeaderId::from_bytes(accepted.header),
+            state: OwnerStateCommitment::from_bytes(accepted.state),
+        })
+        .map_err(reject)?;
+        let mut verifier = V2GeneralPrefixVerifier::from_genesis(
+            expected,
+            profile,
+            &self.founder,
+            self.genesis.header(),
+            self.genesis.image(),
+            group,
+            origin,
+        )
+        .map_err(reject)?;
+        let candidate = verifier
+            .derive_successor(add, ReplayBody::Admission(own), self.add.image())
+            .map_err(reject)?;
+        Ok(PreparedV2JoinedPrefix {
+            verifier,
+            candidate: Some(candidate),
+            own: own.admission_id(),
+        })
+    }
+}
+
+/// Real Core candidate for the original authenticated first Add. Its App
+/// owner keeps the matching selected journal and native scope before advancing.
+pub struct PreparedV2JoinedPrefix {
+    verifier: V2GeneralPrefixVerifier,
+    candidate: Option<V2GeneralCandidate>,
+    own: OwnerFactId,
+}
+
+impl PreparedV2JoinedPrefix {
+    pub fn own_admission_data(&self) -> OwnerFactId {
+        self.own
+    }
+
+    pub fn pending_history_data(&self) -> Option<&V2PreparedSelectedHistoryData> {
+        self.candidate
+            .as_ref()
+            .map(V2GeneralCandidate::selected_history_append_data)
+    }
+
+    pub fn finish_host_selected(
+        &mut self,
+        selection: &V2HostSelectionExpectation,
+    ) -> Result<V2GeneralRetiredData, SyncError> {
+        self.verifier
+            .advance_host_selected(selection, &mut self.candidate)
+            .map_err(|_| SyncError::JoinRejected)
+    }
+
+    pub fn selected_replay_data(&self) -> Option<&ReplayMath> {
+        self.candidate
+            .is_none()
+            .then(|| self.verifier.replay_data())
     }
 }
 

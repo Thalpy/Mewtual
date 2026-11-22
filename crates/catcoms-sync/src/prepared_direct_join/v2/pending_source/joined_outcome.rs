@@ -5,7 +5,10 @@ use catcoms_mls::persist::{
     restore_server_text_current_bounded, snapshot_server_bounded, TextCurrentSdkRestoreAdmission,
 };
 use catcoms_replication::chat::{
-    owner_header::OwnerHeaderId, owner_profile::AdmissionOrigin, owner_state::StateFrame,
+    owner_header::{OwnerHeaderId, OwnerStateCommitment},
+    owner_profile::AdmissionOrigin,
+    owner_state::StateFrame,
+    ProjectionGroupView, V2ProjectionOrigin,
 };
 
 const TAG: &[u8] = b"catcoms/private-chat-v2-joined-outcome/v1\0";
@@ -135,7 +138,11 @@ pub struct RecoveredV2JoinedOutcome {
     _routing_secret: Zeroizing<[u8; 32]>,
     _file_key: Zeroizing<[u8; 32]>,
     head: OwnerHeaderId,
+    state: OwnerStateCommitment,
     epoch: u64,
+    accepted: GenesisAnchorBindingData,
+    delivery: [u8; 32],
+    prefix_prepared: bool,
 }
 
 impl RecoveredV2JoinedOutcome {
@@ -249,7 +256,11 @@ impl RecoveredV2JoinedOutcome {
             _routing_secret: routing_secret,
             _file_key: file_key,
             head: header.id(),
+            state: header.spec().state,
             epoch,
+            accepted: anchor.clone(),
+            delivery: *blake3::hash(delivery_bytes).as_bytes(),
+            prefix_prepared: false,
         })
     }
 
@@ -257,7 +268,37 @@ impl RecoveredV2JoinedOutcome {
         self.head
     }
 
+    pub fn governing_state_data(&self) -> OwnerStateCommitment {
+        self.state
+    }
+
+    pub fn group_data(&self) -> &[u8] {
+        &self.accepted.group
+    }
+
     pub fn epoch_data(&self) -> u64 {
         self.epoch
+    }
+
+    /// Reconstruct the real selected-history candidate from this outcome's
+    /// exact signed delivery. The App supplies the original paid projection
+    /// group and negative origin for its private runtime.
+    pub fn prepare_initial_prefix(
+        &mut self,
+        delivery: &[u8],
+        group: &ProjectionGroupView,
+        origin: V2ProjectionOrigin,
+    ) -> Result<PreparedV2JoinedPrefix, SyncError> {
+        if self.prefix_prepared
+            || delivery.len() > MAX_V2_FIRST_JOIN_DELIVERY_BYTES
+            || blake3::hash(delivery).as_bytes() != &self.delivery
+        {
+            return Err(SyncError::JoinRejected);
+        }
+        let delivery = V2FirstJoinDeliveryData::decode(delivery)?;
+        let (_, proof) = delivery.data();
+        let prepared = proof.prepare_joined_prefix(&self.accepted, group, origin)?;
+        self.prefix_prepared = true;
+        Ok(prepared)
     }
 }

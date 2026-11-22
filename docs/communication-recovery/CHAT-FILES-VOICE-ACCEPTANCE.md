@@ -59,6 +59,16 @@ archive independently, and restored its closed MLS graph. Replacing the
 held Head2 file with an equal-byte copy failed the recovery reproof.
 [Native Add and recovery CI](https://github.com/Thalpy/Mewtual/actions/runs/45036371225).
 
+At `e0ff1033`, Linux and Windows passed the focused governed Add workflow.
+The suite covered exact JoinRequest custody, signed first-Add delivery,
+independent restoration of the joined MLS graph, and founder authoring after
+the selected Add. [Governed Add CI](https://github.com/Thalpy/Mewtual/actions/runs/45040362601).
+
+At `7aff1956`, Linux and Windows passed all six focused joined storage cases.
+They covered the namespace 6 declaration and cold reopen, the original pin
+index, warm selection of the first private JoinRequest, and cold replay of
+that same request and pin insertion. [Joined storage CI](https://github.com/Thalpy/Mewtual/actions/runs/45043452277).
+
 ## Invitation and join branch CI (22 November 2026)
 
 Both hosted workflows passed on Linux and Windows at

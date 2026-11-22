@@ -283,9 +283,48 @@ fn v2_join_request_and_welcome_complete_with_actual_add() {
         },
     )
     .is_err());
-    let recovered = restore(&immutable_outcome, &delivery, graph_limits).unwrap();
+    let mut recovered = restore(&immutable_outcome, &delivery, graph_limits).unwrap();
     assert_eq!(recovered.governing_head_data(), header_id);
     assert_eq!(recovered.epoch_data(), 1);
+    use catcoms_replication::chat::{
+        ProjectionGroup, V2HostSelectionExpectation, V2ProjectionOrigin,
+    };
+    let mut member_group = ProjectionGroup::new(&fixture.invite.spec_data().anchor.group).unwrap();
+    let mut member_view = member_group.begin_view();
+    assert!(member_view.try_ready());
+    let origin = V2ProjectionOrigin::new(g.live.clone());
+    assert!(recovered
+        .prepare_initial_prefix(
+            &delivery[..delivery.len() - 1],
+            &member_view,
+            origin.clone()
+        )
+        .is_err());
+    let mut prefix = recovered
+        .prepare_initial_prefix(&delivery, &member_view, origin.clone())
+        .unwrap();
+    assert!(recovered
+        .prepare_initial_prefix(&delivery, &member_view, origin)
+        .is_err());
+    assert_eq!(
+        prefix.own_admission_data().as_bytes(),
+        &response.binding.spec_data().admission
+    );
+    assert!(prefix.selected_replay_data().is_none());
+    assert!(prefix.pending_history_data().is_some());
+    let state = g.verifier.replay_data().header().spec().state;
+    let wrong = V2HostSelectionExpectation::from_trusted_host(
+        catcoms_replication::chat::owner_header::OwnerHeaderId::from_bytes(
+            fixture.invite.spec_data().anchor.header,
+        ),
+        state,
+    );
+    assert!(prefix.finish_host_selected(&wrong).is_err());
+    let exact = V2HostSelectionExpectation::from_trusted_host(header_id, state);
+    drop(prefix.finish_host_selected(&exact).unwrap());
+    let replay = prefix.selected_replay_data().unwrap();
+    assert_eq!(replay.header().id(), header_id);
+    assert_eq!(replay.mls_epoch_data(), 1);
     let retry = prepared
         .seal_joined_outcome(&vault_key, pending, &mut journal_rng)
         .unwrap();

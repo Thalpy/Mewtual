@@ -339,12 +339,16 @@ impl ServerStore {
         if !self.uses_joined_pin_layout() {
             return Ok(());
         }
-        let selected = self
+        let mut selected = self
             .joined_pin_selection
             .lock()
             .map_err(|_| denied())?
             .take()
             .ok_or_else(denied)?;
+        selected.require(self)?;
+        if let Some(pending) = selected.index.pending.as_mut() {
+            pending.finish_core()?;
+        }
         selected.require(self)?;
         let mut index = self.joined_pin_index.lock().map_err(|_| denied())?;
         if index.is_some() {

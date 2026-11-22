@@ -44,6 +44,15 @@ pub(super) struct SelectedPending {
     _fee: CatalogReadReservation,
 }
 
+impl SelectedPending {
+    pub(super) fn finish_core(&mut self) -> Result<(), AppError> {
+        if let Some(welcome) = self.welcome.as_mut() {
+            welcome.finish_core()?;
+        }
+        Ok(())
+    }
+}
+
 pub(super) struct WarmSelection<'a> {
     original_pending: &'a CreatedStage,
     previous_index: &'a SelectedPinIndex,

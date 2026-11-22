@@ -220,6 +220,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Check real MLS Welcome, original joined outcome, and Core replay
+        run: python .github/scripts/check-chat-v2-invite-intent.py join-welcome
       - name: Check joined pin, declaration seed, and original file custody
         run: python .github/scripts/check-chat-v2-invite-intent.py joined-pin
       - uses: actions/upload-artifact@v4

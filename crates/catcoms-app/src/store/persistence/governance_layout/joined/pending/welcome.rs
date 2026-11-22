@@ -5,7 +5,12 @@ use catcoms_mls::persist::{
     text_current_add::TextCurrentAddLimits, TextCurrentSdkGraphReservation,
     TextCurrentSdkRestoreAdmission, TextCurrentSdkRestoreLimits,
 };
-use catcoms_sync::{RecoveredV2JoinedOutcome, V2PendingJoinContextData};
+use catcoms_replication::chat::{
+    owner_state::transition::REPLAY_MATH_PRIVATE_INVOICE, ProjectionGroup, ProjectionGroupView,
+    V2GeneralPrefixVerifier, V2GeneralRetiredData, V2HostSelectionExpectation, V2OriginNegative,
+    V2ProjectionOrigin,
+};
+use catcoms_sync::{PreparedV2JoinedPrefix, RecoveredV2JoinedOutcome, V2PendingJoinContextData};
 use critical_namespaces::joined_pin::welcome as codec;
 
 const ENTRY: &str = "chat-critical-namespaces.joined-welcome-entry.bin";
@@ -128,8 +133,67 @@ fn write_held(
 
 pub(super) struct RecoveredWelcome {
     entry: OpenedArchiveObject,
-    outcome: Option<(OpenedArchiveObject, RecoveredV2JoinedOutcome)>,
+    outcome: Option<ClosedOutcome>,
     _fee: CatalogReadReservation,
+}
+
+struct ClosedOutcome {
+    file: OpenedArchiveObject,
+    graph: RecoveredV2JoinedOutcome,
+    core: PreparedV2JoinedPrefix,
+    retired: Option<V2GeneralRetiredData>,
+    _view: ProjectionGroupView,
+    _group: ProjectionGroup,
+    _fee: CatalogReadReservation,
+}
+
+struct ProjectionMount(crate::store::chat_admission::CachedPhysicalMountNegative);
+
+impl std::fmt::Debug for ProjectionMount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProjectionMount").finish_non_exhaustive()
+    }
+}
+impl V2OriginNegative for ProjectionMount {
+    fn is_live(&self) -> bool {
+        self.0.is_live_cached()
+    }
+}
+
+impl ClosedOutcome {
+    fn prepare(
+        store: &ServerStore,
+        file: OpenedArchiveObject,
+        mut graph: RecoveredV2JoinedOutcome,
+        delivery: &[u8],
+    ) -> Result<Self, AppError> {
+        const CORE_FEE: usize = 2 * REPLAY_MATH_PRIVATE_INVOICE
+            + V2GeneralPrefixVerifier::metadata_layout_bytes()
+            + ProjectionGroup::initial_metadata_layout_bytes()
+            + 4 * std::mem::size_of::<ClosedOutcome>();
+        let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
+        let fee = policy.current.archive.pending.pool.try_reserve(CORE_FEE)?;
+        let mut group = ProjectionGroup::new(graph.group_data()).map_err(|_| denied())?;
+        let mut view = group.begin_view();
+        if !view.try_ready() {
+            return Err(denied());
+        }
+        let origin = V2ProjectionOrigin::new(Arc::new(ProjectionMount(
+            store.chat_mount.capture_cached_physical_negative(),
+        )));
+        let core = graph
+            .prepare_initial_prefix(delivery, &view, origin)
+            .map_err(|_| denied())?;
+        Ok(Self {
+            file,
+            graph,
+            core,
+            retired: None,
+            _view: view,
+            _group: group,
+            _fee: fee,
+        })
+    }
 }
 
 impl RecoveredWelcome {
@@ -142,19 +206,36 @@ impl RecoveredWelcome {
             bytes,
         )?;
         let path = fixed(store, false, OUTCOME)?;
-        if let Some(((file, bytes), _)) = &self.outcome {
+        if let Some(outcome) = &self.outcome {
+            let (file, bytes) = &outcome.file;
             exact_held(&path, file, session_id(file).map_err(io)?, bytes)
         } else {
             absent(&path)
         }
     }
 
+    pub(super) fn finish_core(&mut self) -> Result<(), AppError> {
+        if let Some(outcome) = self.outcome.as_mut() {
+            let selected = V2HostSelectionExpectation::from_trusted_host(
+                outcome.graph.governing_head_data(),
+                outcome.graph.governing_state_data(),
+            );
+            let retired = outcome
+                .core
+                .finish_host_selected(&selected)
+                .map_err(|_| denied())?;
+            outcome.retired = Some(retired);
+        }
+        Ok(())
+    }
+
     pub(super) fn outcome_data(
         &self,
     ) -> Option<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64)> {
-        self.outcome
-            .as_ref()
-            .map(|(_, result)| (result.governing_head_data(), result.epoch_data()))
+        self.outcome.as_ref().and_then(|outcome| {
+            let replay = outcome.core.selected_replay_data()?;
+            Some((replay.header().id(), replay.mls_epoch_data()))
+        })
     }
 }
 
@@ -206,7 +287,9 @@ pub(super) fn recover(
         })?;
         let recovered = RecoveredV2JoinedOutcome::open(&sealed, key, request, &delivery, admission)
             .map_err(|_| denied())?;
-        Some((outcome, recovered))
+        Some(ClosedOutcome::prepare(
+            store, outcome, recovered, &delivery,
+        )?)
     } else {
         None
     };

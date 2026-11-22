@@ -16,7 +16,7 @@ pub use pending_source::{
 };
 mod welcome;
 pub use first_add_proof::{
-    V2AdmissionStepData, V2FirstAddProofData, V2FirstJoinDeliveryData,
+    PreparedV2JoinedPrefix, V2AdmissionStepData, V2FirstAddProofData, V2FirstJoinDeliveryData,
     MAX_V2_FIRST_ADD_PROOF_BYTES, MAX_V2_FIRST_JOIN_DELIVERY_BYTES,
 };
 pub use welcome::{
