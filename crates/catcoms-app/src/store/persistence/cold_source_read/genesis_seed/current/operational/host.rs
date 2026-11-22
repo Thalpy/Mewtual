@@ -86,6 +86,8 @@ pub struct PreparedV2TextHost<T, R> {
     member: Option<Box<member::V2MemberLane>>,
     // Retained native invitation original and its isolated immutable journal.
     invite: Option<Box<invite::PendingInvite>>,
+    // Original exact warm Add reservation and its unpublished stage custody.
+    governed_add: Option<Box<governed_add::PendingGovernedAdd>>,
     resident: Option<PreparedV2TextResidentProjection>,
     capture: Option<PreparedV2TextPromotionCapture>,
     prepared: Option<PreparedV2TextPromotion>,
@@ -160,6 +162,7 @@ impl<T, R> PreparedV2TextHost<T, R> {
             projection: None,
             member: None,
             invite: None,
+            governed_add: None,
             resident: None,
             capture: None,
             prepared: None,

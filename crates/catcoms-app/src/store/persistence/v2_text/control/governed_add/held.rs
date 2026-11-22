@@ -27,7 +27,6 @@ mod header_read;
 mod outcome_read;
 pub(in crate::store) use header_read::GovernedAddHeaderRecoveryState;
 mod writer;
-#[cfg(all(test, any(windows, target_os = "linux")))]
 pub(in crate::store) use writer::PreparedGovernedAddFence;
 
 /// An actual bounded, read-only File capture, tied to the exact selected

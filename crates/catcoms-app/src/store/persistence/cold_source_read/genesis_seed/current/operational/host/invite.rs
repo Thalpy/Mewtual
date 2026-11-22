@@ -13,6 +13,7 @@ use catcoms_sync::owner_v2::{
 #[cfg(all(test, any(windows, target_os = "linux")))]
 mod governed_add_tests;
 mod journal;
+use super::governed_add::PendingGovernedAdd;
 use journal::{InviteIntentJournal, InviteRecoveryRead, InviteSigningJournal};
 
 #[cfg(test)]
@@ -240,6 +241,83 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             return Err(refused());
         }
         keys.preflight(&self.origin)
+    }
+
+    /// Retain one exact warm request before any file creation. A late refusal
+    /// leaves the same paid writer on this original runtime for exact retry.
+    /// This covers the reservation only. It does not enter the SDK.
+    pub(super) fn reserve_governed_add(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        packet: &catcoms_sync::V2JoinRequestPacketData<'_>,
+        routing_plan: &[u8],
+        keys: &NativeFounderKeys,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+        negative: &RequestCancellation,
+    ) -> Result<(), AppError> {
+        let store = layout.checked_store()?;
+        let first = self.governed_add.is_none();
+        if first {
+            self.require_received_join_request(layout, packet, routing_plan, keys, negative)?;
+        }
+        let require_live = || {
+            if negative.is_cancelled() {
+                return Err(refused());
+            }
+            keys.preflight(&self.origin)
+        };
+        require_live()?;
+        self.require_member_quiescent_for_add(layout)?;
+        self.member
+            .as_ref()
+            .ok_or_else(refused)?
+            .require_quiescent_for_add()?;
+        let owner = self.owner.borrow_current()?;
+        if first {
+            let mut parent = PreparedV2TextParentCapture::prepare(store, owner.source())?;
+            let resources = parent.resources().clone();
+            store.with_v2_text_current(&owner, |admission| {
+                let guard = store.lock_v2_text_current_group(admission, &resources)?;
+                guard.require_governed_native_invite_parent()?;
+                parent.capture(&guard)?.genesis_member_anchor_data(&guard)?;
+                require_live()
+            })?;
+            let original = PendingGovernedAdd::prepare(store, &owner, parent, packet, rng)?;
+            self.governed_add = Some(Box::new(original));
+        }
+        self.governed_add
+            .as_ref()
+            .ok_or_else(refused)?
+            .require_request(store, packet)?;
+        let mut read = InviteRecoveryRead::prepare(store)?;
+        let p = self.governed_add.as_ref().ok_or_else(refused)?;
+        let resources = p.parent.resources().clone();
+        let selected = p.parent.selected_data().ok_or_else(refused)?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            guard.require_governed_native_invite_parent()?;
+            selected.validate_under_current_guard(&guard)?;
+            require_live()?;
+            read.capture(&guard)
+        })?;
+        read.require_received_invite(
+            packet.founder_add_data().invite,
+            routing_plan,
+            owner.source().data(),
+        )?;
+        self.require_member_quiescent_for_add(layout)?;
+        let p = self.governed_add.as_mut().ok_or_else(refused)?;
+        let selected = p.parent.selected_data().ok_or_else(refused)?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            guard.require_governed_native_invite_parent()?;
+            read.require_current(&guard)?;
+            require_live()?;
+            p.fence.cover(&guard, selected)?;
+            read.require_current(&guard)?;
+            require_live()
+        })?;
+        require_live()
     }
 
     fn read_native_invite<U>(

@@ -42,9 +42,10 @@ pub(in crate::store) use common::{
     TextHeadIdData, TextRetirementPlanIdData, TextTransactionIdData,
 };
 pub(in crate::store) use context::TextContextData;
+pub(in crate::store) use control::governed_add::held::PreparedGovernedAddFence;
 #[cfg(all(test, any(windows, target_os = "linux")))]
 pub(in crate::store) use control::governed_add::held::{
-    GovernedAddHeaderRecoveryState, GovernedAddRecoveryState, PreparedGovernedAddFence,
+    GovernedAddHeaderRecoveryState, GovernedAddRecoveryState,
 };
 pub(in crate::store) use head::{TextPendingData, TextRootData};
 #[cfg(all(test, windows))]

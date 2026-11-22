@@ -1,6 +1,5 @@
 //! Real native governed Add integration fixture.
 use super::super::super::owner::V2TextOwnerRef;
-use super::super::governed_add::prepare_sdk_admission;
 use super::*;
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextHost<T, R> {
@@ -8,37 +7,37 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         &mut self,
         layout: &V2CurrentLayoutStore,
         packet: &catcoms_sync::V2JoinRequestPacketData<'_>,
+        replacement: &catcoms_sync::V2JoinRequestPacketData<'_>,
         routing_plan: &[u8],
         keys: &NativeFounderKeys,
         rng: &mut impl catcoms_rt::CryptoRngCore,
         negative: &RequestCancellation,
         [sdk_cut, header_cut, welcome_cut]: [catcoms_rt::NativeChatPreparedKeyCut; 3],
-        mut inject_outcome: impl FnMut(bool),
+        mut inject: impl FnMut(&str, bool),
     ) -> Result<(), AppError> {
         use crate::store::persistence::v2_text::{
             GovernedAddHeaderRecoveryState, GovernedAddRecoveryState, PreparedGovernedAddFence,
         };
-        self.require_received_join_request(layout, packet, routing_plan, keys, negative)?;
+        self.reserve_governed_add(layout, packet, routing_plan, keys, rng, negative)?;
+        assert!(self
+            .reserve_governed_add(layout, replacement, routing_plan, keys, rng, negative)
+            .is_err());
+        inject("invite.raw.v1", true);
+        assert!(self
+            .reserve_governed_add(layout, packet, routing_plan, keys, rng, negative)
+            .is_err());
+        inject("invite.raw.v1", false);
+        self.reserve_governed_add(layout, packet, routing_plan, keys, rng, negative)?;
+        self.require_member_quiescent_for_add(layout)?;
         let store = layout.checked_store()?;
-        let sdk_admission = prepare_sdk_admission(store)?;
+        let original = self.governed_add.as_mut().ok_or_else(refused)?;
+        let sdk_admission = original.sdk.take().ok_or_else(refused)?;
         assert!(sdk_admission.supports_routing_data());
         let owner = self.owner.borrow_current()?;
         let original_seed = owner.source().seed().observe_original_seed_data();
-        let mut parent = PreparedV2TextParentCapture::prepare(store, owner.source())?;
-        let resources = parent.resources().clone();
-        store.with_v2_text_current(&owner, |admission| {
-            let guard = store.lock_v2_text_current_group(admission, &resources)?;
-            parent.capture(&guard)?.genesis_member_anchor_data(&guard)?;
-            Ok(())
-        })?;
-        let selected = parent.selected_data().ok_or_else(refused)?;
-        let mut fence =
-            PreparedGovernedAddFence::prepare(store, owner.source(), selected, packet, rng)?;
-        store.with_v2_text_current(&owner, |admission| {
-            let guard = store.lock_v2_text_current_group(admission, &resources)?;
-            keys.preflight(&self.origin)?;
-            fence.cover(&guard, selected)
-        })?;
+        let resources = original.parent.resources().clone();
+        let selected = original.parent.selected_data().ok_or_else(refused)?;
+        let fence = &mut original.fence;
         self.owner.prepare_governed_node(store)?;
         let owner = self.owner.borrow_current()?;
         original_seed.require_same_seed_data(owner.source().seed())?;
@@ -97,7 +96,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
                 .is_none());
             Ok(())
         })?;
-        inject_outcome(true);
+        inject("text.add.outcome.v2", true);
         store.with_v2_text_current(&owner, |admission| {
             let guard = store.lock_v2_text_current_group(admission, &resources)?;
             assert!(after_entry
@@ -114,9 +113,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         assert!(with_outcome
             .authenticate_outcome(store, owner.source())
             .is_err());
-        inject_outcome(false);
-
-        self.require_member_quiescent_for_add(layout)?;
+        inject("text.add.outcome.v2", false);
         store.with_v2_text_current(&owner, |admission| {
             let guard = store.lock_v2_text_current_group(admission, &resources)?;
             keys.preflight(&self.origin)?;

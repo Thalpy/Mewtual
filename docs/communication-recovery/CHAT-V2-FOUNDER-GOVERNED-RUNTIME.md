@@ -313,8 +313,11 @@ the OLD WAL KDF/tag at `text.wal.stage.v1`, held continuously through SDK work
 until covered head2 itself makes old owning readers refuse. Old owning
 promotion/workspace/recovery paths preserve and refuse its authentic MAC.
 Historical metadata readers may still open. The warm writer has its own
-fixed-name creation and covering barriers. The native Host must still own and
-invoke that writer as part of the Add transaction.
+fixed-name creation and covering barriers. The Host retains one paid
+reservation, its exact request, selected parent and SDK debit before the
+first write. It reauthenticates and rechecks the original signed invite journal
+on exact retries. The production dispatcher still has to drive this owner
+through the later phases.
 
 The fence codec uses the existing outer WAL tag and key with logical version 2
 and a separate governed Add role. Its four fixed-width commitments cover the

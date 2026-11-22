@@ -88,7 +88,7 @@ async fn native_runtime_invite_join_request_requires_the_actual_signed_journal()
         .check_received_join_request(&changed, &negative)
         .is_err());
     assert!(check().is_ok());
-    assert_eq!(std::fs::read(raw).unwrap(), original);
+    assert_eq!(std::fs::read(&raw).unwrap(), original);
 
     let prior = body("finish this member request before changing the group");
     assert_eq!(
@@ -119,6 +119,18 @@ async fn native_runtime_invite_join_request_requires_the_actual_signed_journal()
     // Cover the fixed fence on the actual original governed Current. The
     // native fixture has already reconciled its one existing member lane.
     let packet = check().unwrap();
+    let replacement_request = PreparedV2JoinRequest::prepare(
+        catcoms_mls::MlsDevice::generate().unwrap(),
+        &invite.binding().spec_data().anchor,
+        invite.binding(),
+        [60; 32],
+        saved.expires_at_ms() - 1,
+        DirectJoinLimits::new(512 * 1024, 512 * 1024, 64 * 1024).unwrap(),
+    )
+    .unwrap();
+    let replacement = prepare(&owner, &row, &vault, &budget)
+        .check_received_join_request(replacement_request.request_bytes_data(), &negative)
+        .unwrap();
     let preparation = owner.capture_member(
         &row,
         command(&vault, &budget),
@@ -152,12 +164,23 @@ async fn native_runtime_invite_join_request_requires_the_actual_signed_journal()
         .cover_governed_add_fence_for_test(
             runtime.work.current_for_governed_add_test(),
             &packet,
+            &replacement,
             &route,
             &job.inner.keys,
             runtime.rng.as_mut().unwrap(),
             &negative,
             cuts,
-            |present| {
+            |name, present| {
+                if name == "invite.raw.v1" {
+                    if present {
+                        std::fs::rename(&raw, &parked).unwrap();
+                    } else {
+                        std::fs::rename(&parked, &raw).unwrap();
+                        assert_eq!(std::fs::read(&raw).unwrap(), original);
+                    }
+                    return;
+                }
+                assert_eq!(name, "text.add.outcome.v2");
                 let outcome = only_named(directory.path(), "text.add.sdk-entry.v2")
                     .with_file_name("text.add.outcome.v2");
                 if present {
