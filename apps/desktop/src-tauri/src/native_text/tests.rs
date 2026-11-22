@@ -1602,6 +1602,7 @@ async fn native_text_sources_real_boot_envelope_unpolled_and_unwind_drop_files_b
                 ),
                 state.native_text.ui_budget.clone(),
                 state.native_text.sources.policy(),
+                boot::NativeRowBudget::capture(&state).await,
             )
             .unwrap();
         assert!(matches!(

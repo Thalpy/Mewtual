@@ -498,10 +498,7 @@ async fn execute(
         );
         let budget = state.native_text.ui_budget.clone();
         let source_policy = state.native_text.sources.policy();
-        let row = boot::NativeRowBudget {
-            budget: state.servers.lock().await.native_budget(),
-            instance: state.next_server_instance.fetch_add(1, Ordering::Relaxed),
-        };
+        let row = boot::NativeRowBudget::capture(state).await;
         // Whole original storage work, outside store/UI/operation guards. A
         // waiter disappearing does not cancel this owned native router task.
         // Construct BEFORE scheduling: an unpolled closure or panic in file

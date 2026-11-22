@@ -28,8 +28,16 @@ pub(super) enum Bootstrap {
 
 type Atoms = (Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicBool>);
 pub(super) struct NativeRowBudget {
-    pub(super) budget: NativeUiInvocationBudget,
-    pub(super) instance: u64,
+    budget: NativeUiInvocationBudget,
+    instance: u64,
+}
+impl NativeRowBudget {
+    pub(super) async fn capture(state: &AppState) -> Self {
+        Self {
+            budget: state.servers.lock().await.native_budget(),
+            instance: state.next_server_instance.fetch_add(1, Ordering::Relaxed),
+        }
+    }
 }
 const FAILED: &str = "Vault startup did not complete. Its files have been kept.";
 
