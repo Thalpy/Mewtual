@@ -1,5 +1,5 @@
 //! Plain native Create: retain the exact original from signing through actual
-//! encrypted local IO. A local save does not establish transport or receipt.
+//! encrypted local IO. The local receipt precedes any joined outbox attempt.
 use super::*;
 use catcoms_app::store::{
     MemberSaveJobReport, MemberSaveNativeAdmission, NativeTextJoinedMemberFinalPreparation,
@@ -225,35 +225,51 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
                 edge.wait_once().await;
             }
         }
-        let _commit = state.ui_session_commit.lock().await;
-        // Cancellation/cached target liveness cannot identify a still-live
-        // original parked outside a replaced Store/table. Repeat the actual
-        // installed-object checks through the real resolver call.
-        let store = state.store.lock().await;
-        let table = state.servers.lock().await;
-        let original_mount = store
-            .as_ref()
-            .and_then(MountedVault::as_text_v2)
-            .is_some_and(|vault| captured.target.is_for_original_vault(vault));
-        let original_row = table.native(&captured.intent.server).is_some_and(|row| {
-            row.matches(&captured.selection, captured.instance, &captured.target)
-                && row.data().request == captured.intent.context
-                && row.data().channel == captured.intent.channel
-        });
-        if state.ui_session_generation.load(Ordering::SeqCst) != captured.generation
-            || ui_session_closed(&state)
-            || !captured.target.is_live_cached()
-            || captured.scope.is_cancelled()
-            || state.native_text.sources.is_closing_cached()
-            || !original_mount
-            || !original_row
-        {
-            resolver.reject(STALE);
-        } else {
-            match result {
-                Ok(body) => resolver.resolve(InvokeResponseBody::Json(body)),
-                Err(error) => resolver.reject(error),
+        let confirmed = {
+            let _commit = state.ui_session_commit.lock().await;
+            // A parked original can stay live after the Store/table has been
+            // replaced. Reprove the installed objects through the resolver.
+            let store = state.store.lock().await;
+            let table = state.servers.lock().await;
+            let original_mount = store
+                .as_ref()
+                .and_then(MountedVault::as_text_v2)
+                .is_some_and(|vault| captured.target.is_for_original_vault(vault));
+            let original_row = table.native(&captured.intent.server).is_some_and(|row| {
+                row.matches(&captured.selection, captured.instance, &captured.target)
+                    && row.data().request == captured.intent.context
+                    && row.data().channel == captured.intent.channel
+            });
+            if state.ui_session_generation.load(Ordering::SeqCst) != captured.generation
+                || ui_session_closed(&state)
+                || !captured.target.is_live_cached()
+                || captured.scope.is_cancelled()
+                || state.native_text.sources.is_closing_cached()
+                || !original_mount
+                || !original_row
+            {
+                resolver.reject(STALE);
+                false
+            } else {
+                match result {
+                    Ok(reply) => {
+                        resolver.resolve(InvokeResponseBody::Json(reply.body));
+                        reply.saved_local
+                    }
+                    Err(error) => {
+                        resolver.reject(error);
+                        false
+                    }
+                }
             }
+        };
+        if confirmed
+            && matches!(
+                &captured.selection,
+                server_table::NativeSelection::Joined(_)
+            )
+        {
+            publish_joined_debt(&state, &captured).await;
         }
     }));
     true
@@ -540,7 +556,12 @@ fn admit(
         }
     }
 }
-async fn execute(state: &AppState, invocation: &Invocation) -> Result<String, String> {
+struct Reply {
+    body: String,
+    saved_local: bool,
+}
+
+async fn execute(state: &AppState, invocation: &Invocation) -> Result<Reply, String> {
     let mut outcome = prepare(state, invocation).await?;
     if outcome == V2MemberSaveOutcome::Ready {
         let preparation = capture(state, invocation).await?;
@@ -585,15 +606,62 @@ async fn execute(state: &AppState, invocation: &Invocation) -> Result<String, St
         .await
         .map_err(|_| STALE)?;
         if report == MemberSaveJobReport::Uncertain {
-            return Ok(serde_json::json!({"backend":"text-v2","disposition":"uncertain","retry_token":hex::encode(token)}).to_string());
+            return Ok(Reply {
+                body: serde_json::json!({"backend":"text-v2","disposition":"uncertain","retry_token":hex::encode(token)}).to_string(),
+                saved_local: false,
+            });
         }
         outcome = prepare(state, invocation).await?; // recover exact receipt without re-signing
     }
     match outcome {
-        V2MemberSaveOutcome::Saved{action,ordinal}=>Ok(serde_json::json!({"backend":"text-v2","disposition":"saved-local",
-            "message_id":hex::encode(action.as_bytes()),"ordinal":ordinal.to_string(),"retry_token":hex::encode(invocation.intent.token)}).to_string()),
+        V2MemberSaveOutcome::Saved{action,ordinal}=>Ok(Reply {
+            body: serde_json::json!({"backend":"text-v2","disposition":"saved-local",
+                "message_id":hex::encode(action.as_bytes()),"ordinal":ordinal.to_string(),"retry_token":hex::encode(invocation.intent.token)}).to_string(),
+            saved_local: true,
+        }),
         V2MemberSaveOutcome::Ready=>Err("The message outcome is still being checked. Retry with the same message token.".into()),
     }
+}
+
+async fn publish_joined_debt(state: &AppState, invocation: &Invocation) {
+    let Ok(Preparation::Joined(original, row)) = capture(state, invocation).await else {
+        return;
+    };
+    let work = Worker {
+        value: (original, row, invocation.scope.clone()),
+        _payment: invocation.payment.clone(),
+    };
+    let prepared = tauri::async_runtime::spawn_blocking(move || {
+        work.run(|(original, row, scope)| {
+            original.prepare_member_publication(&row, scope, &mut OsCryptoRng)
+        })
+    })
+    .await;
+    let Ok(Ok(Some(prepared))) = prepared else {
+        return;
+    };
+    let mut scope = invocation.scope.clone();
+    let receipt = tokio::select! {
+        biased;
+        _ = scope.cancelled() => return,
+        receipt = prepared.submit() => receipt,
+    };
+    let Ok(Some(receipt)) = receipt else {
+        return;
+    };
+    let Ok(Preparation::Joined(original, _)) = capture(state, invocation).await else {
+        return;
+    };
+    let work = Worker {
+        value: (original, receipt, invocation.scope.clone()),
+        _payment: invocation.payment.clone(),
+    };
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        work.run(|(original, receipt, scope)| {
+            original.checkpoint_member_publication(receipt, &scope, &mut OsCryptoRng)
+        })
+    })
+    .await;
 }
 const _: () = assert!(
     std::mem::size_of::<Invocation>() + std::mem::size_of::<Attempt>() + 3 * TEXT_LIMIT + 4096

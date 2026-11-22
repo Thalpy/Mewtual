@@ -114,8 +114,9 @@ The mounted joined source prepares one exact debt item for its original mesh and
 the metadata slot before awaiting the driver. The caller, original Core Admission and
 selected MLS fence must still authorize it at the driver's submission boundary. A real
 `Submitted` result produces a receipt that a fresh capture of the same registered row can
-checkpoint. Desktop scheduling, inbound dependency recovery and durable shared history
-remain open.
+checkpoint. A successful desktop joined send or exact saved retry resolves the local receipt
+before making one publication attempt. The next attempt can recover unchanged debt.
+Continuous retry, desktop inbound processing and durable shared history remain open.
 Original audit chunks and request receipts remain retained after scheduling debt clears.
 Removal changes active view, never deletes the audit. Unproven late removed actions stay
 Held pending the separately authorized moderation path; ordinary concurrent edits resolve

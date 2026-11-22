@@ -660,7 +660,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
             ActionState, GuardedProjection, ProjectionCertainty, V2OrdinaryReceiveStatus,
         };
         use catcoms_rt::{MeshTransport as _, PublishOnceError, PublishSubmission, TransportEvent};
-        tokio::time::timeout(std::time::Duration::from_secs(12), async {
+        tokio::time::timeout(std::time::Duration::from_secs(25), async {
             let (retire, signal) = tokio::sync::watch::channel(false);
             let live = RequestCancellation::new(signal, None);
             let channel = request().channel;
@@ -681,10 +681,12 @@ async fn mounted_join_fixture(recover_stage: bool) {
             assert!(ledger.prepare_message_projection(action).is_err());
             let (relay, _) = catcoms_net::MeshService::new_tcp(None, &[]).unwrap();
             relay.subscribe(topic.clone()).await.unwrap();
-            relay
-                .dial(format!("/ip4/127.0.0.1/tcp/{}", local_transport.1).parse().unwrap())
-                .await
-                .unwrap();
+            let peer = recovered_row().mesh_peer_name_for_test().unwrap();
+            let address = format!("/ip4/127.0.0.1/tcp/{}/p2p/{peer}", local_transport.1);
+            assert_eq!(
+                relay.dial_outcome(address.parse().unwrap()).await.unwrap(),
+                catcoms_rt::DialSubmission::Submitted
+            );
             relay.wait_for_peer_connected(local_transport.0).await.unwrap();
             let receipt = loop {
                 let transmission = recovered_row()

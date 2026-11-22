@@ -16,6 +16,8 @@ struct Attempt {
     original: NativeTcpPreparation,
     state: State,
     members: Option<NativeChatMemberIngress>,
+    #[cfg(test)]
+    peer_name: Option<String>,
 }
 
 enum State {
@@ -77,10 +79,16 @@ impl Transport {
                 original,
                 state: State::Starting,
                 members: None,
+                #[cfg(test)]
+                peer_name: None,
             });
             let attempt = slot.as_mut().expect("original TCP attempt");
             match attempt.original.build(key, &listen, &[]) {
-                Ok((service, _, _)) if service.local_peer() == peer => {
+                Ok((service, _public_peer, _)) if service.local_peer() == peer => {
+                    #[cfg(test)]
+                    {
+                        attempt.peer_name = Some(_public_peer.to_string());
+                    }
                     attempt.members = service.native_chat_member_ingress();
                     attempt.state = State::Idle(Box::new(service));
                 }
@@ -104,6 +112,11 @@ impl Transport {
             original: self.clone(),
             attached: false,
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn peer_name_for_test(&self) -> Option<String> {
+        self.attempt.try_lock().ok()?.as_ref()?.peer_name.clone()
     }
 
     pub(super) fn capture_member_ingress(&self) -> Result<NativeChatMemberIngress, AppError> {

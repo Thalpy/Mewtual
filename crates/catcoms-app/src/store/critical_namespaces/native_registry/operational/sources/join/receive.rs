@@ -165,6 +165,13 @@ impl NativeTextJoinedMemberProjection<'_> {
 }
 
 impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
+    #[cfg(test)]
+    pub(in crate::store::critical_namespaces::native_registry) fn mesh_peer_name_for_test(
+        self,
+    ) -> Option<String> {
+        self.original.tcp.upgrade()?.peer_name_for_test()
+    }
+
     pub fn prepare_member_ingress(
         self,
         selection: &NativeTextJoinedRowSelection,
