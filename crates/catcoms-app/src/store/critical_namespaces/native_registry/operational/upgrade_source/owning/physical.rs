@@ -1108,26 +1108,83 @@ impl MetadataWork {
         ),
         AppError,
     > {
-        self.with_joined_store(|store| {
-            let inventory = UpgradeInventory::capture(
-                store,
-                self.physical.handler.debit(),
-                self.physical.handler.pool(),
+        self.with_joined_store(|store| self.registered_joined_row_in(store, data, warm))
+    }
+
+    fn registered_joined_row_in(
+        &self,
+        store: &ServerStore,
+        data: crate::store::NativeTextJoinedRegistrationData,
+        warm: Option<
+            &crate::store::persistence::governance_layout::joined::JoinedRegistrationDependency,
+        >,
+    ) -> Result<
+        (
+            crate::store::NativeTextJoinedRegistryRowData,
+            super::super::super::super::lifecycle::joined::LocalNames,
+        ),
+        AppError,
+    > {
+        let inventory = UpgradeInventory::capture(
+            store,
+            self.physical.handler.debit(),
+            self.physical.handler.pool(),
+        )?;
+        let result =
+            super::super::super::super::lifecycle::preparation::observe_registered_native_join(
+                store, &inventory, data,
             )?;
-            let result =
-                super::super::super::super::lifecycle::preparation::observe_registered_native_join(
-                    store, &inventory, data,
-                )?;
-            if let Some(warm) = warm {
-                if warm.data() != data {
-                    return Err(refused());
-                }
-                warm.require(store)?;
-            } else if store.recovered_join_registration_data()? != Some(data) {
+        if let Some(warm) = warm {
+            if warm.data() != data {
                 return Err(refused());
             }
-            inventory.require(store)?;
-            Ok(result)
+            warm.require(store)?;
+        } else if store.recovered_join_registration_data()? != Some(data) {
+            return Err(refused());
+        }
+        inventory.require(store)?;
+        Ok(result)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn lookup_saved_joined_member(
+        &self,
+        data: crate::store::NativeTextJoinedRegistrationData,
+        warm: Option<
+            &crate::store::persistence::governance_layout::joined::JoinedRegistrationDependency,
+        >,
+        selection: crate::store::NativeTextJoinedRegistryRowData,
+        request: &crate::store::V2MemberSignRequest<'_>,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Option<(catcoms_replication::chat::ActionId, u64)>, AppError> {
+        use crate::store::persistence::v2_member_outbox::{
+            member_outbox_key, MemberRequestData, MemberRequestToken,
+        };
+        self.with_joined_store(|store| {
+            let require_original = || {
+                if self.registered_joined_row_in(store, data, warm)?.0 != selection {
+                    return Err(refused());
+                }
+                Ok(())
+            };
+            require_original()?;
+            let mount = store.member_outbox_mount()?;
+            let key = member_outbox_key(store)?;
+            let receipt = mount
+                .lookup_existing(
+                    store,
+                    data.member_outbox_context_data()?,
+                    &key,
+                    &MemberRequestData {
+                        token: MemberRequestToken::from_bytes(request.token),
+                        channel: request.channel,
+                        parents: request.parents,
+                        body: request.body,
+                    },
+                    rng,
+                )
+                .map_err(|_| refused())?;
+            require_original()?;
+            Ok(receipt.map(|receipt| (receipt.action, receipt.ordinal)))
         })
     }
 

@@ -397,6 +397,9 @@ The mounted joined row derives the existing member outbox context from its
 exact original pin, selected Profile, initial tenure and full device key.
 The warm receipt and independently verified cold receipt derive the same
 context. The current epoch and Admission are separate from that identity.
+The approved joined row can look up a saved request through that context.
+An absent namespace stays absent. An ambiguous or damaged namespace refuses
+and preserves the original files.
 
 The warm joined node can draw and sign an ordinary action through the original
 native Joiner Source. Its signing cut requires the ordinary member purpose and

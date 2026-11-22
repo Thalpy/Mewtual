@@ -53,9 +53,9 @@ mod tests;
 // Consumed by the primary's member-source/native integration, which is not yet wired.
 #[allow(unused_imports)]
 pub(in crate::store) use data::{
-    MemberHeadId, MemberOutboxContextData, MemberOutboxContextId, MemberOutboxContextSpec,
-    MemberReceiptData, MemberRequestData, MemberRequestDigest, MemberRequestToken,
-    MemberSignedOriginal,
+    canonical_member_parents, MemberHeadId, MemberOutboxContextData, MemberOutboxContextId,
+    MemberOutboxContextSpec, MemberReceiptData, MemberRequestData, MemberRequestDigest,
+    MemberRequestToken, MemberSignedOriginal,
 };
 pub(in crate::store) use engine::history::{
     MemberHistoryItem, MemberHistoryPage, MemberHistoryRead, MEMBER_HISTORY_MAX_ITEMS,

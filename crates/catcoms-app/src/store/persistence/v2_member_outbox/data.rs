@@ -244,6 +244,27 @@ pub(in crate::store) struct MemberRequestData<'a> {
     pub(in crate::store) parents: &'a [ActionId],
     pub(in crate::store) body: &'a Body,
 }
+
+/// Canonical parent list for both authoring and the exact outbox lookup.
+pub(in crate::store) fn canonical_member_parents(
+    body: &Body,
+    parents: &[ActionId],
+) -> Result<Vec<ActionId>, AppError> {
+    if parents.len() > MAX_PARENTS {
+        return Err(refused());
+    }
+    let mut canonical = parents.to_vec();
+    canonical.sort();
+    canonical.dedup();
+    if let Body::Create { reply_to, .. } = body {
+        if canonical.as_slice() != reply_to.as_slice() {
+            return Err(refused());
+        }
+    }
+    // ActionDraft refuses spare parent backing above MAX_PARENTS.
+    canonical.shrink_to_fit();
+    Ok(canonical)
+}
 impl MemberRequestData<'_> {
     /// Bounded digest. Oversized DATA is refused rather than hashed, so an absurd lookup
     /// cannot be mistaken for a conflict with a real stored request. The member-save driver

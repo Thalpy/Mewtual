@@ -27,13 +27,13 @@
 //! Authority boundary: nothing here grants membership, signing, save or publication rights.
 //! Holding a cell or an owner is custody; a save still needs the host's final edge.
 use super::data::{
-    MemberOutboxContextData, MemberOutboxContextId, MemberReceiptData, MemberRequestToken,
-    MemberSignedOriginal,
+    canonical_member_parents, MemberOutboxContextData, MemberOutboxContextId, MemberReceiptData,
+    MemberRequestData, MemberRequestToken, MemberSignedOriginal,
 };
 use super::engine::{
-    MemberOutbox, MemberOutboxError, MemberOutboxOpen, MemberOutboxParentDirectory,
-    MemberOutboxQuota, MemberOutboxRefusal, MemberOutboxRegistry, MEMBER_OUTBOX_OWNER_FEE,
-    MEMBER_OUTBOX_RECOVERY_FEE,
+    MemberLookup, MemberOutbox, MemberOutboxError, MemberOutboxOpen, MemberOutboxParentDirectory,
+    MemberOutboxQuota, MemberOutboxRefusal, MemberOutboxRegistry, MEMBER_OUTBOX_LOOKUP_FEE,
+    MEMBER_OUTBOX_OWNER_FEE, MEMBER_OUTBOX_RECOVERY_FEE,
 };
 use super::transaction::PreparedMemberAppend;
 use crate::store::critical_namespaces::member_outbox_layout::{
@@ -322,6 +322,17 @@ impl MemberOutboxMount {
         key: &[u8; 32],
         rng: &mut dyn CryptoRngCore,
     ) -> Result<MemberOutbox, MemberOutboxError> {
+        self.open_owner_for(store, context, key, rng, true)
+    }
+
+    fn open_owner_for(
+        &self,
+        store: &ServerStore,
+        context: MemberOutboxContextData,
+        key: &[u8; 32],
+        rng: &mut dyn CryptoRngCore,
+        create: bool,
+    ) -> Result<MemberOutbox, MemberOutboxError> {
         // A logical payment shortfall is a retryable Payment refusal, never an IO failure.
         let metadata = self
             .pay(MEMBER_OUTBOX_OWNER_FEE)
@@ -336,7 +347,7 @@ impl MemberOutboxMount {
                 parent: &self.parent,
                 context,
                 quota: self.quota,
-                create: true,
+                create,
                 pool: &self.pool,
                 metadata,
                 work,
@@ -345,6 +356,71 @@ impl MemberOutboxMount {
             key,
             rng,
         )
+    }
+
+    /// Historical request lookup in the original context. It uses the same
+    /// exclusive cell and recovery as saves, without creating a namespace.
+    pub(in crate::store) fn lookup_existing(
+        &self,
+        store: &ServerStore,
+        context: MemberOutboxContextData,
+        key: &[u8; 32],
+        request: &MemberRequestData<'_>,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<Option<MemberReceiptData>, MemberOutboxError> {
+        self.require_live(store)?;
+        let id = context.id();
+        let payment = self
+            .pay(MEMBER_OUTBOX_LOOKUP_FEE)
+            .map_err(|_| MemberOutboxRefusal::Payment)?;
+        let parents = canonical_member_parents(request.body, request.parents)?;
+        let request = MemberRequestData {
+            token: request.token,
+            channel: request.channel,
+            parents: &parents,
+            body: request.body,
+        };
+        request.digest(id)?;
+        let cell = self.cell(id)?;
+        let mut state = cell.try_lock()?.ok_or(MemberOutboxRefusal::Busy)?;
+        if matches!(state.custody, Some(MemberOriginalCustody::Running { .. })) {
+            return Err(MemberOutboxRefusal::Busy.into());
+        }
+        let has_original = state
+            .custody
+            .as_ref()
+            .is_some_and(|value| value.token() == request.token);
+        if state.owner.is_none() {
+            match self.open_owner_for(store, context, key, rng, false) {
+                Ok(owner) => state.owner = Some(owner),
+                Err(error) if matches!(error.refusal(), Some(MemberOutboxRefusal::Absent)) => {
+                    if state.custody.is_some() {
+                        return Err(MemberOutboxRefusal::Incomplete.into());
+                    }
+                    self.require_live(store)?;
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        let owner = state
+            .owner
+            .as_mut()
+            .filter(|owner| owner.context_id() == id)
+            .ok_or(MemberOutboxRefusal::Foreign)?;
+        if owner.needs_recovery() {
+            self.recover_owner(store, owner, key, rng)?;
+        }
+        let receipt = match owner.lookup(key, &request, payment)? {
+            MemberLookup::Hit(hit) => Some(*hit.receipt()),
+            MemberLookup::Conflict(other) => {
+                return Err(MemberOutboxRefusal::TokenConflict(other).into())
+            }
+            MemberLookup::Absent if !has_original => None,
+            MemberLookup::Absent => return Err(MemberOutboxRefusal::Incomplete.into()),
+        };
+        self.require_live(store)?;
+        Ok(receipt)
     }
 
     /// Re-derive an owner's state from its files after an uncertain operation.

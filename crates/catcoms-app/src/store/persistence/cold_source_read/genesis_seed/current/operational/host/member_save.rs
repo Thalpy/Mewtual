@@ -39,7 +39,7 @@
 //! Not here: transport (reseal, publication, checkpoints) and the native producer. Root
 //! fixtures that build [`MemberSaveNativeAdmission`] from a test guard establish no native
 //! authorization; that needs the native consumer's checked factory and its own barrier tests.
-use super::member::{canonical_member_parents, V2MemberSignRequest};
+use super::member::V2MemberSignRequest;
 use super::projection::V2TextProjectionNegative;
 use super::{FounderAccess, PreparedV2TextHost};
 use crate::store::critical_namespaces::archive_current_namespace_codec::CurrentLayoutData;
@@ -49,12 +49,12 @@ use crate::store::critical_namespaces::read_pool::{
 };
 use crate::store::critical_namespaces::refused;
 use crate::store::persistence::v2_member_outbox::{
-    member_outbox_key, AdmittedMemberCommit, MemberCommitRun, MemberContextCell,
-    MemberContextState, MemberLookup, MemberOriginalCustody, MemberOutbox, MemberOutboxContextData,
-    MemberOutboxContextId, MemberOutboxContextSpec, MemberOutboxError, MemberOutboxMount,
-    MemberOutboxRefusal, MemberOutboxSaveAdmission, MemberReceiptData, MemberRequestData,
-    MemberRequestToken, MemberSignedOriginal, RefusedMemberAppendAdmission, ReturnedMemberOriginal,
-    MEMBER_OUTBOX_APPEND_FEE, MEMBER_OUTBOX_LOOKUP_FEE,
+    canonical_member_parents, member_outbox_key, AdmittedMemberCommit, MemberCommitRun,
+    MemberContextCell, MemberContextState, MemberLookup, MemberOriginalCustody, MemberOutbox,
+    MemberOutboxContextData, MemberOutboxContextId, MemberOutboxContextSpec, MemberOutboxError,
+    MemberOutboxMount, MemberOutboxRefusal, MemberOutboxSaveAdmission, MemberReceiptData,
+    MemberRequestData, MemberRequestToken, MemberSignedOriginal, RefusedMemberAppendAdmission,
+    ReturnedMemberOriginal, MEMBER_OUTBOX_APPEND_FEE, MEMBER_OUTBOX_LOOKUP_FEE,
 };
 use crate::store::persistence::V2TextOwnerRef;
 use crate::store::ServerStore;

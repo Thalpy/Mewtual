@@ -49,7 +49,9 @@ use super::member_save::{V2MemberSaveSource, V2MemberSaveSourceEnd};
 use super::projection::{BoundV2TextFounderAnchor, V2TextProjectionDomain};
 use super::*;
 use crate::store::critical_namespaces::read_pool::CatalogReadReservation;
-use crate::store::persistence::v2_member_outbox::{MemberOutboxContextId, MemberSignedOriginal};
+use crate::store::persistence::v2_member_outbox::{
+    canonical_member_parents, MemberOutboxContextId, MemberSignedOriginal,
+};
 use crate::store::persistence::v2_text::{PreparedV2TextParentCapture, V2TextFounderAnchorData};
 use crate::store::ServerStore;
 use catcoms_replication::chat::owner_facts::OwnerFactId;
@@ -145,31 +147,6 @@ impl std::fmt::Debug for V2MemberDependency<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("V2MemberDependency").finish_non_exhaustive()
     }
-}
-
-/// The ONE parent canonicalisation for a member request: sort and dedup, refuse more than
-/// MAX_PARENTS (bounded as supplied, before dedup), and a Create must name exactly its reply
-/// target. The member-save driver digests its pre-signing outbox lookup over exactly this
-/// list, after funding that lookup, so the lookup and the signed spec agree. Parents are the
-/// request's explicit persisted list, never fresh tips sampled during a retry.
-pub(super) fn canonical_member_parents(
-    body: &Body,
-    parents: &[ActionId],
-) -> Result<Vec<ActionId>, AppError> {
-    if parents.len() > MAX_PARENTS {
-        return Err(refused());
-    }
-    let mut canonical = parents.to_vec();
-    canonical.sort();
-    canonical.dedup();
-    if let Body::Create { reply_to, .. } = body {
-        if canonical.as_slice() != reply_to.as_slice() {
-            return Err(refused());
-        }
-    }
-    // Exact capacity: ActionDraft refuses spare parent backing above MAX_PARENTS.
-    canonical.shrink_to_fit();
-    Ok(canonical)
 }
 
 /// Allocation-free set equality of a stored canonical list and a fresh request's list.

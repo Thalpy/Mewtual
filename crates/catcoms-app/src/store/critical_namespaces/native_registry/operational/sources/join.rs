@@ -752,6 +752,50 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         Ok(parked)
     }
 
+    /// Look up the exact local request in the selected joined row's outbox.
+    /// This can recover existing bytes but never opens signing or appends.
+    pub fn lookup_saved_member(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        request: &crate::store::V2MemberSignRequest<'_>,
+        negative: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Option<(catcoms_replication::chat::ActionId, u64)>, AppError> {
+        let require_current = || {
+            self.original.require_current(negative)?;
+            if !selection.is_current_cached() {
+                return Err(refused());
+            }
+            Ok(())
+        };
+        require_current()?;
+        let mounted = self.mounted.upgrade().ok_or_else(refused)?;
+        let slot = mounted.try_lock().map_err(|_| refused())?;
+        let runtime = slot
+            .as_ref()
+            .filter(|runtime| {
+                runtime
+                    .selection
+                    .as_ref()
+                    .is_some_and(|original| original.same_original(selection))
+            })
+            .ok_or_else(refused)?;
+        let data = runtime
+            .recovered
+            .or_else(|| runtime.registration.as_ref().map(|proof| proof.data()))
+            .ok_or_else(refused)?;
+        let metadata = self.original.work.as_ref().ok_or_else(refused)?;
+        let result = metadata.lookup_saved_joined_member(
+            data,
+            runtime.registration.as_deref(),
+            selection.original.row,
+            request,
+            rng,
+        )?;
+        require_current()?;
+        Ok(result)
+    }
+
     /// Borrow the same paid association only after proving the exact joined
     /// row against its original parked, selected node and current UI.
     pub fn select_registered(

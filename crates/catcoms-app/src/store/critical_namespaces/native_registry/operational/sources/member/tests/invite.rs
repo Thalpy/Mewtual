@@ -346,6 +346,22 @@ async fn mounted_join_fixture(recover_stage: bool) {
         .unwrap()
         .id()
         .as_bytes();
+    let body = catcoms_replication::chat::Body::Create {
+        text: "No saved original".into(),
+        reply_to: None,
+    };
+    let unsaved = crate::store::V2MemberSignRequest {
+        token: [142; 32],
+        channel: 42,
+        body: &body,
+        parents: &[],
+        dependencies: &[],
+    };
+    let outbox_path = dir
+        .path()
+        .join("chat-owner-v2")
+        .join("member-outbox-v1")
+        .join(format!("mo-{}", hex::encode(original_member_outbox)));
     if !recover_stage {
         let mut after = rng.clone();
         let row = register(&mut rng).unwrap();
@@ -356,6 +372,13 @@ async fn mounted_join_fixture(recover_stage: bool) {
         assert_eq!(view.name_data(), "Original Room");
         assert_eq!(view.display_name_data(), Some("Original Member"));
         assert_eq!(view.member_outbox_context_id_data(), original_member_outbox);
+        assert_eq!(
+            inspect()
+                .lookup_saved_member(&view, &unsaved, &fresh, &mut rng)
+                .unwrap(),
+            None
+        );
+        assert!(!outbox_path.exists());
         assert!(view.same_original(&inspect().select_registered(&fresh).unwrap()));
         assert_eq!(register(&mut rng).unwrap(), row);
         assert_eq!(rng.next_u64(), after.next_u64());
@@ -461,6 +484,21 @@ async fn mounted_join_fixture(recover_stage: bool) {
         selection.member_outbox_context_id_data(),
         original_member_outbox
     );
+    let mut history_rng = catcoms_rt::OsCryptoRng;
+    assert_eq!(
+        recovered_row()
+            .lookup_saved_member(&selection, &unsaved, &fresh, &mut history_rng)
+            .unwrap(),
+        None
+    );
+    assert!(!outbox_path.exists());
+    std::fs::create_dir(&outbox_path).unwrap();
+    let damaged = outbox_path.join("head.bin");
+    std::fs::write(&damaged, b"damaged").unwrap();
+    assert!(recovered_row()
+        .lookup_saved_member(&selection, &unsaved, &fresh, &mut history_rng)
+        .is_err());
+    assert_eq!(std::fs::read(&damaged).unwrap(), b"damaged");
     assert!(selection.is_from_original_vault_cached(&mounted_vault));
     assert!(selection.same_original(&recovered_row().select_registered(&fresh).unwrap()));
     selection.close_original_cached();
