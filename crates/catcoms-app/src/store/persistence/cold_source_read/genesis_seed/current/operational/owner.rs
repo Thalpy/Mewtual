@@ -117,6 +117,62 @@ impl<T, R> V2TextOwnedCurrent<T, R> {
 }
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurrent<T, R> {
+    pub(super) fn cached_governed_header_raw(
+        &self,
+        store: &ServerStore,
+    ) -> Result<Option<[u8; 64]>, AppError> {
+        match &self.core {
+            OwnedCurrent::Warm(current) => current.cached_governed_header_raw(store),
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
+    pub(super) fn borrow_governed_header_parts(
+        &mut self,
+    ) -> Result<
+        (
+            V2TextOwnerRef<'_>,
+            catcoms_sync::owner_v2::V2FounderHeaderSigning<'_>,
+        ),
+        AppError,
+    > {
+        match &mut self.core {
+            OwnedCurrent::Warm(current) => {
+                let (original, signing) = current.borrow_governed_header_parts()?;
+                Ok((V2TextOwnerRef { original }, signing))
+            }
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
+    pub(super) fn prepare_governed_sdk(
+        &mut self,
+        store: &ServerStore,
+        request: catcoms_sync::owner_v2::V2FounderAddRequestData<'_>,
+        original: catcoms_rt::NativeChatSourceObservation,
+        admission: &mut Option<catcoms_mls::persist::text_current_add::TextCurrentAddAdmission>,
+        cuts: [catcoms_rt::NativeChatPreparedKeyCut; 3],
+    ) -> Result<(), AppError> {
+        match &mut self.core {
+            OwnedCurrent::Warm(current) => {
+                current.prepare_governed_sdk(store, request, original, admission, cuts)
+            }
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
+    pub(super) fn run_governed_sdk(
+        &mut self,
+        store: &ServerStore,
+        request: catcoms_sync::owner_v2::V2FounderAddRequestData<'_>,
+        replay: &catcoms_replication::chat::owner_state::transition::ReplayMath,
+    ) -> Result<(), AppError> {
+        match &mut self.core {
+            OwnedCurrent::Warm(current) => current.run_governed_sdk(store, request, replay),
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
     pub(super) fn preflight_first_add_package_data(
         &self,
         store: &ServerStore,
@@ -162,13 +218,12 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurr
         }
     }
 
-    #[cfg(all(test, any(windows, target_os = "linux")))]
-    pub(super) fn governed_outcome_for_test(
+    pub(super) fn governed_outcome_data(
         &self,
         store: &ServerStore,
     ) -> Result<catcoms_sync::owner_v2::V2FounderAddOutcomeData<'_>, AppError> {
         match &self.core {
-            OwnedCurrent::Warm(current) => current.governed_outcome_for_test(store),
+            OwnedCurrent::Warm(current) => current.governed_outcome_data(store),
             OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
         }
     }

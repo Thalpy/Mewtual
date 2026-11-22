@@ -166,6 +166,56 @@ struct PendingAdd {
     ends: NativeChatKeyEnds,
 }
 
+/// Disjoint loan of the original Header primitive and its retained native
+/// custody. Root can hold the actual seed/Current proof while using this loan.
+pub struct V2FounderHeaderSigning<'a> {
+    seed: &'a UnboundV2GenesisSeed,
+    negative: V2FounderGovernanceNegative<'a>,
+    pending: &'a mut PendingAdd,
+}
+
+impl V2FounderHeaderSigning<'_> {
+    pub fn sign_native(&mut self) -> Result<(), SyncError> {
+        let p = &mut *self.pending;
+        if p.raw.is_some() {
+            return Ok(());
+        }
+        self.negative.require_live_data()?;
+        let unsigned = p.unsigned.as_ref().ok_or_else(unavailable)?;
+        if p.phase != Phase::Complete {
+            return Err(unavailable());
+        }
+        let signer = self.seed.body.context.spec_data().signer;
+        if !self.seed.body.device.retained_ed25519_key_matches(&signer) {
+            return Err(unavailable());
+        }
+        p.header_native.enter(
+            p.header_cut.as_mut().ok_or_else(unavailable)?,
+            &p.original,
+            NativeChatKeyPurpose::GoverningHeader,
+            &mut p.ends,
+        )?;
+        p.phase = Phase::HeaderEntered;
+        #[cfg(test)]
+        test_cut(TestCut::HeaderEntered);
+        let raw = self
+            .seed
+            .body
+            .device
+            .sign_retained_ed25519_bounded(
+                &signer,
+                unsigned.signing_bytes_data(),
+                catcoms_replication::chat::owner_header::MAX_HEADER_SEMANTIC_BYTES,
+            )
+            .map_err(|_| unavailable())?;
+        p.raw = Some(raw);
+        p.phase = Phase::Raw;
+        #[cfg(test)]
+        test_cut(TestCut::RawCached);
+        Ok(())
+    }
+}
+
 /// SAME complete original node and private candidate slot. There is no SDK,
 /// runtime, transport, mutable seed getter, or conversion back to genesis.
 /// The real host independently retains all source/metadata fees and must own
@@ -190,6 +240,7 @@ pub const FOUNDER_GOVERNANCE_DATA_BYTES: usize = UNSIGNED_ADMISSION_DATA_INVOICE
     + 4 * std::mem::size_of::<PendingAdd>()
     + 4 * std::mem::size_of::<V2InstalledFounderAddData>()
     + 4 * std::mem::size_of::<V2FounderAddOutcomeData<'static>>()
+    + 4 * std::mem::size_of::<V2FounderHeaderSigning<'static>>()
     + 4 * std::mem::size_of::<RetiredV2FounderAddNativeCustody>()
     + 4 * std::mem::size_of::<PreparedV2FounderGovernanceNode<(), ()>>()
     + 4 * std::mem::size_of::<(
@@ -587,52 +638,33 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
     /// proofs. Cache raw64 IMMEDIATELY; an unwind after entry with no cached raw
     /// stays terminal. A cached signature is historical DATA, not permission.
     pub fn sign_admission_native(&mut self) -> Result<(), SyncError> {
-        if self.pending.as_ref().is_some_and(|p| p.raw.is_some()) {
-            return Ok(());
-        }
-        // Full SDK checks belong in the preceding host preflight, outside its
-        // final writers. Here only stable lifetime/retained-key checks run.
-        self.stable_negative().require_live_data()?;
-        let p = self.pending.as_mut().ok_or_else(unavailable)?;
-        let unsigned = p.unsigned.as_ref().ok_or_else(unavailable)?;
-        if p.phase != Phase::Complete {
-            return Err(unavailable());
-        }
-        let signer = self.node.seed.body.context.spec_data().signer;
-        if !self
-            .node
-            .seed
-            .body
-            .device
-            .retained_ed25519_key_matches(&signer)
-        {
-            return Err(unavailable());
-        }
-        p.header_native.enter(
-            p.header_cut.as_mut().ok_or_else(unavailable)?,
-            &p.original,
-            NativeChatKeyPurpose::GoverningHeader,
-            &mut p.ends,
-        )?;
-        p.phase = Phase::HeaderEntered;
-        #[cfg(test)]
-        test_cut(TestCut::HeaderEntered);
-        let raw = self
-            .node
-            .seed
-            .body
-            .device
-            .sign_retained_ed25519_bounded(
-                &signer,
-                unsigned.signing_bytes_data(),
-                catcoms_replication::chat::owner_header::MAX_HEADER_SEMANTIC_BYTES,
-            )
-            .map_err(|_| unavailable())?;
-        p.raw = Some(raw);
-        p.phase = Phase::Raw;
-        #[cfg(test)]
-        test_cut(TestCut::RawCached);
-        Ok(())
+        self.header_signing_parts_data()?.1.sign_native()
+    }
+
+    /// Root can use the seed loan for its original Current while the second
+    /// loan retains only this operation's fixed native signing state.
+    pub fn header_signing_parts_data(
+        &mut self,
+    ) -> Result<(&UnboundV2GenesisSeed, V2FounderHeaderSigning<'_>), SyncError> {
+        let seed = &self.node.seed;
+        let negative = V2FounderGovernanceNegative {
+            source: seed.body.source,
+            context: &seed.body.context,
+            scope: &seed.body.metadata.scope,
+            parts: StableParts {
+                warm: self.node._parts.body.warm.as_ref(),
+                fresh: self.node._parts.body.fresh.as_ref(),
+            },
+        };
+        let pending = self.pending.as_deref_mut().ok_or_else(unavailable)?;
+        Ok((
+            seed,
+            V2FounderHeaderSigning {
+                seed,
+                negative,
+                pending,
+            },
+        ))
     }
 
     /// Borrow the exact cached key result for Root's RawHeader record. This

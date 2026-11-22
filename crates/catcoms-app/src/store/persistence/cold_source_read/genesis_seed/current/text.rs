@@ -5,7 +5,73 @@
 //! cached original ownership; they deliberately never invoke strict genesis physical proof.
 use super::UnexposedV2GenesisCurrent;
 
+use catcoms_mls::persist::text_current_add::TextCurrentAddAdmission;
+use catcoms_rt::{NativeChatPreparedKeyCut, NativeChatSourceObservation};
+use catcoms_sync::owner_v2::{V2FounderAddOutcomeData, V2FounderAddRequestData};
+
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> UnexposedV2GenesisCurrent<T, R> {
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn cached_governed_header_raw(
+        &self,
+        store: &crate::store::ServerStore,
+    ) -> Result<Option<[u8; 64]>, crate::AppError> {
+        use crate::store::critical_namespaces::refused;
+        self.require_text_original_data(store)
+            .map_err(|_| refused())?;
+        let node = self.governed_text_node().ok_or_else(refused)?;
+        Ok(node.raw_admission_signature_data().ok().copied())
+    }
+
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn prepare_governed_sdk(
+        &mut self,
+        store: &crate::store::ServerStore,
+        request: V2FounderAddRequestData<'_>,
+        original: NativeChatSourceObservation,
+        admission: &mut Option<TextCurrentAddAdmission>,
+        [sdk, header, welcome]: [NativeChatPreparedKeyCut; 3],
+    ) -> Result<(), crate::AppError> {
+        use crate::store::critical_namespaces::refused;
+        self.require_text_original_data(store)
+            .map_err(|_| refused())?;
+        let node = self.governed_text_node_mut().ok_or_else(refused)?;
+        if let Some(payment) = admission.take() {
+            if let Err(refusal) =
+                node.prepare_add_data(request, original, payment, sdk, header, welcome)
+            {
+                let (_, payment, _, _, _) = *refusal;
+                *admission = Some(payment);
+                return Err(refused());
+            }
+        } else {
+            // Only the same original never-entered/refused SDK stage can use
+            // a replacement cut. Existing live custody stays with the node.
+            drop(node.prepare_add_native_stage_data(
+                catcoms_sync::owner_v2::V2FounderAddNativeStage::Sdk,
+                sdk,
+            ));
+        }
+        self.require_text_original_data(store)
+            .map_err(|_| refused())
+    }
+
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn run_governed_sdk(
+        &mut self,
+        store: &crate::store::ServerStore,
+        request: V2FounderAddRequestData<'_>,
+        replay: &catcoms_replication::chat::owner_state::transition::ReplayMath,
+    ) -> Result<(), crate::AppError> {
+        use crate::store::critical_namespaces::refused;
+        self.require_text_original_data(store)
+            .map_err(|_| refused())?;
+        let node = self.governed_text_node_mut().ok_or_else(refused)?;
+        if node.completed_add_data().is_err() {
+            node.execute_add_data_native(request)?;
+        }
+        node.prepare_admission_data(replay)?;
+        node.outcome_data()?.require_request_data(request)?;
+        self.require_text_original_data(store)
+            .map_err(|_| refused())
+    }
+
     pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn preflight_first_add_package_data(
         &self,
         store: &crate::store::ServerStore,
@@ -56,11 +122,10 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> UnexposedV2Gene
             .ok_or_else(crate::store::critical_namespaces::refused)
     }
 
-    #[cfg(all(test, any(windows, target_os = "linux")))]
-    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn governed_outcome_for_test(
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn governed_outcome_data(
         &self,
         store: &crate::store::ServerStore,
-    ) -> Result<catcoms_sync::owner_v2::V2FounderAddOutcomeData<'_>, crate::AppError> {
+    ) -> Result<V2FounderAddOutcomeData<'_>, crate::AppError> {
         self.require_text_original_data(store)
             .map_err(|_| crate::store::critical_namespaces::refused())?;
         self.governed_text_node()

@@ -319,6 +319,12 @@ first write. It reauthenticates and rechecks the original signed invite journal
 on exact retries. The production dispatcher still has to drive this owner
 through the later phases.
 
+The Host's SDK phase covers the exact Entry before calling the original Node
+and saves its cached outcome before signing. Its Header phase borrows the
+same original seed and a disjoint pending signing slot, so it can hold the
+actual Current through the covered attempt and key entry. Exact retries use
+the cached signature for Raw coverage.
+
 The fence codec uses the existing outer WAL tag and key with logical version 2
 and a separate governed Add role. Its four fixed-width commitments cover the
 original storage context, the exact selected Head ciphertext, the invitation

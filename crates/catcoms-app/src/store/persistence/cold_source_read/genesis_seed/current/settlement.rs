@@ -208,6 +208,57 @@ impl<'owner> GenesisCurrentOwnerRef<'owner> {
 }
 
 impl<T, R> UnexposedV2GenesisCurrent<T, R> {
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn borrow_governed_header_parts(
+        &mut self,
+    ) -> Result<
+        (
+            GenesisCurrentOwnerRef<'_>,
+            catcoms_sync::owner_v2::V2FounderHeaderSigning<'_>,
+        ),
+        AppError,
+    > {
+        let Self {
+            node,
+            governed,
+            resources,
+            activation,
+            task,
+            scope,
+            writer,
+            fee,
+            seed_settlement,
+            ..
+        } = self;
+        if node.is_some()
+            || seed_settlement
+                .as_ref()
+                .and_then(|work| work.saved_outcome())
+                .is_none()
+        {
+            return Err(critical_namespaces::refused());
+        }
+        let head = scope
+            .saved_head()
+            .ok_or_else(critical_namespaces::refused)?;
+        activation.require_same_saved_head(head)?;
+        let (seed, signing) = governed
+            .as_mut()
+            .and_then(|owner| owner.node.as_mut())
+            .ok_or_else(critical_namespaces::refused)?
+            .header_signing_parts_data()?;
+        let owner = GenesisCurrentOwnerRef {
+            source: GenesisSourceDataRef { seed, resources },
+            task,
+            role: GenesisCurrentOwnerRole::Warm {
+                scope,
+                head,
+                writer,
+            },
+            wrapper_fee: fee,
+        };
+        Ok((owner, signing))
+    }
+
     /// Cached prerequisite only; new operational physical proof is separate. An ambiguous
     /// cleanup must first finish its SAME worker, not adopt file absence.
     pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn text_owner_ref(

@@ -95,6 +95,10 @@ const WRITER_BYTES: usize = 3 * MAX_TEXT_PATH
     + 1024;
 
 impl PreparedGovernedAddFence {
+    pub(in crate::store) fn has_prepared_outcome_data(&self) -> bool {
+        self.outcome.is_some()
+    }
+
     /// This must run before entering Current, under the caller's authenticated
     /// original request and selected context. Retain the result across retries.
     pub(in crate::store) fn prepare(

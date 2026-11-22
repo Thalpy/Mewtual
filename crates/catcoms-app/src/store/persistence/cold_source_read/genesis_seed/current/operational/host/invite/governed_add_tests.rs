@@ -12,11 +12,12 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         keys: &NativeFounderKeys,
         rng: &mut impl catcoms_rt::CryptoRngCore,
         negative: &RequestCancellation,
-        [sdk_cut, header_cut, welcome_cut]: [catcoms_rt::NativeChatPreparedKeyCut; 3],
+        cuts: [catcoms_rt::NativeChatPreparedKeyCut; 3],
         mut inject: impl FnMut(&str, bool),
     ) -> Result<(), AppError> {
         use crate::store::persistence::v2_text::{
             GovernedAddHeaderRecoveryState, GovernedAddRecoveryState, PreparedGovernedAddFence,
+            SelectedV2TextHead,
         };
         self.reserve_governed_add(layout, packet, routing_plan, keys, rng, negative)?;
         assert!(self
@@ -31,8 +32,11 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         self.require_member_quiescent_for_add(layout)?;
         let store = layout.checked_store()?;
         let original = self.governed_add.as_mut().ok_or_else(refused)?;
-        let sdk_admission = original.sdk.take().ok_or_else(refused)?;
-        assert!(sdk_admission.supports_routing_data());
+        assert!(original
+            .sdk
+            .as_ref()
+            .ok_or_else(refused)?
+            .supports_routing_data());
         let owner = self.owner.borrow_current()?;
         let original_seed = owner.source().seed().observe_original_seed_data();
         let resources = original.parent.resources().clone();
@@ -48,17 +52,19 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             assert!(fence.require_covered_sdk_entry(&guard, selected).is_err());
             Ok(())
         })?;
-        let read_fence = |fence: &PreparedGovernedAddFence, owner: &V2TextOwnerRef<'_>| {
+        let read_fence = |fence: &PreparedGovernedAddFence,
+                          owner: &V2TextOwnerRef<'_>,
+                          selected: &SelectedV2TextHead| {
             let mut reader =
                 fence.prepare_recovery_read_for_test(store, owner.source(), selected)?;
             store.with_v2_text_current(owner, |admission| {
-                let guard = store.lock_v2_text_current_group(admission, &resources)?;
+                let guard = store.lock_v2_text_current_group(admission, selected.resources())?;
                 reader.capture(&guard, selected)
             })?;
             reader.authenticate(store, owner.source())?;
             Ok::<_, AppError>(reader)
         };
-        let mut before_entry = read_fence(&fence, &owner)?;
+        let mut before_entry = read_fence(fence, &owner, selected)?;
         store.with_v2_text_current(&owner, |admission| {
             let guard = store.lock_v2_text_current_group(admission, &resources)?;
             assert_eq!(
@@ -75,7 +81,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
                 fence.cover_sdk_entry(&guard, selected)
             })?;
         }
-        let mut after_entry = read_fence(&fence, &owner)?;
+        let mut after_entry = read_fence(fence, &owner, selected)?;
         after_entry.prepare_outcome_read(store, owner.source())?;
         store.with_v2_text_current(&owner, |admission| {
             let guard = store.lock_v2_text_current_group(admission, &resources)?;
@@ -104,7 +110,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
                 .is_err());
             Ok(())
         })?;
-        let mut with_outcome = read_fence(&fence, &owner)?;
+        let mut with_outcome = read_fence(fence, &owner, selected)?;
         with_outcome.prepare_outcome_read(store, owner.source())?;
         store.with_v2_text_current(&owner, |admission| {
             let guard = store.lock_v2_text_current_group(admission, &resources)?;
@@ -114,42 +120,14 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             .authenticate_outcome(store, owner.source())
             .is_err());
         inject("text.add.outcome.v2", false);
-        store.with_v2_text_current(&owner, |admission| {
-            let guard = store.lock_v2_text_current_group(admission, &resources)?;
-            keys.preflight(&self.origin)?;
-            fence.require_covered_sdk_entry(&guard, selected)
-        })?;
-        let replay = self
-            .member
-            .as_ref()
-            .ok_or_else(refused)?
-            .governed_add_replay_for_test()?;
-        let node = self.owner.governed_node_for_test(store)?;
-        node.prepare_add_data(
-            packet.founder_add_data(),
-            keys.original.clone(),
-            sdk_admission,
-            sdk_cut,
-            header_cut,
-            welcome_cut,
-        )
-        .map_err(|_| refused())?;
-        node.execute_add_data_native(packet.founder_add_data())
-            .expect("actual native SDK Add");
-        node.prepare_admission_data(replay)
-            .expect("actual replay of the original unsigned Admission");
-
+        self.execute_governed_add_sdk(layout, packet, routing_plan, keys, cuts, rng, negative)?;
+        let original = self.governed_add.as_mut().ok_or_else(refused)?;
+        let resources = original.parent.resources().clone();
+        let selected = original.parent.selected_data().ok_or_else(refused)?;
+        let fence = &mut original.fence;
         let owner = self.owner.borrow_current()?;
-        let outcome = self.owner.governed_outcome_for_test(store)?;
-        fence.prepare_outcome(store, owner.source(), selected, packet, &outcome, rng)?;
-        for _ in 0..2 {
-            store.with_v2_text_current(&owner, |admission| {
-                let guard = store.lock_v2_text_current_group(admission, &resources)?;
-                keys.preflight(&self.origin)?;
-                fence.cover_outcome(&guard, selected)
-            })?;
-        }
-        let mut verified = read_fence(&fence, &owner)?;
+        let outcome = self.owner.governed_outcome_data(store)?;
+        let mut verified = read_fence(fence, &owner, selected)?;
         verified.prepare_outcome_read(store, owner.source())?;
         store.with_v2_text_current(&owner, |admission| {
             let guard = store.lock_v2_text_current_group(admission, &resources)?;
@@ -182,12 +160,17 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             keys.preflight(&self.origin)?;
             fence.cover_header_attempt(&guard, selected)
         })?;
-        let node = self.owner.governed_node_for_test(store)?;
-        node.sign_admission_native()?;
-        let raw = *node.raw_admission_signature_data()?;
-
+        self.sign_governed_header(layout, packet, routing_plan, keys, rng, negative)?;
+        let original = self.governed_add.as_mut().ok_or_else(refused)?;
+        let selected = original.parent.selected_data().ok_or_else(refused)?;
+        let resources = original.parent.resources().clone();
+        let fence = &mut original.fence;
+        let raw = self
+            .owner
+            .cached_governed_header_raw(store)?
+            .ok_or_else(refused)?;
         let owner = self.owner.borrow_current()?;
-        let outcome = self.owner.governed_outcome_for_test(store)?;
+        let outcome = self.owner.governed_outcome_data(store)?;
         let mut foreign = raw;
         foreign[0] ^= 1;
         assert!(fence
@@ -203,7 +186,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
                 Ok(())
             })?;
         }
-        let mut fresh = read_fence(&fence, &owner)?;
+        let mut fresh = read_fence(fence, &owner, selected)?;
         fresh.prepare_outcome_read(store, owner.source())?;
         store.with_v2_text_current(&owner, |admission| {
             let guard = store.lock_v2_text_current_group(admission, &resources)?;
@@ -227,9 +210,9 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         node.materialize_admission_data()?;
         let admitted = node.signed_admission_data()?.clone();
         let owner = self.owner.borrow_current()?;
-        let outcome = self.owner.governed_outcome_for_test(store)?;
+        let outcome = self.owner.governed_outcome_data(store)?;
         let read_record = |fence: &PreparedGovernedAddFence| {
-            let mut reader = read_fence(fence, &owner)?;
+            let mut reader = read_fence(fence, &owner, selected)?;
             reader.prepare_outcome_read(store, owner.source())?;
             store.with_v2_text_current(&owner, |admission| {
                 let guard = store.lock_v2_text_current_group(admission, &resources)?;

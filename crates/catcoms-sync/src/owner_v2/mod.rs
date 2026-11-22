@@ -6,9 +6,9 @@ mod founder;
 pub use founder::{
     PreparedV2FounderGovernanceNode, PreparedV2FounderInviteData, RetiredV2FounderAddNativeCustody,
     V2FounderAddNativeStage, V2FounderAddOutcomeData, V2FounderAddPreparationRefusal,
-    V2FounderAddRequestData, V2FounderGovernanceNegative, V2FounderInviteRequestData,
-    V2InstalledFounderAddData, FOUNDER_GOVERNANCE_DATA_BYTES, FOUNDER_INVITE_DATA_BYTES,
-    MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES, MAX_FOUNDER_INVITE_LIFETIME_MS,
+    V2FounderAddRequestData, V2FounderGovernanceNegative, V2FounderHeaderSigning,
+    V2FounderInviteRequestData, V2InstalledFounderAddData, FOUNDER_GOVERNANCE_DATA_BYTES,
+    FOUNDER_INVITE_DATA_BYTES, MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES, MAX_FOUNDER_INVITE_LIFETIME_MS,
 };
 // The live ordered source fence of a joined node: finalized transitions, contest/merge state
 // and final-admission custody. Observation and ordering only; it issues no authority.

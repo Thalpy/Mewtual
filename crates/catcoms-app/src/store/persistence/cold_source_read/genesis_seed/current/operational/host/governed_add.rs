@@ -1,6 +1,7 @@
 //! Payments for the original native governed Add candidate. The candidate
 //! keeps this debit for as long as its SDK graph or pending output owns it.
 use super::*;
+use crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounderKeys;
 use crate::store::critical_namespaces::read_pool::{
     CatalogReadReservation, CriticalCatalogReadPool,
 };
@@ -76,6 +77,122 @@ impl PendingGovernedAdd {
 }
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextHost<T, R> {
+    /// Key use follows exact Outcome/Attempt coverage under the actual Current
+    /// and original native source. The Sync loan caches the result in place.
+    pub(super) fn sign_governed_header(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        packet: &V2JoinRequestPacketData<'_>,
+        routing_plan: &[u8],
+        keys: &NativeFounderKeys,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+        negative: &catcoms_rt::RequestCancellation,
+    ) -> Result<(), AppError> {
+        self.reserve_governed_add(layout, packet, routing_plan, keys, rng, negative)?;
+        let store = layout.checked_store()?;
+        let require_live = || {
+            if negative.is_cancelled() {
+                return Err(refused());
+            }
+            keys.preflight(&self.origin)
+        };
+        let p = self.governed_add.as_mut().ok_or_else(refused)?;
+        let selected = p.parent.selected_data().ok_or_else(refused)?;
+        let resources = p.parent.resources().clone();
+        if self.owner.cached_governed_header_raw(store)?.is_none() {
+            let owner = self.owner.borrow_current()?;
+            p.fence.prepare_header_attempt(store, owner.source(), rng)?;
+            let (owner, mut primitive) = self.owner.borrow_governed_header_parts()?;
+            store.with_v2_text_current(&owner, |admission| {
+                let guard = store.lock_v2_text_current_group(admission, &resources)?;
+                require_live()?;
+                p.fence.cover_header_attempt(&guard, selected)?;
+                require_live()?;
+                primitive.sign_native()?;
+                require_live()
+            })?;
+        }
+
+        let raw = self
+            .owner
+            .cached_governed_header_raw(store)?
+            .ok_or_else(refused)?;
+        let owner = self.owner.borrow_current()?;
+        let outcome = self.owner.governed_outcome_data(store)?;
+        p.fence
+            .prepare_raw_header(store, owner.source(), &outcome, &raw, rng)?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            p.fence.cover_raw_header(&guard, selected)?;
+            require_live()
+        })?;
+        require_live()
+    }
+
+    /// The same original runtime retains the request, paid SDK input, Entry,
+    /// SDK Cell and outcome. Any SDK work follows the original durable Entry.
+    /// The caller still owns the remaining signing and selection transaction.
+    pub(super) fn execute_governed_add_sdk(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        packet: &V2JoinRequestPacketData<'_>,
+        routing_plan: &[u8],
+        keys: &NativeFounderKeys,
+        cuts: [catcoms_rt::NativeChatPreparedKeyCut; 3],
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+        negative: &catcoms_rt::RequestCancellation,
+    ) -> Result<(), AppError> {
+        self.reserve_governed_add(layout, packet, routing_plan, keys, rng, negative)?;
+        self.require_member_quiescent_for_add(layout)?;
+        let store = layout.checked_store()?;
+        let require_live = || {
+            if negative.is_cancelled() {
+                return Err(refused());
+            }
+            keys.preflight(&self.origin)
+        };
+        let replay = self
+            .member
+            .as_ref()
+            .ok_or_else(refused)?
+            .governed_add_replay()?;
+        let p = self.governed_add.as_mut().ok_or_else(refused)?;
+        p.require_request(store, packet)?;
+        require_live()?;
+        self.owner.prepare_governed_node(store)?;
+        self.owner.prepare_governed_sdk(
+            store,
+            packet.founder_add_data(),
+            keys.original.clone(),
+            &mut p.sdk,
+            cuts,
+        )?;
+        let selected = p.parent.selected_data().ok_or_else(refused)?;
+        let resources = p.parent.resources().clone();
+        let owner = self.owner.borrow_current()?;
+        p.fence.prepare_sdk_entry(store, owner.source(), rng)?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            require_live()?;
+            p.fence.cover_sdk_entry(&guard, selected)?;
+            require_live()
+        })?;
+        self.owner
+            .run_governed_sdk(store, packet.founder_add_data(), replay)?;
+        let owner = self.owner.borrow_current()?;
+        if !p.fence.has_prepared_outcome_data() {
+            let outcome = self.owner.governed_outcome_data(store)?;
+            p.fence
+                .prepare_outcome(store, owner.source(), selected, packet, &outcome, rng)?;
+        }
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            p.fence.cover_outcome(&guard, selected)?;
+            require_live()
+        })?;
+        require_live()
+    }
+
     pub(in crate::store) fn retire_add_for_closed_ui(
         &mut self,
         closed: &[Option<&catcoms_rt::NativeChatKeyDrain>],
