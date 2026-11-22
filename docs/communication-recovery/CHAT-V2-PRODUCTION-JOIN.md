@@ -216,6 +216,9 @@ pending-JOIN record covers the private request and the one exact index
 insertion. The original warm owner can select the insert and release the
 exact signed request bytes while keeping the private package. Cold opening
 can complete the same insertion and verify the original request. The warm
+store can create and cover a first request directly from the caller's accepted
+signed invite. It checks the anchor and mounted pin before creating the MLS
+device, then retains the same request on an exact retry. The warm
 owner verifies the delivery before covering possible Welcome entry, then
 seals and covers the exact successful outcome. New outcome records also retain
 the node page for the original Core candidate under the same Entry commitment.

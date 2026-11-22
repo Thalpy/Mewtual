@@ -2,8 +2,10 @@
 //! facade conversion. Operational cold authoring needs its separate owner.
 use super::super::lifecycle::preparation::Policy;
 use super::*;
-use crate::store::persistence::governance_layout::joined::{JoinedPendingIo, JoinedPinDeclaration};
-use catcoms_replication::chat::join_bindings::SignedInviteBindingData;
+use crate::store::persistence::governance_layout::joined::{
+    first_join_limits, JoinedPendingIo, JoinedPinDeclaration,
+};
+use catcoms_replication::chat::join_bindings::{GenesisAnchorBindingData, SignedInviteBindingData};
 use catcoms_rt::{
     ConnectionLease, CryptoRngCore, MeshTransport, ProtocolId, RequestAuthority,
     RequestCancellation, CHAT_V2_JOIN_KIND, CHAT_V2_JOIN_REQUEST_MAX_BYTES,
@@ -156,6 +158,64 @@ impl NativeTextJoinedStorage {
         anchor: &catcoms_replication::chat::join_bindings::GenesisAnchorBindingData,
     ) -> Result<Option<catcoms_sync::V2PendingJoinContextData>, AppError> {
         self.index.selected_joined_pin_context_data(anchor)
+    }
+
+    /// Prepare and cover the first native request only after the caller's
+    /// accepted anchor agrees with the signed invite and the mounted index.
+    /// An exact retry reuses the original provider, request and covered pin.
+    /// The trusted caller provides its original session cancellation and time.
+    pub fn cover_accepted_first_join(
+        &mut self,
+        invite: &crate::store::NativeTextInvitePacketData<'_>,
+        accepted: &GenesisAnchorBindingData,
+        token: [u8; 32],
+        now_ms: u64,
+        negative: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        // Temporary device/KeyPackage and provider snapshot overlap. The
+        // original sealed Pending pays its persistent owner separately.
+        const PREPARATION_BYTES: usize = 16 * 1024 * 1024;
+        let binding = invite.binding();
+        if negative.is_cancelled() || token == [0; 32] || accepted != &binding.spec_data().anchor {
+            return Err(refused());
+        }
+        let (mount, _fee) = self.index.joined_exchange_resources(PREPARATION_BYTES)?;
+        let require_live = || {
+            if negative.is_cancelled() || mount.is_cancelled() {
+                Err(refused())
+            } else {
+                Ok(())
+            }
+        };
+        if let Some(pending) = &self.pending {
+            pending.require_original_join_intent(binding, token)?;
+            if self.first_join_request_data().is_ok() {
+                return require_live();
+            }
+            self.retry_first_join()?;
+        } else {
+            if binding.expired_at_data(now_ms)
+                || self.pending_join_data()?.is_some()
+                || self.joined_pin_context_data(accepted)?.is_some()
+            {
+                return Err(refused());
+            }
+            require_live()?;
+            let source = PreparedV2JoinRequest::prepare(
+                catcoms_mls::MlsDevice::generate()?,
+                accepted,
+                binding,
+                token,
+                now_ms,
+                first_join_limits()?,
+            )?;
+            require_live()?;
+            self.stage_first_join(source, binding, rng)?;
+        }
+        require_live()?;
+        self.select_first_join()?;
+        require_live()
     }
 
     /// Cover one original request and the first pin insertion under this

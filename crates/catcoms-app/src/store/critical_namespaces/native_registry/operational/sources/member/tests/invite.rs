@@ -89,7 +89,8 @@ async fn native_governed_add_fixture(case: JoinCase) {
         .unwrap();
     let invite =
         crate::store::NativeTextInvitePacketData::decode(saved.packet_bytes_data()).unwrap();
-    let mut request = Some(
+    let native_joiner = matches!(case, JoinCase::NativeResponse | JoinCase::WarmRuntime);
+    let request = (!native_joiner).then(|| {
         PreparedV2JoinRequest::prepare(
             catcoms_mls::MlsDevice::generate().unwrap(),
             &invite.binding().spec_data().anchor,
@@ -98,9 +99,8 @@ async fn native_governed_add_fixture(case: JoinCase) {
             saved.expires_at_ms() - 1,
             DirectJoinLimits::new(512 * 1024, 512 * 1024, 64 * 1024).unwrap(),
         )
-        .unwrap(),
-    );
-    let native_joiner = matches!(case, JoinCase::NativeResponse | JoinCase::WarmRuntime);
+        .unwrap()
+    });
     let join_directory = native_joiner.then(|| tempfile::tempdir().unwrap());
     let mut join_rng = rand_chacha::ChaCha20Rng::seed_from_u64(0xe715);
     let mut joined_storage = join_directory.as_ref().map(|join_dir| {
@@ -117,10 +117,42 @@ async fn native_governed_add_fixture(case: JoinCase) {
         let mut joined =
             NativeTextJoinedStorage::open(join_dir.path(), SECRET, &mut join_rng, current_policy())
                 .unwrap();
-        joined
-            .stage_first_join(request.take().unwrap(), invite.binding(), &mut join_rng)
-            .unwrap();
-        joined.select_first_join().unwrap();
+        let anchor = &invite.binding().spec_data().anchor;
+        let mut other = anchor.clone();
+        other.state[0] ^= 1;
+        let cover = |joined: &mut NativeTextJoinedStorage,
+                     accepted,
+                     token,
+                     now,
+                     rng: &mut rand_chacha::ChaCha20Rng| {
+            joined.cover_accepted_first_join(&invite, accepted, token, now, &negative, rng)
+        };
+        let now = saved.expires_at_ms() - 1;
+        assert!(cover(&mut joined, &other, [59; 32], now, &mut join_rng).is_err());
+        assert!(cover(
+            &mut joined,
+            anchor,
+            [59; 32],
+            saved.expires_at_ms(),
+            &mut join_rng
+        )
+        .is_err());
+        assert!(joined.pending_join_data().unwrap().is_none());
+        cover(&mut joined, anchor, [59; 32], now, &mut join_rng).unwrap();
+        let original = joined.first_join_request_data().unwrap().to_vec();
+        assert!(cover(&mut joined, anchor, [60; 32], now, &mut join_rng).is_err());
+        cover(
+            &mut joined,
+            anchor,
+            [59; 32],
+            saved.expires_at_ms(),
+            &mut join_rng,
+        )
+        .unwrap();
+        assert_eq!(
+            joined.first_join_request_data().unwrap(),
+            original.as_slice()
+        );
         joined
     });
     let bytes = if let Some(joined) = &joined_storage {

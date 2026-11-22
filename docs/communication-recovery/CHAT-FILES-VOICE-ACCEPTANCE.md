@@ -91,6 +91,16 @@ including the original warm graph paired with its selected Core prefix and
 one closed runtime. The same matrix passed the transport limits and receiver
 retirement cases. [Warm joined runtime CI](https://github.com/Thalpy/Mewtual/actions/runs/45054233586).
 
+At `2752dd43`, Windows and Linux passed all four focused desktop cases. These
+exercise an authenticated idle cold reopen, refusal of unowned directories,
+invitation mode isolation, and exact Welcome replay after a UI lock. The
+connected founder case also checks valid and malformed invite previews and
+refuses an original preview queued before lock. [Native joined-vault and invitation CI](https://github.com/Thalpy/Mewtual/actions/runs/45058968071).
+
+At `0058ccf1`, Windows and Linux passed both selected-history page cases,
+including verification of a proof read through pages produced by actual Core
+selection. [Selected-history page CI](https://github.com/Thalpy/Mewtual/actions/runs/45058635166).
+
 ## Invitation and join branch CI (22 November 2026)
 
 Both hosted workflows passed on Linux and Windows at

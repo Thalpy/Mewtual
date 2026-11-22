@@ -14,7 +14,7 @@ const SOURCE_FEE: usize = 12 * MAX_FRAME + 4 * 1024 * 1024;
 const SOURCE_ID_DOMAIN: &str = "catcoms/private-chat-v2-native-pending-source-id/v1";
 mod welcome;
 
-fn limits() -> Result<DirectJoinLimits, AppError> {
+pub(in crate::store) fn first_join_limits() -> Result<DirectJoinLimits, AppError> {
     DirectJoinLimits::new(
         512 * 1024,
         2 * 1024 * 1024,
@@ -116,7 +116,7 @@ pub(super) fn select(
     {
         return Err(denied());
     }
-    let pending = RecoveredPinnedPending::open(key, layout, &original.1, limits()?)?;
+    let pending = RecoveredPinnedPending::open(key, layout, &original.1, first_join_limits()?)?;
     let (before, after) = pending.index_frames();
     let (request, context) = pending.pending_data();
     if context.original_pending
@@ -271,7 +271,7 @@ impl ServerStore {
             rng,
         )?;
         let exact = Zeroizing::new(prepared.seal(&key, rng)?.to_vec());
-        let recovered = RecoveredPinnedPending::open(&key, layout, &exact, limits()?)?;
+        let recovered = RecoveredPinnedPending::open(&key, layout, &exact, first_join_limits()?)?;
         if recovered.index_frames().0 != selected.selected.1.as_slice() {
             return Err(denied());
         }
@@ -373,6 +373,23 @@ impl ServerStore {
 }
 
 impl JoinedPendingIo {
+    pub(in crate::store) fn require_original_join_intent(
+        &self,
+        invite: &SignedInviteBindingData,
+        request_token: [u8; 32],
+    ) -> Result<(), AppError> {
+        let packet =
+            catcoms_sync::V2JoinRequestPacketData::decode(self.prepared.request_bytes_data())
+                .map_err(|_| denied())?;
+        let original = packet.founder_add_data();
+        if original.invite.encode() != invite.encode()
+            || original.request.spec_data().request_token != request_token
+        {
+            return Err(denied());
+        }
+        Ok(())
+    }
+
     fn require_catalog(&self, store: &ServerStore) -> Result<(), AppError> {
         store.require_governance_directory_matches_root(&self.directory)?;
         absent(&fixed(store, false, governance::GOVERNANCE_SEED)?)?;
@@ -400,7 +417,7 @@ impl JoinedPendingIo {
             &key,
             selected.index.layout_data(),
             &self.exact,
-            limits()?,
+            first_join_limits()?,
         )?;
         if expected.index_frames().0 != selected.selected.1.as_slice() {
             return Err(denied());
