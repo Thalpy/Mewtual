@@ -14,6 +14,7 @@ const MAX_PREPARATIONS: usize = 2;
 /// negative observer may retain the collection, an issuer or Physical here.
 pub(super) struct Control {
     captured: AtomicBool,
+    ui_add_pass: AtomicBool,
     preparations: AtomicUsize,
     _payment: CatalogReadReservation,
 }
@@ -21,9 +22,16 @@ impl Control {
     pub(super) fn new(payment: CatalogReadReservation) -> Self {
         Self {
             captured: AtomicBool::new(false),
+            ui_add_pass: AtomicBool::new(false),
             preparations: AtomicUsize::new(0),
             _payment: payment,
         }
+    }
+    pub(super) fn try_begin_ui_add_pass(&self) -> Option<UiAddPass<'_>> {
+        self.ui_add_pass
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| UiAddPass(&self.ui_add_pass))
     }
     pub(super) fn enter_preparation(self: &Arc<Self>) -> Option<PreparationEnd> {
         self.preparations
@@ -42,6 +50,13 @@ impl Control {
     }
 }
 
+pub(super) struct UiAddPass<'a>(&'a AtomicBool);
+impl Drop for UiAddPass<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Admission and closure share one packed atomic: no delayed increment can
 /// arrive behind CLOSED+zero. LAST after actual preparation custody leaves.
 pub(super) struct PreparationEnd(Arc<Control>);
@@ -56,6 +71,7 @@ pub(super) fn invoice<T: MeshTransport, R: CryptoRngCore>() -> usize {
     2 * std::mem::size_of::<NativeTextSourceRetirement<T, R>>()
         + 2 * std::mem::size_of::<NativeTextSourceRetirementPreparation<T, R>>()
         + std::mem::size_of::<Control>()
+        + ui_add_retirement::invoice::<T, R>()
         // The Weak book can outlive Sources. Its real allocation header and
         // Mutex/Vec metadata stay covered by the capture's Control fee tail.
         + std::mem::size_of::<SourceBook<T, R>>() + 2 * std::mem::size_of::<usize>()

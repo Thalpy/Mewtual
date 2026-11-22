@@ -23,6 +23,12 @@ invitation cohort. The replacement run superseded both jobs during the repeat
 of the pinned predecessor step.
 [Outcome and accounting CI](https://github.com/Thalpy/Mewtual/actions/runs/45023926239).
 
+At `03e1dc6d`, the native fixture used the original runtime to execute MLS Add,
+cover the Outcome and Header attempt and Raw, and independently reopen the
+exact bytes. Both platforms passed the partial-Add and original Source
+retirement cases as well as the native invitation cohort.
+[Header and Source CI](https://github.com/Thalpy/Mewtual/actions/runs/45026146810).
+
 ## Invitation and join branch CI (22 November 2026)
 
 Both hosted workflows passed on Linux and Windows at

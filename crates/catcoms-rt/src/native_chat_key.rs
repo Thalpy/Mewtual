@@ -501,6 +501,12 @@ pub struct NativeChatPreparedKeyCut {
     entered: bool,
 }
 impl NativeChatPreparedKeyCut {
+    /// Pure identity and closure check for the actual UI counters a lock
+    /// owns. This cannot close a generation or admit a primitive.
+    pub fn belongs_to_closed_ui(&self, closed: &[Option<&NativeChatKeyDrain>]) -> bool {
+        closed_ui_in(&self.ui.counter, closed)
+    }
+
     /// Exact negative metadata only, including after cancellation. Unlike
     /// preflight this deliberately checks no current UI/source permission: a
     /// cleanup owner needs to distinguish a never-entered cut from partial
@@ -619,6 +625,13 @@ pub struct NativeChatKeyEnds {
     slots: [Option<KeyEnd>; PURPOSES],
 }
 impl NativeChatKeyEnds {
+    pub fn all_ui_counters_closed_in(&self, closed: &[Option<&NativeChatKeyDrain>]) -> bool {
+        self.slots
+            .iter()
+            .flatten()
+            .all(|end| closed_ui_in(&end.ui.counter, closed))
+    }
+
     pub fn new() -> Self {
         Self {
             slots: std::array::from_fn(|_| None),
@@ -651,6 +664,14 @@ pub struct NativeChatKeyDrain {
     original: Arc<Counter>,
 }
 
+fn closed_ui_in(counter: &Arc<Counter>, closed: &[Option<&NativeChatKeyDrain>]) -> bool {
+    !counter.open()
+        && closed
+            .iter()
+            .flatten()
+            .any(|drain| Arc::ptr_eq(counter, &drain.original))
+}
+
 /// Fixed application-wrapper overlap for one Host/UI generation, including
 /// conservative Arc controls and preparation/negative owners. Caller custody,
 /// actual waiting tasks, SDK/OS heaps and allocator/RSS are separate invoices.
@@ -667,6 +688,10 @@ pub const NATIVE_CHAT_UI_FIXED_METADATA_BYTES: usize = std::mem::size_of::<Host>
     + 8 * 64;
 
 impl NativeChatKeyDrain {
+    pub fn is_closed_cached(&self) -> bool {
+        !self.original.open()
+    }
+
     /// Match the actual original permanently closed Source, even while work
     /// still owns its final End. A UI drain or another Source cannot match it.
     /// Check outside writers because upgrading the observation briefly pins it.

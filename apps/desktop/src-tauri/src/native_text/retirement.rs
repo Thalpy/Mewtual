@@ -163,6 +163,11 @@ struct Job {
     // One original, negative-only counter observation. Install before publishing
     // PENDING; a failed task must never substitute a replacement Root registry.
     drain: std::sync::OnceLock<NativeTextUiRetirementDrain>,
+    // Retain the same original runtime capture if the first task is lost or
+    // never polled. It cannot keep the source collection or its issuer alive.
+    add_cleanup: std::sync::OnceLock<sources::UiAddRetirement>,
+    add_cleanup_complete: AtomicBool,
+    add_cleanup_running: AtomicBool,
     completed: Notify,
     _metadata: NativeUiInvocationMetadata,
 }
@@ -171,6 +176,9 @@ impl Job {
         Arc::new(Self {
             status: AtomicU8::new(PENDING),
             drain: std::sync::OnceLock::new(),
+            add_cleanup: std::sync::OnceLock::new(),
+            add_cleanup_complete: AtomicBool::new(false),
+            add_cleanup_running: AtomicBool::new(false),
             completed: Notify::new(),
             _metadata: metadata,
         })
@@ -178,14 +186,18 @@ impl Job {
     fn is_finished_cached(&self) -> bool {
         match self.status.load(Ordering::Acquire) {
             COMPLETE => true,
-            FAILED => self
-                .drain
-                .get()
-                .is_some_and(|original| original.is_drained_cached()),
+            FAILED => {
+                (self.add_cleanup.get().is_none()
+                    || self.add_cleanup_complete.load(Ordering::Acquire))
+                    && self
+                        .drain
+                        .get()
+                        .is_some_and(|original| original.is_drained_cached())
+            }
             _ => false,
         }
     }
-    async fn wait(&self) -> Result<(), &'static str> {
+    async fn wait(self: &Arc<Self>) -> Result<(), &'static str> {
         loop {
             let notified = self.completed.notified();
             tokio::pin!(notified);
@@ -196,12 +208,54 @@ impl Job {
                     // Task destruction closes affine owners, but admitted key
                     // Ends may still exist. Only THEIR original counters can
                     // establish recovery, even if the mounted vault changed.
+                    self.reconcile_add().await?;
                     self.drain.get().ok_or(FAILED_MESSAGE)?.wait().await;
                     return Ok(());
                 }
                 _ => notified.await,
             }
         }
+    }
+
+    async fn reconcile_add(self: &Arc<Self>) -> Result<(), &'static str> {
+        if self.add_cleanup.get().is_none() {
+            return Ok(());
+        }
+        while !self.add_cleanup_complete.load(Ordering::Acquire) {
+            if self
+                .add_cleanup_running
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                let pass = AddCleanupPass(self.clone());
+                tokio::task::spawn_blocking(move || pass.run())
+                    .await
+                    .map_err(|_| FAILED_MESSAGE)??;
+            }
+            if !self.add_cleanup_complete.load(Ordering::Acquire) {
+                SystemClock.sleep(Duration::from_millis(10)).await;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One already-paid pass may survive a dropped waiter. The job retains its
+/// original weak runtime capture and never queues a second simultaneous pass.
+struct AddCleanupPass(Arc<Job>);
+impl AddCleanupPass {
+    fn run(self) -> Result<(), &'static str> {
+        let cleanup = self.0.add_cleanup.get().ok_or(FAILED_MESSAGE)?;
+        let closed = self.0.drain.get().ok_or(FAILED_MESSAGE)?;
+        if cleanup.try_retire(closed).map_err(|_| FAILED_MESSAGE)? {
+            self.0.add_cleanup_complete.store(true, Ordering::Release);
+        }
+        Ok(())
+    }
+}
+impl Drop for AddCleanupPass {
+    fn drop(&mut self) {
+        self.0.add_cleanup_running.store(false, Ordering::Release);
     }
 }
 
@@ -233,7 +287,11 @@ struct OwnedTask {
 }
 impl OwnedTask {
     async fn run(mut self) {
-        if let Some(batch) = self.batch.take() {
+        if let Some(mut batch) = self.batch.take() {
+            batch.close_owners();
+            if self.completion.original.reconcile_add().await.is_err() {
+                return;
+            }
             batch.retire().await;
         }
         self.completion.finish();
@@ -314,6 +372,7 @@ pub(super) async fn older_with_spawn(
         // Declare all outgoing owners before guards. Every losing candidate,
         // old completion, batch and GC object is destroyed outside those guards.
         let mut original: Option<NativeTextUiRetirement> = None;
+        let mut add_cleanup = None;
         let mut previous = None;
         let mut garbage = None;
         let step = {
@@ -328,6 +387,10 @@ pub(super) async fn older_with_spawn(
                 Step::Waiting(job.clone())
             } else if let Some(vault) = store.as_ref().and_then(MountedVault::as_text_v2) {
                 let through = generation.checked_sub(1).ok_or(UNAVAILABLE)?;
+                add_cleanup = state
+                    .native_text
+                    .sources
+                    .capture_ui_add_retirement(&store)?;
                 original = Some(
                     vault
                         .begin_ui_retirement(through)
@@ -336,6 +399,9 @@ pub(super) async fn older_with_spawn(
                 match original.as_ref().expect("captured above").state() {
                     NativeTextUiRetirementState::Started => {
                         let job = candidate.take().expect("one independently paid candidate");
+                        if let Some(cleanup) = add_cleanup.take() {
+                            assert!(job.add_cleanup.set(cleanup).is_ok(), "one publication");
+                        }
                         job.drain
                             .set(
                                 original
@@ -362,6 +428,7 @@ pub(super) async fn older_with_spawn(
                 Step::Drained
             }
         };
+        drop(add_cleanup);
         drop(garbage);
         drop(previous);
         drop(candidate);
@@ -403,6 +470,7 @@ pub(super) async fn older_with_spawn(
 // each actual batch/record; this pins the extra native wrappers to their4KiB.
 const _: () = assert!(
     2 * std::mem::size_of::<OwnedTask>()
+        + 2 * std::mem::size_of::<AddCleanupPass>()
         + std::mem::size_of::<Job>()
         + std::mem::size_of::<Prelude>()
         + std::mem::size_of::<Coalescer>()

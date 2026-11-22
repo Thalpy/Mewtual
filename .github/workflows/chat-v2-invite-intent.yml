@@ -58,6 +58,8 @@ on:
       - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/network/tests.rs'
       - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/retirement.rs'
       - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/retirement/**'
+      - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/ui_add_retirement.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/native_ui.rs'
       - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/member/tests/admission.rs'
       - 'crates/catcoms-replication/src/chat/join_bindings/**'
       - 'crates/catcoms-replication/src/chat/join_bindings.rs'
@@ -109,6 +111,8 @@ jobs:
         run: python .github/scripts/check-chat-v2-invite-intent.py join-welcome
       - name: Check that whole-Source shutdown drains the original partial Add
         run: python .github/scripts/check-chat-v2-invite-intent.py add-source-close
+      - name: Check that UI retirement resumes only the original admitted partial Add
+        run: python .github/scripts/check-chat-v2-invite-intent.py add-ui-lock
       - name: Check invitation journal format and physical-prefix controls
         run: python .github/scripts/check-chat-v2-invite-intent.py journal
       - name: Check the governed Add fence and old WAL refusal

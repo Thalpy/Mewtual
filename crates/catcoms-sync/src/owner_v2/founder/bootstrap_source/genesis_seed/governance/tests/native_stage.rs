@@ -3,6 +3,51 @@
 use super::*;
 
 #[test]
+fn governed_add_ui_retirement_finishes_the_original_partial_sdk_after_its_ui_closes() {
+    let (original, _reservation, _opened, _old_fee) = prepared_node(0xec12);
+    let mut node = original.prepare_governance_data().unwrap();
+    let native = Native::new();
+    let request = Request::new(&node, 96);
+    let count = Arc::new(AtomicUsize::new(0));
+    begin(&mut node, &native, &count, request.data());
+    hook(TestCut::BeforeSdkExecution, || {
+        panic!("after the native SDK End")
+    });
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        node.execute_add_data_native(request.data())
+    }))
+    .is_err());
+    assert!(node.completed_add_data().is_err());
+    let live = native.ui.observe_retirement();
+    assert!(node
+        .retire_add_for_closed_ui(&[Some(&live)])
+        .unwrap()
+        .is_none());
+    let foreign = Native::new().ui.retire();
+    assert!(node
+        .retire_add_for_closed_ui(&[Some(&foreign)])
+        .unwrap()
+        .is_none());
+
+    let original = native.ui.retire();
+    assert!(!original.is_drained());
+    let retired = node
+        .retire_add_for_closed_ui(&[Some(&original)])
+        .unwrap()
+        .unwrap();
+    assert!(node.completed_add_data().is_ok());
+    assert!(node.require_sdk_current_data().is_ok());
+    assert!(!original.is_drained());
+    drop(retired);
+    assert!(original.is_drained());
+    assert!(node
+        .retire_add_for_closed_ui(&[Some(&original)])
+        .unwrap()
+        .is_none());
+    assert_eq!(count.load(SeqCst), 1);
+}
+
+#[test]
 fn governed_add_whole_source_retirement_destroys_partial_candidate_before_key_drain() {
     let (original, _reservation, _opened, _old_fee) = prepared_node(0xec10);
     let mut node = original.prepare_governance_data().unwrap();

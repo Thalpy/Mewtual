@@ -27,10 +27,12 @@ mod selection;
 pub use capture::{NativeTextCreationBudget, NativeTextCreationPreparation};
 pub use selection::NativeTextRuntimeSelection;
 mod retirement;
+mod ui_add_retirement;
 pub use retirement::{
     NativeTextSourceRetirement, NativeTextSourceRetirementPreparation,
     NativeTextSourceRetirementRefusal, NativeTextSourceRetirementStatus,
 };
+pub use ui_add_retirement::NativeTextUiAddRetirement;
 
 const MAX_SOURCES: usize = 64;
 const CONTROL_BYTES: usize = 64 * 1024;

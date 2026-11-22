@@ -10,6 +10,13 @@ use catcoms_mls::persist::text_current_add::{
 };
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextHost<T, R> {
+    pub(in crate::store) fn retire_add_for_closed_ui(
+        &mut self,
+        closed: &[Option<&catcoms_rt::NativeChatKeyDrain>],
+    ) -> Result<(), AppError> {
+        self.owner.retire_add_for_closed_ui(closed)
+    }
+
     /// Whole native Source retirement has exclusive custody of this idle host.
     /// It must retire existing Add Ends before waiting for drained keys.
     pub(in crate::store) fn discard_add_for_closed_source(

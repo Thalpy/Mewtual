@@ -291,30 +291,20 @@ Whole-Source retirement now loans an idle original runtime after its Source
 admission closes. It matches the actual permanently closed counter, retires
 the governed operation, and drops its private SDK candidate before the key
 Ends that operation owns. Outstanding external Ends still delay destruction of
-the whole runtime. The original durable records remain for recovery. UI lock
-requires a separate cleanup path that retains the live Source.
+the whole runtime. The original durable records remain for recovery.
 
-An idle Runtime-held candidate retains real native Ends. UI lock currently
-waits those counters while retaining canonical Sources and Runtime bodies.
-Connecting the new owner without cancellation cleanup would deadlock lock,
-unlock and full close. Whole-Source retirement has the analogous keys-before-
-Runtime cycle. There is no reachable Add owner today, so this is an integration
-requirement, not a current lock regression.
+UI lock uses a separate cleanup pass that retains the live Source. Its
+coalesced job keeps a bounded capture of the original runtime collection
+alongside the exact closed UI counters. Before waiting on those counters,
+it borrows each idle runtime and retires only custody from that batch. An
+already-admitted partial SDK operation continues on its original Cell and
+End. The same capture survives an unpolled task or lost waiter. Busy runtime
+loans return before the next pass, including when zero Ends exist.
 
-Add a bounded capture of the ORIGINAL Runtime cells beside the original native
-retirement Job. After generation closure, it must borrow only idle runtimes,
-reconcile actual admitted work and dispose eligible cancelled Add custody
-outside every writer BEFORE waiting for key drainage. Do not use whole-Source
-`capture_retirement` for UI locking; it permanently closes Source scope.
-The capture must also cover Prepared and in-flight preparation: the frozen
-secret routing plaintext exists before AddSdk entry, when key Ends can still
-be zero. Zero counters alone cannot decide that no cleanup owner is needed.
-
-Retain cleanup custody and retry progress on the SAME Job/Runtime across lost
-waiters, unpolled tasks and panics. Never replace the original mount/drain with
-an empty one. Active disk/SDK work and ambiguous durable debt must remain
-owned. Do not drop an End merely to make lock appear complete while retaining
-its covered secret candidate. Define a legal cleanup outcome for every phase.
+Terminal SDK failure still needs an owning recovery decision using the
+original durable Entry and any downstream files. UI lock preserves the
+existing candidate when that proof is unavailable. Production must reconcile
+admitted writes before retiring the operation that owns them.
 
 ### Old-reader fence
 

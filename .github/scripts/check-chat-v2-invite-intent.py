@@ -24,6 +24,7 @@ COHORTS = {
     "add-outcome": ("catcoms-app", "governed_add_outcome_", 4),
     "add-header-signing": ("catcoms-app", "governed_add_header_signing_", 1),
     "add-source-close": ("catcoms-sync", "governed_add_whole_source_retirement_", 1),
+    "add-ui-lock": ("catcoms-sync", "governed_add_ui_retirement_", 1),
     "source-retirement": ("catcoms-app", "operational::sources::retirement::tests::", 11),
     "control-scratch": ("catcoms-app", "v2_text::control::tests::scratch::", 3),
     "warm-member-fence": ("catcoms-app", "a_crash_left_founder_wal_keeps_the_member_lane_closed_until_it_is_gone", 1),

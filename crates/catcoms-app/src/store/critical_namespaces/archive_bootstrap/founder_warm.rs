@@ -534,6 +534,16 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
         Ok(())
     }
 
+    pub(in crate::store) fn retire_add_for_closed_ui(
+        &mut self,
+        closed: &[Option<&catcoms_rt::NativeChatKeyDrain>],
+    ) -> Result<(), AppError> {
+        if let Some(host) = &mut self.host {
+            host.retire_add_for_closed_ui(closed)?;
+        }
+        Ok(())
+    }
+
     /// Test only: retain a genuine member-save source End while the whole
     /// driver attempts to close. No key/signing/save authorization is tested.
     #[cfg(all(test, any(windows, target_os = "linux")))]

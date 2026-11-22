@@ -139,6 +139,42 @@ impl std::fmt::Debug for RetiredV2FounderAddNativeCustody {
 }
 
 impl<T, R: CryptoRngCore> PreparedV2FounderGovernanceNode<T, R> {
+    /// UI lock keeps the Source and the original request alive. Only retire
+    /// custody from the actual closed generation's batch. A partial Cell
+    /// first finishes that same admitted SDK unit outside writers.
+    pub fn retire_add_for_closed_ui(
+        &mut self,
+        closed: &[Option<&catcoms_rt::NativeChatKeyDrain>],
+    ) -> Result<Option<RetiredV2FounderAddNativeCustody>, SyncError> {
+        let Some(pending) = self.pending.as_ref() else {
+            return Ok(None);
+        };
+        let cuts = [&pending.sdk_cut, &pending.header_cut, &pending.welcome_cut];
+        if !cuts
+            .into_iter()
+            .filter_map(Option::as_ref)
+            .any(|cut| cut.belongs_to_closed_ui(closed))
+        {
+            return Ok(None);
+        }
+        if !cuts
+            .into_iter()
+            .filter_map(Option::as_ref)
+            .all(|cut| cut.belongs_to_closed_ui(closed))
+            || !pending.ends.all_ui_counters_closed_in(closed)
+        {
+            return Err(unavailable());
+        }
+        let phase = pending.phase;
+        if phase == Phase::Prepared {
+            return self.retire_unstarted_add_native_data().map(Some);
+        }
+        if phase == Phase::SdkEntered && self.completed_add_data().is_err() {
+            self.finish_admitted_add_data_native()?;
+        }
+        self.retire_closed_add_native_data().map(Some)
+    }
+
     /// Complete ONLY the SAME already-admitted finite SDK unit from its frozen
     /// inputs/time and retained RNG. It neither constructs another Cell nor
     /// enters a new native cut. A real retained source End is mandatory even

@@ -32,6 +32,7 @@ pub use sources::{
     NativeTextSourceBudget, NativeTextSourceCommand, NativeTextSourcePolicy,
     NativeTextSourcePreparation, NativeTextSourceRetirement, NativeTextSourceRetirementPreparation,
     NativeTextSourceRetirementRefusal, NativeTextSourceRetirementStatus, NativeTextSources,
+    NativeTextUiAddRetirement,
 };
 mod ui_state;
 mod work_retirement;

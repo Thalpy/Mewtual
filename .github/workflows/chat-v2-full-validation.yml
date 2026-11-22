@@ -12,7 +12,7 @@ on:
       scope:
         description: Workspaces to execute; all is the normal validation run.
         type: choice
-        options: [all, root, native, native-focused]
+        options: [all, root, native, native-focused, native-lock]
         default: all
       run_deferred_catchup:
         description: Include the slow case at final Chat V2 acceptance (scope all or root).
@@ -36,7 +36,7 @@ env:
 jobs:
   root:
     name: Root tests, slow case deferred (${{ matrix.os }})
-    if: github.event_name != 'workflow_dispatch' || (inputs.scope != 'native' && inputs.scope != 'native-focused')
+    if: github.event_name != 'workflow_dispatch' || (inputs.scope != 'native' && inputs.scope != 'native-focused' && inputs.scope != 'native-lock')
     runs-on: ${{ matrix.os }}
     # Both OSes have reached the old aggregate120-minute CI bound while
     # individual tests still reported progress (Linux run43547127334 included).
@@ -127,29 +127,51 @@ jobs:
       - name: Install frontend dependencies
         run: npm --prefix apps/desktop ci
       - name: Run the complete frontend tests
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && inputs.scope != 'native-lock'
         run: npm --prefix apps/desktop test
       - name: Check frontend types
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && inputs.scope != 'native-lock'
         run: npm --prefix apps/desktop run check
       # Native builds consume real frontend assets; build them on both operating systems.
       - name: Build frontend assets
         run: npm --prefix apps/desktop run build
       - name: Check original native IPC and delayed-reply custody regressions
+        if: inputs.scope != 'native-lock'
         run: >-
           cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --lib -- --exact --test-threads=1
           voice_activation_tests::admitted_ipc::admitted_commands_cross_real_tauri_json_dispatch_and_recover_locked_history
           voice_handoff::commands::tests::ready_and_closed_share_one_guard_and_delayed_closed_body_remains_paid_after_collection
       - name: Run the complete native workspace
-        if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || inputs.scope != 'native-focused') }}
+        if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || (inputs.scope != 'native-focused' && inputs.scope != 'native-lock')) }}
         run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --no-fail-fast
       - uses: actions/setup-python@v5
-        if: github.event_name == 'workflow_dispatch' && inputs.scope == 'native-focused'
+        if: github.event_name == 'workflow_dispatch' && (inputs.scope == 'native-focused' || inputs.scope == 'native-lock')
         with:
           python-version: '3.12'
       - name: Run exact native gate regressions (focused, not complete acceptance)
         if: github.event_name == 'workflow_dispatch' && inputs.scope == 'native-focused'
         run: python .github/scripts/check-chat-v2-native-gates.py
+      - name: Check native UI retirement and original lock worker lifetimes
+        if: github.event_name == 'workflow_dispatch' && inputs.scope == 'native-lock'
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import runpy
+
+          guard = runpy.run_path('.github/scripts/check-chat-v2-member-save.py')
+          directory = Path('logs/chat-v2-native-gates')
+          directory.mkdir(parents=True, exist_ok=True)
+          command = ['cargo', 'test', '--locked', '--manifest-path',
+                     'apps/desktop/src-tauri/Cargo.toml', '--lib',
+                     'native_text_retirement_', '--', '--test-threads=1']
+          code, summaries, timed_out, _ = guard['run_logged'](
+              'native-ui-retirement', command, directory, limit=45 * 60,
+          )
+          if timed_out:
+              raise RuntimeError('native UI retirement exceeded its deadline')
+          guard['validate'](''.join(summaries), code, 4)
+          PY
       # Collect the separate compile gate even if a native test fails, without masking it.
       - name: Check the native workspace
         if: ${{ !cancelled() }}

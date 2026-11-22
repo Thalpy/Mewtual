@@ -509,6 +509,17 @@ pub struct RetirementDrain {
     records: [Option<Arc<RetirementRecord>>; GENERATIONS],
 }
 impl RetirementDrain {
+    pub(super) fn all_closed(&self) -> bool {
+        self.records
+            .iter()
+            .flatten()
+            .all(|record| record.drain.is_closed_cached())
+    }
+
+    pub(super) fn add_cleanup_counters(&self) -> [Option<&NativeChatKeyDrain>; GENERATIONS] {
+        std::array::from_fn(|index| self.records[index].as_ref().map(|record| &record.drain))
+    }
+
     /// Both closure and zero entered work are required. Zero while an owner is
     /// still open must never permit GC or recovery after a failed native task.
     pub fn is_drained_cached(&self) -> bool {
@@ -530,14 +541,20 @@ pub struct RetirementBatch {
     records: [Option<Arc<RetirementRecord>>; GENERATIONS],
 }
 impl RetirementBatch {
-    /// Outside every guard. Never return success merely because a wait timed
-    /// out. Caller owns/coalesces this task independently of its IPC reply.
-    pub async fn retire(mut self) {
+    /// Start the original closure outside all writers, before reconciling any
+    /// finite runtime work that itself retains an End from this batch.
+    pub fn close_owners(&mut self) {
         for owner in &mut self.owners {
             if let Some(owner) = owner.take() {
                 drop(owner.retire());
             }
         }
+    }
+
+    /// Outside every guard. Never return success merely because a wait timed
+    /// out. Caller owns/coalesces this task independently of its IPC reply.
+    pub async fn retire(mut self) {
+        self.close_owners();
         for record in self.records.iter().flatten() {
             record.drain.wait().await;
         }

@@ -225,16 +225,30 @@ async fn native_runtime_invite_join_request_requires_the_actual_signed_journal()
         assert_eq!(entries.len(), 1);
         entries[0].owner.observe_retirement()
     };
+    let unpolled = prepare(&owner, &row, &vault, &budget);
+    let cleanup = owner.capture_ui_add_retirement();
+    let retiring = vault.begin_ui_retirement(7).unwrap();
+    let ui = retiring.observe_drain().unwrap();
+    let mut batch = retiring.into_batch().unwrap();
+    assert!(!cleanup.try_retire(&ui).unwrap());
+    batch.close_owners();
+    assert!(!ui.is_drained_cached());
+    assert!(
+        !cleanup.try_retire(&ui).unwrap(),
+        "the original runtime is still loaned"
+    );
+    let original_cell = unpolled.inner.loan.cell.clone();
+    drop(unpolled);
+    assert!(cleanup.try_retire(&ui).unwrap());
+    assert!(ui.is_drained_cached());
+    assert!(original_cell.state.lock().unwrap().interrupted);
+    assert!(
+        !key_work.is_closed_cached(),
+        "UI lock keeps the original Source open"
+    );
     let mut close = owner.prepare_retirement().unwrap();
-    assert!(
-        !key_work.is_drained(),
-        "the actual runtime owns the Add and Header Ends"
-    );
     close.try_retire().unwrap();
-    assert!(
-        key_work.is_drained(),
-        "the idle runtime retired its closed Source work before key wait"
-    );
+    assert!(key_work.is_drained());
 }
 
 #[tokio::test]

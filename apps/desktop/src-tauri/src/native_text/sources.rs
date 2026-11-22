@@ -4,12 +4,14 @@ use super::*;
 use catcoms_app::store::{
     ArchiveFounderPolicy, CriticalCatalogReadPool, FreshV2TextFounderPolicy, GenesisSeedBudget,
     NativeTextSourcePolicy, NativeTextSourceRetirementPreparation,
-    NativeTextSourceRetirementStatus, NativeTextSources, NativeTextVault,
-    NativeTextWorkRetirementPreparation, NativeUiInvocationMetadata, V2TextHostPolicy,
+    NativeTextSourceRetirementStatus, NativeTextSources, NativeTextUiAddRetirement,
+    NativeTextVault, NativeTextWorkRetirementPreparation, NativeUiInvocationMetadata,
+    V2TextHostPolicy,
 };
 use catcoms_sync::owner_v2::FounderSnapshotLimits;
 
 type Sources = NativeTextSources<catcoms_net::MeshService, OsCryptoRng>;
+pub(super) type UiAddRetirement = NativeTextUiAddRetirement<catcoms_net::MeshService, OsCryptoRng>;
 type Retirement = NativeTextSourceRetirementPreparation<catcoms_net::MeshService, OsCryptoRng>;
 type RemovedPair = (Option<Sources>, Option<MountedVault>);
 
@@ -55,6 +57,24 @@ pub(super) struct Controller {
     pub(super) boot: Arc<boot_lifetime::Control>,
 }
 impl Controller {
+    pub(super) fn capture_ui_add_retirement(
+        &self,
+        store: &Option<MountedVault>,
+    ) -> Result<Option<UiAddRetirement>, &'static str> {
+        let record = self
+            .record
+            .try_lock()
+            .map_err(|_| "Chat is still locking. Try again.")?;
+        if !record.ever_installed && record.sources.is_none() {
+            return Ok(None);
+        }
+        record.require_pair(store)?;
+        Ok(record
+            .sources
+            .as_ref()
+            .map(Sources::capture_ui_add_retirement))
+    }
+
     /// Same guard-safe finite capture as founding, selected only by the actual
     /// native row. Caller checks its incarnation while holding the table guard.
     pub(super) fn capture_member(
