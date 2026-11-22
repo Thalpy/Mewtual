@@ -27,7 +27,7 @@ macro_rules! redacted_debug {
 mod ordinary;
 mod selected_history;
 mod signing;
-pub use ordinary::{V2GeneralAcceptanceSource, V2OrdinaryDependency};
+pub use ordinary::{V2GeneralAcceptanceSource, V2OrdinaryDependency, V2OrdinaryReceiveStatus};
 pub use selected_history::{
     V2ArchivedHeaderRefusal, V2PreparedSelectedHistoryData, V2SelectedHistoryHashData,
     V2SelectedHistoryNodeData, V2SelectedHistoryTipData, V2SelectedParentProof,

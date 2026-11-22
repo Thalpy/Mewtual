@@ -98,6 +98,8 @@ verifier and received topic before opening the envelope. The receiver can import
 original channel ledger with exact dependencies. The resulting effect is provisional and
 requires the receiver's actual view and current sender Admission. An original opened by
 one source cannot be applied through another source with equal cryptographic bytes.
+The receiver resolves parents and targets from that ledger's Valid originals. Missing
+dependencies return their exact IDs without importing the child or making it visible.
 The mounted joined source prepares one exact debt item for its original mesh and releases
 the metadata slot before awaiting the driver. The caller, original Core Admission and
 selected MLS fence must still authorize it at the driver's submission boundary. A real

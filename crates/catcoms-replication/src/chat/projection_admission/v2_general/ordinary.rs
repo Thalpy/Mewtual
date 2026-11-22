@@ -22,6 +22,12 @@ pub enum V2GeneralAcceptanceSource<'a> {
 }
 redacted_debug!(V2OrdinaryDependency<'_>, V2GeneralAcceptanceSource<'_>);
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum V2OrdinaryReceiveStatus {
+    WaitingForDependencies(Vec<ActionId>),
+    Retained(ActionState),
+}
+
 impl V2GeneralPrefixVerifier {
     fn require_admission(&self, admission: &V2AuthenticatedAdmission) -> Result<(), ChatError> {
         if !Arc::ptr_eq(&self.identity, &admission.core.identity)
@@ -181,15 +187,18 @@ impl V2GeneralPrefixVerifier {
         dependencies: &[V2OrdinaryDependency<'_>],
         work: usize,
     ) -> Result<ActionState, ChatError> {
-        if !ledger
-            .projection
-            .current
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, &view.life))
-        {
-            return Err(ChatError::Scope);
-        }
+        self.require_receiver_ledger(ledger, view, action)?;
         let (verified, token) = self.provisional_evidence(action, admission, dependencies, view)?;
+        Self::apply_provisional(ledger, action, work, verified, token)
+    }
+
+    fn apply_provisional(
+        ledger: &mut ChatLedger,
+        action: &SignedAction,
+        work: usize,
+        verified: VerifiedAuthorityBasis,
+        token: ProjectionAdmissionToken,
+    ) -> Result<ActionState, ChatError> {
         let id = token.binding.action;
         match ledger.action(id) {
             Some(original) if original == action => {}
@@ -205,6 +214,91 @@ impl V2GeneralPrefixVerifier {
             ledger.admit_projection(&token, work)?;
         }
         Ok(state)
+    }
+
+    /// Resolve only the action's exact canonical dependencies from this
+    /// ledger's Valid signed originals and their verified governing Admission.
+    /// Missing evidence does not import a partially authorized child.
+    pub fn project_provisional_from_ledger(
+        &self,
+        ledger: &mut ChatLedger,
+        view: &ProjectionView,
+        action: &SignedAction,
+        admission: &V2AuthenticatedAdmission,
+        work: usize,
+    ) -> Result<V2OrdinaryReceiveStatus, ChatError> {
+        self.require_receiver_ledger(ledger, view, action)?;
+        let profile = self.math.profile();
+        let required = action.dependencies();
+        let mut missing = Vec::new();
+        let mut owners = Vec::with_capacity(required.len());
+        for id in required {
+            let Some(entry) = ledger.entries.get(&id) else {
+                missing.push(id);
+                continue;
+            };
+            match entry.state {
+                ActionState::Pending(_) => {
+                    missing.push(id);
+                    continue;
+                }
+                ActionState::Invalid(_) => return Err(ChatError::Dependency),
+                ActionState::Valid => {}
+            }
+            let Some(verified) = &entry.authority else {
+                return Err(ChatError::Authority);
+            };
+            let (origin, owner, tenure) = match &verified.constraint {
+                SemanticConstraint::V2OrdinaryAction {
+                    profile,
+                    admission,
+                    tenure,
+                    ..
+                }
+                | SemanticConstraint::V2FounderCreate {
+                    profile,
+                    admission,
+                    tenure,
+                    ..
+                } => (profile, admission, tenure),
+                SemanticConstraint::LegacyReusable => return Err(ChatError::Authority),
+            };
+            if *origin != profile.id() || *tenure != profile.tenure() {
+                return Err(ChatError::Scope);
+            }
+            owners.push((&entry.action, self.admission(*owner)?));
+        }
+        if !missing.is_empty() {
+            self.require_admission(admission)?;
+            admission.core.body.matches_action_delegation(action)?;
+            self.observe_live_member(admission.core.body.admission_id())?;
+            return Ok(V2OrdinaryReceiveStatus::WaitingForDependencies(missing));
+        }
+        let dependencies = owners
+            .iter()
+            .map(|(original, owner)| V2OrdinaryDependency::new(original, owner))
+            .collect::<Vec<_>>();
+        let (verified, token) =
+            self.provisional_evidence(action, admission, &dependencies, view)?;
+        Self::apply_provisional(ledger, action, work, verified, token)
+            .map(V2OrdinaryReceiveStatus::Retained)
+    }
+
+    fn require_receiver_ledger(
+        &self,
+        ledger: &ChatLedger,
+        view: &ProjectionView,
+        action: &SignedAction,
+    ) -> Result<(), ChatError> {
+        if !ledger
+            .projection
+            .current
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &view.life))
+        {
+            return Err(ChatError::Scope);
+        }
+        self.require_view(action, view)
     }
 
     fn provisional_evidence(

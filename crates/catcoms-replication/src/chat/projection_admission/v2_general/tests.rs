@@ -397,6 +397,60 @@ fn install(
 }
 
 #[test]
+fn ordinary_receiver_waits_for_exact_valid_dependencies_then_projects() {
+    let mut f = Fixture::new();
+    let original = DeviceKeypair::from_seed(&[90; 32]);
+    let responder = DeviceKeypair::from_seed(&[91; 32]);
+    let first = f.add(&original, 20);
+    let second = f.add(&responder, 21);
+    let target = create(&original, &first, 1);
+    let reply = action(
+        &responder,
+        &second,
+        2,
+        Body::Create {
+            text: "ordered reply".into(),
+            reply_to: Some(target.id()),
+        },
+        vec![target.id()],
+    );
+    let (mut ledger, view) = f.ledger();
+    let receive = |ledger: &mut ChatLedger, action, admission| {
+        f.verifier
+            .project_provisional_from_ledger(ledger, &view, action, admission, 64)
+    };
+    assert_eq!(
+        receive(&mut ledger, &reply, &first),
+        Err(ChatError::Authority)
+    );
+    assert_eq!(
+        receive(&mut ledger, &reply, &second).unwrap(),
+        V2OrdinaryReceiveStatus::WaitingForDependencies(vec![target.id()])
+    );
+    assert!(ledger.action(reply.id()).is_none());
+    ledger.import(target.clone()).unwrap();
+    assert_eq!(
+        receive(&mut ledger, &reply, &second).unwrap(),
+        V2OrdinaryReceiveStatus::WaitingForDependencies(vec![target.id()])
+    );
+    assert!(ledger.action(reply.id()).is_none());
+    assert_eq!(
+        receive(&mut ledger, &target, &first).unwrap(),
+        V2OrdinaryReceiveStatus::Retained(ActionState::Valid)
+    );
+    assert_eq!(
+        receive(&mut ledger, &reply, &second).unwrap(),
+        V2OrdinaryReceiveStatus::Retained(ActionState::Valid)
+    );
+    assert!(
+        matches!(ledger.guarded_projection(reply.id(), 64).unwrap().with_publication(Clone::clone).unwrap(),
+        GuardedProjection::Visible { text, reply_to: Some(id), certainty: ProjectionCertainty::Provisional, .. }
+        if text == "ordered reply" && id == target.id())
+    );
+    assert_eq!(ledger.action(reply.id()), Some(&reply));
+}
+
+#[test]
 fn actual_twenty_and_fifty_independent_keys_edit_delete_reply_and_merge_without_owner_signatures() {
     for count in [20, 50] {
         let mut f = Fixture::new();

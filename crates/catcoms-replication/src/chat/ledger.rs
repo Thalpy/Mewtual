@@ -47,7 +47,7 @@ pub struct Advance {
 pub(super) struct Entry {
     pub(super) action: SignedAction,
     pub(super) state: ActionState,
-    authority: Option<VerifiedAuthorityBasis>,
+    pub(super) authority: Option<VerifiedAuthorityBasis>,
     // At most one constant-size normalized approval for this already imported action. There
     // is no unknown-action cache or unbounded collection of equivalent proof representations.
     delete_approval: Option<VerifiedDeleteApproval>,

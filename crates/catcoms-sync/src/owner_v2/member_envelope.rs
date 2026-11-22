@@ -6,7 +6,8 @@ use catcoms_mls::{MlsDevice, ServerGroup};
 use catcoms_replication::chat::{
     owner_facts::OwnerFactId, owner_header::OwnerHeaderId, ActionState, ChatError, ChatLedger,
     ProjectionAdmissionToken, ProjectionView, SignedAction, V2AuthenticatedAdmission,
-    V2GeneralPrefixVerifier, V2LiveMemberObservation, V2OrdinaryDependency, MAX_ACTION_BYTES,
+    V2GeneralPrefixVerifier, V2LiveMemberObservation, V2OrdinaryDependency,
+    V2OrdinaryReceiveStatus, MAX_ACTION_BYTES,
 };
 use catcoms_rt::{
     AuthorizedMeshPublication, CryptoRngCore, PublishSubmission, RequestAuthority,
@@ -244,6 +245,19 @@ impl SelectedV2MemberEnvelope {
             dependencies,
             work,
         )
+    }
+
+    /// Resolve exactly the receiver's available validated parents and target.
+    /// The caller may retain this same original for later dependency recovery.
+    pub fn project_from_ledger(
+        &self,
+        verifier: &V2GeneralPrefixVerifier,
+        ledger: &mut ChatLedger,
+        view: &ProjectionView,
+        work: usize,
+    ) -> Result<V2OrdinaryReceiveStatus, ChatError> {
+        let admission = self.original_admission(verifier)?;
+        verifier.project_provisional_from_ledger(ledger, view, self.action_data(), &admission, work)
     }
 
     fn original_admission(

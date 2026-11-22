@@ -45,6 +45,7 @@ COHORTS = {
     "founder-member-save": ("catcoms-app", "native_runtime_member_prepare_uses_actual_native_signer_and_exact_retry_never_resigns", 1),
     "member-envelope": ("catcoms-sync", "member_envelope_uses_the_real_mls_group_and_exact_signed_original", 1),
     "member-publication-driver": ("catcoms-net", "captured_publication_checks_queued_authority_and_never_adopts_a_replacement_driver", 1),
+    "member-receive-dependencies": ("catcoms-replication", "ordinary_receiver_waits_for_exact_valid_dependencies_then_projects", 1),
     "selected-history": ("catcoms-replication", "selected_history_archive_page_", 2),
     "add-source-close": ("catcoms-sync", "governed_add_whole_source_retirement_", 1),
     "add-ui-lock": ("catcoms-sync", "governed_add_ui_retirement_", 1),
