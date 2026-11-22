@@ -11,16 +11,14 @@ fn v2_join_request_and_welcome_complete_with_actual_add() {
         V2JoinResponseData, V2JoinResponsePacketData,
     };
     use catcoms_mls::persist::{
-        TextCurrentSdkGraphReservation, TextCurrentSdkRestoreAdmission, TextCurrentSdkRestoreLimits,
+        text_current_add::TextCurrentAddLimits, TextCurrentSdkGraphReservation,
+        TextCurrentSdkRestoreAdmission, TextCurrentSdkRestoreLimits,
     };
     use rand_core::SeedableRng;
-    struct Paid;
+    struct Paid(TextCurrentSdkRestoreLimits);
     impl TextCurrentSdkGraphReservation for Paid {
         fn limits(&self) -> TextCurrentSdkRestoreLimits {
-            TextCurrentSdkRestoreLimits {
-                max_typed_bytes: 8 * 1024 * 1024,
-                max_work: 8 * 1024 * 1024,
-            }
+            self.0
         }
     }
     // MLS itself places a lifetime on the live KeyPackage. Use the same
@@ -243,21 +241,40 @@ fn v2_join_request_and_welcome_complete_with_actual_add() {
     let original = sealed.encrypted_parts().1.as_ptr();
     let (nonce, cipher) = sealed.encrypted_parts();
     let immutable_outcome = SealedV2JoinedOutcome::from_encrypted_parts(*nonce, cipher).unwrap();
-    let restore = |outcome: &SealedV2JoinedOutcome, delivery: &[u8]| {
+    let governed = TextCurrentAddLimits::governed_text_v2();
+    let graph_limits = TextCurrentSdkRestoreLimits {
+        max_typed_bytes: governed.restore_typed_bytes,
+        max_work: governed.restore_work,
+    };
+    let restore = |outcome: &SealedV2JoinedOutcome, delivery: &[u8], fee| {
         RecoveredV2JoinedOutcome::open(
             outcome,
             &vault_key,
             &recovered_pending,
             delivery,
-            TextCurrentSdkRestoreAdmission::new(Paid).unwrap(),
+            TextCurrentSdkRestoreAdmission::new(Paid(fee)).unwrap(),
         )
     };
     let mut wrong_nonce = *nonce;
     wrong_nonce[0] ^= 1;
     let tampered = SealedV2JoinedOutcome::from_encrypted_parts(wrong_nonce, cipher).unwrap();
-    assert!(restore(&tampered, &delivery).is_err());
-    assert!(restore(&immutable_outcome, &delivery[..delivery.len() - 1]).is_err());
-    let recovered = restore(&immutable_outcome, &delivery).unwrap();
+    assert!(restore(&tampered, &delivery, graph_limits).is_err());
+    assert!(restore(
+        &immutable_outcome,
+        &delivery[..delivery.len() - 1],
+        graph_limits
+    )
+    .is_err());
+    assert!(restore(
+        &immutable_outcome,
+        &delivery,
+        TextCurrentSdkRestoreLimits {
+            max_work: 1,
+            ..graph_limits
+        },
+    )
+    .is_err());
+    let recovered = restore(&immutable_outcome, &delivery, graph_limits).unwrap();
     assert_eq!(recovered.governing_head_data(), header_id);
     assert_eq!(recovered.epoch_data(), 1);
     let retry = prepared
