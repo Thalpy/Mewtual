@@ -55,8 +55,19 @@ fn v2_join_request_and_welcome_complete_with_actual_add() {
     let mut g = governance(d.profile, d.admission, d.header, d.state);
     begin(&mut node, &native, &count, request);
     node.execute_add_data_native(request).unwrap();
+    assert!(node.outcome_data().is_err());
     node.prepare_admission_data(g.verifier.replay_data())
         .unwrap();
+    let outcome = node.outcome_data().unwrap();
+    outcome.require_request_data(request).unwrap();
+    let other_request = Request::new(&node, 95);
+    assert!(outcome.require_request_data(other_request.data()).is_err());
+    let before_header = outcome.result_data().secret_snapshot_data().as_ptr();
+    let unsigned_intent = outcome.unsigned_data().intent_commitment_data();
+    assert_eq!(
+        outcome.admission_data().spec().subject,
+        request.request.spec_data().joiner
+    );
     node.sign_admission_native().unwrap();
     node.materialize_admission_data().unwrap();
     node.prepare_welcome_data().unwrap();
@@ -67,6 +78,19 @@ fn v2_join_request_and_welcome_complete_with_actual_add() {
     assert!(node.join_response_data().is_err());
     node.materialize_welcome_data().unwrap();
     let completed = node.completed_add_data().unwrap();
+    let saved_outcome = node.outcome_data().unwrap();
+    saved_outcome
+        .result_data()
+        .require_same_cell_data(&completed)
+        .unwrap();
+    assert_eq!(
+        saved_outcome.result_data().secret_snapshot_data().as_ptr(),
+        before_header
+    );
+    assert_eq!(
+        saved_outcome.unsigned_data().intent_commitment_data(),
+        unsigned_intent
+    );
     let response = node.join_response_data().unwrap();
     assert!(response.binding.encode().ends_with(&raw));
     let response_wire = response.encode_packet_data().unwrap();

@@ -1,5 +1,22 @@
 # Chat, files and voice implementation evidence
 
+## Governed Add fence checkpoint (22 November 2026)
+
+The focused invitation workflow passed on Linux and Windows at `89637e3e`.
+It verified exact governing Header and Welcome signature retention, fence
+framing and held-file identity, and the actual pinned `3d3bce63` predecessor.
+The Windows regression also verified that a warm member verifier refuses
+new signing under either founder WAL name.
+[Focused CI](https://github.com/Thalpy/Mewtual/actions/runs/45018943766).
+
+The warm writer and member-reconciliation checkpoint at `adebedd0` passed
+the native invitation cohort on both platforms, including durable fence
+coverage through the original governed Current. Linux completed the full
+focused workflow. The new revision superseded the Windows run during its
+repeat of the pinned predecessor step. The earlier source-pinned Windows
+predecessor result remains recorded above.
+[Writer CI](https://github.com/Thalpy/Mewtual/actions/runs/45020822704).
+
 ## Invitation and join branch CI (22 November 2026)
 
 Both hosted workflows passed on Linux and Windows at

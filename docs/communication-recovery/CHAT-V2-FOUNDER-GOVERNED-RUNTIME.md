@@ -236,6 +236,14 @@ once; equal epochs/authenticators do not authorize substituting another Cell
 or a later encoding. Keep archive1/head1 strict and introduce an explicit,
 separately invoiced format family rather than increasing their old caps.
 
+The outcome codec binds the exact SDK-entry ciphertext and seals the original
+completed snapshot, Commit, Welcome, GroupInfo and routing transfer together
+with the unsigned governing bytes. Sync lends these values from one operation
+before Header signing. The outcome has its own field caps and memory payment.
+Its decoder checks framing and lineage. Recovery still has to verify the
+governing record and restored SDK state, and the native Host must cover the
+outcome file before signing.
+
 Final installation must preflight the exclusive SDK pair outside writers,
 then validate the real covering receipt/Current/native source through stable
 field loans. Run Core's fallible selection first. Cache its returned retired

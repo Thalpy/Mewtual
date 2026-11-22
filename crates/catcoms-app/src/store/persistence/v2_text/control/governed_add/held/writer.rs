@@ -2,8 +2,10 @@
 //! own the original quiescent member lane and prove the signed invite journal
 //! before calling it. No desktop, network or SDK stage invokes it yet.
 use super::*;
+use crate::store::persistence::v2_text::control::governed_add::outcome::PreparedGovernedAddOutcome;
 use crate::store::persistence::v2_text::head::TextPendingData;
 use catcoms_storage::kept::session_id;
+use catcoms_sync::owner_v2::V2FounderAddOutcomeData;
 use std::fs::OpenOptions;
 use std::io::Write;
 
@@ -218,6 +220,49 @@ impl PreparedGovernedAddFence {
             target, directory, id,
         )?;
         guard.validate_source_only()
+    }
+
+    /// Bind the actual SDK outcome to this original warm entry. Root must
+    /// retain the returned frame before writing it and independently reprove
+    /// the same held controls under Current for the physical save.
+    pub(in crate::store::persistence::v2_text) fn prepare_outcome(
+        &self,
+        store: &ServerStore,
+        source: &GenesisSourceDataRef<'_>,
+        selected: &SelectedV2TextHead,
+        packet: &V2JoinRequestPacketData<'_>,
+        outcome: &V2FounderAddOutcomeData<'_>,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<PreparedGovernedAddOutcome, AppError> {
+        self.held
+            .resources
+            .require_same_original(selected.resources())?;
+        self.held
+            .resources
+            .require_bound_original_negative(store, source)?;
+        let expected = GovernedAddFenceData::for_request(
+            selected.head_data().context.id_data()?,
+            selected.head_id_data(),
+            packet,
+        );
+        if expected != self.held.expected
+            || outcome.unsigned_data().header_spec_data().parent
+                != selected.archive_data().spec_data().header.id()
+        {
+            return Err(refused());
+        }
+        outcome.require_request_data(packet.founder_add_data())?;
+        let entry = self
+            .entry
+            .as_ref()
+            .filter(|entry| entry.covered)
+            .ok_or_else(refused)?;
+        let raw = &entry.original.as_ref().ok_or_else(refused)?.frame;
+        let result = PreparedGovernedAddOutcome::prepare(store, raw, outcome, rng)?;
+        self.held
+            .resources
+            .require_bound_original_negative(store, source)?;
+        Ok(result)
     }
 
     #[cfg(all(test, any(windows, target_os = "linux")))]

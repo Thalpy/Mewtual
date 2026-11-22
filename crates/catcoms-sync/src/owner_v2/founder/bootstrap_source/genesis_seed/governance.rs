@@ -49,6 +49,44 @@ pub struct V2InstalledFounderAddData {
     pub state: OwnerStateCommitment,
 }
 
+/// The actual completed SDK output and unsigned governing data from one Add.
+/// The provider snapshot is secret and must be sealed by an independently
+/// funded Root transaction. This loan cannot select, save or install anything.
+pub struct V2FounderAddOutcomeData<'a> {
+    result: CompletedTextCurrentAddData<'a>,
+    admission: &'a AdmissionBody,
+    unsigned: &'a UnsignedAdmissionStepData,
+    request: &'a FrozenAddRequest,
+}
+
+impl<'a> V2FounderAddOutcomeData<'a> {
+    pub fn result_data(&self) -> &CompletedTextCurrentAddData<'a> {
+        &self.result
+    }
+
+    pub fn admission_data(&self) -> &'a AdmissionBody {
+        self.admission
+    }
+
+    pub fn unsigned_data(&self) -> &'a UnsignedAdmissionStepData {
+        self.unsigned
+    }
+
+    pub fn require_request_data(
+        &self,
+        request: V2FounderAddRequestData<'_>,
+    ) -> Result<(), SyncError> {
+        self.request.require_same(request)
+    }
+}
+
+impl std::fmt::Debug for V2FounderAddOutcomeData<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("V2FounderAddOutcomeData")
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Prepared,
@@ -116,6 +154,7 @@ pub const FOUNDER_GOVERNANCE_DATA_BYTES: usize = UNSIGNED_ADMISSION_DATA_INVOICE
     + 2 * catcoms_mls::group::text_current_add::MAX_TEXT_ADD_ROUTING_PLAIN_BYTES
     + 4 * std::mem::size_of::<PendingAdd>()
     + 4 * std::mem::size_of::<V2InstalledFounderAddData>()
+    + 4 * std::mem::size_of::<V2FounderAddOutcomeData<'static>>()
     + 4 * std::mem::size_of::<RetiredV2FounderAddNativeCustody>()
     + 4 * std::mem::size_of::<PreparedV2FounderGovernanceNode<(), ()>>()
     + 4 * std::mem::size_of::<(
@@ -481,6 +520,21 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
             p.body.as_ref().ok_or_else(unavailable)?,
             p.unsigned.as_ref().ok_or_else(unavailable)?,
         ))
+    }
+
+    /// Borrow the exact jointly prepared outcome for the durable record.
+    /// The signed Header can only follow that record, so this works before
+    /// signing and continues to lend the same original bytes afterwards.
+    pub fn outcome_data(&self) -> Result<V2FounderAddOutcomeData<'_>, SyncError> {
+        let result = self.completed_add_data()?;
+        let (admission, unsigned) = self.unsigned_admission_data()?;
+        let request = &self.pending.as_ref().ok_or_else(unavailable)?.request;
+        Ok(V2FounderAddOutcomeData {
+            result,
+            admission,
+            unsigned,
+            request,
+        })
     }
 
     /// Final primitive only, after Root's genuine saved-outcome/current/Core
