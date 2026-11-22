@@ -200,6 +200,10 @@ session. Its parser switch happens inside that exclusive owner. An equal-byte
 replacement of the held Stage refuses, and retry takes the original file.
 Fresh gated desktop startup moves that same original owner through the
 joined declaration before publishing the native vault and its source collection.
+The factory rechecks the governed selection around joined declaration preparation.
+Warm promotion uses the exact native leaves already held by that declaration.
+An equal-byte replacement of a native leaf refuses promotion until the original
+is returned.
 The mounted index preserves the first pin ciphertext
 for each group and checks the held index when reading pin context. The first
 pending-JOIN record covers the private request and the one exact index

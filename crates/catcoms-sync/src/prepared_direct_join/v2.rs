@@ -104,7 +104,9 @@ pub struct PreparedV2JoinRequest {
     master: Zeroizing<Vec<u8>>,
     limits: DirectJoinLimits,
     welcome_entered: bool,
-    completed: Option<CompletedV2JoinCandidate>,
+    // A pending request moves through transport and covering futures even
+    // before a completed SDK graph exists. Keep that graph out of those frames.
+    completed: Option<Box<CompletedV2JoinCandidate>>,
     sealed_source: Option<SealedV2PendingJoinSource>,
     sealed_outcome: Option<SealedV2JoinedOutcome>,
     initial_prefix_origin: Option<std::sync::Arc<()>>,

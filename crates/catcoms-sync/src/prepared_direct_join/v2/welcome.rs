@@ -413,7 +413,7 @@ impl PreparedV2JoinRequest {
             )?);
             // Record the verified candidate before any late prefix or
             // admission revocation can suppress the response.
-            self.completed = Some(CompletedV2JoinCandidate {
+            self.completed = Some(Box::new(CompletedV2JoinCandidate {
                 device,
                 group,
                 facts,
@@ -422,7 +422,7 @@ impl PreparedV2JoinRequest {
                 file_key,
                 response_binding,
                 state: header.spec().state,
-            });
+            }));
         } else if self
             .completed
             .as_ref()

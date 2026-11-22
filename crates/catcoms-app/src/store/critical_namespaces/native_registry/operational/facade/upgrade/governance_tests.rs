@@ -27,8 +27,35 @@ fn governed_joined_pin_native_factory_proves_the_selected_catalog_before_exposur
         Ok(_) => panic!("unselected joined catalog escaped the factory"),
         Err(joined) => joined,
     };
-    joined.retry(&mut rng).unwrap();
     let current = dir.path().join(Slot::Current.name());
+    let governed_current = fs::read(&current).unwrap();
+    let parked = current.with_extension("held-governed-current");
+    fs::rename(&current, &parked).unwrap();
+    fs::write(&current, &governed_current).unwrap();
+    assert!(joined.retry(&mut NeverRng).is_err());
+    assert!(!dir.path().join(governance::GOVERNANCE_SEED).exists());
+    assert!(!dir.path().join(Slot::Stage.name()).exists());
+    fs::remove_file(&current).unwrap();
+    fs::rename(&parked, &current).unwrap();
+    let native_index = dir
+        .path()
+        .join(ARCHIVE_BOOTSTRAP_ROOT)
+        .join("native-registry.bin");
+    let held_index = native_index.with_extension("held-index");
+    let before = fs::read(&native_index).unwrap();
+    let replacement = before.clone();
+    let (source, parked) = (native_index.clone(), held_index.clone());
+    governance::set_stage_selection_hook_for_test(Box::new(move || {
+        fs::rename(&source, parked).unwrap();
+        fs::write(source, replacement).unwrap();
+    }));
+    assert!(joined.retry(&mut rng).is_err());
+    assert_eq!(fs::read(&current).unwrap(), governed_current);
+    assert_eq!(fs::read(&native_index).unwrap(), before);
+    assert!(dir.path().join(Slot::Stage.name()).is_file());
+    fs::remove_file(&native_index).unwrap();
+    fs::rename(held_index, native_index).unwrap();
+    joined.retry(&mut NeverRng).unwrap();
     let parked = current.with_extension("held-current");
     let raw = fs::read(&current).unwrap();
     fs::rename(&current, &parked).unwrap();

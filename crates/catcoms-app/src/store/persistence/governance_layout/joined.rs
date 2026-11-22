@@ -27,6 +27,8 @@ pub(in crate::store) struct JoinedPinDeclaration {
     marker: OpenedArchiveObject,
     directory: GovernanceDirectoryCapture,
     native: VerifiedGovernanceNative,
+    layout: CurrentLayoutData,
+    leaves: DeclarationLeaves,
     prepared: PreparedDeclaration,
     seed: Option<CreatedStage>,
     index: Option<CreatedStage>,
@@ -179,19 +181,34 @@ impl ServerStore {
             let seed_data = AuthenticatedSeed::open(&key, &raw_seed)?;
             let marker = inventory.marker.ok_or_else(denied)?;
             let marker_id = session_id(&marker.0).map_err(io)?;
-            let native = NativeGovernanceInventory::capture(
-                self,
-                policy.native_pool.as_ref().ok_or_else(denied)?,
-            )?;
-            let layout = native.layout(self)?;
-            let leaves = DeclarationLeaves::from_frames(
-                &marker.1,
-                native.member_marker(),
-                native.marker(),
-                native.index(),
-            )?;
+            // Warm selection already holds the authenticated leaves. The prior
+            // governed declaration can still own the startup inventory slot.
+            let (layout, leaves, cold_inventory) = if let Some(warm) = warm {
+                (warm.layout, warm.leaves, None)
+            } else {
+                let inventory = NativeGovernanceInventory::capture(
+                    self,
+                    policy.native_pool.as_ref().ok_or_else(denied)?,
+                )?;
+                let layout = inventory.layout(self)?;
+                let leaves = DeclarationLeaves::from_frames(
+                    &marker.1,
+                    inventory.member_marker(),
+                    inventory.marker(),
+                    inventory.index(),
+                )?;
+                (layout, leaves, Some(inventory))
+            };
             let expected = seed_data.validate(&key, layout, leaves)?;
-            let native = verify_joined_pin_parent(self, native, expected.original, &marker.1)?;
+            let cold_native = cold_inventory
+                .map(|inventory| {
+                    verify_joined_pin_parent(self, inventory, expected.original, &marker.1)
+                })
+                .transpose()?;
+            let native = warm
+                .map(|warm| &warm.native)
+                .or(cold_native.as_ref())
+                .ok_or_else(denied)?;
             let current_id = session_id(&current).map_err(io)?;
             let before_selection = || {
                 self.require_governance_directory_matches_root_if_mounted(&directory)?;
@@ -321,7 +338,8 @@ impl ServerStore {
             fs::remove_file(&seed_path).map_err(durable)?;
             drop(seed);
             sync_directory(&self.dir).map_err(durable)?;
-            (selected, candidate_bytes, Some((marker, native)), index)
+            let original_leaves = cold_native.map(|native| (marker, native));
+            (selected, candidate_bytes, original_leaves, index)
         } else {
             if inventory.stage.is_some() {
                 return Err(denied());
@@ -507,6 +525,8 @@ impl ServerStore {
             marker,
             directory: inventory.directory,
             native,
+            layout,
+            leaves,
             prepared,
             seed: None,
             index: None,

@@ -177,7 +177,8 @@ fn write_held(
 
 pub(super) struct RecoveredWelcome {
     entry: OpenedArchiveObject,
-    outcome: Option<ClosedOutcome>,
+    // The paid graph and Core models stay out of catalog and Store frames.
+    outcome: Option<Box<ClosedOutcome>>,
     _fee: CatalogReadReservation,
 }
 
@@ -389,9 +390,9 @@ pub(super) fn recover(
         })?;
         let recovered = RecoveredV2JoinedOutcome::open(&sealed, key, request, &delivery, admission)
             .map_err(|_| denied())?;
-        Some(ClosedOutcome::prepare(
+        Some(Box::new(ClosedOutcome::prepare(
             store, outcome, recovered, &delivery,
-        )?)
+        )?))
     } else {
         None
     };

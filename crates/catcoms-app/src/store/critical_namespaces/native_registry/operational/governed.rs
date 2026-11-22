@@ -108,9 +108,9 @@ impl NativeTextGovernedStorage {
         mut self,
         rng: &mut impl CryptoRngCore,
     ) -> Result<NativeTextJoinedStorage, (Self, AppError)> {
-        if let Err(error) = self
-            .index
-            .advance_joined_pin_layout(&mut self.joined_declaration, rng)
+        if let Err(error) =
+            self.index
+                .advance_joined_pin_layout(&mut self.joined_declaration, None, rng)
         {
             return Err((self, error));
         }

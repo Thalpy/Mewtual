@@ -187,6 +187,7 @@ impl Physical {
         declaration: &mut Option<
             crate::store::persistence::governance_layout::joined::JoinedPinDeclaration,
         >,
+        governed: Option<&crate::store::critical_namespaces::governance_layout::native::Startup>,
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
         self.cell.get_mut().map_err(|_| refused())?.require_idle()?;
@@ -199,6 +200,7 @@ impl Physical {
             .advance_native_joined_pin(
                 declaration,
                 NativeRegistryHandler::GovernedLifecycle(joined.clone()),
+                governed,
                 rng,
             )?;
         self.handler = joined;

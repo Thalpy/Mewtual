@@ -619,6 +619,7 @@ impl V2CurrentLayoutStore {
             crate::store::persistence::governance_layout::joined::JoinedPinDeclaration,
         >,
         handler: super::native_registry::preparation::NativeRegistryHandler,
+        governed: Option<&super::governance_layout::native::Startup>,
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
         if !handler.uses_joined_pin_layout()
@@ -627,13 +628,18 @@ impl V2CurrentLayoutStore {
             return Err(refused());
         }
         if !self.store.uses_joined_pin_layout() {
+            let store = self.checked_store()?;
             if declaration.is_none() {
-                *declaration = Some(self.checked_store()?.prepare_joined_pin_declaration(rng)?);
+                if let Some(original) = governed {
+                    original.require_complete(store)?;
+                }
+                let prepared = store.prepare_joined_pin_declaration(rng)?;
+                if let Some(original) = governed {
+                    original.require_complete(store)?;
+                }
+                *declaration = Some(prepared);
             }
-            declaration
-                .as_mut()
-                .ok_or_else(refused)?
-                .stage(self.checked_store()?)?;
+            declaration.as_mut().ok_or_else(refused)?.stage(store)?;
             let current = self
                 .store
                 .current_layout_policy
