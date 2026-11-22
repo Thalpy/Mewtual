@@ -11,7 +11,7 @@ use super::*;
 use crate::store::persistence::governance_layout::joined::{
     AcceptedFirstJoin, AcceptedJoinTransport, JoinedPendingIo,
 };
-use crate::store::NativeTextInvitePacketData;
+use crate::store::{NativeTextInvitePacketData, NativeTextJoinedRegistrationData};
 use catcoms_replication::chat::join_bindings::GenesisAnchorBindingData;
 use catcoms_replication::chat::owner_facts::OwnerFactId;
 use catcoms_replication::chat::owner_header::OwnerHeaderId;
@@ -560,6 +560,19 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         token: [u8; 32],
         negative: &RequestCancellation,
     ) -> Result<Option<(OwnerHeaderId, OwnerFactId, u64)>, AppError> {
+        Ok(self
+            .inspect_registration(invite, token, negative)?
+            .map(|value| value.selected_data()))
+    }
+
+    /// Check all immutable registration fields for this same parked node
+    /// under fresh authorization. The result is authenticated history.
+    pub fn inspect_registration(
+        self,
+        invite: &NativeTextInvitePacketData<'_>,
+        token: [u8; 32],
+        negative: &RequestCancellation,
+    ) -> Result<Option<NativeTextJoinedRegistrationData>, AppError> {
         self.original.require_current(negative)?;
         let original = self.original.pending.upgrade().ok_or_else(refused)?;
         let pending = original.state.try_lock().map_err(|_| refused())?;
@@ -569,15 +582,15 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             let node = runtime.node.as_ref().ok_or_else(refused)?;
             let (head, admission, epoch) = node.selected_join_data().map_err(|_| refused())?;
             let metadata = self.original.work.as_ref().ok_or_else(refused)?;
-            if metadata.observe_join_installation(
+            let receipt = metadata.observe_join_installation(
                 pending.io.as_ref().ok_or_else(refused)?,
                 invite,
                 token,
-            )? != (head, epoch)
-            {
+            )?;
+            if receipt.selected_data() != (head, admission, epoch) {
                 return Err(refused());
             }
-            Some((head, admission, epoch))
+            Some(receipt)
         } else {
             None
         };

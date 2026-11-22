@@ -1,6 +1,7 @@
 //! Exact covered native Pending and first index insertion. Covering these
 //! files grants historical request custody. Welcome has its own entry fence.
 use super::*;
+use crate::store::NativeTextJoinedRegistrationData;
 use catcoms_replication::chat::join_bindings::{GenesisAnchorBindingData, SignedInviteBindingData};
 use catcoms_replication::chat::owner_header::OwnerHeaderId;
 use catcoms_sync::{
@@ -431,6 +432,39 @@ impl ServerStore {
         Ok(transport.map(|(peer, port, _)| (peer, port)))
     }
 
+    /// Authenticate the registration facts beside this original recovered
+    /// Pending and Welcome. External v1 requests carry no native receipt.
+    pub(in crate::store) fn recovered_join_registration_data(
+        &self,
+    ) -> Result<Option<NativeTextJoinedRegistrationData>, AppError> {
+        self.validate_mounted_governance_layout()?;
+        let guard = self.joined_pin_index.lock().map_err(|_| denied())?;
+        let original = guard.as_ref().ok_or_else(denied)?;
+        original.require(self)?;
+        let Some(pending) = original.pending.as_ref() else {
+            return Ok(None);
+        };
+        let selected = pending
+            .welcome
+            .as_ref()
+            .and_then(welcome::RecoveredWelcome::selected_data);
+        let receipt = if let (Some(transport), Some(selected)) =
+            (pending._pending.transport_data()?, selected)
+        {
+            let (request, context) = pending._pending.pending_data();
+            Some(NativeTextJoinedRegistrationData::from_selection(
+                request.request_bytes_data(),
+                context,
+                transport,
+                selected,
+            )?)
+        } else {
+            None
+        };
+        original.require(self)?;
+        Ok(receipt)
+    }
+
     pub(in crate::store) fn selected_pending_join_data(
         &self,
     ) -> Result<Option<([u8; 32], catcoms_sync::V2PendingJoinContextData)>, AppError> {
@@ -801,6 +835,26 @@ impl JoinedPendingIo {
             welcome.require_outcome(store)?;
         }
         Ok(data)
+    }
+
+    pub(in crate::store) fn warm_registration_data(
+        &self,
+        store: &ServerStore,
+    ) -> Result<NativeTextJoinedRegistrationData, AppError> {
+        let request = self.request_data(store)?;
+        let transport = self.transport_data()?.ok_or_else(denied)?;
+        let welcome = self.welcome.as_ref().ok_or_else(denied)?;
+        welcome.require_outcome(store)?;
+        let selected = welcome.selected_data().ok_or_else(denied)?;
+        let receipt = NativeTextJoinedRegistrationData::from_selection(
+            request,
+            self.prepared.context_data(),
+            transport,
+            selected,
+        )?;
+        self.request_data(store)?;
+        welcome.require_outcome(store)?;
+        Ok(receipt)
     }
 
     pub(in crate::store) fn copy_selected_governing_proof(

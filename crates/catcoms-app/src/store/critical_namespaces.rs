@@ -60,6 +60,7 @@ pub use current_layout::{
 pub use governance_layout::{
     PreparedV2GovernanceLayoutStore, V2GovernanceLayoutPolicy, V2GovernanceLayoutStore,
 };
+pub use joined_pin::pending::NativeTextJoinedRegistrationData;
 pub use member_outbox_layout::V2MemberOutboxPolicy;
 pub use native_registry::NativeTextInvitePublication;
 pub use native_registry::NativeTextJoinedRequestPreparation;

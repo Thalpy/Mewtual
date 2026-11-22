@@ -271,6 +271,15 @@ async fn mounted_join_request_uses_the_original_native_command_and_retains_its_p
         inspect().inspect(&invite, token, &fresh).unwrap(),
         Some((head, own_add, epoch))
     );
+    let registration = inspect()
+        .inspect_registration(&invite, token, &fresh)
+        .unwrap()
+        .unwrap();
+    assert_eq!(registration.transport_data(), local_transport);
+    assert!(registration.context == selected.1);
+    assert_eq!(registration.request, selected.0);
+    assert_eq!(registration.invocation, token);
+    assert_eq!(registration.profile, anchor.profile);
     assert!(inspect().inspect(&invite, [62; 32], &fresh).is_err());
     let file = dir
         .path()
@@ -312,6 +321,10 @@ async fn mounted_join_request_uses_the_original_native_command_and_retains_its_p
             .unwrap();
     assert!(cold.pending_join_data().unwrap() == Some(selected));
     assert_eq!(cold.recovered_join_outcome_data().unwrap(), Some(outcome));
+    assert_eq!(
+        cold.recovered_join_registration_data().unwrap(),
+        Some(registration)
+    );
     assert_eq!(
         cold.recovered_join_transport_data().unwrap(),
         Some(local_transport)

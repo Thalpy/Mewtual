@@ -158,6 +158,16 @@ impl Physical {
             .recovered_join_transport_data()
     }
 
+    pub(super) fn recovered_join_registration_data(
+        &self,
+    ) -> Result<Option<crate::store::NativeTextJoinedRegistrationData>, AppError> {
+        self.handler.require()?;
+        self.handler.require_idle_cached()?;
+        self.current()?
+            .checked_store()?
+            .recovered_join_registration_data()
+    }
+
     pub(super) fn copy_selected_governing_proof(
         &self,
         pending: Option<&crate::store::persistence::governance_layout::joined::JoinedPendingIo>,
@@ -1155,10 +1165,10 @@ impl MetadataWork {
         pending: &JoinedPendingIo,
         invite: &crate::store::NativeTextInvitePacketData<'_>,
         token: [u8; 32],
-    ) -> Result<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64), AppError> {
+    ) -> Result<crate::store::NativeTextJoinedRegistrationData, AppError> {
         self.with_joined_store(|store| {
             pending.require_original_join_intent(invite.binding(), token)?;
-            pending.warm_outcome_data(store)?.ok_or_else(refused)
+            pending.warm_registration_data(store)
         })
     }
 

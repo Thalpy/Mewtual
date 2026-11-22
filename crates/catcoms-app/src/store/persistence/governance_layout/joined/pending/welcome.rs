@@ -16,6 +16,7 @@ use catcoms_sync::{
     PreparedV2JoinedPrefix, RecoveredV2JoinedOutcome, V2FirstJoinDeliveryData,
     V2PendingJoinContextData, MAX_V2_FIRST_ADD_PROOF_BYTES,
 };
+use critical_namespaces::joined_pin::pending::SelectedJoinData;
 use critical_namespaces::joined_pin::welcome as codec;
 
 const ENTRY: &str = "chat-critical-namespaces.joined-welcome-entry.bin";
@@ -155,6 +156,12 @@ impl WarmWelcome {
         &self,
     ) -> Option<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64)> {
         self.selection.as_deref().and_then(JoinedCore::outcome_data)
+    }
+
+    pub(super) fn selected_data(&self) -> Option<SelectedJoinData> {
+        self.selection
+            .as_deref()
+            .and_then(JoinedCore::selected_data)
     }
 
     pub(super) fn copy_selected_governing_proof(
@@ -299,8 +306,18 @@ impl JoinedCore {
     fn outcome_data(
         &self,
     ) -> Option<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64)> {
+        let selected = self.selected_data()?;
+        Some((selected.governing_add, selected.epoch))
+    }
+
+    fn selected_data(&self) -> Option<SelectedJoinData> {
         let replay = self.core.selected_replay_data()?;
-        Some((replay.header().id(), replay.mls_epoch_data()))
+        Some(SelectedJoinData {
+            governing_add: replay.header().id(),
+            own_admission: self.core.own_admission_data(),
+            state: *replay.header().spec().state.as_bytes(),
+            epoch: replay.mls_epoch_data(),
+        })
     }
 
     fn copy_selected_governing_proof(
@@ -416,6 +433,12 @@ impl RecoveredWelcome {
         self.outcome
             .as_ref()
             .and_then(|outcome| outcome.selection.outcome_data())
+    }
+
+    pub(super) fn selected_data(&self) -> Option<SelectedJoinData> {
+        self.outcome
+            .as_ref()
+            .and_then(|outcome| outcome.selection.selected_data())
     }
 }
 

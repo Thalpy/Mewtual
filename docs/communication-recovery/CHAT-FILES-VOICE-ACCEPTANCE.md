@@ -129,6 +129,13 @@ pin while the original Pending was parked. Restoring the original file
 recovered the exact selected pin and request.
 [Selected Pending CI](https://github.com/Thalpy/Mewtual/actions/runs/45063296093).
 
+At `90628093`, Windows and Linux passed the mounted two-vault checks and the
+eleven whole-source retirement cases. The founder observed the same original
+authenticated joiner peer on both attempts. The mounted joiner refused a
+revoked Welcome, reused the covered request and TCP actor, paired the exact
+closed node, then waited for the original actor to drain during retirement.
+[Mounted join and TCP retirement CI](https://github.com/Thalpy/Mewtual/actions/runs/45066705889).
+
 ## Invitation and join branch CI (22 November 2026)
 
 Both hosted workflows passed on Linux and Windows at

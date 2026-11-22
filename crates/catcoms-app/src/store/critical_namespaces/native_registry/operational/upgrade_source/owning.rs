@@ -430,6 +430,12 @@ impl Store {
         self.physical.recovered_join_transport_data()
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn recovered_join_registration_data(
+        &self,
+    ) -> Result<Option<crate::store::NativeTextJoinedRegistrationData>, AppError> {
+        self.physical.recovered_join_registration_data()
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn copy_selected_governing_proof(
         &self,
         pending: Option<&crate::store::persistence::governance_layout::joined::JoinedPendingIo>,

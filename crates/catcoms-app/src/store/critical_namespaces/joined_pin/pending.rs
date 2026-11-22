@@ -1,6 +1,7 @@
 //! Authenticated first-pin and private JoinRequest transaction.
 //! The mounted owner covers this exact output before any request can leave.
 use super::*;
+use catcoms_replication::chat::{owner_facts::OwnerFactId, owner_header::OwnerHeaderId};
 use catcoms_sync::{
     DirectJoinLimits, NativeV2JoinKeyEntry, PreparedV2JoinRequest, RecoveredV2PendingJoinSource,
     SealedV2PendingJoinSource, V2JoinRequestPacketData, V2PendingJoinContextData,
@@ -16,6 +17,71 @@ const MAX_SOURCE: usize = 512 * 1024 + MAX_V2_JOIN_REQUEST_PACKET_BYTES + 1024;
 const HEAD: usize = 4 + TAG.len() + 2 + 4 * 36 + 4 + 24 + 4 * 4;
 pub(in crate::store) const MAX_FRAME: usize =
     HEAD + 2 * MAX_INDEX_FRAME + MAX_SOURCE + MAX_JOIN_BINDING_BYTES + 40 + 36 + 2;
+
+/// Historical registration facts read from the exact selected Pending and
+/// Welcome. This carries no source, key, runtime or native write authority.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct NativeTextJoinedRegistrationData {
+    pub(in crate::store) context: V2PendingJoinContextData,
+    pub(in crate::store) group: [u8; 16],
+    pub(in crate::store) profile: [u8; 32],
+    pub(in crate::store) signer: [u8; 32],
+    pub(in crate::store) invocation: [u8; 32],
+    pub(in crate::store) request: [u8; 32],
+    pub(in crate::store) transport: (catcoms_rt::PeerId, u16, [u8; 32]),
+    pub(in crate::store) selected: SelectedJoinData,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::store) struct SelectedJoinData {
+    pub(in crate::store) governing_add: OwnerHeaderId,
+    pub(in crate::store) own_admission: OwnerFactId,
+    pub(in crate::store) state: [u8; 32],
+    pub(in crate::store) epoch: u64,
+}
+
+impl std::fmt::Debug for NativeTextJoinedRegistrationData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeTextJoinedRegistrationData")
+            .finish_non_exhaustive()
+    }
+}
+
+impl NativeTextJoinedRegistrationData {
+    pub(in crate::store) fn from_selection(
+        request: &[u8],
+        context: V2PendingJoinContextData,
+        transport: (catcoms_rt::PeerId, u16, [u8; 32]),
+        selected: SelectedJoinData,
+    ) -> Result<Self, AppError> {
+        let packet = V2JoinRequestPacketData::decode(request).map_err(|_| refused())?;
+        let original = packet.founder_add_data();
+        let anchor = &original.invite.spec_data().anchor;
+        let spec = original.request.spec_data();
+        Ok(Self {
+            context,
+            group: anchor.group.as_slice().try_into().map_err(|_| refused())?,
+            profile: anchor.profile,
+            signer: spec.joiner,
+            invocation: spec.request_token,
+            request: *blake3::hash(request).as_bytes(),
+            transport,
+            selected,
+        })
+    }
+
+    pub fn selected_data(&self) -> (OwnerHeaderId, OwnerFactId, u64) {
+        (
+            self.selected.governing_add,
+            self.selected.own_admission,
+            self.selected.epoch,
+        )
+    }
+
+    pub fn transport_data(&self) -> (catcoms_rt::PeerId, u16) {
+        (self.transport.0, self.transport.1)
+    }
+}
 
 /// The first native transport reservation, bound to the original Pending.
 /// Storage readers may view public facts without creating a transport.

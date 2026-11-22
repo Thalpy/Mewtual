@@ -372,6 +372,14 @@ impl NativeTextJoinedStorage {
     ) -> Result<Option<(catcoms_rt::PeerId, u16)>, AppError> {
         self.index.recovered_join_transport_data()
     }
+
+    /// Historical native registration fields independently proved from the
+    /// original Pending, Welcome and selected governing replay after reopen.
+    pub fn recovered_join_registration_data(
+        &self,
+    ) -> Result<Option<crate::store::NativeTextJoinedRegistrationData>, AppError> {
+        self.index.recovered_join_registration_data()
+    }
 }
 
 pub(super) fn connected_join_invoice(request_bytes: usize) -> usize {
