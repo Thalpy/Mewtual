@@ -1,5 +1,15 @@
 # Mewtual; Handover
 
+## 22 November 2026 — Invitation and join branch CI
+
+Both focused workflows passed on Linux and Windows at `3d3bce63` on
+`feat/chat-v2-invite-signing`. They exercised the native invitation journal,
+exact JoinRequest and response frames, real MLS Add/Welcome with test Host
+selection, and the broader storage and predecessor cohorts. No local tests
+ran. The production founder Add transaction, joined pin/source, and shared
+transport remain open. Chat V2 is disabled.
+[Source-pinned results](communication-recovery/CHAT-FILES-VOICE-ACCEPTANCE.md#invitation-and-join-branch-ci-22-november-2026).
+
 ## 20 November: retained join request and private Welcome candidate
 
 Sync retains one signed V2 request and its original MLS private bundle. It

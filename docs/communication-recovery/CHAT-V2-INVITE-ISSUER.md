@@ -3,8 +3,9 @@
 The warm native runtime covers the original intent, signing attempt and
 signature before returning `NativeTextSavedInvite` with a verified invitation
 packet for trusted Rust. Chat V2 remains off. Cold recovery, the desktop
-invitation command, certified contacts and usable joins remain open. Hosted
-validation is pending.
+invitation command, certified contacts and usable joins remain open. The
+Linux and Windows hosted checks passed at `3d3bce63`.
+[Source-pinned results](CHAT-FILES-VOICE-ACCEPTANCE.md#invitation-and-join-branch-ci-22-november-2026).
 
 ## Initial durable intent profile
 
@@ -117,7 +118,8 @@ attempt and Raw writes, key accounting on refusal, late cancellation, and
 compatibility with ordinary page retirement. The exact-request lookup and
 signature coverage share one Host call. A fresh runtime loan cannot begin
 until the previous invitation key End has drained. Rust formatting, whitespace
-and the Store filesystem boundary check passed. Runtime validation is pending.
+and the Store filesystem boundary check passed. The focused hosted run covers
+all 15 native invitation cases on each OS.
 
 ## Invitation packet
 

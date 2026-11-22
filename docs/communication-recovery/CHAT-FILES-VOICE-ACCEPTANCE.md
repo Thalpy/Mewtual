@@ -1,5 +1,27 @@
 # Chat, files and voice implementation evidence
 
+## Invitation and join branch CI (22 November 2026)
+
+Both hosted workflows passed on Linux and Windows at
+`3d3bce638fe6736f9073bd07be1cf89465766b83` on `feat/chat-v2-invite-signing`.
+The invitation workflow passed 15 binding cases, three JoinRequest cases,
+one exact response-budget case, one real MLS Add/Welcome case, four journal
+controls, 15 native invitation cases and three packet cases on each OS. The
+real MLS case used test Host selection. Windows also passed the ordinary
+save and retirement preservation fixture, and Linux passed the Store raw
+filesystem gate. No local tests ran.
+[Invitation workflow](https://github.com/Thalpy/Mewtual/actions/runs/44932774906).
+
+The joined-source workflow passed all exact-count regressions, including the
+360 nonignored native registry cases, and its pinned predecessor checks on
+both OSes. Root formatting and affected protocol crate strict Clippy passed
+on both OSes. The Linux frontend test, type and build steps passed.
+[Joined-source workflow](https://github.com/Thalpy/Mewtual/actions/runs/44932774546).
+
+Production still requires the Root-covered Add and Welcome release, joined
+pin and Source installation, shared transport and projection, and operational
+restart recovery. Chat V2 remains disabled.
+
 ## Retained V2 request and private Welcome candidate (20 November)
 
 Four hosted regression cases are prepared for exact packet and provider
