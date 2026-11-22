@@ -3,7 +3,9 @@
 use super::*;
 use catcoms_replication::chat::join_bindings::{GenesisAnchorBindingData, SignedInviteBindingData};
 use catcoms_replication::chat::owner_header::OwnerHeaderId;
-use catcoms_sync::{DirectJoinLimits, PreparedV2JoinRequest, MAX_V2_FIRST_JOIN_DELIVERY_BYTES};
+use catcoms_sync::{
+    DirectJoinLimits, NativeV2JoinKeyEntry, PreparedV2JoinRequest, MAX_V2_FIRST_JOIN_DELIVERY_BYTES,
+};
 use critical_namespaces::joined_pin::pending::{
     JoinedTransportReservation, PreparedPinnedPending, RecoveredPinnedPending, MAX_FRAME,
 };
@@ -237,13 +239,12 @@ pub(in crate::store) struct AcceptedFirstJoin<'a> {
     pub(in crate::store) anchor: &'a GenesisAnchorBindingData,
     pub(in crate::store) token: [u8; 32],
     pub(in crate::store) now_ms: u64,
-    pub(in crate::store) transport: AcceptedJoinTransport,
+    pub(in crate::store) transport: AcceptedJoinTransport<'a>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(in crate::store) enum AcceptedJoinTransport {
+pub(in crate::store) enum AcceptedJoinTransport<'a> {
     External,
-    Native,
+    Native(NativeV2JoinKeyEntry<'a>),
 }
 
 #[cfg(test)]
@@ -260,6 +261,7 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
     ) -> Result<([u8; 32], catcoms_sync::V2PendingJoinContextData), AppError> {
         let binding = accepted.invite.binding();
+        let native = matches!(&accepted.transport, AcceptedJoinTransport::Native(_));
         if accepted.token == [0; 32] || accepted.anchor != &binding.spec_data().anchor {
             return Err(denied());
         }
@@ -273,9 +275,7 @@ impl ServerStore {
         require_live()?;
         if let Some(original) = pending.as_ref() {
             original.require_original_join_intent(binding, accepted.token)?;
-            if original.transport_data()?.is_some()
-                != (accepted.transport == AcceptedJoinTransport::Native)
-            {
+            if original.transport_data()?.is_some() != native {
                 return Err(denied());
             }
         } else {
@@ -294,19 +294,29 @@ impl ServerStore {
             let pool = &policy.current.archive.pending.pool;
             let _fee = pool.try_reserve(PREPARATION_BYTES)?;
             require_live()?;
-            let source = PreparedV2JoinRequest::prepare(
-                catcoms_mls::MlsDevice::generate()?,
-                accepted.anchor,
-                binding,
-                accepted.token,
-                accepted.now_ms,
-                first_join_limits()?,
-            )?;
-            require_live()?;
-            let transport = match accepted.transport {
-                AcceptedJoinTransport::External => None,
-                AcceptedJoinTransport::Native => Some(JoinedTransportReservation::generate(rng)?),
+            let limits = first_join_limits()?;
+            let source = match accepted.transport {
+                AcceptedJoinTransport::External => PreparedV2JoinRequest::prepare(
+                    catcoms_mls::MlsDevice::generate()?,
+                    accepted.anchor,
+                    binding,
+                    accepted.token,
+                    accepted.now_ms,
+                    limits,
+                )?,
+                AcceptedJoinTransport::Native(key) => PreparedV2JoinRequest::prepare_native(
+                    accepted.anchor,
+                    binding,
+                    accepted.token,
+                    accepted.now_ms,
+                    limits,
+                    key,
+                )?,
             };
+            require_live()?;
+            let transport = native
+                .then(|| JoinedTransportReservation::generate(rng))
+                .transpose()?;
             require_live()?;
             *pending = Some(self.prepare_joined_pending(source, binding, transport, rng)?);
         }
@@ -714,6 +724,7 @@ impl JoinedPendingIo {
         delivery: &[u8],
         rng: &mut impl CryptoRngCore,
         negative: Option<&catcoms_rt::RequestCancellation>,
+        key: Option<NativeV2JoinKeyEntry<'_>>,
     ) -> Result<(), AppError> {
         let require_current = || {
             if negative.is_some_and(catcoms_rt::RequestCancellation::is_cancelled) {
@@ -755,6 +766,7 @@ impl JoinedPendingIo {
             &key,
             rng,
             negative,
+            key,
         )?;
         self.request_data(store)?;
         require_current()?;

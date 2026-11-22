@@ -89,11 +89,12 @@ impl WarmWelcome {
         key: &[u8; 32],
         rng: &mut impl CryptoRngCore,
         negative: Option<&catcoms_rt::RequestCancellation>,
+        keys: Option<NativeV2JoinKeyEntry<'_>>,
     ) -> Result<(), AppError> {
         self.require_entry(store)?;
         if self.outcome.is_none() {
             let context = required.context_data();
-            required.finish_delivery(&self.delivery, negative)?;
+            required.finish_delivery(&self.delivery, negative, keys)?;
             if negative.is_some_and(catcoms_rt::RequestCancellation::is_cancelled) {
                 return Err(denied());
             }

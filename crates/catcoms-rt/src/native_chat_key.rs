@@ -22,7 +22,7 @@ pub use source_close::NativeChatSourceClose;
 
 const CLOSED: usize = 1 << (usize::BITS - 1);
 const MAX_ENTRIES: usize = 32;
-const PURPOSES: usize = 9;
+const PURPOSES: usize = 11;
 
 /// Closed purposes selected by concrete producers, never a WebView permission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,6 +44,10 @@ pub enum NativeChatKeyPurpose {
     /// A retained invitation preimage. This does not authorize Add, consume
     /// an invite nonce, or prove that the invitation has been saved.
     JoinInvite,
+    /// First local MLS device and KeyPackage for the accepted joined source.
+    JoinerDevice,
+    /// Enter the original joiner's private MLS Welcome operation.
+    JoinerWelcomeSdk,
 }
 impl NativeChatKeyPurpose {
     fn slot(self) -> usize {
@@ -59,6 +63,8 @@ impl NativeChatKeyPurpose {
             Self::GoverningHeader => 6,
             Self::JoinWelcome => 7,
             Self::JoinInvite => 8,
+            Self::JoinerDevice => 9,
+            Self::JoinerWelcomeSdk => 10,
         }
     }
 }

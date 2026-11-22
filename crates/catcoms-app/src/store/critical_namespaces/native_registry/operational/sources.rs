@@ -543,7 +543,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSourcePreparation<T, R> {
             return Err(Box::new(self));
         }
         let entries = Arc::new(Mutex::new(Vec::with_capacity(self.budget.policy.maximum)));
-        let pending_join = Arc::new(Mutex::new(None));
+        let pending_join = Arc::new(join::PendingJoin::default());
         let mounted_join = Arc::new(Mutex::new(None));
         let joined_tcp = Arc::new(join::Transport::default());
         if self.scope.claim_once().is_err() {
@@ -600,6 +600,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSources<T, R> {
     pub fn close_admission(&self) {
         self.scope.close_first();
         self.retirement.close_preparations();
+        self.pending_join.close_keys();
         let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         for entry in entries.iter() {
             entry.owner.close();

@@ -272,7 +272,7 @@ impl PreparedV2JoinRequest {
                 epoch: replay.mls_epoch_data(),
             },
             cap,
-            None,
+            WelcomeAuthority::default(),
         )?;
         prefix.require_join_genesis_data(anchor).map_err(reject)?;
         if !admission.is_open_data() {
@@ -290,14 +290,14 @@ impl PreparedV2JoinRequest {
         response: V2JoinResponseData<'_>,
         proof: &V2FirstAddProofData<'_>,
     ) -> Result<&CompletedV2JoinCandidate, SyncError> {
-        self.finish_first_welcome_with(response, proof, None)
+        self.finish_first_welcome_with(response, proof, WelcomeAuthority::default())
     }
 
     fn finish_first_welcome_with(
         &mut self,
         response: V2JoinResponseData<'_>,
         proof: &V2FirstAddProofData<'_>,
-        negative: Option<&catcoms_rt::RequestCancellation>,
+        authority: WelcomeAuthority<'_>,
     ) -> Result<&CompletedV2JoinCandidate, SyncError> {
         let cap = self
             .limits
@@ -307,7 +307,7 @@ impl PreparedV2JoinRequest {
         let request_bytes = self.request.clone();
         let packet = V2JoinRequestPacketData::decode(&request_bytes)?;
         let admission = WelcomeAdmission::first(proof, &packet.invite.spec_data().anchor)?;
-        self.finish_verified_welcome(&packet, response, admission, cap, negative)
+        self.finish_verified_welcome(&packet, response, admission, cap, authority)
     }
 
     /// Verify the full delivery without restoring the private provider or
@@ -323,7 +323,7 @@ impl PreparedV2JoinRequest {
         &mut self,
         bytes: &[u8],
     ) -> Result<&CompletedV2JoinCandidate, SyncError> {
-        self.finish_first_join_delivery_with(bytes, None)
+        self.finish_first_join_delivery_with(bytes, WelcomeAuthority::default())
     }
 
     /// The owning host retains its original cancellation until the exact
@@ -334,20 +334,43 @@ impl PreparedV2JoinRequest {
         bytes: &[u8],
         negative: &catcoms_rt::RequestCancellation,
     ) -> Result<&CompletedV2JoinCandidate, SyncError> {
-        self.finish_first_join_delivery_with(bytes, Some(negative))
+        self.finish_first_join_delivery_with(
+            bytes,
+            WelcomeAuthority {
+                negative: Some(negative),
+                native: None,
+            },
+        )
+    }
+
+    /// Enter the actual native joiner's private MLS work under its original
+    /// source and current UI, after authenticating the covered delivery.
+    pub fn finish_native_first_join_delivery(
+        &mut self,
+        bytes: &[u8],
+        negative: &catcoms_rt::RequestCancellation,
+        key: NativeV2JoinKeyEntry<'_>,
+    ) -> Result<&CompletedV2JoinCandidate, SyncError> {
+        self.finish_first_join_delivery_with(
+            bytes,
+            WelcomeAuthority {
+                negative: Some(negative),
+                native: Some(key),
+            },
+        )
     }
 
     fn finish_first_join_delivery_with(
         &mut self,
         bytes: &[u8],
-        negative: Option<&catcoms_rt::RequestCancellation>,
+        authority: WelcomeAuthority<'_>,
     ) -> Result<&CompletedV2JoinCandidate, SyncError> {
         if bytes.len() > self.limits.exchange {
             return Err(SyncError::Malformed);
         }
         let delivery = V2FirstJoinDeliveryData::decode(bytes)?;
         let (response, proof) = delivery.data();
-        self.finish_first_welcome_with(response, proof, negative)
+        self.finish_first_welcome_with(response, proof, authority)
     }
 
     fn finish_verified_welcome(
@@ -356,7 +379,7 @@ impl PreparedV2JoinRequest {
         response: V2JoinResponseData<'_>,
         admission: WelcomeAdmission<'_>,
         cap: usize,
-        negative: Option<&catcoms_rt::RequestCancellation>,
+        mut authority: WelcomeAuthority<'_>,
     ) -> Result<&CompletedV2JoinCandidate, SyncError> {
         let ValidatedWelcome {
             binding: response_binding,
@@ -366,12 +389,27 @@ impl PreparedV2JoinRequest {
         } = admission.validate(packet, response, cap)?;
         let header = admission.header;
         let request = packet.request.spec_data();
-        if negative.is_some_and(catcoms_rt::RequestCancellation::is_cancelled) {
+        if authority
+            .negative
+            .is_some_and(catcoms_rt::RequestCancellation::is_cancelled)
+        {
             return Err(SyncError::JoinRejected);
+        }
+        match (&self.native_origin, &authority.native) {
+            (None, None) => (),
+            (Some(original), Some(key)) if original.same_original(key.original) => {
+                key.cut
+                    .preflight(original, NativeChatKeyPurpose::JoinerWelcomeSdk)
+                    .map_err(|_| SyncError::JoinRejected)?;
+            }
+            _ => return Err(SyncError::JoinRejected),
         }
         if self.completed.is_none() {
             if self.welcome_entered {
                 return Err(SyncError::JoinRejected);
+            }
+            if let Some(key) = authority.native.as_mut() {
+                key.enter(NativeChatKeyPurpose::JoinerWelcomeSdk)?;
             }
             // Only a fully authenticated response can spend the original
             // finite SDK attempt. Ambiguous or failed SDK entry stays held.
@@ -434,6 +472,12 @@ impl PreparedV2JoinRequest {
         result.validate_initial_state_data()?;
         Ok(result)
     }
+}
+
+#[derive(Default)]
+struct WelcomeAuthority<'a> {
+    negative: Option<&'a catcoms_rt::RequestCancellation>,
+    native: Option<NativeV2JoinKeyEntry<'a>>,
 }
 
 pub(super) fn validate_delivery_data(

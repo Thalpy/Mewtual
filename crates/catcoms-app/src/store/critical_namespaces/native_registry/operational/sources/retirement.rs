@@ -223,6 +223,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSources<T, R> {
     pub fn capture_retirement(&self) -> NativeTextSourceRetirementPreparation<T, R> {
         self.scope.close_first();
         self.retirement.close_preparations();
+        self.pending_join.close_keys();
         let ack = self
             .retirement
             .captured

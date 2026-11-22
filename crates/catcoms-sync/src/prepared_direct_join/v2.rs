@@ -7,6 +7,9 @@ use catcoms_replication::chat::join_bindings::{
     SignedInviteBindingData, SignedJoinRequestBindingData, MAX_JOIN_BINDING_BYTES,
 };
 use catcoms_replication::chat::ChatError;
+use catcoms_rt::{
+    NativeChatKeyEnds, NativeChatKeyPurpose, NativeChatPreparedKeyCut, NativeChatSourceObservation,
+};
 use catcoms_wire::Encoder;
 mod first_add_proof;
 mod pending_source;
@@ -104,12 +107,48 @@ pub struct PreparedV2JoinRequest {
     master: Zeroizing<Vec<u8>>,
     limits: DirectJoinLimits,
     welcome_entered: bool,
+    native_origin: Option<NativeChatSourceObservation>,
     // A pending request moves through transport and covering futures even
     // before a completed SDK graph exists. Keep that graph out of those frames.
     completed: Option<Box<CompletedV2JoinCandidate>>,
     sealed_source: Option<SealedV2PendingJoinSource>,
     sealed_outcome: Option<SealedV2JoinedOutcome>,
     initial_prefix_origin: Option<std::sync::Arc<()>>,
+}
+
+/// Explicit owning native cut and its externally retained End batch. The
+/// cut itself enforces original source allocation, purpose and UI session.
+pub struct NativeV2JoinKeyEntry<'a> {
+    original: &'a NativeChatSourceObservation,
+    cut: &'a mut NativeChatPreparedKeyCut,
+    ends: &'a mut NativeChatKeyEnds,
+}
+
+impl<'a> NativeV2JoinKeyEntry<'a> {
+    pub fn new(
+        original: &'a NativeChatSourceObservation,
+        cut: &'a mut NativeChatPreparedKeyCut,
+        ends: &'a mut NativeChatKeyEnds,
+    ) -> Self {
+        Self {
+            original,
+            cut,
+            ends,
+        }
+    }
+
+    fn enter(&mut self, purpose: NativeChatKeyPurpose) -> Result<(), SyncError> {
+        self.cut
+            .enter(self.original, purpose, self.ends)
+            .map_err(|_| SyncError::JoinRejected)
+    }
+}
+
+impl fmt::Debug for NativeV2JoinKeyEntry<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NativeV2JoinKeyEntry")
+            .finish_non_exhaustive()
+    }
 }
 
 impl PreparedV2JoinRequest {
@@ -124,15 +163,8 @@ impl PreparedV2JoinRequest {
         now_ms: u64,
         limits: DirectJoinLimits,
     ) -> Result<Self, SyncError> {
+        require_first_invite(accepted_anchor, invite, token, now_ms)?;
         let spec = invite.spec_data();
-        if token == [0; 32]
-            || !invite.verify()
-            || spec.anchor != *accepted_anchor
-            || spec.inviter != accepted_anchor.founder
-            || invite.expired_at_data(now_ms)
-        {
-            return Err(SyncError::JoinRejected);
-        }
         // Verify existing provider capacity before building a KeyPackage.
         // The caller still accounts for the SDK's typed heap and work.
         drop(snapshot_join_device_bounded(
@@ -183,11 +215,30 @@ impl PreparedV2JoinRequest {
             master,
             limits,
             welcome_entered: false,
+            native_origin: None,
             completed: None,
             sealed_source: None,
             sealed_outcome: None,
             initial_prefix_origin: None,
         })
+    }
+
+    /// Admit device generation and KeyPackage signing in the same original
+    /// native cut. Later Welcome work requires that same source's SDK cut.
+    pub fn prepare_native(
+        accepted_anchor: &GenesisAnchorBindingData,
+        invite: &SignedInviteBindingData,
+        token: [u8; 32],
+        now_ms: u64,
+        limits: DirectJoinLimits,
+        mut key: NativeV2JoinKeyEntry<'_>,
+    ) -> Result<Self, SyncError> {
+        require_first_invite(accepted_anchor, invite, token, now_ms)?;
+        key.enter(NativeChatKeyPurpose::JoinerDevice)?;
+        let device = MlsDevice::generate()?;
+        let mut request = Self::prepare(device, accepted_anchor, invite, token, now_ms, limits)?;
+        request.native_origin = Some(key.original.clone());
+        Ok(request)
     }
 
     /// Lost requests can resend these same bytes without building a new package.
@@ -225,6 +276,24 @@ impl PreparedV2JoinRequest {
         )?;
         Ok(device)
     }
+}
+
+fn require_first_invite(
+    accepted_anchor: &GenesisAnchorBindingData,
+    invite: &SignedInviteBindingData,
+    token: [u8; 32],
+    now_ms: u64,
+) -> Result<(), SyncError> {
+    let spec = invite.spec_data();
+    if token == [0; 32]
+        || !invite.verify()
+        || spec.anchor != *accepted_anchor
+        || spec.inviter != accepted_anchor.founder
+        || invite.expired_at_data(now_ms)
+    {
+        return Err(SyncError::JoinRejected);
+    }
+    Ok(())
 }
 
 impl fmt::Debug for PreparedV2JoinRequest {

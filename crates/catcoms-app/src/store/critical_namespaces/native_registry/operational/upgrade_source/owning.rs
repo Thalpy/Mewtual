@@ -393,7 +393,13 @@ impl Store {
         negative: Option<&catcoms_rt::RequestCancellation>,
     ) -> Result<(), AppError> {
         let physical = Arc::get_mut(&mut self.physical).ok_or_else(refused)?;
-        pending.finish_welcome(physical.joined_pending_store()?, delivery, rng, negative)
+        pending.finish_welcome(
+            physical.joined_pending_store()?,
+            delivery,
+            rng,
+            negative,
+            None,
+        )
     }
 
     pub(in crate::store::critical_namespaces::native_registry) fn attach_joined_node<

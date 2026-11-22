@@ -156,6 +156,7 @@ impl RecoveredV2PendingJoinSource {
             master: Zeroizing::new(master.to_vec()),
             limits,
             welcome_entered: false,
+            native_origin: None,
             completed: None,
             sealed_source: None,
             sealed_outcome: None,

@@ -15,14 +15,41 @@ use crate::store::NativeTextInvitePacketData;
 use catcoms_replication::chat::join_bindings::GenesisAnchorBindingData;
 use catcoms_replication::chat::owner_facts::OwnerFactId;
 use catcoms_replication::chat::owner_header::OwnerHeaderId;
-use catcoms_rt::{Clock, PeerId, RequestAuthority, RequestCancellation};
-use catcoms_sync::{ClosedV2JoinedNode, V2JoinedRuntimeInputs, V2PendingJoinContextData};
-use std::{sync::Weak, time::Duration};
+use catcoms_rt::{
+    Clock, NativeChatKeyEnds, NativeChatKeyPurpose, NativeChatSourceClose, NativeChatUiCommand,
+    PeerId, RequestAuthority, RequestCancellation,
+};
+use catcoms_sync::{
+    ClosedV2JoinedNode, NativeV2JoinKeyEntry, V2JoinedRuntimeInputs, V2PendingJoinContextData,
+};
+use std::{
+    sync::{OnceLock, Weak},
+    time::Duration,
+};
 use tokio::sync::watch;
 mod transport;
 pub(super) use transport::Transport;
 
-pub(super) type PendingJoin = Mutex<Option<JoinedPendingIo>>;
+#[derive(Default)]
+pub(super) struct PendingJoin {
+    state: Mutex<PendingJoinState>,
+    close: OnceLock<NativeChatSourceClose>,
+}
+
+#[derive(Default)]
+struct PendingJoinState {
+    // The original graph/provider drains before the source counter is destroyed.
+    io: Option<JoinedPendingIo>,
+    owner: Option<NativeChatSourceOwner>,
+}
+
+impl PendingJoin {
+    pub(super) fn close_keys(&self) {
+        if let Some(close) = self.close.get() {
+            close.close();
+        }
+    }
+}
 pub(super) type MountedJoin<R> = Mutex<Option<MountedNode<R>>>;
 
 pub(super) fn invoice<R: CryptoRngCore>() -> usize {
@@ -33,6 +60,8 @@ pub(super) fn invoice<R: CryptoRngCore>() -> usize {
         + 2 * std::mem::size_of::<NativeTextJoinedSelectionPreparation<R>>()
         + std::mem::size_of::<MountedJoin<R>>()
         + std::mem::size_of::<Transport>()
+        + 2 * std::mem::size_of::<NativeChatKeyEnds>()
+        + 4096 // original joined Source counter, cuts, and their Arc allocations
         + 6 * std::mem::size_of::<usize>()
 }
 
@@ -105,19 +134,50 @@ impl NativeTextJoinedRequestPreparation {
         negative: &RequestCancellation,
         rng: &mut impl CryptoRngCore,
     ) -> Result<([u8; 32], V2PendingJoinContextData), AppError> {
+        let mut ends = NativeChatKeyEnds::new();
         let work = self.work.as_ref().ok_or_else(refused)?;
         let require_current = || self.require_current(negative);
         require_current()?;
         let original = self.pending.upgrade().ok_or_else(refused)?;
-        let mut pending = original.try_lock().map_err(|_| refused())?;
+        let mut pending = original.state.try_lock().map_err(|_| refused())?;
+        if token == [0; 32]
+            || anchor != &invite.binding().spec_data().anchor
+            || (pending.io.is_none() && invite.binding().expired_at_data(now_ms))
+        {
+            return Err(refused());
+        }
+        if pending.owner.is_none() {
+            require_current()?;
+            let owner = NativeChatSourceOwner::for_trusted_source(
+                &self.command.ui.command,
+                self._control.clone(),
+            )
+            .map_err(|_| refused())?;
+            original
+                .close
+                .set(owner.close_handle())
+                .map_err(|_| refused())?;
+            pending.owner = Some(owner);
+            if !self.scope.is_open() {
+                original.close_keys();
+            }
+            require_current()?;
+        }
+        let owner = pending.owner.as_ref().ok_or_else(refused)?;
+        let source = owner.observe();
+        let mut cut = owner
+            .prepare_cut(&self.command.ui.command, NativeChatKeyPurpose::JoinerDevice)
+            .map_err(|_| refused())?;
         let accepted = AcceptedFirstJoin {
             invite,
             anchor,
             token,
             now_ms,
-            transport: AcceptedJoinTransport::Native,
+            transport: AcceptedJoinTransport::Native(NativeV2JoinKeyEntry::new(
+                &source, &mut cut, &mut ends,
+            )),
         };
-        work.cover_accepted_first_join(&mut pending, accepted, require_current, rng)
+        work.cover_accepted_first_join(&mut pending.io, accepted, require_current, rng)
     }
 
     /// Reprove and copy the exact covered request outside native guards. The
@@ -130,8 +190,8 @@ impl NativeTextJoinedRequestPreparation {
         self.require_current(&caller)?;
         let (prepared, tcp) = {
             let original = self.pending.upgrade().ok_or_else(refused)?;
-            let pending = original.try_lock().map_err(|_| refused())?;
-            let pending = pending.as_ref().ok_or_else(refused)?;
+            let pending = original.state.try_lock().map_err(|_| refused())?;
+            let pending = pending.io.as_ref().ok_or_else(refused)?;
             let metadata = self.work.as_ref().ok_or_else(refused)?;
             let prepared = metadata.prepare_join_connection(pending, invite)?;
             let tcp = self.tcp.upgrade().ok_or_else(refused)?.checkout(
@@ -152,6 +212,7 @@ impl NativeTextJoinedRequestPreparation {
             fee,
         } = prepared;
         let (invocation, live) = watch::channel(false);
+        let command = self.command.ui.command.clone();
         let authority = Arc::new(JoinEffect {
             scope: self.scope,
             ui: self.command.ui.into_effect_negative(),
@@ -164,6 +225,7 @@ impl NativeTextJoinedRequestPreparation {
             target: invite.connected_peer_data(),
             local_transport,
             signal: caller.with_authority(authority),
+            command,
             tcp,
             mount,
             work,
@@ -222,6 +284,7 @@ pub struct NativeTextJoinedExchange {
     local_transport: (PeerId, u16),
     tcp: transport::Loan,
     signal: RequestCancellation,
+    command: NativeChatUiCommand,
     mount: RequestCancellation,
     work: SourceWork,
     pending: Weak<PendingJoin>,
@@ -299,19 +362,30 @@ impl NativeTextJoinedDelivery {
     /// Cover Welcome outside native guards only while the original connection,
     /// invocation and mounted files still authorize the original request.
     pub fn cover(self, rng: &mut impl CryptoRngCore) -> Result<(OwnerHeaderId, u64), AppError> {
+        let mut ends = NativeChatKeyEnds::new();
         let scope = &self.delivery.scope;
         if scope.is_cancelled() {
             return Err(refused());
         }
         let metadata = self.exchange.work.metadata().ok_or_else(refused)?;
         let original = self.exchange.pending.upgrade().ok_or_else(refused)?;
-        let mut pending = original.try_lock().map_err(|_| refused())?;
+        let mut pending = original.state.try_lock().map_err(|_| refused())?;
+        let PendingJoinState { io, owner } = &mut *pending;
+        let owner = owner.as_ref().ok_or_else(refused)?;
+        let source = owner.observe();
+        let mut cut = owner
+            .prepare_cut(
+                &self.exchange.command,
+                NativeChatKeyPurpose::JoinerWelcomeSdk,
+            )
+            .map_err(|_| refused())?;
         let outcome = metadata.cover_join_delivery(
-            pending.as_mut().ok_or_else(refused)?,
+            io.as_mut().ok_or_else(refused)?,
             &self.exchange.request,
             &self.delivery.bytes,
             scope,
             rng,
+            NativeV2JoinKeyEntry::new(&source, &mut cut, &mut ends),
         )?;
         if scope.is_cancelled() {
             return Err(refused());
@@ -373,6 +447,7 @@ impl<R: CryptoRngCore> NativeTextJoinedInstallation<R> {
     /// Cover the Welcome, then park the one closed node beside its exact
     /// mounted Pending. Native row publication and signing remain separate.
     pub fn install(&mut self) -> Result<(OwnerHeaderId, OwnerFactId, u64), AppError> {
+        let mut ends = NativeChatKeyEnds::new();
         let scope = &self.delivery.scope;
         if scope.is_cancelled() {
             return Err(refused());
@@ -380,15 +455,31 @@ impl<R: CryptoRngCore> NativeTextJoinedInstallation<R> {
         let mut payment;
         let metadata = self.exchange.work.metadata().ok_or_else(refused)?;
         let original = self.exchange.pending.upgrade().ok_or_else(refused)?;
-        let mut pending = original.try_lock().map_err(|_| refused())?;
-        let pending = pending.as_mut().ok_or_else(refused)?;
+        let mut stored = original.state.try_lock().map_err(|_| refused())?;
+        let PendingJoinState { io, owner } = &mut *stored;
+        let pending = io.as_mut().ok_or_else(refused)?;
         let mounted = self.mounted.upgrade().ok_or_else(refused)?;
         let mut slot = mounted.try_lock().map_err(|_| refused())?;
         let request = &self.exchange.request;
 
         if slot.is_none() {
             let (_, rng, _) = self.inputs.as_mut().ok_or_else(refused)?;
-            metadata.cover_join_delivery(pending, request, &self.delivery.bytes, scope, rng)?;
+            let owner = owner.as_ref().ok_or_else(refused)?;
+            let source = owner.observe();
+            let mut cut = owner
+                .prepare_cut(
+                    &self.exchange.command,
+                    NativeChatKeyPurpose::JoinerWelcomeSdk,
+                )
+                .map_err(|_| refused())?;
+            metadata.cover_join_delivery(
+                pending,
+                request,
+                &self.delivery.bytes,
+                scope,
+                rng,
+                NativeV2JoinKeyEntry::new(&source, &mut cut, &mut ends),
+            )?;
             if scope.is_cancelled() {
                 return Err(refused());
             }
@@ -471,7 +562,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
     ) -> Result<Option<(OwnerHeaderId, OwnerFactId, u64)>, AppError> {
         self.original.require_current(negative)?;
         let original = self.original.pending.upgrade().ok_or_else(refused)?;
-        let pending = original.try_lock().map_err(|_| refused())?;
+        let pending = original.state.try_lock().map_err(|_| refused())?;
         let mounted = self.mounted.upgrade().ok_or_else(refused)?;
         let slot = mounted.try_lock().map_err(|_| refused())?;
         let result = if let Some(runtime) = slot.as_ref() {
@@ -479,7 +570,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             let (head, admission, epoch) = node.selected_join_data().map_err(|_| refused())?;
             let metadata = self.original.work.as_ref().ok_or_else(refused)?;
             if metadata.observe_join_installation(
-                pending.as_ref().ok_or_else(refused)?,
+                pending.io.as_ref().ok_or_else(refused)?,
                 invite,
                 token,
             )? != (head, epoch)

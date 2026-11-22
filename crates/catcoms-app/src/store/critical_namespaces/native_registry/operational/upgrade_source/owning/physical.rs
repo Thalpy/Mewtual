@@ -1126,12 +1126,13 @@ impl MetadataWork {
         delivery: &[u8],
         negative: &catcoms_rt::RequestCancellation,
         rng: &mut impl CryptoRngCore,
+        key: catcoms_sync::NativeV2JoinKeyEntry<'_>,
     ) -> Result<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64), AppError> {
         self.with_joined_store(|store| {
             if negative.is_cancelled() || pending.request_data(store)? != request {
                 return Err(refused());
             }
-            pending.finish_welcome(store, delivery, rng, Some(negative))?;
+            pending.finish_welcome(store, delivery, rng, Some(negative), Some(key))?;
             pending.warm_outcome_data(store)?.ok_or_else(refused)
         })
     }

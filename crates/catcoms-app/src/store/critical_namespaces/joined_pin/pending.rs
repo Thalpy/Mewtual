@@ -2,7 +2,7 @@
 //! The mounted owner covers this exact output before any request can leave.
 use super::*;
 use catcoms_sync::{
-    DirectJoinLimits, PreparedV2JoinRequest, RecoveredV2PendingJoinSource,
+    DirectJoinLimits, NativeV2JoinKeyEntry, PreparedV2JoinRequest, RecoveredV2PendingJoinSource,
     SealedV2PendingJoinSource, V2JoinRequestPacketData, V2PendingJoinContextData,
     MAX_V2_JOIN_REQUEST_PACKET_BYTES,
 };
@@ -136,12 +136,17 @@ impl PreparedPinnedPending {
         &mut self,
         delivery: &[u8],
         negative: Option<&catcoms_rt::RequestCancellation>,
+        key: Option<NativeV2JoinKeyEntry<'_>>,
     ) -> Result<(), AppError> {
-        match negative {
-            Some(negative) => self
+        match (negative, key) {
+            (Some(negative), Some(key)) => self
+                .source
+                .finish_native_first_join_delivery(delivery, negative, key),
+            (Some(negative), None) => self
                 .source
                 .finish_first_join_delivery_cancellable(delivery, negative),
-            None => self.source.finish_first_join_delivery(delivery),
+            (None, None) => self.source.finish_first_join_delivery(delivery),
+            (None, Some(_)) => return Err(refused()),
         }
         .map(|_| ())
         .map_err(|_| refused())

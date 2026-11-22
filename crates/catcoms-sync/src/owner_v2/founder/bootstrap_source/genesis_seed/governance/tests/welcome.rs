@@ -4,8 +4,17 @@ use super::*;
 
 #[test]
 fn v2_join_request_and_welcome_complete_with_actual_add() {
+    complete_original_welcome(false);
+}
+
+#[test]
+fn native_joiner_welcome_requires_the_original_device_source_and_sdk_cut() {
+    complete_original_welcome(true);
+}
+
+fn complete_original_welcome(native_joiner: bool) {
     use crate::{
-        DirectJoinLimits, PreparedV2JoinRequest, RecoveredV2JoinedOutcome,
+        DirectJoinLimits, NativeV2JoinKeyEntry, PreparedV2JoinRequest, RecoveredV2JoinedOutcome,
         RecoveredV2PendingJoinSource, SealedV2JoinedOutcome, SealedV2PendingJoinSource,
         V2AdmissionStepData, V2FirstAddProofData, V2FirstJoinDeliveryData, V2JoinRequestPacketData,
         V2JoinResponseData, V2JoinResponsePacketData,
@@ -52,15 +61,32 @@ fn v2_join_request_and_welcome_complete_with_actual_add() {
     let mut fixture = Request::new(&node, 75);
     fixture.change_invite(&node, |spec| spec.expires_at_ms = now + 60_000);
     let limits = DirectJoinLimits::new(RAW, RAW, 256 * 1024).unwrap();
-    let mut prepared = PreparedV2JoinRequest::prepare(
-        MlsDevice::generate().unwrap(),
-        &fixture.invite.spec_data().anchor,
-        &fixture.invite,
-        [76; 32],
-        now,
-        limits,
-    )
-    .unwrap();
+    let joiner = native_joiner.then(Native::new);
+    let anchor = &fixture.invite.spec_data().anchor;
+    let mut prepared = if let Some(joiner) = &joiner {
+        let source = joiner.source.observe();
+        let mut device = joiner.cut(NativeChatKeyPurpose::JoinerDevice);
+        let mut ends = catcoms_rt::NativeChatKeyEnds::new();
+        PreparedV2JoinRequest::prepare_native(
+            anchor,
+            &fixture.invite,
+            [76; 32],
+            now,
+            limits,
+            NativeV2JoinKeyEntry::new(&source, &mut device, &mut ends),
+        )
+        .unwrap()
+    } else {
+        PreparedV2JoinRequest::prepare(
+            MlsDevice::generate().unwrap(),
+            anchor,
+            &fixture.invite,
+            [76; 32],
+            now,
+            limits,
+        )
+        .unwrap()
+    };
     let pending = crate::V2PendingJoinContextData {
         vault: [101; 32],
         root: [102; 32],
@@ -228,7 +254,43 @@ fn v2_join_request_and_welcome_complete_with_actual_add() {
     assert!(prepared
         .finish_first_join_delivery_cancellable(&delivery, &canceled)
         .is_err());
-    let joined = prepared.finish_welcome(response, &g.verifier).unwrap();
+    let (_current, signal) = tokio::sync::watch::channel(false);
+    let current = catcoms_rt::RequestCancellation::new(signal, None);
+    let mut native_cut = joiner
+        .as_ref()
+        .map(|joiner| joiner.cut(NativeChatKeyPurpose::JoinerWelcomeSdk));
+    let original_source = joiner.as_ref().map(|joiner| joiner.source.observe());
+    let mut ends = catcoms_rt::NativeChatKeyEnds::new();
+    let joined = if let (Some(source), Some(cut)) = (&original_source, &mut native_cut) {
+        assert!(prepared.finish_welcome(response, &g.verifier).is_err());
+        assert!(prepared
+            .finish_first_join_delivery_cancellable(&delivery, &current)
+            .is_err());
+        let foreign = Native::new();
+        for (owner, purpose) in [
+            (&foreign, NativeChatKeyPurpose::JoinerWelcomeSdk),
+            (joiner.as_ref().unwrap(), NativeChatKeyPurpose::JoinWelcome),
+        ] {
+            let original = owner.source.observe();
+            let mut wrong = owner.cut(purpose);
+            assert!(prepared
+                .finish_native_first_join_delivery(
+                    &delivery,
+                    &current,
+                    NativeV2JoinKeyEntry::new(&original, &mut wrong, &mut ends),
+                )
+                .is_err());
+        }
+        prepared
+            .finish_native_first_join_delivery(
+                &delivery,
+                &current,
+                NativeV2JoinKeyEntry::new(source, cut, &mut ends),
+            )
+            .unwrap()
+    } else {
+        prepared.finish_welcome(response, &g.verifier).unwrap()
+    };
     let facts = joined.facts_data();
     assert_eq!(
         facts.key_package_data(),
@@ -245,7 +307,17 @@ fn v2_join_request_and_welcome_complete_with_actual_add() {
         catcoms_mls::GroupMode::PeerToPeer
     );
     let original = joined as *const _;
-    let retry = prepared.finish_welcome(response, &g.verifier).unwrap();
+    let retry = if let (Some(source), Some(cut)) = (&original_source, &mut native_cut) {
+        prepared
+            .finish_native_first_join_delivery(
+                &delivery,
+                &current,
+                NativeV2JoinKeyEntry::new(source, cut, &mut ends),
+            )
+            .unwrap()
+    } else {
+        prepared.finish_welcome(response, &g.verifier).unwrap()
+    };
     assert_eq!(original, retry as *const _);
     prepared.validate_retained_package_data().unwrap();
     assert_eq!(prepared.request_bytes_data(), &wire[..]);

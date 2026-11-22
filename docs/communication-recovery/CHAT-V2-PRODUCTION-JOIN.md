@@ -257,6 +257,13 @@ selecting. Version-one outcomes retain their original read path. Both the warm
 successful graph and the independent cold graph prepare Core's initial selected-history candidate from the same
 signed delivery. Each advances only after the mounted storage rechecks the
 original pin and outcome, and retains the retired parent for fork evidence.
+A mounted join uses separate native key cuts for first Device/KeyPackage work
+and for the joiner's Welcome SDK entry. The prepared request remembers the
+original Source allocation and requires that source and the actual UI counter
+at the Welcome entry edge, after the signed response and public proof verify.
+The existing founder response-signing purpose and the external trusted Rust
+join path cannot enter that native SDK operation. Whole retirement closes the
+original joined key counter before waiting for its admitted work.
 A possible entry with no outcome stays
 historical. An owning warm join can move the actual private Welcome graph and
 its original transport into one closed joined node after selected history and

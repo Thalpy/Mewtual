@@ -51,7 +51,8 @@ COHORTS = {
     "join-request": ("catcoms-sync", "prepared_direct_join::v2::tests::", 3),
     "joined-pending": ("catcoms-sync", "v2_pending_join_keeps_the_original_", 1),
     "join-response": ("catcoms-sync", "prepared_direct_join::v2::welcome::tests::", 1),
-    "join-welcome": ("catcoms-sync", "governance::tests::welcome::", 6),
+    "join-welcome": ("catcoms-sync", "governance::tests::welcome::", 7),
+    "native-joiner-key": ("catcoms-sync", "native_joiner_welcome_requires_the_original_device_source_and_sdk_cut", 1),
     "governed-header": ("catcoms-sync", "raw_header_survives_late_lock_and_exact_retry_never_reenters_key", 1),
     "interrupted-header": ("catcoms-sync", "panic_after_header_entry_does_not_repeat_key_or_lose_completed_sdk_result", 1),
     "predecessor": (
