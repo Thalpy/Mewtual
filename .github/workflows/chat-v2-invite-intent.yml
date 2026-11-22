@@ -129,6 +129,8 @@ jobs:
         run: python .github/scripts/check-chat-v2-invite-intent.py add-outcome
       - name: Check the governing Header attempt and raw signature bindings
         run: python .github/scripts/check-chat-v2-invite-intent.py add-header-signing
+      - name: Check the Welcome intent bound to the original governing record
+        run: python .github/scripts/check-chat-v2-invite-intent.py add-welcome-intent
       - name: Check the original native Source retirement barriers
         run: python .github/scripts/check-chat-v2-invite-intent.py source-retirement
       - name: Check the existing authenticated scratch controls

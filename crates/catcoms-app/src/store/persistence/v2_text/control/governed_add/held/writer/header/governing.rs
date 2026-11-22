@@ -74,6 +74,9 @@ impl PreparedGovernedAddFence {
             .as_mut()
             .and_then(|header| header.governing.as_mut())
             .ok_or_else(refused)?;
+        if !governing.covered {
+            require_absent(&self.held.welcome_intent_path)?;
+        }
         governing.cover(
             &self.held.governing_path,
             governing_record::MAX_BYTES,

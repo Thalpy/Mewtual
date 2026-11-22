@@ -271,6 +271,11 @@ compares every governing body with the original Outcome. It rejects a record
 without its Raw parent and rechecks the original file before handing back
 historical data. A later operation must still select this governing prefix.
 
+The warm Host freezes `text.add.welcome-intent.v2` from the original request,
+covered governing Header, Admission, and exact SDK Welcome and routing bodies.
+The file binds the exact governing ciphertext. The Welcome signing attempt,
+Raw, response coverage and final selection remain separate phases.
+
 The native regression runs one real Add on the original warm runtime with all
 three cuts issued by its actual native source. It covers and independently reads
 the original snapshot, checks that an earlier absence expires when a file appears,

@@ -24,6 +24,7 @@ COHORTS = {
     "add-package-preflight": ("catcoms-sync", "expired_actual_package_refuses_with_a_still_valid_signed_invite", 1),
     "add-outcome": ("catcoms-app", "governed_add_outcome_", 4),
     "add-header-signing": ("catcoms-app", "governed_add_header_signing_", 1),
+    "add-welcome-intent": ("catcoms-app", "governed_add_welcome_intent_", 1),
     "add-source-close": ("catcoms-sync", "governed_add_whole_source_retirement_", 1),
     "add-ui-lock": ("catcoms-sync", "governed_add_ui_retirement_", 1),
     "source-retirement": ("catcoms-app", "operational::sources::retirement::tests::", 11),

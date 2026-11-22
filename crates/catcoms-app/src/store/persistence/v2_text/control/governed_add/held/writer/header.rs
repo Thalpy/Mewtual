@@ -3,9 +3,11 @@ use super::super::super::header_signing::{HeaderOutcomeCommitment, ATTEMPT_BYTES
 use super::*;
 
 mod governing;
+mod welcome;
 
-pub(super) const BUFFER_BYTES: usize =
-    6 * (ATTEMPT_BYTES + RAW_BYTES) + 10 * governing_record::MAX_BYTES;
+pub(super) const BUFFER_BYTES: usize = 6 * (ATTEMPT_BYTES + RAW_BYTES)
+    + 10 * governing_record::MAX_BYTES
+    + 8 * welcome_intent::MAX_BYTES;
 
 pub(super) struct PreparedHeaderSigning {
     outcome: HeaderOutcomeCommitment,
@@ -15,6 +17,7 @@ pub(super) struct PreparedHeaderSigning {
         catcoms_replication::chat::owner_header::OwnerHeaderId,
         PreparedSmallControl,
     )>,
+    welcome: Option<([u8; 32], PreparedSmallControl)>,
     unexpected_raw: bool,
 }
 
@@ -45,6 +48,7 @@ impl PreparedGovernedAddFence {
                 attempt: PreparedSmallControl::new(frozen),
                 raw: None,
                 governing: None,
+                welcome: None,
                 unexpected_raw: false,
             });
         }
@@ -64,6 +68,7 @@ impl PreparedGovernedAddFence {
         guard.require_text_control_io_quiescent()?;
         let header = self.header.as_mut().ok_or_else(refused)?;
         require_absent(&self.held.governing_path)?;
+        require_absent(&self.held.welcome_intent_path)?;
         header.require_raw_absent(&self.held.raw_header_path)?;
         header
             .attempt
@@ -75,6 +80,7 @@ impl PreparedGovernedAddFence {
             .require_covered(&self.held.header_attempt_path)?;
         header.require_raw_absent(&self.held.raw_header_path)?;
         require_absent(&self.held.governing_path)?;
+        require_absent(&self.held.welcome_intent_path)?;
         guard.validate_source_only()
     }
 
@@ -138,6 +144,7 @@ impl PreparedGovernedAddFence {
         let (_, raw) = header.raw.as_mut().ok_or_else(refused)?;
         if !raw.covered {
             require_absent(&self.held.governing_path)?;
+            require_absent(&self.held.welcome_intent_path)?;
         }
         raw.cover(&self.held.raw_header_path, RAW_BYTES, guard)?;
         self.require_covered_outcome(guard, selected)?;

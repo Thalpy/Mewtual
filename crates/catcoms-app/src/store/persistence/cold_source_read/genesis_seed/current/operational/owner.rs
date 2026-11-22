@@ -117,6 +117,26 @@ impl<T, R> V2TextOwnedCurrent<T, R> {
 }
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurrent<T, R> {
+    pub(super) fn freeze_governed_welcome(
+        &mut self,
+        store: &ServerStore,
+    ) -> Result<Vec<u8>, AppError> {
+        match &mut self.core {
+            OwnedCurrent::Warm(current) => current.freeze_governed_welcome(store),
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
+    pub(super) fn materialize_governed_header(
+        &mut self,
+        store: &ServerStore,
+    ) -> Result<catcoms_replication::chat::owner_header::SignedOwnerHeader, AppError> {
+        match &mut self.core {
+            OwnedCurrent::Warm(current) => current.materialize_governed_header(store),
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
     pub(super) fn cached_governed_header_raw(
         &self,
         store: &ServerStore,
@@ -204,17 +224,6 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurr
         match &mut self.core {
             OwnedCurrent::Warm(current) => current.discard_add_for_closed_source(closed),
             OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Ok(()),
-        }
-    }
-
-    #[cfg(all(test, any(windows, target_os = "linux")))]
-    pub(super) fn governed_node_for_test(
-        &mut self,
-        store: &ServerStore,
-    ) -> Result<&mut catcoms_sync::owner_v2::PreparedV2FounderGovernanceNode<T, R>, AppError> {
-        match &mut self.core {
-            OwnedCurrent::Warm(current) => current.governed_node_for_test(store),
-            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
         }
     }
 

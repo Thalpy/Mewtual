@@ -77,6 +77,66 @@ impl PendingGovernedAdd {
 }
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextHost<T, R> {
+    /// Freeze and cover the exact response preimage from the original Cell
+    /// and Admission before any Welcome key entry.
+    pub(super) fn cover_governed_welcome_intent(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        packet: &V2JoinRequestPacketData<'_>,
+        routing_plan: &[u8],
+        keys: &NativeFounderKeys,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+        negative: &catcoms_rt::RequestCancellation,
+    ) -> Result<(), AppError> {
+        self.cover_governed_history(layout, packet, routing_plan, keys, rng, negative)?;
+        let store = layout.checked_store()?;
+        let preimage = self.owner.freeze_governed_welcome(store)?;
+        let owner = self.owner.borrow_current()?;
+        let outcome = self.owner.governed_outcome_data(store)?;
+        let p = self.governed_add.as_mut().ok_or_else(refused)?;
+        let selected = p.parent.selected_data().ok_or_else(refused)?;
+        let resources = p.parent.resources();
+        p.fence
+            .prepare_welcome_intent(store, owner.source(), packet, &outcome, &preimage, rng)?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, resources)?;
+            p.fence.cover_welcome_intent(&guard, selected)?;
+            if negative.is_cancelled() {
+                return Err(refused());
+            }
+            keys.preflight(&self.origin)
+        })
+    }
+
+    pub(super) fn cover_governed_history(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        packet: &V2JoinRequestPacketData<'_>,
+        routing_plan: &[u8],
+        keys: &NativeFounderKeys,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+        negative: &catcoms_rt::RequestCancellation,
+    ) -> Result<(), AppError> {
+        self.sign_governed_header(layout, packet, routing_plan, keys, rng, negative)?;
+        let store = layout.checked_store()?;
+        let header = self.owner.materialize_governed_header(store)?;
+        let owner = self.owner.borrow_current()?;
+        let outcome = self.owner.governed_outcome_data(store)?;
+        let p = self.governed_add.as_mut().ok_or_else(refused)?;
+        let selected = p.parent.selected_data().ok_or_else(refused)?;
+        let resources = p.parent.resources();
+        p.fence
+            .prepare_governing_record(store, owner.source(), &outcome, &header, rng)?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, resources)?;
+            p.fence.cover_governing_record(&guard, selected)?;
+            if negative.is_cancelled() {
+                return Err(refused());
+            }
+            keys.preflight(&self.origin)
+        })
+    }
+
     /// Key use follows exact Outcome/Attempt coverage under the actual Current
     /// and original native source. The Sync loan caches the result in place.
     pub(super) fn sign_governed_header(

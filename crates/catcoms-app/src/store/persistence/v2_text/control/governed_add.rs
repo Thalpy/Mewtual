@@ -11,6 +11,7 @@ mod header_signing;
 pub(in crate::store::persistence::v2_text) mod held;
 mod outcome;
 mod sdk_entry;
+mod welcome_intent;
 
 const ROLE: &[u8] = b"catcoms/private-chat-text-governed-add-fence/v2\0";
 const REQUEST_DOMAIN: &str = "catcoms/private-chat-text-governed-add-request/v2";

@@ -54,6 +54,7 @@ impl HeldGovernedAddFence {
         header.raw = read_stage(&self.raw_header_path, RAW_BYTES)?;
         if header.raw.is_none() {
             require_absent(&self.governing_path)?;
+            require_absent(&self.welcome_intent_path)?;
         }
         guard.validate_source_only()?;
         header.complete_capture = true;
@@ -122,6 +123,7 @@ impl HeldGovernedAddFence {
         require_stage(&self.raw_header_path, header.raw.as_mut())?;
         if header.raw.is_none() {
             require_absent(&self.governing_path)?;
+            require_absent(&self.welcome_intent_path)?;
         }
         let (target, directory, id) = guard.target_directory_data();
         crate::store::persistence::v2_genesis_activation::require_directory_name(

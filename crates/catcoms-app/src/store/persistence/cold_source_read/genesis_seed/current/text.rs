@@ -10,6 +10,36 @@ use catcoms_rt::{NativeChatPreparedKeyCut, NativeChatSourceObservation};
 use catcoms_sync::owner_v2::{V2FounderAddOutcomeData, V2FounderAddRequestData};
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> UnexposedV2GenesisCurrent<T, R> {
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn freeze_governed_welcome(
+        &mut self,
+        store: &crate::store::ServerStore,
+    ) -> Result<Vec<u8>, crate::AppError> {
+        use crate::store::critical_namespaces::refused;
+        self.require_text_original_data(store)
+            .map_err(|_| refused())?;
+        let node = self.governed_text_node_mut().ok_or_else(refused)?;
+        node.prepare_welcome_data()?;
+        let preimage = node.unsigned_welcome_data()?.1.to_vec();
+        self.require_text_original_data(store)
+            .map_err(|_| refused())?;
+        Ok(preimage)
+    }
+
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn materialize_governed_header(
+        &mut self,
+        store: &crate::store::ServerStore,
+    ) -> Result<catcoms_replication::chat::owner_header::SignedOwnerHeader, crate::AppError> {
+        use crate::store::critical_namespaces::refused;
+        self.require_text_original_data(store)
+            .map_err(|_| refused())?;
+        let node = self.governed_text_node_mut().ok_or_else(refused)?;
+        node.materialize_admission_data()?;
+        let header = node.signed_admission_data()?.clone();
+        self.require_text_original_data(store)
+            .map_err(|_| refused())?;
+        Ok(header)
+    }
+
     pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn cached_governed_header_raw(
         &self,
         store: &crate::store::ServerStore,
@@ -108,18 +138,6 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> UnexposedV2Gene
             node.discard_add_for_closed_source(closed)?;
         }
         Ok(())
-    }
-
-    #[cfg(all(test, any(windows, target_os = "linux")))]
-    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn governed_node_for_test(
-        &mut self,
-        store: &crate::store::ServerStore,
-    ) -> Result<&mut catcoms_sync::owner_v2::PreparedV2FounderGovernanceNode<T, R>, crate::AppError>
-    {
-        self.require_text_original_data(store)
-            .map_err(|_| crate::store::critical_namespaces::refused())?;
-        self.governed_text_node_mut()
-            .ok_or_else(crate::store::critical_namespaces::refused)
     }
 
     pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn governed_outcome_data(

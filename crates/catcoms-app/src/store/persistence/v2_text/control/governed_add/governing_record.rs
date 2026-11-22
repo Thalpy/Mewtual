@@ -12,7 +12,7 @@ const TAG: &[u8] = b"catcoms/private-chat-text-governed-add-record/v2\0";
 const KEY_DOMAIN: &str = "catcoms/private-chat-text-governed-add-record-key/v2";
 const RAW_DOMAIN: &str = "catcoms/private-chat-text-governed-add-record-parent/v2";
 const VERSION: u16 = 2;
-const MIN_BYTES: usize = 4 + TAG.len() + 2 + 36 + 2 * 4 + 40;
+pub(super) const MIN_BYTES: usize = 4 + TAG.len() + 2 + 36 + 2 * 4 + 40;
 pub(super) const MAX_BYTES: usize = MIN_BYTES + MAX_HEADER_ROW_BYTES + MAX_ADMISSION_BYTES;
 
 fn raw_commitment(raw: &[u8]) -> Result<[u8; 32], AppError> {

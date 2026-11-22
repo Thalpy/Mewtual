@@ -25,8 +25,12 @@ impl HeldGovernedAddFence {
         if header.governing.is_some() {
             return Err(refused());
         }
+        let original = read_stage(&self.governing_path, governing_record::MAX_BYTES)?;
+        if original.is_none() {
+            require_absent(&self.welcome_intent_path)?;
+        }
         header.governing = Some(ObservedGoverning {
-            original: read_stage(&self.governing_path, governing_record::MAX_BYTES)?,
+            original,
             verified: false,
             header: None,
         });
@@ -86,6 +90,9 @@ impl HeldGovernedAddFence {
             .filter(|governing| governing.verified)
             .ok_or_else(refused)?;
         require_stage(&self.governing_path, governing.original.as_mut())?;
+        if governing.original.is_none() {
+            require_absent(&self.welcome_intent_path)?;
+        }
         let (target, directory, id) = guard.target_directory_data();
         crate::store::persistence::v2_genesis_activation::require_directory_name(
             target, directory, id,
