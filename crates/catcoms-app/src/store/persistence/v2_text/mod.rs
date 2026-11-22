@@ -44,7 +44,7 @@ pub(in crate::store) use common::{
 pub(in crate::store) use context::TextContextData;
 #[cfg(all(test, any(windows, target_os = "linux")))]
 pub(in crate::store) use control::governed_add::held::{
-    GovernedAddRecoveryState, PreparedGovernedAddFence,
+    GovernedAddHeaderRecoveryState, GovernedAddRecoveryState, PreparedGovernedAddFence,
 };
 pub(in crate::store) use head::{TextPendingData, TextRootData};
 #[cfg(all(test, windows))]

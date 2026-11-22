@@ -17,6 +17,12 @@ repeat of the pinned predecessor step. The earlier source-pinned Windows
 predecessor result remains recorded above.
 [Writer CI](https://github.com/Thalpy/Mewtual/actions/runs/45020822704).
 
+At `7e088461` the new exact outcome, large-file prefix, SDK entry and SDK
+candidate accounting checks passed on both platforms, along with the native
+invitation cohort. The replacement run superseded both jobs during the repeat
+of the pinned predecessor step.
+[Outcome and accounting CI](https://github.com/Thalpy/Mewtual/actions/runs/45023926239).
+
 ## Invitation and join branch CI (22 November 2026)
 
 Both hosted workflows passed on Linux and Windows at

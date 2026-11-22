@@ -190,6 +190,8 @@ impl SelectedV2TextHead {
             "text.wal.stage.v1",
             "text.add.sdk-entry.v2",
             "text.add.outcome.v2",
+            "text.add.header-attempt.v2",
+            "text.add.raw-header.v2",
         ] {
             match std::fs::symlink_metadata(fixed_child(target, name)?) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

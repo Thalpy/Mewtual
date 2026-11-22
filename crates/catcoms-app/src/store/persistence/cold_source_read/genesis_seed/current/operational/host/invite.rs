@@ -229,7 +229,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         mut inject_outcome: impl FnMut(bool),
     ) -> Result<(), AppError> {
         use crate::store::persistence::v2_text::{
-            GovernedAddRecoveryState, PreparedGovernedAddFence,
+            GovernedAddHeaderRecoveryState, GovernedAddRecoveryState, PreparedGovernedAddFence,
         };
         self.require_received_invite(
             layout,
@@ -359,7 +359,6 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         .map_err(|_| refused())?;
         node.execute_add_data_native(packet.founder_add_data())?;
         node.prepare_admission_data(replay)?;
-        drop(node.retire_closed_add_native_data()?);
 
         let owner = self.owner.borrow_current()?;
         let outcome = self.owner.governed_outcome_for_test(store)?;
@@ -386,6 +385,69 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             assert!(plaintext.ends_with(outcome.result_data().secret_snapshot_data()));
             Ok(())
         })?;
+
+        fence.prepare_header_attempt(store, owner.source(), rng)?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            keys.preflight(&self.origin)?;
+            fence.cover_header_attempt(&guard, selected)?;
+            verified.capture_header(&guard, selected)
+        })?;
+        verified.authenticate_header(store, owner.source())?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            assert_eq!(
+                verified.require_header_current(&guard, selected)?,
+                GovernedAddHeaderRecoveryState::PossiblyEntered
+            );
+            keys.preflight(&self.origin)?;
+            fence.cover_header_attempt(&guard, selected)
+        })?;
+        let node = self.owner.governed_node_for_test(store)?;
+        node.sign_admission_native()?;
+        let raw = *node.raw_admission_signature_data()?;
+        drop(node.retire_closed_add_native_data()?);
+
+        let owner = self.owner.borrow_current()?;
+        let outcome = self.owner.governed_outcome_for_test(store)?;
+        let mut foreign = raw;
+        foreign[0] ^= 1;
+        assert!(fence
+            .prepare_raw_header(store, owner.source(), &outcome, &foreign, rng)
+            .is_err());
+        fence.prepare_raw_header(store, owner.source(), &outcome, &raw, rng)?;
+        for _ in 0..2 {
+            store.with_v2_text_current(&owner, |admission| {
+                let guard = store.lock_v2_text_current_group(admission, &resources)?;
+                assert!(fence.cover_header_attempt(&guard, selected).is_err());
+                fence.cover_raw_header(&guard, selected)?;
+                assert!(verified.require_header_current(&guard, selected).is_err());
+                Ok(())
+            })?;
+        }
+        let mut fresh = read_fence(&fence, &owner)?;
+        fresh.prepare_outcome_read(store, owner.source())?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            fresh.capture_outcome(&guard, selected)
+        })?;
+        fresh.authenticate_outcome(store, owner.source())?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            fresh.capture_header(&guard, selected)
+        })?;
+        fresh.authenticate_header(store, owner.source())?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            assert_eq!(
+                fresh.require_header_current(&guard, selected)?,
+                GovernedAddHeaderRecoveryState::SignatureRecovered(raw)
+            );
+            Ok(())
+        })?;
+        self.owner
+            .governed_node_for_test(store)?
+            .materialize_admission_data()?;
         Ok(())
     }
 

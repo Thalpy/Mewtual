@@ -41,6 +41,7 @@ const MAX_PLAIN: usize = HEADER_BYTES
     + MAX_STATE_BYTES
     + MAX_SNAPSHOT;
 pub(super) const MAX_FRAME: usize = MAX_PLAIN + 40;
+pub(super) const MIN_FRAME: usize = HEADER_BYTES + BODY_CAPS.len() + 40;
 
 struct OutcomeFields<'a> {
     before: u64,
@@ -185,32 +186,52 @@ pub(in crate::store::persistence::v2_text) fn open_outcome_data(
     entry: &[u8],
     raw: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, AppError> {
-    if raw.len() <= HEADER_BYTES + 40 || raw.len() > MAX_FRAME {
+    if !(MIN_FRAME..=MAX_FRAME).contains(&raw.len()) {
         return Err(refused());
     }
     let parent = entry_digest(entry)?;
     let key = Zeroizing::new(blake3::derive_key(KEY_DOMAIN, key));
     let plain = Zeroizing::new(unseal(&key, &unframe(raw)?)?);
-    let mut d = Decoder::new(&plain);
+    decode_outcome_fields(&plain, parent)?;
+    Ok(plain)
+}
+
+/// Call only on the plaintext of the authenticated exact held Outcome.
+pub(super) fn header_signing_bytes<'a>(
+    entry: &[u8],
+    plain: &'a [u8],
+) -> Result<&'a [u8], AppError> {
+    Ok(decode_outcome_fields(plain, entry_digest(entry)?)?.bodies[5])
+}
+
+fn decode_outcome_fields(plain: &[u8], parent: [u8; 32]) -> Result<OutcomeFields<'_>, AppError> {
+    let mut d = Decoder::new(plain);
     if field(&mut d, TAG.len())? != TAG
         || d.get_u16().map_err(|_| refused())? != VERSION
         || b32(&mut d)? != parent
     {
         return Err(refused());
     }
-    let _authenticator = b32(&mut d)?;
+    let authenticator = field(&mut d, 32)?.try_into().map_err(|_| refused())?;
     let before = d.get_u64().map_err(|_| refused())?;
     let after = d.get_u64().map_err(|_| refused())?;
-    d.get_u64().map_err(|_| refused())?;
+    let admitted_at_ms = d.get_u64().map_err(|_| refused())?;
     if before.checked_add(1) != Some(after) {
         return Err(refused());
     }
-    for cap in BODY_CAPS {
-        let body = field(&mut d, cap)?;
+    let mut bodies = [&[][..]; BODY_CAPS.len()];
+    for (body, cap) in bodies.iter_mut().zip(BODY_CAPS) {
+        *body = field(&mut d, cap)?;
         require_body(body, cap)?;
     }
     d.finish().map_err(|_| refused())?;
-    Ok(plain)
+    Ok(OutcomeFields {
+        before,
+        after,
+        admitted_at_ms,
+        authenticator,
+        bodies,
+    })
 }
 
 #[cfg(test)]

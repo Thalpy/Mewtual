@@ -9,24 +9,74 @@ use catcoms_sync::owner_v2::V2FounderAddOutcomeData;
 use std::fs::OpenOptions;
 use std::io::Write;
 
+mod header;
+
 /// File custody is cached immediately after creation and survives errors or
 /// interruption. Retrying this owner can append only its own verified prefix.
 pub(in crate::store) struct PreparedGovernedAddFence {
     frozen: Option<Zeroizing<Vec<u8>>>,
     entered_create: bool,
-    entry: Option<PreparedSdkEntry>,
+    entry: Option<PreparedSmallControl>,
     outcome: Option<PreparedOutcome>,
+    header: Option<header::PreparedHeaderSigning>,
     other_paths: [PathBuf; 3],
     // The downstream Files and paths drain before the fence's physical lease.
     held: HeldGovernedAddFence,
     _fee: CatalogReadReservation,
 }
 
-struct PreparedSdkEntry {
+struct PreparedSmallControl {
     frozen: Option<Zeroizing<Vec<u8>>>,
     entered_create: bool,
     original: Option<OpenedTextControl>,
     covered: bool,
+}
+
+impl PreparedSmallControl {
+    fn new(frame: Zeroizing<Vec<u8>>) -> Self {
+        Self {
+            frozen: Some(frame),
+            entered_create: false,
+            original: None,
+            covered: false,
+        }
+    }
+
+    fn cover(
+        &mut self,
+        path: &Path,
+        maximum: usize,
+        guard: &V2TextCurrentGroupGuard<'_, '_>,
+    ) -> Result<(), AppError> {
+        let (target, directory, id) = guard.target_directory_data();
+        if !self.covered {
+            ensure_original(
+                path,
+                &mut self.frozen,
+                &mut self.entered_create,
+                &mut self.original,
+                maximum,
+            )?;
+            crate::store::persistence::v2_genesis_activation::require_directory_name(
+                target, directory, id,
+            )?;
+            fill_original(path, self.original.as_mut().ok_or_else(refused)?)?;
+            crate::store::persistence::sync_directory(target).map_err(io)?;
+            crate::store::persistence::v2_genesis_activation::require_directory_name(
+                target, directory, id,
+            )?;
+            self.covered = true;
+        }
+        self.require_covered(path)?;
+        guard.validate_source_only()
+    }
+
+    fn require_covered(&mut self, path: &Path) -> Result<(), AppError> {
+        if !self.covered {
+            return Err(refused());
+        }
+        require_exact_held(path, self.original.as_mut().ok_or_else(refused)?)
+    }
 }
 
 struct PreparedOutcome {
@@ -34,11 +84,13 @@ struct PreparedOutcome {
     sealed: SealedGovernedAddOutcome,
     entered_create: bool,
     covered: bool,
+    header_intent: [u8; 32],
 }
 
 const WRITER_BYTES: usize = 3 * MAX_TEXT_PATH
     + 6 * FRAME_BYTES
     + 6 * ENTRY_BYTES
+    + header::BUFFER_BYTES
     + 4 * std::mem::size_of::<PreparedGovernedAddFence>()
     + 1024;
 
@@ -88,6 +140,7 @@ impl PreparedGovernedAddFence {
             other_paths,
             entry: None,
             outcome: None,
+            header: None,
             _fee: fee,
         })
     }
@@ -108,6 +161,7 @@ impl PreparedGovernedAddFence {
         if !self.held.authenticated {
             require_absent(&self.held.entry_path)?;
             require_absent(&self.held.outcome_path)?;
+            self.held.require_header_stages_absent()?;
             ensure_original(
                 &self.held.path,
                 &mut self.frozen,
@@ -166,12 +220,7 @@ impl PreparedGovernedAddFence {
         let data = GovernedAddSdkEntryData::from_fence_data(raw)?;
         let key = Zeroizing::new(store.keys.db_key()?);
         let frozen = data.seal_data(&key, rng)?;
-        self.entry = Some(PreparedSdkEntry {
-            frozen: Some(frozen),
-            entered_create: false,
-            original: None,
-            covered: false,
-        });
+        self.entry = Some(PreparedSmallControl::new(frozen));
         self.held
             .resources
             .require_bound_original_negative(store, source)
@@ -186,30 +235,12 @@ impl PreparedGovernedAddFence {
     ) -> Result<(), AppError> {
         self.require_covered(guard, selected)?;
         guard.require_text_control_io_quiescent()?;
-        let (target, directory, id) = guard.target_directory_data();
         let entry = self.entry.as_mut().ok_or_else(refused)?;
         if !entry.covered {
             require_absent(&self.held.outcome_path)?;
-            ensure_original(
-                &self.held.entry_path,
-                &mut entry.frozen,
-                &mut entry.entered_create,
-                &mut entry.original,
-                ENTRY_BYTES,
-            )?;
-            crate::store::persistence::v2_genesis_activation::require_directory_name(
-                target, directory, id,
-            )?;
-            fill_original(
-                &self.held.entry_path,
-                entry.original.as_mut().ok_or_else(refused)?,
-            )?;
-            crate::store::persistence::sync_directory(target).map_err(io)?;
-            crate::store::persistence::v2_genesis_activation::require_directory_name(
-                target, directory, id,
-            )?;
-            entry.covered = true;
+            self.held.require_header_stages_absent()?;
         }
+        entry.cover(&self.held.entry_path, ENTRY_BYTES, guard)?;
         self.require_covered_sdk_entry(guard, selected)
     }
 
@@ -220,13 +251,7 @@ impl PreparedGovernedAddFence {
     ) -> Result<(), AppError> {
         self.require_covered(guard, selected)?;
         let entry = self.entry.as_mut().ok_or_else(refused)?;
-        if !entry.covered {
-            return Err(refused());
-        }
-        require_exact_held(
-            &self.held.entry_path,
-            entry.original.as_mut().ok_or_else(refused)?,
-        )?;
+        entry.require_covered(&self.held.entry_path)?;
         let (target, directory, id) = guard.target_directory_data();
         crate::store::persistence::v2_genesis_activation::require_directory_name(
             target, directory, id,
@@ -278,6 +303,7 @@ impl PreparedGovernedAddFence {
             sealed,
             entered_create: false,
             covered: false,
+            header_intent: outcome.unsigned_data().intent_commitment_data(),
         });
         self.held
             .resources
@@ -302,6 +328,7 @@ impl PreparedGovernedAddFence {
             .ok_or_else(refused)?;
         outcome.sealed.require_entry(&entry.frame)?;
         if !outcome.covered {
+            self.held.require_header_stages_absent()?;
             ensure_original(
                 &self.held.outcome_path,
                 &mut outcome.sealed.raw,

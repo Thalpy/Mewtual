@@ -17,6 +17,21 @@ enum CapturedOutcome {
     Present(OpenedTextControl),
 }
 
+impl ObservedOutcome {
+    pub(super) fn authenticated_bytes(&self) -> Result<(&[u8], &[u8]), AppError> {
+        let Some(CapturedOutcome::Present(outcome)) = &self.capture else {
+            return Err(refused());
+        };
+        if !self.authenticated {
+            return Err(refused());
+        }
+        Ok((
+            &outcome.frame,
+            self.plain.as_ref().ok_or_else(refused)?.as_slice(),
+        ))
+    }
+}
+
 impl HeldGovernedAddFence {
     /// Reserve the full outcome read and AEAD inventory outside Current.
     /// Only the reader already holding an authenticated Entry can observe it.
@@ -73,7 +88,11 @@ impl HeldGovernedAddFence {
                 MAX_FRAME,
                 &mut outcome.buffer,
             )?),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => CapturedOutcome::Absent,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                require_absent(&self.header_attempt_path)?;
+                require_absent(&self.raw_header_path)?;
+                CapturedOutcome::Absent
+            }
             Err(error) => return Err(io(error)),
         });
         guard.validate_source_only()
@@ -121,7 +140,11 @@ impl HeldGovernedAddFence {
             .filter(|outcome| outcome.authenticated)
             .ok_or_else(refused)?;
         match outcome.capture.as_mut().ok_or_else(refused)? {
-            CapturedOutcome::Absent => require_absent(&self.outcome_path)?,
+            CapturedOutcome::Absent => {
+                require_absent(&self.outcome_path)?;
+                require_absent(&self.header_attempt_path)?;
+                require_absent(&self.raw_header_path)?;
+            }
             CapturedOutcome::Present(data) => require_exact_held(&self.outcome_path, data)?,
         }
         let (target, directory, id) = guard.target_directory_data();

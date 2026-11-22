@@ -228,7 +228,7 @@ then the SAME SDK outcome, unsigned preimage, raw Header, governing history and
 response before selecting head2. A decoder or namespace4 descriptor cannot
 mint `SavedGovernedAdd`. The immutable dependency graph is:
 
-`Outcome` → `RawHeader` → governing record → `WelcomeIntent` → `RawWelcome`
+`Outcome` → `HeaderAttempt` → `RawHeader` → governing record → `WelcomeIntent` → `RawWelcome`
 → exact response → `Archive2` → `Head2`.
 
 The founder owner lends its exact cached RawHeader and RawWelcome signatures
@@ -257,6 +257,13 @@ own bounded buffer, authenticates the exact Entry and Outcome outside Current,
 then checks the same named file or observed absence under fresh Current. Its
 result is historical data. Recovery must verify the governing record and restored
 SDK state before selection.
+
+`text.add.header-attempt.v2` commits the exact sealed outcome and records
+possible Header key entry. `text.add.raw-header.v2` commits that same outcome
+and the exact attempt file. The independent reader verifies the recovered
+signature over the original outcome's signing bytes with the current founder
+key. An attempt with no Raw remains possible entry. A later Raw invalidates
+an earlier absence observation. Neither state authorizes a reader to sign.
 
 The native regression runs one real Add on the original warm runtime with all
 three cuts issued by its actual native source. It covers and independently reads

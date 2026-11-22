@@ -1,6 +1,7 @@
 //! Hold and revalidate the fixed governed reservation under actual Current.
 //! The read path authenticates an existing file. It cannot adopt an owner,
 //! complete a partial write, enter MLS, or return a covering save receipt.
+use super::header_signing::{ATTEMPT_BYTES, ATTEMPT_NAME, RAW_BYTES, RAW_NAME};
 use super::outcome::OUTCOME_NAME;
 use super::sdk_entry::{GovernedAddSdkEntryData, ENTRY_BYTES, SDK_ENTRY_NAME};
 use super::*;
@@ -21,7 +22,9 @@ use std::path::{Path, PathBuf};
 const STAGE: &str = "text.wal.stage.v1";
 const FILE_COMPARE_BYTES: usize = 8192;
 
+mod header_read;
 mod outcome_read;
+pub(in crate::store) use header_read::GovernedAddHeaderRecoveryState;
 mod writer;
 #[cfg(all(test, any(windows, target_os = "linux")))]
 pub(in crate::store) use writer::PreparedGovernedAddFence;
@@ -33,9 +36,12 @@ pub(in crate::store) struct HeldGovernedAddFence {
     path: PathBuf,
     entry_path: PathBuf,
     outcome_path: PathBuf,
+    header_attempt_path: PathBuf,
+    raw_header_path: PathBuf,
     original: Option<OpenedTextControl>,
     entry: Option<ObservedSdkEntry>,
     outcome: Option<outcome_read::ObservedOutcome>,
+    header: Option<header_read::ObservedHeader>,
     expected: GovernedAddFenceData,
     authenticated: bool,
     resources: V2TextReadResources,
@@ -58,9 +64,10 @@ pub(in crate::store) enum GovernedAddRecoveryState {
     PossiblyEntered,
 }
 
-const FENCE_READ_BYTES: usize = 3 * MAX_TEXT_PATH
+const FENCE_READ_BYTES: usize = 5 * MAX_TEXT_PATH
     + 6 * FRAME_BYTES
     + 6 * ENTRY_BYTES
+    + 6 * (ATTEMPT_BYTES + RAW_BYTES)
     + FILE_COMPARE_BYTES
     + 4 * std::mem::size_of::<HeldGovernedAddFence>()
     + 1024;
@@ -93,14 +100,19 @@ impl HeldGovernedAddFence {
         let path = fixed_child(target, STAGE)?;
         let entry_path = fixed_child(target, SDK_ENTRY_NAME)?;
         let outcome_path = fixed_child(target, OUTCOME_NAME)?;
+        let header_attempt_path = fixed_child(target, ATTEMPT_NAME)?;
+        let raw_header_path = fixed_child(target, RAW_NAME)?;
         resources.require_bound_original_negative(store, source)?;
         Ok(Self {
             path,
             entry_path,
             outcome_path,
+            header_attempt_path,
+            raw_header_path,
             original: None,
             entry: None,
             outcome: None,
+            header: None,
             expected,
             authenticated: false,
             resources,
@@ -123,6 +135,7 @@ impl HeldGovernedAddFence {
             Ok(_) => ObservedSdkEntry::Present(read_control(&self.entry_path, ENTRY_BYTES)?),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 require_absent(&self.outcome_path)?;
+                self.require_header_stages_absent()?;
                 ObservedSdkEntry::Absent
             }
             Err(error) => return Err(io(error)),
@@ -182,6 +195,7 @@ impl HeldGovernedAddFence {
             ObservedSdkEntry::Absent => {
                 require_absent(&self.entry_path)?;
                 require_absent(&self.outcome_path)?;
+                self.require_header_stages_absent()?;
                 GovernedAddRecoveryState::ReservationOnly
             }
             ObservedSdkEntry::Present(entry) => {
@@ -213,6 +227,11 @@ impl HeldGovernedAddFence {
         )?;
         selected.validate_under_current_guard(guard)?;
         guard.require_governed_native_invite_parent()
+    }
+
+    fn require_header_stages_absent(&self) -> Result<(), AppError> {
+        require_absent(&self.header_attempt_path)?;
+        require_absent(&self.raw_header_path)
     }
 }
 
