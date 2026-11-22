@@ -34,15 +34,27 @@ fn only_named(root: &std::path::Path, name: &str) -> std::path::PathBuf {
 
 #[tokio::test]
 async fn native_runtime_invite_join_request_requires_the_actual_signed_journal() {
-    native_governed_add_fixture(false).await;
+    native_governed_add_fixture(JoinCase::Staged).await;
 }
 
 #[tokio::test]
 async fn native_runtime_invite_governed_add_resumes_install_after_a_lost_head_save_reply() {
-    native_governed_add_fixture(true).await;
+    native_governed_add_fixture(JoinCase::InterruptedInstall).await;
 }
 
-async fn native_governed_add_fixture(install: bool) {
+#[tokio::test]
+async fn native_runtime_invite_returns_only_the_original_installed_join_response() {
+    native_governed_add_fixture(JoinCase::NativeResponse).await;
+}
+
+#[derive(PartialEq, Eq)]
+enum JoinCase {
+    Staged,
+    InterruptedInstall,
+    NativeResponse,
+}
+
+async fn native_governed_add_fixture(case: JoinCase) {
     use catcoms_sync::{DirectJoinLimits, PreparedV2JoinRequest};
     let directory = tempfile::tempdir().unwrap();
     let (vault, budget) = selected_governed(directory.path());
@@ -140,6 +152,36 @@ async fn native_governed_add_fixture(install: bool) {
     let replacement = prepare(&owner, &row, &vault, &budget)
         .check_received_join_request(replacement_request.request_bytes_data(), &negative)
         .unwrap();
+    let accept = |wire| {
+        owner
+            .capture_member(
+                &row,
+                command(&vault, &budget),
+                owner.policy.prepare_member().unwrap(),
+            )
+            .accept_join_request(wire, &negative)
+    };
+    if case == JoinCase::NativeResponse {
+        let saved = accept(bytes).unwrap();
+        let decoded =
+            catcoms_sync::V2JoinResponsePacketData::decode(saved.packet_bytes_data()).unwrap();
+        assert_eq!(
+            decoded.response_data().binding.spec_data().request_binding,
+            packet.founder_add_data().request.id_data()
+        );
+        assert!(find_named(directory.path(), "text.add.head-stage.v2").is_empty());
+        assert!(accept(replacement.packet_bytes_data()).is_err());
+        let retry = accept(bytes).unwrap();
+        assert_eq!(saved.packet_bytes_data(), retry.packet_bytes_data());
+        assert_eq!(
+            saved.packet_bytes_data().as_ptr(),
+            retry.packet_bytes_data().as_ptr()
+        );
+        let mut close = owner.prepare_retirement().unwrap();
+        close.try_retire().unwrap();
+        assert_eq!(saved.packet_bytes_data(), retry.packet_bytes_data());
+        return;
+    }
     let preparation = owner.capture_member(
         &row,
         command(&vault, &budget),
@@ -302,7 +344,7 @@ async fn native_governed_add_fixture(install: bool) {
     assert_eq!(std::fs::read(response).unwrap(), response_bytes);
     assert_eq!(std::fs::read(&head_stage).unwrap(), head_stage_bytes);
 
-    if install {
+    if case == JoinCase::InterruptedInstall {
         let mut job = prepare(&owner, &row, &vault, &budget);
         let runtime = job.inner.loan.body.as_mut().unwrap();
         runtime
@@ -327,6 +369,8 @@ async fn native_governed_add_fixture(install: bool) {
             head_stage_bytes
         );
         assert!(check().is_err());
+        assert!(accept(replacement.packet_bytes_data()).is_err());
+        assert!(accept(bytes).is_ok());
         let mut close = owner.prepare_retirement().unwrap();
         close.try_retire().unwrap();
         return;

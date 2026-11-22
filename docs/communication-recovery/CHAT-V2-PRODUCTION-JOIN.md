@@ -137,8 +137,12 @@ the original commitments, actual Add parent and epochs, exact policy and
 fixed L0 slot. It verifies the policy against the actual joined MLS owner.
 Exact completed retries reuse the private candidate after fresh prefix
 checks. The candidate exposes public facts and has no Legacy conversion.
-Durable Add selection, response release and the joined native owner remain
-required for production.
+The native founder job now drives the retained Add through covered Head2 and
+installation. It returns the original response only after a fresh check of
+the selected head and archive. A later delivery of the exact same request
+reuses the original response. Rejecting a different request still requires
+the original nonce fence. Network delivery and the joined native owner
+remain required for production.
 
 ## Namespace6 and original pin custody
 

@@ -1,13 +1,15 @@
 //! Warm coverage of the exact complete SDK Welcome response. A covered
 //! response stays private until the same Add is selected and installed.
 use super::*;
+use crate::store::native_text_invite::PreparedNativeTextJoinResponse;
+use crate::store::NativeTextSavedJoinResponse;
 use catcoms_sync::V2JoinResponseData;
 
 mod archive_file;
 
 pub(super) struct PreparedResponse {
     record: PreparedSmallControl,
-    packet_digest: [u8; 32],
+    packet: PreparedNativeTextJoinResponse,
     archive: Option<archive_file::PreparedArchive>,
     _fee: CatalogReadReservation,
 }
@@ -63,7 +65,7 @@ impl PreparedGovernedAddFence {
         if let Some(prepared) = &stage.response {
             original.require_packet(response)?;
             let packet = Zeroizing::new(response.encode_packet_data()?);
-            if prepared.packet_digest != *blake3::hash(&packet).as_bytes() {
+            if prepared.packet.packet_bytes_data() != packet.as_slice() {
                 return Err(refused());
             }
         } else {
@@ -81,9 +83,10 @@ impl PreparedGovernedAddFence {
             let packet = Zeroizing::new(response.encode_packet_data()?);
             let key = Zeroizing::new(store.keys.db_key()?);
             let frame = response::seal_data(&key, raw_frame, &packet, rng)?;
+            let packet = PreparedNativeTextJoinResponse::prepare(pool, packet)?;
             stage.response = Some(PreparedResponse {
                 record: PreparedSmallControl::new(frame),
-                packet_digest: *blake3::hash(&packet).as_bytes(),
+                packet,
                 archive: None,
                 _fee: fee,
             });
@@ -121,5 +124,20 @@ impl PreparedGovernedAddFence {
             .record;
         prepared.require_covered(path)?;
         guard.validate_source_only()
+    }
+
+    pub(in crate::store) fn saved_response_data(
+        &mut self,
+        guard: &V2TextCurrentGroupGuard<'_, '_>,
+        selected: &SelectedV2TextHead,
+        installed: TextHeadIdData,
+    ) -> Result<NativeTextSavedJoinResponse, AppError> {
+        self.require_selected_head2(guard, selected, installed)?;
+        let response = self
+            .header
+            .as_ref()
+            .and_then(|header| header.welcome_signing.as_ref()?.response.as_ref())
+            .ok_or_else(refused)?;
+        Ok(response.packet.saved_data())
     }
 }

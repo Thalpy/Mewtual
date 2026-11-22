@@ -665,6 +665,30 @@ impl SourceWork {
         )
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn handle_received_join_request<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
+        &self,
+        driver: &mut crate::store::PreparedFreshV2TextFounder<T, R>,
+        incoming: &catcoms_sync::V2JoinRequestPacketData<'_>,
+        routing_plan: &[u8],
+        keys: &crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounderKeys,
+        cuts: [catcoms_rt::NativeChatPreparedKeyCut; 3],
+        rng: &mut impl CryptoRngCore,
+        negative: &catcoms_rt::RequestCancellation,
+    ) -> Result<crate::store::NativeTextSavedJoinResponse, AppError> {
+        driver.handle_received_join_request(
+            self.physical.current()?,
+            incoming,
+            routing_plan,
+            keys,
+            cuts,
+            rng,
+            negative,
+        )
+    }
+
     #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store::critical_namespaces::native_registry) fn current_for_governed_add_test(
         &self,

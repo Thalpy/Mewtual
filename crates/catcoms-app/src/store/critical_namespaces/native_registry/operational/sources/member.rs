@@ -179,6 +179,35 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
         self.finish_prepared(prepared)
     }
 
+    /// Run an incoming join on this exact native founder runtime. The
+    /// caller owns the request bytes and invokes this job outside UI guards.
+    pub fn accept_join_request(
+        self,
+        bytes: &[u8],
+        negative: &RequestCancellation,
+    ) -> Result<crate::store::NativeTextSavedJoinResponse, V2MemberSaveRefusal> {
+        use catcoms_rt::NativeChatKeyPurpose as Purpose;
+        use V2MemberSaveRefusal as Error;
+        if negative.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let packet =
+            catcoms_sync::V2JoinRequestPacketData::decode(bytes).map_err(|_| Error::Failed)?;
+        let (cell, (keys, cuts)) = self.prepare_using_issuer(|source, command| {
+            let cut = |purpose| source.prepare_cut(command, purpose).map_err(|_| refused());
+            Ok((
+                NativeFounderKeys::prepare(source, command)?,
+                [
+                    cut(Purpose::AddSdk)?,
+                    cut(Purpose::GoverningHeader)?,
+                    cut(Purpose::JoinWelcome)?,
+                ],
+            ))
+        })?;
+        self.finish_prepared((cell, keys))?
+            .run_join_request(&packet, cuts, negative)
+    }
+
     fn finish_prepared(
         mut self,
         (cell, keys): MemberKeys<T, R>,

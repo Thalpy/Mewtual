@@ -91,7 +91,7 @@ pub(crate) use mounted::LegacyStoreCustody;
 pub use mounted::{MountedLeaseRefusal, MountedLeaseRefusalKind, MountedVault};
 pub use native_text_invite::{
     NativeTextInvitePacketData, NativeTextInviteRecovery, NativeTextSavedInvite,
-    MAX_NATIVE_TEXT_INVITE_PACKET_BYTES,
+    NativeTextSavedJoinResponse, MAX_NATIVE_TEXT_INVITE_PACKET_BYTES,
 };
 mod owner_evidence;
 pub use chat_admission::{

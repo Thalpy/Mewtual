@@ -35,7 +35,7 @@ COHORTS = {
     "source-retirement": ("catcoms-app", "operational::sources::retirement::tests::", 11),
     "control-scratch": ("catcoms-app", "v2_text::control::tests::scratch::", 3),
     "warm-member-fence": ("catcoms-app", "a_crash_left_founder_wal_keeps_the_member_lane_closed_until_it_is_gone", 1),
-    "native": ("catcoms-app", "native_runtime_invite_", 16),
+    "native": ("catcoms-app", "native_runtime_invite_", 17),
     "packet": ("catcoms-app", "native_invite_packet_", 3),
     "join-request": ("catcoms-sync", "prepared_direct_join::v2::tests::", 3),
     "join-response": ("catcoms-sync", "prepared_direct_join::v2::welcome::tests::", 1),

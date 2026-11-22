@@ -12,6 +12,7 @@ use catcoms_replication::chat::{
     ChatError, MAX_GROUP_ID_BYTES,
 };
 use catcoms_wire::{Decoder, Encoder};
+use std::sync::Arc;
 use zeroize::Zeroizing;
 
 const PACKET: &[u8] = b"mewtual/chat/native-invite-packet/v2\0";
@@ -176,6 +177,49 @@ fn encode_packet(binding: &[u8], policy: &[u8], reservation: &[u8]) -> Result<Ve
 /// can be inspected by trusted Rust. It has no certified address, publication
 /// permission or current Add authority.
 pub struct NativeTextSavedInvite(PreparedNativeTextInvitePacket);
+
+/// The exact response released by a covered, installed governed Add.
+pub struct NativeTextSavedJoinResponse(PreparedNativeTextJoinResponse);
+
+pub(super) struct PreparedNativeTextJoinResponse(Arc<PaidJoinResponse>);
+
+struct PaidJoinResponse {
+    packet: Zeroizing<Vec<u8>>,
+    _payment: CatalogReadReservation,
+}
+
+impl PreparedNativeTextJoinResponse {
+    pub(super) fn prepare(
+        pool: &CriticalCatalogReadPool,
+        packet: Zeroizing<Vec<u8>>,
+    ) -> Result<Self, AppError> {
+        if packet.is_empty() || packet.capacity() > catcoms_sync::MAX_V2_JOIN_RESPONSE_PACKET_BYTES
+        {
+            return Err(refused());
+        }
+        let bytes = packet.capacity() + 4 * std::mem::size_of::<PaidJoinResponse>() + 256;
+        let payment = pool.try_reserve(bytes)?;
+        payment.validate(pool, bytes)?;
+        Ok(Self(Arc::new(PaidJoinResponse {
+            packet,
+            _payment: payment,
+        })))
+    }
+
+    pub(super) fn packet_bytes_data(&self) -> &[u8] {
+        &self.0.packet
+    }
+
+    pub(super) fn saved_data(&self) -> NativeTextSavedJoinResponse {
+        NativeTextSavedJoinResponse(Self(self.0.clone()))
+    }
+}
+
+impl NativeTextSavedJoinResponse {
+    pub fn packet_bytes_data(&self) -> &[u8] {
+        self.0.packet_bytes_data()
+    }
+}
 
 pub(super) struct PreparedNativeTextInvitePacket {
     binding_id: [u8; 32],

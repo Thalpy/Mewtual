@@ -83,6 +83,55 @@ impl PendingGovernedAdd {
 }
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextHost<T, R> {
+    pub(in crate::store) fn handle_received_join_request(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        packet: &V2JoinRequestPacketData<'_>,
+        routing_plan: &[u8],
+        keys: &NativeFounderKeys,
+        cuts: [catcoms_rt::NativeChatPreparedKeyCut; 3],
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+        negative: &catcoms_rt::RequestCancellation,
+    ) -> Result<crate::store::NativeTextSavedJoinResponse, AppError> {
+        let continuing_selection = self
+            .governed_add
+            .as_mut()
+            .is_some_and(|pending| pending.fence.head_selection_entered());
+        if !continuing_selection {
+            self.execute_governed_add_sdk(layout, packet, routing_plan, keys, cuts, rng, negative)?;
+        }
+        self.install_governed_add(layout, packet, routing_plan, keys, rng, negative)?;
+        self.saved_governed_response(layout, packet, keys, negative)
+    }
+
+    pub(super) fn saved_governed_response(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        packet: &V2JoinRequestPacketData<'_>,
+        keys: &NativeFounderKeys,
+        negative: &catcoms_rt::RequestCancellation,
+    ) -> Result<crate::store::NativeTextSavedJoinResponse, AppError> {
+        let store = layout.checked_store()?;
+        let p = self.governed_add.as_mut().ok_or_else(refused)?;
+        p.require_request(store, packet)?;
+        let head = p.installed.ok_or_else(refused)?;
+        let selected = p.parent.selected_data().ok_or_else(refused)?;
+        let owner = self.owner.borrow_current()?;
+        let require_live = || {
+            if negative.is_cancelled() {
+                return Err(refused());
+            }
+            keys.preflight(&self.origin)
+        };
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, p.parent.resources())?;
+            require_live()?;
+            let response = p.fence.saved_response_data(&guard, selected, head)?;
+            require_live()?;
+            Ok(response)
+        })
+    }
+
     pub(super) fn install_governed_add(
         &mut self,
         layout: &V2CurrentLayoutStore,

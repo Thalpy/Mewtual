@@ -9,6 +9,7 @@ on:
       - '.github/predecessor/governed_add_fence_control.rs'
       - '.github/predecessor/governed_add_fence_owner.rs'
       - 'crates/catcoms-app/src/store/native_text_invite.rs'
+      - 'crates/catcoms-app/src/store.rs'
       - 'crates/catcoms-app/src/store/native_text_invite/**'
       - 'crates/catcoms-app/src/store/persistence/v2_text/control.rs'
       - 'crates/catcoms-app/src/store/persistence/v2_text/control/**'

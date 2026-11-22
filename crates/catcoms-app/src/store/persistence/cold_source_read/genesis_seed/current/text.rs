@@ -141,10 +141,14 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> UnexposedV2Gene
         } else {
             // Only the same original never-entered/refused SDK stage can use
             // a replacement cut. Existing live custody stays with the node.
-            drop(node.prepare_add_native_stage_data(
-                catcoms_sync::owner_v2::V2FounderAddNativeStage::Sdk,
-                sdk,
-            ));
+            use catcoms_sync::owner_v2::V2FounderAddNativeStage as Stage;
+            for (stage, cut) in [
+                (Stage::Sdk, sdk),
+                (Stage::GoverningHeader, header),
+                (Stage::Welcome, welcome),
+            ] {
+                drop(node.prepare_add_native_stage_data(stage, cut));
+            }
         }
         self.require_text_original_data(store)
             .map_err(|_| refused())
@@ -331,7 +335,7 @@ macro_rules! node_call_throughs {
                 node_call_throughs!(@governed_mut self $(, $mode)?)
             }
 
-            fn require_text_original_data(
+            pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn require_text_original_data(
                 &self,
                 store: &crate::store::ServerStore,
             ) -> Result<(), catcoms_sync::owner_v2::V2CreateRefusal> {

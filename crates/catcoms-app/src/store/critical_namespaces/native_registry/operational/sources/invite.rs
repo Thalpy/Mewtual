@@ -22,6 +22,45 @@ std::thread_local! {
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> member::NativeTextMemberJob<T, R> {
+    pub(super) fn run_join_request(
+        mut self,
+        packet: &V2JoinRequestPacketData<'_>,
+        cuts: [catcoms_rt::NativeChatPreparedKeyCut; 3],
+        negative: &RequestCancellation,
+    ) -> Result<crate::store::NativeTextSavedJoinResponse, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Error;
+        if negative.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        self.inner
+            .require_current()
+            .map_err(|_| Error::Unavailable)?;
+        let inner = &mut self.inner;
+        let body = inner.loan.body.as_mut().ok_or(Error::Unavailable)?;
+        let driver = body.driver.as_mut().ok_or(Error::Unavailable)?;
+        let route = body
+            .network
+            .as_ref()
+            .ok_or(Error::Unavailable)?
+            .invite_routing_plan_data(driver.binding_data().ok_or(Error::Unavailable)?)
+            .map_err(|_| Error::Unavailable)?;
+        let result = body.work.handle_received_join_request(
+            driver,
+            packet,
+            &route,
+            &inner.keys,
+            cuts,
+            body.rng.as_mut().ok_or(Error::Unavailable)?,
+            negative,
+        );
+        inner.loan.recorded = true;
+        if negative.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        inner.require_current().map_err(|_| Error::Unavailable)?;
+        result.map_err(|_| Error::Failed)
+    }
+
     /// Prepare one founder invite's unsigned original through this same-row
     /// job. Reuses the paid member-operation capture; the Host pays its retained
     /// invite separately. The UI supplies only token/lifetime, never a route,

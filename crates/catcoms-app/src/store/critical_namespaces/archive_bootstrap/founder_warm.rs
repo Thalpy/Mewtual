@@ -221,6 +221,25 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
             .require_received_join_request(layout, incoming, routing_plan, keys, negative)
     }
 
+    pub(in crate::store) fn handle_received_join_request(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        incoming: &catcoms_sync::V2JoinRequestPacketData<'_>,
+        routing_plan: &[u8],
+        keys: &super::founder::NativeFounderKeys,
+        cuts: [catcoms_rt::NativeChatPreparedKeyCut; 3],
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+        negative: &catcoms_rt::RequestCancellation,
+    ) -> Result<crate::store::NativeTextSavedJoinResponse, AppError> {
+        if !self.is_ready_data() {
+            return Err(refused());
+        }
+        self.host
+            .as_mut()
+            .ok_or_else(refused)?
+            .handle_received_join_request(layout, incoming, routing_plan, keys, cuts, rng, negative)
+    }
+
     #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store) fn host_for_governed_add_test(
         &mut self,
