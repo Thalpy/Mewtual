@@ -24,7 +24,8 @@ async fn complete_original_welcome(native_joiner: bool) {
         TextCurrentSdkRestoreAdmission, TextCurrentSdkRestoreLimits,
     };
     use catcoms_replication::chat::{
-        ActionDraft, ActionSpec, Body, ChatLedger, LedgerLimits, ProjectionGroupView, Realm,
+        ActionDraft, ActionSpec, ActionState, Body, ChatLedger, GuardedProjection, LedgerLimits,
+        ProjectionCertainty, ProjectionGroupView, Realm,
     };
     use catcoms_rt::{
         MeshTransport, PublishOnceError, PublishSubmission, RequestCancellation, TransportEvent,
@@ -527,9 +528,9 @@ async fn complete_original_welcome(native_joiner: bool) {
         let plan = selected.prepare_member_plan(&draft, &[], &view).unwrap();
         (ledger, view, draft, plan)
     };
-    let (_warm_ledger, _warm_channel, warm_draft, warm_plan) =
+    let (mut warm_ledger, warm_channel, warm_draft, warm_plan) =
         member_plan(&warm_prefix, &warm_view, (now, [109; 16]));
-    let (_cold_ledger, cold_channel, cold_draft, cold_plan) =
+    let (mut cold_ledger, cold_channel, cold_draft, cold_plan) =
         member_plan(&prefix, &member_view, (now, [109; 16]));
     assert_eq!(warm_draft.action_id_data(), cold_draft.action_id_data());
     assert_eq!(warm_plan.admission_id_data(), cold_plan.admission_id_data());
@@ -595,17 +596,21 @@ async fn complete_original_welcome(native_joiner: bool) {
         let wire = joined_node
             .seal_selected_member_envelope(&warm_prefix, 42, admission, &raw)
             .unwrap();
+        let topic = cold_node.selected_member_topic_data(&prefix, 42).unwrap();
         assert!(cold_node
-            .open_selected_member_envelope(&warm_prefix, 42, &wire)
+            .open_selected_member_envelope(&warm_prefix, 42, &topic, &wire)
+            .is_err());
+        assert!(cold_node
+            .open_selected_member_envelope(&prefix, 42, &catcoms_rt::Topic::new("foreign"), &wire)
             .is_err());
         assert_eq!(
             joined_node
                 .selected_member_topic_data(&warm_prefix, 42)
                 .unwrap(),
-            cold_node.selected_member_topic_data(&prefix, 42).unwrap()
+            topic
         );
         let opened = cold_node
-            .open_selected_member_envelope(&prefix, 42, &wire)
+            .open_selected_member_envelope(&prefix, 42, &topic, &wire)
             .unwrap();
         assert_eq!(opened.original_data(), raw);
         let verifier = prefix.selected_member_verifier().unwrap();
@@ -613,10 +618,46 @@ async fn complete_original_welcome(native_joiner: bool) {
             .provisional_authority(verifier, &[], &cold_channel)
             .is_ok());
         assert!(opened
-            .provisional_authority(verifier, &[], &_warm_channel)
+            .provisional_authority(verifier, &[], &warm_channel)
             .is_err());
+        assert!(opened
+            .project_provisional(verifier, &mut warm_ledger, &cold_channel, &[], 8)
+            .is_err());
+        assert!(opened
+            .project_provisional(
+                warm_prefix.selected_member_verifier().unwrap(),
+                &mut warm_ledger,
+                &warm_channel,
+                &[],
+                8
+            )
+            .is_err());
+        assert!(warm_ledger.action(action.id()).is_none());
+        assert!(matches!(
+            opened
+                .project_provisional(verifier, &mut cold_ledger, &cold_channel, &[], 0)
+                .unwrap(),
+            ActionState::Pending(_)
+        ));
+        assert!(!matches!(
+            cold_ledger
+                .guarded_projection(action.id(), 8)
+                .unwrap()
+                .with_publication(Clone::clone)
+                .unwrap(),
+            GuardedProjection::Visible { .. }
+        ));
+        assert_eq!(
+            opened
+                .project_provisional(verifier, &mut cold_ledger, &cold_channel, &[], 8)
+                .unwrap(),
+            ActionState::Valid
+        );
+        assert!(
+            matches!(cold_ledger.guarded_projection(action.id(), 8).unwrap().with_publication(Clone::clone).unwrap(),
+            GuardedProjection::Visible { text, certainty: ProjectionCertainty::Provisional, .. } if text == "Joined member draft")
+        );
         let receiver = peer(18);
-        let topic = cold_node.selected_member_topic_data(&prefix, 42).unwrap();
         receiver.subscribe(topic.clone()).await.unwrap();
         let (cancel, signal) = tokio::sync::watch::channel(true);
         let submission = joined_node
@@ -654,9 +695,17 @@ async fn complete_original_welcome(native_joiner: bool) {
         assert_eq!(observed, topic);
         assert_eq!(from, catcoms_rt::PeerId::from_u64(11));
         let received = cold_node
-            .open_selected_member_envelope(&prefix, 42, &data)
+            .open_selected_member_envelope(&prefix, 42, &observed, &data)
             .unwrap();
         assert_eq!(received.original_data(), raw);
+        assert_eq!(
+            received
+                .project_provisional(verifier, &mut cold_ledger, &cold_channel, &[], 8)
+                .unwrap(),
+            ActionState::Valid
+        );
+        assert_eq!(cold_ledger.action_ids().count(), 1);
+        assert_eq!(cold_ledger.action(action.id()).unwrap().encode(), raw);
         revoked_submission = Some(
             joined_node
                 .prepare_member_submission(&warm_prefix, 42, admission, &raw)

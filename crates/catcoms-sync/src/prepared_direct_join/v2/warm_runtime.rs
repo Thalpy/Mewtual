@@ -5,7 +5,7 @@ use super::*;
 pub type V2JoinedRuntimeInputs<T, R> = (T, R, Box<dyn Clock + Send>);
 use crate::owner_v2::{
     open_v2_member_envelope_data, seal_v2_member_envelope_data, v2_member_envelope_topic_data,
-    JoinFactsSlot, JoinedFenceNode, OpenedV2MemberEnvelopeData, PreparedV2MemberSubmission,
+    JoinFactsSlot, JoinedFenceNode, PreparedV2MemberSubmission, SelectedV2MemberEnvelope,
     V2JoinFacts, V2JoinedFenceAdmission, V2JoinedSourceFence, V2MemberDraftInputs,
     V2MemberEnvelopeScopeData, V2MemberPublicationObservation, V2MemberSignRefusal,
 };
@@ -178,11 +178,26 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
         &self,
         prefix: &PreparedV2JoinedPrefix,
         channel: u128,
+        topic: &catcoms_rt::Topic,
         wire: &[u8],
-    ) -> Result<OpenedV2MemberEnvelopeData, SyncError> {
+    ) -> Result<SelectedV2MemberEnvelope, SyncError> {
+        if wire.len() > crate::owner_v2::MAX_V2_MEMBER_TRANSPORT_BYTES {
+            return Err(SyncError::Malformed);
+        }
+        let observation = self.observe_member_publication(prefix)?;
         let scope =
             V2MemberEnvelopeScopeData::for_selected_prefix(self.member_prefix(prefix)?, channel)?;
-        open_v2_member_envelope_data(&self.node.group, &self.node.device, &scope, wire)
+        if *topic != v2_member_envelope_topic_data(&self.node.group, &self.node.device, &scope)? {
+            return Err(SyncError::Malformed);
+        }
+        let opened =
+            open_v2_member_envelope_data(&self.node.group, &self.node.device, &scope, wire)?;
+        Ok(SelectedV2MemberEnvelope {
+            opened,
+            recipient: self.admission.clone(),
+            recipient_id: self.admission_id,
+            observation,
+        })
     }
 
     /// Prepare one paid host-selected original for the actual mesh driver.

@@ -4,9 +4,9 @@ use crate::SyncError;
 use catcoms_crypto::{seal, unseal, SealedBlob};
 use catcoms_mls::{MlsDevice, ServerGroup};
 use catcoms_replication::chat::{
-    owner_facts::OwnerFactId, owner_header::OwnerHeaderId, ProjectionAdmissionToken,
-    ProjectionView, SignedAction, V2GeneralPrefixVerifier, V2LiveMemberObservation,
-    V2OrdinaryDependency, MAX_ACTION_BYTES,
+    owner_facts::OwnerFactId, owner_header::OwnerHeaderId, ActionState, ChatError, ChatLedger,
+    ProjectionAdmissionToken, ProjectionView, SignedAction, V2AuthenticatedAdmission,
+    V2GeneralPrefixVerifier, V2LiveMemberObservation, V2OrdinaryDependency, MAX_ACTION_BYTES,
 };
 use catcoms_rt::{
     AuthorizedMeshPublication, CryptoRngCore, PublishSubmission, RequestAuthority,
@@ -183,6 +183,30 @@ impl OpenedV2MemberEnvelopeData {
     pub fn original_data(&self) -> &[u8] {
         &self.original
     }
+}
+
+/// An opened original tied to the actual receiver's registered MLS state and
+/// selected Core Admission. Equal Profile, Header and key bytes cannot move
+/// it into a different runtime's ledger.
+pub struct SelectedV2MemberEnvelope {
+    pub(crate) opened: OpenedV2MemberEnvelopeData,
+    pub(crate) recipient: V2AuthenticatedAdmission,
+    pub(crate) recipient_id: OwnerFactId,
+    pub(crate) observation: V2MemberPublicationObservation,
+}
+
+impl SelectedV2MemberEnvelope {
+    pub fn original_data(&self) -> &[u8] {
+        self.opened.original_data()
+    }
+
+    pub fn action_data(&self) -> &SignedAction {
+        self.opened.action_data()
+    }
+
+    pub fn admission_data(&self) -> OwnerFactId {
+        self.opened.admission_data()
+    }
 
     /// Authorize the exact ordinary action against the receiver's current
     /// verified Core prefix, actual Admission and minimal dependencies.
@@ -192,17 +216,52 @@ impl OpenedV2MemberEnvelopeData {
         dependencies: &[V2OrdinaryDependency<'_>],
         view: &ProjectionView,
     ) -> Result<ProjectionAdmissionToken, SyncError> {
-        if self.scope
-            != V2MemberEnvelopeScopeData::for_selected_prefix(verifier, self.scope.channel)?
-        {
-            return Err(SyncError::Malformed);
-        }
-        let admission = verifier
-            .admission(self.admission)
+        let admission = self
+            .original_admission(verifier)
             .map_err(|_| SyncError::Malformed)?;
         verifier
-            .provisional_action(&self.action, &admission, dependencies, view)
+            .provisional_action(self.action_data(), &admission, dependencies, view)
             .map_err(|_| SyncError::Malformed)
+    }
+
+    /// Apply the exact opened action to the caller's paid ledger, under its
+    /// actual selected channel view. Only a Valid result has a current
+    /// provisional effect. The original bytes remain available to the host.
+    pub fn project_provisional(
+        &self,
+        verifier: &V2GeneralPrefixVerifier,
+        ledger: &mut ChatLedger,
+        view: &ProjectionView,
+        dependencies: &[V2OrdinaryDependency<'_>],
+        work: usize,
+    ) -> Result<ActionState, ChatError> {
+        let admission = self.original_admission(verifier)?;
+        verifier.project_provisional_action(
+            ledger,
+            view,
+            self.action_data(),
+            &admission,
+            dependencies,
+            work,
+        )
+    }
+
+    fn original_admission(
+        &self,
+        verifier: &V2GeneralPrefixVerifier,
+    ) -> Result<V2AuthenticatedAdmission, ChatError> {
+        let scope = &self.opened.scope;
+        if !self.observation.is_current_cached()
+            || !self
+                .recipient
+                .same_original(&verifier.admission(self.recipient_id)?)
+            || *scope
+                != V2MemberEnvelopeScopeData::for_selected_prefix(verifier, scope.channel)
+                    .map_err(|_| ChatError::Scope)?
+        {
+            return Err(ChatError::Scope);
+        }
+        verifier.admission(self.admission_data())
     }
 }
 

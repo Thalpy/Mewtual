@@ -93,14 +93,17 @@ selected group, Profile, governing Header, epoch and channel. It wraps the exact
 action and claimed Admission in authenticated padding. Exporting this key leaves the MLS
 application sender ratchet unchanged. Receivers still need the original selected Core
 prefix to validate the claimed Admission before projection. The joined runtime derives the
-blinded topic from the distinct MLS metadata exporter and checks the original selected
-verifier before sealing or opening the envelope. The receiver issues a provisional token
-only for the actual current Admission, exact channel view and validated dependencies.
+blinded topic from the distinct MLS metadata exporter and checks the actual selected
+verifier and received topic before opening the envelope. The receiver can import into an
+original channel ledger with exact dependencies. The resulting effect is provisional and
+requires the receiver's actual view and current sender Admission. An original opened by
+one source cannot be applied through another source with equal cryptographic bytes.
 The mounted joined source prepares one exact debt item for its original mesh and releases
 the metadata slot before awaiting the driver. The caller, original Core Admission and
 selected MLS fence must still authorize it at the driver's submission boundary. A real
 `Submitted` result produces a receipt that a fresh capture of the same registered row can
-checkpoint. Desktop scheduling and inbound projection remain open.
+checkpoint. Desktop scheduling, inbound dependency recovery and durable shared history
+remain open.
 Original audit chunks and request receipts remain retained after scheduling debt clears.
 Removal changes active view, never deletes the audit. Unproven late removed actions stay
 Held pending the separately authorized moderation path; ordinary concurrent edits resolve

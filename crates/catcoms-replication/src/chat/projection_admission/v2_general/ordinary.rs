@@ -164,7 +164,57 @@ impl V2GeneralPrefixVerifier {
         dependencies: &[V2OrdinaryDependency<'_>],
         view: &ProjectionView,
     ) -> Result<ProjectionAdmissionToken, ChatError> {
-        self.verify_action_semantics(action, admission, dependencies)?;
+        self.provisional_evidence(action, admission, dependencies, view)
+            .map(|(_, token)| token)
+    }
+
+    /// Import one already opened ordinary action into the actual receiver
+    /// ledger. Exact dependencies must be provided in canonical order. A
+    /// pending action has no current effect and can be retried under the same
+    /// original view after bounded semantic work or dependency recovery.
+    pub fn project_provisional_action(
+        &self,
+        ledger: &mut ChatLedger,
+        view: &ProjectionView,
+        action: &SignedAction,
+        admission: &V2AuthenticatedAdmission,
+        dependencies: &[V2OrdinaryDependency<'_>],
+        work: usize,
+    ) -> Result<ActionState, ChatError> {
+        if !ledger
+            .projection
+            .current
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &view.life))
+        {
+            return Err(ChatError::Scope);
+        }
+        let (verified, token) = self.provisional_evidence(action, admission, dependencies, view)?;
+        let id = token.binding.action;
+        match ledger.action(id) {
+            Some(original) if original == action => {}
+            Some(_) => return Err(ChatError::AuthorityConflict),
+            None => {
+                ledger.import(action.clone())?;
+            }
+        }
+        ledger.authorize(id, verified)?;
+        ledger.advance(work);
+        let state = ledger.state(id).ok_or(ChatError::Unknown)?;
+        if state == ActionState::Valid {
+            ledger.admit_projection(&token, work)?;
+        }
+        Ok(state)
+    }
+
+    fn provisional_evidence(
+        &self,
+        action: &SignedAction,
+        admission: &V2AuthenticatedAdmission,
+        dependencies: &[V2OrdinaryDependency<'_>],
+        view: &ProjectionView,
+    ) -> Result<(VerifiedAuthorityBasis, ProjectionAdmissionToken), ChatError> {
+        let verified = self.verify_action_semantics(action, admission, dependencies)?;
         self.require_view(action, view)?;
         if !self
             .admissions
@@ -175,7 +225,7 @@ impl V2GeneralPrefixVerifier {
             return Err(ChatError::Scope);
         }
         self.live()?;
-        Ok(ProjectionAdmissionToken {
+        let token = ProjectionAdmissionToken {
             binding: ActionBinding::of(action.id(), action),
             context: EvidenceContext::V2Ordinary {
                 profile: self.math.profile().id(),
@@ -187,7 +237,8 @@ impl V2GeneralPrefixVerifier {
             support: ProjectionSupport::GeneralOpen {
                 origin: admission.core.open_origin.clone(),
             },
-        })
+        };
+        Ok((verified, token))
     }
 
     /// Exact LOG inclusion is independent of OPEN. A frozen original removal cut may prove
