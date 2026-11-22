@@ -2,12 +2,14 @@
 //! private provider. A completed candidate has no Legacy runtime conversion.
 use super::*;
 use crate::owner_v2::{V2JoinFacts, V2_JOIN_ROUTING_DOMAIN};
+use catcoms_crypto::DeviceId;
 use catcoms_mls::group::text_current_add::MAX_TEXT_ADD_ROUTING_PLAIN_BYTES;
 use catcoms_replication::chat::{
     join_bindings::{SignedWelcomeBindingData, MAX_JOIN_PAYLOAD_BYTES},
     owner_facts::OwnerFactId,
     owner_header::SignedOwnerHeader,
     owner_profile::{AdmissionBody, AdmissionOrigin, SignedOwnerProfile},
+    owner_state::StateFrame,
     V2GeneralPrefixVerifier,
 };
 
@@ -165,6 +167,7 @@ struct WelcomeAdmission<'a> {
     profile: &'a SignedOwnerProfile,
     body: &'a AdmissionBody,
     header: &'a SignedOwnerHeader,
+    state_image: &'a [u8],
     epoch: u64,
 }
 
@@ -200,6 +203,7 @@ impl PreparedV2JoinRequest {
                 profile: replay.profile(),
                 body: admission.admission_data(),
                 header: replay.header(),
+                state_image: replay.image(),
                 epoch: replay.mls_epoch_data(),
             },
             cap,
@@ -236,6 +240,7 @@ impl PreparedV2JoinRequest {
                 profile,
                 body,
                 header,
+                state_image: proof.add_image_data(),
                 epoch: 1,
             },
             cap,
@@ -264,6 +269,7 @@ impl PreparedV2JoinRequest {
             profile,
             body,
             header,
+            state_image,
             epoch,
         }: WelcomeAdmission<'_>,
         cap: usize,
@@ -290,6 +296,7 @@ impl PreparedV2JoinRequest {
             .binding
             .check_payloads_data(response.welcome, response.sealed_routing)
             .map_err(reject)?;
+        let state = StateFrame::decode(state_image).map_err(reject)?;
         if self.completed.is_none() {
             if self.welcome_entered {
                 return Err(SyncError::JoinRejected);
@@ -308,6 +315,7 @@ impl PreparedV2JoinRequest {
                 || facts.signer_data() != &request.joiner
                 || facts.credential_data() != &request.credential
                 || facts.join_epoch_data() != after_epoch
+                || !matches_welcome_roster(&group, &state)
             {
                 return Err(SyncError::JoinRejected);
             }
@@ -356,9 +364,18 @@ impl PreparedV2JoinRequest {
     }
 }
 
+pub(super) fn matches_welcome_roster(group: &ServerGroup, state: &StateFrame) -> bool {
+    group.member_count() == state.slots().len()
+        && state.slots().all(|slot| {
+            group
+                .member_signature_key(&DeviceId::from_public_key_bytes(&slot.subject))
+                .is_some_and(|key| key == slot.subject)
+        })
+}
+
 type RoutingTransfer = (GroupPolicy, Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>);
 
-fn open_routing(
+pub(super) fn open_routing(
     plain: &[u8],
     packet: &V2JoinRequestPacketData<'_>,
     before_epoch: u64,

@@ -133,7 +133,7 @@ jobs:
       - name: Check interrupted governing Header signing
         if: inputs.scope != 'governed-add'
         run: python .github/scripts/check-chat-v2-invite-intent.py interrupted-header
-      - name: Check real MLS Add, exact Welcome, and native lifecycle regressions
+      - name: Check real MLS Add, exact Welcome, and sealed joined recovery
         run: python .github/scripts/check-chat-v2-invite-intent.py join-welcome
       - name: Check that whole-Source shutdown drains the original partial Add
         if: inputs.scope != 'governed-add'

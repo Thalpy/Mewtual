@@ -64,14 +64,15 @@ fn v2_pending_join_keeps_the_original_private_package_and_pin() {
     );
     assert!(join.seal_pending_source(&key, wrong, &mut rng).is_err());
     let recovered =
-        RecoveredV2PendingJoinSource::open(&restored, &key, expected, &anchor, limits).unwrap();
+        RecoveredV2PendingJoinSource::open(&restored, &key, expected, &invite, limits).unwrap();
     assert_eq!(recovered.request_bytes_data(), original);
-    assert!(RecoveredV2PendingJoinSource::open(&restored, &key, wrong, &anchor, limits).is_err());
-    let unrelated = GenesisAnchorBindingData {
-        state: [48; 32],
-        ..anchor
-    };
+    assert!(RecoveredV2PendingJoinSource::open(&restored, &key, wrong, &invite, limits).is_err());
+    let mut wrong_invite = invite.spec_data().clone();
+    wrong_invite.nonce = [48; 16];
+    let wrong_invite =
+        SignedInviteBindingData::sign_using(wrong_invite, |bytes| Ok(founder.sign(bytes))).unwrap();
     assert!(
-        RecoveredV2PendingJoinSource::open(&restored, &key, expected, &unrelated, limits).is_err()
+        RecoveredV2PendingJoinSource::open(&restored, &key, expected, &wrong_invite, limits)
+            .is_err()
     );
 }

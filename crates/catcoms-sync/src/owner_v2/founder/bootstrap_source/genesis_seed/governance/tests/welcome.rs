@@ -5,10 +5,24 @@ use super::*;
 #[test]
 fn v2_join_request_and_welcome_complete_with_actual_add() {
     use crate::{
-        DirectJoinLimits, PreparedV2JoinRequest, V2JoinRequestPacketData, V2JoinResponseData,
-        V2JoinResponsePacketData,
+        DirectJoinLimits, PreparedV2JoinRequest, RecoveredV2JoinedOutcome,
+        RecoveredV2PendingJoinSource, SealedV2JoinedOutcome, SealedV2PendingJoinSource,
+        V2AdmissionStepData, V2FirstAddProofData, V2FirstJoinDeliveryData, V2JoinRequestPacketData,
+        V2JoinResponseData, V2JoinResponsePacketData,
+    };
+    use catcoms_mls::persist::{
+        TextCurrentSdkGraphReservation, TextCurrentSdkRestoreAdmission, TextCurrentSdkRestoreLimits,
     };
     use rand_core::SeedableRng;
+    struct Paid;
+    impl TextCurrentSdkGraphReservation for Paid {
+        fn limits(&self) -> TextCurrentSdkRestoreLimits {
+            TextCurrentSdkRestoreLimits {
+                max_typed_bytes: 8 * 1024 * 1024,
+                max_work: 8 * 1024 * 1024,
+            }
+        }
+    }
     // MLS itself places a lifetime on the live KeyPackage. Use the same
     // current clock for the founder fixture, then keep it fixed through Add.
     let now = catcoms_rt::Clock::now_ms(&catcoms_rt::SystemClock);
@@ -39,13 +53,14 @@ fn v2_join_request_and_welcome_complete_with_actual_add() {
     let native = Native::new();
     let mut fixture = Request::new(&node, 75);
     fixture.change_invite(&node, |spec| spec.expires_at_ms = now + 60_000);
+    let limits = DirectJoinLimits::new(RAW, RAW, 256 * 1024).unwrap();
     let mut prepared = PreparedV2JoinRequest::prepare(
         MlsDevice::generate().unwrap(),
         &fixture.invite.spec_data().anchor,
         &fixture.invite,
         [76; 32],
         now,
-        DirectJoinLimits::new(RAW, RAW, 256 * 1024).unwrap(),
+        limits,
     )
     .unwrap();
     let pending = crate::V2PendingJoinContextData {
@@ -59,9 +74,19 @@ fn v2_join_request_and_welcome_complete_with_actual_add() {
     assert!(prepared
         .seal_joined_outcome(&vault_key, pending, &mut journal_rng)
         .is_err());
-    prepared
+    let sealed_pending = prepared
         .seal_pending_source(&vault_key, pending, &mut journal_rng)
         .unwrap();
+    let (nonce, cipher) = sealed_pending.encrypted_parts();
+    let original_pending = SealedV2PendingJoinSource::from_encrypted_parts(*nonce, cipher).unwrap();
+    let recovered_pending = RecoveredV2PendingJoinSource::open(
+        &original_pending,
+        &vault_key,
+        pending,
+        &fixture.invite,
+        limits,
+    )
+    .unwrap();
     let wire = prepared.request_bytes_data().to_vec();
     let packet = V2JoinRequestPacketData::decode(&wire).unwrap();
     let request = packet.founder_add_data();
@@ -118,6 +143,22 @@ fn v2_join_request_and_welcome_complete_with_actual_add() {
     // Only the genuine resulting Add advances the fixture's verified prefix.
     let header = node.signed_admission_data().unwrap();
     let (admission, output) = node.unsigned_admission_data().unwrap();
+    let genesis = node.genesis_data();
+    let proof = V2FirstAddProofData::encode(
+        genesis.profile,
+        V2AdmissionStepData {
+            admission: genesis.admission,
+            header: genesis.header,
+            image: genesis.state,
+        },
+        V2AdmissionStepData {
+            admission,
+            header,
+            image: output.image_data(),
+        },
+    )
+    .unwrap();
+    let delivery = V2FirstJoinDeliveryData::encode(&response_wire, &proof).unwrap();
     let mut candidate = Some(
         g.verifier
             .derive_successor(
@@ -200,6 +241,25 @@ fn v2_join_request_and_welcome_complete_with_actual_add() {
         .seal_joined_outcome(&vault_key, pending, &mut journal_rng)
         .unwrap();
     let original = sealed.encrypted_parts().1.as_ptr();
+    let (nonce, cipher) = sealed.encrypted_parts();
+    let immutable_outcome = SealedV2JoinedOutcome::from_encrypted_parts(*nonce, cipher).unwrap();
+    let restore = |outcome: &SealedV2JoinedOutcome, delivery: &[u8]| {
+        RecoveredV2JoinedOutcome::open(
+            outcome,
+            &vault_key,
+            &recovered_pending,
+            delivery,
+            TextCurrentSdkRestoreAdmission::new(Paid).unwrap(),
+        )
+    };
+    let mut wrong_nonce = *nonce;
+    wrong_nonce[0] ^= 1;
+    let tampered = SealedV2JoinedOutcome::from_encrypted_parts(wrong_nonce, cipher).unwrap();
+    assert!(restore(&tampered, &delivery).is_err());
+    assert!(restore(&immutable_outcome, &delivery[..delivery.len() - 1]).is_err());
+    let recovered = restore(&immutable_outcome, &delivery).unwrap();
+    assert_eq!(recovered.governing_head_data(), header_id);
+    assert_eq!(recovered.epoch_data(), 1);
     let retry = prepared
         .seal_joined_outcome(&vault_key, pending, &mut journal_rng)
         .unwrap();

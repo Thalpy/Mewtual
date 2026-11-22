@@ -150,13 +150,18 @@ exact Admission and state before opening Welcome. A truncated or unrelated
 proof leaves the original private KeyPackage available for a valid retry.
 
 The private request owner can seal its exact KeyPackage provider and request
-against the original pending join and joined pin. Reopening authenticates
-that pairing and checks that the retained provider owns the same package.
+against the original pending join and joined pin. Reopening matches the
+complete signed invite from that pin and checks that the retained provider
+owns the same package.
 An owning journal must still prove whether Welcome entry was possible before
 resuming SDK work.
 A successful Welcome's private graph, policy, routing secrets and verified
 binding can be sealed to that same original request for later native
 installation. The completed outcome reuses its original ciphertext on retry.
+Its independent reader authenticates the original pending ciphertext, replays
+the signed delivery, and checks the restored closed MLS graph and routing
+transfer against it. Mounting and installing that graph require separate
+native ownership.
 
 The warm founder continues to use its existing ordinary-member lane after
 installation. Before signing a new action it checks the selected Head2,

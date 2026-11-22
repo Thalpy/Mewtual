@@ -9,7 +9,7 @@ const MAX_PLAIN: usize =
     4 + TAG.len() + 2 + 4 * 36 + 8 + MAX_V2_JOIN_REQUEST_PACKET_BYTES + MAX_MASTER;
 
 mod joined_outcome;
-pub use joined_outcome::SealedV2JoinedOutcome;
+pub use joined_outcome::{RecoveredV2JoinedOutcome, SealedV2JoinedOutcome};
 
 /// The actual journal and pin owner supplies these exact immutable labels.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -110,7 +110,9 @@ impl PreparedV2JoinRequest {
 /// Authenticated historical custody. No public conversion grants another
 /// possible Welcome attempt or turns a recovered graph into fresh membership.
 pub struct RecoveredV2PendingJoinSource {
-    original: PreparedV2JoinRequest,
+    request: Bytes,
+    limits: DirectJoinLimits,
+    outcome_parent: [u8; 32],
 }
 
 impl RecoveredV2PendingJoinSource {
@@ -118,7 +120,7 @@ impl RecoveredV2PendingJoinSource {
         sealed: &SealedV2PendingJoinSource,
         key: &[u8; 32],
         expected: V2PendingJoinContextData,
-        anchor: &GenesisAnchorBindingData,
+        accepted: &SignedInviteBindingData,
         limits: DirectJoinLimits,
     ) -> Result<Self, SyncError> {
         expected.validate()?;
@@ -144,8 +146,8 @@ impl RecoveredV2PendingJoinSource {
             return Err(SyncError::Malformed);
         }
         let packet = V2JoinRequestPacketData::decode(request)?;
-        if packet.invite.spec_data().anchor != *anchor
-            || packet.invite.spec_data().inviter != anchor.founder
+        if packet.invite.encode() != accepted.encode()
+            || packet.invite.spec_data().inviter != accepted.spec_data().anchor.founder
         {
             return Err(SyncError::JoinRejected);
         }
@@ -159,11 +161,15 @@ impl RecoveredV2PendingJoinSource {
             sealed_outcome: None,
         };
         original.validate_retained_package_data()?;
-        Ok(Self { original })
+        Ok(Self {
+            request: original.request,
+            limits,
+            outcome_parent: joined_outcome::parent_data(sealed),
+        })
     }
 
     pub fn request_bytes_data(&self) -> &[u8] {
-        self.original.request_bytes_data()
+        &self.request
     }
 }
 

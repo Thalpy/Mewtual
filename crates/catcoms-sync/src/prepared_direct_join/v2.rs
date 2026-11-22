@@ -11,8 +11,8 @@ use catcoms_wire::Encoder;
 mod first_add_proof;
 mod pending_source;
 pub use pending_source::{
-    RecoveredV2PendingJoinSource, SealedV2JoinedOutcome, SealedV2PendingJoinSource,
-    V2PendingJoinContextData,
+    RecoveredV2JoinedOutcome, RecoveredV2PendingJoinSource, SealedV2JoinedOutcome,
+    SealedV2PendingJoinSource, V2PendingJoinContextData,
 };
 mod welcome;
 pub use first_add_proof::{

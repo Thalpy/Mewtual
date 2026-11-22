@@ -1,20 +1,49 @@
 //! The completed private Join graph, tied to the same sealed request.
+use super::super::welcome::{matches_welcome_roster, open_routing};
 use super::*;
-use catcoms_mls::persist::snapshot_server_bounded;
+use catcoms_mls::persist::{
+    restore_server_text_current_bounded, snapshot_server_bounded, TextCurrentSdkRestoreAdmission,
+};
+use catcoms_replication::chat::{
+    owner_header::OwnerHeaderId, owner_profile::AdmissionOrigin, owner_state::StateFrame,
+};
 
 const TAG: &[u8] = b"catcoms/private-chat-v2-joined-outcome/v1\0";
 const KEY_DOMAIN: &str = "catcoms/private-chat-v2-joined-outcome-key/v1";
 const PARENT_DOMAIN: &str = "catcoms/private-chat-v2-joined-outcome-parent/v1";
 const MAX_POLICY_BYTES: usize = 1024;
+const OVERHEAD: usize = 4 + TAG.len() + 2 + 6 * 36 + 8 + 5 * 4 + 2 * 32;
+const MAX_ENCRYPTED: usize = OVERHEAD + MAX_JOIN_BINDING_BYTES + MAX_POLICY_BYTES + MAX_MASTER + 16;
 
 pub struct SealedV2JoinedOutcome {
     blob: SealedBlob,
 }
 
 impl SealedV2JoinedOutcome {
+    /// The mounted reader owns the independent allowance for this exact copy.
+    pub fn from_encrypted_parts(nonce: [u8; 24], ciphertext: &[u8]) -> Result<Self, SyncError> {
+        if !(OVERHEAD + 17..=MAX_ENCRYPTED).contains(&ciphertext.len()) {
+            return Err(SyncError::Malformed);
+        }
+        Ok(Self {
+            blob: SealedBlob {
+                nonce,
+                ciphertext: ciphertext.to_vec(),
+            },
+        })
+    }
+
     pub fn encrypted_parts(&self) -> (&[u8; 24], &[u8]) {
         (&self.blob.nonce, &self.blob.ciphertext)
     }
+}
+
+pub(super) fn parent_data(source: &SealedV2PendingJoinSource) -> [u8; 32] {
+    let (nonce, ciphertext) = source.encrypted_parts();
+    let mut parent = blake3::Hasher::new_derive_key(PARENT_DOMAIN);
+    parent.update(nonce);
+    parent.update(ciphertext);
+    *parent.finalize().as_bytes()
 }
 
 impl PreparedV2JoinRequest {
@@ -55,33 +84,20 @@ fn seal_outcome(
         limits.provider.min(MAX_MASTER),
         limits.backing,
     )?;
-    let (nonce, ciphertext) = source.encrypted_parts();
-    let mut parent = blake3::Hasher::new_derive_key(PARENT_DOMAIN);
-    parent.update(nonce);
-    parent.update(ciphertext);
-    let parent = parent.finalize();
+    let parent = parent_data(source);
     let policy = candidate.policy_data().encode();
     if policy.len() > MAX_POLICY_BYTES || candidate.response_binding.len() > MAX_JOIN_BINDING_BYTES
     {
         return Err(SyncError::Malformed);
     }
-    let length = 4
-        + TAG.len()
-        + 2
-        + 6 * 36
-        + 8
-        + 5 * 4
-        + 2 * 32
-        + policy.len()
-        + candidate.response_binding.len()
-        + snapshot.len();
+    let length = OVERHEAD + policy.len() + candidate.response_binding.len() + snapshot.len();
     let facts = candidate.facts_data();
     let mut e = Encoder::with_capacity(length);
     let malformed = |_| SyncError::Malformed;
     e.put_bytes(TAG).map_err(malformed)?;
     e.put_u16(VERSION);
     for field in [
-        parent.as_bytes(),
+        &parent,
         facts.key_package_data(),
         facts.credential_data(),
         facts.admission_state_data(),
@@ -109,4 +125,139 @@ fn seal_outcome(
     let key = Zeroizing::new(blake3::derive_key(KEY_DOMAIN, key));
     let blob = seal(&key, &plain, rng).map_err(|_| SyncError::Malformed)?;
     Ok(SealedV2JoinedOutcome { blob })
+}
+
+/// Independently authenticated historical state. No Welcome entry or live
+/// source is granted by opening the encrypted journal record.
+pub struct RecoveredV2JoinedOutcome {
+    _device: MlsDevice,
+    _group: ServerGroup,
+    _routing_secret: Zeroizing<[u8; 32]>,
+    _file_key: Zeroizing<[u8; 32]>,
+    head: OwnerHeaderId,
+    epoch: u64,
+}
+
+impl RecoveredV2JoinedOutcome {
+    pub fn open(
+        sealed: &SealedV2JoinedOutcome,
+        key: &[u8; 32],
+        pending: &RecoveredV2PendingJoinSource,
+        delivery_bytes: &[u8],
+        paid: TextCurrentSdkRestoreAdmission,
+    ) -> Result<Self, SyncError> {
+        let limits = pending.limits;
+        if delivery_bytes.len() > limits.exchange {
+            return Err(SyncError::Malformed);
+        }
+        let packet = V2JoinRequestPacketData::decode(pending.request_bytes_data())?;
+        let delivery = V2FirstJoinDeliveryData::decode(delivery_bytes)?;
+        let (response, proof) = delivery.data();
+        let anchor = &packet.invite.spec_data().anchor;
+        let (profile, admission, header) = proof.verified_admission(anchor)?;
+        response
+            .binding
+            .check_links_data(&packet.invite, &packet.request, profile, admission, header)
+            .map_err(|_| SyncError::JoinRejected)?;
+        let state =
+            StateFrame::decode(proof.add_image_data()).map_err(|_| SyncError::JoinRejected)?;
+        let AdmissionOrigin::Add {
+            before_epoch: 0,
+            after_epoch: 1,
+            ..
+        } = admission.spec().origin
+        else {
+            return Err(SyncError::JoinRejected);
+        };
+
+        let key = Zeroizing::new(blake3::derive_key(KEY_DOMAIN, key));
+        let plain = Zeroizing::new(unseal(&key, &sealed.blob).map_err(|_| SyncError::Malformed)?);
+        let mut d = Decoder::new(&plain);
+        let malformed = |_| SyncError::Malformed;
+        if d.get_bytes().map_err(malformed)? != TAG || d.get_u16().map_err(malformed)? != VERSION {
+            return Err(SyncError::Malformed);
+        }
+        let request = packet.request.spec_data();
+        for expected in [
+            &pending.outcome_parent,
+            &request.key_package_reference,
+            &request.credential,
+        ] {
+            if d.get_bytes().map_err(malformed)? != expected {
+                return Err(SyncError::JoinRejected);
+            }
+        }
+        let authenticator: &[u8; 32] = d
+            .get_bytes()
+            .map_err(malformed)?
+            .try_into()
+            .map_err(|_| SyncError::Malformed)?;
+        if d.get_bytes().map_err(malformed)? != header.spec().state.as_bytes()
+            || d.get_bytes().map_err(malformed)? != request.joiner
+        {
+            return Err(SyncError::JoinRejected);
+        }
+        let epoch = d.get_u64().map_err(malformed)?;
+        let binding = d.get_bytes().map_err(malformed)?;
+        let policy = d.get_bytes().map_err(malformed)?;
+        let routing = d.get_bytes().map_err(malformed)?;
+        let file = d.get_bytes().map_err(malformed)?;
+        let snapshot = d.get_bytes().map_err(malformed)?;
+        d.finish().map_err(malformed)?;
+        if epoch != 1
+            || binding != response.binding.encode()
+            || policy.len() > MAX_POLICY_BYTES
+            || routing.len() != 32
+            || file.len() != 32
+            || snapshot.is_empty()
+        {
+            return Err(SyncError::JoinRejected);
+        }
+
+        let (device, group) = restore_server_text_current_bounded(
+            snapshot,
+            limits.provider.min(MAX_MASTER),
+            limits.backing,
+            paid,
+        )?;
+        if group.group_id_ref() != anchor.group
+            || !device.retained_ed25519_key_matches(&request.joiner)
+            || group.own_credential_digest(&device)? != request.credential
+            || group.epoch() != epoch
+            || &group.epoch_authenticator_id() != authenticator
+            || !matches_welcome_roster(&group, &state)
+        {
+            return Err(SyncError::JoinRejected);
+        }
+        let routing_key = Zeroizing::new(group.routing_transfer_key(&device)?);
+        let transfer = Zeroizing::new(
+            unseal(&routing_key, &decode_sealed(response.sealed_routing)?)
+                .map_err(|_| SyncError::JoinRejected)?,
+        );
+        let (verified_policy, routing_secret, file_key) =
+            open_routing(&transfer, &packet, 0, 1, header.spec().parent.as_bytes())?;
+        verified_policy.verify_current_owner(&group)?;
+        if verified_policy.encode() != policy
+            || &routing_secret[..] != routing
+            || &file_key[..] != file
+        {
+            return Err(SyncError::JoinRejected);
+        }
+        Ok(Self {
+            _device: device,
+            _group: group,
+            _routing_secret: routing_secret,
+            _file_key: file_key,
+            head: header.id(),
+            epoch,
+        })
+    }
+
+    pub fn governing_head_data(&self) -> OwnerHeaderId {
+        self.head
+    }
+
+    pub fn epoch_data(&self) -> u64 {
+        self.epoch
+    }
 }

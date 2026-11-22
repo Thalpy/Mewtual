@@ -122,6 +122,10 @@ impl<'a> V2FirstAddProofData<'a> {
     pub(super) fn frame_bytes(&self) -> usize {
         self.bytes
     }
+
+    pub(super) fn add_image_data(&self) -> &[u8] {
+        self.add.image()
+    }
 }
 
 impl fmt::Debug for V2FirstAddProofData<'_> {
