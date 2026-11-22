@@ -281,14 +281,39 @@ async fn mounted_join_fixture(recover_stage: bool) {
         inspect().inspect(&invite, token, &fresh).unwrap(),
         Some((head, own_add, epoch))
     );
+    let registration = inspect()
+        .inspect_registration(&invite, token, &fresh)
+        .unwrap()
+        .unwrap();
+    assert_eq!(registration.transport_data(), local_transport);
+    assert!(registration.context == selected.1);
+    assert_eq!(registration.request, selected.0);
+    assert_eq!(registration.invocation, token);
+    assert_eq!(registration.profile, anchor.profile);
+    assert!(inspect().inspect(&invite, [62; 32], &fresh).is_err());
+    let file = dir
+        .path()
+        .join("chat-critical-namespaces.joined-welcome-outcome.bin");
+    let inspection_parked = file.with_extension("before-parked-join-inspection");
+    let contents = std::fs::read(&file).unwrap();
+    std::fs::rename(&file, &inspection_parked).unwrap();
+    std::fs::write(&file, &contents).unwrap();
+    assert!(inspect().inspect(&invite, token, &fresh).is_err());
+    std::fs::remove_file(&file).unwrap();
+    std::fs::rename(inspection_parked, file).unwrap();
+    assert_eq!(
+        inspect().inspect(&invite, token, &fresh).unwrap(),
+        Some((head, own_add, epoch))
+    );
+
     let index = only_named(dir.path(), "native-registry.bin");
     let stage = index.with_extension("stage");
     let prior_index = std::fs::read(&index).unwrap();
     let outcome_path = dir
         .path()
         .join("chat-critical-namespaces.joined-welcome-outcome.bin");
-    let parked = outcome_path.with_extension("held-original-at-index-selection");
-    let (file, held) = (outcome_path.clone(), parked.clone());
+    let registration_parked = outcome_path.with_extension("held-original-at-index-selection");
+    let (file, held) = (outcome_path.clone(), registration_parked.clone());
     let raw = std::fs::read(&outcome_path).unwrap();
     use crate::store::persistence::native_registry::operational::{
         before_target_proof, RenameTarget,
@@ -304,11 +329,11 @@ async fn mounted_join_fixture(recover_stage: bool) {
         inspect().register(&invite, token, "Original Room".into(), &fresh, rng)
     };
     assert!(register(&mut rng).is_err());
-    assert!(parked.is_file());
+    assert!(registration_parked.is_file());
     let saved_stage = std::fs::read(&stage).unwrap();
     assert_eq!(std::fs::read(&index).unwrap(), prior_index);
     std::fs::remove_file(&outcome_path).unwrap();
-    std::fs::rename(&parked, &outcome_path).unwrap();
+    std::fs::rename(&registration_parked, &outcome_path).unwrap();
     if !recover_stage {
         let mut after = rng.clone();
         let row = register(&mut rng).unwrap();
@@ -318,30 +343,6 @@ async fn mounted_join_fixture(recover_stage: bool) {
         assert_eq!(std::fs::read(&index).unwrap(), saved_stage);
         assert!(!stage.exists());
     }
-    let registration = inspect()
-        .inspect_registration(&invite, token, &fresh)
-        .unwrap()
-        .unwrap();
-    assert_eq!(registration.transport_data(), local_transport);
-    assert!(registration.context == selected.1);
-    assert_eq!(registration.request, selected.0);
-    assert_eq!(registration.invocation, token);
-    assert_eq!(registration.profile, anchor.profile);
-    assert!(inspect().inspect(&invite, [62; 32], &fresh).is_err());
-    let file = dir
-        .path()
-        .join("chat-critical-namespaces.joined-welcome-outcome.bin");
-    let parked = file.with_extension("before-parked-join-inspection");
-    let contents = std::fs::read(&file).unwrap();
-    std::fs::rename(&file, &parked).unwrap();
-    std::fs::write(&file, &contents).unwrap();
-    assert!(inspect().inspect(&invite, token, &fresh).is_err());
-    std::fs::remove_file(&file).unwrap();
-    std::fs::rename(parked, file).unwrap();
-    assert_eq!(
-        inspect().inspect(&invite, token, &fresh).unwrap(),
-        Some((head, own_add, epoch))
-    );
     assert!(capture()
         .cover(&invite, anchor, token, after, &negative, &mut rng)
         .is_err());
@@ -364,7 +365,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
     drop(original);
     drop(vault);
     if recover_stage {
-        std::fs::rename(&outcome_path, &parked).unwrap();
+        std::fs::rename(&outcome_path, &registration_parked).unwrap();
         assert!(crate::store::NativeTextJoinedStorage::open(
             dir.path(),
             SECRET,
@@ -374,7 +375,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
         .is_err());
         assert_eq!(std::fs::read(&index).unwrap(), prior_index);
         assert_eq!(std::fs::read(&stage).unwrap(), saved_stage);
-        std::fs::rename(&parked, &outcome_path).unwrap();
+        std::fs::rename(&registration_parked, &outcome_path).unwrap();
     }
     let cold =
         crate::store::NativeTextJoinedStorage::open(dir.path(), SECRET, &mut rng, current_policy())
