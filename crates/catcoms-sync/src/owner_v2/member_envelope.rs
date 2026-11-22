@@ -1,14 +1,25 @@
 //! Epoch-protected transport bytes for an exact ordinary signed original.
+use crate::owner_v2::V2JoinedPublicationFence;
 use crate::SyncError;
 use catcoms_crypto::{seal, unseal, SealedBlob};
 use catcoms_mls::{MlsDevice, ServerGroup};
 use catcoms_replication::chat::{
     owner_facts::OwnerFactId, owner_header::OwnerHeaderId, ProjectionAdmissionToken,
-    ProjectionView, SignedAction, V2GeneralPrefixVerifier, V2OrdinaryDependency, MAX_ACTION_BYTES,
+    ProjectionView, SignedAction, V2GeneralPrefixVerifier, V2LiveMemberObservation,
+    V2OrdinaryDependency, MAX_ACTION_BYTES,
 };
-use catcoms_rt::{CryptoRngCore, Topic};
+use catcoms_rt::{
+    CryptoRngCore, MeshTransport, PublishSubmission, RequestAuthority, RequestCancellation, Topic,
+};
 use catcoms_storage::pad::{self, OP_PAD_CEILING, OP_PAD_FLOOR, PAD_FOOTER_BYTES};
 use catcoms_wire::{Decoder, DocType, Encoder};
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 use zeroize::Zeroizing;
 
 const SEALED_TAG: &[u8] = b"mewtual/chat/member-transport/v2\0";
@@ -21,6 +32,93 @@ const MAX_CIPHER: usize = MAX_PLAIN.next_power_of_two() + PAD_FOOTER_BYTES + 16;
 const SEALED_PREFIX: usize = 4 + SEALED_TAG.len() + 2 + 4 + 24 + 4;
 pub const MAX_V2_MEMBER_TRANSPORT_BYTES: usize = SEALED_PREFIX + MAX_CIPHER;
 const _: () = assert!(MAX_PLAIN < OP_PAD_CEILING);
+const _: () = assert!(MAX_V2_MEMBER_TRANSPORT_BYTES <= catcoms_rt::MAX_PUBLISH_ONCE_BYTES);
+
+/// One ownership-scoped attempt, including its original mesh and sealed bytes.
+/// Only the driver's `Submitted` result can later settle local outbox debt.
+#[must_use = "an envelope prepared in memory has not been submitted"]
+pub struct PreparedV2MemberSubmission<T: MeshTransport> {
+    pub(crate) transport: T,
+    pub(crate) topic: Topic,
+    pub(crate) wire: bytes::Bytes,
+    pub(crate) member: V2LiveMemberObservation,
+    pub(crate) fence: V2JoinedPublicationFence,
+}
+
+impl<T: MeshTransport> PreparedV2MemberSubmission<T> {
+    pub fn is_current_cached(&self) -> bool {
+        self.member.is_live_cached() && self.fence.is_current_cached()
+    }
+
+    /// Retain the caller's original lifetime and payment through queue custody.
+    /// The synchronous driver edge also checks the original MLS and Core state.
+    pub async fn submit(self, caller: RequestCancellation) -> Result<PublishSubmission, SyncError> {
+        let Self {
+            transport,
+            topic,
+            wire,
+            member,
+            fence,
+        } = self;
+        let authority = Arc::new(MemberSubmissionAuthority {
+            caller: caller.clone(),
+            member,
+            fence,
+            retired: AtomicBool::new(false),
+        });
+        if !authority.authorized() {
+            return Err(catcoms_rt::PublishOnceError::Revoked.into());
+        }
+        let checked = caller.with_authority(authority);
+        Ok(transport
+            .publish_once_authorized(topic, wire, checked)
+            .await?)
+    }
+}
+
+struct MemberSubmissionAuthority {
+    caller: RequestCancellation,
+    member: V2LiveMemberObservation,
+    fence: V2JoinedPublicationFence,
+    retired: AtomicBool,
+}
+
+impl std::fmt::Debug for MemberSubmissionAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemberSubmissionAuthority")
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait::async_trait]
+impl RequestAuthority for MemberSubmissionAuthority {
+    fn authorized(&self) -> bool {
+        if self.retired.load(Ordering::Acquire) {
+            return false;
+        }
+        if self.caller.is_cancelled()
+            || !self.member.is_live_cached()
+            || !self.fence.is_current_cached()
+        {
+            self.retired.store(true, Ordering::Release);
+            return false;
+        }
+        !self.retired.load(Ordering::Acquire)
+    }
+
+    async fn revoked(&self) {
+        let mut caller = self.caller.clone();
+        while self.authorized() {
+            tokio::select! {
+                _ = caller.cancelled() => {
+                    self.retired.store(true, Ordering::Release);
+                    return;
+                },
+                _ = tokio::time::sleep(Duration::from_millis(25)) => {},
+            }
+        }
+    }
+}
 
 fn wire_data<T>(value: Result<T, catcoms_wire::WireError>) -> Result<T, SyncError> {
     value.map_err(|_| SyncError::Malformed)

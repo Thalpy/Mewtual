@@ -5,9 +5,9 @@ use super::*;
 pub type V2JoinedRuntimeInputs<T, R> = (T, R, Box<dyn Clock + Send>);
 use crate::owner_v2::{
     open_v2_member_envelope_data, seal_v2_member_envelope_data, v2_member_envelope_topic_data,
-    JoinFactsSlot, JoinedFenceNode, OpenedV2MemberEnvelopeData, V2JoinFacts,
-    V2JoinedFenceAdmission, V2JoinedSourceFence, V2MemberDraftInputs, V2MemberEnvelopeScopeData,
-    V2MemberSignRefusal,
+    JoinFactsSlot, JoinedFenceNode, OpenedV2MemberEnvelopeData, PreparedV2MemberSubmission,
+    V2JoinFacts, V2JoinedFenceAdmission, V2JoinedSourceFence, V2MemberDraftInputs,
+    V2MemberEnvelopeScopeData, V2MemberSignRefusal,
 };
 use catcoms_replication::chat::{
     join_bindings::SignedWelcomeBindingData, owner_facts::OwnerFactId, owner_header::OwnerHeaderId,
@@ -183,6 +183,37 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
         let scope =
             V2MemberEnvelopeScopeData::for_selected_prefix(self.member_prefix(prefix)?, channel)?;
         open_v2_member_envelope_data(&self.node.group, &self.node.device, &scope, wire)
+    }
+
+    /// Prepare one paid host-selected original for the actual mesh driver.
+    /// Hold the outer native admission and payment through lower ownership.
+    pub fn prepare_member_submission(
+        &mut self,
+        prefix: &PreparedV2JoinedPrefix,
+        channel: u128,
+        admission: OwnerFactId,
+        original: &[u8],
+    ) -> Result<PreparedV2MemberSubmission<T>, SyncError>
+    where
+        T: Clone,
+    {
+        let member = self
+            .member_prefix(prefix)?
+            .observe_live_member(admission)
+            .map_err(|_| SyncError::JoinRejected)?;
+        let fence = self
+            .fence
+            .observe_publication(admission.as_bytes())
+            .map_err(|_| SyncError::JoinRejected)?;
+        let topic = self.selected_member_topic_data(prefix, channel)?;
+        let wire = self.seal_selected_member_envelope(prefix, channel, admission, original)?;
+        Ok(PreparedV2MemberSubmission {
+            transport: self.node.transport().clone(),
+            topic,
+            wire: bytes::Bytes::from(wire),
+            member,
+            fence,
+        })
     }
 
     /// Sign using this warm native joiner's original device and Source. The

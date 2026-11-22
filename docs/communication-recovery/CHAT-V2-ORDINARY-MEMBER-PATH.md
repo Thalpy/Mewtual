@@ -97,7 +97,10 @@ prefix to validate the claimed Admission before projection. The joined runtime d
 blinded topic from the distinct MLS metadata exporter and checks the original selected
 verifier before sealing or opening the envelope. The receiver issues a provisional token
 only for the actual current Admission, exact channel view and validated dependencies.
-The transport scheduler, receiver and durable checkpoint still need to consume this data.
+The joined runtime prepares one sealed submission for its own mesh. The caller, original
+Core Admission and selected MLS fence must still authorize it at the driver's submission
+boundary. App outbox scheduling, inbound projection and the durable publication checkpoint
+still need to consume this data.
 Original audit chunks and request receipts remain retained after scheduling debt clears.
 Removal changes active view, never deletes the audit. Unproven late removed actions stay
 Held pending the separately authorized moderation path; ordinary concurrent edits resolve

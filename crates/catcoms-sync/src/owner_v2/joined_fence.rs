@@ -307,6 +307,25 @@ impl V2MergeResult {
 pub struct V2JoinedSourceFence {
     inner: Arc<FenceInner>,
 }
+
+/// The original finalized MLS selection observed when an envelope was sealed.
+/// It can refuse an attempt and cannot install or renew the Source.
+pub(crate) struct V2JoinedPublicationFence {
+    inner: Arc<FenceInner>,
+    selected: Selected,
+}
+
+impl V2JoinedPublicationFence {
+    pub(crate) fn is_current_cached(&self) -> bool {
+        let Ok(state) = self.inner.try_lock() else {
+            return false;
+        };
+        state.selected == Some(self.selected)
+            && state
+                .authorized(&self.inner.closed, &self.selected.own)
+                .is_ok()
+    }
+}
 impl std::fmt::Debug for V2JoinedSourceFence {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("V2JoinedSourceFence")
@@ -334,6 +353,19 @@ impl std::fmt::Debug for V2JoinedFenceAdmission<'_> {
 }
 
 impl V2JoinedSourceFence {
+    pub(crate) fn observe_publication(
+        &self,
+        own: &[u8; 32],
+    ) -> Result<V2JoinedPublicationFence, V2JoinedFenceRefusal> {
+        let state = self.inner.try_lock()?;
+        state.authorized(&self.inner.closed, own)?;
+        let selected = state.selected.ok_or(V2JoinedFenceRefusal::Unknown)?;
+        Ok(V2JoinedPublicationFence {
+            inner: self.inner.clone(),
+            selected,
+        })
+    }
+
     /// Monotone negative for Core origins and the save-source lifecycle: one atomic load, no
     /// lock, allocation or callback. `false` can be stale immediately; only `admit_final`
     /// orders an admission.

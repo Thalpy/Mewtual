@@ -2,17 +2,17 @@
 //! test native atoms are NOT real AppState credentials or Root covering saves.
 use super::*;
 
-#[test]
-fn v2_join_request_and_welcome_complete_with_actual_add() {
-    complete_original_welcome(false);
+#[tokio::test]
+async fn v2_join_request_and_welcome_complete_with_actual_add() {
+    complete_original_welcome(false).await;
 }
 
-#[test]
-fn native_joiner_welcome_requires_the_original_device_source_and_sdk_cut() {
-    complete_original_welcome(true);
+#[tokio::test]
+async fn native_joiner_welcome_requires_the_original_device_source_and_sdk_cut() {
+    complete_original_welcome(true).await;
 }
 
-fn complete_original_welcome(native_joiner: bool) {
+async fn complete_original_welcome(native_joiner: bool) {
     use crate::{
         DirectJoinLimits, NativeV2JoinKeyEntry, PreparedV2JoinRequest, RecoveredV2JoinedOutcome,
         RecoveredV2PendingJoinSource, SealedV2JoinedOutcome, SealedV2PendingJoinSource,
@@ -25,6 +25,9 @@ fn complete_original_welcome(native_joiner: bool) {
     };
     use catcoms_replication::chat::{
         ActionDraft, ActionSpec, Body, ChatLedger, LedgerLimits, ProjectionGroupView, Realm,
+    };
+    use catcoms_rt::{
+        MeshTransport, PublishOnceError, PublishSubmission, RequestCancellation, TransportEvent,
     };
     use rand_core::SeedableRng;
     struct Paid(TextCurrentSdkRestoreLimits);
@@ -536,6 +539,7 @@ fn complete_original_welcome(native_joiner: bool) {
     assert!(joined_node.admit_member_save(&warm_plan).is_err());
     drop(original);
     drop(cold_node.admit_member_save(&cold_plan).unwrap());
+    let mut revoked_submission = None;
     if let Some(joiner) = &joiner {
         let mut inputs = crate::owner_v2::V2MemberDraftInputs::new();
         let drawn = joined_node.draw_member_draft_inputs(&mut inputs).unwrap();
@@ -585,6 +589,9 @@ fn complete_original_welcome(native_joiner: bool) {
         assert!(joined_node
             .seal_selected_member_envelope(&prefix, 42, admission, &raw)
             .is_err());
+        assert!(joined_node
+            .prepare_member_submission(&prefix, 42, admission, &raw)
+            .is_err());
         let wire = joined_node
             .seal_selected_member_envelope(&warm_prefix, 42, admission, &raw)
             .unwrap();
@@ -608,6 +615,53 @@ fn complete_original_welcome(native_joiner: bool) {
         assert!(opened
             .provisional_authority(verifier, &[], &_warm_channel)
             .is_err());
+        let receiver = peer(18);
+        let topic = cold_node.selected_member_topic_data(&prefix, 42).unwrap();
+        receiver.subscribe(topic.clone()).await.unwrap();
+        let (cancel, signal) = tokio::sync::watch::channel(true);
+        let submission = joined_node
+            .prepare_member_submission(&warm_prefix, 42, admission, &raw)
+            .unwrap();
+        assert!(matches!(
+            submission
+                .submit(RequestCancellation::new(signal, None))
+                .await,
+            Err(crate::SyncError::Publication(PublishOnceError::Revoked))
+        ));
+        drop(cancel);
+        let (_cancel, signal) = tokio::sync::watch::channel(false);
+        let caller = RequestCancellation::new(signal, None);
+        let submission = joined_node
+            .prepare_member_submission(&warm_prefix, 42, admission, &raw)
+            .unwrap();
+        assert!(submission.is_current_cached());
+        assert_eq!(
+            submission.submit(caller).await.unwrap(),
+            PublishSubmission::Submitted
+        );
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), receiver.next_event())
+            .await
+            .unwrap()
+            .unwrap();
+        let TransportEvent::Gossip {
+            topic: observed,
+            from,
+            data,
+        } = event
+        else {
+            panic!("expected ordinary member gossip");
+        };
+        assert_eq!(observed, topic);
+        assert_eq!(from, catcoms_rt::PeerId::from_u64(11));
+        let received = cold_node
+            .open_selected_member_envelope(&prefix, 42, &data)
+            .unwrap();
+        assert_eq!(received.original_data(), raw);
+        revoked_submission = Some(
+            joined_node
+                .prepare_member_submission(&warm_prefix, 42, admission, &raw)
+                .unwrap(),
+        );
         drop(ends);
         let mut retry_ends = catcoms_rt::NativeChatKeyEnds::new();
         drop(
@@ -653,6 +707,16 @@ fn complete_original_welcome(native_joiner: bool) {
             .is_err());
     }
     drop(warm_view.revoker().close());
+    if let Some(submission) = revoked_submission {
+        assert!(!submission.is_current_cached());
+        let (_cancel, signal) = tokio::sync::watch::channel(false);
+        assert!(matches!(
+            submission
+                .submit(RequestCancellation::new(signal, None))
+                .await,
+            Err(crate::SyncError::Publication(PublishOnceError::Revoked))
+        ));
+    }
     assert!(joined_node.admit_member_save(&warm_plan).is_err());
     drop(cold_node.admit_member_save(&cold_plan).unwrap());
 }

@@ -80,6 +80,25 @@ struct AdmissionCore {
 pub struct V2AuthenticatedAdmission {
     core: Arc<AdmissionCore>,
 }
+
+/// Cached negatives of the exact verifier group and its current Admission.
+/// The owning transport still checks the concrete node and native authority.
+pub struct V2LiveMemberObservation {
+    group: Arc<GroupViewLife>,
+    admission: V2AuthenticatedAdmission,
+}
+
+impl V2LiveMemberObservation {
+    pub fn is_live_cached(&self) -> bool {
+        self.group.live() && self.admission.is_open_data()
+    }
+}
+impl std::fmt::Debug for V2LiveMemberObservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("V2LiveMemberObservation")
+            .finish_non_exhaustive()
+    }
+}
 impl std::fmt::Debug for V2AuthenticatedAdmission {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("V2AuthenticatedAdmission")
@@ -311,6 +330,20 @@ redacted_debug!(
 );
 
 impl V2GeneralPrefixVerifier {
+    pub fn observe_live_member(
+        &self,
+        id: crate::chat::owner_facts::OwnerFactId,
+    ) -> Result<V2LiveMemberObservation, ChatError> {
+        let admission = self.admission(id)?;
+        let original = V2LiveMemberObservation {
+            group: self.group.clone(),
+            admission,
+        };
+        if !original.is_live_cached() {
+            return Err(ChatError::Scope);
+        }
+        Ok(original)
+    }
     /// Metadata ADDITIONAL to the existing complete ReplayMath1MiB invoice, ordinary action
     /// buffers/ledger slots, host observers and archive escrow. This is a named layout only,
     /// not a paid quota or a claim that the Founder/Root metadata allowance covers this type.

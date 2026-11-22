@@ -42,7 +42,7 @@ pub use founder::{
 };
 #[cfg(test)]
 pub(crate) use joined_fence::faults as joined_fence_faults;
-pub(crate) use joined_fence::{JoinedFenceNode, V2MergeResult};
+pub(crate) use joined_fence::{JoinedFenceNode, V2JoinedPublicationFence, V2MergeResult};
 pub use joined_fence::{
     V2AppliedTransition, V2JoinedFenceAdmission, V2JoinedFenceObservation, V2JoinedFenceRefusal,
     V2JoinedFenceTerminal, V2JoinedSourceFence, V2TransitionDelta, V2_JOINED_TRANSITION_CAPACITY,
@@ -52,7 +52,8 @@ pub use joined_source::V2JoinFacts;
 pub use member::{V2MemberDraftInputs, V2MemberSignRefusal};
 pub use member_envelope::{
     open_v2_member_envelope_data, seal_v2_member_envelope_data, v2_member_envelope_topic_data,
-    OpenedV2MemberEnvelopeData, V2MemberEnvelopeScopeData, MAX_V2_MEMBER_TRANSPORT_BYTES,
+    OpenedV2MemberEnvelopeData, PreparedV2MemberSubmission, V2MemberEnvelopeScopeData,
+    MAX_V2_MEMBER_TRANSPORT_BYTES,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) const V2_JOIN_ROUTING_DOMAIN: &[u8] = b"mewtual/chat/join-routing-plain/v2\0";
