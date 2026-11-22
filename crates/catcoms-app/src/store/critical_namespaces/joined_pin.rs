@@ -17,6 +17,7 @@ use zeroize::Zeroizing;
 pub(in crate::store) mod declaration;
 pub(in crate::store) mod index;
 pub(super) mod namespace;
+pub(in crate::store) mod pending;
 
 const TAG: &[u8] = b"catcoms/private-chat-v2-joined-anchor-pin/v1\0";
 const KEY_DOMAIN: &str = "catcoms/private-chat-v2-joined-anchor-pin-key/v1";

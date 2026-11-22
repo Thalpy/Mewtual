@@ -2,8 +2,10 @@
 //! facade conversion. Operational cold authoring needs its separate owner.
 use super::super::lifecycle::preparation::Policy;
 use super::*;
-use crate::store::persistence::governance_layout::joined::JoinedPinDeclaration;
+use crate::store::persistence::governance_layout::joined::{JoinedPendingIo, JoinedPinDeclaration};
+use catcoms_replication::chat::join_bindings::SignedInviteBindingData;
 use catcoms_rt::CryptoRngCore;
+use catcoms_sync::{PreparedV2JoinRequest, V2PendingJoinContextData};
 
 /// Original opaque combined4+5+native3 physical custody. Metadata reads do not
 /// reconstruct a signer, reuse fresh Welcome evidence or grant a native caller.
@@ -56,6 +58,7 @@ impl NativeTextGovernedStorage {
 /// Explicit custody of the joined-pin catalog and its existing native leaves.
 /// Opening this metadata owner cannot install a joined MLS runtime.
 pub struct NativeTextJoinedStorage {
+    pending: Option<JoinedPendingIo>,
     index: upgrade_source::owning::Store,
 }
 
@@ -71,6 +74,7 @@ impl NativeTextJoinedStorage {
             Policy::required_persistent_capacity(),
         )?;
         Ok(Self {
+            pending: None,
             index: upgrade_source::owning::Store::open_joined(dir, secret, rng, current, policy)?,
         })
     }
@@ -85,5 +89,32 @@ impl NativeTextJoinedStorage {
         anchor: &catcoms_replication::chat::join_bindings::GenesisAnchorBindingData,
     ) -> Result<Option<catcoms_sync::V2PendingJoinContextData>, AppError> {
         self.index.selected_joined_pin_context_data(anchor)
+    }
+
+    /// Cover one original request and the first pin insertion under this
+    /// selected mount. The caller retains this owner across a write refusal.
+    pub fn stage_first_join(
+        &mut self,
+        source: PreparedV2JoinRequest,
+        invite: &SignedInviteBindingData,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        if self.pending.is_some() {
+            return Err(refused());
+        }
+        self.pending = Some(self.index.prepare_joined_pending(source, invite, rng)?);
+        self.retry_first_join()
+    }
+
+    pub fn retry_first_join(&mut self) -> Result<(), AppError> {
+        self.index
+            .stage_joined_pending(self.pending.as_mut().ok_or_else(refused)?)
+    }
+
+    /// Reference to the exact saved request for diagnostics and later admission.
+    pub fn pending_join_data(
+        &self,
+    ) -> Result<Option<([u8; 32], V2PendingJoinContextData)>, AppError> {
+        self.index.selected_pending_join_data()
     }
 }

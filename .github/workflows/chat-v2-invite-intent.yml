@@ -91,7 +91,7 @@ permissions:
 
 concurrency:
   group: chat-v2-invite-intent-${{ github.event.pull_request.number || github.ref }}-${{ inputs.scope || 'invitation' }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ inputs.scope != 'joined-storage' }}
 
 env:
   CARGO_BUILD_JOBS: 1

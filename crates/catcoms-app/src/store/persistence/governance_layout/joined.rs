@@ -13,6 +13,8 @@ use critical_namespaces::{
 
 pub(in crate::store) const INDEX_NAME: &str = "chat-critical-namespaces.joined-pin.index";
 const INDEX_FEE: usize = 12 * MAX_INDEX_FRAME + 512 * 1024;
+mod pending;
+pub(in crate::store) use pending::JoinedPendingIo;
 
 /// Kept by the unique native startup continuation before any Source is exposed.
 /// The existing governance seed name is the predecessor-visible first claim.
@@ -42,6 +44,7 @@ pub(in crate::store) struct ColdJoinedSelection {
 pub(in crate::store) struct SelectedPinIndex {
     selected: OpenedArchiveObject,
     index: JoinedPinIndex,
+    pending: Option<pending::SelectedPending>,
     _fee: CatalogReadReservation,
 }
 
@@ -64,13 +67,19 @@ impl SelectedPinIndex {
         let value = Self {
             selected,
             index,
+            pending: None,
             _fee: fee,
         };
-        value.require(store)?;
+        value.require_file(store)?;
         Ok(value)
     }
 
     fn require(&self, store: &ServerStore) -> Result<(), AppError> {
+        self.require_file(store)?;
+        pending::require_pending_names(store, self.pending.as_ref())
+    }
+
+    fn require_file(&self, store: &ServerStore) -> Result<(), AppError> {
         exact_held(
             &fixed(store, false, INDEX_NAME)?,
             &self.selected.0,
@@ -215,6 +224,7 @@ impl ServerStore {
                     0,
                 )?;
                 sync_directory(&self.dir).map_err(io)?;
+                pending::require_pending_names(self, None)?;
                 let index = SelectedPinIndex::open(
                     self,
                     &key,
@@ -289,7 +299,8 @@ impl ServerStore {
                 }
                 let plain = Zeroizing::new(unseal(&key, &unframe(&raw)?)?);
                 let layout = self.parse_joined_pin_catalog(&plain)?;
-                let index = SelectedPinIndex::open(self, &key, layout, None, index_fee)?;
+                let index =
+                    pending::select(self, &key, layout, &directory, (&current, &raw), index_fee)?;
                 (current, raw, None, index)
             };
         let value = ColdJoinedSelection {
@@ -375,6 +386,7 @@ impl ServerStore {
         if inventory.seed.is_some() || inventory.stage.is_some() {
             return Err(denied());
         }
+        pending::require_pending_names(self, None)?;
         absent(&fixed(self, false, INDEX_NAME)?)?;
         let original = inventory.current.ok_or_else(denied)?;
         let marker = inventory.marker.ok_or_else(denied)?;

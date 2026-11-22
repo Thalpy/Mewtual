@@ -195,9 +195,11 @@ The explicit joined storage opener classifies this declaration before the
 older inspectors and carries the same selected file through their checks.
 It can finish an authenticated interrupted declaration or open an already
 selected joined catalog. The mounted index preserves the first pin ciphertext
-for each group and checks the held index when reading pin context. It
-currently accepts settled catalogs. First pin insertion still needs the
-joined pending-JOIN transaction and native runtime installation.
+for each group and checks the held index when reading pin context. The first
+pending-JOIN record covers the private request and the one exact index
+insertion. Cold opening can complete that insertion and verify the original
+request. Welcome entry, recovery of other pending-JOIN transitions, and native
+runtime installation remain open.
 Unknown/ambiguous remnants are preserved and refused, never cleared as debris.
 Predecessor tests must use a real prior binary with positive open controls.
 

@@ -317,6 +317,33 @@ impl std::fmt::Debug for Store {
     }
 }
 impl Store {
+    pub(in crate::store::critical_namespaces::native_registry) fn prepare_joined_pending(
+        &mut self,
+        source: catcoms_sync::PreparedV2JoinRequest,
+        invite: &catcoms_replication::chat::join_bindings::SignedInviteBindingData,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<crate::store::persistence::governance_layout::joined::JoinedPendingIo, AppError>
+    {
+        let physical = Arc::get_mut(&mut self.physical).ok_or_else(refused)?;
+        physical
+            .joined_pending_store()?
+            .prepare_joined_pending(source, invite, rng)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn stage_joined_pending(
+        &mut self,
+        pending: &mut crate::store::persistence::governance_layout::joined::JoinedPendingIo,
+    ) -> Result<(), AppError> {
+        let physical = Arc::get_mut(&mut self.physical).ok_or_else(refused)?;
+        pending.stage(physical.joined_pending_store()?)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn selected_pending_join_data(
+        &self,
+    ) -> Result<Option<([u8; 32], catcoms_sync::V2PendingJoinContextData)>, AppError> {
+        self.physical.selected_pending_join_data()
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn selected_joined_pin_context_data(
         &self,
         anchor: &catcoms_replication::chat::join_bindings::GenesisAnchorBindingData,

@@ -139,6 +139,48 @@ fn governed_joined_pin_keeps_the_original_anchor_ciphertext_and_pending_provenan
     let mut wrong = prepare(&another);
     let wrong = wrong.seal_pending_source(&key, bound, &mut rng).unwrap();
     assert!(pin.open_pending_source(&key, wrong, limits).is_err());
+    let original_index = index::JoinedPinIndex::seal_initial(&key, layout, &mut rng).unwrap();
+    assert!(pending::PreparedPinnedPending::prepare(
+        prepare(&another),
+        &original_index,
+        &invite,
+        &key,
+        layout,
+        pending,
+        &mut rng,
+    )
+    .is_err());
+    let source = prepare(&invite);
+    let original_request = source.request_bytes_data().to_vec();
+    let mut first = pending::PreparedPinnedPending::prepare(
+        source,
+        &original_index,
+        &invite,
+        &key,
+        layout,
+        pending,
+        &mut rng,
+    )
+    .unwrap();
+    let first_frame = first.seal(&key, &mut rng).unwrap().to_vec();
+    assert_eq!(first.seal(&key, &mut rng).unwrap(), first_frame);
+    assert!(first.seal(&[21; 32], &mut rng).is_err());
+    let reopened =
+        pending::RecoveredPinnedPending::open(&key, layout, &first_frame, limits).unwrap();
+    let (before, after) = reopened.index_frames();
+    assert_eq!(before, original_index.as_slice());
+    assert_ne!(before, after);
+    let (private, context) = reopened.pending_data();
+    assert_eq!(private.request_bytes_data(), original_request);
+    assert_eq!(context.original_pending, pending);
+    assert_ne!(context.pin, bound.pin);
+    assert!(pending::RecoveredPinnedPending::open(
+        &key,
+        layout,
+        &first_frame[..first_frame.len() - 1],
+        limits
+    )
+    .is_err());
     assert!(open_original(
         &key,
         CurrentLayoutData {

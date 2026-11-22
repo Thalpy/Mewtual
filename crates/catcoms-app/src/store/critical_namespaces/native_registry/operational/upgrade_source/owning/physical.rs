@@ -68,6 +68,24 @@ pub(super) const METADATA: usize = 8
     + 512;
 
 impl Physical {
+    pub(super) fn joined_pending_store(&mut self) -> Result<&ServerStore, AppError> {
+        self.cell.get_mut().map_err(|_| refused())?.require_idle()?;
+        self.handler.require()?;
+        self.handler.require_idle_cached()?;
+        if !self.handler.uses_joined_pin_layout() {
+            return Err(refused());
+        }
+        self.current()?.checked_store()
+    }
+
+    pub(super) fn selected_pending_join_data(
+        &self,
+    ) -> Result<Option<([u8; 32], catcoms_sync::V2PendingJoinContextData)>, AppError> {
+        self.current()?
+            .checked_store()?
+            .selected_pending_join_data()
+    }
+
     pub(super) fn selected_joined_pin_context_data(
         &self,
         anchor: &catcoms_replication::chat::join_bindings::GenesisAnchorBindingData,

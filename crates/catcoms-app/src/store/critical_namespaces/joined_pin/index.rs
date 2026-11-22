@@ -88,6 +88,10 @@ impl JoinedPinIndex {
         self.rows.is_empty()
     }
 
+    pub(in crate::store) fn layout_data(&self) -> CurrentLayoutData {
+        self.layout
+    }
+
     pub(in crate::store::critical_namespaces) fn lookup(
         &self,
         anchor: &GenesisAnchorBindingData,

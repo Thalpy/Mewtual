@@ -152,6 +152,9 @@ declare -A allowed=(
   ['crates/catcoms-app/src/store/persistence/governance_layout/joined.rs|select_joined_pin_catalog|fs::rename(&stage_path, &current_path).map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/governance_layout/joined.rs|select_joined_pin_catalog|selected.sync_all().map_err(durable)?;']=1
   ['crates/catcoms-app/src/store/persistence/governance_layout/joined.rs|select_joined_pin_catalog|fs::remove_file(&seed_path).map_err(durable)?;']=1
+  # First joined-pending record selects only its exact one-insertion index successor.
+  ['crates/catcoms-app/src/store/persistence/governance_layout/joined/pending.rs|select|fs::rename(&stage_path, &index_path).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout/joined/pending.rs|select|index.selected.0.sync_all().map_err(durable)?;']=1
   # Namespace5 (member outbox layout) declaration: the same reviewed protocol as namespace4,
   # with its own fixed seed/marker names. A zero-byte claim of the fixed seed name comes
   # first (no content, so older readers may ignore it), then the empty legacy stage fence
