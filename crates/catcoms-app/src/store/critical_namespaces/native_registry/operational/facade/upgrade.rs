@@ -142,7 +142,7 @@ impl NativeTextJoinedVaultUpgrade {
             };
             index.advance_joined_pin_layout(
                 &mut self.joined,
-                Some(&self.original.receiver),
+                Some(&mut self.original.receiver),
                 rng,
             )?;
             self.complete = true;

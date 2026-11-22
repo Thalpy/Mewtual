@@ -619,7 +619,7 @@ impl V2CurrentLayoutStore {
             crate::store::persistence::governance_layout::joined::JoinedPinDeclaration,
         >,
         handler: super::native_registry::preparation::NativeRegistryHandler,
-        governed: Option<&super::governance_layout::native::Startup>,
+        governed: Option<&mut super::governance_layout::native::Startup>,
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
         if !handler.uses_joined_pin_layout()
@@ -630,14 +630,19 @@ impl V2CurrentLayoutStore {
         if !self.store.uses_joined_pin_layout() {
             let store = self.checked_store()?;
             if declaration.is_none() {
-                if let Some(original) = governed {
+                if let Some(original) = governed.as_deref() {
                     original.require_complete(store)?;
                 }
                 let prepared = store.prepare_joined_pin_declaration(rng)?;
                 if let Some(original) = governed {
                     original.require_complete(store)?;
+                    *declaration = Some(prepared);
+                    // Retire the predecessor after the successor holds its
+                    // proved inputs, before funding any promotion overlap.
+                    *original = super::governance_layout::native::Startup::default();
+                } else {
+                    *declaration = Some(prepared);
                 }
-                *declaration = Some(prepared);
             }
             declaration.as_mut().ok_or_else(refused)?.stage(store)?;
             let current = self

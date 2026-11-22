@@ -41,15 +41,28 @@ fn governed_joined_pin_native_factory_proves_the_selected_catalog_before_exposur
         .path()
         .join(ARCHIVE_BOOTSTRAP_ROOT)
         .join("native-registry.bin");
-    let held_index = native_index.with_extension("held-index");
+    let held_index = dir.path().join("held-native-index");
     let before = fs::read(&native_index).unwrap();
     let replacement = before.clone();
+    let predecessor_retired = Arc::new(AtomicBool::new(false));
+    let retired = predecessor_retired.clone();
+    let directory = dir.path().to_owned();
+    governance::set_declaration_tail_hook_for_test(Box::new(move || {
+        assert!(!directory.join(governance::GOVERNANCE_SEED).exists());
+        assert!(catcoms_storage::acquire_vault_session(&directory).is_err());
+        retired.store(true, Ordering::SeqCst);
+    }));
     let (source, parked) = (native_index.clone(), held_index.clone());
     governance::set_stage_selection_hook_for_test(Box::new(move || {
+        assert!(predecessor_retired.load(Ordering::SeqCst));
         fs::rename(&source, parked).unwrap();
         fs::write(source, replacement).unwrap();
     }));
-    assert!(joined.retry(&mut rng).is_err());
+    let refusal = joined.retry(&mut rng).unwrap_err();
+    assert!(
+        held_index.is_file(),
+        "selection refused before replacing its leaf: {refusal}"
+    );
     assert_eq!(fs::read(&current).unwrap(), governed_current);
     assert_eq!(fs::read(&native_index).unwrap(), before);
     assert!(dir.path().join(Slot::Stage.name()).is_file());

@@ -201,7 +201,8 @@ replacement of the held Stage refuses, and retry takes the original file.
 Fresh gated desktop startup moves that same original owner through the
 joined declaration before publishing the native vault and its source collection.
 The factory rechecks the governed selection around joined declaration preparation.
-Warm promotion uses the exact native leaves already held by that declaration.
+Warm promotion uses the exact native leaves already held by that declaration,
+after retiring the predecessor's covered declaration and its read reservation.
 An equal-byte replacement of a native leaf refuses promotion until the original
 is returned.
 On a process restart, gated desktop startup opens an idle joined-aware vault
