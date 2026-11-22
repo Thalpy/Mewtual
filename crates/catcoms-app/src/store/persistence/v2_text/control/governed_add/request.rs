@@ -9,6 +9,7 @@ const KEY_DOMAIN: &str = "catcoms/private-chat-text-governed-add-request-key/v2"
 const PARENT_DOMAIN: &str = "catcoms/private-chat-text-governed-add-request-parent/v2";
 const VERSION: u16 = 2;
 const OVERHEAD: usize = 4 + TAG.len() + 2 + 36 + 4 + 40;
+pub(super) const MIN_BYTES: usize = OVERHEAD + 1;
 pub(super) const MAX_BYTES: usize = OVERHEAD + MAX_V2_JOIN_REQUEST_PACKET_BYTES;
 
 fn parent(fence: &[u8]) -> Result<[u8; 32], AppError> {
@@ -45,7 +46,7 @@ pub(super) fn open_data(
     fence: &[u8],
     raw: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, AppError> {
-    if !(OVERHEAD + 1..=MAX_BYTES).contains(&raw.len()) {
+    if !(MIN_BYTES..=MAX_BYTES).contains(&raw.len()) {
         return Err(refused());
     }
     let reservation = GovernedAddFenceData::open_data(key, fence)?;

@@ -78,6 +78,14 @@ impl PreparedSmallControl {
         }
         require_exact_held(path, self.original.as_mut().ok_or_else(refused)?)
     }
+
+    fn covered_frame(&self) -> Result<&[u8], AppError> {
+        self.original
+            .as_ref()
+            .filter(|_| self.covered)
+            .map(|original| original.frame.as_slice())
+            .ok_or_else(refused)
+    }
 }
 
 struct PreparedOutcome {

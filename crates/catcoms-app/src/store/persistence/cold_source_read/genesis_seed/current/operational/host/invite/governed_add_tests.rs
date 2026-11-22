@@ -403,6 +403,26 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             );
             Ok(())
         })?;
+        drop((exact, response));
+        let archive =
+            self.cover_governed_archive(layout, packet, routing_plan, keys, rng, negative)?;
+        assert_eq!(
+            self.cover_governed_archive(layout, packet, routing_plan, keys, rng, negative)?,
+            archive
+        );
+        let head = self.stage_governed_head(layout, packet, routing_plan, keys, rng, negative)?;
+        assert_eq!(
+            self.stage_governed_head(layout, packet, routing_plan, keys, rng, negative)?,
+            head
+        );
+        let p = self.governed_add.as_ref().ok_or_else(refused)?;
+        let selected = p.parent.selected_data().ok_or_else(refused)?;
+        assert_ne!(head, selected.head_id_data());
+        let owner = self.owner.borrow_current()?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            selected.validate_under_current_guard(&guard)
+        })?;
         Ok(())
     }
 }

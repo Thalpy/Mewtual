@@ -3,9 +3,12 @@
 use super::*;
 use catcoms_sync::V2JoinResponseData;
 
+mod archive_file;
+
 pub(super) struct PreparedResponse {
     record: PreparedSmallControl,
     packet_digest: [u8; 32],
+    archive: Option<archive_file::PreparedArchive>,
     _fee: CatalogReadReservation,
 }
 
@@ -81,6 +84,7 @@ impl PreparedGovernedAddFence {
             stage.response = Some(PreparedResponse {
                 record: PreparedSmallControl::new(frame),
                 packet_digest: *blake3::hash(&packet).as_bytes(),
+                archive: None,
                 _fee: fee,
             });
         }
@@ -96,6 +100,7 @@ impl PreparedGovernedAddFence {
     ) -> Result<(), AppError> {
         self.cover_raw_welcome(guard, selected)?;
         let path = &self.held.welcome_paths.response;
+        let head_stage = &self.held.welcome_paths.head_stage;
         let prepared = &mut self
             .header
             .as_mut()
@@ -103,6 +108,7 @@ impl PreparedGovernedAddFence {
             .ok_or_else(refused)?
             .record;
         if !prepared.covered {
+            require_absent(head_stage)?;
             prepared.cover(path, response::MAX_BYTES, guard)?;
             self.cover_raw_welcome(guard, selected)?;
         }

@@ -102,7 +102,7 @@ impl PreparedGovernedAddFence {
         if !welcome.covered {
             require_absent(&self.held.welcome_paths.attempt)?;
             require_absent(&self.held.welcome_paths.raw)?;
-            require_absent(&self.held.welcome_paths.response)?;
+            self.held.welcome_paths.require_after_raw_absent()?;
             welcome.cover(
                 &self.held.welcome_paths.intent,
                 welcome_intent::MAX_BYTES,
@@ -167,7 +167,7 @@ impl PreparedGovernedAddFence {
             return Err(refused());
         }
         self.cover_welcome_intent(guard, selected)?;
-        require_absent(&self.held.welcome_paths.response)?;
+        self.held.welcome_paths.require_after_raw_absent()?;
         let stage = self
             .header
             .as_mut()
@@ -189,7 +189,7 @@ impl PreparedGovernedAddFence {
             .attempt
             .require_covered(&self.held.welcome_paths.attempt)?;
         stage.require_raw_absent(&self.held.welcome_paths.raw)?;
-        require_absent(&self.held.welcome_paths.response)?;
+        self.held.welcome_paths.require_after_raw_absent()?;
         guard.validate_source_only()
     }
 
@@ -266,7 +266,7 @@ impl PreparedGovernedAddFence {
             .require_covered(&self.held.welcome_paths.attempt)?;
         let (_, raw) = stage.raw.as_mut().ok_or_else(refused)?;
         if !raw.covered {
-            require_absent(&self.held.welcome_paths.response)?;
+            self.held.welcome_paths.require_after_raw_absent()?;
             raw.cover(&self.held.welcome_paths.raw, WELCOME_RAW_BYTES, guard)?;
             self.cover_welcome_intent(guard, selected)?;
         }

@@ -58,7 +58,7 @@ impl HeldGovernedAddFence {
         observed.attempt = read_stage(&self.welcome_paths.attempt, WELCOME_ATTEMPT_BYTES)?;
         observed.raw = read_stage(&self.welcome_paths.raw, WELCOME_RAW_BYTES)?;
         if observed.raw.is_none() {
-            require_absent(&self.welcome_paths.response)?;
+            self.welcome_paths.require_after_raw_absent()?;
         }
         guard.validate_source_only()?;
         observed.complete_capture = true;
@@ -158,7 +158,7 @@ impl HeldGovernedAddFence {
         require_stage(&self.welcome_paths.attempt, observed.attempt.as_mut())?;
         require_stage(&self.welcome_paths.raw, observed.raw.as_mut())?;
         if observed.raw.is_none() {
-            require_absent(&self.welcome_paths.response)?;
+            self.welcome_paths.require_after_raw_absent()?;
         }
         let (target, directory, id) = guard.target_directory_data();
         crate::store::persistence::v2_genesis_activation::require_directory_name(

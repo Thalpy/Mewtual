@@ -12,6 +12,7 @@ const KEY_DOMAIN: &str = "catcoms/private-chat-text-governed-add-response-key/v2
 const PARENT_DOMAIN: &str = "catcoms/private-chat-text-governed-add-response-parent/v2";
 const VERSION: u16 = 2;
 const OVERHEAD: usize = 4 + TAG.len() + 2 + 36 + 4 + 40;
+pub(super) const MIN_BYTES: usize = OVERHEAD + 1;
 pub(super) const MAX_BYTES: usize = OVERHEAD + MAX_V2_JOIN_RESPONSE_PACKET_BYTES;
 
 pub(super) struct OriginalResponse<'a> {
@@ -75,7 +76,7 @@ pub(super) fn open_data(
     raw: &[u8],
     original: OriginalResponse<'_>,
 ) -> Result<Zeroizing<Vec<u8>>, AppError> {
-    if !(OVERHEAD + 1..=MAX_BYTES).contains(&raw.len()) {
+    if !(MIN_BYTES..=MAX_BYTES).contains(&raw.len()) {
         return Err(refused());
     }
     let key = Zeroizing::new(blake3::derive_key(KEY_DOMAIN, key));

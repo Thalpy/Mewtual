@@ -10,6 +10,7 @@ use super::outcome::OUTCOME_NAME;
 use super::request;
 use super::response;
 use super::sdk_entry::{GovernedAddSdkEntryData, ENTRY_BYTES, SDK_ENTRY_NAME};
+use super::selected_head;
 use super::welcome_intent;
 use super::*;
 use crate::store::critical_namespaces::current_layout::V2TextCurrentGroupGuard;
@@ -79,6 +80,7 @@ struct WelcomeControlPaths {
     attempt: PathBuf,
     raw: PathBuf,
     response: PathBuf,
+    head_stage: PathBuf,
 }
 
 impl WelcomeControlPaths {
@@ -86,7 +88,12 @@ impl WelcomeControlPaths {
         require_absent(&self.intent)?;
         require_absent(&self.attempt)?;
         require_absent(&self.raw)?;
-        require_absent(&self.response)
+        self.require_after_raw_absent()
+    }
+
+    fn require_after_raw_absent(&self) -> Result<(), AppError> {
+        require_absent(&self.response)?;
+        require_absent(&self.head_stage)
     }
 }
 
@@ -98,7 +105,7 @@ pub(in crate::store) enum GovernedAddRecoveryState {
     PossiblyEntered,
 }
 
-const FENCE_READ_BYTES: usize = 11 * MAX_TEXT_PATH
+const FENCE_READ_BYTES: usize = 12 * MAX_TEXT_PATH
     + 6 * FRAME_BYTES
     + 6 * ENTRY_BYTES
     + 6 * (ATTEMPT_BYTES + RAW_BYTES + WELCOME_ATTEMPT_BYTES + WELCOME_RAW_BYTES)
@@ -149,6 +156,7 @@ impl HeldGovernedAddFence {
             attempt: fixed_child(target, WELCOME_ATTEMPT_NAME)?,
             raw: fixed_child(target, WELCOME_RAW_NAME)?,
             response: fixed_child(target, response::NAME)?,
+            head_stage: fixed_child(target, selected_head::NAME)?,
         };
         resources.require_bound_original_negative(store, source)?;
         Ok(Self {

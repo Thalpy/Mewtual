@@ -5,7 +5,9 @@ use crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounder
 use crate::store::critical_namespaces::read_pool::{
     CatalogReadReservation, CriticalCatalogReadPool,
 };
-use crate::store::persistence::v2_text::{PreparedGovernedAddFence, PreparedV2TextParentCapture};
+use crate::store::persistence::v2_text::{
+    PreparedGovernedAddFence, PreparedV2TextParentCapture, TextHeadIdData,
+};
 use crate::store::ServerStore;
 use catcoms_mls::persist::text_current_add::{
     TextCurrentAddAdmission, TextCurrentAddLimits, TextCurrentAddReservation,
@@ -77,6 +79,69 @@ impl PendingGovernedAdd {
 }
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextHost<T, R> {
+    pub(super) fn stage_governed_head(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        packet: &V2JoinRequestPacketData<'_>,
+        routing_plan: &[u8],
+        keys: &NativeFounderKeys,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+        negative: &catcoms_rt::RequestCancellation,
+    ) -> Result<TextHeadIdData, AppError> {
+        self.cover_governed_archive(layout, packet, routing_plan, keys, rng, negative)?;
+        let store = layout.checked_store()?;
+        let owner = self.owner.borrow_current()?;
+        let p = self.governed_add.as_mut().ok_or_else(refused)?;
+        let selected = p.parent.selected_data().ok_or_else(refused)?;
+        p.fence
+            .prepare_head_stage(store, owner.source(), selected, rng)?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, p.parent.resources())?;
+            keys.preflight(&self.origin)?;
+            if negative.is_cancelled() {
+                return Err(refused());
+            }
+            let head = p.fence.cover_head_stage(&guard, selected)?;
+            keys.preflight(&self.origin)?;
+            if negative.is_cancelled() {
+                return Err(refused());
+            }
+            Ok(head)
+        })
+    }
+
+    pub(super) fn cover_governed_archive(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        packet: &V2JoinRequestPacketData<'_>,
+        routing_plan: &[u8],
+        keys: &NativeFounderKeys,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+        negative: &catcoms_rt::RequestCancellation,
+    ) -> Result<catcoms_replication::chat::cold_manifest::ArchiveHeadId, AppError> {
+        self.cover_governed_response(layout, packet, routing_plan, keys, rng, negative)?;
+        let store = layout.checked_store()?;
+        let owner = self.owner.borrow_current()?;
+        let outcome = self.owner.governed_outcome_data(store)?;
+        let p = self.governed_add.as_mut().ok_or_else(refused)?;
+        let selected = p.parent.selected_data().ok_or_else(refused)?;
+        p.fence
+            .prepare_archive(store, owner.source(), selected, &outcome, rng)?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, p.parent.resources())?;
+            keys.preflight(&self.origin)?;
+            if negative.is_cancelled() {
+                return Err(refused());
+            }
+            let id = p.fence.cover_archive(&guard, selected)?;
+            keys.preflight(&self.origin)?;
+            if negative.is_cancelled() {
+                return Err(refused());
+            }
+            Ok(id)
+        })
+    }
+
     pub(super) fn cover_governed_response(
         &mut self,
         layout: &V2CurrentLayoutStore,

@@ -283,6 +283,18 @@ reserves its own buffer and compares the recovered packet with the verified
 Welcome intent, signature and Outcome. Head2 selection and response release
 still require separate proofs.
 
+The immutable governed Add archive stores the exact encrypted request,
+Outcome, signing journal and response together. It links the prior selected
+Head and archive to the governing Header, state and completed SDK fingerprint.
+The Host covers it under the original Current before returning its file ID.
+This format leaves the ordinary archive caps unchanged and keeps the original
+records available after later retirement of the fixed Add journal.
+
+The Host stages `text.add.head-stage.v2` against that exact archive. The
+selector uses the established Head envelope with a new version. Prior
+readers recognize its MAC and refuse to interpret it as their operational
+head. The current staged writer keeps the original `head.bin` selected.
+
 `text.add.governing.v2` binds the exact Raw Header to the signed Admission
 and state image. The reader checks the existing public history encoding and
 compares every governing body with the original Outcome. It rejects a record

@@ -92,7 +92,10 @@ impl HeldGovernedAddFence {
                 response::MAX_BYTES,
                 &mut read.buffer,
             )?),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => CapturedResponse::Absent,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                require_absent(&self.welcome_paths.head_stage)?;
+                CapturedResponse::Absent
+            }
             Err(error) => return Err(io(error)),
         });
         guard.validate_source_only()
@@ -173,7 +176,10 @@ impl HeldGovernedAddFence {
             .ok_or_else(refused)?;
         let path = &self.welcome_paths.response;
         match read.captured.as_mut().ok_or_else(refused)? {
-            CapturedResponse::Absent => require_absent(path)?,
+            CapturedResponse::Absent => {
+                require_absent(path)?;
+                require_absent(&self.welcome_paths.head_stage)?;
+            }
             CapturedResponse::Present(original) => require_exact_held(path, original)?,
         }
         let (target, directory, id) = guard.target_directory_data();

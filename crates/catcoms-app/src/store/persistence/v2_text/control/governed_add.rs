@@ -6,6 +6,7 @@ use super::*;
 use catcoms_sync::V2JoinRequestPacketData;
 use catcoms_wire::Encoder;
 
+mod archive;
 mod governing_record;
 mod header_signing;
 pub(in crate::store::persistence::v2_text) mod held;
@@ -13,6 +14,7 @@ mod outcome;
 mod request;
 mod response;
 mod sdk_entry;
+mod selected_head;
 mod welcome_intent;
 
 const ROLE: &[u8] = b"catcoms/private-chat-text-governed-add-fence/v2\0";
