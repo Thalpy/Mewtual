@@ -278,7 +278,6 @@ impl<T: MeshTransport, R: CryptoRngCore> Row<T, R> {
         use NativeTextSourceRetirementRefusal as Error;
         // This negative remains distinct from worker presence and body Drop.
         // It must be closed even if no key primitive was ever entered.
-        let keys_drained = self.keys.is_drained();
         let body = {
             let mut state = match self.cell.state.try_lock() {
                 Ok(state) => state,
@@ -289,7 +288,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Row<T, R> {
             if state.poisoned {
                 return Err(Error::Unknown);
             }
-            if !keys_drained || state.running {
+            if state.running {
                 return Ok(false);
             }
             if state.retirement.destroyed != Destruction::NotDestroyed {
@@ -299,7 +298,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Row<T, R> {
                 {
                     return Err(Error::Unknown);
                 }
-                return Ok(state.retirement.complete());
+                return Ok(self.keys.is_drained() && state.retirement.complete());
             }
             // A missing body without its actual destruction envelope is never
             // success, even if an old task failed and every counter is idle.
@@ -312,6 +311,16 @@ impl<T: MeshTransport, R: CryptoRngCore> Row<T, R> {
             cell: self.cell.clone(),
             recorded: true,
         };
+        if let Some(driver) = loan.body.as_mut().and_then(|body| body.driver.as_mut()) {
+            // This exclusive idle body can itself own key Ends. It must dispose
+            // of the original pending Add after Source closure, before key wait.
+            driver
+                .discard_add_for_closed_source(&self.keys)
+                .map_err(|_| Error::Unknown)?;
+        }
+        if !self.keys.is_drained() {
+            return Ok(false);
+        }
         if let Some(driver) = loan.body.as_mut().and_then(|body| body.driver.as_mut()) {
             // Whole driver closes owner, projection and member domains. In
             // particular an admitted member save End still keeps this Busy.

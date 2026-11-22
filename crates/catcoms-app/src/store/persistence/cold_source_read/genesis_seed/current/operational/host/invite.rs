@@ -357,8 +357,10 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             welcome_cut,
         )
         .map_err(|_| refused())?;
-        node.execute_add_data_native(packet.founder_add_data())?;
-        node.prepare_admission_data(replay)?;
+        node.execute_add_data_native(packet.founder_add_data())
+            .expect("actual native SDK Add");
+        node.prepare_admission_data(replay)
+            .expect("actual replay of the original unsigned Admission");
 
         let owner = self.owner.borrow_current()?;
         let outcome = self.owner.governed_outcome_for_test(store)?;
@@ -406,7 +408,6 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         let node = self.owner.governed_node_for_test(store)?;
         node.sign_admission_native()?;
         let raw = *node.raw_admission_signature_data()?;
-        drop(node.retire_closed_add_native_data()?);
 
         let owner = self.owner.borrow_current()?;
         let outcome = self.owner.governed_outcome_for_test(store)?;

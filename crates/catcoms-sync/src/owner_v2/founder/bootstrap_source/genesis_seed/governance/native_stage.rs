@@ -174,6 +174,25 @@ impl<T, R: CryptoRngCore> PreparedV2FounderGovernanceNode<T, R> {
 }
 
 impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
+    /// Permanent Source shutdown only. The owning runtime must first finish
+    /// admitting/dispatching its finite disk work. Dispose the entire pending
+    /// operation before waiting on the actual Ends retained by that operation.
+    /// Its durable controls remain available to independent recovery.
+    pub fn discard_add_for_closed_source(
+        &mut self,
+        closed: &catcoms_rt::NativeChatKeyDrain,
+    ) -> Result<(), SyncError> {
+        let Some(operation) = self.pending.as_ref() else {
+            return Ok(());
+        };
+        closed
+            .require_closed_source(&operation.original)
+            .map_err(|_| unavailable())?;
+        self.node.seed.body.metadata.scope.retire();
+        drop(self.pending.take());
+        Ok(())
+    }
+
     /// Move finite native custody only AFTER the actual Cell is fully closed.
     /// Partial resumable SDK work must keep its original End; there is no
     /// inference from phase alone or another UI generation. The closed Cell

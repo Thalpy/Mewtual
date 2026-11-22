@@ -6,6 +6,16 @@
 use super::UnexposedV2GenesisCurrent;
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> UnexposedV2GenesisCurrent<T, R> {
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn discard_add_for_closed_source(
+        &mut self,
+        closed: &catcoms_rt::NativeChatKeyDrain,
+    ) -> Result<(), crate::AppError> {
+        if let Some(node) = self.governed_text_node_mut() {
+            node.discard_add_for_closed_source(closed)?;
+        }
+        Ok(())
+    }
+
     #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn governed_node_for_test(
         &mut self,

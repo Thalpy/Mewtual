@@ -117,6 +117,16 @@ impl<T, R> V2TextOwnedCurrent<T, R> {
 }
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurrent<T, R> {
+    pub(super) fn discard_add_for_closed_source(
+        &mut self,
+        closed: &catcoms_rt::NativeChatKeyDrain,
+    ) -> Result<(), AppError> {
+        match &mut self.core {
+            OwnedCurrent::Warm(current) => current.discard_add_for_closed_source(closed),
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Ok(()),
+        }
+    }
+
     #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(super) fn governed_node_for_test(
         &mut self,

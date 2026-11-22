@@ -524,6 +524,16 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
         }
     }
 
+    pub(in crate::store) fn discard_add_for_closed_source(
+        &mut self,
+        closed: &catcoms_rt::NativeChatKeyDrain,
+    ) -> Result<(), AppError> {
+        if let Some(host) = &mut self.host {
+            host.discard_add_for_closed_source(closed)?;
+        }
+        Ok(())
+    }
+
     /// Test only: retain a genuine member-save source End while the whole
     /// driver attempts to close. No key/signing/save authorization is tested.
     #[cfg(all(test, any(windows, target_os = "linux")))]

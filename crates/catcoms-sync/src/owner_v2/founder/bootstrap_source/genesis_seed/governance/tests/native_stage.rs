@@ -3,6 +3,44 @@
 use super::*;
 
 #[test]
+fn governed_add_whole_source_retirement_destroys_partial_candidate_before_key_drain() {
+    let (original, _reservation, _opened, _old_fee) = prepared_node(0xec10);
+    let mut node = original.prepare_governance_data().unwrap();
+    let native = Native::new();
+    let request = Request::new(&node, 95);
+    let count = Arc::new(AtomicUsize::new(0));
+    begin(&mut node, &native, &count, request.data());
+    hook(TestCut::BeforeSdkExecution, || {
+        panic!("after the first native End")
+    });
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        node.execute_add_data_native(request.data())
+    }))
+    .is_err());
+    assert!(node.pending.as_ref().unwrap().cell.is_some());
+    let drain = native.source.observe_retirement();
+    assert!(node.discard_add_for_closed_source(&drain).is_err());
+    let foreign = Native::new();
+    foreign.source.close();
+    assert!(node
+        .discard_add_for_closed_source(&foreign.source.observe_retirement())
+        .is_err());
+    let ui_drain = native.ui.retire();
+    assert!(node.discard_add_for_closed_source(&ui_drain).is_err());
+    assert_eq!(count.load(SeqCst), 1);
+
+    native.source.close();
+    assert!(!drain.is_drained());
+    node.discard_add_for_closed_source(&drain).unwrap();
+    assert!(drain.is_drained());
+    assert!(ui_drain.is_drained());
+    assert_eq!(count.load(SeqCst), 0);
+    assert!(node.pending.is_none());
+    assert!(node.require_sdk_current_data().is_err());
+    node.discard_add_for_closed_source(&drain).unwrap();
+}
+
+#[test]
 fn partial_sdk_keeps_original_end_and_finishes_after_lock_without_new_admission() {
     let clock = ManualClock::new(NOW);
     let (original, _reservation, _opened, _old_fee) =

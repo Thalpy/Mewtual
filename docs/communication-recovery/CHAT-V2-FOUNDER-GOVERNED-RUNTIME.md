@@ -269,7 +269,7 @@ The native regression runs one real Add on the original warm runtime with all
 three cuts issued by its actual native source. It covers and independently reads
 the original snapshot, checks that an earlier absence expires when a file appears,
 and verifies that malformed bytes stay in place on refusal. The test retires its closed native
-key custody outside the writers. Production still needs the owning dispatcher
+key custody through whole-Source retirement. Production still needs the owning dispatcher
 and recovery lifecycle before this path can handle incoming requests.
 
 Final installation must preflight the exclusive SDK pair outside writers,
@@ -280,6 +280,13 @@ installed evidence immediately. No hook, Result, IO or owning destructor may
 intervene in that successful tail. Dispose retired owners outside writers.
 
 ### Lock and close cycle
+
+Whole-Source retirement now loans an idle original runtime after its Source
+admission closes. It matches the actual permanently closed counter, retires
+the governed operation, and drops its private SDK candidate before the key
+Ends that operation owns. Outstanding external Ends still delay destruction of
+the whole runtime. The original durable records remain for recovery. UI lock
+requires a separate cleanup path that retains the live Source.
 
 An idle Runtime-held candidate retains real native Ends. UI lock currently
 waits those counters while retaining canonical Sources and Runtime bodies.

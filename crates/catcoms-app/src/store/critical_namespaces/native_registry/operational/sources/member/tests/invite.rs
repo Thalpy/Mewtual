@@ -1,5 +1,6 @@
 //! Real whole native runtime, held Current4 and the same member verifier.
 //! The harness covers unsigned and signed local storage and exact retry.
+use super::super::super::network::tests::prepared_mesh_founder_with_clock;
 use super::super::super::tests::selected_governed;
 use super::*;
 use crate::store::critical_namespaces::{
@@ -36,7 +37,16 @@ async fn native_runtime_invite_join_request_requires_the_actual_signed_journal()
     use catcoms_sync::{DirectJoinLimits, PreparedV2JoinRequest};
     let directory = tempfile::tempdir().unwrap();
     let (vault, budget) = selected_governed(directory.path());
-    let (owner, row) = active(&vault, &budget, 0xe710);
+    let (owner, row) = activate(
+        prepared_mesh_founder_with_clock(
+            &vault,
+            &budget,
+            0xe710,
+            Box::new(catcoms_rt::SystemClock),
+        ),
+        &vault,
+        &budget,
+    );
     let (_sender, receiver) = tokio::sync::watch::channel(false);
     let negative = RequestCancellation::new(receiver, None);
     let saved = prepare(&owner, &row, &vault, &budget)
@@ -203,6 +213,22 @@ async fn native_runtime_invite_join_request_requires_the_actual_signed_journal()
     assert_eq!(std::fs::read(outcome).unwrap(), outcome_bytes);
     assert_eq!(std::fs::read(header_attempt).unwrap(), header_attempt_bytes);
     assert_eq!(std::fs::read(raw_header).unwrap(), raw_header_bytes);
+
+    let key_work = {
+        let entries = owner.entries.lock().unwrap();
+        assert_eq!(entries.len(), 1);
+        entries[0].owner.observe_retirement()
+    };
+    let mut close = owner.prepare_retirement().unwrap();
+    assert!(
+        !key_work.is_drained(),
+        "the actual runtime owns the Add and Header Ends"
+    );
+    close.try_retire().unwrap();
+    assert!(
+        key_work.is_drained(),
+        "the idle runtime retired its closed Source work before key wait"
+    );
 }
 
 #[tokio::test]

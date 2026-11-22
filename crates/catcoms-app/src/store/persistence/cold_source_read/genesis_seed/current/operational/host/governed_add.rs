@@ -9,6 +9,17 @@ use catcoms_mls::persist::text_current_add::{
     TextCurrentAddAdmission, TextCurrentAddLimits, TextCurrentAddReservation,
 };
 
+impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextHost<T, R> {
+    /// Whole native Source retirement has exclusive custody of this idle host.
+    /// It must retire existing Add Ends before waiting for drained keys.
+    pub(in crate::store) fn discard_add_for_closed_source(
+        &mut self,
+        closed: &catcoms_rt::NativeChatKeyDrain,
+    ) -> Result<(), AppError> {
+        self.owner.discard_add_for_closed_source(closed)
+    }
+}
+
 struct GovernedAddSdkReservation {
     _debit: CatalogReadReservation,
 }

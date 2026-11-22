@@ -667,6 +667,26 @@ pub const NATIVE_CHAT_UI_FIXED_METADATA_BYTES: usize = std::mem::size_of::<Host>
     + 8 * 64;
 
 impl NativeChatKeyDrain {
+    /// Match the actual original permanently closed Source, even while work
+    /// still owns its final End. A UI drain or another Source cannot match it.
+    /// Check outside writers because upgrading the observation briefly pins it.
+    pub fn require_closed_source(
+        &self,
+        source: &NativeChatSourceObservation,
+    ) -> Result<(), NativeChatKeyRefusal> {
+        let source = source
+            .original
+            .upgrade()
+            .ok_or(NativeChatKeyRefusal::Unavailable)?;
+        if !Arc::ptr_eq(&self.original, &source.counter) {
+            return Err(NativeChatKeyRefusal::Foreign);
+        }
+        if self.original.open() {
+            return Err(NativeChatKeyRefusal::Unavailable);
+        }
+        Ok(())
+    }
+
     /// No admitted key work remains on this CLOSED original. Unentered cuts,
     /// workers and metadata may still exist and retain their independent fees.
     /// This is not destruction, source authority or an SDK/physical drain.
