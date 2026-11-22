@@ -223,8 +223,10 @@ activation and ordinary-member save admission remain open.
 The joined storage owner can exchange the exact selected JoinRequest on an
 already authenticated connection to the peer named by the signed invite.
 It keeps the original connection and vault cancellation through response
-receipt. The connected fixture uses loopback TCP and the actual native
-founder responder. The request kind selects separate transport size
+receipt and rechecks that authority before covering or entering the Welcome.
+Revocation after covering Entry and before SDK entry leaves no Outcome.
+A fresh authorization can retry the same covered Entry. The connected
+fixture uses loopback TCP and the actual native founder responder. The request kind selects separate transport size
 limits before the decoder allocates either body. The founder stops upon
 loss of the original response waiter. The queued reply retains the original
 native session and Source checks and pays for its transport copies through

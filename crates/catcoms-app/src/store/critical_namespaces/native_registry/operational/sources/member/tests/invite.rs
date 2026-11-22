@@ -278,27 +278,59 @@ async fn native_governed_add_fixture(case: JoinCase) {
                 .unwrap();
         };
         if case == JoinCase::WarmRuntime {
+            use crate::store::persistence::governance_layout::joined::BEFORE_WELCOME_SDK;
             let mut runtime = joined_storage
                 .take()
                 .unwrap()
                 .bind_first_join_runtime(client, join_rng, Box::new(catcoms_rt::SystemClock))
                 .ok()
                 .unwrap();
-            let (canceled, retired) = tokio::sync::watch::channel(true);
-            assert!(runtime
-                .complete_first_join(&invite, RequestCancellation::new(retired, None))
+            let (cancel, pending) = tokio::sync::watch::channel(false);
+            BEFORE_WELCOME_SDK.with(|slot| {
+                assert!(slot
+                    .replace(Some(Box::new(move || {
+                        cancel.send_replace(true);
+                    })))
+                    .is_none());
+            });
+            let (interrupted, ()) =
+                tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                    tokio::join!(
+                        runtime
+                            .complete_first_join(&invite, RequestCancellation::new(pending, None)),
+                        serve
+                    )
+                })
                 .await
-                .is_err());
-            drop(canceled);
+                .unwrap();
+            assert!(interrupted.is_err());
+            let entry = only_named(join_dir, entry_name);
+            let original_entry = std::fs::read(&entry).unwrap();
+            assert!(find_named(join_dir, outcome_name).is_empty());
+            let retry_serve = async {
+                let Some(TransportEvent::Request {
+                    data,
+                    responder,
+                    proto,
+                    ..
+                }) = requests.next().await
+                else {
+                    panic!("exact connected retry");
+                };
+                capture()
+                    .serve_connected_join_request(proto, &data, responder, negative.clone())
+                    .unwrap();
+            };
             let (completed, ()) = tokio::time::timeout(std::time::Duration::from_secs(8), async {
                 tokio::join!(
                     runtime.complete_first_join(&invite, negative.clone()),
-                    serve
+                    retry_serve
                 )
             })
             .await
             .unwrap();
             let (head, own, epoch) = completed.unwrap();
+            assert_eq!(std::fs::read(&entry).unwrap(), original_entry);
             assert_eq!(epoch, 1);
             drop(requests);
             let saved = accept(&original_request).unwrap();

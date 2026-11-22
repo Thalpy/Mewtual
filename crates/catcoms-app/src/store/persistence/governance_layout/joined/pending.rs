@@ -437,7 +437,16 @@ impl JoinedPendingIo {
         store: &ServerStore,
         delivery: &[u8],
         rng: &mut impl CryptoRngCore,
+        negative: Option<&catcoms_rt::RequestCancellation>,
     ) -> Result<(), AppError> {
+        let require_current = || {
+            if negative.is_some_and(catcoms_rt::RequestCancellation::is_cancelled) {
+                Err(denied())
+            } else {
+                Ok(())
+            }
+        };
+        require_current()?;
         self.request_data(store)?;
         let key = Zeroizing::new(store.keys.db_key()?);
         if self.welcome.is_none() {
@@ -454,15 +463,25 @@ impl JoinedPendingIo {
         if welcome.delivery.as_slice() != delivery {
             return Err(denied());
         }
+        require_current()?;
         welcome.cover_entry(store)?;
         self.request_data(store)?;
+        #[cfg(test)]
+        BEFORE_WELCOME_SDK.with(|slot| {
+            if let Some(run) = slot.take() {
+                run();
+            }
+        });
+        require_current()?;
         self.welcome.as_mut().ok_or_else(denied)?.prepare_outcome(
             store,
             &mut self.prepared,
             &key,
             rng,
+            negative,
         )?;
         self.request_data(store)?;
+        require_current()?;
         self.welcome
             .as_mut()
             .ok_or_else(denied)?
@@ -474,12 +493,14 @@ impl JoinedPendingIo {
         self.request_data(store)?;
         let welcome = self.welcome.as_mut().ok_or_else(denied)?;
         welcome.require_outcome(store)?;
+        require_current()?;
         welcome.finish_core()?;
         self.request_data(store)?;
         self.welcome
             .as_ref()
             .ok_or_else(denied)?
-            .require_outcome(store)
+            .require_outcome(store)?;
+        require_current()
     }
 
     pub(in crate::store) fn warm_outcome_data(
@@ -516,4 +537,9 @@ impl JoinedPendingIo {
         self.request_data(store)?;
         welcome.require_outcome(store)
     }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    pub(in crate::store) static BEFORE_WELCOME_SDK: std::cell::Cell<Option<Box<dyn FnOnce()>>> = const { std::cell::Cell::new(None) };
 }

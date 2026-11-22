@@ -365,9 +365,10 @@ impl Store {
         pending: &mut crate::store::persistence::governance_layout::joined::JoinedPendingIo,
         delivery: &[u8],
         rng: &mut impl CryptoRngCore,
+        negative: Option<&catcoms_rt::RequestCancellation>,
     ) -> Result<(), AppError> {
         let physical = Arc::get_mut(&mut self.physical).ok_or_else(refused)?;
-        pending.finish_welcome(physical.joined_pending_store()?, delivery, rng)
+        pending.finish_welcome(physical.joined_pending_store()?, delivery, rng, negative)
     }
 
     pub(in crate::store::critical_namespaces::native_registry) fn attach_joined_node<

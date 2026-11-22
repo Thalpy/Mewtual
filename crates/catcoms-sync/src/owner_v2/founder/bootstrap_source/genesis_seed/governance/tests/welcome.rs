@@ -223,6 +223,11 @@ fn v2_join_request_and_welcome_complete_with_actual_add() {
             &g.verifier,
         )
         .is_err());
+    let (_retire, signal) = tokio::sync::watch::channel(true);
+    let canceled = catcoms_rt::RequestCancellation::new(signal, None);
+    assert!(prepared
+        .finish_first_join_delivery_cancellable(&delivery, &canceled)
+        .is_err());
     let joined = prepared.finish_welcome(response, &g.verifier).unwrap();
     let facts = joined.facts_data();
     assert_eq!(

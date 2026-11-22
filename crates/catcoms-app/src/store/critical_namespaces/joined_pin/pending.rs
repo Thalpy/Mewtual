@@ -83,10 +83,15 @@ impl PreparedPinnedPending {
         key: &[u8; 32],
         delivery: &[u8],
         rng: &mut impl CryptoRngCore,
+        negative: Option<&catcoms_rt::RequestCancellation>,
     ) -> Result<&catcoms_sync::SealedV2JoinedOutcome, AppError> {
-        self.source
-            .finish_first_join_delivery(delivery)
-            .map_err(|_| refused())?;
+        match negative {
+            Some(negative) => self
+                .source
+                .finish_first_join_delivery_cancellable(delivery, negative),
+            None => self.source.finish_first_join_delivery(delivery),
+        }
+        .map_err(|_| refused())?;
         self.source
             .seal_joined_outcome(key, self.context, rng)
             .map_err(|_| refused())

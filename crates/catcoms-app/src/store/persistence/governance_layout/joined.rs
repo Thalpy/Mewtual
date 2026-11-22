@@ -17,6 +17,8 @@ pub(in crate::store) const INDEX_NAME: &str = "chat-critical-namespaces.joined-p
 const INDEX_FEE: usize = 12 * MAX_INDEX_FRAME + 512 * 1024;
 mod pending;
 pub(in crate::store) use pending::JoinedPendingIo;
+#[cfg(test)]
+pub(in crate::store) use pending::BEFORE_WELCOME_SDK;
 
 /// Kept by the unique native startup continuation before any Source is exposed.
 /// The existing governance seed name is the predecessor-visible first claim.

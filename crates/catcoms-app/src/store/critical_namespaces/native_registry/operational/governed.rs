@@ -197,8 +197,12 @@ impl NativeTextJoinedStorage {
         delivery: &[u8],
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
-        self.index
-            .finish_joined_pending(self.pending.as_mut().ok_or_else(refused)?, delivery, rng)
+        self.index.finish_joined_pending(
+            self.pending.as_mut().ok_or_else(refused)?,
+            delivery,
+            rng,
+            None,
+        )
     }
 
     /// The actual original warm selection after the complete covered Welcome.
@@ -246,14 +250,19 @@ impl NativeTextJoinedStorage {
                 target,
                 JOIN_PROTOCOL,
                 bytes::Bytes::from(wire),
-                negative,
+                negative.clone(),
             )
             .await
             .map_err(|_| refused())?;
         if !authority.authorized() || delivery.len() > MAX_V2_FIRST_JOIN_DELIVERY_BYTES {
             return Err(refused());
         }
-        self.finish_first_join(&delivery, rng)
+        self.index.finish_joined_pending(
+            self.pending.as_mut().ok_or_else(refused)?,
+            &delivery,
+            rng,
+            Some(&negative),
+        )
     }
 
     fn require_exact_invite(

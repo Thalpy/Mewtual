@@ -83,11 +83,12 @@ impl WarmWelcome {
         required: &mut PreparedPinnedPending,
         key: &[u8; 32],
         rng: &mut impl CryptoRngCore,
+        negative: Option<&catcoms_rt::RequestCancellation>,
     ) -> Result<(), AppError> {
         self.require_entry(store)?;
         if self.outcome.is_none() {
             let context = required.context_data();
-            let result = required.finish_delivery(key, &self.delivery, rng)?;
+            let result = required.finish_delivery(key, &self.delivery, rng, negative)?;
             self.outcome = Some(codec::seal_outcome(key, context, &self.entry, result, rng)?);
         }
         Ok(())
