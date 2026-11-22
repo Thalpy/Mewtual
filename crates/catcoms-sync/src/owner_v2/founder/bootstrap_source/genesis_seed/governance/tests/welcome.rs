@@ -546,13 +546,14 @@ fn complete_original_welcome(native_joiner: bool) {
         let (_ledger, _view, draft, mut plan) = member_plan(&warm_prefix, &warm_view, drawn);
         let original = joiner.source.observe();
         let mut ends = catcoms_rt::NativeChatKeyEnds::new();
-        let mut foreign = native.cut(NativeChatKeyPurpose::MemberAction);
+        let foreign_source = Native::new();
+        let mut foreign = foreign_source.cut(NativeChatKeyPurpose::MemberAction);
         assert!(joined_node
             .sign_member_action_native(
                 &inputs,
                 &draft,
                 &mut plan,
-                &native.source.observe(),
+                &foreign_source.source.observe(),
                 &mut foreign,
                 &mut ends
             )
