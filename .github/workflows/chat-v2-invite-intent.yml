@@ -67,12 +67,20 @@ on:
       - 'crates/catcoms-replication/src/chat/join_bindings.rs'
       - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/tests/text_group_guard/query/workspace/retain_admission/intent_admission/raw_admission/accepted_admission/retirement/worker.rs'
   workflow_dispatch:
+    inputs:
+      scope:
+        description: Focused invitation or governed Add persistence checks
+        type: choice
+        default: invitation
+        options:
+          - invitation
+          - governed-add
 
 permissions:
   contents: read
 
 concurrency:
-  group: chat-v2-invite-intent-${{ github.event.pull_request.number || github.ref }}
+  group: chat-v2-invite-intent-${{ github.event.pull_request.number || github.ref }}-${{ inputs.scope || 'invitation' }}
   cancel-in-progress: true
 
 env:
@@ -100,27 +108,39 @@ jobs:
         with:
           python-version: '3.12'
       - name: Check original join binding codecs
+        if: inputs.scope != 'governed-add'
         run: python .github/scripts/check-chat-v2-invite-intent.py bindings
       - name: Check the retained V2 JoinRequest and private KeyPackage
+        if: inputs.scope != 'governed-add'
         run: python .github/scripts/check-chat-v2-invite-intent.py join-request
       - name: Check the original-clock KeyPackage preflight before Add work
+        if: inputs.scope != 'governed-add'
         run: python .github/scripts/check-chat-v2-invite-intent.py add-package-preflight
       - name: Check exact V2 join response frame accounting
+        if: inputs.scope != 'governed-add'
         run: python .github/scripts/check-chat-v2-invite-intent.py join-response
       - name: Check the cached governing Header after native lock
+        if: inputs.scope != 'governed-add'
         run: python .github/scripts/check-chat-v2-invite-intent.py governed-header
       - name: Check interrupted governing Header signing
+        if: inputs.scope != 'governed-add'
         run: python .github/scripts/check-chat-v2-invite-intent.py interrupted-header
       - name: Check real MLS Add, exact Welcome, and native lifecycle regressions
+        if: inputs.scope != 'governed-add'
         run: python .github/scripts/check-chat-v2-invite-intent.py join-welcome
       - name: Check that whole-Source shutdown drains the original partial Add
+        if: inputs.scope != 'governed-add'
         run: python .github/scripts/check-chat-v2-invite-intent.py add-source-close
       - name: Check that UI retirement resumes only the original admitted partial Add
+        if: inputs.scope != 'governed-add'
         run: python .github/scripts/check-chat-v2-invite-intent.py add-ui-lock
       - name: Check invitation journal format and physical-prefix controls
+        if: inputs.scope != 'governed-add'
         run: python .github/scripts/check-chat-v2-invite-intent.py journal
       - name: Check the governed Add fence and old WAL refusal
         run: python .github/scripts/check-chat-v2-invite-intent.py add-fence
+      - name: Check durable custody of the original signed JoinRequest
+        run: python .github/scripts/check-chat-v2-invite-intent.py add-request-record
       - name: Check SDK entry binding to the exact covered fence
         run: python .github/scripts/check-chat-v2-invite-intent.py add-sdk-entry
       - name: Check the governed Add SDK candidate debit
@@ -145,15 +165,17 @@ jobs:
       - name: Check native invitation ownership, signing and durable retries
         run: python .github/scripts/check-chat-v2-invite-intent.py native
       - name: Check invitation packet framing and bound bodies
+        if: inputs.scope != 'governed-add'
         run: python .github/scripts/check-chat-v2-invite-intent.py packet
       - name: Check actual predecessor save and physical retirement preservation
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && inputs.scope != 'governed-add'
         run: python .github/scripts/check-chat-v2-invite-intent.py predecessor
       - name: Check storage mutation boundaries
         if: runner.os == 'Linux'
         shell: bash
         run: bash scripts/check-store-raw-fs.sh
       - name: Check the pinned predecessor against the original governed Add fence
+        if: inputs.scope != 'governed-add'
         run: python .github/scripts/check-chat-v2-invite-intent.py add-fence-predecessor
       - uses: actions/upload-artifact@v4
         if: always()

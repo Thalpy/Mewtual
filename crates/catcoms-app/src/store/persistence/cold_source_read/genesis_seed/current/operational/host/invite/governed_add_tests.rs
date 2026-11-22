@@ -69,6 +69,10 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         store.with_v2_text_current(&owner, |admission| {
             let guard = store.lock_v2_text_current_group(admission, &resources)?;
             assert_eq!(
+                before_entry.require_request_current(&guard, selected)?,
+                Some(packet.packet_bytes_data())
+            );
+            assert_eq!(
                 before_entry.require_recovery_state(&guard, selected)?,
                 GovernedAddRecoveryState::ReservationOnly
             );

@@ -359,6 +359,13 @@ creates neither a held file nor a reservation receipt. The codec regressions
 compare the old envelope decoder and the new parser and exercise exact request,
 parent and context replacement, torn frames and authenticated wrong roles.
 
+Before SDK Entry the writer covers `text.add.request.v2`. It contains the
+exact signed request and KeyPackage wire frame, sealed to the original fence
+ciphertext. A fresh reader can match the reservation to the selected parent
+and recover the signed request without asking the peer to resend it. Older
+reservations without these bytes remain observable for refusal and recovery
+classification. Their original operation still needs separately verified input.
+
 A separate read owner reserves its buffers and physical lease before Current.
 It captures the fixed stage under the governed parent, authenticates outside
 writers, then rechecks the same file handle, exact bytes, named directory and

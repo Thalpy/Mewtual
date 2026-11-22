@@ -135,7 +135,10 @@ impl HeldGovernedAddFence {
     }
 }
 
-fn read_stage(path: &Path, maximum: usize) -> Result<Option<OpenedTextControl>, AppError> {
+pub(super) fn read_stage(
+    path: &Path,
+    maximum: usize,
+) -> Result<Option<OpenedTextControl>, AppError> {
     match fs::symlink_metadata(path) {
         Ok(_) => read_control(path, maximum).map(Some),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -143,7 +146,10 @@ fn read_stage(path: &Path, maximum: usize) -> Result<Option<OpenedTextControl>, 
     }
 }
 
-fn require_stage(path: &Path, capture: Option<&mut OpenedTextControl>) -> Result<(), AppError> {
+pub(super) fn require_stage(
+    path: &Path,
+    capture: Option<&mut OpenedTextControl>,
+) -> Result<(), AppError> {
     match capture {
         Some(original) => require_exact_held(path, original),
         None => require_absent(path),

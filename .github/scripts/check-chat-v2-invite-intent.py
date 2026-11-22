@@ -19,6 +19,7 @@ COHORTS = {
     "bindings": ("catcoms-replication", "chat::join_bindings::tests::", 15),
     "journal": ("catcoms-app", "unsigned_invite_journal_", 4),
     "add-fence": ("catcoms-app", "governed_add_fence_", 5),
+    "add-request-record": ("catcoms-app", "governed_add_request_record_", 1),
     "add-sdk-entry": ("catcoms-app", "governed_add_sdk_entry_", 1),
     "add-sdk-budget": ("catcoms-app", "governed_add_sdk_budget_", 1),
     "add-package-preflight": ("catcoms-sync", "expired_actual_package_refuses_with_a_still_valid_signed_invite", 1),

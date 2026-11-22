@@ -84,6 +84,32 @@ fn governed_add_fence_authenticates_exact_request_and_parent() {
 }
 
 #[test]
+fn governed_add_request_record_preserves_only_the_original_packet() {
+    let original = request(37);
+    let packet = V2JoinRequestPacketData::decode(original.request_bytes_data()).unwrap();
+    let data = GovernedAddFenceData::for_request(
+        TextContextIdData::from_bytes([41; 32]),
+        TextHeadIdData::from_bytes([42; 32]),
+        &packet,
+    );
+    let mut rng = ChaCha20Rng::seed_from_u64(160);
+    let fence = data.seal_data(&KEY, &mut rng).unwrap();
+    let raw = super::request::seal_data(&KEY, &fence, &packet, &mut rng).unwrap();
+    assert_eq!(
+        super::request::open_data(&KEY, &fence, &raw)
+            .unwrap()
+            .as_slice(),
+        original.request_bytes_data()
+    );
+    let resealed = data.seal_data(&KEY, &mut rng).unwrap();
+    assert!(super::request::open_data(&KEY, &resealed, &raw).is_err());
+    assert!(super::request::open_data(&KEY, &fence, &raw[..raw.len() - 1]).is_err());
+    let replacement = request(38);
+    let replacement = V2JoinRequestPacketData::decode(replacement.request_bytes_data()).unwrap();
+    assert!(super::request::seal_data(&KEY, &fence, &replacement, &mut rng).is_err());
+}
+
+#[test]
 fn governed_add_fence_preserves_old_wal_authentication_and_refusal() {
     let kind = TextControlKindData::Wal;
     let mut rng = ChaCha20Rng::seed_from_u64(73);

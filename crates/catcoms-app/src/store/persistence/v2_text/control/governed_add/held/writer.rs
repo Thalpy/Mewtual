@@ -16,6 +16,7 @@ mod header;
 pub(in crate::store) struct PreparedGovernedAddFence {
     frozen: Option<Zeroizing<Vec<u8>>>,
     entered_create: bool,
+    request: PreparedSmallControl,
     entry: Option<PreparedSmallControl>,
     outcome: Option<PreparedOutcome>,
     header: Option<header::PreparedHeaderSigning>,
@@ -90,6 +91,7 @@ struct PreparedOutcome {
 const WRITER_BYTES: usize = 3 * MAX_TEXT_PATH
     + 6 * FRAME_BYTES
     + 6 * ENTRY_BYTES
+    + 6 * (request::MAX_BYTES + 1)
     + header::BUFFER_BYTES
     + 4 * std::mem::size_of::<PreparedGovernedAddFence>()
     + 1024;
@@ -126,7 +128,7 @@ impl PreparedGovernedAddFence {
             selected.head_id_data(),
             packet,
         );
-        let held = HeldGovernedAddFence::prepare(store, source, selected, data)?;
+        let held = HeldGovernedAddFence::prepare(store, source, selected, Some(data))?;
         let target = selected.physical_query_data().target;
         let other_paths = [
             fixed_child(target, "text.wal")?,
@@ -134,14 +136,16 @@ impl PreparedGovernedAddFence {
             fixed_child(target, "text.seed.stage.v1")?,
         ];
         let key = Zeroizing::new(store.keys.db_key()?);
-        let frozen = Some(data.seal_data(&key, rng)?);
+        let frozen = data.seal_data(&key, rng)?;
+        let request = PreparedSmallControl::new(request::seal_data(&key, &frozen, packet, rng)?);
         held.resources
             .require_bound_original_negative(store, source)?;
         Ok(Self {
-            frozen,
+            frozen: Some(frozen),
             entered_create: false,
             held,
             other_paths,
+            request,
             entry: None,
             outcome: None,
             header: None,
@@ -150,7 +154,7 @@ impl PreparedGovernedAddFence {
     }
 
     /// The original runtime alone calls this with its member lane and outbox
-    /// held idle. This covers the fixed reservation only, never an SDK entry.
+    /// held idle. This covers the fixed reservation and its exact request.
     pub(in crate::store) fn cover(
         &mut self,
         guard: &V2TextCurrentGroupGuard<'_, '_>,
@@ -163,6 +167,7 @@ impl PreparedGovernedAddFence {
         require_absences(&self.other_paths)?;
 
         if !self.held.authenticated {
+            require_absent(&self.held.request_path)?;
             require_absent(&self.held.entry_path)?;
             require_absent(&self.held.outcome_path)?;
             self.held.require_header_stages_absent()?;
@@ -186,10 +191,28 @@ impl PreparedGovernedAddFence {
             // or a later retry cannot extend or rewrite even a proper prefix.
             self.held.authenticated = true;
         }
+        if !self.request.covered {
+            self.require_covered_fence(guard, selected)?;
+            require_absent(&self.held.entry_path)?;
+            require_absent(&self.held.outcome_path)?;
+            self.held.require_header_stages_absent()?;
+            self.request
+                .cover(&self.held.request_path, request::MAX_BYTES, guard)?;
+        }
         self.require_covered(guard, selected)
     }
 
     pub(in crate::store) fn require_covered(
+        &mut self,
+        guard: &V2TextCurrentGroupGuard<'_, '_>,
+        selected: &SelectedV2TextHead,
+    ) -> Result<(), AppError> {
+        self.require_covered_fence(guard, selected)?;
+        self.request.require_covered(&self.held.request_path)?;
+        guard.validate_source_only()
+    }
+
+    fn require_covered_fence(
         &mut self,
         guard: &V2TextCurrentGroupGuard<'_, '_>,
         selected: &SelectedV2TextHead,
@@ -214,7 +237,7 @@ impl PreparedGovernedAddFence {
         self.held
             .resources
             .require_bound_original_negative(store, source)?;
-        if !self.held.authenticated {
+        if !self.held.authenticated || !self.request.covered {
             return Err(refused());
         }
         if self.entry.is_some() {
@@ -288,7 +311,7 @@ impl PreparedGovernedAddFence {
             selected.head_id_data(),
             packet,
         );
-        if expected != self.held.expected
+        if Some(expected) != self.held.expected
             || outcome.unsigned_data().header_spec_data().parent
                 != selected.archive_data().spec_data().header.id()
         {
@@ -384,7 +407,7 @@ impl PreparedGovernedAddFence {
         source: &GenesisSourceDataRef<'_>,
         selected: &SelectedV2TextHead,
     ) -> Result<HeldGovernedAddFence, AppError> {
-        HeldGovernedAddFence::prepare(store, source, selected, self.held.expected)
+        HeldGovernedAddFence::prepare(store, source, selected, None)
     }
 }
 

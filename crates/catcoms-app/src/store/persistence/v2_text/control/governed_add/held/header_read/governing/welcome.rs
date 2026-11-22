@@ -73,7 +73,7 @@ impl HeldGovernedAddFence {
     ) -> Result<(), AppError> {
         self.resources
             .require_bound_original_negative(store, source)?;
-        self.expected.require_packet(packet)?;
+        self.expected.ok_or_else(refused)?.require_packet(packet)?;
         let governing = self
             .header
             .as_mut()

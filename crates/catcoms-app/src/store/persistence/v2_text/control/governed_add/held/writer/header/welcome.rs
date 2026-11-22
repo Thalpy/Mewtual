@@ -25,7 +25,10 @@ impl PreparedGovernedAddFence {
         self.held
             .resources
             .require_bound_original_negative(store, source)?;
-        self.held.expected.require_packet(packet)?;
+        self.held
+            .expected
+            .ok_or_else(refused)?
+            .require_packet(packet)?;
         let header = self.header.as_mut().ok_or_else(refused)?;
         let (id, record) = header
             .governing

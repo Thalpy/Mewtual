@@ -7,6 +7,7 @@ use super::header_signing::{
     WELCOME_RAW_BYTES, WELCOME_RAW_NAME,
 };
 use super::outcome::OUTCOME_NAME;
+use super::request;
 use super::response;
 use super::sdk_entry::{GovernedAddSdkEntryData, ENTRY_BYTES, SDK_ENTRY_NAME};
 use super::welcome_intent;
@@ -41,6 +42,7 @@ pub(in crate::store) use writer::PreparedGovernedAddFence;
 /// leaves before the physical lease and the dedicated buffer reservation.
 pub(in crate::store) struct HeldGovernedAddFence {
     path: PathBuf,
+    request_path: PathBuf,
     entry_path: PathBuf,
     outcome_path: PathBuf,
     header_attempt_path: PathBuf,
@@ -48,10 +50,12 @@ pub(in crate::store) struct HeldGovernedAddFence {
     governing_path: PathBuf,
     welcome_paths: WelcomeControlPaths,
     original: Option<OpenedTextControl>,
+    request: Option<ObservedRequest>,
     entry: Option<ObservedSdkEntry>,
     outcome: Option<outcome_read::ObservedOutcome>,
     header: Option<header_read::ObservedHeader>,
-    expected: GovernedAddFenceData,
+    parent: (TextContextIdData, TextHeadIdData),
+    expected: Option<GovernedAddFenceData>,
     authenticated: bool,
     resources: V2TextReadResources,
     // The independent buffer payment includes the bounded path and file read,
@@ -63,6 +67,11 @@ pub(in crate::store) struct HeldGovernedAddFence {
 enum ObservedSdkEntry {
     Absent,
     Present(OpenedTextControl),
+}
+
+struct ObservedRequest {
+    original: Option<OpenedTextControl>,
+    packet: Option<Zeroizing<Vec<u8>>>,
 }
 
 struct WelcomeControlPaths {
@@ -89,12 +98,13 @@ pub(in crate::store) enum GovernedAddRecoveryState {
     PossiblyEntered,
 }
 
-const FENCE_READ_BYTES: usize = 10 * MAX_TEXT_PATH
+const FENCE_READ_BYTES: usize = 11 * MAX_TEXT_PATH
     + 6 * FRAME_BYTES
     + 6 * ENTRY_BYTES
     + 6 * (ATTEMPT_BYTES + RAW_BYTES + WELCOME_ATTEMPT_BYTES + WELCOME_RAW_BYTES)
     + 10 * governing_record::MAX_BYTES
     + 8 * welcome_intent::MAX_BYTES
+    + 6 * (request::MAX_BYTES + 1)
     + FILE_COMPARE_BYTES
     + 4 * std::mem::size_of::<HeldGovernedAddFence>()
     + 1024;
@@ -106,12 +116,15 @@ impl HeldGovernedAddFence {
         store: &ServerStore,
         source: &GenesisSourceDataRef<'_>,
         selected: &SelectedV2TextHead,
-        expected: GovernedAddFenceData,
+        expected: Option<GovernedAddFenceData>,
     ) -> Result<Self, AppError> {
-        expected.require_parent(
+        let parent = (
             selected.head_data().context.id_data()?,
             selected.head_id_data(),
-        )?;
+        );
+        if let Some(expected) = expected {
+            expected.require_parent(parent.0, parent.1)?;
+        }
         let resources = selected.resources().clone();
         resources.require_bound_original_negative(store, source)?;
         let pool = &store
@@ -125,6 +138,7 @@ impl HeldGovernedAddFence {
         let lease = store._session.retain_for_physical_work();
         let target = selected.physical_query_data().target;
         let path = fixed_child(target, STAGE)?;
+        let request_path = fixed_child(target, request::NAME)?;
         let entry_path = fixed_child(target, SDK_ENTRY_NAME)?;
         let outcome_path = fixed_child(target, OUTCOME_NAME)?;
         let header_attempt_path = fixed_child(target, ATTEMPT_NAME)?;
@@ -139,6 +153,7 @@ impl HeldGovernedAddFence {
         resources.require_bound_original_negative(store, source)?;
         Ok(Self {
             path,
+            request_path,
             entry_path,
             outcome_path,
             header_attempt_path,
@@ -146,9 +161,11 @@ impl HeldGovernedAddFence {
             governing_path,
             welcome_paths,
             original: None,
+            request: None,
             entry: None,
             outcome: None,
             header: None,
+            parent,
             expected,
             authenticated: false,
             resources,
@@ -167,6 +184,10 @@ impl HeldGovernedAddFence {
         }
         self.require_parent(guard, selected)?;
         self.original = Some(read_control(&self.path, FRAME_BYTES)?);
+        self.request = Some(ObservedRequest {
+            original: header_read::read_stage(&self.request_path, request::MAX_BYTES)?,
+            packet: None,
+        });
         self.entry = Some(match fs::symlink_metadata(&self.entry_path) {
             Ok(_) => ObservedSdkEntry::Present(read_control(&self.entry_path, ENTRY_BYTES)?),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -191,8 +212,13 @@ impl HeldGovernedAddFence {
         let original = self.original.as_ref().ok_or_else(refused)?;
         let key = Zeroizing::new(store.keys.db_key()?);
         let data = GovernedAddFenceData::open_data(&key, &original.frame)?;
-        if data != self.expected {
+        data.require_parent(self.parent.0, self.parent.1)?;
+        if self.expected.is_some_and(|expected| data != expected) {
             return Err(refused());
+        }
+        let request = self.request.as_mut().ok_or_else(refused)?;
+        if let Some(capture) = &request.original {
+            request.packet = Some(request::open_data(&key, &original.frame, &capture.frame)?);
         }
         if let ObservedSdkEntry::Present(entry) = self.entry.as_ref().ok_or_else(refused)? {
             GovernedAddSdkEntryData::from_fence_data(&original.frame)?
@@ -201,6 +227,7 @@ impl HeldGovernedAddFence {
         self.resources
             .require_bound_original_negative(store, source)?;
         self.authenticated = true;
+        self.expected = Some(data);
         Ok(())
     }
 
@@ -226,7 +253,7 @@ impl HeldGovernedAddFence {
         guard: &V2TextCurrentGroupGuard<'_, '_>,
         selected: &SelectedV2TextHead,
     ) -> Result<GovernedAddRecoveryState, AppError> {
-        self.require_current(guard, selected)?;
+        self.require_request_current(guard, selected)?;
         let state = match self.entry.as_mut().ok_or_else(refused)? {
             ObservedSdkEntry::Absent => {
                 require_absent(&self.entry_path)?;
@@ -247,6 +274,22 @@ impl HeldGovernedAddFence {
         Ok(state)
     }
 
+    pub(in crate::store) fn require_request_current(
+        &mut self,
+        guard: &V2TextCurrentGroupGuard<'_, '_>,
+        selected: &SelectedV2TextHead,
+    ) -> Result<Option<&[u8]>, AppError> {
+        self.require_current(guard, selected)?;
+        let request = self.request.as_mut().ok_or_else(refused)?;
+        header_read::require_stage(&self.request_path, request.original.as_mut())?;
+        let (target, directory, id) = guard.target_directory_data();
+        crate::store::persistence::v2_genesis_activation::require_directory_name(
+            target, directory, id,
+        )?;
+        guard.validate_source_only()?;
+        Ok(request.packet.as_ref().map(|bytes| bytes.as_slice()))
+    }
+
     fn require_parent(
         &self,
         guard: &V2TextCurrentGroupGuard<'_, '_>,
@@ -257,10 +300,14 @@ impl HeldGovernedAddFence {
             return Err(refused());
         }
         self.resources.require_same_original(selected.resources())?;
-        self.expected.require_parent(
-            selected.head_data().context.id_data()?,
-            selected.head_id_data(),
-        )?;
+        if self.parent
+            != (
+                selected.head_data().context.id_data()?,
+                selected.head_id_data(),
+            )
+        {
+            return Err(refused());
+        }
         selected.validate_under_current_guard(guard)?;
         guard.require_governed_native_invite_parent()
     }

@@ -208,6 +208,8 @@ async fn native_runtime_invite_join_request_requires_the_actual_signed_journal()
     let fence = only_named(directory.path(), "text.wal.stage.v1");
     let frozen = std::fs::read(&fence).unwrap();
     assert!(frozen.len() > 40);
+    let request = only_named(directory.path(), "text.add.request.v2");
+    let request_bytes = std::fs::read(&request).unwrap();
     let entry = only_named(directory.path(), "text.add.sdk-entry.v2");
     let entry_bytes = std::fs::read(&entry).unwrap();
     assert!(entry_bytes.len() > 40);
@@ -231,6 +233,7 @@ async fn native_runtime_invite_join_request_requires_the_actual_signed_journal()
     assert!(raw_header_bytes.len() > header_attempt_bytes.len());
     assert!(check().is_err());
     let parked_fence = fence.with_extension("held");
+    let parked_request = request.with_extension("held");
     let parked_entry = entry.with_extension("held");
     let parked_outcome = outcome.with_extension("held");
     let parked_header_attempt = header_attempt.with_extension("held");
@@ -241,6 +244,7 @@ async fn native_runtime_invite_join_request_requires_the_actual_signed_journal()
     let parked_raw_welcome = raw_welcome.with_extension("held");
     let parked_response = response.with_extension("held");
     std::fs::rename(&fence, &parked_fence).unwrap();
+    std::fs::rename(&request, &parked_request).unwrap();
     std::fs::rename(&entry, &parked_entry).unwrap();
     std::fs::rename(&outcome, &parked_outcome).unwrap();
     std::fs::rename(&header_attempt, &parked_header_attempt).unwrap();
@@ -258,6 +262,7 @@ async fn native_runtime_invite_join_request_requires_the_actual_signed_journal()
     std::fs::remove_file(&orphan).unwrap();
     assert!(check().is_ok());
     std::fs::rename(&parked_fence, &fence).unwrap();
+    std::fs::rename(&parked_request, &request).unwrap();
     std::fs::rename(&parked_entry, &entry).unwrap();
     std::fs::rename(&parked_outcome, &outcome).unwrap();
     std::fs::rename(&parked_header_attempt, &header_attempt).unwrap();
@@ -268,6 +273,7 @@ async fn native_runtime_invite_join_request_requires_the_actual_signed_journal()
     std::fs::rename(&parked_raw_welcome, &raw_welcome).unwrap();
     std::fs::rename(&parked_response, &response).unwrap();
     assert_eq!(std::fs::read(fence).unwrap(), frozen);
+    assert_eq!(std::fs::read(request).unwrap(), request_bytes);
     assert_eq!(std::fs::read(entry).unwrap(), entry_bytes);
     assert_eq!(std::fs::read(outcome).unwrap(), outcome_bytes);
     assert_eq!(std::fs::read(header_attempt).unwrap(), header_attempt_bytes);

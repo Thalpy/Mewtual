@@ -188,6 +188,7 @@ impl SelectedV2TextHead {
         for name in [
             "text.wal",
             "text.wal.stage.v1",
+            "text.add.request.v2",
             "text.add.sdk-entry.v2",
             "text.add.outcome.v2",
             "text.add.header-attempt.v2",
