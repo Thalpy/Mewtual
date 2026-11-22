@@ -653,6 +653,91 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 .is_some(),
             "the no-peers result preserves debt for a fresh attempt"
         );
+        // Relay the exact ciphertext back through a second authenticated TCP
+        // mesh. The relay forwards bytes and never acquires the MLS signer.
+        use catcoms_net::{NativeChatMemberGossipError, NativeChatMemberGossipEvent};
+        use catcoms_replication::chat::{
+            ActionState, GuardedProjection, ProjectionCertainty, V2OrdinaryReceiveStatus,
+        };
+        use catcoms_rt::{MeshTransport as _, PublishOnceError, PublishSubmission, TransportEvent};
+        tokio::time::timeout(std::time::Duration::from_secs(12), async {
+            let (retire, signal) = tokio::sync::watch::channel(false);
+            let live = RequestCancellation::new(signal, None);
+            let channel = request().channel;
+            let (mut receiver, topic) = loop {
+                let prepared = recovered_row()
+                    .prepare_member_ingress(&selection, channel, live.clone())
+                    .unwrap();
+                let topic = prepared.topic_for_test();
+                match prepared.open().await {
+                    Ok(receiver) => break (receiver, topic),
+                    Err(NativeChatMemberGossipError::Busy) => tokio::task::yield_now().await,
+                    Err(error) => panic!("fresh original receiver attachment: {error}"),
+                }
+            };
+            let mut ledger = recovered_row()
+                .prepare_member_ledger(&selection, channel, live.clone())
+                .unwrap();
+            assert!(ledger.prepare_message_projection(action).is_err());
+            let (relay, _) = catcoms_net::MeshService::new_tcp(None, &[]).unwrap();
+            relay.subscribe(topic.clone()).await.unwrap();
+            relay
+                .dial(format!("/ip4/127.0.0.1/tcp/{}", local_transport.1).parse().unwrap())
+                .await
+                .unwrap();
+            relay.wait_for_peer_connected(local_transport.0).await.unwrap();
+            let receipt = loop {
+                let transmission = recovered_row()
+                    .prepare_member_publication(&selection, live.clone(), &mut history_rng)
+                    .unwrap()
+                    .expect("the first original is still pending");
+                match transmission.submit().await {
+                    Ok(Some(receipt)) => break receipt,
+                    Err(catcoms_sync::SyncError::Publication(PublishOnceError::NoPeers)) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    }
+                    _ => panic!("expected one acknowledgement for the first original"),
+                }
+            };
+            let encrypted = loop {
+                if let TransportEvent::Gossip { topic: arrived, from, data } =
+                    relay.next_event().await.expect("the relay remains connected")
+                {
+                    assert_eq!(arrived, topic);
+                    assert_eq!(from, local_transport.0);
+                    break data;
+                }
+            };
+            assert_eq!(
+                relay.publish_once(topic, encrypted).await.unwrap(),
+                PublishSubmission::Submitted
+            );
+            let Some(NativeChatMemberGossipEvent::Frame(frame)) = receiver.next().await else {
+                panic!("expected the relayed original");
+            };
+            assert!(recovered_row().open_member_frame(&selection, channel + 1, &frame, &live).is_err());
+            let received = recovered_row()
+                .open_member_frame(&selection, channel, &frame, &live)
+                .unwrap();
+            assert_eq!(received.action_id_data(), action);
+            assert_eq!(
+                recovered_row().project_received_member(&mut ledger, &received, &live).unwrap(),
+                V2OrdinaryReceiveStatus::Retained(ActionState::Valid)
+            );
+            let result = ledger.prepare_message_projection(action).unwrap();
+            assert!(result.with_publication(|view| matches!(
+                view, GuardedProjection::Visible { text, certainty: ProjectionCertainty::Provisional, .. }
+                if text == "Original joined message"
+            )).unwrap());
+            let front = recovered_row()
+                .checkpoint_member_publication(receipt, &live, &mut history_rng)
+                .unwrap();
+            assert_eq!(front, ordinal + 1);
+            assert_ne!(std::fs::read(&head_path).unwrap(), head);
+            retire.send_replace(true);
+            assert!(result.with_publication(|_| panic!("retired original view escaped")).is_err());
+            assert!(!received.is_for_original_row_cached(&selection));
+        }).await.expect("bounded joined message and exact acknowledgement over native TCP");
     } else {
         assert!(recovered_row()
             .prepare_member_publication(&selection, fresh.clone(), &mut history_rng)

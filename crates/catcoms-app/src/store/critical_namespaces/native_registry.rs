@@ -52,7 +52,8 @@ pub use operational::{
 };
 pub use operational::{NativeTextJoinedMemberFinalPreparation, NativeTextJoinedMemberSaveJob};
 pub use operational::{
-    NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberPublication,
+    NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberLedger,
+    NativeTextJoinedMemberProjection, NativeTextJoinedMemberPublication,
     NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
     NativeTextJoinedReceivedOriginal, NativeTextJoinedSelectionPreparation,
 };

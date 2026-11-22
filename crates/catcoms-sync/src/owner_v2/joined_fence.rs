@@ -37,7 +37,7 @@
 //! short lock; nodes without join facts pay nothing.
 use crate::*;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, TryLockError};
 
 /// Finalized transitions retained until the joined source consumes them.
@@ -225,9 +225,24 @@ impl FenceState {
 
 struct FenceInner {
     closed: AtomicBool,
+    // Advanced BEFORE any selected-state change, merge, or contest. Driver
+    // observers cannot reopen when a temporary contest or no-op merge ends.
+    publication_generation: AtomicU64,
     state: Mutex<FenceState>,
 }
 impl FenceInner {
+    fn retire_publications(&self) {
+        if self
+            .publication_generation
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                value.checked_add(1)
+            })
+            .is_err()
+        {
+            self.closed.store(true, Ordering::Release);
+        }
+    }
+
     fn lock(&self) -> Result<MutexGuard<'_, FenceState>, V2JoinedFenceRefusal> {
         match self.state.lock() {
             Ok(state) => Ok(state),
@@ -312,18 +327,13 @@ pub struct V2JoinedSourceFence {
 /// It can refuse an attempt and cannot install or renew the Source.
 pub(crate) struct V2JoinedPublicationFence {
     inner: Arc<FenceInner>,
-    selected: Selected,
+    generation: u64,
 }
 
 impl V2JoinedPublicationFence {
     pub(crate) fn is_current_cached(&self) -> bool {
-        let Ok(state) = self.inner.try_lock() else {
-            return false;
-        };
-        state.selected == Some(self.selected)
-            && state
-                .authorized(&self.inner.closed, &self.selected.own)
-                .is_ok()
+        self.inner.publication_generation.load(Ordering::Acquire) == self.generation
+            && !self.inner.closed.load(Ordering::Acquire)
     }
 }
 impl std::fmt::Debug for V2JoinedSourceFence {
@@ -359,10 +369,9 @@ impl V2JoinedSourceFence {
     ) -> Result<V2JoinedPublicationFence, V2JoinedFenceRefusal> {
         let state = self.inner.try_lock()?;
         state.authorized(&self.inner.closed, own)?;
-        let selected = state.selected.ok_or(V2JoinedFenceRefusal::Unknown)?;
         Ok(V2JoinedPublicationFence {
             inner: self.inner.clone(),
-            selected,
+            generation: self.inner.publication_generation.load(Ordering::Acquire),
         })
     }
 
@@ -465,6 +474,7 @@ impl V2JoinedSourceFence {
         {
             state.transitions.pop_front();
         }
+        self.inner.retire_publications();
         state.selected = Some(selected);
         Ok(())
     }
@@ -519,6 +529,7 @@ impl JoinedFenceNode {
         let state = (group.epoch(), group.epoch_authenticator_id());
         Self(Some(Arc::new(FenceInner {
             closed: AtomicBool::new(false),
+            publication_generation: AtomicU64::new(0),
             state: Mutex::new(FenceState {
                 settled: state,
                 join: state,
@@ -590,6 +601,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         };
         if let Ok(mut state) = inner.lock() {
             let _unwind = CloseOnUnwind(&inner.closed);
+            inner.retire_publications();
             state.merging = true;
         }
         Some(bracket)
@@ -684,7 +696,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         };
         if let Ok(mut state) = inner.lock() {
             let _unwind = CloseOnUnwind(&inner.closed);
-            state.contested = self.pending.is_some();
+            let contested = self.pending.is_some();
+            if contested && !state.contested {
+                inner.retire_publications();
+            }
+            state.contested = contested;
         }
     }
 
@@ -696,6 +712,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         };
         if let Ok(mut state) = inner.lock() {
             let _unwind = CloseOnUnwind(&inner.closed);
+            inner.retire_publications();
             state.contested = false;
             state.merging = true;
         }

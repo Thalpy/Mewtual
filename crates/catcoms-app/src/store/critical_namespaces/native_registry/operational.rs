@@ -29,6 +29,7 @@ pub use sources::{
     NativeTextCreationRequest, NativeTextCreationSettings, NativeTextInvitePublication,
     NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,
     NativeTextJoinedMemberFinalPreparation, NativeTextJoinedMemberIngressPreparation,
+    NativeTextJoinedMemberLedger, NativeTextJoinedMemberProjection,
     NativeTextJoinedMemberPublication, NativeTextJoinedMemberPublicationReceipt,
     NativeTextJoinedMemberReceiver, NativeTextJoinedMemberSaveJob,
     NativeTextJoinedReceivedOriginal, NativeTextJoinedRequestPreparation,

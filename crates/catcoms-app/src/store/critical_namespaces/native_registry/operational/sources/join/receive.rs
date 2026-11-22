@@ -4,6 +4,11 @@ use catcoms_net::{
     NativeChatMemberFrame, NativeChatMemberFrameObservation, NativeChatMemberGossip,
     NativeChatMemberGossipError, NativeChatMemberGossipEvent, NativeChatMemberIngress,
 };
+use catcoms_replication::chat::{
+    ActionId, ChatLedger, GuardedMessageProjection, GuardedProjection, LedgerLimits,
+    ProjectionGroupView, ProjectionView, Realm, V2GeneralPrefixVerifier, V2OrdinaryReceiveStatus,
+    MAX_PARENTS,
+};
 use catcoms_rt::Topic;
 use catcoms_sync::owner_v2::{SelectedV2MemberEnvelope, MAX_V2_MEMBER_TRANSPORT_BYTES};
 use catcoms_sync::PreparedV2JoinedPrefix;
@@ -11,6 +16,15 @@ use catcoms_sync::PreparedV2JoinedPrefix;
 const INGRESS_FEE: usize = 8 * 1024;
 // Padded plaintext, canonical signed action and its original frame may overlap.
 const OPEN_FEE: usize = 4 * MAX_V2_MEMBER_TRANSPORT_BYTES + 4096;
+const MAX_RECEIVED_ACTIONS: usize = 64;
+const MAX_RECEIVED_BYTES: usize = 1024 * 1024;
+const RECEIVE_WORK: usize = 4 * MAX_RECEIVED_ACTIONS + MAX_PARENTS;
+// Allow two copies of canonical originals and separately budget the ledger
+// entries, dependency edges, authority sets, tokens, and bounded work indices.
+const LEDGER_FEE: usize = 2 * MAX_RECEIVED_BYTES
+    + MAX_RECEIVED_ACTIONS * (MAX_PARENTS + 2) * 256
+    + V2GeneralPrefixVerifier::ordinary_authorization_temporary_layout_bytes()
+    + 16 * 1024;
 
 /// One subscription can attach after the metadata slot and SDK loan leave.
 pub struct NativeTextJoinedMemberIngressPreparation {
@@ -26,6 +40,11 @@ pub struct NativeTextJoinedMemberReceiver {
 }
 
 impl NativeTextJoinedMemberIngressPreparation {
+    #[cfg(test)]
+    pub(in crate::store::critical_namespaces::native_registry) fn topic_for_test(&self) -> Topic {
+        self.topic.clone()
+    }
+
     pub async fn open(self) -> Result<NativeTextJoinedMemberReceiver, NativeChatMemberGossipError> {
         let receiver = self
             .ingress
@@ -67,6 +86,62 @@ impl NativeTextJoinedReceivedOriginal {
     }
 }
 
+/// Paid current ledger for one channel in the original selected joined row.
+/// The durable history owner can replay verified originals into a fresh view.
+pub struct NativeTextJoinedMemberLedger {
+    _invocation: watch::Sender<bool>,
+    view: ProjectionView,
+    ledger: ChatLedger,
+    selection: NativeTextJoinedRowSelection,
+    signal: RequestCancellation,
+    _fee: CatalogReadReservation,
+}
+
+impl NativeTextJoinedMemberLedger {
+    /// Prepare the exact view and bounded body outside the final UI guard.
+    /// One paid query can borrow this ledger at a time.
+    pub fn prepare_message_projection(
+        &mut self,
+        create: ActionId,
+    ) -> Result<NativeTextJoinedMemberProjection<'_>, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        if self.signal.is_cancelled() {
+            return Err(Refusal::Cancelled);
+        }
+        let projection = self
+            .ledger
+            .guarded_projection(create, RECEIVE_WORK)
+            .map_err(|_| Refusal::Failed)?;
+        Ok(NativeTextJoinedMemberProjection {
+            projection,
+            signal: &self.signal,
+        })
+    }
+}
+
+pub struct NativeTextJoinedMemberProjection<'a> {
+    projection: GuardedMessageProjection,
+    signal: &'a RequestCancellation,
+}
+
+impl NativeTextJoinedMemberProjection<'_> {
+    /// Resolve inside the already acquired outer native UI guard.
+    pub fn with_publication<T>(
+        &self,
+        publish: impl FnOnce(&GuardedProjection) -> T,
+    ) -> Result<T, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        self.projection
+            .with_publication(|result| {
+                if self.signal.is_cancelled() {
+                    return Err(Refusal::Cancelled);
+                }
+                Ok(publish(result))
+            })
+            .map_err(|_| Refusal::Stale)?
+    }
+}
+
 impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
     pub fn prepare_member_ingress(
         self,
@@ -77,7 +152,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         use V2MemberSaveRefusal as Refusal;
         let ingress = self.require_member_ingress()?;
         let (topic, observed, authentication, fee) =
-            self.with_member_receiver(selection, &caller, |metadata, node, prefix| {
+            self.with_member_receiver(selection, &caller, |metadata, node, prefix, _| {
                 let fee = metadata
                     .reserve_join_node(INGRESS_FEE)
                     .map_err(|_| Refusal::Busy)?;
@@ -125,7 +200,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         if !ingress.owns_frame(frame) {
             return Err(Refusal::Stale);
         }
-        self.with_member_receiver(selection, caller, |metadata, node, prefix| {
+        self.with_member_receiver(selection, caller, |metadata, node, prefix, _| {
             let (topic, _, bytes) = frame.current_data().ok_or(Refusal::Stale)?;
             let fee = metadata
                 .reserve_join_node(OPEN_FEE)
@@ -142,6 +217,93 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 frame: frame.observe(),
                 _fee: fee,
             })
+        })
+    }
+
+    pub fn prepare_member_ledger(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        channel: u128,
+        caller: RequestCancellation,
+    ) -> Result<NativeTextJoinedMemberLedger, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        let (view, ledger, observed, authentication, fee) =
+            self.with_member_receiver(selection, &caller, |metadata, node, prefix, group| {
+                let fee = metadata
+                    .reserve_join_node(LEDGER_FEE)
+                    .map_err(|_| Refusal::Busy)?;
+                let verifier = prefix
+                    .selected_member_verifier()
+                    .map_err(|_| Refusal::Unavailable)?;
+                let group_data = &verifier.replay_data().profile().spec().group;
+                let realm = Realm::new(group_data, channel).map_err(|_| Refusal::Failed)?;
+                let mut ledger = ChatLedger::new(
+                    realm,
+                    LedgerLimits {
+                        max_actions: MAX_RECEIVED_ACTIONS,
+                        max_action_bytes: MAX_RECEIVED_BYTES,
+                    },
+                )
+                .map_err(|_| Refusal::Failed)?;
+                let mut view = ledger
+                    .begin_projection_view_in(group)
+                    .map_err(|_| Refusal::Unavailable)?;
+                if !view.try_ready() {
+                    return Err(Refusal::Busy);
+                }
+                let observed = node
+                    .observe_member_publication(prefix)
+                    .map_err(|_| Refusal::Unavailable)?;
+                let authentication = metadata
+                    .authentication_negative()
+                    .map_err(|_| Refusal::Unavailable)?;
+                Ok((view, ledger, observed, authentication, fee))
+            })?;
+        let (invocation, live) = watch::channel(false);
+        let authority = Arc::new(JoinEffect {
+            scope: self.original.scope,
+            ui: self.original.command.ui.into_effect_negative(),
+            authentication,
+            invocation: live,
+            caller: caller.clone(),
+            row: Some(selection.clone()),
+        });
+        let signal = observed.constrain(caller.with_authority(authority));
+        Ok(NativeTextJoinedMemberLedger {
+            _invocation: invocation,
+            view,
+            ledger,
+            selection: selection.clone(),
+            signal,
+            _fee: fee,
+        })
+    }
+
+    /// Admit a live network original into this exact channel ledger. A missing
+    /// dependency leaves the child outside the ledger for bounded recovery.
+    pub fn project_received_member(
+        self,
+        ledger: &mut NativeTextJoinedMemberLedger,
+        original: &NativeTextJoinedReceivedOriginal,
+        caller: &RequestCancellation,
+    ) -> Result<V2OrdinaryReceiveStatus, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        if ledger.signal.is_cancelled() || !original.is_for_original_row_cached(&ledger.selection) {
+            return Err(Refusal::Stale);
+        }
+        self.with_member_receiver(&ledger.selection, caller, |_, _, prefix, _| {
+            let verifier = prefix
+                .selected_member_verifier()
+                .map_err(|_| Refusal::Unavailable)?;
+            if ledger.signal.is_cancelled()
+                || !original.is_for_original_row_cached(&ledger.selection)
+            {
+                return Err(Refusal::Stale);
+            }
+            original
+                .opened
+                .project_from_ledger(verifier, &mut ledger.ledger, &ledger.view, RECEIVE_WORK)
+                .map_err(|_| Refusal::Failed)
         })
     }
 
@@ -162,6 +324,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             &MetadataWork,
             &ClosedV2JoinedNode<catcoms_net::MeshService, R>,
             &PreparedV2JoinedPrefix,
+            &ProjectionGroupView,
         ) -> Result<T, V2MemberSaveRefusal>,
     ) -> Result<T, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
@@ -204,7 +367,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                         .map(|data| store.capture_recovered_member_prefix(data))
                         .transpose()
                         .map_err(|_| Refusal::Unavailable)?;
-                    let (prefix, _) = match &recovered {
+                    let (prefix, view) = match &recovered {
                         Some(prefix) => prefix.member_parts(),
                         None => pending
                             .io
@@ -213,7 +376,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                             .borrow_warm_member_prefix(store)
                             .map_err(|_| Refusal::Unavailable)?,
                     };
-                    read(metadata, node, prefix)
+                    read(metadata, node, prefix, view)
                 },
             )?
         };

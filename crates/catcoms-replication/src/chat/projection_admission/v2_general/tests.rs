@@ -448,6 +448,20 @@ fn ordinary_receiver_waits_for_exact_valid_dependencies_then_projects() {
         if text == "ordered reply" && id == target.id())
     );
     assert_eq!(ledger.action(reply.id()), Some(&reply));
+    let original_effect = f
+        .verifier
+        .observe_live_member(second.core.body.admission_id())
+        .unwrap();
+    let epoch = f.epoch();
+    drop(f.append_one(&second, &reply));
+    assert_eq!(f.epoch(), epoch);
+    assert!(!original_effect.is_live_cached());
+    assert!(second.is_open_data());
+    assert!(f
+        .verifier
+        .observe_live_member(second.core.body.admission_id())
+        .unwrap()
+        .is_live_cached());
 }
 
 #[test]

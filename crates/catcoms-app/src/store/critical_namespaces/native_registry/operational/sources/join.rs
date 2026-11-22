@@ -45,7 +45,8 @@ pub use publication::{
 };
 mod receive;
 pub use receive::{
-    NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberReceiver,
+    NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberLedger,
+    NativeTextJoinedMemberProjection, NativeTextJoinedMemberReceiver,
     NativeTextJoinedReceivedOriginal,
 };
 

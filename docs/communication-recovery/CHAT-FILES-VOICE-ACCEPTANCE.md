@@ -1,5 +1,24 @@
 # Chat, files and voice implementation evidence
 
+## Native joined text and ordinary member transport (22 November 2026)
+
+Windows and Linux exercised native Join, local joined text save with the founder
+offline, exact receipt recovery and new authoring after restarting the registered
+joined source. [Native commands CI](https://github.com/Thalpy/Mewtual/actions/runs/45079122432)
+and [joined source CI](https://github.com/Thalpy/Mewtual/actions/runs/45078038029).
+
+At `e12d345f` the mounted outbox and original driver queue checks passed on both
+platforms. Cancellation, no peers and corrupt storage preserved publication debt.
+At `9439557a` both platforms also verified provisional projection, exact receive
+dependencies, duplicate originals and wrong-view refusal.
+[Publication CI](https://github.com/Thalpy/Mewtual/actions/runs/45080872913) and
+[receiver CI](https://github.com/Thalpy/Mewtual/actions/runs/45081739366).
+
+The desktop still needs to drive shared peer catch-up and persist received
+history. Later governed membership changes, broader cold startup and physical
+acceptance remain open. Chat V2 remains disabled. The full suite is scheduled
+for Wednesday, 25 November 2026.
+
 ## Governed Add fence checkpoint (22 November 2026)
 
 The focused invitation workflow passed on Linux and Windows at `89637e3e`.

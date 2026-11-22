@@ -102,6 +102,10 @@ requires the receiver's actual view and current sender Admission. An original op
 one source cannot be applied through another source with equal cryptographic bytes.
 The receiver resolves parents and targets from that ledger's Valid originals. Missing
 dependencies return their exact IDs without importing the child or making it visible.
+The mounted joined row can prepare a paid channel ledger and apply frames from its own
+receiver. A final native callback checks the original receiving scope and the prepared
+Core view before revealing a body. The ledger holds up to 64 originals or 1 MiB of
+canonical action bytes. Durable replay and catch-up must address pressure at this limit.
 The mounted joined source prepares one exact debt item for its original mesh and releases
 the metadata slot before awaiting the driver. The caller, original Core Admission and
 selected MLS fence must still authorize it at the driver's submission boundary. A real

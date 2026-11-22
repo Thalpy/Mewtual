@@ -96,7 +96,8 @@ pub use native_registry::{
 };
 pub use native_registry::{NativeTextJoinedMemberFinalPreparation, NativeTextJoinedMemberSaveJob};
 pub use native_registry::{
-    NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberPublication,
+    NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberLedger,
+    NativeTextJoinedMemberProjection, NativeTextJoinedMemberPublication,
     NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
     NativeTextJoinedReceivedOriginal, NativeTextJoinedSelectionPreparation,
 };

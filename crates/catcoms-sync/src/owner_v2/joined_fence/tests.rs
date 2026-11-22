@@ -87,6 +87,21 @@ fn stale_join_and_same_epoch_mismatch_cannot_replace_a_consumed_newer_selection(
     let epoch = b.epoch();
     let join_authenticator = b.group.epoch_authenticator_id();
     settle_at_join(&b, &fence);
+    let original = fence.observe_publication(&OWN).unwrap();
+    let save = fence.admit_final(&OWN).unwrap();
+    assert!(
+        original.is_current_cached(),
+        "an unchanged save must not retire the mesh"
+    );
+    drop(save);
+    let unchanged = b.v2_fence_begin_merge();
+    assert!(!original.is_current_cached());
+    b.v2_fence_end_merge(unchanged, V2MergeResult::Observed(None));
+    assert!(fence.observe_publication(&OWN).unwrap().is_current_cached());
+    assert!(
+        !original.is_current_cached(),
+        "a no-op cannot renew an old driver observation"
+    );
     assert_eq!(
         fence.install_selected(epoch, join_authenticator, [0; 32]),
         Err(V2JoinedFenceRefusal::Unknown)

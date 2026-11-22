@@ -86,11 +86,15 @@ pub struct V2AuthenticatedAdmission {
 pub struct V2LiveMemberObservation {
     group: Arc<GroupViewLife>,
     admission: V2AuthenticatedAdmission,
+    selected_sequence: Arc<AtomicU64>,
+    sequence: u64,
 }
 
 impl V2LiveMemberObservation {
     pub fn is_live_cached(&self) -> bool {
-        self.group.live() && self.admission.is_open_data()
+        self.selected_sequence.load(Ordering::Acquire) == self.sequence
+            && self.group.live()
+            && self.admission.is_open_data()
     }
 }
 impl std::fmt::Debug for V2LiveMemberObservation {
@@ -310,6 +314,7 @@ pub struct V2GeneralPrefixVerifier {
     origin: V2ProjectionOrigin,
     fork_close: Option<ProjectionGroupCloseCompletion>,
     candidate_live: Arc<AtomicBool>,
+    selected_sequence: Arc<AtomicU64>,
     history: Box<selected_history::HistoryFrontier>,
     archived_conflict: Option<Box<V2KnownGoverningParent>>,
 }
@@ -338,6 +343,8 @@ impl V2GeneralPrefixVerifier {
         let original = V2LiveMemberObservation {
             group: self.group.clone(),
             admission,
+            selected_sequence: self.selected_sequence.clone(),
+            sequence: self.math.header().spec().sequence,
         };
         if !original.is_live_cached() {
             return Err(ChatError::Scope);
@@ -349,6 +356,7 @@ impl V2GeneralPrefixVerifier {
     /// not a paid quota or a claim that the Founder/Root metadata allowance covers this type.
     pub const fn metadata_layout_bytes() -> usize {
         2 * std::mem::size_of::<Self>()
+            + 2 * (std::mem::size_of::<AtomicU64>() + 2 * std::mem::size_of::<usize>())
             + 2 * MAX_ADMISSIONS
                 * (std::mem::size_of::<V2AuthenticatedAdmission>()
                     + std::mem::size_of::<AdmissionCore>()
@@ -414,6 +422,7 @@ impl V2GeneralPrefixVerifier {
             origin,
             fork_close: None,
             candidate_live: Arc::new(AtomicBool::new(false)),
+            selected_sequence: Arc::new(AtomicU64::new(header.spec().sequence)),
             history,
             archived_conflict: None,
         })
@@ -603,6 +612,8 @@ impl V2GeneralPrefixVerifier {
         });
         let frozen_admission = next.removed.clone();
         self.live()?;
+        self.selected_sequence
+            .store(next.step.next.header().spec().sequence, Ordering::Release);
         let next = candidate.take().expect("checked same general candidate");
         // Every fallible predicate precedes take. Move the SAME original whole cut
         // into returned archive custody; copying only its tip would discard the

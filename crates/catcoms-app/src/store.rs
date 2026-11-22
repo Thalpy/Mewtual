@@ -101,7 +101,8 @@ pub use critical_namespaces::{
     NativeTextJoinedMemberFinalPreparation, NativeTextJoinedMemberSaveJob,
 };
 pub use critical_namespaces::{
-    NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberPublication,
+    NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberLedger,
+    NativeTextJoinedMemberProjection, NativeTextJoinedMemberPublication,
     NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
     NativeTextJoinedReceivedOriginal, NativeTextJoinedSelectionPreparation,
 };
