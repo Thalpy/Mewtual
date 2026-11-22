@@ -117,6 +117,16 @@ impl<T, R> V2TextOwnedCurrent<T, R> {
 }
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurrent<T, R> {
+    pub(super) fn cached_governed_welcome_raw(
+        &self,
+        store: &ServerStore,
+    ) -> Result<Option<[u8; 64]>, AppError> {
+        match &self.core {
+            OwnedCurrent::Warm(current) => current.cached_governed_welcome_raw(store),
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
     pub(super) fn freeze_governed_welcome(
         &mut self,
         store: &ServerStore,
@@ -147,18 +157,18 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurr
         }
     }
 
-    pub(super) fn borrow_governed_header_parts(
+    pub(super) fn borrow_governed_signing_parts(
         &mut self,
     ) -> Result<
         (
             V2TextOwnerRef<'_>,
-            catcoms_sync::owner_v2::V2FounderHeaderSigning<'_>,
+            catcoms_sync::owner_v2::V2FounderAddSigning<'_>,
         ),
         AppError,
     > {
         match &mut self.core {
             OwnedCurrent::Warm(current) => {
-                let (original, signing) = current.borrow_governed_header_parts()?;
+                let (original, signing) = current.borrow_governed_signing_parts()?;
                 Ok((V2TextOwnerRef { original }, signing))
             }
             OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),

@@ -77,6 +77,56 @@ impl PendingGovernedAdd {
 }
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextHost<T, R> {
+    pub(super) fn sign_governed_welcome(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        packet: &V2JoinRequestPacketData<'_>,
+        routing_plan: &[u8],
+        keys: &NativeFounderKeys,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+        negative: &catcoms_rt::RequestCancellation,
+    ) -> Result<(), AppError> {
+        self.cover_governed_welcome_intent(layout, packet, routing_plan, keys, rng, negative)?;
+        let store = layout.checked_store()?;
+        let preimage = self.owner.freeze_governed_welcome(store)?;
+        let require_live = || {
+            if negative.is_cancelled() {
+                return Err(refused());
+            }
+            keys.preflight(&self.origin)
+        };
+        let p = self.governed_add.as_mut().ok_or_else(refused)?;
+        let selected = p.parent.selected_data().ok_or_else(refused)?;
+        let resources = p.parent.resources();
+        if self.owner.cached_governed_welcome_raw(store)?.is_none() {
+            let owner = self.owner.borrow_current()?;
+            p.fence
+                .prepare_welcome_attempt(store, owner.source(), rng)?;
+            let (owner, mut primitive) = self.owner.borrow_governed_signing_parts()?;
+            store.with_v2_text_current(&owner, |admission| {
+                let guard = store.lock_v2_text_current_group(admission, resources)?;
+                require_live()?;
+                p.fence.cover_welcome_attempt(&guard, selected)?;
+                require_live()?;
+                primitive.sign_welcome_native()?;
+                require_live()
+            })?;
+        }
+        let raw = self
+            .owner
+            .cached_governed_welcome_raw(store)?
+            .ok_or_else(refused)?;
+        let owner = self.owner.borrow_current()?;
+        p.fence
+            .prepare_raw_welcome(store, owner.source(), &preimage, &raw, rng)?;
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, resources)?;
+            p.fence.cover_raw_welcome(&guard, selected)?;
+            require_live()
+        })?;
+        require_live()
+    }
+
     /// Freeze and cover the exact response preimage from the original Cell
     /// and Admission before any Welcome key entry.
     pub(super) fn cover_governed_welcome_intent(
@@ -162,13 +212,13 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         if self.owner.cached_governed_header_raw(store)?.is_none() {
             let owner = self.owner.borrow_current()?;
             p.fence.prepare_header_attempt(store, owner.source(), rng)?;
-            let (owner, mut primitive) = self.owner.borrow_governed_header_parts()?;
+            let (owner, mut primitive) = self.owner.borrow_governed_signing_parts()?;
             store.with_v2_text_current(&owner, |admission| {
                 let guard = store.lock_v2_text_current_group(admission, &resources)?;
                 require_live()?;
                 p.fence.cover_header_attempt(&guard, selected)?;
                 require_live()?;
-                primitive.sign_native()?;
+                primitive.sign_header_native()?;
                 require_live()
             })?;
         }

@@ -29,6 +29,16 @@ exact bytes. Both platforms passed the partial-Add and original Source
 retirement cases as well as the native invitation cohort.
 [Header and Source CI](https://github.com/Thalpy/Mewtual/actions/runs/45026146810).
 
+At `e9a80c30`, Linux and Windows passed the App checks for governing history,
+KeyPackage validation, and Source retirement. The focused desktop workflow
+passed all four original-runtime lock and retirement cases on both platforms.
+[App CI](https://github.com/Thalpy/Mewtual/actions/runs/45028313884) ·
+[Desktop lock CI](https://github.com/Thalpy/Mewtual/actions/runs/45028313513).
+
+At `f08b7282`, Linux passed the focused workflow, including actual Host SDK
+execution and Header signing, plus the pinned predecessor check.
+[Warm Host CI](https://github.com/Thalpy/Mewtual/actions/runs/45029874030).
+
 ## Invitation and join branch CI (22 November 2026)
 
 Both hosted workflows passed on Linux and Windows at

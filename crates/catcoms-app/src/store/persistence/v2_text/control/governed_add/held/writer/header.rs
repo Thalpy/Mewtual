@@ -1,16 +1,19 @@
 //! Header key-attempt and Raw coverage on the original warm Add writer.
-use super::super::super::header_signing::{HeaderOutcomeCommitment, ATTEMPT_BYTES, RAW_BYTES};
+use super::super::super::header_signing::{
+    AddSigningParent, ATTEMPT_BYTES, RAW_BYTES, WELCOME_ATTEMPT_BYTES, WELCOME_RAW_BYTES,
+};
 use super::*;
 
 mod governing;
 mod welcome;
 
-pub(super) const BUFFER_BYTES: usize = 6 * (ATTEMPT_BYTES + RAW_BYTES)
+pub(super) const BUFFER_BYTES: usize = 6
+    * (ATTEMPT_BYTES + RAW_BYTES + WELCOME_ATTEMPT_BYTES + WELCOME_RAW_BYTES)
     + 10 * governing_record::MAX_BYTES
     + 8 * welcome_intent::MAX_BYTES;
 
 pub(super) struct PreparedHeaderSigning {
-    outcome: HeaderOutcomeCommitment,
+    outcome: AddSigningParent,
     attempt: PreparedSmallControl,
     raw: Option<([u8; 64], PreparedSmallControl)>,
     governing: Option<(
@@ -18,6 +21,7 @@ pub(super) struct PreparedHeaderSigning {
         PreparedSmallControl,
     )>,
     welcome: Option<([u8; 32], PreparedSmallControl)>,
+    welcome_signing: Option<welcome::PreparedWelcomeSigning>,
     unexpected_raw: bool,
 }
 
@@ -40,7 +44,7 @@ impl PreparedGovernedAddFence {
                 .filter(|outcome| outcome.covered)
                 .ok_or_else(refused)?;
             let frame = &outcome.original.as_ref().ok_or_else(refused)?.frame;
-            let outcome = HeaderOutcomeCommitment::from_outcome(frame)?;
+            let outcome = AddSigningParent::from_outcome(frame)?;
             let key = Zeroizing::new(store.keys.db_key()?);
             let frozen = outcome.seal_attempt(&key, rng)?;
             self.header = Some(PreparedHeaderSigning {
@@ -49,6 +53,7 @@ impl PreparedGovernedAddFence {
                 raw: None,
                 governing: None,
                 welcome: None,
+                welcome_signing: None,
                 unexpected_raw: false,
             });
         }
@@ -68,7 +73,7 @@ impl PreparedGovernedAddFence {
         guard.require_text_control_io_quiescent()?;
         let header = self.header.as_mut().ok_or_else(refused)?;
         require_absent(&self.held.governing_path)?;
-        require_absent(&self.held.welcome_intent_path)?;
+        self.held.welcome_paths.require_absent()?;
         header.require_raw_absent(&self.held.raw_header_path)?;
         header
             .attempt
@@ -80,7 +85,7 @@ impl PreparedGovernedAddFence {
             .require_covered(&self.held.header_attempt_path)?;
         header.require_raw_absent(&self.held.raw_header_path)?;
         require_absent(&self.held.governing_path)?;
-        require_absent(&self.held.welcome_intent_path)?;
+        self.held.welcome_paths.require_absent()?;
         guard.validate_source_only()
     }
 
@@ -144,7 +149,7 @@ impl PreparedGovernedAddFence {
         let (_, raw) = header.raw.as_mut().ok_or_else(refused)?;
         if !raw.covered {
             require_absent(&self.held.governing_path)?;
-            require_absent(&self.held.welcome_intent_path)?;
+            self.held.welcome_paths.require_absent()?;
         }
         raw.cover(&self.held.raw_header_path, RAW_BYTES, guard)?;
         self.require_covered_outcome(guard, selected)?;

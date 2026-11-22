@@ -166,16 +166,16 @@ struct PendingAdd {
     ends: NativeChatKeyEnds,
 }
 
-/// Disjoint loan of the original Header primitive and its retained native
+/// Disjoint loan of the original Add signing state and its retained native
 /// custody. Root can hold the actual seed/Current proof while using this loan.
-pub struct V2FounderHeaderSigning<'a> {
+pub struct V2FounderAddSigning<'a> {
     seed: &'a UnboundV2GenesisSeed,
     negative: V2FounderGovernanceNegative<'a>,
     pending: &'a mut PendingAdd,
 }
 
-impl V2FounderHeaderSigning<'_> {
-    pub fn sign_native(&mut self) -> Result<(), SyncError> {
+impl V2FounderAddSigning<'_> {
+    pub fn sign_header_native(&mut self) -> Result<(), SyncError> {
         let p = &mut *self.pending;
         if p.raw.is_some() {
             return Ok(());
@@ -240,7 +240,7 @@ pub const FOUNDER_GOVERNANCE_DATA_BYTES: usize = UNSIGNED_ADMISSION_DATA_INVOICE
     + 4 * std::mem::size_of::<PendingAdd>()
     + 4 * std::mem::size_of::<V2InstalledFounderAddData>()
     + 4 * std::mem::size_of::<V2FounderAddOutcomeData<'static>>()
-    + 4 * std::mem::size_of::<V2FounderHeaderSigning<'static>>()
+    + 4 * std::mem::size_of::<V2FounderAddSigning<'static>>()
     + 4 * std::mem::size_of::<RetiredV2FounderAddNativeCustody>()
     + 4 * std::mem::size_of::<PreparedV2FounderGovernanceNode<(), ()>>()
     + 4 * std::mem::size_of::<(
@@ -638,14 +638,14 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
     /// proofs. Cache raw64 IMMEDIATELY; an unwind after entry with no cached raw
     /// stays terminal. A cached signature is historical DATA, not permission.
     pub fn sign_admission_native(&mut self) -> Result<(), SyncError> {
-        self.header_signing_parts_data()?.1.sign_native()
+        self.signing_parts_data()?.1.sign_header_native()
     }
 
     /// Root can use the seed loan for its original Current while the second
     /// loan retains only this operation's fixed native signing state.
-    pub fn header_signing_parts_data(
+    pub fn signing_parts_data(
         &mut self,
-    ) -> Result<(&UnboundV2GenesisSeed, V2FounderHeaderSigning<'_>), SyncError> {
+    ) -> Result<(&UnboundV2GenesisSeed, V2FounderAddSigning<'_>), SyncError> {
         let seed = &self.node.seed;
         let negative = V2FounderGovernanceNegative {
             source: seed.body.source,
@@ -659,7 +659,7 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
         let pending = self.pending.as_deref_mut().ok_or_else(unavailable)?;
         Ok((
             seed,
-            V2FounderHeaderSigning {
+            V2FounderAddSigning {
                 seed,
                 negative,
                 pending,

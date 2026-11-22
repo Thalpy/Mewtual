@@ -92,7 +92,7 @@ impl HeldGovernedAddFence {
                 require_absent(&self.header_attempt_path)?;
                 require_absent(&self.raw_header_path)?;
                 require_absent(&self.governing_path)?;
-                require_absent(&self.welcome_intent_path)?;
+                self.welcome_paths.require_absent()?;
                 CapturedOutcome::Absent
             }
             Err(error) => return Err(io(error)),
@@ -147,7 +147,7 @@ impl HeldGovernedAddFence {
                 require_absent(&self.header_attempt_path)?;
                 require_absent(&self.raw_header_path)?;
                 require_absent(&self.governing_path)?;
-                require_absent(&self.welcome_intent_path)?;
+                self.welcome_paths.require_absent()?;
             }
             CapturedOutcome::Present(data) => require_exact_held(&self.outcome_path, data)?,
         }

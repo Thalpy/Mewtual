@@ -58,6 +58,8 @@ pub(super) fn fixed_child(base: &Path, leaf: &'static str) -> Result<PathBuf, Ap
             | "text.add.raw-header.v2"
             | "text.add.governing.v2"
             | "text.add.welcome-intent.v2"
+            | "text.add.welcome-attempt.v2"
+            | "text.add.raw-welcome.v2"
             | "text.pages"
     ) {
         return Err(refused());

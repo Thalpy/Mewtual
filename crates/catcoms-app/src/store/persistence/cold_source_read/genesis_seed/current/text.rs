@@ -10,6 +10,17 @@ use catcoms_rt::{NativeChatPreparedKeyCut, NativeChatSourceObservation};
 use catcoms_sync::owner_v2::{V2FounderAddOutcomeData, V2FounderAddRequestData};
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> UnexposedV2GenesisCurrent<T, R> {
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn cached_governed_welcome_raw(
+        &self,
+        store: &crate::store::ServerStore,
+    ) -> Result<Option<[u8; 64]>, crate::AppError> {
+        use crate::store::critical_namespaces::refused;
+        self.require_text_original_data(store)
+            .map_err(|_| refused())?;
+        let node = self.governed_text_node().ok_or_else(refused)?;
+        Ok(node.raw_welcome_signature_data().ok().copied())
+    }
+
     pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn freeze_governed_welcome(
         &mut self,
         store: &crate::store::ServerStore,

@@ -207,10 +207,14 @@ async fn native_runtime_invite_join_request_requires_the_actual_signed_journal()
     let raw_header = only_named(directory.path(), "text.add.raw-header.v2");
     let governing = only_named(directory.path(), "text.add.governing.v2");
     let welcome_intent = only_named(directory.path(), "text.add.welcome-intent.v2");
+    let welcome_attempt = only_named(directory.path(), "text.add.welcome-attempt.v2");
+    let raw_welcome = only_named(directory.path(), "text.add.raw-welcome.v2");
     let header_attempt_bytes = std::fs::read(&header_attempt).unwrap();
     let raw_header_bytes = std::fs::read(&raw_header).unwrap();
     let governing_bytes = std::fs::read(&governing).unwrap();
     let welcome_intent_bytes = std::fs::read(&welcome_intent).unwrap();
+    let welcome_attempt_bytes = std::fs::read(&welcome_attempt).unwrap();
+    let raw_welcome_bytes = std::fs::read(&raw_welcome).unwrap();
     assert!(raw_header_bytes.len() > header_attempt_bytes.len());
     assert!(check().is_err());
     let parked_fence = fence.with_extension("held");
@@ -220,6 +224,8 @@ async fn native_runtime_invite_join_request_requires_the_actual_signed_journal()
     let parked_raw_header = raw_header.with_extension("held");
     let parked_governing = governing.with_extension("held");
     let parked_welcome_intent = welcome_intent.with_extension("held");
+    let parked_welcome_attempt = welcome_attempt.with_extension("held");
+    let parked_raw_welcome = raw_welcome.with_extension("held");
     std::fs::rename(&fence, &parked_fence).unwrap();
     std::fs::rename(&entry, &parked_entry).unwrap();
     std::fs::rename(&outcome, &parked_outcome).unwrap();
@@ -227,6 +233,8 @@ async fn native_runtime_invite_join_request_requires_the_actual_signed_journal()
     std::fs::rename(&raw_header, &parked_raw_header).unwrap();
     std::fs::rename(&governing, &parked_governing).unwrap();
     std::fs::rename(&welcome_intent, &parked_welcome_intent).unwrap();
+    std::fs::rename(&welcome_attempt, &parked_welcome_attempt).unwrap();
+    std::fs::rename(&raw_welcome, &parked_raw_welcome).unwrap();
     assert!(check().is_ok());
     let orphan = fence.with_file_name("text.add.outcome.v2");
     std::fs::write(&orphan, b"incomplete held outcome").unwrap();
@@ -241,6 +249,8 @@ async fn native_runtime_invite_join_request_requires_the_actual_signed_journal()
     std::fs::rename(&parked_raw_header, &raw_header).unwrap();
     std::fs::rename(&parked_governing, &governing).unwrap();
     std::fs::rename(&parked_welcome_intent, &welcome_intent).unwrap();
+    std::fs::rename(&parked_welcome_attempt, &welcome_attempt).unwrap();
+    std::fs::rename(&parked_raw_welcome, &raw_welcome).unwrap();
     assert_eq!(std::fs::read(fence).unwrap(), frozen);
     assert_eq!(std::fs::read(entry).unwrap(), entry_bytes);
     assert_eq!(std::fs::read(outcome).unwrap(), outcome_bytes);
@@ -248,6 +258,11 @@ async fn native_runtime_invite_join_request_requires_the_actual_signed_journal()
     assert_eq!(std::fs::read(raw_header).unwrap(), raw_header_bytes);
     assert_eq!(std::fs::read(governing).unwrap(), governing_bytes);
     assert_eq!(std::fs::read(welcome_intent).unwrap(), welcome_intent_bytes);
+    assert_eq!(
+        std::fs::read(welcome_attempt).unwrap(),
+        welcome_attempt_bytes
+    );
+    assert_eq!(std::fs::read(raw_welcome).unwrap(), raw_welcome_bytes);
 
     let key_work = {
         let entries = owner.entries.lock().unwrap();

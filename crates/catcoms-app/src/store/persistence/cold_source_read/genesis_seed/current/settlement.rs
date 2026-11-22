@@ -208,12 +208,12 @@ impl<'owner> GenesisCurrentOwnerRef<'owner> {
 }
 
 impl<T, R> UnexposedV2GenesisCurrent<T, R> {
-    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn borrow_governed_header_parts(
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn borrow_governed_signing_parts(
         &mut self,
     ) -> Result<
         (
             GenesisCurrentOwnerRef<'_>,
-            catcoms_sync::owner_v2::V2FounderHeaderSigning<'_>,
+            catcoms_sync::owner_v2::V2FounderAddSigning<'_>,
         ),
         AppError,
     > {
@@ -245,7 +245,7 @@ impl<T, R> UnexposedV2GenesisCurrent<T, R> {
             .as_mut()
             .and_then(|owner| owner.node.as_mut())
             .ok_or_else(critical_namespaces::refused)?
-            .header_signing_parts_data()?;
+            .signing_parts_data()?;
         let owner = GenesisCurrentOwnerRef {
             source: GenesisSourceDataRef { seed, resources },
             task,

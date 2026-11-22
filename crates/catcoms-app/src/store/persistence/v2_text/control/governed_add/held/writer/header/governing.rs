@@ -75,7 +75,7 @@ impl PreparedGovernedAddFence {
             .and_then(|header| header.governing.as_mut())
             .ok_or_else(refused)?;
         if !governing.covered {
-            require_absent(&self.held.welcome_intent_path)?;
+            self.held.welcome_paths.require_absent()?;
         }
         governing.cover(
             &self.held.governing_path,

@@ -279,6 +279,16 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         for _ in 0..2 {
             self.cover_governed_welcome_intent(layout, packet, routing_plan, keys, rng, negative)?;
         }
+        self.sign_governed_welcome(layout, packet, routing_plan, keys, rng, negative)?;
+        let welcome_raw = self
+            .owner
+            .cached_governed_welcome_raw(store)?
+            .ok_or_else(refused)?;
+        self.sign_governed_welcome(layout, packet, routing_plan, keys, rng, negative)?;
+        assert_eq!(
+            self.owner.cached_governed_welcome_raw(store)?,
+            Some(welcome_raw)
+        );
         Ok(())
     }
 }

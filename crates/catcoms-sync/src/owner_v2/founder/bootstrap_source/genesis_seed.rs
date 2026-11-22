@@ -29,7 +29,7 @@ mod ordinary_member;
 pub use governance::{
     PreparedV2FounderGovernanceNode, RetiredV2FounderAddNativeCustody, V2FounderAddNativeStage,
     V2FounderAddOutcomeData, V2FounderAddPreparationRefusal, V2FounderAddRequestData,
-    V2FounderGovernanceNegative, V2FounderHeaderSigning, V2InstalledFounderAddData,
+    V2FounderAddSigning, V2FounderGovernanceNegative, V2InstalledFounderAddData,
     FOUNDER_GOVERNANCE_DATA_BYTES, MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES,
 };
 #[cfg(not(target_arch = "wasm32"))]

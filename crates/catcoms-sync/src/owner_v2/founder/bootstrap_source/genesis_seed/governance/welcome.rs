@@ -85,53 +85,7 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
     /// Root supplies genuine covering intent/current/source admission. Cache raw64 before any
     /// postverification or late negative, so a lost reply cannot repeat signing.
     pub fn sign_welcome_native(&mut self) -> Result<(), SyncError> {
-        if self
-            .pending
-            .as_ref()
-            .and_then(|p| p.welcome.as_ref())
-            .is_some_and(|w| w.raw.is_some())
-        {
-            return Ok(()); // historical raw, never publication permission
-        }
-        self.stable_negative().require_live_data()?;
-        let p = self.pending.as_mut().ok_or_else(unavailable)?;
-        let w = p.welcome.as_mut().ok_or_else(unavailable)?;
-        let signer = self.node.seed.body.context.spec_data().signer;
-        if w.entered
-            || w.spec.admitter != signer
-            || !self
-                .node
-                .seed
-                .body
-                .device
-                .retained_ed25519_key_matches(&signer)
-        {
-            return Err(unavailable());
-        }
-        p.welcome_native.enter(
-            p.welcome_cut.as_mut().ok_or_else(unavailable)?,
-            &p.original,
-            NativeChatKeyPurpose::JoinWelcome,
-            &mut p.ends,
-        )?;
-        w.entered = true;
-        #[cfg(test)]
-        test_cut(TestCut::WelcomeEntered);
-        let raw = self
-            .node
-            .seed
-            .body
-            .device
-            .sign_retained_ed25519_bounded(
-                &signer,
-                &w.bytes,
-                catcoms_replication::chat::join_bindings::MAX_JOIN_BINDING_BYTES,
-            )
-            .map_err(|_| unavailable())?;
-        w.raw = Some(raw);
-        #[cfg(test)]
-        test_cut(TestCut::WelcomeRawCached);
-        Ok(())
+        self.signing_parts_data()?.1.sign_welcome_native()
     }
 
     /// Borrow the exact cached key result for Root's RawWelcome record before
@@ -204,6 +158,47 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
             .unwrap()
             .spec
             .sealed_routing_transfer[0] ^= 1;
+    }
+}
+
+impl V2FounderAddSigning<'_> {
+    pub fn sign_welcome_native(&mut self) -> Result<(), SyncError> {
+        let p = &mut *self.pending;
+        let w = p.welcome.as_mut().ok_or_else(unavailable)?;
+        if w.raw.is_some() {
+            return Ok(());
+        }
+        self.negative.require_live_data()?;
+        let signer = self.seed.body.context.spec_data().signer;
+        if w.entered
+            || w.spec.admitter != signer
+            || !self.seed.body.device.retained_ed25519_key_matches(&signer)
+        {
+            return Err(unavailable());
+        }
+        p.welcome_native.enter(
+            p.welcome_cut.as_mut().ok_or_else(unavailable)?,
+            &p.original,
+            NativeChatKeyPurpose::JoinWelcome,
+            &mut p.ends,
+        )?;
+        w.entered = true;
+        #[cfg(test)]
+        test_cut(TestCut::WelcomeEntered);
+        let raw = self
+            .seed
+            .body
+            .device
+            .sign_retained_ed25519_bounded(
+                &signer,
+                &w.bytes,
+                catcoms_replication::chat::join_bindings::MAX_JOIN_BINDING_BYTES,
+            )
+            .map_err(|_| unavailable())?;
+        w.raw = Some(raw);
+        #[cfg(test)]
+        test_cut(TestCut::WelcomeRawCached);
+        Ok(())
     }
 }
 

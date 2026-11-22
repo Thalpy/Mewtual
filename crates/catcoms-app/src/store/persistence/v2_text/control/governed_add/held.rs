@@ -2,7 +2,9 @@
 //! The read path authenticates an existing file. It cannot adopt an owner,
 //! complete a partial write, enter MLS, or return a covering save receipt.
 use super::governing_record;
-use super::header_signing::{ATTEMPT_BYTES, ATTEMPT_NAME, RAW_BYTES, RAW_NAME};
+use super::header_signing::{
+    ATTEMPT_BYTES, ATTEMPT_NAME, RAW_BYTES, RAW_NAME, WELCOME_ATTEMPT_NAME, WELCOME_RAW_NAME,
+};
 use super::outcome::OUTCOME_NAME;
 use super::sdk_entry::{GovernedAddSdkEntryData, ENTRY_BYTES, SDK_ENTRY_NAME};
 use super::welcome_intent;
@@ -40,7 +42,7 @@ pub(in crate::store) struct HeldGovernedAddFence {
     header_attempt_path: PathBuf,
     raw_header_path: PathBuf,
     governing_path: PathBuf,
-    welcome_intent_path: PathBuf,
+    welcome_paths: WelcomeControlPaths,
     original: Option<OpenedTextControl>,
     entry: Option<ObservedSdkEntry>,
     outcome: Option<outcome_read::ObservedOutcome>,
@@ -59,6 +61,20 @@ enum ObservedSdkEntry {
     Present(OpenedTextControl),
 }
 
+struct WelcomeControlPaths {
+    intent: PathBuf,
+    attempt: PathBuf,
+    raw: PathBuf,
+}
+
+impl WelcomeControlPaths {
+    fn require_absent(&self) -> Result<(), AppError> {
+        require_absent(&self.intent)?;
+        require_absent(&self.attempt)?;
+        require_absent(&self.raw)
+    }
+}
+
 /// Historical disk status for the exact reservation. Even ReservationOnly
 /// requires separate proofs of all downstream absences before disposal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,7 +83,7 @@ pub(in crate::store) enum GovernedAddRecoveryState {
     PossiblyEntered,
 }
 
-const FENCE_READ_BYTES: usize = 7 * MAX_TEXT_PATH
+const FENCE_READ_BYTES: usize = 9 * MAX_TEXT_PATH
     + 6 * FRAME_BYTES
     + 6 * ENTRY_BYTES
     + 6 * (ATTEMPT_BYTES + RAW_BYTES)
@@ -108,7 +124,11 @@ impl HeldGovernedAddFence {
         let header_attempt_path = fixed_child(target, ATTEMPT_NAME)?;
         let raw_header_path = fixed_child(target, RAW_NAME)?;
         let governing_path = fixed_child(target, governing_record::NAME)?;
-        let welcome_intent_path = fixed_child(target, welcome_intent::NAME)?;
+        let welcome_paths = WelcomeControlPaths {
+            intent: fixed_child(target, welcome_intent::NAME)?,
+            attempt: fixed_child(target, WELCOME_ATTEMPT_NAME)?,
+            raw: fixed_child(target, WELCOME_RAW_NAME)?,
+        };
         resources.require_bound_original_negative(store, source)?;
         Ok(Self {
             path,
@@ -117,7 +137,7 @@ impl HeldGovernedAddFence {
             header_attempt_path,
             raw_header_path,
             governing_path,
-            welcome_intent_path,
+            welcome_paths,
             original: None,
             entry: None,
             outcome: None,
@@ -242,7 +262,7 @@ impl HeldGovernedAddFence {
         require_absent(&self.header_attempt_path)?;
         require_absent(&self.raw_header_path)?;
         require_absent(&self.governing_path)?;
-        require_absent(&self.welcome_intent_path)
+        self.welcome_paths.require_absent()
     }
 }
 

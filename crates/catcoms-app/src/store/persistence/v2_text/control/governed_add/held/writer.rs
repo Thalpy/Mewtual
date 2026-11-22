@@ -1,6 +1,6 @@
-//! Warm exact-file writer for the governed reservation. The future Host must
-//! own the original quiescent member lane and prove the signed invite journal
-//! before calling it. No desktop, network or SDK stage invokes it yet.
+//! Warm exact-file writer for the governed reservation. The Host owns the
+//! original quiescent member lane and proves the signed invite journal before
+//! advancing the SDK outcome or the signing records.
 use super::super::outcome::{SealedGovernedAddOutcome, MAX_FRAME};
 use super::*;
 use crate::store::persistence::v2_text::head::TextPendingData;

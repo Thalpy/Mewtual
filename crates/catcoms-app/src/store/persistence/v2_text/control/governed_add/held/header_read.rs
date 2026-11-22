@@ -1,5 +1,5 @@
 //! Independent capture of the exact original Header attempt and signature.
-use super::super::header_signing::HeaderOutcomeCommitment;
+use super::super::header_signing::AddSigningParent;
 use super::super::outcome::header_signing_bytes;
 use super::*;
 
@@ -54,7 +54,7 @@ impl HeldGovernedAddFence {
         header.raw = read_stage(&self.raw_header_path, RAW_BYTES)?;
         if header.raw.is_none() {
             require_absent(&self.governing_path)?;
-            require_absent(&self.welcome_intent_path)?;
+            self.welcome_paths.require_absent()?;
         }
         guard.validate_source_only()?;
         header.complete_capture = true;
@@ -82,7 +82,7 @@ impl HeldGovernedAddFence {
             .filter(|header| header.complete_capture)
             .ok_or_else(refused)?;
         if header.state.is_none() {
-            let parent = HeaderOutcomeCommitment::from_outcome(outcome_frame)?;
+            let parent = AddSigningParent::from_outcome(outcome_frame)?;
             let key = Zeroizing::new(store.keys.db_key()?);
             let state = match (&header.attempt, &header.raw) {
                 (None, None) => GovernedAddHeaderRecoveryState::OutcomeOnly,
@@ -123,7 +123,7 @@ impl HeldGovernedAddFence {
         require_stage(&self.raw_header_path, header.raw.as_mut())?;
         if header.raw.is_none() {
             require_absent(&self.governing_path)?;
-            require_absent(&self.welcome_intent_path)?;
+            self.welcome_paths.require_absent()?;
         }
         let (target, directory, id) = guard.target_directory_data();
         crate::store::persistence::v2_genesis_activation::require_directory_name(

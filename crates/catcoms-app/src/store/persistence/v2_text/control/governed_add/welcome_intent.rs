@@ -9,6 +9,7 @@ const KEY_DOMAIN: &str = "catcoms/private-chat-text-governed-add-welcome-intent-
 const PARENT_DOMAIN: &str = "catcoms/private-chat-text-governed-add-welcome-intent-parent/v2";
 const VERSION: u16 = 2;
 const BASE: usize = 4 + TAG.len() + 2 + 36 + 4 + 40;
+pub(super) const MIN_BYTES: usize = BASE + 1;
 pub(super) const MAX_BYTES: usize = BASE + MAX_JOIN_BINDING_BYTES;
 
 fn parent(frame: &[u8]) -> Result<[u8; 32], AppError> {

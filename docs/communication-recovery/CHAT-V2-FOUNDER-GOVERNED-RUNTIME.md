@@ -228,7 +228,7 @@ then the SAME SDK outcome, unsigned preimage, raw Header, governing history and
 response before selecting head2. A decoder or namespace4 descriptor cannot
 mint `SavedGovernedAdd`. The immutable dependency graph is:
 
-`Outcome` → `HeaderAttempt` → `RawHeader` → governing record → `WelcomeIntent` → `RawWelcome`
+`Outcome` → `HeaderAttempt` → `RawHeader` → governing record → `WelcomeIntent` → `WelcomeAttempt` → `RawWelcome`
 → exact response → `Archive2` → `Head2`.
 
 The founder owner lends its exact cached RawHeader and RawWelcome signatures
@@ -251,8 +251,8 @@ Its decoder checks framing and lineage. The warm reservation writer retains
 that exact sealed frame for `text.add.outcome.v2`. It creates the file only
 once, checks the held file's prefix in bounded chunks, and covers the file and
 directory before rechecking the original Entry and Current. An orphan outcome
-blocks a reservation-only recovery classification. The native Host still has
-to invoke the writer before Header signing. An independent reader prepays its
+blocks a reservation-only recovery classification. The native Host covers
+this record before entering Header signing. An independent reader prepays its
 own bounded buffer, authenticates the exact Entry and Outcome outside Current,
 then checks the same named file or observed absence under fresh Current. Its
 result is historical data. Recovery must verify the governing record and restored
@@ -264,6 +264,14 @@ and the exact attempt file. The independent reader verifies the recovered
 signature over the original outcome's signing bytes with the current founder
 key. An attempt with no Raw remains possible entry. A later Raw invalidates
 an earlier absence observation. Neither state authorizes a reader to sign.
+
+The native Host covers `text.add.welcome-intent.v2` against the exact signed
+governing record and checks the original request, MLS Welcome and sealed
+routing transfer. `text.add.welcome-attempt.v2` binds that exact sealed intent
+with a dedicated signing domain. The Host verifies the cached native
+signature against the same intent and signer before covering
+`text.add.raw-welcome.v2` against the original attempt. Each advance rechecks
+the original Current. The response and Head2 still require separate coverage.
 
 `text.add.governing.v2` binds the exact Raw Header to the signed Admission
 and state image. The reader checks the existing public history encoding and
