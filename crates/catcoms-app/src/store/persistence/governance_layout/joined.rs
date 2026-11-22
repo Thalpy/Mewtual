@@ -51,7 +51,35 @@ pub(in crate::store) struct SelectedPinIndex {
     selected: OpenedArchiveObject,
     index: JoinedPinIndex,
     pending: Option<pending::SelectedPending>,
+    cold_catalog: Option<ColdPendingCatalog>,
     _fee: CatalogReadReservation,
+}
+
+/// The physical Current file selected while recovering the private Pending.
+/// Keep it beside that Pending after the transient constructor invoice ends.
+struct ColdPendingCatalog {
+    current: OpenedArchiveObject,
+    directory: GovernanceDirectoryCapture,
+    _fee: CatalogReadReservation,
+}
+
+impl ColdPendingCatalog {
+    fn require(&self, store: &ServerStore) -> Result<(), AppError> {
+        validate_directory(store, &self.directory)?;
+        absent(&fixed(store, false, governance::GOVERNANCE_SEED)?)?;
+        absent(&fixed(
+            store,
+            false,
+            critical_namespaces::Slot::Stage.name(),
+        )?)?;
+        let (file, raw) = &self.current;
+        exact_held(
+            &fixed(store, false, critical_namespaces::Slot::Current.name())?,
+            file,
+            session_id(file).map_err(io)?,
+            raw,
+        )
+    }
 }
 
 impl SelectedPinIndex {
@@ -74,6 +102,7 @@ impl SelectedPinIndex {
             selected,
             index,
             pending: None,
+            cold_catalog: None,
             _fee: fee,
         };
         value.require_file(store)?;
@@ -82,7 +111,11 @@ impl SelectedPinIndex {
 
     fn require(&self, store: &ServerStore) -> Result<(), AppError> {
         self.require_file(store)?;
-        pending::require_pending_names(store, self.pending.as_ref())
+        pending::require_pending_names(store, self.pending.as_ref())?;
+        if let Some(catalog) = &self.cold_catalog {
+            catalog.require(store)?;
+        }
+        Ok(())
     }
 
     fn require_file(&self, store: &ServerStore) -> Result<(), AppError> {
@@ -455,6 +488,21 @@ impl ServerStore {
             pending.finish_core()?;
         }
         selected.require(self)?;
+        if selected.index.pending.is_some() {
+            let policy = self.governance_layout_policy.as_ref().ok_or_else(denied)?;
+            let bytes = selected
+                .bytes
+                .capacity()
+                .checked_add(16384 + std::mem::size_of::<ColdPendingCatalog>())
+                .ok_or_else(denied)?;
+            let fee = policy.current.archive.pending.pool.try_reserve(bytes)?;
+            selected.index.cold_catalog = Some(ColdPendingCatalog {
+                current: (selected.current, selected.bytes),
+                directory: selected.directory,
+                _fee: fee,
+            });
+        }
+        selected.index.require(self)?;
         let mut index = self.joined_pin_index.lock().map_err(|_| denied())?;
         if index.is_some() {
             return Err(denied());

@@ -229,7 +229,8 @@ the physical files agree. It takes the original node's join facts and sets the
 joined fence against the actual own Add. The mounted runtime retains the Core
 selection and retired parent. A separate cold attachment can move the
 independently restored graph into a closed node, using its own original
-verified prefix and exact held pin and outcome files. It never re-enters
+verified prefix and held catalog, pin and outcome files. Equal-byte replacements
+of those files refuse, including after the closed node is attached. Cold attachment never re-enters
 Welcome or creates fresh join facts. Native registry installation, restoring
 the original native transport and ordinary-member save admission remain open.
 The joined storage owner can exchange the exact selected JoinRequest on an

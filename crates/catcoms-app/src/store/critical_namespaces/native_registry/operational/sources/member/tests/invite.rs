@@ -388,6 +388,18 @@ async fn native_governed_add_fixture(case: JoinCase) {
                 restored.complete_recovery(&negative).unwrap(),
                 (head, own, epoch)
             );
+            let current = join_dir.join(crate::store::critical_namespaces::Slot::Current.name());
+            let held_current = join_dir.join("original-cold-current");
+            let original_current = std::fs::read(&current).unwrap();
+            std::fs::rename(&current, &held_current).unwrap();
+            std::fs::write(&current, original_current).unwrap();
+            assert!(restored.complete_recovery(&negative).is_err());
+            std::fs::remove_file(&current).unwrap();
+            std::fs::rename(&held_current, &current).unwrap();
+            assert_eq!(
+                restored.complete_recovery(&negative).unwrap(),
+                (head, own, epoch)
+            );
             return;
         }
         let (joined_result, ()) = tokio::time::timeout(std::time::Duration::from_secs(8), async {
