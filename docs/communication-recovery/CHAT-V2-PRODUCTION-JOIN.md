@@ -233,7 +233,9 @@ joined fence against the actual own Add. The mounted runtime retains the Core
 selection and retired parent. A separate cold attachment can move the
 independently restored graph into a closed node, using its own original
 verified prefix and held catalog, pin and outcome files. Equal-byte replacements
-of those files refuse, including after the closed node is attached. Cold attachment never re-enters
+of those files refuse, including after the closed node is attached. A prefix
+refusal before attachment preserves the original transport, RNG and clock
+inputs so that the same owner can retry. Cold attachment never re-enters
 Welcome or creates fresh join facts. Native registry installation, restoring
 the original native transport and ordinary-member save admission remain open.
 Warm and recovered nodes can read the same original signed first governing

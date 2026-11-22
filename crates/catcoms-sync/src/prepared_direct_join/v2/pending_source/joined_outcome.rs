@@ -361,9 +361,7 @@ impl RecoveredV2JoinedOutcome {
     pub fn take_closed_recovered_node<T: MeshTransport, R: CryptoRngCore>(
         &mut self,
         prefix: &PreparedV2JoinedPrefix,
-        transport: T,
-        rng: R,
-        clock: Box<dyn Clock + Send>,
+        inputs: &mut Option<V2JoinedRuntimeInputs<T, R>>,
     ) -> Result<ClosedV2JoinedNode<T, R>, SyncError> {
         let original = self.prefix_origin.as_ref().ok_or(SyncError::JoinRejected)?;
         let graph = self.graph.as_ref().ok_or(SyncError::JoinRejected)?;
@@ -393,7 +391,8 @@ impl RecoveredV2JoinedOutcome {
                 epoch: self.epoch,
             },
         )?;
-        let graph = self.graph.take().ok_or(SyncError::JoinRejected)?;
+        let (transport, rng, clock) = inputs.take().ok_or(SyncError::JoinRejected)?;
+        let graph = self.graph.take().expect("checked original recovered graph");
         let routing = RoutingState {
             label: 0,
             secrets: vec![(0, graph.routing_secret)],

@@ -1,6 +1,8 @@
 //! Move the actual private Welcome into one closed joined node.
 use super::first_add_proof::SelectedJoinData;
 use super::*;
+
+pub type V2JoinedRuntimeInputs<T, R> = (T, R, Box<dyn Clock + Send>);
 use crate::owner_v2::{JoinFactsSlot, JoinedFenceNode, V2JoinFacts, V2JoinedSourceFence};
 use catcoms_replication::chat::{
     join_bindings::SignedWelcomeBindingData, owner_facts::OwnerFactId, owner_header::OwnerHeaderId,
@@ -85,9 +87,7 @@ impl PreparedV2JoinRequest {
     pub fn take_closed_warm_node<T: MeshTransport, R: CryptoRngCore>(
         &mut self,
         prefix: &PreparedV2JoinedPrefix,
-        transport: T,
-        rng: R,
-        clock: Box<dyn Clock + Send>,
+        inputs: &mut Option<V2JoinedRuntimeInputs<T, R>>,
     ) -> Result<ClosedV2JoinedNode<T, R>, SyncError> {
         let original = self
             .initial_prefix_origin
@@ -112,7 +112,8 @@ impl PreparedV2JoinRequest {
             },
         )?;
 
-        let graph = self.completed.take().ok_or(SyncError::JoinRejected)?;
+        let (transport, rng, clock) = inputs.take().ok_or(SyncError::JoinRejected)?;
+        let graph = self.completed.take().expect("checked original warm graph");
         let routing = RoutingState {
             label: 0,
             secrets: vec![(0, graph.routing_secret)],

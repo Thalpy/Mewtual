@@ -20,7 +20,7 @@ pub use first_add_proof::{
     PreparedV2JoinedPrefix, V2AdmissionStepData, V2FirstAddProofData, V2FirstJoinDeliveryData,
     MAX_V2_FIRST_ADD_PROOF_BYTES, MAX_V2_FIRST_JOIN_DELIVERY_BYTES,
 };
-pub use warm_runtime::ClosedV2JoinedNode;
+pub use warm_runtime::{ClosedV2JoinedNode, V2JoinedRuntimeInputs};
 pub use welcome::{
     CompletedV2JoinCandidate, V2JoinResponseData, V2JoinResponsePacketData,
     MAX_V2_JOIN_RESPONSE_PACKET_BYTES,

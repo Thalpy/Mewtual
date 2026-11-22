@@ -63,12 +63,10 @@ impl PreparedPinnedPending {
     >(
         &mut self,
         prefix: &catcoms_sync::PreparedV2JoinedPrefix,
-        transport: T,
-        rng: R,
-        clock: Box<dyn catcoms_rt::Clock + Send>,
+        inputs: &mut Option<catcoms_sync::V2JoinedRuntimeInputs<T, R>>,
     ) -> Result<catcoms_sync::ClosedV2JoinedNode<T, R>, AppError> {
         self.source
-            .take_closed_warm_node(prefix, transport, rng, clock)
+            .take_closed_warm_node(prefix, inputs)
             .map_err(|_| refused())
     }
 

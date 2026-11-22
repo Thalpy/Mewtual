@@ -372,38 +372,47 @@ fn v2_join_request_and_welcome_complete_with_actual_add() {
     let hub = catcoms_rt::Hub::new();
     let peer = |id| hub.join(catcoms_rt::PeerId::from_u64(id));
     let rng = || rand_chacha::ChaCha20Rng::seed_from_u64(108);
-    let clock = || Box::new(ManualClock::new(now));
+    let clock = || -> Box<dyn catcoms_rt::Clock + Send> { Box::new(ManualClock::new(now)) };
+    let mut warm_inputs = Some((peer(11), rng(), clock()));
     assert!(
         prepared
-            .take_closed_warm_node(&prefix, peer(11), rng(), clock())
+            .take_closed_warm_node(&prefix, &mut warm_inputs)
             .is_err(),
         "the independently restored prefix has the same bytes but no warm origin"
     );
+    assert!(warm_inputs.is_some());
     let joined_node = prepared
-        .take_closed_warm_node(&warm_prefix, peer(12), rng(), clock())
+        .take_closed_warm_node(&warm_prefix, &mut warm_inputs)
         .unwrap();
+    assert!(warm_inputs.is_none());
     assert_eq!(
         joined_node.selected_join_data().unwrap(),
         (header_id, prefix.own_admission_data(), 1)
     );
     assert!(!joined_node.was_recovered_data());
+    let mut unused = Some((peer(13), rng(), clock()));
     assert!(prepared
-        .take_closed_warm_node(&warm_prefix, peer(13), rng(), clock())
+        .take_closed_warm_node(&warm_prefix, &mut unused)
         .is_err());
+    assert!(unused.is_some());
+    let mut cold_inputs = Some((peer(14), rng(), clock()));
     assert!(recovered
-        .take_closed_recovered_node(&warm_prefix, peer(14), rng(), clock())
+        .take_closed_recovered_node(&warm_prefix, &mut cold_inputs)
         .is_err());
+    assert!(cold_inputs.is_some());
     let cold_node = recovered
-        .take_closed_recovered_node(&prefix, peer(15), rng(), clock())
+        .take_closed_recovered_node(&prefix, &mut cold_inputs)
         .unwrap();
+    assert!(cold_inputs.is_none());
     assert!(cold_node.was_recovered_data());
     assert_eq!(
         cold_node.selected_join_data().unwrap(),
         joined_node.selected_join_data().unwrap()
     );
     assert!(recovered
-        .take_closed_recovered_node(&prefix, peer(16), rng(), clock())
+        .take_closed_recovered_node(&prefix, &mut unused)
         .is_err());
+    assert!(unused.is_some());
 }
 
 #[test]

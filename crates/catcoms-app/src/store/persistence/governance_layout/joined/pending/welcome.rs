@@ -177,8 +177,7 @@ impl WarmWelcome {
             .as_ref()
             .filter(|selected| selected.retired.is_some())
             .ok_or_else(denied)?;
-        let (transport, rng, clock) = inputs.take().ok_or_else(denied)?;
-        pending.take_closed_warm_node(&selection.core, transport, rng, clock)
+        pending.take_closed_warm_node(&selection.core, inputs)
     }
 }
 
@@ -380,10 +379,9 @@ impl RecoveredWelcome {
             .as_mut()
             .filter(|outcome| outcome.selection.retired.is_some())
             .ok_or_else(denied)?;
-        let (transport, rng, clock) = inputs.take().ok_or_else(denied)?;
         outcome
             .graph
-            .take_closed_recovered_node(&outcome.selection.core, transport, rng, clock)
+            .take_closed_recovered_node(&outcome.selection.core, inputs)
             .map_err(|_| denied())
     }
 

@@ -1,10 +1,10 @@
 //! Same-file first declaration claim and stage for the joined-pin catalog.
 use super::*;
 
-pub(in crate::store) type JoinedRuntimeInputs<T, R> = (T, R, Box<dyn catcoms_rt::Clock + Send>);
 use crate::store::persistence::native_registry::lifecycle::governed::{
     NativeGovernanceInventory, INVENTORY_FEE,
 };
+pub(in crate::store) use catcoms_sync::V2JoinedRuntimeInputs as JoinedRuntimeInputs;
 use critical_namespaces::{
     archive_current_namespace_codec::CurrentLayoutData,
     joined_pin::declaration::{AuthenticatedSeed, DeclarationLeaves, PreparedDeclaration},
