@@ -514,10 +514,6 @@ impl JoinedPendingIo {
             .as_mut()
             .ok_or_else(denied)?
             .cover_outcome(store)?;
-        self.welcome
-            .as_mut()
-            .ok_or_else(denied)?
-            .prepare_core(store, &mut self.prepared)?;
         self.request_data(store)?;
         let welcome = self.welcome.as_mut().ok_or_else(denied)?;
         welcome.require_outcome(store)?;

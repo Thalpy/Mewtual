@@ -217,9 +217,12 @@ insertion. The original warm owner can select the insert and release the
 exact signed request bytes while keeping the private package. Cold opening
 can complete the same insertion and verify the original request. The warm
 owner verifies the delivery before covering possible Welcome entry, then
-seals and covers the exact successful outcome. Cold opening independently
-recovers that outcome. Both the warm successful graph and the independent
-cold graph prepare Core's initial selected-history candidate from the same
+seals and covers the exact successful outcome. New outcome records also retain
+the node page for the original Core candidate under the same Entry commitment.
+Core selection follows coverage. Cold opening reconstructs that candidate from
+the exact original signed delivery and verifies every retained node hash before
+selecting. Version-one outcomes retain their original read path. Both the warm
+successful graph and the independent cold graph prepare Core's initial selected-history candidate from the same
 signed delivery. Each advances only after the mounted storage rechecks the
 original pin and outcome, and retains the retired parent for fork evidence.
 A possible entry with no outcome stays

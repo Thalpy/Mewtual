@@ -80,18 +80,24 @@ impl PreparedPinnedPending {
 
     pub(in crate::store) fn finish_delivery(
         &mut self,
-        key: &[u8; 32],
         delivery: &[u8],
-        rng: &mut impl CryptoRngCore,
         negative: Option<&catcoms_rt::RequestCancellation>,
-    ) -> Result<&catcoms_sync::SealedV2JoinedOutcome, AppError> {
+    ) -> Result<(), AppError> {
         match negative {
             Some(negative) => self
                 .source
                 .finish_first_join_delivery_cancellable(delivery, negative),
             None => self.source.finish_first_join_delivery(delivery),
         }
-        .map_err(|_| refused())?;
+        .map(|_| ())
+        .map_err(|_| refused())
+    }
+
+    pub(in crate::store) fn seal_outcome(
+        &mut self,
+        key: &[u8; 32],
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<&catcoms_sync::SealedV2JoinedOutcome, AppError> {
         self.source
             .seal_joined_outcome(key, self.context, rng)
             .map_err(|_| refused())

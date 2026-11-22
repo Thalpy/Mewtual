@@ -6,9 +6,10 @@ use catcoms_mls::persist::{
     TextCurrentSdkRestoreAdmission, TextCurrentSdkRestoreLimits,
 };
 use catcoms_replication::chat::{
-    owner_state::transition::REPLAY_MATH_PRIVATE_INVOICE, ProjectionGroup, ProjectionGroupView,
-    V2GeneralPrefixVerifier, V2GeneralRetiredData, V2HostSelectionExpectation, V2OriginNegative,
-    V2ProjectionOrigin,
+    cold_selected_history::{encode_selected_history_node_page, SelectedHistoryNodePage},
+    owner_state::transition::REPLAY_MATH_PRIVATE_INVOICE,
+    ProjectionGroup, ProjectionGroupView, V2GeneralPrefixVerifier, V2GeneralRetiredData,
+    V2HostSelectionExpectation, V2OriginNegative, V2ProjectionOrigin,
 };
 use catcoms_sync::{PreparedV2JoinedPrefix, RecoveredV2JoinedOutcome, V2PendingJoinContextData};
 use critical_namespaces::joined_pin::welcome as codec;
@@ -88,8 +89,37 @@ impl WarmWelcome {
         self.require_entry(store)?;
         if self.outcome.is_none() {
             let context = required.context_data();
-            let result = required.finish_delivery(key, &self.delivery, rng, negative)?;
-            self.outcome = Some(codec::seal_outcome(key, context, &self.entry, result, rng)?);
+            required.finish_delivery(&self.delivery, negative)?;
+            if negative.is_some_and(catcoms_rt::RequestCancellation::is_cancelled) {
+                return Err(denied());
+            }
+            if self.selection.is_none() {
+                // Sync prepares the provisional prefix only beside its own
+                // sealed SDK graph. The outer record covers both originals.
+                required.seal_outcome(key, rng)?;
+                let group = required.group_data()?;
+                self.selection = Some(Box::new(JoinedCore::prepare(
+                    store,
+                    &group,
+                    |view, origin| required.prepare_initial_prefix(&self.delivery, view, origin),
+                )?));
+            }
+            let append = self
+                .selection
+                .as_ref()
+                .and_then(|selection| selection.core.pending_history_data())
+                .ok_or_else(denied)?;
+            let history =
+                encode_selected_history_node_page(&context.vault, append).map_err(|_| denied())?;
+            let result = required.seal_outcome(key, rng)?;
+            self.outcome = Some(codec::seal_outcome(
+                key,
+                context,
+                &self.entry,
+                result,
+                &history,
+                rng,
+            )?);
         }
         Ok(())
     }
@@ -109,23 +139,6 @@ impl WarmWelcome {
             self.held_outcome.as_ref().ok_or_else(denied)?,
             self.outcome.as_ref().ok_or_else(denied)?,
         )
-    }
-
-    pub(super) fn prepare_core(
-        &mut self,
-        store: &ServerStore,
-        pending: &mut PreparedPinnedPending,
-    ) -> Result<(), AppError> {
-        if self.selection.is_none() {
-            self.require_outcome(store)?;
-            let group = pending.group_data()?;
-            self.selection = Some(Box::new(JoinedCore::prepare(
-                store,
-                &group,
-                |view, origin| pending.prepare_initial_prefix(&self.delivery, view, origin),
-            )?));
-        }
-        Ok(())
     }
 
     pub(super) fn finish_core(&mut self) -> Result<(), AppError> {
@@ -270,6 +283,7 @@ impl ClosedOutcome {
         file: OpenedArchiveObject,
         mut graph: RecoveredV2JoinedOutcome,
         delivery: &[u8],
+        history: Option<(&[u8; 32], &[u8])>,
     ) -> Result<Self, AppError> {
         let group = graph.group_data().to_vec();
         let expected = V2HostSelectionExpectation::from_trusted_host(
@@ -284,6 +298,12 @@ impl ClosedOutcome {
                 expected,
             ))
         })?;
+        if let Some((vault, page)) = history {
+            let append = selection.core.pending_history_data().ok_or_else(denied)?;
+            SelectedHistoryNodePage::decode(page)
+                .and_then(|page| page.verify_exact_append_data(vault, append))
+                .map_err(|_| denied())?;
+        }
         Ok(Self {
             file,
             graph,
@@ -372,7 +392,7 @@ pub(super) fn recover(
         .validate_first_join_delivery_data(&delivery)
         .map_err(|_| denied())?;
     let outcome = if let Some(outcome) = read(&outcome_path, codec::OUTCOME_FRAME)? {
-        let sealed = codec::open_outcome(key, context, &entry.1, &outcome.1)?;
+        let opened = codec::open_outcome(key, context, &entry.1, &outcome.1)?;
         let restore = TextCurrentAddLimits::governed_text_v2();
         let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
         let fee = policy
@@ -388,10 +408,18 @@ pub(super) fn recover(
             },
             _fee: fee,
         })?;
-        let recovered = RecoveredV2JoinedOutcome::open(&sealed, key, request, &delivery, admission)
-            .map_err(|_| denied())?;
+        let recovered =
+            RecoveredV2JoinedOutcome::open(&opened.sealed, key, request, &delivery, admission)
+                .map_err(|_| denied())?;
         Some(Box::new(ClosedOutcome::prepare(
-            store, outcome, recovered, &delivery,
+            store,
+            outcome,
+            recovered,
+            &delivery,
+            opened
+                .history
+                .as_ref()
+                .map(|history| (&context.vault, history.as_slice())),
         )?))
     } else {
         None
