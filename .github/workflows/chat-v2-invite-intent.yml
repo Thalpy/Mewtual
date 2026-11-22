@@ -270,6 +270,9 @@ jobs:
       - name: Check that final outbox admission retains the original prepared append
         if: inputs.scope == 'joined-member'
         run: python .github/scripts/check-chat-v2-invite-intent.py member-outbox-admission
+      - name: Check the original founder member-save path through the shared driver
+        if: inputs.scope == 'joined-member'
+        run: python .github/scripts/check-chat-v2-invite-intent.py founder-member-save
       - name: Check Chat V2 request and response bounds before allocation
         if: inputs.scope == 'joined-storage'
         run: python .github/scripts/check-chat-v2-invite-intent.py joined-wire

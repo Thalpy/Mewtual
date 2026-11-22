@@ -14,8 +14,11 @@ use crate::store::persistence::governance_layout::joined::{
     AcceptedFirstJoin, AcceptedJoinTransport, JoinedPendingIo, JoinedRegistrationDependency,
 };
 use crate::store::persistence::v2_member_outbox::MemberOutboxContextId;
+use crate::store::persistence::{JoinedMemberLane, JoinedMemberSource};
 use crate::store::{
-    NativeTextInvitePacketData, NativeTextJoinedRegistrationData, NativeTextJoinedRegistryRowData,
+    MemberSaveJob, MemberSaveJobReport, MemberSaveNativeAdmission, NativeTextInvitePacketData,
+    NativeTextJoinedRegistrationData, NativeTextJoinedRegistryRowData, V2MemberSaveOutcome,
+    V2MemberSaveRefusal, V2MemberSignRequest,
 };
 use catcoms_replication::chat::join_bindings::GenesisAnchorBindingData;
 use catcoms_replication::chat::owner_facts::OwnerFactId;
@@ -399,6 +402,7 @@ impl NativeTextJoinedDelivery {
 }
 
 pub(super) struct MountedNode<R: CryptoRngCore> {
+    member: Option<JoinedMemberLane>,
     node: Option<ClosedV2JoinedNode<catcoms_net::MeshService, R>>,
     registration: Option<Arc<JoinedRegistrationDependency>>,
     recovered: Option<NativeTextJoinedRegistrationData>,
@@ -451,6 +455,7 @@ impl<R: CryptoRngCore> NativeTextSources<catcoms_net::MeshService, R> {
         }
         self.joined_tcp = transport;
         *slot = Some(MountedNode {
+            member: None,
             node: node.take(),
             registration: None,
             recovered: Some(receipt),
@@ -537,6 +542,7 @@ impl<R: CryptoRngCore> NativeTextJoinedInstallation<R> {
             // with the mounted owner after the one-time move.
             if node.is_some() {
                 *slot = Some(MountedNode {
+                    member: None,
                     node,
                     registration: None,
                     recovered: None,
@@ -575,6 +581,24 @@ impl<R: CryptoRngCore> Drop for NativeTextJoinedInstallation<R> {
 pub struct NativeTextJoinedSelectionPreparation<R: CryptoRngCore> {
     mounted: Weak<MountedJoin<R>>,
     original: NativeTextJoinedRequestPreparation,
+}
+
+/// One actual joined append coupled to the original counted native Source work.
+pub struct NativeTextJoinedMemberSaveJob<R: CryptoRngCore> {
+    job: MemberSaveJob,
+    _original: NativeTextJoinedMemberFinalPreparation<R>,
+}
+
+pub struct NativeTextJoinedMemberFinalPreparation<R: CryptoRngCore> {
+    selection: NativeTextJoinedRowSelection,
+    token: [u8; 32],
+    original: NativeTextJoinedSelectionPreparation<R>,
+}
+
+impl<R: CryptoRngCore> NativeTextJoinedMemberSaveJob<R> {
+    pub fn run(self) -> MemberSaveJobReport {
+        self.job.run()
+    }
 }
 
 /// Paid original row association issued by the covered mounted runtime.
@@ -693,6 +717,12 @@ impl<R: CryptoRngCore> NativeTextSources<catcoms_net::MeshService, R> {
 }
 
 impl<R: CryptoRngCore> MountedNode<R> {
+    fn matches_selection(&self, selection: &NativeTextJoinedRowSelection) -> bool {
+        self.selection
+            .as_ref()
+            .is_some_and(|original| original.same_original(selection))
+    }
+
     fn observe_selected(
         &self,
         metadata: &MetadataWork,
@@ -741,6 +771,200 @@ impl<R: CryptoRngCore> MountedNode<R> {
 }
 
 impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
+    /// Prepare or recover the exact ordinary member action under its original
+    /// covered joined files. Only the warm Source can enter the member key.
+    pub fn prepare_member_save(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        request: V2MemberSignRequest<'_>,
+        negative: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<V2MemberSaveOutcome, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        let mut ends = NativeChatKeyEnds::new();
+        self.original
+            .require_current(negative)
+            .map_err(|_| Refusal::Cancelled)?;
+        if !selection.is_current_cached() {
+            return Err(Refusal::Stale);
+        }
+        let original = self
+            .original
+            .pending
+            .upgrade()
+            .ok_or(Refusal::Unavailable)?;
+        let pending = original.state.try_lock().map_err(|_| Refusal::Busy)?;
+        let mounted = self.mounted.upgrade().ok_or(Refusal::Unavailable)?;
+        let mut slot = mounted.try_lock().map_err(|_| Refusal::Busy)?;
+        let runtime = slot
+            .as_mut()
+            .filter(|runtime| runtime.matches_selection(selection))
+            .ok_or(Refusal::Stale)?;
+        let metadata = self.original.work.as_ref().ok_or(Refusal::Unavailable)?;
+        if let Some(receipt) = runtime.recovered {
+            let saved = metadata
+                .lookup_saved_joined_member(receipt, None, selection.original.row, &request, rng)
+                .map_err(|_| Refusal::Failed)?;
+            self.original
+                .require_current(negative)
+                .map_err(|_| Refusal::Cancelled)?;
+            return saved
+                .map(|(action, ordinal)| V2MemberSaveOutcome::Saved { action, ordinal })
+                .ok_or(Refusal::Unavailable);
+        }
+        let held = pending.io.as_ref().ok_or(Refusal::Unavailable)?;
+        let owner = pending.owner.as_ref().ok_or(Refusal::Unavailable)?;
+        let native = owner.observe();
+        let mut cut = owner
+            .prepare_cut(
+                &self.original.command.ui.command,
+                NativeChatKeyPurpose::MemberAction,
+            )
+            .map_err(|_| Refusal::Unavailable)?;
+        let MountedNode {
+            member,
+            node,
+            registration,
+            ..
+        } = runtime;
+        let proof = registration.as_deref().ok_or(Refusal::Unavailable)?;
+        let node = node.as_mut().ok_or(Refusal::Unavailable)?;
+        let result = metadata.with_registered_warm_member(
+            proof,
+            selection.original.row,
+            |layout, store| {
+                let (prefix, view) = held
+                    .borrow_warm_member_prefix(store)
+                    .map_err(|_| Refusal::Unavailable)?;
+                if member.is_none() {
+                    *member = Some(
+                        JoinedMemberLane::new(store, selection.clone())
+                            .map_err(|_| Refusal::Busy)?,
+                    );
+                }
+                self.original
+                    .require_current(negative)
+                    .map_err(|_| Refusal::Cancelled)?;
+                let source = JoinedMemberSource {
+                    node,
+                    prefix,
+                    view,
+                    native: &native,
+                    cut: &mut cut,
+                    ends: &mut ends,
+                };
+                member
+                    .as_mut()
+                    .ok_or(Refusal::Unavailable)?
+                    .prepare_member_save(layout, request, source, proof.data(), negative, rng)
+            },
+        )?;
+        self.original
+            .require_current(negative)
+            .map_err(|_| Refusal::Cancelled)?;
+        if !selection.is_current_cached() {
+            return Err(Refusal::Stale);
+        }
+        Ok(result)
+    }
+
+    /// Reprove the exact registered row and its held physical files outside
+    /// the native commit guard, using the second original capture.
+    pub fn finish_member_admission(
+        self,
+        selection: NativeTextJoinedRowSelection,
+        token: [u8; 32],
+        negative: &RequestCancellation,
+    ) -> Result<NativeTextJoinedMemberFinalPreparation<R>, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        self.original
+            .require_current(negative)
+            .map_err(|_| Refusal::Cancelled)?;
+        {
+            if !selection.is_current_cached() {
+                return Err(Refusal::Stale);
+            }
+            let mounted = self.mounted.upgrade().ok_or(Refusal::Unavailable)?;
+            let slot = mounted.try_lock().map_err(|_| Refusal::Busy)?;
+            let runtime = slot
+                .as_ref()
+                .filter(|runtime| runtime.matches_selection(&selection))
+                .ok_or(Refusal::Stale)?;
+            let proof = runtime
+                .registration
+                .as_deref()
+                .filter(|_| runtime.member.is_some())
+                .ok_or(Refusal::Stale)?;
+            let metadata = self.original.work.as_ref().ok_or(Refusal::Unavailable)?;
+            if runtime
+                .observe_selected(metadata, proof.data())
+                .map_err(|_| Refusal::Unavailable)?
+                .0
+                != selection.original.row
+            {
+                return Err(Refusal::Stale);
+            }
+        }
+        self.original
+            .require_current(negative)
+            .map_err(|_| Refusal::Cancelled)?;
+        Ok(NativeTextJoinedMemberFinalPreparation {
+            selection,
+            token,
+            original: self,
+        })
+    }
+}
+
+impl<R: CryptoRngCore> NativeTextJoinedMemberFinalPreparation<R> {
+    /// Cached final edge. A refusal leaves the original preparation in its
+    /// outer slot so native commit guards release before any Source work drops.
+    pub fn try_admit_member_save(
+        original: &mut Option<Self>,
+        negative: &RequestCancellation,
+        native: MemberSaveNativeAdmission,
+    ) -> Result<NativeTextJoinedMemberSaveJob<R>, (MemberSaveNativeAdmission, V2MemberSaveRefusal)>
+    {
+        use V2MemberSaveRefusal as Refusal;
+        let Some(final_cut) = original.as_ref() else {
+            return Err((native, Refusal::Unavailable));
+        };
+        let preparation = &final_cut.original;
+        let selection = &final_cut.selection;
+        if preparation.original.require_current(negative).is_err() || !selection.is_current_cached()
+        {
+            return Err((native, Refusal::Cancelled));
+        }
+        let Some(mounted) = preparation.mounted.upgrade() else {
+            return Err((native, Refusal::Unavailable));
+        };
+        let Ok(slot) = mounted.try_lock() else {
+            return Err((native, Refusal::Busy));
+        };
+        let Some(runtime) = slot
+            .as_ref()
+            .filter(|runtime| runtime.matches_selection(selection))
+        else {
+            return Err((native, Refusal::Stale));
+        };
+        let (Some(member), Some(node), Some(metadata)) = (
+            runtime.member.as_ref(),
+            runtime.node.as_ref(),
+            preparation.original.work.as_ref(),
+        ) else {
+            return Err((native, Refusal::Stale));
+        };
+        let job = metadata.with_joined_member_final(native, |layout, native| {
+            member.admit_member_save(layout, selection, node, final_cut.token, native)
+        })?;
+        Ok(NativeTextJoinedMemberSaveJob {
+            job,
+            _original: original.take().expect("checked original joined work"),
+        })
+    }
+}
+
+impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
     /// Observe the one original parked slot before choosing a retry phase.
     /// Actual contact and registry writes still verify their exact inputs.
     pub fn has_parked_runtime(self, negative: &RequestCancellation) -> Result<bool, AppError> {
@@ -773,12 +997,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         let slot = mounted.try_lock().map_err(|_| refused())?;
         let runtime = slot
             .as_ref()
-            .filter(|runtime| {
-                runtime
-                    .selection
-                    .as_ref()
-                    .is_some_and(|original| original.same_original(selection))
-            })
+            .filter(|runtime| runtime.matches_selection(selection))
             .ok_or_else(refused)?;
         let data = runtime
             .recovered

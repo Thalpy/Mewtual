@@ -51,6 +51,7 @@ pub use operational::{
 pub use operational::{
     NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,
 };
+pub use operational::{NativeTextJoinedMemberFinalPreparation, NativeTextJoinedMemberSaveJob};
 pub use preparation::{
     NativeRegistryInstallation, NativeRegistryPolicy, NativeRegistryPreparationPolicy,
     NativeRegistryStore, PreparedNativeRegistryMigration,

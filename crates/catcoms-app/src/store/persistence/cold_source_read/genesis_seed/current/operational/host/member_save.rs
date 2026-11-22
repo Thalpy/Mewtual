@@ -39,7 +39,9 @@
 //! Not here: transport (reseal, publication, checkpoints) and the native producer. Root
 //! fixtures that build [`MemberSaveNativeAdmission`] from a test guard establish no native
 //! authorization; that needs the native consumer's checked factory and its own barrier tests.
-use super::member::V2MemberSignRequest;
+use super::member::{
+    FinishMode, JoinedMemberLane, JoinedMemberSource, V2MemberLane, V2MemberSignRequest,
+};
 use super::projection::V2TextProjectionNegative;
 use super::{FounderAccess, PreparedV2TextHost};
 use crate::store::critical_namespaces::archive_current_namespace_codec::CurrentLayoutData;
@@ -58,10 +60,12 @@ use crate::store::persistence::v2_member_outbox::{
 };
 use crate::store::persistence::V2TextOwnerRef;
 use crate::store::ServerStore;
+use crate::store::{NativeTextJoinedRegistrationData, NativeTextJoinedRowSelection};
 use crate::AppError;
 use catcoms_replication::chat::{ActionId, ActionSpec};
 use catcoms_rt::{CryptoRngCore, MeshTransport, RequestCancellation};
 use catcoms_storage::VaultPhysicalWorkLease;
+use catcoms_sync::ClosedV2JoinedNode;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
@@ -268,6 +272,28 @@ fn ensure_owner<'s>(
     Ok(owner)
 }
 
+enum MemberSavePath<'a, T: MeshTransport, R: CryptoRngCore> {
+    Founder(&'a mut PreparedV2TextHost<T, R>, FounderAccess<'a>),
+    Joined(
+        &'a mut JoinedMemberLane,
+        JoinedMemberSource<'a, T, R>,
+        NativeTextJoinedRegistrationData,
+    ),
+}
+
+enum MemberSaveFinal<'a, 'key, T: MeshTransport, R: CryptoRngCore> {
+    Founder {
+        lane: &'a V2MemberLane,
+        origin: &'a super::FounderOrigin,
+        access: &'a FounderAccess<'key>,
+    },
+    Joined {
+        lane: &'a JoinedMemberLane,
+        row: &'a NativeTextJoinedRowSelection,
+        node: &'a ClosedV2JoinedNode<T, R>,
+    },
+}
+
 impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
     /// Check the original lane and its actual mounted outbox, without settling
     /// or retiring another request. The caller owns the whole warm RuntimeLoan.
@@ -313,9 +339,56 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         rng: &mut impl CryptoRngCore,
         access: FounderAccess<'_>,
     ) -> Result<V2MemberSaveOutcome, V2MemberSaveRefusal> {
-        access
-            .require(&self.origin)
-            .map_err(|_| V2MemberSaveRefusal::Unavailable)?;
+        MemberSavePath::Founder(self, access).prepare(layout, request, negative, rng)
+    }
+}
+
+impl JoinedMemberLane {
+    pub(in crate::store) fn prepare_member_save<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        request: V2MemberSignRequest<'_>,
+        source: JoinedMemberSource<'_, T, R>,
+        original: NativeTextJoinedRegistrationData,
+        negative: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<V2MemberSaveOutcome, V2MemberSaveRefusal> {
+        MemberSavePath::Joined(self, source, original).prepare(layout, request, negative, rng)
+    }
+
+    pub(in crate::store) fn admit_member_save<T: MeshTransport, R: CryptoRngCore>(
+        &self,
+        layout: &V2CurrentLayoutStore,
+        row: &NativeTextJoinedRowSelection,
+        node: &ClosedV2JoinedNode<T, R>,
+        token: [u8; 32],
+        native: MemberSaveNativeAdmission,
+    ) -> Result<MemberSaveJob, (MemberSaveNativeAdmission, V2MemberSaveRefusal)> {
+        if self.require_original_row(row).is_err() {
+            return Err((native, V2MemberSaveRefusal::Unavailable));
+        }
+        MemberSaveFinal::Joined {
+            lane: self,
+            row,
+            node,
+        }
+        .admit(layout, token, native)
+    }
+}
+
+impl<T: MeshTransport, R: CryptoRngCore> MemberSavePath<'_, T, R> {
+    fn prepare(
+        mut self,
+        layout: &V2CurrentLayoutStore,
+        request: V2MemberSignRequest<'_>,
+        negative: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<V2MemberSaveOutcome, V2MemberSaveRefusal> {
+        if let Self::Founder(host, access) = &self {
+            access
+                .require(&host.origin)
+                .map_err(|_| V2MemberSaveRefusal::Unavailable)?;
+        }
         if negative.is_cancelled() {
             return Err(V2MemberSaveRefusal::Cancelled);
         }
@@ -330,16 +403,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         let lookup_fee = mount
             .pay(MEMBER_OUTBOX_LOOKUP_FEE)
             .map_err(|_| V2MemberSaveRefusal::Busy)?;
-        let (context, signer) = {
-            let owner = self
-                .owner
-                .borrow_current()
-                .map_err(|_| V2MemberSaveRefusal::Unavailable)?;
-            let layout_data = mount.capability().current_layout_data();
-            let context = member_outbox_context(&owner, layout_data)
-                .map_err(|_| V2MemberSaveRefusal::Unavailable)?;
-            (context, owner.source().data().context.spec_data().signer)
-        };
+        let (context, signer) = self.outbox_context(mount.capability().current_layout_data())?;
         let id = context.id();
         let token = MemberRequestToken::from_bytes(request.token);
         // The caller's exact request, canonicalised and digested ONCE (funded above). Every
@@ -459,29 +523,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         // 3. Bind an existing lane BEFORE signing, so a binding refusal can never strand a
         // fresh signature; a lane this call creates has no binding and is bound right after.
         // Then author and sign (a retry reuses the cached original) and take it.
-        if let Some(lane) = self.member.as_deref_mut() {
-            lane.bind_outbox_context(id)
-                .map_err(|_| V2MemberSaveRefusal::Stale)?;
-        }
-        self.retry_sign_member_request_with_access(layout, request, access)
-            .map_err(|_| V2MemberSaveRefusal::Signing)?;
-        self.member
-            .as_deref_mut()
-            .ok_or(V2MemberSaveRefusal::Signing)?
-            .bind_outbox_context(id)
-            .map_err(|_| V2MemberSaveRefusal::Stale)?;
-        let original = match self.take_member_signed_original(*token.as_bytes()) {
-            Ok(original) => original,
-            Err(_) => {
-                // Lent, yet this Store holds no custody for it and the exact lookup just
-                // proved Absent: the in-process original is gone. Retire the token rather
-                // than sign again; a new attempt needs a new token.
-                if self.forget_lent_member_request(*token.as_bytes()).is_ok() {
-                    return Err(V2MemberSaveRefusal::Unresolved);
-                }
-                return Err(V2MemberSaveRefusal::Signing);
-            }
-        };
+        let original = self.sign_and_lend(&env, request)?;
 
         // 4. The Store's independently paid slot owns the known original BEFORE any
         // fallible preseal payment. Host/lane replacement must not lose it and re-sign.
@@ -518,6 +560,81 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         }
     }
 
+    fn outbox_context(
+        &self,
+        layout: CurrentLayoutData,
+    ) -> Result<(MemberOutboxContextData, [u8; 32]), V2MemberSaveRefusal> {
+        match self {
+            Self::Founder(host, _) => {
+                let owner = host
+                    .owner
+                    .borrow_current()
+                    .map_err(|_| V2MemberSaveRefusal::Unavailable)?;
+                let context = member_outbox_context(&owner, layout)
+                    .map_err(|_| V2MemberSaveRefusal::Unavailable)?;
+                Ok((context, owner.source().data().context.spec_data().signer))
+            }
+            Self::Joined(lane, source, original) => {
+                if original.context.vault != layout.vault
+                    || original.context.root != layout.root
+                    || source
+                        .node
+                        .member_signer_data()
+                        .map_err(|_| V2MemberSaveRefusal::Unavailable)?
+                        != original.signer
+                {
+                    return Err(V2MemberSaveRefusal::Unavailable);
+                }
+                let context = original
+                    .member_outbox_context_data()
+                    .map_err(|_| V2MemberSaveRefusal::Unavailable)?;
+                if context.id() != lane.outbox_context() {
+                    return Err(V2MemberSaveRefusal::Stale);
+                }
+                Ok((context, original.signer))
+            }
+        }
+    }
+
+    fn sign_and_lend(
+        &mut self,
+        env: &SaveEnvironment<'_>,
+        request: V2MemberSignRequest<'_>,
+    ) -> Result<MemberSignedOriginal, V2MemberSaveRefusal> {
+        let token = request.token;
+        match self {
+            Self::Founder(host, access) => {
+                if let Some(lane) = host.member.as_deref_mut() {
+                    lane.bind_outbox_context(env.id)
+                        .map_err(|_| V2MemberSaveRefusal::Stale)?;
+                }
+                host.retry_sign_member_request_with_access(env.layout, request, access.reborrow())
+                    .map_err(|_| V2MemberSaveRefusal::Signing)?;
+                host.member
+                    .as_deref_mut()
+                    .ok_or(V2MemberSaveRefusal::Signing)?
+                    .bind_outbox_context(env.id)
+                    .map_err(|_| V2MemberSaveRefusal::Stale)?;
+                match host.take_member_signed_original(token) {
+                    Ok(original) => Ok(original),
+                    Err(_) if host.forget_lent_member_request(token).is_ok() => {
+                        Err(V2MemberSaveRefusal::Unresolved)
+                    }
+                    Err(_) => Err(V2MemberSaveRefusal::Signing),
+                }
+            }
+            Self::Joined(lane, source, _) => {
+                lane.retry_request(env.store, &request, source)
+                    .map_err(|_| V2MemberSaveRefusal::Signing)?;
+                lane.requests
+                    .take_signed(token)
+                    .map_err(|_| V2MemberSaveRefusal::Unresolved)
+            }
+        }
+    }
+}
+
+impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
     /// PHASE 2: the final edge, under the native UI commit guard. No IO, no payment wait, no
     /// new allocation, no blocking lock (every acquisition is fail-fast). On success the job
     /// owns the commit, the lane's save-source end and `native`; move it into `spawn_blocking`
@@ -541,6 +658,25 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         if access.require(&self.origin).is_err() {
             return Err((native, V2MemberSaveRefusal::Unavailable));
         }
+        let Some(lane) = self.member.as_deref() else {
+            return Err((native, V2MemberSaveRefusal::Stale));
+        };
+        MemberSaveFinal::<T, R>::Founder {
+            lane,
+            origin: &self.origin,
+            access: &access,
+        }
+        .admit(layout, token, native)
+    }
+}
+
+impl<T: MeshTransport, R: CryptoRngCore> MemberSaveFinal<'_, '_, T, R> {
+    fn admit(
+        self,
+        layout: &V2CurrentLayoutStore,
+        token: [u8; 32],
+        native: MemberSaveNativeAdmission,
+    ) -> Result<MemberSaveJob, (MemberSaveNativeAdmission, V2MemberSaveRefusal)> {
         let token = MemberRequestToken::from_bytes(token);
         let Ok(store) = layout.cached_store() else {
             return Err((native, V2MemberSaveRefusal::Unavailable));
@@ -548,10 +684,11 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         // No lane/context conclusively means this host has no phase-1 work. Check that
         // before the lazy mount lookup: its None also covers contention, and would otherwise
         // misreport a never-prepared request as Busy solely because no mount was installed.
-        let Some(lane) = self.member.as_deref() else {
-            return Err((native, V2MemberSaveRefusal::Stale));
+        let context = match &self {
+            Self::Founder { lane, .. } => lane.outbox_context(),
+            Self::Joined { lane, .. } => Some(lane.outbox_context()),
         };
-        let Some(context) = lane.outbox_context() else {
+        let Some(context) = context else {
             return Err((native, V2MemberSaveRefusal::Stale));
         };
         let mount = match store.installed_member_outbox_mount() {
@@ -585,12 +722,16 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
             _ => return Err((native, V2MemberSaveRefusal::Stale)),
         };
         // The lane's own serialized save-source lifecycle: cached negatives, no IO.
-        let Ok(source) = lane.admit_save_source(
-            facts.context,
-            *token.as_bytes(),
-            facts.action,
-            facts.admission,
-        ) else {
+        let source = match &self {
+            Self::Founder { lane, .. } => lane.admit_save_source(
+                facts.context,
+                *token.as_bytes(),
+                facts.action,
+                facts.admission,
+            ),
+            Self::Joined { lane, node, .. } => lane.admit_save_source(facts, node),
+        };
+        let Ok(source) = source else {
             return Err((native, V2MemberSaveRefusal::Stale));
         };
         if mount.require_live(store).is_err() {
@@ -603,7 +744,11 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         // The first mode/source check preceded cell and source acquisition.
         // Repeat its pinned, allocation-free native negatives at this actual
         // edge; a live legacy cancellation object cannot replace that binding.
-        if access.require(&self.origin).is_err() {
+        let current = match self {
+            Self::Founder { origin, access, .. } => access.require(origin),
+            Self::Joined { lane, row, .. } => lane.require_original_row(row),
+        };
+        if current.is_err() {
             drop(guard);
             drop(source);
             return Err((native, V2MemberSaveRefusal::Unavailable));
@@ -617,7 +762,9 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         }
         MemberSaveJob::admit_from_cell(&cell, guard, facts, lease, source, native)
     }
+}
 
+impl<T: MeshTransport, R: CryptoRngCore> MemberSavePath<'_, T, R> {
     /// Settle the cell's earlier custody without signing. Custody stays IN the cell across
     /// every lane and IO call made here, so a panic in one of them loses nothing; an original
     /// leaves the cell only for the pure DATA sealing of a re-preseal. Returns a receipt
@@ -814,15 +961,26 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         token: MemberRequestToken,
         original: &MemberSignedOriginal,
     ) -> Result<(), V2MemberSaveRefusal> {
-        let lane = self
-            .ensure_member_lane(env.layout)
-            .map_err(|_| V2MemberSaveRefusal::Unavailable)?;
-        lane.require_live_source()
-            .map_err(|_| V2MemberSaveRefusal::Unavailable)?;
-        lane.bind_outbox_context(env.id)
-            .map_err(|_| V2MemberSaveRefusal::Stale)?;
-        lane.adopt_retained_original(env.store, *token.as_bytes(), original, env.signer)
-            .map_err(|_| V2MemberSaveRefusal::Busy)
+        match self {
+            Self::Founder(host, _) => {
+                let lane = host
+                    .ensure_member_lane(env.layout)
+                    .map_err(|_| V2MemberSaveRefusal::Unavailable)?;
+                lane.require_live_source()
+                    .map_err(|_| V2MemberSaveRefusal::Unavailable)?;
+                lane.bind_outbox_context(env.id)
+                    .map_err(|_| V2MemberSaveRefusal::Stale)?;
+                lane.adopt_retained_original(env.store, *token.as_bytes(), original, env.signer)
+                    .map_err(|_| V2MemberSaveRefusal::Busy)
+            }
+            Self::Joined(lane, _, _) => {
+                if lane.outbox_context() != env.id {
+                    return Err(V2MemberSaveRefusal::Stale);
+                }
+                lane.require_retained_original(*token.as_bytes(), original)
+                    .map_err(|_| V2MemberSaveRefusal::Unresolved)
+            }
+        }
     }
 
     /// Tell the lane (if it holds this token) that the stored entry `action` is the request's
@@ -833,19 +991,17 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         action: ActionId,
         spec: Option<&ActionSpec>,
     ) -> Result<(), V2MemberSaveRefusal> {
-        match self.member.as_deref_mut() {
-            Some(lane) => lane
-                .reconcile_saved(*token.as_bytes(), action, spec)
-                .map(|_| ())
-                .map_err(|_| V2MemberSaveRefusal::Stale),
-            None => Ok(()),
-        }
-    }
-
-    /// Put an untouched original back into the lane after a refusal that wrote nothing.
-    fn restore_after_refusal(&mut self, token: MemberRequestToken, original: MemberSignedOriginal) {
-        // A failed restore leaves the lane Lent; the next attempt's exact lookup decides.
-        drop(self.restore_member_signed_original(*token.as_bytes(), original));
+        let result = match self {
+            Self::Founder(host, _) => match host.member.as_deref_mut() {
+                Some(lane) => lane.reconcile_saved(*token.as_bytes(), action, spec),
+                None => Ok(None),
+            },
+            Self::Joined(lane, _, _) => {
+                lane.requests
+                    .reconcile_saved(*token.as_bytes(), action, spec)
+            }
+        };
+        result.map(|_| ()).map_err(|_| V2MemberSaveRefusal::Stale)
     }
 
     /// The `prepare_append` refusal table. The exact original is kept for every retryable
@@ -863,8 +1019,15 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                 // request): the stored entry is the only one that may be published.
                 drop(original);
                 state.custody = Some(MemberOriginalCustody::Saved(**receipt));
-                self.finish_member_request_saved(*token.as_bytes(), receipt.action)
-                    .map_err(|_| V2MemberSaveRefusal::Stale)?;
+                match self {
+                    Self::Founder(host, _) => {
+                        host.finish_member_request_saved(*token.as_bytes(), receipt.action)
+                    }
+                    Self::Joined(lane, _, _) => lane
+                        .requests
+                        .finish(*token.as_bytes(), FinishMode::Saved(receipt.action)),
+                }
+                .map_err(|_| V2MemberSaveRefusal::Stale)?;
                 Ok(V2MemberSaveOutcome::Saved {
                     action: receipt.action,
                     ordinal: receipt.ordinal,
@@ -874,10 +1037,13 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                 MemberOutboxRefusal::TokenConflict(_)
                 | MemberOutboxRefusal::Foreign
                 | MemberOutboxRefusal::IndexExhausted,
-            ) => {
+            ) if matches!(self, Self::Founder(..)) => {
+                let Self::Founder(host, _) = self else {
+                    unreachable!("checked founder request")
+                };
                 // Never saveable here and it never left this process: retire the request.
-                self.restore_after_refusal(token, original);
-                drop(self.abandon_member_request(*token.as_bytes()));
+                drop(host.restore_member_signed_original(*token.as_bytes(), original));
+                drop(host.abandon_member_request(*token.as_bytes()));
                 Err(refusal_of(error))
             }
             _ => {
@@ -1094,9 +1260,26 @@ struct SaveSourceBody {
     completed: AtomicU64,
     // The member domain's own paid negative: an end keeps that original funding alive, never
     // a Host, Store or SDK backlink.
-    negative: V2TextProjectionNegative,
+    negative: SaveSourceNegative,
     // LAST: this body's own independent payment.
     _fee: CatalogReadReservation,
+}
+
+enum SaveSourceNegative {
+    Founder(V2TextProjectionNegative),
+    Joined(NativeTextJoinedRowSelection),
+}
+
+impl SaveSourceNegative {
+    fn validate_negative(&self) -> Result<(), AppError> {
+        match self {
+            Self::Founder(original) => original.validate_negative(),
+            Self::Joined(original) => original
+                .is_current_cached()
+                .then_some(())
+                .ok_or_else(refused),
+        }
+    }
 }
 
 /// The member lane's save-source lifecycle. Owned by the lane: `close` is part of the lane's
@@ -1116,6 +1299,20 @@ impl V2MemberSaveSource {
     pub(super) fn prepare(
         pool: &CriticalCatalogReadPool,
         negative: V2TextProjectionNegative,
+    ) -> Result<Self, AppError> {
+        Self::from_negative(pool, SaveSourceNegative::Founder(negative))
+    }
+
+    pub(super) fn prepare_joined(
+        pool: &CriticalCatalogReadPool,
+        row: NativeTextJoinedRowSelection,
+    ) -> Result<Self, AppError> {
+        Self::from_negative(pool, SaveSourceNegative::Joined(row))
+    }
+
+    fn from_negative(
+        pool: &CriticalCatalogReadPool,
+        negative: SaveSourceNegative,
     ) -> Result<Self, AppError> {
         let fee = pool.try_reserve(V2_MEMBER_SAVE_SOURCE_BYTES)?;
         fee.validate(pool, V2_MEMBER_SAVE_SOURCE_BYTES)?;

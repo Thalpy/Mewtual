@@ -53,7 +53,7 @@ use crate::store::persistence::v2_member_outbox::{
     canonical_member_parents, MemberOutboxContextId, MemberSignedOriginal,
 };
 use crate::store::persistence::v2_text::{PreparedV2TextParentCapture, V2TextFounderAnchorData};
-use crate::store::ServerStore;
+use crate::store::{NativeTextJoinedRowSelection, ServerStore};
 use catcoms_replication::chat::owner_facts::OwnerFactId;
 use catcoms_replication::chat::owner_state::transition::REPLAY_MATH_PRIVATE_INVOICE;
 use catcoms_replication::chat::{
@@ -62,8 +62,12 @@ use catcoms_replication::chat::{
     V2AuthenticatedAdmission, V2GeneralPrefixVerifier, V2OrdinaryDependency, V2OrdinarySigningPlan,
     MAX_ACTION_BYTES, MAX_GROUP_ID_BYTES, MAX_PARENTS, MAX_TEXT_BYTES,
 };
-use catcoms_rt::{CryptoRngCore, MeshTransport};
+use catcoms_rt::{
+    CryptoRngCore, MeshTransport, NativeChatKeyEnds, NativeChatPreparedKeyCut,
+    NativeChatSourceObservation,
+};
 use catcoms_sync::owner_v2::V2MemberDraftInputs;
+use catcoms_sync::{ClosedV2JoinedNode, PreparedV2JoinedPrefix};
 use std::collections::VecDeque;
 
 /// Bounded live channel views per lane. Refuse beyond it; a view with a live Plan is never
@@ -424,10 +428,211 @@ pub(super) struct V2MemberLane {
 
 /// Request custody for a single ordinary-member source. It retains the exact
 /// signed original or its loan and never obtains a key, a new Source or IO.
-struct MemberRequests {
+pub(super) struct MemberRequests {
     request: Option<Box<PendingMemberRequest>>,
     finished: VecDeque<[u8; 32]>,
     retired_unsaved: Vec<[u8; 32]>,
+}
+
+/// The joined member uses the same request and save-source custody as the
+/// founder. Its verifier and SDK stay in their original selected owners.
+pub(in crate::store) struct JoinedMemberLane {
+    pub(super) requests: MemberRequests,
+    channels: Vec<MemberChannel>,
+    save_source: V2MemberSaveSource,
+    row: NativeTextJoinedRowSelection,
+    fee: CatalogReadReservation,
+}
+
+/// A warm node loan and its checked selected Core prefix. Root retains the
+/// surrounding physical and native admission through work on this borrow.
+pub(in crate::store) struct JoinedMemberSource<'a, T: MeshTransport, R: CryptoRngCore> {
+    pub(in crate::store) node: &'a mut ClosedV2JoinedNode<T, R>,
+    pub(in crate::store) prefix: &'a PreparedV2JoinedPrefix,
+    pub(in crate::store) view: &'a catcoms_replication::chat::ProjectionGroupView,
+    pub(in crate::store) native: &'a NativeChatSourceObservation,
+    pub(in crate::store) cut: &'a mut NativeChatPreparedKeyCut,
+    pub(in crate::store) ends: &'a mut NativeChatKeyEnds,
+}
+
+impl JoinedMemberLane {
+    pub(in crate::store) fn new(
+        store: &ServerStore,
+        row: NativeTextJoinedRowSelection,
+    ) -> Result<Self, AppError> {
+        if !row.is_current_cached() {
+            return Err(refused());
+        }
+        let pool = &store
+            .archive_bootstrap_policy
+            .as_ref()
+            .ok_or_else(refused)?
+            .pending
+            .pool;
+        let fee = pool.try_reserve(V2_MEMBER_LANE_BYTES)?;
+        fee.validate(pool, V2_MEMBER_LANE_BYTES)?;
+        let save_source = V2MemberSaveSource::prepare_joined(pool, row.clone())?;
+        Ok(Self {
+            requests: MemberRequests::new(),
+            channels: Vec::with_capacity(MAX_MEMBER_CHANNELS),
+            save_source,
+            row,
+            fee,
+        })
+    }
+
+    pub(super) fn outbox_context(&self) -> MemberOutboxContextId {
+        MemberOutboxContextId::from_bytes(self.row.member_outbox_context_id_data())
+    }
+
+    pub(super) fn require_original_row(
+        &self,
+        row: &NativeTextJoinedRowSelection,
+    ) -> Result<(), AppError> {
+        if !self.row.same_original(row) || !self.row.is_current_cached() {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
+    pub(super) fn require_retained_original(
+        &self,
+        token: [u8; 32],
+        original: &MemberSignedOriginal,
+    ) -> Result<(), AppError> {
+        if !self.row.is_current_cached() {
+            return Err(refused());
+        }
+        self.requests
+            .require_lent(token, original.action().id(), original.admission())?;
+        Ok(())
+    }
+
+    pub(super) fn admit_save_source<T: MeshTransport, R: CryptoRngCore>(
+        &self,
+        facts: crate::store::persistence::v2_member_outbox::MemberAppendAdmissionFacts,
+        node: &ClosedV2JoinedNode<T, R>,
+    ) -> Result<V2MemberSaveSourceEnd, AppError> {
+        if facts.context != self.outbox_context() || !self.row.is_current_cached() {
+            return Err(refused());
+        }
+        let pending =
+            self.requests
+                .require_lent(*facts.token.as_bytes(), facts.action, facts.admission)?;
+        let plan = pending.plan.as_ref().ok_or_else(refused)?;
+        let _fence = node.admit_member_save(plan).map_err(|_| refused())?;
+        self.save_source.issue()
+    }
+
+    pub(super) fn retry_request<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        store: &ServerStore,
+        request: &V2MemberSignRequest<'_>,
+        source: &mut JoinedMemberSource<'_, T, R>,
+    ) -> Result<(), AppError> {
+        let pool = &store
+            .archive_bootstrap_policy
+            .as_ref()
+            .ok_or_else(refused)?
+            .pending
+            .pool;
+        self.fee.validate(pool, V2_MEMBER_LANE_BYTES)?;
+        if !self.row.is_current_cached() {
+            return Err(refused());
+        }
+        if self.requests.retry_completed(request)? {
+            return Ok(());
+        }
+        self.requests.ensure_pending(store, request)?;
+        let pending = self.requests.request.as_deref_mut().ok_or_else(refused)?;
+        pending.validate_accounts(store)?;
+        let verifier = source
+            .prefix
+            .selected_member_verifier()
+            .map_err(|_| refused())?;
+        let own = verifier
+            .admission(source.prefix.own_admission_data())
+            .map_err(|_| refused())?;
+        let group = &source.prefix.initial_profile_data().spec().group;
+        if pending.draft.is_none() && pending.inputs.drawn_data().is_none() {
+            source
+                .node
+                .draw_member_draft_inputs(&mut pending.inputs)
+                .map_err(|_| refused())?;
+        }
+        if pending.draft.is_none() {
+            let signer = source.node.member_signer_data().map_err(|_| refused())?;
+            pending.prepare_draft(group, signer, &own)?;
+        }
+        if pending.plan.is_none() {
+            let channel = pending.channel;
+            let index = if let Some(index) = self
+                .channels
+                .iter()
+                .position(|view| view.channel == channel)
+            {
+                index
+            } else {
+                if self.channels.len() >= MAX_MEMBER_CHANNELS {
+                    return Err(refused());
+                }
+                let realm = Realm::new(group, channel).map_err(|_| refused())?;
+                let mut ledger = ChatLedger::new(
+                    realm,
+                    LedgerLimits {
+                        max_actions: 1,
+                        max_action_bytes: MAX_ACTION_BYTES,
+                    },
+                )
+                .map_err(|_| refused())?;
+                let mut view = ledger
+                    .begin_projection_view_in(source.view)
+                    .map_err(|_| refused())?;
+                if !view.try_ready() {
+                    return Err(refused());
+                }
+                self.channels.push(MemberChannel {
+                    view,
+                    _ledger: ledger,
+                    channel,
+                });
+                self.channels.len() - 1
+            };
+            pending.prepare_plan(
+                verifier,
+                &own,
+                request.dependencies,
+                &self.channels[index].view,
+            )?;
+        }
+        let mut signed = Ok(());
+        if !pending.has_cached_raw() {
+            let PendingMemberRequest {
+                inputs,
+                draft,
+                plan,
+                ..
+            } = pending;
+            signed = source
+                .node
+                .sign_member_action_native(
+                    inputs,
+                    draft.as_ref().ok_or_else(refused)?,
+                    plan.as_mut().ok_or_else(refused)?,
+                    source.native,
+                    source.cut,
+                    source.ends,
+                )
+                .map(drop)
+                .map_err(|_| refused());
+        }
+        pending.complete_cached();
+        signed?;
+        if matches!(pending.signed, SignedState::Pending) {
+            return Err(refused());
+        }
+        Ok(())
+    }
 }
 
 impl V2MemberLane {
@@ -937,7 +1142,7 @@ impl MemberRequests {
         Ok(pending)
     }
 
-    fn reconcile_saved(
+    pub(super) fn reconcile_saved(
         &mut self,
         token: [u8; 32],
         saved: ActionId,
@@ -963,7 +1168,10 @@ impl MemberRequests {
         self.finish(token, FinishMode::SavedHit(saved)).map(Some)
     }
 
-    fn take_signed(&mut self, token: [u8; 32]) -> Result<MemberSignedOriginal, AppError> {
+    pub(super) fn take_signed(
+        &mut self,
+        token: [u8; 32],
+    ) -> Result<MemberSignedOriginal, AppError> {
         let pending = self
             .request
             .as_deref_mut()
@@ -988,7 +1196,7 @@ impl MemberRequests {
         clippy::result_large_err,
         reason = "A refused restore returns the same signed original and its payment instead of allocating or destroying it."
     )]
-    fn restore_signed(
+    pub(super) fn restore_signed(
         &mut self,
         token: [u8; 32],
         value: MemberSignedOriginal,
@@ -1025,7 +1233,7 @@ impl MemberRequests {
     /// Retire the request and its fee. Unsaved negatives are permanent for this lane;
     /// saved tokens rely on exact durable lookup once their positive cache entry expires.
     /// Returns, for `Saved`, whether the outbox's saved original is the one this lane lent.
-    fn finish(&mut self, token: [u8; 32], mode: FinishMode) -> Result<bool, AppError> {
+    pub(super) fn finish(&mut self, token: [u8; 32], mode: FinishMode) -> Result<bool, AppError> {
         let pending = self
             .request
             .as_deref_mut()
@@ -1065,7 +1273,7 @@ impl MemberRequests {
 
 /// How a request leaves the lane. Never serialized.
 #[derive(Clone, Copy)]
-enum FinishMode {
+pub(super) enum FinishMode {
     /// The outbox reported SavedLocal/AlreadySaved; the receipt's ActionId.
     Saved(ActionId),
     /// An exact authoritative outbox hit for this token (any lane state); the stored ActionId.

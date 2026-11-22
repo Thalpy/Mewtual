@@ -89,6 +89,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
         self.node.draw_ordinary_draft_inputs(&instance, inputs)
     }
 
+    pub fn member_signer_data(&self) -> Result<[u8; 32], V2MemberSignRefusal> {
+        self.selected_join_data()
+            .map_err(|_| V2MemberSignRefusal::Source)?;
+        self.node
+            .ordinary_member_signer_data(&self.node.registry_instance())
+    }
+
     /// Sign using this warm native joiner's original device and Source. The
     /// caller must hold the mounted prefix/source custody and keep its native
     /// cut and ends outside the enclosing writers. No historical graph can

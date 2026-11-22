@@ -28,6 +28,7 @@ pub use sources::{
     NativeTextCreationPreparation, NativeTextCreationProgress, NativeTextCreationRefusal,
     NativeTextCreationRequest, NativeTextCreationSettings, NativeTextInvitePublication,
     NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,
+    NativeTextJoinedMemberFinalPreparation, NativeTextJoinedMemberSaveJob,
     NativeTextJoinedRequestPreparation, NativeTextJoinedRowSelection,
     NativeTextJoinedSelectionPreparation, NativeTextMemberAdmissionFailure, NativeTextMemberBudget,
     NativeTextMemberFinalPreparation, NativeTextMemberHistoryItem, NativeTextMemberHistoryPage,

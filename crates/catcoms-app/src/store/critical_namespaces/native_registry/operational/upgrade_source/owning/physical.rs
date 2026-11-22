@@ -1095,6 +1095,76 @@ pub(in crate::store::critical_namespaces::native_registry) struct JoinedConnecti
 }
 
 impl MetadataWork {
+    pub(in crate::store::critical_namespaces::native_registry) fn with_registered_warm_member<T>(
+        &self,
+        warm: &crate::store::persistence::governance_layout::joined::JoinedRegistrationDependency,
+        row: crate::store::NativeTextJoinedRegistryRowData,
+        run: impl FnOnce(
+            &V2CurrentLayoutStore,
+            &ServerStore,
+        ) -> Result<T, crate::store::V2MemberSaveRefusal>,
+    ) -> Result<T, crate::store::V2MemberSaveRefusal> {
+        use crate::store::V2MemberSaveRefusal as Refusal;
+        let guard = self.physical.cell.try_lock().map_err(|_| Refusal::Busy)?;
+        guard.require_idle().map_err(|_| Refusal::Busy)?;
+        self.require_joined_store()
+            .map_err(|_| Refusal::Unavailable)?;
+        let layout = self.physical.current().map_err(|_| Refusal::Unavailable)?;
+        let store = layout.checked_store().map_err(|_| Refusal::Unavailable)?;
+        let require_original = || {
+            if self
+                .registered_joined_row_in(store, warm.data(), Some(warm))
+                .map_err(|_| Refusal::Unavailable)?
+                .0
+                != row
+            {
+                return Err(Refusal::Stale);
+            }
+            Ok(())
+        };
+        require_original()?;
+        let result = run(layout, store)?;
+        require_original()?;
+        Ok(result)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn with_joined_member_final(
+        &self,
+        native: crate::store::MemberSaveNativeAdmission,
+        admit: impl FnOnce(
+            &V2CurrentLayoutStore,
+            crate::store::MemberSaveNativeAdmission,
+        ) -> Result<
+            crate::store::MemberSaveJob,
+            (
+                crate::store::MemberSaveNativeAdmission,
+                crate::store::V2MemberSaveRefusal,
+            ),
+        >,
+    ) -> Result<
+        crate::store::MemberSaveJob,
+        (
+            crate::store::MemberSaveNativeAdmission,
+            crate::store::V2MemberSaveRefusal,
+        ),
+    > {
+        use crate::store::V2MemberSaveRefusal as Refusal;
+        let Ok(guard) = self.physical.cell.try_lock() else {
+            return Err((native, Refusal::Busy));
+        };
+        if guard.require_idle().is_err()
+            || !self.physical.handler.uses_joined_pin_layout()
+            || self.physical.handler.require_idle_cached().is_err()
+            || !self.is_live_cached()
+        {
+            return Err((native, Refusal::Unavailable));
+        }
+        let Ok(layout) = self.physical.current() else {
+            return Err((native, Refusal::Unavailable));
+        };
+        admit(layout, native)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn observe_registered_joined_row(
         &self,
         data: crate::store::NativeTextJoinedRegistrationData,

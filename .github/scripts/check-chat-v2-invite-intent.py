@@ -42,6 +42,7 @@ COHORTS = {
     "mounted-join-request": ("catcoms-app", "mounted_join_request_", 2),
     "joined-registry-codec": ("catcoms-app", "native_birth_discriminant_preserves_all_existing_encodings_and_uses_four", 1),
     "member-outbox-admission": ("catcoms-app", "admission_must_name_the_exact_prepared_facts_and_returns_everything_when_refused", 1),
+    "founder-member-save": ("catcoms-app", "native_runtime_member_prepare_uses_actual_native_signer_and_exact_retry_never_resigns", 1),
     "selected-history": ("catcoms-replication", "selected_history_archive_page_", 2),
     "add-source-close": ("catcoms-sync", "governed_add_whole_source_retirement_", 1),
     "add-ui-lock": ("catcoms-sync", "governed_add_ui_retirement_", 1),

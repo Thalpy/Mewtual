@@ -98,6 +98,9 @@ pub use critical_namespaces::{
 pub use critical_namespaces::{
     NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,
 };
+pub use critical_namespaces::{
+    NativeTextJoinedMemberFinalPreparation, NativeTextJoinedMemberSaveJob,
+};
 pub(crate) use mounted::LegacyStoreCustody;
 pub use mounted::{MountedLeaseRefusal, MountedLeaseRefusalKind, MountedVault};
 pub use native_text_invite::{
@@ -613,9 +616,9 @@ mod persistence {
     #[cfg(target_os = "linux")]
     mod exact_inventory_linux;
     pub(in crate::store) use cold_source_read::{
-        OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
-        PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
-        PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis,
+        JoinedMemberLane, JoinedMemberSource, OriginalV2TextResidentObservation,
+        OriginalV2UnsignedPlanObservation, PreparedV2NextUnsignedAppend,
+        PreparedV2TextResidentProjection, PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis,
     };
     mod current_group;
     mod current_layout;

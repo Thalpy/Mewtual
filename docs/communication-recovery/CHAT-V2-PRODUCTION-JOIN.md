@@ -257,7 +257,7 @@ before selection. A cold opener proves the same registered facts before
 recovering a staged row or consuming an already selected row. The gated
 desktop Join command publishes that row from the same mounted Source. A retry
 after registration observes that original row without dialing or entering
-Welcome again. Ordinary joined-member saves still need their own Source lane.
+Welcome again. The warm joined row can take the ordinary member save path.
 The explicit cold native storage owner can reopen that selected row with a TCP
 actor built from its same covered seed and port. It attaches the independently
 restored private graph after matching its receipt and governing replay. The
@@ -390,7 +390,7 @@ The closed node retains its actual Core Admission from the selected prefix.
 Its final save fence admits a plan only when that plan belongs to the original
 Admission and its original Core group and channel remain live. Warm and cold
 plans can have equal action and Admission IDs and still belong to different
-incarnations. The native writer still needs to use this fence when issuing the
+incarnations. The native joined writer uses this fence when issuing the
 save-source end for its exact prepared outbox action.
 
 The mounted joined row derives the existing member outbox context from its
@@ -404,8 +404,10 @@ and preserves the original files.
 The warm joined node can draw and sign an ordinary action through the original
 native Joiner Source. Its signing cut requires the ordinary member purpose and
 retains the one result in the original Core plan. An independently reopened
-graph carries no warm native key issuer. The native save driver still needs to
-retain the action and issue its save-source end under the same joined fence.
+graph carries no warm native key issuer. The native save driver retains the
+action in the shared outbox and issues its save-source end under the same
+joined fence. The desktop can recover an exact saved request after restart.
+Fresh ordinary authoring after restart still requires a restored native Source.
 
 The actual joined fence orders every transition/removal against final issuance.
 An admission that wins retains its original end through IO; removal that wins

@@ -2,7 +2,9 @@
 //! encrypted local IO. A local save does not establish transport or receipt.
 use super::*;
 use catcoms_app::store::{
-    MemberSaveJobReport, MemberSaveNativeAdmission, NativeTextMemberFinalPreparation,
+    MemberSaveJobReport, MemberSaveNativeAdmission, NativeTextJoinedMemberFinalPreparation,
+    NativeTextJoinedMemberSaveJob, NativeTextJoinedRowSelection,
+    NativeTextJoinedSelectionPreparation, NativeTextMemberFinalPreparation,
     NativeTextMemberPreparation, NativeTextMemberSaveJob, NativeUiInvocationMetadata,
     V2MemberSaveOutcome, V2MemberSaveRefusal, V2MemberSignRequest,
 };
@@ -10,9 +12,36 @@ use catcoms_replication::chat::Body;
 use tauri::ipc::InvokeResponseBody;
 use tokio::sync::OwnedMutexGuard;
 
-type Preparation = NativeTextMemberPreparation<catcoms_net::MeshService, OsCryptoRng>;
-type FinalPreparation = NativeTextMemberFinalPreparation<catcoms_net::MeshService, OsCryptoRng>;
-type SaveJob = NativeTextMemberSaveJob<catcoms_net::MeshService, OsCryptoRng>;
+type FounderPreparation = NativeTextMemberPreparation<catcoms_net::MeshService, OsCryptoRng>;
+type FounderFinal = NativeTextMemberFinalPreparation<catcoms_net::MeshService, OsCryptoRng>;
+type FounderJob = NativeTextMemberSaveJob<catcoms_net::MeshService, OsCryptoRng>;
+
+enum Preparation {
+    Founder(FounderPreparation),
+    Joined(
+        NativeTextJoinedSelectionPreparation<OsCryptoRng>,
+        NativeTextJoinedRowSelection,
+    ),
+}
+
+enum FinalPreparation {
+    Founder(FounderFinal),
+    Joined(Option<NativeTextJoinedMemberFinalPreparation<OsCryptoRng>>),
+}
+
+enum SaveJob {
+    Founder(FounderJob),
+    Joined(NativeTextJoinedMemberSaveJob<OsCryptoRng>),
+}
+
+impl SaveJob {
+    fn run(self) -> MemberSaveJobReport {
+        match self {
+            Self::Founder(job) => job.run(),
+            Self::Joined(job) => job.run(),
+        }
+    }
+}
 const BUSY: &str = "Chat is busy. Retry with the same message.";
 const STALE: &str = "The chat session changed. Retry with the same message.";
 const TEXT_LIMIT: usize = 8 * 1024;
@@ -232,10 +261,15 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
 
 async fn capture(state: &AppState, invocation: &Invocation) -> Result<Preparation, String> {
     let policy = state.native_text.sources.policy();
-    let mut budget = Some(policy.prepare_member().map_err(|_| BUSY)?);
+    let mut budget = if invocation.selection.founder().is_some() {
+        Some(policy.prepare_member().map_err(|_| BUSY)?)
+    } else {
+        None
+    };
     let mut ui =
         Some(founding::ui_capture(state, invocation.generation, &invocation.target).await?);
-    let mut output = None;
+    let mut founder = None;
+    let mut joined = None;
     let result = {
         let _commit = require_ui_session_generation(state, invocation.generation).await?;
         let store = state.store.lock().await;
@@ -256,17 +290,43 @@ async fn capture(state: &AppState, invocation: &Invocation) -> Result<Preparatio
             {
                 return Err(STALE);
             }
-            state.native_text.sources.capture_member(
-                &store,
-                &mut ui,
-                &invocation.selection,
-                &mut budget,
-                &mut output,
-            )
+            match &invocation.selection {
+                server_table::NativeSelection::Founder(_) => {
+                    state.native_text.sources.capture_member(
+                        &store,
+                        &mut ui,
+                        &invocation.selection,
+                        &mut budget,
+                        &mut founder,
+                    )
+                }
+                server_table::NativeSelection::Joined(selection) => state
+                    .native_text
+                    .sources
+                    .capture_join(&store, |sources, vault| {
+                        if !selection.is_current_cached()
+                            || !selection.is_from_original_vault_cached(vault)
+                        {
+                            return Err(STALE);
+                        }
+                        let command = vault
+                            .bind_native_source_command(&mut ui)
+                            .map_err(|_| STALE)?;
+                        joined =
+                            Some((sources.capture_joined_selection(command), selection.clone()));
+                        Ok(())
+                    }),
+            }
         })()
     };
     result.map_err(str::to_owned)?;
-    Ok(output.take().unwrap())
+    if let Some(original) = founder {
+        Ok(Preparation::Founder(original))
+    } else {
+        joined
+            .map(|(original, row)| Preparation::Joined(original, row))
+            .ok_or_else(|| STALE.to_owned())
+    }
 }
 
 /// Fee/permit tail survives actual blocking execution even if the async/IPC
@@ -310,16 +370,21 @@ impl PrepareWork<Preparation> {
             text: self.text.value,
             reply_to: None,
         };
-        self.preparation.finish()?.prepare_member_save(
-            V2MemberSignRequest {
-                token: self.token,
-                channel: self.channel,
-                body: &body,
-                parents: &[],
-                dependencies: &[],
-            },
-            &self.scope,
-        )
+        let request = V2MemberSignRequest {
+            token: self.token,
+            channel: self.channel,
+            body: &body,
+            parents: &[],
+            dependencies: &[],
+        };
+        match self.preparation {
+            Preparation::Founder(original) => {
+                original.finish()?.prepare_member_save(request, &self.scope)
+            }
+            Preparation::Joined(original, row) => {
+                original.prepare_member_save(&row, request, &self.scope, &mut OsCryptoRng)
+            }
+        }
     }
 }
 
@@ -366,18 +431,23 @@ struct Attempt {
     _payment: Arc<Payment>,
 }
 struct Admitted {
-    job: Option<
-        Result<
-            SaveJob,
-            Box<
-                catcoms_app::store::NativeTextMemberAdmissionFailure<
-                    catcoms_net::MeshService,
-                    OsCryptoRng,
-                >,
+    job: Option<Result<SaveJob, SaveAdmissionRefusal>>,
+    _payment: Arc<Payment>,
+}
+enum SaveAdmissionRefusal {
+    Founder(
+        Box<
+            catcoms_app::store::NativeTextMemberAdmissionFailure<
+                catcoms_net::MeshService,
+                OsCryptoRng,
             >,
         >,
-    >,
-    _payment: Arc<Payment>,
+    ),
+    Joined {
+        reason: V2MemberSaveRefusal,
+        _native: MemberSaveNativeAdmission,
+        _original: Option<NativeTextJoinedMemberFinalPreparation<OsCryptoRng>>,
+    },
 }
 fn admit(
     state: &AppState,
@@ -437,7 +507,30 @@ fn admit(
             attempt.custody.take().unwrap(),
             invocation.scope.clone(),
         );
-        admitted.job = Some(attempt.preparation.take().unwrap().try_admit(native));
+        admitted.job = Some(
+            if let Some(FinalPreparation::Joined(original)) = attempt.preparation.as_mut() {
+                match NativeTextJoinedMemberFinalPreparation::try_admit_member_save(
+                    original,
+                    &invocation.scope,
+                    native,
+                ) {
+                    Ok(job) => Ok(SaveJob::Joined(job)),
+                    Err((native, reason)) => Err(SaveAdmissionRefusal::Joined {
+                        reason,
+                        _native: native,
+                        _original: original.take(),
+                    }),
+                }
+            } else {
+                let Some(FinalPreparation::Founder(founder)) = attempt.preparation.take() else {
+                    unreachable!("checked founder final preparation")
+                };
+                founder
+                    .try_admit(native)
+                    .map(SaveJob::Founder)
+                    .map_err(SaveAdmissionRefusal::Founder)
+            },
+        );
         Ok(())
     })(); // Store/table guards have left before either whole owning result.
     drop(attempt); // native guards BEFORE any unentered Source preparation
@@ -448,7 +541,10 @@ fn admit(
             _payment: invocation.payment.clone(),
         }),
         Err(failure) => {
-            let reason = failure.refusal();
+            let reason = match &failure {
+                SaveAdmissionRefusal::Founder(original) => original.refusal(),
+                SaveAdmissionRefusal::Joined { reason, .. } => *reason,
+            };
             drop(failure);
             Err(refusal(reason))
         }
@@ -459,12 +555,20 @@ async fn execute(state: &AppState, invocation: &Invocation) -> Result<String, St
     if outcome == V2MemberSaveOutcome::Ready {
         let preparation = capture(state, invocation).await?;
         let token = invocation.intent.token;
+        let scope = invocation.scope.clone();
         let worker = Worker {
             value: preparation,
             _payment: invocation.payment.clone(),
         };
         let prepared = tauri::async_runtime::spawn_blocking(move || {
-            worker.map(|value| value.finish_admission(token))
+            worker.map(|value| match value {
+                Preparation::Founder(original) => original
+                    .finish_admission(token)
+                    .map(FinalPreparation::Founder),
+                Preparation::Joined(original, row) => original
+                    .finish_member_admission(row, token, &scope)
+                    .map(|ready| FinalPreparation::Joined(Some(ready))),
+            })
         })
         .await
         .map_err(|_| STALE)?;

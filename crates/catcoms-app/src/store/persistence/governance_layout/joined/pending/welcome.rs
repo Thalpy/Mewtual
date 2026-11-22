@@ -45,6 +45,16 @@ pub(super) struct WarmWelcome {
 }
 
 impl WarmWelcome {
+    pub(super) fn member_prefix(
+        &self,
+    ) -> Result<(&PreparedV2JoinedPrefix, &ProjectionGroupView), AppError> {
+        let selected = self
+            .selection
+            .as_ref()
+            .filter(|selected| selected.retired.is_some())
+            .ok_or_else(denied)?;
+        Ok((&selected.core, &selected._view))
+    }
     pub(super) fn registration_files(&self) -> Result<RegistrationFiles<'_>, AppError> {
         let entry = self.held_entry.as_ref().ok_or_else(denied)?;
         let outcome = self.held_outcome.as_ref().ok_or_else(denied)?;

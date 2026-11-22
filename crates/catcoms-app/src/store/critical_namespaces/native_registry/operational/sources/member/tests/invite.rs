@@ -347,10 +347,10 @@ async fn mounted_join_fixture(recover_stage: bool) {
         .id()
         .as_bytes();
     let body = catcoms_replication::chat::Body::Create {
-        text: "No saved original".into(),
+        text: "Original joined message".into(),
         reply_to: None,
     };
-    let unsaved = crate::store::V2MemberSignRequest {
+    let request = || crate::store::V2MemberSignRequest {
         token: [142; 32],
         channel: 42,
         body: &body,
@@ -362,6 +362,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
         .join("chat-owner-v2")
         .join("member-outbox-v1")
         .join(format!("mo-{}", hex::encode(original_member_outbox)));
+    let mut saved = None;
     if !recover_stage {
         let mut after = rng.clone();
         let row = register(&mut rng).unwrap();
@@ -374,7 +375,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
         assert_eq!(view.member_outbox_context_id_data(), original_member_outbox);
         assert_eq!(
             inspect()
-                .lookup_saved_member(&view, &unsaved, &fresh, &mut rng)
+                .lookup_saved_member(&view, &request(), &fresh, &mut rng)
                 .unwrap(),
             None
         );
@@ -384,6 +385,66 @@ async fn mounted_join_fixture(recover_stage: bool) {
         assert_eq!(rng.next_u64(), after.next_u64());
         assert_eq!(std::fs::read(&index).unwrap(), saved_stage);
         assert!(!stage.exists());
+
+        use crate::store::{
+            MemberSaveJobReport, MemberSaveNativeAdmission, NativeTextJoinedMemberFinalPreparation,
+            V2MemberSaveOutcome,
+        };
+        assert_eq!(
+            inspect()
+                .prepare_member_save(&view, request(), &fresh, &mut rng)
+                .unwrap(),
+            V2MemberSaveOutcome::Ready
+        );
+        assert!(inspect()
+            .lookup_saved_member(&view, &request(), &fresh, &mut rng)
+            .is_err());
+        let new_final = || {
+            Some(
+                inspect()
+                    .finish_member_admission(view.clone(), request().token, &fresh)
+                    .unwrap(),
+            )
+        };
+        let mut final_work = new_final();
+        let (_cancel, signal) = tokio::sync::watch::channel(true);
+        assert!(
+            NativeTextJoinedMemberFinalPreparation::try_admit_member_save(
+                &mut final_work,
+                &fresh,
+                MemberSaveNativeAdmission::new((), RequestCancellation::new(signal, None)),
+            )
+            .is_err()
+        );
+        assert!(final_work.is_some());
+        let job = NativeTextJoinedMemberFinalPreparation::try_admit_member_save(
+            &mut final_work,
+            &fresh,
+            MemberSaveNativeAdmission::new((), fresh.clone()),
+        )
+        .unwrap();
+        assert!(final_work.is_none());
+        drop(job);
+        let job = NativeTextJoinedMemberFinalPreparation::try_admit_member_save(
+            &mut new_final(),
+            &fresh,
+            MemberSaveNativeAdmission::new((), fresh.clone()),
+        )
+        .unwrap();
+        assert_eq!(job.run(), MemberSaveJobReport::SavedLocal);
+        let receipt = inspect()
+            .prepare_member_save(&view, request(), &fresh, &mut rng)
+            .unwrap();
+        let V2MemberSaveOutcome::Saved { action, ordinal } = receipt else {
+            panic!("original joined action was not saved")
+        };
+        saved = Some((action, ordinal));
+        assert_eq!(
+            inspect()
+                .lookup_saved_member(&view, &request(), &fresh, &mut rng)
+                .unwrap(),
+            saved
+        );
     }
     assert!(capture()
         .cover(&invite, anchor, token, after, &negative, &mut rng)
@@ -487,18 +548,27 @@ async fn mounted_join_fixture(recover_stage: bool) {
     let mut history_rng = catcoms_rt::OsCryptoRng;
     assert_eq!(
         recovered_row()
-            .lookup_saved_member(&selection, &unsaved, &fresh, &mut history_rng)
+            .lookup_saved_member(&selection, &request(), &fresh, &mut history_rng)
             .unwrap(),
-        None
+        saved
     );
-    assert!(!outbox_path.exists());
-    std::fs::create_dir(&outbox_path).unwrap();
-    let damaged = outbox_path.join("head.bin");
-    std::fs::write(&damaged, b"damaged").unwrap();
-    assert!(recovered_row()
-        .lookup_saved_member(&selection, &unsaved, &fresh, &mut history_rng)
-        .is_err());
-    assert_eq!(std::fs::read(&damaged).unwrap(), b"damaged");
+    if let Some((action, ordinal)) = saved {
+        assert_eq!(
+            recovered_row()
+                .prepare_member_save(&selection, request(), &fresh, &mut history_rng)
+                .unwrap(),
+            crate::store::V2MemberSaveOutcome::Saved { action, ordinal }
+        );
+    } else {
+        assert!(!outbox_path.exists());
+        std::fs::create_dir(&outbox_path).unwrap();
+        let damaged = outbox_path.join("head.bin");
+        std::fs::write(&damaged, b"damaged").unwrap();
+        assert!(recovered_row()
+            .lookup_saved_member(&selection, &request(), &fresh, &mut history_rng)
+            .is_err());
+        assert_eq!(std::fs::read(&damaged).unwrap(), b"damaged");
+    }
     assert!(selection.is_from_original_vault_cached(&mounted_vault));
     assert!(selection.same_original(&recovered_row().select_registered(&fresh).unwrap()));
     selection.close_original_cached();

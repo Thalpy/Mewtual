@@ -1290,6 +1290,13 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
         listed["servers"].as_array().unwrap(),
         std::slice::from_ref(&original)
     );
+    let send = native_send_request(&joiner_window, &original, 9, "Joined message");
+    run(&joiner_queue).await;
+    let saved = found_value(send.await.unwrap());
+    assert_eq!(saved["disposition"], "saved-local");
+    assert!(saved["message_id"]
+        .as_str()
+        .is_some_and(|id| id.len() == 64));
     let locked = snapshot_request(&joiner_window, None);
     run(&joiner_queue).await;
     assert!(snapshot_result(locked.await.unwrap())["continuity_error"].is_null());
@@ -1315,6 +1322,12 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     let restored = restored["servers"].as_array().unwrap();
     assert_eq!(restored.len(), 1);
     assert_eq!(restored[0], original);
+    let retry = native_send_request(&window, &restored[0], 9, "Joined message");
+    run(&queue).await;
+    assert_eq!(found_value(retry.await.unwrap()), saved);
+    let changed = native_send_request(&window, &restored[0], 9, "Changed joined message");
+    run(&queue).await;
+    refused(changed.await.unwrap());
     assert_eq!(
         std::fs::read(joiner_path.join("chat-critical-namespaces.joined-pin.index")).unwrap(),
         saved_pins

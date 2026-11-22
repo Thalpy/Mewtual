@@ -911,6 +911,22 @@ impl JoinedPendingIo {
         self.request_data(store)?;
         welcome.require_outcome(store)
     }
+
+    pub(in crate::store) fn borrow_warm_member_prefix(
+        &self,
+        store: &ServerStore,
+    ) -> Result<
+        (
+            &catcoms_sync::PreparedV2JoinedPrefix,
+            &catcoms_replication::chat::ProjectionGroupView,
+        ),
+        AppError,
+    > {
+        self.request_data(store)?;
+        let welcome = self.welcome.as_ref().ok_or_else(denied)?;
+        welcome.require_outcome(store)?;
+        welcome.member_prefix()
+    }
 }
 
 #[cfg(test)]

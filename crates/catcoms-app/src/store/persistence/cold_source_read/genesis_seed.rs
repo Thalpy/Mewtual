@@ -15,6 +15,11 @@ use catcoms_sync::owner_v2::{
     V2_GENESIS_SEED_METADATA_BYTES,
 };
 pub(in crate::store) use current::settlement::GenesisCurrentOwnerRef;
+pub(in crate::store) use current::{
+    JoinedMemberLane, JoinedMemberSource, OriginalV2TextResidentObservation,
+    OriginalV2UnsignedPlanObservation, PreparedV2NextUnsignedAppend,
+    PreparedV2TextResidentProjection, PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis,
+};
 pub use current::{
     MemberSaveJob, MemberSaveJobReport, MemberSaveNativeAdmission, PreparedColdV2GenesisCurrent,
     PreparedColdV2GenesisInitializing, PreparedColdV2GenesisPreInitializing,
@@ -22,11 +27,6 @@ pub use current::{
     UnexposedColdV2GenesisCurrent, UnexposedRepairedV2GenesisCurrent, UnexposedV2GenesisCurrent,
     V2MemberDependency, V2MemberSaveOutcome, V2MemberSaveRefusal, V2MemberSignRequest,
     V2TextHostPolicy,
-};
-pub(in crate::store) use current::{
-    OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
-    PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
-    PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis,
 };
 #[cfg(all(test, windows))]
 pub(in crate::store) use current::{PreparedV2TextSourceObserver, V2_TEXT_SOURCE_OBSERVER_BYTES};

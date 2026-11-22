@@ -51,6 +51,7 @@ pub(in crate::store) use member::{
 };
 // The member-save API the native consumer calls: borrowed request DATA in, advisory outcome
 // DATA and an owned admitted job out. None of these types is authority by itself.
+pub(in crate::store) use member::{JoinedMemberLane, JoinedMemberSource};
 pub use member::{V2MemberDependency, V2MemberSignRequest};
 pub use member_save::{
     MemberSaveJob, MemberSaveJobReport, MemberSaveNativeAdmission, V2MemberSaveOutcome,

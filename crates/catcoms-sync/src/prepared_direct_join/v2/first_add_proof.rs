@@ -258,6 +258,15 @@ impl PreparedV2JoinedPrefix {
         self.verifier.replay_data().profile()
     }
 
+    /// Borrow the selected verifier for the joined source's ordinary plan.
+    /// An unselected first Add still owes the host its original file proof.
+    pub fn selected_member_verifier(&self) -> Result<&V2GeneralPrefixVerifier, SyncError> {
+        self.candidate
+            .is_none()
+            .then_some(&self.verifier)
+            .ok_or(SyncError::JoinRejected)
+    }
+
     /// Use the same selected Core verifier and original own Admission to plan
     /// an ordinary action. The Join candidate must already have been selected.
     pub fn prepare_member_plan(
@@ -266,14 +275,11 @@ impl PreparedV2JoinedPrefix {
         dependencies: &[V2OrdinaryDependency<'_>],
         view: &ProjectionView,
     ) -> Result<V2OrdinarySigningPlan, SyncError> {
-        if self.candidate.is_some() {
-            return Err(SyncError::JoinRejected);
-        }
-        let admission = self
-            .verifier
+        let verifier = self.selected_member_verifier()?;
+        let admission = verifier
             .admission(self.own)
             .map_err(|_| SyncError::JoinRejected)?;
-        self.verifier
+        verifier
             .prepare_ordinary_signing_plan(draft, &admission, dependencies, view)
             .map_err(|_| SyncError::JoinRejected)
     }
