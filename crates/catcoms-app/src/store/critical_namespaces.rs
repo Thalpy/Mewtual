@@ -74,14 +74,14 @@ pub use native_registry::{
     NativeTextRuntimeSelection, NativeTextSourceBudget, NativeTextSourceCommand,
     NativeTextSourcePolicy, NativeTextSourcePreparation, NativeTextSourceRetirement,
     NativeTextSourceRetirementPreparation, NativeTextSourceRetirementRefusal,
-    NativeTextSourceRetirementStatus, NativeTextSources, NativeTextUiCandidate,
-    NativeTextUiGarbage, NativeTextUiObservation, NativeTextUiPreparation, NativeTextUiRetirement,
-    NativeTextUiRetirementBatch, NativeTextUiRetirementDrain, NativeTextUiRetirementState,
-    NativeTextVault, NativeTextVaultAuthentication, NativeTextVaultAuthenticationCheck,
-    NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal, NativeTextWorkRetirement,
-    NativeTextWorkRetirementPreparation, NativeUiInvocationBudget, NativeUiInvocationMetadata,
-    NativeUiStateBudget, NativeUiStateCredit, NativeUiStatePreparation, NativeUiStateRead,
-    NativeUiStateSaved, PreparedNativeRegistryMigration,
+    NativeTextSourceRetirementStatus, NativeTextSources, NativeTextUiAddRetirement,
+    NativeTextUiCandidate, NativeTextUiGarbage, NativeTextUiObservation, NativeTextUiPreparation,
+    NativeTextUiRetirement, NativeTextUiRetirementBatch, NativeTextUiRetirementDrain,
+    NativeTextUiRetirementState, NativeTextVault, NativeTextVaultAuthentication,
+    NativeTextVaultAuthenticationCheck, NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal,
+    NativeTextWorkRetirement, NativeTextWorkRetirementPreparation, NativeUiInvocationBudget,
+    NativeUiInvocationMetadata, NativeUiStateBudget, NativeUiStateCredit, NativeUiStatePreparation,
+    NativeUiStateRead, NativeUiStateSaved, PreparedNativeRegistryMigration,
 };
 pub(super) mod read_pool;
 pub use read_pool::CriticalCatalogReadPool;

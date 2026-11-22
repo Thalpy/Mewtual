@@ -4,7 +4,9 @@
 //! No raw device/group/provider, mutable SDK getter or publication is returned.
 use super::*;
 use crate::device::text_add_package::{self, PackageBudget, ValidatedTextAddPackage};
-use crate::persist::text_current_add::{self, CandidateGraph, TextCurrentAddAdmission};
+use crate::persist::text_current_add::{
+    self, CandidateGraph, TextCurrentAddAdmission, TextCurrentAddLimits,
+};
 use crate::persist::OwnerSdkGraphLease;
 use std::sync::Arc;
 use zeroize::Zeroizing;
@@ -76,6 +78,54 @@ impl fmt::Debug for TextCurrentAddRequestData<'_> {
             .field("package_bytes", &self.frame.len())
             .finish_non_exhaustive()
     }
+}
+
+/// Validate only the public package before the host writes its durable
+/// reservation. The host prepays this separate public verification budget.
+/// The real candidate construction repeats validation at its admitted time.
+pub fn check_private_text_add_package(
+    device: &MlsDevice,
+    group: &ServerGroup,
+    request: TextCurrentAddRequestData<'_>,
+    limits: TextCurrentAddLimits,
+) -> Result<(), MlsError> {
+    let original = OriginalParent::observe(device, group)?;
+    if original.author == request.subject {
+        return Err(bad());
+    }
+    drop(validate_request_package(
+        device,
+        &original.group,
+        request,
+        limits,
+    )?);
+    original.require_same(device, group)
+}
+
+fn validate_request_package(
+    device: &MlsDevice,
+    group: &[u8; 16],
+    request: TextCurrentAddRequestData<'_>,
+    limits: TextCurrentAddLimits,
+) -> Result<ValidatedTextAddPackage, MlsError> {
+    let mut budget = PackageBudget::new(limits.package_typed_bytes, limits.package_work);
+    let package = text_add_package::validate(
+        device,
+        request.frame,
+        group,
+        &request.subject,
+        &request.nonce,
+        &request.reference,
+        request.now_ms,
+        &mut budget,
+    )?;
+    if request
+        .expected_credential
+        .is_some_and(|expected| &expected != package.identity().credential_digest())
+    {
+        return Err(bad());
+    }
+    Ok(package)
 }
 
 struct OriginalParent {
@@ -300,25 +350,8 @@ impl PreparedTextCurrentAdd {
         // The same SDK preparation entry already owns both resource classes.
         // A failure below never refunds/reconstructs that cumulative allowance.
         let routing = routing_plain.map(routing::RoutingOutput::new);
-        let mut package_budget =
-            PackageBudget::new(limits.package_typed_bytes, limits.package_work);
-        let package = text_add_package::validate(
-            device,
-            request.frame,
-            &original.group,
-            &request.subject,
-            &request.nonce,
-            &request.reference,
-            request.now_ms,
-            &mut package_budget,
-        )?;
+        let package = validate_request_package(device, &original.group, request, limits)?;
         let credential_digest = *package.identity().credential_digest();
-        if request
-            .expected_credential
-            .is_some_and(|expected| expected != credential_digest)
-        {
-            return Err(bad());
-        }
         let output_remaining = limits
             .output_bytes
             .checked_sub(request.frame.len())

@@ -4,8 +4,8 @@
 use super::*;
 use catcoms_mls::group::text_current_add::MAX_TEXT_ADD_ROUTING_PLAIN_BYTES;
 use catcoms_replication::chat::join_bindings::{
-    GenesisAnchorBindingData, JoinPayloadKindData, JoinRequestBindingSpecData,
-    SignedInviteBindingData, SignedJoinRequestBindingData,
+    JoinPayloadKindData, JoinRequestBindingSpecData, SignedInviteBindingData,
+    SignedJoinRequestBindingData,
 };
 
 /// Complete DATA input, with no renderer time or separately supplied nonce.
@@ -60,27 +60,19 @@ impl V2FounderAddRequestData<'_> {
             .check_key_package_wire_data(self.key_package)
             .map_err(|_| unavailable())
     }
-}
 
-impl FrozenAddRequest {
-    pub(super) fn prepare(
-        seed: &SeedBody,
-        installed: Option<V2InstalledFounderAddData>,
-        data: V2FounderAddRequestData<'_>,
-    ) -> Result<Self, SyncError> {
-        data.verify()?;
+    pub(super) fn verify_seed(self, seed: &SeedBody) -> Result<Vec<u8>, SyncError> {
+        self.verify()?;
         let g = &seed.genesis;
-        let expected = GenesisAnchorBindingData {
-            group: g.profile.spec().group.clone(),
-            founder: g.profile.spec().founder,
-            profile: *g.profile.id().as_bytes(),
-            admission: *g.admission.admission_id().as_bytes(),
-            tenure: *g.profile.tenure().as_bytes(),
-            header: *g.header.id().as_bytes(),
-            state: *g.header.spec().state.as_bytes(),
-        };
-        let invite = data.invite.spec_data();
-        if invite.anchor != expected
+        let invite = self.invite.spec_data();
+        let anchor = &invite.anchor;
+        if anchor.group != g.profile.spec().group
+            || anchor.founder != g.profile.spec().founder
+            || anchor.profile != *g.profile.id().as_bytes()
+            || anchor.admission != *g.admission.admission_id().as_bytes()
+            || anchor.tenure != *g.profile.tenure().as_bytes()
+            || anchor.header != *g.header.id().as_bytes()
+            || anchor.state != *g.header.spec().state.as_bytes()
             || invite.inviter != seed.context.spec_data().signer
             || seed.metadata.routing_label != 0
             || seed.metadata.routing.len() != 1
@@ -88,10 +80,6 @@ impl FrozenAddRequest {
         {
             return Err(unavailable());
         }
-        // The wrapper admits Add only. No Remove or policy mutation can make
-        // these original L0 secrets stale. Future transition support MUST
-        // install genuine updated routing custody, never rederive L0 from a
-        // post-Add exporter (only the transfer wrapping key changes on Add).
         let policy = seed.metadata.policy.as_ref().ok_or_else(unavailable)?;
         crate::group_policy::require_supported(policy).map_err(|_| unavailable())?;
         let policy = policy.encode();
@@ -102,6 +90,23 @@ impl FrozenAddRequest {
         {
             return Err(unavailable());
         }
+        Ok(policy)
+    }
+}
+
+impl FrozenAddRequest {
+    pub(super) fn prepare(
+        seed: &SeedBody,
+        installed: Option<V2InstalledFounderAddData>,
+        data: V2FounderAddRequestData<'_>,
+    ) -> Result<Self, SyncError> {
+        let policy = data.verify_seed(seed)?;
+        let g = &seed.genesis;
+        let invite = data.invite.spec_data();
+        // The wrapper admits Add only. No Remove or policy mutation can make
+        // these original L0 secrets stale. Future transition support MUST
+        // install genuine updated routing custody, never rederive L0 from a
+        // post-Add exporter (only the transfer wrapping key changes on Add).
         let spec = data.request.spec_data().clone();
         let before_epoch = seed.group.epoch();
         let after_epoch = before_epoch.checked_add(1).ok_or_else(unavailable)?;
@@ -112,7 +117,7 @@ impl FrozenAddRequest {
         let mut plain = Zeroizing::new(Vec::with_capacity(MAX_TEXT_ADD_ROUTING_PLAIN_BYTES));
         field(&mut plain, crate::owner_v2::V2_JOIN_ROUTING_DOMAIN)?;
         plain.extend_from_slice(&2u16.to_be_bytes());
-        field(&mut plain, &expected.group)?;
+        field(&mut plain, &invite.anchor.group)?;
         field(&mut plain, &spec.anchor)?;
         field(&mut plain, &data.request.id_data())?;
         field(&mut plain, &spec.key_package_wire)?;

@@ -80,6 +80,41 @@ impl<'a> V2FounderAddOutcomeData<'a> {
     }
 }
 
+impl<T, R> UnboundV2GenesisNode<T, R> {
+    /// Outside writers with separate package verification credit. This uses
+    /// the original source clock and performs no private candidate work.
+    pub fn preflight_first_add_package_data(
+        &self,
+        request: V2FounderAddRequestData<'_>,
+        limits: catcoms_mls::persist::text_current_add::TextCurrentAddLimits,
+    ) -> Result<(), SyncError> {
+        ordinary_create::source(self).map_err(|_| unavailable())?;
+        let seed = &self.seed.body;
+        drop(request.verify_seed(seed)?);
+        let now = self._parts.body._clock.now_ms();
+        if request.invite.expired_at_data(now) {
+            return Err(unavailable());
+        }
+        let signed = request.request.spec_data();
+        let packet = TextCurrentAddRequestData::from_untrusted_data(
+            request.key_package,
+            signed.joiner,
+            request.invite.spec_data().nonce,
+            signed.key_package_reference,
+            now,
+        )
+        .with_expected_credential_data(signed.credential);
+        catcoms_mls::group::text_current_add::check_private_text_add_package(
+            &seed.device,
+            &seed.group,
+            packet,
+            limits,
+        )
+        .map_err(|_| unavailable())?;
+        ordinary_create::source(self).map_err(|_| unavailable())
+    }
+}
+
 impl std::fmt::Debug for V2FounderAddOutcomeData<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("V2FounderAddOutcomeData")
@@ -213,6 +248,17 @@ impl<T, R> UnboundV2GenesisNode<T, R> {
 }
 
 impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
+    pub fn preflight_first_add_package_data(
+        &self,
+        request: V2FounderAddRequestData<'_>,
+        limits: catcoms_mls::persist::text_current_add::TextCurrentAddLimits,
+    ) -> Result<(), SyncError> {
+        if self.installed.is_some() {
+            return Err(unavailable());
+        }
+        self.node.preflight_first_add_package_data(request, limits)
+    }
+
     /// Original immutable provenance, always the initial pin/source context.
     /// These historical labels do not describe the installed live SDK epoch.
     pub fn genesis_data(&self) -> V2GenesisSeedData<'_> {

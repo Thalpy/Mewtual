@@ -117,6 +117,20 @@ impl<T, R> V2TextOwnedCurrent<T, R> {
 }
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurrent<T, R> {
+    pub(super) fn preflight_first_add_package_data(
+        &self,
+        store: &ServerStore,
+        request: catcoms_sync::owner_v2::V2FounderAddRequestData<'_>,
+        limits: catcoms_mls::persist::text_current_add::TextCurrentAddLimits,
+    ) -> Result<(), AppError> {
+        match &self.core {
+            OwnedCurrent::Warm(current) => {
+                current.preflight_first_add_package_data(store, request, limits)
+            }
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
     pub(super) fn retire_add_for_closed_ui(
         &mut self,
         closed: &[Option<&catcoms_rt::NativeChatKeyDrain>],

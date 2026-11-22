@@ -27,6 +27,8 @@ on:
       - 'crates/catcoms-mls/src/group/text_current_add/**'
       - 'crates/catcoms-mls/src/group/text_current_add.rs'
       - 'crates/catcoms-mls/src/persist/text_current_add.rs'
+      - 'crates/catcoms-mls/src/device/text_add_package.rs'
+      - 'crates/catcoms-mls/src/device/text_add_package/**'
       - 'crates/catcoms-sync/src/prepared_direct_join.rs'
       - 'crates/catcoms-sync/src/prepared_direct_join/v2.rs'
       - 'crates/catcoms-sync/src/prepared_direct_join/v2/**'
@@ -101,6 +103,8 @@ jobs:
         run: python .github/scripts/check-chat-v2-invite-intent.py bindings
       - name: Check the retained V2 JoinRequest and private KeyPackage
         run: python .github/scripts/check-chat-v2-invite-intent.py join-request
+      - name: Check the original-clock KeyPackage preflight before Add work
+        run: python .github/scripts/check-chat-v2-invite-intent.py add-package-preflight
       - name: Check exact V2 join response frame accounting
         run: python .github/scripts/check-chat-v2-invite-intent.py join-response
       - name: Check the cached governing Header after native lock

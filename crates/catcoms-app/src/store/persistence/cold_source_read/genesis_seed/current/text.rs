@@ -6,6 +6,24 @@
 use super::UnexposedV2GenesisCurrent;
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> UnexposedV2GenesisCurrent<T, R> {
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn preflight_first_add_package_data(
+        &self,
+        store: &crate::store::ServerStore,
+        request: catcoms_sync::owner_v2::V2FounderAddRequestData<'_>,
+        limits: catcoms_mls::persist::text_current_add::TextCurrentAddLimits,
+    ) -> Result<(), crate::AppError> {
+        use crate::store::critical_namespaces::refused;
+        self.require_text_original_data(store)
+            .map_err(|_| refused())?;
+        match (self.genesis_text_node(), self.governed_text_node()) {
+            (Some(node), None) => node.preflight_first_add_package_data(request, limits)?,
+            (None, Some(node)) => node.preflight_first_add_package_data(request, limits)?,
+            _ => return Err(refused()),
+        }
+        self.require_text_original_data(store)
+            .map_err(|_| refused())
+    }
+
     pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn retire_add_for_closed_ui(
         &mut self,
         closed: &[Option<&catcoms_rt::NativeChatKeyDrain>],

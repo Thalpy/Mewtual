@@ -121,9 +121,12 @@ On the native founder, `check_received_join_request` verifies both request
 signatures and the package wire commitment. It compares the complete
 incoming Invite with the linked, verified signature recovered from the
 original mounted journal. It does not accept a caller-supplied journal token.
-The original Current and file checks bracket authentication. This read gate
-does not spend the nonce. SDK admission, lifetime checks and the durable Add
-transaction still own that decision.
+The original Current and file checks bracket authentication. The paid read
+gate then validates the exact MLS package, including its credential, MLS
+reference, and lifetime against the founder's original clock. This keeps a
+signed request with a malformed or expired package from reaching a future
+durable reservation. SDK admission repeats validation at entry. The owning
+transaction spends the nonce only through durable Add coverage.
 
 The joiner checks the complete verified genesis anchor and the current
 replay tip at its own Add. It validates the signed response and both

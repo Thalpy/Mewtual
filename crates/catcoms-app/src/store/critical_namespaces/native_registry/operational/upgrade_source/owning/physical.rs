@@ -645,18 +645,18 @@ impl SourceWork {
         )
     }
 
-    pub(in crate::store::critical_namespaces::native_registry) fn require_received_invite<
+    pub(in crate::store::critical_namespaces::native_registry) fn require_received_join_request<
         T: catcoms_rt::MeshTransport,
         R: catcoms_rt::CryptoRngCore,
     >(
         &self,
         driver: &crate::store::PreparedFreshV2TextFounder<T, R>,
-        incoming: &catcoms_replication::chat::join_bindings::SignedInviteBindingData,
+        incoming: &catcoms_sync::V2JoinRequestPacketData<'_>,
         routing_plan: &[u8],
         keys: &crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounderKeys,
         negative: &catcoms_rt::RequestCancellation,
     ) -> Result<(), AppError> {
-        driver.require_received_invite(
+        driver.require_received_join_request(
             self.physical.current()?,
             incoming,
             routing_plan,

@@ -18,13 +18,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         use crate::store::persistence::v2_text::{
             GovernedAddHeaderRecoveryState, GovernedAddRecoveryState, PreparedGovernedAddFence,
         };
-        self.require_received_invite(
-            layout,
-            packet.founder_add_data().invite,
-            routing_plan,
-            keys,
-            negative,
-        )?;
+        self.require_received_join_request(layout, packet, routing_plan, keys, negative)?;
         let store = layout.checked_store()?;
         let sdk_admission = prepare_sdk_admission(store)?;
         assert!(sdk_admission.supports_routing_data());

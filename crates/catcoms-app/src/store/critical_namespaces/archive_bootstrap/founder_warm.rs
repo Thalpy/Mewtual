@@ -204,10 +204,10 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
             .inspect_native_invite_data(layout, request, routing_plan, keys, negative)
     }
 
-    pub(in crate::store) fn require_received_invite(
+    pub(in crate::store) fn require_received_join_request(
         &self,
         layout: &V2CurrentLayoutStore,
-        incoming: &catcoms_replication::chat::join_bindings::SignedInviteBindingData,
+        incoming: &catcoms_sync::V2JoinRequestPacketData<'_>,
         routing_plan: &[u8],
         keys: &super::founder::NativeFounderKeys,
         negative: &catcoms_rt::RequestCancellation,
@@ -218,7 +218,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
         self.host
             .as_ref()
             .ok_or_else(refused)?
-            .require_received_invite(layout, incoming, routing_plan, keys, negative)
+            .require_received_join_request(layout, incoming, routing_plan, keys, negative)
     }
 
     #[cfg(all(test, any(windows, target_os = "linux")))]

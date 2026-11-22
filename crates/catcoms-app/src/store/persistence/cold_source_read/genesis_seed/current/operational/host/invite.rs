@@ -5,7 +5,6 @@ use crate::store::critical_namespaces::read_pool::CatalogReadReservation;
 use crate::store::native_text_invite::PreparedNativeTextInvitePacket;
 use crate::store::persistence::v2_text::PreparedV2TextParentCapture;
 use crate::store::{NativeTextInviteRecovery, NativeTextSavedInvite};
-use catcoms_replication::chat::join_bindings::SignedInviteBindingData;
 use catcoms_rt::{NativeChatKeyEnds, RequestCancellation};
 use catcoms_sync::owner_v2::{
     PreparedV2FounderInviteData, V2FounderInviteRequestData, V2GenesisSeedData,
@@ -204,18 +203,43 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
 
     /// Match the exact received invitation to the actual persisted signed
     /// original. This is a negative gate before a separate Add transaction.
-    pub(in crate::store) fn require_received_invite(
+    pub(in crate::store) fn require_received_join_request(
         &self,
         layout: &V2CurrentLayoutStore,
-        incoming: &SignedInviteBindingData,
+        packet: &catcoms_sync::V2JoinRequestPacketData<'_>,
         routing_plan: &[u8],
         keys: &NativeFounderKeys,
         negative: &RequestCancellation,
     ) -> Result<(), AppError> {
+        let request = packet.founder_add_data();
         self.read_native_invite(layout, keys, negative, |read, genesis| {
-            read.require_received_invite(incoming, routing_plan, genesis)
+            read.require_received_invite(request.invite, routing_plan, genesis)
         })?;
-        self.require_member_quiescent_for_add(layout)
+        self.require_member_quiescent_for_add(layout)?;
+        let store = layout.checked_store()?;
+        let limits =
+            catcoms_mls::persist::text_current_add::TextCurrentAddLimits::governed_text_v2();
+        let pool = &store
+            .archive_bootstrap_policy
+            .as_ref()
+            .ok_or_else(refused)?
+            .pending
+            .pool;
+        let bytes = limits.package_typed_bytes
+            + 4 * catcoms_sync::owner_v2::MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES
+            + 16 * 1024;
+        let fee = pool.try_reserve(bytes)?;
+        fee.validate(pool, bytes)?;
+        if negative.is_cancelled() {
+            return Err(refused());
+        }
+        keys.preflight(&self.origin)?;
+        self.owner
+            .preflight_first_add_package_data(store, request, limits)?;
+        if negative.is_cancelled() {
+            return Err(refused());
+        }
+        keys.preflight(&self.origin)
     }
 
     fn read_native_invite<U>(

@@ -70,8 +70,8 @@ impl<T: MeshTransport, R: CryptoRngCore> member::NativeTextMemberJob<T, R> {
 
     /// Authenticates both request signatures and exact package bytes, then
     /// matches the invitation to the original signed journal on this row.
-    /// This reads only. Clock, actual SDK admission, durable nonce ownership
-    /// and covered Add execution belong to the separate owning transaction.
+    /// This reads only. Package validation uses the original source clock,
+    /// and the owning Add transaction repeats it at actual SDK admission.
     pub fn check_received_join_request<'wire>(
         mut self,
         bytes: &'wire [u8],
@@ -94,13 +94,9 @@ impl<T: MeshTransport, R: CryptoRngCore> member::NativeTextMemberJob<T, R> {
             .ok_or(Error::Unavailable)?
             .invite_routing_plan_data(driver.binding_data().ok_or(Error::Unavailable)?)
             .map_err(|_| Error::Unavailable)?;
-        let result = body.work.require_received_invite(
-            driver,
-            packet.founder_add_data().invite,
-            &route,
-            &inner.keys,
-            negative,
-        );
+        let result =
+            body.work
+                .require_received_join_request(driver, &packet, &route, &inner.keys, negative);
         inner.loan.recorded = true;
         if negative.is_cancelled() {
             return Err(Error::Cancelled);
