@@ -724,6 +724,12 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 recovered_row().project_received_member(&mut ledger, &received, &live).unwrap(),
                 V2OrdinaryReceiveStatus::Retained(ActionState::Valid)
             );
+            let prepared_history = recovered_row()
+                .prepare_shared_history_record(&ledger, &received, &live, &mut history_rng)
+                .unwrap();
+            assert_eq!(prepared_history.record.action, action);
+            assert!(!prepared_history.record.chunks.is_empty());
+            assert!(!prepared_history.record.manifest.as_bytes().is_empty());
             let result = ledger.prepare_message_projection(action).unwrap();
             assert!(result.with_publication(|view| matches!(
                 view, GuardedProjection::Visible { text, certainty: ProjectionCertainty::Provisional, .. }

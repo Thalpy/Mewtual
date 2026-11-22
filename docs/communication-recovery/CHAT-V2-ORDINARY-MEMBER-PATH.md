@@ -106,6 +106,10 @@ The mounted joined row can prepare a paid channel ledger and apply frames from i
 receiver. A final native callback checks the original receiving scope and the prepared
 Core view before revealing a body. The ledger holds up to 64 originals or 1 MiB of
 canonical action bytes. Durable replay and catch-up must address pressure at this limit.
+An exact Valid original can be prepared as encrypted action chunks and a manifest
+bound to the local vault, Profile, initial tenure and channel. The manifest preserves
+the action's original Admission and signed bytes across transport epochs. Native
+storage must select the manifest before cold replay can treat it as saved history.
 The mounted joined source prepares one exact debt item for its original mesh and releases
 the metadata slot before awaiting the driver. The caller, original Core Admission and
 selected MLS fence must still authorize it at the driver's submission boundary. A real

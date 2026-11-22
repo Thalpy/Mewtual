@@ -636,6 +636,7 @@ mod persistence {
     mod v2_group_directory;
     /// Chat V2 ordinary-member durable outbox; independent of the founder `v2_text` journal.
     pub(in crate::store) mod v2_member_outbox;
+    pub(in crate::store) mod v2_shared_history;
     pub(in crate::store) mod v2_text;
     pub(in crate::store) use cold_source_read::v2_genesis_activation;
     pub use cold_source_read::RetainedBootstrapSourceData;

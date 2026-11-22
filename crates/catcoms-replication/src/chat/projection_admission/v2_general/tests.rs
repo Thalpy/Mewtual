@@ -448,6 +448,8 @@ fn ordinary_receiver_waits_for_exact_valid_dependencies_then_projects() {
         if text == "ordered reply" && id == target.id())
     );
     assert_eq!(ledger.action(reply.id()), Some(&reply));
+    assert!(ledger.matches_valid_ordinary_original(&reply, second.core.body.admission_id()));
+    assert!(!ledger.matches_valid_ordinary_original(&reply, first.core.body.admission_id()));
     let original_effect = f
         .verifier
         .observe_live_member(second.core.body.admission_id())

@@ -1,5 +1,10 @@
 //! Bind ciphertext from the original native actor to the actual registered row.
 use super::*;
+use crate::store::persistence::v2_member_outbox::member_outbox_key;
+use crate::store::persistence::v2_shared_history::{
+    PreparedSharedHistoryRecord, SharedHistoryScope, SHARED_HISTORY_RECORD_FEE,
+};
+use crate::store::ServerStore;
 use catcoms_net::{
     NativeChatMemberFrame, NativeChatMemberFrameObservation, NativeChatMemberGossip,
     NativeChatMemberGossipError, NativeChatMemberGossipEvent, NativeChatMemberIngress,
@@ -97,6 +102,23 @@ pub struct NativeTextJoinedMemberLedger {
     _fee: CatalogReadReservation,
 }
 
+/// Same native files, selected Core view and installed SDK in one synchronous
+/// physical read. No capability borrows these parts across an await.
+struct ReceiverSource<'a, R: CryptoRngCore> {
+    metadata: &'a MetadataWork,
+    node: &'a ClosedV2JoinedNode<catcoms_net::MeshService, R>,
+    prefix: &'a PreparedV2JoinedPrefix,
+    view: &'a ProjectionGroupView,
+    store: &'a ServerStore,
+    registration: NativeTextJoinedRegistrationData,
+}
+
+pub(in crate::store::critical_namespaces::native_registry) struct NativeTextJoinedSharedHistoryRecord
+{
+    pub(in crate::store::critical_namespaces::native_registry) record: PreparedSharedHistoryRecord,
+    _fee: CatalogReadReservation,
+}
+
 impl NativeTextJoinedMemberLedger {
     /// Prepare the exact view and bounded body outside the final UI guard.
     /// One paid query can borrow this ledger at a time.
@@ -152,7 +174,13 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         use V2MemberSaveRefusal as Refusal;
         let ingress = self.require_member_ingress()?;
         let (topic, observed, authentication, fee) =
-            self.with_member_receiver(selection, &caller, |metadata, node, prefix, _| {
+            self.with_member_receiver(selection, &caller, |source| {
+                let ReceiverSource {
+                    metadata,
+                    node,
+                    prefix,
+                    ..
+                } = source;
                 let fee = metadata
                     .reserve_join_node(INGRESS_FEE)
                     .map_err(|_| Refusal::Busy)?;
@@ -200,7 +228,13 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         if !ingress.owns_frame(frame) {
             return Err(Refusal::Stale);
         }
-        self.with_member_receiver(selection, caller, |metadata, node, prefix, _| {
+        self.with_member_receiver(selection, caller, |source| {
+            let ReceiverSource {
+                metadata,
+                node,
+                prefix,
+                ..
+            } = source;
             let (topic, _, bytes) = frame.current_data().ok_or(Refusal::Stale)?;
             let fee = metadata
                 .reserve_join_node(OPEN_FEE)
@@ -228,7 +262,14 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
     ) -> Result<NativeTextJoinedMemberLedger, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
         let (view, ledger, observed, authentication, fee) =
-            self.with_member_receiver(selection, &caller, |metadata, node, prefix, group| {
+            self.with_member_receiver(selection, &caller, |source| {
+                let ReceiverSource {
+                    metadata,
+                    node,
+                    prefix,
+                    view: group,
+                    ..
+                } = source;
                 let fee = metadata
                     .reserve_join_node(LEDGER_FEE)
                     .map_err(|_| Refusal::Busy)?;
@@ -291,8 +332,9 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         if ledger.signal.is_cancelled() || !original.is_for_original_row_cached(&ledger.selection) {
             return Err(Refusal::Stale);
         }
-        self.with_member_receiver(&ledger.selection, caller, |_, _, prefix, _| {
-            let verifier = prefix
+        self.with_member_receiver(&ledger.selection, caller, |source| {
+            let verifier = source
+                .prefix
                 .selected_member_verifier()
                 .map_err(|_| Refusal::Unavailable)?;
             if ledger.signal.is_cancelled()
@@ -304,6 +346,58 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 .opened
                 .project_from_ledger(verifier, &mut ledger.ledger, &ledger.view, RECEIVE_WORK)
                 .map_err(|_| Refusal::Failed)
+        })
+    }
+
+    /// Freeze the exact admitted original into paid archive pages. Preparing
+    /// these pages does not select them in the vault's shared history.
+    pub(in crate::store::critical_namespaces::native_registry) fn prepare_shared_history_record(
+        self,
+        ledger: &NativeTextJoinedMemberLedger,
+        original: &NativeTextJoinedReceivedOriginal,
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<NativeTextJoinedSharedHistoryRecord, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        let action = original.opened.action_data();
+        if ledger.signal.is_cancelled()
+            || !original.is_for_original_row_cached(&ledger.selection)
+            || !ledger
+                .ledger
+                .matches_valid_ordinary_original(action, original.opened.admission_data())
+        {
+            return Err(Refusal::Stale);
+        }
+        self.with_member_receiver(&ledger.selection, caller, |source| {
+            let fee = source
+                .metadata
+                .reserve_join_node(SHARED_HISTORY_RECORD_FEE)
+                .map_err(|_| Refusal::Busy)?;
+            let data = source.registration;
+            let scope = SharedHistoryScope {
+                vault: data.context.vault,
+                group: data.group,
+                profile: data.selected.profile,
+                tenure: data.selected.initial_tenure,
+                creation: data.selected.profile_creation,
+                channel: ledger.ledger.realm().channel(),
+            };
+            let key = member_outbox_key(source.store).map_err(|_| Refusal::Unavailable)?;
+            let record = PreparedSharedHistoryRecord::prepare(
+                &scope,
+                &key,
+                original.opened.admission_data(),
+                action,
+                original.opened.original_data(),
+                rng,
+            )
+            .map_err(|_| Refusal::Failed)?;
+            if ledger.signal.is_cancelled()
+                || !original.is_for_original_row_cached(&ledger.selection)
+            {
+                return Err(Refusal::Stale);
+            }
+            Ok(NativeTextJoinedSharedHistoryRecord { record, _fee: fee })
         })
     }
 
@@ -320,12 +414,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         &self,
         selection: &NativeTextJoinedRowSelection,
         caller: &RequestCancellation,
-        read: impl FnOnce(
-            &MetadataWork,
-            &ClosedV2JoinedNode<catcoms_net::MeshService, R>,
-            &PreparedV2JoinedPrefix,
-            &ProjectionGroupView,
-        ) -> Result<T, V2MemberSaveRefusal>,
+        read: impl FnOnce(ReceiverSource<'_, R>) -> Result<T, V2MemberSaveRefusal>,
     ) -> Result<T, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
         self.original
@@ -376,7 +465,14 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                             .borrow_warm_member_prefix(store)
                             .map_err(|_| Refusal::Unavailable)?,
                     };
-                    read(metadata, node, prefix, view)
+                    read(ReceiverSource {
+                        metadata,
+                        node,
+                        prefix,
+                        view,
+                        store,
+                        registration: data,
+                    })
                 },
             )?
         };
