@@ -202,6 +202,14 @@ Before freezing the Add parent it must wait for the exact existing unsigned,
 raw, lent or unresolved member request to finish through normal authenticated
 retry/save. Zero issued save Ends alone does not establish an empty lane.
 
+The warm native received-request check now verifies this negative on the
+original Host after matching the signed journal. It checks the lane request,
+actual save counters and the mounted outbox's exact context, including any
+unreconciled saved receipt. Busy state refuses without consuming custody.
+The regression saves and reconciles the same original member request before
+the Add preflight can succeed again. The future reservation writer must repeat
+the check at its covering edge.
+
 An original physical Current guard must cover the exact request and parent,
 then the SAME SDK outcome, unsigned preimage, raw Header, governing history and
 response before selecting head2. A decoder or namespace4 descriptor cannot
@@ -259,8 +267,9 @@ The reviewed group-work fence is a complete unsupported-version frame under
 the OLD WAL KDF/tag at `text.wal.stage.v1`, held continuously through SDK work
 until covered head2 itself makes old owning readers refuse. Old owning
 promotion/workspace/recovery paths preserve and refuse its authentic MAC.
-Historical metadata readers may still open. Actual fence creation and covering
-barriers are still outstanding.
+Historical metadata readers may still open. The warm writer has its own
+fixed-name creation and covering barriers. The native Host must still own and
+invoke that writer as part of the Add transaction.
 
 The fence codec uses the existing outer WAL tag and key with logical version 2
 and a separate governed Add role. Its four fixed-width commitments cover the
@@ -278,6 +287,15 @@ It captures the fixed stage under the governed parent, authenticates outside
 writers, then rechecks the same file handle, exact bytes, named directory and
 original Current. The file test covers both in-place mutation and replacement
 with identical bytes. The reader does not create or repair a fence.
+
+The warm writer freezes one ciphertext and records the actual create-new file
+before its first write. It continues a partial prefix only through that held
+file. It refuses an equal preexisting file or a missing created file. File and
+directory barriers precede a fresh Current and same-file check. A covered
+frame is never rewritten on retry. The writer cannot clear a reservation or
+enter the SDK. Cold abort and entry-marker recovery need their own typed path.
+The native regression opens the actual original Current and covers the same
+file twice after the earlier member request has settled.
 
 Genesis member signing now reproves both founder WAL absences at the key
 edge, even if its verifier is already warm. The invitation journal writer

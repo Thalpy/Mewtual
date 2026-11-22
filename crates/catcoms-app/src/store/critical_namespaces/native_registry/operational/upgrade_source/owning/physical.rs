@@ -664,6 +664,13 @@ impl SourceWork {
             negative,
         )
     }
+
+    #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(in crate::store::critical_namespaces::native_registry) fn current_for_governed_add_test(
+        &self,
+    ) -> &V2CurrentLayoutStore {
+        self.physical.current().expect("selected governed fixture")
+    }
     /// Bounded history setup/recovery through the exact retained NativeRequired
     /// Host. No raw Current/Store getter or library-origin fallback escapes.
     pub(in crate::store::critical_namespaces::native_registry) fn prepare_native_member_history<

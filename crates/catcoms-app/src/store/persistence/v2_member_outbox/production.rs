@@ -290,6 +290,27 @@ impl MemberOutboxMount {
         }
     }
 
+    /// A read-only warm Add negative. A missing slot is distinct from a busy
+    /// table. An unreconciled Saved receipt also keeps the original occupied.
+    pub(in crate::store) fn require_context_quiescent(
+        &self,
+        context: MemberOutboxContextId,
+    ) -> Result<(), AppError> {
+        let cells = self.cells.try_lock().map_err(|_| refused())?;
+        if let Some(cell) = cells.iter().find(|cell| cell.context == context) {
+            let state = cell.try_lock()?.ok_or_else(refused)?;
+            if state.custody.is_some()
+                || state
+                    .owner
+                    .as_ref()
+                    .is_some_and(MemberOutbox::needs_recovery)
+            {
+                return Err(refused());
+            }
+        }
+        Ok(())
+    }
+
     /// Open (creating it if needed) the namespace of `context`, completing or preserving any
     /// interrupted work, under this mount's registry and production parent. Pays the owner's
     /// retained metadata and the open/recovery work invoice first; holds the Store's physical

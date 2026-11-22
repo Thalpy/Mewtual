@@ -17,6 +17,10 @@ use std::path::{Path, PathBuf};
 
 const STAGE: &str = "text.wal.stage.v1";
 
+mod writer;
+#[cfg(all(test, any(windows, target_os = "linux")))]
+pub(in crate::store) use writer::PreparedGovernedAddFence;
+
 /// An actual bounded, read-only File capture, tied to the exact selected
 /// parent through its read-resource association. All file and path custody
 /// leaves before the physical lease and the dedicated buffer reservation.
@@ -144,11 +148,25 @@ impl HeldGovernedAddFence {
 
 fn require_exact_held(path: &Path, original: &mut OpenedTextControl) -> Result<(), AppError> {
     require_named(path, original)?;
-    let file = &mut original.file;
+    if read_matching_prefix(&mut original.file, &original.frame)? != FRAME_BYTES {
+        return Err(refused());
+    }
+    require_named(path, original)
+}
+
+fn read_matching_prefix(file: &mut std::fs::File, expected: &[u8]) -> Result<usize, AppError> {
+    if expected.len() != FRAME_BYTES {
+        return Err(refused());
+    }
+    let metadata = file.metadata().map_err(io)?;
+    if !metadata.is_file() || metadata.len() > FRAME_BYTES as u64 {
+        return Err(refused());
+    }
+    let length = metadata.len() as usize;
     file.seek(SeekFrom::Start(0)).map_err(io)?;
     let mut frame = [0; FRAME_BYTES];
-    file.read_exact(&mut frame).map_err(io)?;
-    if frame.as_slice() != original.frame.as_slice() {
+    file.read_exact(&mut frame[..length]).map_err(io)?;
+    if frame[..length] != expected[..length] {
         return Err(refused());
     }
     let mut trailer = [0];
@@ -160,7 +178,7 @@ fn require_exact_held(path: &Path, original: &mut OpenedTextControl) -> Result<(
             Err(error) => return Err(io(error)),
         }
     }
-    require_named(path, original)
+    Ok(length)
 }
 
 fn io(error: std::io::Error) -> AppError {

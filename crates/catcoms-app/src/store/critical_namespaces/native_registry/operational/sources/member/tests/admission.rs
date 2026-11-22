@@ -32,7 +32,7 @@ impl std::task::Wake for RuntimeWake {
         self.observed.store(true, Ordering::SeqCst);
     }
 }
-fn final_preparation(
+pub(super) fn final_preparation(
     owner: &Owner,
     row: &Row,
     vault: &NativeTextVault,
@@ -47,7 +47,7 @@ fn final_preparation(
         .finish_admission([0xe7; 32])
         .unwrap()
 }
-async fn custody(
+pub(super) async fn custody(
     commit: &Arc<tokio::sync::Mutex<()>>,
     session: &RequestCancellation,
 ) -> (MemberSaveNativeAdmission, Arc<AtomicBool>) {

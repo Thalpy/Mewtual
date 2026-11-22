@@ -388,6 +388,13 @@ pub(super) struct V2MemberLane {
 }
 
 impl V2MemberLane {
+    pub(super) fn require_quiescent_for_add(&self) -> Result<(), AppError> {
+        if self.request.is_some() {
+            return Err(refused());
+        }
+        self.save_source.require_open_idle()
+    }
+
     /// Reuse this lane's one verifier and actual selected G1 parent. No second
     /// prefix/domain is constructed for the invite producer. This phase does
     /// not sign or perform IO writes; key admission requires its later journal.

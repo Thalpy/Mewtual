@@ -212,7 +212,48 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
     ) -> Result<(), AppError> {
         self.read_native_invite(layout, keys, negative, |read, genesis| {
             read.require_received_invite(incoming, routing_plan, genesis)
-        })
+        })?;
+        self.require_member_quiescent_for_add(layout)
+    }
+
+    #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(in crate::store) fn cover_governed_add_fence_for_test(
+        &self,
+        layout: &V2CurrentLayoutStore,
+        packet: &catcoms_sync::V2JoinRequestPacketData<'_>,
+        routing_plan: &[u8],
+        keys: &NativeFounderKeys,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+        negative: &RequestCancellation,
+    ) -> Result<(), AppError> {
+        use crate::store::persistence::v2_text::PreparedGovernedAddFence;
+        self.require_received_invite(
+            layout,
+            packet.founder_add_data().invite,
+            routing_plan,
+            keys,
+            negative,
+        )?;
+        let store = layout.checked_store()?;
+        let owner = self.owner.borrow_current()?;
+        let mut parent = PreparedV2TextParentCapture::prepare(store, owner.source())?;
+        let resources = parent.resources().clone();
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            parent.capture(&guard)?.genesis_member_anchor_data(&guard)?;
+            Ok(())
+        })?;
+        let selected = parent.selected_data().ok_or_else(refused)?;
+        let mut fence =
+            PreparedGovernedAddFence::prepare(store, owner.source(), selected, packet, rng)?;
+        for _ in 0..2 {
+            store.with_v2_text_current(&owner, |admission| {
+                let guard = store.lock_v2_text_current_group(admission, &resources)?;
+                keys.preflight(&self.origin)?;
+                fence.cover(&guard, selected)
+            })?;
+        }
+        Ok(())
     }
 
     fn read_native_invite<U>(

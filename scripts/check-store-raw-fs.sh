@@ -185,6 +185,11 @@ declare -A allowed=(
   # a distinct scratch marker verifies the original strict pre-MAIN prefix, parent and
   # absence of dependents before unlinking that one fixed stage. Actual outcomes cache
   # before barriers/late errors. Every helper File drains before its actual lease/End.
+  # Governed Add's fixed old-reader fence. Create-new only, then the exact
+  # original ciphertext prefix via the still-held File. No rename or unlink.
+  ['crates/catcoms-app/src/store/persistence/v2_text/control/governed_add/held/writer.rs|ensure_original|let file = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/control/governed_add/held/writer.rs|ensure_original|.create_new(true)']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/control/governed_add/held/writer.rs|fill_original|original.file.sync_all().map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/v2_text/transaction/recovery/effect.rs|scratch_inner|fs::remove_file(&p.wal_stage_path).map_err(io::io)?;']=1
   ['crates/catcoms-app/src/store/persistence/v2_text/transaction/recovery/effect.rs|complete_authenticated_output|OpenOptions::new()']=1
   ['crates/catcoms-app/src/store/persistence/v2_text/transaction/recovery/effect.rs|complete_authenticated_output|Err(error) if error.kind() == std::io::ErrorKind::NotFound => OpenOptions::new()']=1

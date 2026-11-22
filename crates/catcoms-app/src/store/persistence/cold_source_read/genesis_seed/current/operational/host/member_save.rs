@@ -268,6 +268,25 @@ fn ensure_owner<'s>(
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
+    /// Check the original lane and its actual mounted outbox, without settling
+    /// or retiring another request. The caller owns the whole warm RuntimeLoan.
+    /// A later Add writer will repeat this check at its own reservation edge.
+    pub(super) fn require_member_quiescent_for_add(
+        &self,
+        layout: &V2CurrentLayoutStore,
+    ) -> Result<(), AppError> {
+        let store = layout.checked_store()?;
+        let mount = store.member_outbox_mount()?;
+        let _fee = mount.pay(MEMBER_OUTBOX_LOOKUP_FEE)?;
+        let owner = self.owner.borrow_current()?;
+        let context = member_outbox_context(&owner, mount.capability().current_layout_data())?;
+        mount.require_context_quiescent(context.id())?;
+        if let Some(lane) = self.member.as_deref() {
+            lane.require_quiescent_for_add()?;
+        }
+        mount.require_live(store)
+    }
+
     /// PHASE 1: everything that may do IO, sign or wait, WITHOUT the native UI commit guard.
     ///
     /// Returns `Saved` when the request is already durably saved (an exact lookup Hit, a job's
@@ -1077,6 +1096,14 @@ pub(super) struct V2MemberSaveSource {
     body: Arc<SaveSourceBody>,
 }
 impl V2MemberSaveSource {
+    pub(super) fn require_open_idle(&self) -> Result<(), AppError> {
+        let state = self.body.state.try_lock().map_err(|_| refused())?;
+        if state.closed || state.issued != self.body.completed.load(Ordering::Acquire) {
+            return Err(refused());
+        }
+        self.body.negative.validate_negative()
+    }
+
     pub(super) fn prepare(
         pool: &CriticalCatalogReadPool,
         negative: V2TextProjectionNegative,

@@ -1,5 +1,5 @@
-//! Real whole native runtime, held Current4 and the same member verifier. No
-//! The native harness covers unsigned and signed local storage and retry.
+//! Real whole native runtime, held Current4 and the same member verifier.
+//! The harness covers unsigned and signed local storage and exact retry.
 use super::super::super::tests::selected_governed;
 use super::*;
 use crate::store::critical_namespaces::{
@@ -79,6 +79,63 @@ async fn native_runtime_invite_join_request_requires_the_actual_signed_journal()
         .is_err());
     assert!(check().is_ok());
     assert_eq!(std::fs::read(raw).unwrap(), original);
+
+    let prior = body("finish this member request before changing the group");
+    assert_eq!(
+        prepare(&owner, &row, &vault, &budget).prepare_member_save(sign_request(&prior), &negative),
+        Ok(V2MemberSaveOutcome::Ready),
+    );
+    assert!(
+        check().is_err(),
+        "presealed work holds the lane before any save End"
+    );
+    let final_prepared = super::admission::final_preparation(&owner, &row, &vault, &budget);
+    let commit = Arc::new(tokio::sync::Mutex::new(()));
+    let (native, _) = super::admission::custody(&commit, &negative).await;
+    assert_eq!(
+        final_prepared.try_admit(native).unwrap().run(),
+        crate::store::MemberSaveJobReport::SavedLocal,
+    );
+    assert!(
+        check().is_err(),
+        "the lane still owes reconciliation after the End drains"
+    );
+    assert!(matches!(
+        prepare(&owner, &row, &vault, &budget).prepare_member_save(sign_request(&prior), &negative),
+        Ok(V2MemberSaveOutcome::Saved { .. }),
+    ));
+    assert!(check().is_ok());
+
+    // Cover the fixed fence on the actual original governed Current. The
+    // native fixture has already reconciled its one existing member lane.
+    let packet = check().unwrap();
+    let mut job = prepare(&owner, &row, &vault, &budget);
+    let runtime = job.inner.loan.body.as_mut().unwrap();
+    let driver = runtime.driver.as_ref().unwrap();
+    let route = runtime
+        .network
+        .as_ref()
+        .unwrap()
+        .invite_routing_plan_data(driver.binding_data().unwrap())
+        .unwrap();
+    driver
+        .host_for_governed_add_test()
+        .cover_governed_add_fence_for_test(
+            runtime.work.current_for_governed_add_test(),
+            &packet,
+            &route,
+            &job.inner.keys,
+            runtime.rng.as_mut().unwrap(),
+            &negative,
+        )
+        .unwrap();
+    job.inner.loan.recorded = true;
+    drop(job);
+    let fence = only_named(directory.path(), "text.wal.stage.v1");
+    let frozen = std::fs::read(&fence).unwrap();
+    assert!(frozen.len() > 40);
+    assert!(check().is_err());
+    assert_eq!(std::fs::read(fence).unwrap(), frozen);
 }
 
 #[tokio::test]

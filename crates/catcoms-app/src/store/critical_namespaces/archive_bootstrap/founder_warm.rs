@@ -220,6 +220,13 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
             .ok_or_else(refused)?
             .require_received_invite(layout, incoming, routing_plan, keys, negative)
     }
+
+    #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(in crate::store) fn host_for_governed_add_test(
+        &self,
+    ) -> &crate::store::PreparedV2TextHost<T, R> {
+        self.host.as_ref().expect("promoted fixture host")
+    }
     /// Additional driver/Box/refusal storage only. Existing creator, source,
     /// source-read, restored SDK and Current fees remain independently live.
     fn invoice() -> Result<usize, AppError> {
