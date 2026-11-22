@@ -19,7 +19,8 @@ mod invite;
 pub use invite::NativeTextInvitePublication;
 mod join;
 pub use join::{
-    NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedRequestPreparation,
+    NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,
+    NativeTextJoinedRequestPreparation,
 };
 mod member;
 mod network;
@@ -134,6 +135,7 @@ pub struct NativeTextSourceCommand {
 pub struct NativeTextSources<T: MeshTransport, R: CryptoRngCore> {
     scope: Arc<Scope>,
     entries: Arc<SourceBook<T, R>>,
+    mounted_join: Arc<join::MountedJoin<R>>,
     pending_join: Arc<join::PendingJoin>,
     policy: NativeTextSourcePolicy,
     // Original physical custody and control payment remain until entries leave.
@@ -541,6 +543,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSourcePreparation<T, R> {
         }
         let entries = Arc::new(Mutex::new(Vec::with_capacity(self.budget.policy.maximum)));
         let pending_join = Arc::new(Mutex::new(None));
+        let mounted_join = Arc::new(Mutex::new(None));
         if self.scope.claim_once().is_err() {
             return Err(Box::new(self));
         }
@@ -555,6 +558,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSourcePreparation<T, R> {
         Ok(NativeTextSources {
             scope,
             entries,
+            mounted_join,
             pending_join,
             policy: budget.policy,
             work: work.expect("checked original source work"),

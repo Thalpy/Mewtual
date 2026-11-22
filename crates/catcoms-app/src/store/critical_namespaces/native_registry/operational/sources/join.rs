@@ -11,19 +11,23 @@ use super::*;
 use crate::store::persistence::governance_layout::joined::{AcceptedFirstJoin, JoinedPendingIo};
 use crate::store::NativeTextInvitePacketData;
 use catcoms_replication::chat::join_bindings::GenesisAnchorBindingData;
+use catcoms_replication::chat::owner_facts::OwnerFactId;
 use catcoms_replication::chat::owner_header::OwnerHeaderId;
-use catcoms_rt::{PeerId, RequestAuthority, RequestCancellation};
-use catcoms_sync::V2PendingJoinContextData;
+use catcoms_rt::{Clock, PeerId, RequestAuthority, RequestCancellation};
+use catcoms_sync::{ClosedV2JoinedNode, V2JoinedRuntimeInputs, V2PendingJoinContextData};
 use std::{sync::Weak, time::Duration};
 use tokio::sync::watch;
 
 pub(super) type PendingJoin = Mutex<Option<JoinedPendingIo>>;
+pub(super) type MountedJoin<R> = Mutex<Option<MountedNode<R>>>;
 
-pub(super) fn invoice() -> usize {
+pub(super) fn invoice<R: CryptoRngCore>() -> usize {
     2 * std::mem::size_of::<NativeTextJoinedRequestPreparation>()
         + 2 * std::mem::size_of::<NativeTextJoinedDelivery>()
         + std::mem::size_of::<PendingJoin>()
-        + 2 * std::mem::size_of::<usize>()
+        + 2 * std::mem::size_of::<NativeTextJoinedInstallation<R>>()
+        + std::mem::size_of::<MountedJoin<R>>()
+        + 4 * std::mem::size_of::<usize>()
 }
 
 /// An original UI command and finite metadata slot. Keep the entire capture
@@ -238,12 +242,12 @@ impl NativeTextJoinedExchange {
     /// actor checks the same UI, mount and connection at request admission.
     pub async fn receive(
         self,
-        transport: &impl MeshTransport,
+        transport: catcoms_net::MeshService,
     ) -> Result<NativeTextJoinedDelivery, AppError> {
         let delivery = receive_connected_join(
             &self.request,
             self.target,
-            transport,
+            &transport,
             self.signal.clone(),
             self.mount.clone(),
             self.payment.clone(),
@@ -252,6 +256,7 @@ impl NativeTextJoinedExchange {
         Ok(NativeTextJoinedDelivery {
             delivery,
             exchange: self,
+            transport,
         })
     }
 }
@@ -261,6 +266,7 @@ impl NativeTextJoinedExchange {
 pub struct NativeTextJoinedDelivery {
     delivery: ConnectedJoinDelivery,
     exchange: NativeTextJoinedExchange,
+    transport: catcoms_net::MeshService,
 }
 
 impl std::fmt::Debug for NativeTextJoinedDelivery {
@@ -278,9 +284,9 @@ impl NativeTextJoinedDelivery {
         if scope.is_cancelled() {
             return Err(refused());
         }
+        let metadata = self.exchange.work.metadata().ok_or_else(refused)?;
         let original = self.exchange.pending.upgrade().ok_or_else(refused)?;
         let mut pending = original.try_lock().map_err(|_| refused())?;
-        let metadata = self.exchange.work.metadata().ok_or_else(refused)?;
         let outcome = metadata.cover_join_delivery(
             pending.as_mut().ok_or_else(refused)?,
             &self.exchange.request,
@@ -292,5 +298,112 @@ impl NativeTextJoinedDelivery {
             return Err(refused());
         }
         Ok(outcome)
+    }
+}
+
+pub(super) struct MountedNode<R: CryptoRngCore> {
+    node: Option<ClosedV2JoinedNode<catcoms_net::MeshService, R>>,
+    _payment: CatalogReadReservation,
+}
+
+/// The exact connected Welcome and the runtime inputs ready for mounted
+/// attachment. A refusal before the graph moves keeps the original inputs.
+pub struct NativeTextJoinedInstallation<R: CryptoRngCore> {
+    // These inputs can contain the final original network owner.
+    inputs: Option<V2JoinedRuntimeInputs<catcoms_net::MeshService, R>>,
+    mounted: Weak<MountedJoin<R>>,
+    delivery: ConnectedJoinDelivery,
+    exchange: NativeTextJoinedExchange,
+}
+
+impl<R: CryptoRngCore> std::fmt::Debug for NativeTextJoinedInstallation<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeTextJoinedInstallation")
+            .finish_non_exhaustive()
+    }
+}
+
+impl<R: CryptoRngCore> NativeTextSources<catcoms_net::MeshService, R> {
+    /// Capture under a short checked native guard. Inputs stay in the caller's
+    /// outer slots on refusal, and no book/physical lock or IO occurs here.
+    pub fn capture_join_installation(
+        &self,
+        delivery: &mut Option<NativeTextJoinedDelivery>,
+        inputs: &mut Option<(R, Box<dyn Clock + Send>)>,
+    ) -> Result<NativeTextJoinedInstallation<R>, AppError> {
+        let original = delivery.as_ref().ok_or_else(refused)?;
+        let pending = Arc::downgrade(&self.pending_join);
+        if inputs.is_none() || !self.scope.is_open() || !original.exchange.pending.ptr_eq(&pending)
+        {
+            return Err(refused());
+        }
+        let (rng, clock) = inputs.take().expect("checked original inputs");
+        let NativeTextJoinedDelivery {
+            delivery,
+            exchange,
+            transport,
+        } = delivery.take().expect("checked original delivery");
+        Ok(NativeTextJoinedInstallation {
+            inputs: Some((transport, rng, clock)),
+            mounted: Arc::downgrade(&self.mounted_join),
+            delivery,
+            exchange,
+        })
+    }
+}
+
+impl<R: CryptoRngCore> NativeTextJoinedInstallation<R> {
+    /// Cover the Welcome, then park the one closed node beside its exact
+    /// mounted Pending. Native row publication and signing remain separate.
+    pub fn install(&mut self) -> Result<(OwnerHeaderId, OwnerFactId, u64), AppError> {
+        let scope = &self.delivery.scope;
+        if scope.is_cancelled() {
+            return Err(refused());
+        }
+        let mut payment;
+        let metadata = self.exchange.work.metadata().ok_or_else(refused)?;
+        let original = self.exchange.pending.upgrade().ok_or_else(refused)?;
+        let mut pending = original.try_lock().map_err(|_| refused())?;
+        let pending = pending.as_mut().ok_or_else(refused)?;
+        let mounted = self.mounted.upgrade().ok_or_else(refused)?;
+        let mut slot = mounted.try_lock().map_err(|_| refused())?;
+        let request = &self.exchange.request;
+
+        if slot.is_none() {
+            let (_, rng, _) = self.inputs.as_mut().ok_or_else(refused)?;
+            metadata.cover_join_delivery(pending, request, &self.delivery.bytes, scope, rng)?;
+            if scope.is_cancelled() {
+                return Err(refused());
+            }
+            payment = Some(
+                metadata.reserve_join_node(
+                    ClosedV2JoinedNode::<catcoms_net::MeshService, R>::allocation_bytes(),
+                )?,
+            );
+            let mut node = None;
+            let result = metadata.attach_join_node(pending, &mut self.inputs, &mut node);
+            // A late storage or session refusal must leave the actual graph
+            // with the mounted owner after the one-time move.
+            if node.is_some() {
+                *slot = Some(MountedNode {
+                    node,
+                    _payment: payment.take().unwrap(),
+                });
+            }
+            result?;
+        }
+
+        let node = slot
+            .as_ref()
+            .and_then(|runtime| runtime.node.as_ref())
+            .ok_or_else(refused)?;
+        let (head, admission, epoch) = node.selected_join_data().map_err(|_| refused())?;
+        if scope.is_cancelled() || metadata.warm_join_outcome(pending, request)? != (head, epoch) {
+            return Err(refused());
+        }
+        if scope.is_cancelled() {
+            return Err(refused());
+        }
+        Ok((head, admission, epoch))
     }
 }

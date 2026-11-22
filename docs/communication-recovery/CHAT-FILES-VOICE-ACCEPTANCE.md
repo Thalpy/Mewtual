@@ -117,6 +117,18 @@ original Welcome with SDK entry still closed. Both platforms also passed the
 native dial permit refund after cancellation.
 [Approved direct contact CI](https://github.com/Thalpy/Mewtual/actions/runs/45061846794).
 
+At `5db5b997`, both platforms passed the gated native desktop tests and the
+native workspace build. The desktop test minted the first invitation twice
+and compared the complete returned packet before using it in the connected
+founder and independent joiner exchange.
+[Native invitation IPC CI](https://github.com/Thalpy/Mewtual/actions/runs/45064000366).
+
+At `6d948251`, both platforms passed the joined-storage matrix after it added
+the missing Pending regression. A cold opener refused the already selected
+pin while the original Pending was parked. Restoring the original file
+recovered the exact selected pin and request.
+[Selected Pending CI](https://github.com/Thalpy/Mewtual/actions/runs/45063296093).
+
 ## Invitation and join branch CI (22 November 2026)
 
 Both hosted workflows passed on Linux and Windows at

@@ -45,7 +45,9 @@ pub use operational::{
     NativeUiInvocationBudget, NativeUiInvocationMetadata, NativeUiStateBudget, NativeUiStateCredit,
     NativeUiStatePreparation, NativeUiStateRead, NativeUiStateSaved,
 };
-pub use operational::{NativeTextJoinedDelivery, NativeTextJoinedExchange};
+pub use operational::{
+    NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,
+};
 pub use preparation::{
     NativeRegistryInstallation, NativeRegistryPolicy, NativeRegistryPreparationPolicy,
     NativeRegistryStore, PreparedNativeRegistryMigration,

@@ -1096,6 +1096,39 @@ impl MetadataWork {
         })
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn warm_join_outcome(
+        &self,
+        pending: &JoinedPendingIo,
+        request: &[u8],
+    ) -> Result<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64), AppError> {
+        self.with_joined_store(|store| {
+            if pending.request_data(store)? != request {
+                return Err(refused());
+            }
+            pending.warm_outcome_data(store)?.ok_or_else(refused)
+        })
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn attach_join_node<
+        R: catcoms_rt::CryptoRngCore,
+    >(
+        &self,
+        pending: &mut JoinedPendingIo,
+        inputs: &mut Option<catcoms_sync::V2JoinedRuntimeInputs<catcoms_net::MeshService, R>>,
+        node: &mut Option<catcoms_sync::ClosedV2JoinedNode<catcoms_net::MeshService, R>>,
+    ) -> Result<(), AppError> {
+        self.with_joined_store(|store| pending.attach_warm_node(store, inputs, node))
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn reserve_join_node(
+        &self,
+        bytes: usize,
+    ) -> Result<CatalogReadReservation, AppError> {
+        self.physical
+            .joined_exchange_resources(bytes)
+            .map(|(_, fee)| fee)
+    }
+
     /// Outside every guard, after original-pool validation. Capture the SAME
     /// mount while this work still retains the physical Store. No file reads.
     pub(in crate::store::critical_namespaces::native_registry) fn authentication_negative(

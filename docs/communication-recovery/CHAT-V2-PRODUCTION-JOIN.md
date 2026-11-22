@@ -229,8 +229,12 @@ context. A second capture carries the covered request to the signed peer on an
 already authenticated connection or through one explicitly approved direct IP.
 It releases the metadata slot before contacting the peer. The actor checks the
 original invocation and UI generation, and the mounted worker checks the files
-again before covering Welcome. The desktop Join command still needs to wire
-this handoff to the canonical joined Source installation.
+again before covering Welcome. The transport used to receive that Welcome can
+move with its original closed graph into the same mounted collection. This
+handoff preserves the original runtime inputs on early refusal and keeps an
+already moved graph for an exact retry. Source retirement waits for admitted
+installation work before disposing of that closed node. The desktop Join
+command still requires a selected native registry row and joined authoring.
 
 The warm owner verifies the delivery before covering possible Welcome entry, then
 seals and covers the exact successful outcome. New outcome records also retain

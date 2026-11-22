@@ -88,7 +88,9 @@ pub use native_registry::{
     NativeUiInvocationMetadata, NativeUiStateBudget, NativeUiStateCredit, NativeUiStatePreparation,
     NativeUiStateRead, NativeUiStateSaved, PreparedNativeRegistryMigration,
 };
-pub use native_registry::{NativeTextJoinedDelivery, NativeTextJoinedExchange};
+pub use native_registry::{
+    NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,
+};
 pub(super) mod read_pool;
 pub use read_pool::CriticalCatalogReadPool;
 use read_pool::{CatalogReadReservation, EMPTY_READ_FEE};

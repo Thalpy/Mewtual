@@ -61,7 +61,7 @@ async fn native_runtime_invite_returns_only_the_original_installed_join_response
 
 #[tokio::test]
 async fn mounted_join_request_uses_the_original_native_command_and_retains_its_pending() {
-    use super::super::super::tests::{selected_joined, sources};
+    use super::super::super::tests::{policy, selected_joined};
     use crate::store::critical_namespaces::native_registry::preparation::tests::{
         current_policy, SECRET,
     };
@@ -89,7 +89,12 @@ async fn mounted_join_request_uses_the_original_native_command_and_retains_its_p
     let anchor = &invite.binding().spec_data().anchor;
     let dir = tempfile::tempdir().unwrap();
     let (vault, budget) = selected_joined(dir.path());
-    let original = sources(&vault);
+    let original = vault
+        .capture_native_sources::<catcoms_net::MeshService, rand_chacha::ChaCha20Rng>(
+            policy().prepare().unwrap(),
+        )
+        .finish()
+        .unwrap();
     let capture = || original.capture_join_request(command(&vault, &budget));
     let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(0xe724);
     let now = saved.expires_at_ms() - 1;
@@ -152,7 +157,7 @@ async fn mounted_join_request_uses_the_original_native_command_and_retains_its_p
     assert!(capture()
         .prepare_exchange(&invite, negative.clone())
         .unwrap()
-        .receive(&client)
+        .receive(client.clone())
         .await
         .is_err());
     let founder_capture = || {
@@ -198,7 +203,7 @@ async fn mounted_join_request_uses_the_original_native_command_and_retains_its_p
         .await
         .unwrap();
     let mut receive = async |original: crate::store::NativeTextJoinedExchange| {
-        let (delivery, ()) = tokio::join!(original.receive(&client), serve());
+        let (delivery, ()) = tokio::join!(original.receive(client.clone()), serve());
         delivery.unwrap()
     };
     let delivery = tokio::time::timeout(std::time::Duration::from_secs(10), receive(revoked))
@@ -218,12 +223,54 @@ async fn mounted_join_request_uses_the_original_native_command_and_retains_its_p
     let delivery = tokio::time::timeout(std::time::Duration::from_secs(10), receive(exact))
         .await
         .unwrap();
-    let outcome = delivery.cover(&mut rng).unwrap();
+
+    let mut delivery = Some(delivery);
+    let mut inputs = Some((
+        rng.clone(),
+        Box::new(catcoms_rt::SystemClock) as Box<dyn catcoms_rt::Clock + Send>,
+    ));
+    assert!(owner
+        .capture_join_installation(&mut delivery, &mut inputs)
+        .is_err());
+    assert!(delivery.is_some() && inputs.is_some());
+    let mut installation = original
+        .capture_join_installation(&mut delivery, &mut inputs)
+        .unwrap();
+    assert!(delivery.is_none() && inputs.is_none());
+    let current = dir
+        .path()
+        .join(crate::store::critical_namespaces::Slot::Current.name());
+    let parked = current.with_extension("before-original-joined-attachment");
+    let catalog = std::fs::read(&current).unwrap();
+    std::fs::rename(&current, &parked).unwrap();
+    std::fs::write(&current, &catalog).unwrap();
+    assert!(installation.install().is_err());
+    assert!(find_named(
+        dir.path(),
+        "chat-critical-namespaces.joined-welcome-entry.bin"
+    )
+    .is_empty());
+    std::fs::remove_file(&current).unwrap();
+    std::fs::rename(parked, current).unwrap();
+    let (head, own_add, epoch) = installation.install().unwrap();
+    assert_eq!(installation.install().unwrap(), (head, own_add, epoch));
+    let outcome = (head, epoch);
 
     sender.send(true).unwrap();
     assert!(capture()
         .cover(&invite, anchor, token, after, &negative, &mut rng)
         .is_err());
+    let mut retirement = original.prepare_retirement().unwrap();
+    assert_eq!(
+        retirement.try_retire().unwrap(),
+        crate::store::NativeTextSourceRetirementStatus::Pending
+    );
+    drop(installation);
+    assert_eq!(
+        retirement.try_retire().unwrap(),
+        crate::store::NativeTextSourceRetirementStatus::Drained
+    );
+    drop(retirement);
     drop(original);
     drop(vault);
     let cold =

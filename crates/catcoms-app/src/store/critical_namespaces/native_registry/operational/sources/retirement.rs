@@ -72,7 +72,7 @@ pub(super) fn invoice<T: MeshTransport, R: CryptoRngCore>() -> usize {
         + 2 * std::mem::size_of::<NativeTextSourceRetirementPreparation<T, R>>()
         + std::mem::size_of::<Control>()
         + ui_add_retirement::invoice::<T, R>()
-        + join::invoice()
+        + join::invoice::<R>()
         // The Weak book can outlive Sources. Its real allocation header and
         // Mutex/Vec metadata stay covered by the capture's Control fee tail.
         + std::mem::size_of::<SourceBook<T, R>>() + 2 * std::mem::size_of::<usize>()
@@ -139,6 +139,7 @@ impl Drop for CaptureAck {
 /// Never capture, run or destroy this value while holding native/Root writers.
 pub struct NativeTextSourceRetirement<T: MeshTransport, R: CryptoRngCore> {
     rows: [Option<Row<T, R>>; MAX_SOURCES],
+    mounted_join: Arc<join::MountedJoin<R>>,
     // LAST: another worker cannot enter until all old cell/key pins are gone.
     _ack: CaptureAck,
 }
@@ -149,6 +150,7 @@ pub struct NativeTextSourceRetirementPreparation<T: MeshTransport, R: CryptoRngC
     book: Weak<SourceBook<T, R>>,
     #[cfg(test)]
     weak_drop_order: Option<WeakDropOrder>,
+    mounted_join: Weak<join::MountedJoin<R>>,
     // Slot acknowledgement follows real Weak/cell work. Busy has no slot but
     // still owns the unconditional fee-only tail below.
     ack: Option<CaptureAck>,
@@ -229,6 +231,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSources<T, R> {
             book: Arc::downgrade(&self.entries),
             #[cfg(test)]
             weak_drop_order: None,
+            mounted_join: Arc::downgrade(&self.mounted_join),
             ack,
             _control: self.retirement.clone(),
         }
@@ -248,6 +251,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSourceRetirementPreparation<T
         }
         let mut rows = std::array::from_fn(|_| None);
         let book = self.book.upgrade().ok_or(Error::Unknown)?;
+        let mounted_join = self.mounted_join.upgrade().ok_or(Error::Unknown)?;
         {
             let entries = book.try_lock().map_err(|_| Error::Busy)?;
             for original in entries.iter() {
@@ -264,7 +268,11 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSourceRetirementPreparation<T
                     // Only successful, infallible handoff takes the slot from self. On
                     // every earlier error self drops Weak first, then slot/control last.
         let ack = self.ack.take().expect("original retirement capture slot");
-        Ok(NativeTextSourceRetirement { rows, _ack: ack })
+        Ok(NativeTextSourceRetirement {
+            rows,
+            mounted_join,
+            _ack: ack,
+        })
     }
 }
 
@@ -281,6 +289,17 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSourceRetirement<T, R> {
             if !row.try_retire()? {
                 pending = true;
             }
+        }
+        if !pending {
+            use NativeTextSourceRetirementRefusal as Error;
+            let closed = match self.mounted_join.try_lock() {
+                Ok(mut slot) => slot.take(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    return Ok(NativeTextSourceRetirementStatus::Pending)
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => return Err(Error::Unknown),
+            };
+            drop(closed);
         }
         Ok(if pending {
             NativeTextSourceRetirementStatus::Pending
