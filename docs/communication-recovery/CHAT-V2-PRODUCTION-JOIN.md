@@ -259,7 +259,10 @@ The explicit cold native storage owner can reopen that selected row with a TCP
 actor built from its same covered seed and port. It attaches the independently
 restored private graph after matching its receipt and governing replay. The
 external transport constructor accepts the earlier external profile only.
-Desktop startup still needs to take ownership of the reopened native runtime.
+The cold runtime can move the same physical vault, actor and closed graph into
+a fresh native UI and Sources pair. Fresh authenticated inspection checks the
+original registered row without another Welcome. The desktop boot and server
+table still need to install that pair and publish its selected rows together.
 
 The warm owner verifies the delivery before covering possible Welcome entry, then
 seals and covers the exact successful outcome. New outcome records also retain

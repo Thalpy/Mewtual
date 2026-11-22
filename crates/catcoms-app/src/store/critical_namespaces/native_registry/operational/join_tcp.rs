@@ -9,6 +9,7 @@ use zeroize::Zeroizing;
 #[derive(Default)]
 pub(super) struct Transport {
     attempt: Mutex<Option<Attempt>>,
+    _fee: Option<CatalogReadReservation>,
 }
 
 struct Attempt {
@@ -32,6 +33,13 @@ pub(super) struct Loan {
 }
 
 impl Transport {
+    pub(super) fn paid(fee: CatalogReadReservation) -> Self {
+        Self {
+            attempt: Mutex::new(None),
+            _fee: Some(fee),
+        }
+    }
+
     pub(super) fn checkout(
         self: &Arc<Self>,
         local: (PeerId, u16),

@@ -136,6 +136,12 @@ revoked Welcome, reused the covered request and TCP actor, paired the exact
 closed node, then waited for the original actor to drain during retirement.
 [Mounted join and TCP retirement CI](https://github.com/Thalpy/Mewtual/actions/runs/45066705889).
 
+At `4efaa7aa`, Windows and Linux passed the native joiner key-admission
+fixture and mounted connected cases. The actual prepared Welcome refused a
+foreign source, the founder's separate response-signing cut and the external
+join route before the original joiner source entered and retained its graph.
+[Native joiner key CI](https://github.com/Thalpy/Mewtual/actions/runs/45068953329).
+
 ## Invitation and join branch CI (22 November 2026)
 
 Both hosted workflows passed on Linux and Windows at

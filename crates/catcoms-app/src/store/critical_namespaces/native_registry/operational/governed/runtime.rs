@@ -4,6 +4,7 @@ use super::*;
 use crate::store::persistence::governance_layout::joined::JoinedRuntimeInputs;
 use catcoms_replication::chat::{owner_facts::OwnerFactId, owner_header::OwnerHeaderId};
 use catcoms_sync::{ClosedV2JoinedNode, MAX_V2_FIRST_ADD_PROOF_BYTES};
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use zeroize::Zeroizing;
 
 struct PaidGoverningProof {
@@ -21,11 +22,6 @@ pub struct NativeTextJoinedRuntime<T: MeshTransport, R: CryptoRngCore> {
     node: Option<ClosedV2JoinedNode<T, R>>,
     inputs: Option<JoinedRuntimeInputs<T, R>>,
     storage: NativeTextJoinedStorage,
-    _fee: CatalogReadReservation,
-}
-
-pub(super) struct RecoveredTcp {
-    owner: Arc<join_tcp::Transport>,
     _fee: CatalogReadReservation,
 }
 
@@ -93,13 +89,10 @@ impl NativeTextJoinedStorage {
             let (_, fee) = self.index.joined_exchange_resources(allowance)?;
             if self.recovered_tcp.is_none() {
                 let (_, owner_fee) = self.index.joined_exchange_resources(32 * 1024)?;
-                self.recovered_tcp = Some(RecoveredTcp {
-                    owner: Arc::new(join_tcp::Transport::default()),
-                    _fee: owner_fee,
-                });
+                self.recovered_tcp = Some(Arc::new(join_tcp::Transport::paid(owner_fee)));
             }
             let original = self.recovered_tcp.as_ref().ok_or_else(refused)?;
-            let mut loan = original.owner.checkout(
+            let mut loan = original.checkout(
                 receipt.transport_data(),
                 || self.index.prepare_recovered_native_join_tcp(&receipt),
                 require_original,
@@ -259,5 +252,48 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextJoinedRuntime<T, R> {
             return Err(refused());
         }
         Ok((head, own, epoch))
+    }
+}
+
+impl<R: CryptoRngCore> NativeTextJoinedRuntime<catcoms_net::MeshService, R> {
+    /// Move this already covered and registered cold node into the same
+    /// physical vault's newly authorized native Source collection.
+    pub fn into_recovered_native_sources(
+        mut self,
+        session: (Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicBool>),
+        ui_budget: crate::store::NativeUiInvocationBudget,
+        policy: &crate::store::NativeTextSourcePolicy,
+        negative: &RequestCancellation,
+    ) -> Result<
+        (
+            crate::store::NativeTextVault,
+            crate::store::NativeTextSources<catcoms_net::MeshService, R>,
+        ),
+        AppError,
+    > {
+        if self.storage.row_count_data()? != 1 {
+            return Err(refused());
+        }
+        self.complete_recovery(negative)?;
+        let receipt = self
+            .storage
+            .recovered_join_registration_data()?
+            .ok_or_else(refused)?;
+        let native_tcp = self.storage.recovered_tcp.take().ok_or_else(refused)?;
+        let budget = policy.prepare()?;
+        let vault = crate::store::NativeTextVault::from_recovered_joined_index(
+            self.storage.index,
+            session,
+            ui_budget,
+        )?;
+        let mut sources = vault
+            .capture_native_sources(budget)
+            .finish()
+            .map_err(|_| refused())?;
+        sources.install_recovered_joined(self.node.take(), receipt, native_tcp, self._fee)?;
+        if negative.is_cancelled() {
+            return Err(refused());
+        }
+        Ok((vault, sources))
     }
 }

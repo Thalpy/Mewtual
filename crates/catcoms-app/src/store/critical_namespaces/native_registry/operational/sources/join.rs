@@ -397,6 +397,7 @@ impl NativeTextJoinedDelivery {
 pub(super) struct MountedNode<R: CryptoRngCore> {
     node: Option<ClosedV2JoinedNode<catcoms_net::MeshService, R>>,
     registration: Option<Arc<JoinedRegistrationDependency>>,
+    recovered: Option<NativeTextJoinedRegistrationData>,
     _payment: CatalogReadReservation,
 }
 
@@ -418,6 +419,41 @@ impl<R: CryptoRngCore> std::fmt::Debug for NativeTextJoinedInstallation<R> {
 }
 
 impl<R: CryptoRngCore> NativeTextSources<catcoms_net::MeshService, R> {
+    pub(in super::super) fn install_recovered_joined(
+        &mut self,
+        mut node: Option<ClosedV2JoinedNode<catcoms_net::MeshService, R>>,
+        receipt: NativeTextJoinedRegistrationData,
+        transport: Arc<join_tcp::Transport>,
+        payment: CatalogReadReservation,
+    ) -> Result<(), AppError> {
+        let checked = node
+            .as_ref()
+            .filter(|node| node.was_recovered_data())
+            .ok_or_else(refused)?;
+        if !self.scope.is_open()
+            || !self.work.is_live_cached()
+            || checked.selected_join_data().map_err(|_| refused())? != receipt.selected_data()
+            || checked.local_peer_data() != receipt.transport_data().0
+        {
+            return Err(refused());
+        }
+        let slot = Arc::get_mut(&mut self.mounted_join)
+            .ok_or_else(refused)?
+            .get_mut()
+            .map_err(|_| refused())?;
+        if slot.is_some() {
+            return Err(refused());
+        }
+        self.joined_tcp = transport;
+        *slot = Some(MountedNode {
+            node: node.take(),
+            registration: None,
+            recovered: Some(receipt),
+            _payment: payment,
+        });
+        Ok(())
+    }
+
     /// Capture under a short checked native guard. Inputs stay in the caller's
     /// outer slots on refusal, and no book/physical lock or IO occurs here.
     pub fn capture_join_installation(
@@ -497,6 +533,7 @@ impl<R: CryptoRngCore> NativeTextJoinedInstallation<R> {
                 *slot = Some(MountedNode {
                     node,
                     registration: None,
+                    recovered: None,
                     _payment: payment.take().unwrap(),
                 });
                 self.exchange.tcp.attached();
@@ -621,11 +658,19 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             let node = runtime.node.as_ref().ok_or_else(refused)?;
             let (head, admission, epoch) = node.selected_join_data().map_err(|_| refused())?;
             let metadata = self.original.work.as_ref().ok_or_else(refused)?;
-            let receipt = metadata.observe_join_installation(
-                pending.io.as_ref().ok_or_else(refused)?,
-                invite,
-                token,
-            )?;
+            let receipt = if let Some(recovered) = runtime.recovered {
+                if recovered.invocation != token || recovered.invite != invite.binding().id_data() {
+                    return Err(refused());
+                }
+                metadata.require_recovered_joined(recovered)?;
+                recovered
+            } else {
+                metadata.observe_join_installation(
+                    pending.io.as_ref().ok_or_else(refused)?,
+                    invite,
+                    token,
+                )?
+            };
             if receipt.selected_data() != (head, admission, epoch) {
                 return Err(refused());
             }

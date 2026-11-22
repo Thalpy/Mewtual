@@ -1085,6 +1085,13 @@ pub(in crate::store::critical_namespaces::native_registry) struct JoinedConnecti
 }
 
 impl MetadataWork {
+    pub(in crate::store::critical_namespaces::native_registry) fn require_recovered_joined(
+        &self,
+        receipt: crate::store::NativeTextJoinedRegistrationData,
+    ) -> Result<(), AppError> {
+        self.physical.require_registered_native_join(receipt)
+    }
+
     fn with_joined_store<T>(
         &self,
         run: impl FnOnce(&ServerStore) -> Result<T, AppError>,

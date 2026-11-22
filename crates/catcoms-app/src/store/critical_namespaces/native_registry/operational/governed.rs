@@ -142,7 +142,7 @@ impl NativeTextGovernedStorage {
 /// Opening this metadata owner cannot install a joined MLS runtime.
 pub struct NativeTextJoinedStorage {
     pending: Option<JoinedPendingIo>,
-    recovered_tcp: Option<runtime::RecoveredTcp>,
+    recovered_tcp: Option<Arc<super::join_tcp::Transport>>,
     index: upgrade_source::owning::Store,
 }
 

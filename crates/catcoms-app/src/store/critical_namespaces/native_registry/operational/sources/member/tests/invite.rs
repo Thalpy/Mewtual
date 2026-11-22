@@ -412,6 +412,25 @@ async fn mounted_join_fixture(recover_stage: bool) {
         (head, own_add, epoch)
     );
     assert_eq!(reopened.local_peer_data(), Some(local_transport.0));
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+    let (mounted_vault, mounted_sources) = reopened
+        .into_recovered_native_sources(
+            (
+                Arc::new(AtomicU64::new(7)),
+                Arc::new(AtomicU64::new(7)),
+                Arc::new(AtomicBool::new(false)),
+            ),
+            budget.clone(),
+            &policy(),
+            &fresh,
+        )
+        .unwrap();
+    assert!(mounted_sources.is_from_original_vault_cached(&mounted_vault));
+    let recovered = mounted_sources
+        .capture_joined_selection(command(&mounted_vault, &budget))
+        .inspect_registration(&invite, token, &fresh)
+        .unwrap();
+    assert_eq!(recovered, Some(registration));
 }
 
 #[derive(PartialEq, Eq)]

@@ -128,6 +128,20 @@ const _: () = assert!(
 );
 
 impl NativeTextVault {
+    pub(super) fn from_recovered_joined_index(
+        index: super::upgrade_source::owning::Store,
+        (generation, authorized, requested): (Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicBool>),
+        budget: NativeUiInvocationBudget,
+    ) -> Result<Self, AppError> {
+        let ui = UiAdmissionOwner::new(generation, authorized, requested, budget)?;
+        let sources = super::source_admission::SourceAdmission::new(ui.observe_mount())?;
+        Ok(Self {
+            ui,
+            sources,
+            index: IndexOwner::Version3(index),
+        })
+    }
+
     /// Open a previously selected joined-aware vault under fresh host admission.
     /// The native source table may start empty only when the physical registry
     /// and joined-pin selection both prove that there are no sources to restore.
