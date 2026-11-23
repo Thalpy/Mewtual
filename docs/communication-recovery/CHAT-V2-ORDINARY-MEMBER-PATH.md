@@ -199,8 +199,13 @@ it before awaiting the driver. The founder attaches one receiver to the original
 actor after the Add. It verifies each signed original under its current governing
 view and holds a paid live ledger for that subscription. The main window reads
 that projection under the same native publication guard as a joined row.
-The founder's received history is live. Durable founder receive and recovery of
-missing dependencies on the founder's receiver remain open.
+For an authenticated incoming action that names at most four missing direct
+dependencies, the founder can look up those exact IDs in its own saved outbox.
+The current Core verifier replays each matching saved original into the
+receiver ledger for dependency validation. This gives a remote reply the
+context of the founder's original while its local outbox still owns the
+original's display. Durable founder receive and requests for missing peer
+dependencies remain open.
 Original audit chunks and request receipts remain retained after scheduling debt clears.
 Removal changes active view, never deletes the audit. Unproven late removed actions stay
 Held pending the separately authorized moderation path; ordinary concurrent edits resolve

@@ -501,6 +501,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
         channel: u128,
         operation: crate::store::persistence::v2_member_transport::FounderReceiveOperation<'_>,
         caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
         access: FounderAccess<'_>,
     ) -> Result<
         crate::store::persistence::v2_member_transport::FounderReceiveOutcome,
@@ -515,7 +516,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
         self.host
             .as_mut()
             .ok_or(V2MemberSaveRefusal::Unavailable)?
-            .run_founder_member_receive(layout, channel, operation, caller, access)
+            .run_founder_member_receive(layout, channel, operation, caller, rng, access)
     }
 
     pub(in crate::store) fn run_founder_member_debt(

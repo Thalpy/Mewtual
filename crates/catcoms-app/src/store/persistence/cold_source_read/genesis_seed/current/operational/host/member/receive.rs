@@ -8,6 +8,7 @@ use catcoms_replication::chat::{ActionState, V2OrdinaryReceiveStatus};
 const ACTION_LIMIT: usize = 64;
 const ACTION_BYTES: usize = 1024 * 1024;
 const WORK_LIMIT: usize = 4 * ACTION_LIMIT + MAX_PARENTS;
+const MAX_SAVED_DEPENDENCIES: usize = 4;
 const LEDGER_FEE: usize = 2 * ACTION_BYTES
     + ACTION_LIMIT * (MAX_PARENTS + 2) * 256
     + V2GeneralPrefixVerifier::ordinary_authorization_temporary_layout_bytes()
@@ -27,6 +28,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         channel: u128,
         operation: FounderReceiveOperation<'_>,
         caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
         access: FounderAccess<'_>,
     ) -> Result<FounderReceiveOutcome, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
@@ -112,6 +114,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                         _fee: fee,
                     });
                 }
+                let outbox = lane.outbox_context();
                 let received = lane
                     .received
                     .as_mut()
@@ -123,9 +126,77 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                 if session.signal.is_cancelled() || frame.current_data().is_none() {
                     return Err(Refusal::Stale);
                 }
-                let status = original
+                let mut status = original
                     .project_from_ledger(verifier, &mut received.ledger, &received.view, WORK_LIMIT)
                     .map_err(|_| Refusal::Failed)?;
+                if let V2OrdinaryReceiveStatus::WaitingForDependencies(missing) = &status {
+                    if missing.len() > MAX_SAVED_DEPENDENCIES {
+                        return Ok(FounderReceiveOutcome::Frame(None));
+                    }
+                    let mount = store
+                        .member_outbox_mount()
+                        .map_err(|_| Refusal::Unavailable)?;
+                    let owner = self
+                        .owner
+                        .borrow_current()
+                        .map_err(|_| Refusal::Unavailable)?;
+                    let key = member_outbox_key(store).map_err(|_| Refusal::Unavailable)?;
+                    let admission = verifier
+                        .admission(lane.admission)
+                        .map_err(|_| Refusal::Stale)?;
+                    let mut replayed = false;
+                    for &action in missing {
+                        if session.signal.is_cancelled() || frame.current_data().is_none() {
+                            return Err(Refusal::Stale);
+                        }
+                        let context = super::super::member_save::member_outbox_context(
+                            &owner,
+                            mount.capability().current_layout_data(),
+                        )
+                        .map_err(|_| Refusal::Unavailable)?;
+                        if outbox.is_some_and(|id| id != context.id()) {
+                            return Err(Refusal::Stale);
+                        }
+                        let Some(saved) = mount
+                            .lookup_existing_action(store, context, &key, action, rng)
+                            .map_err(|_| Refusal::Failed)?
+                        else {
+                            continue;
+                        };
+                        if saved.receipt().admission != lane.admission
+                            || saved.action().spec().realm != *received.ledger.realm()
+                        {
+                            return Err(Refusal::Stale);
+                        }
+                        check_governed_member(&self.owner, governed, &lane.domain, verifier, store)
+                            .map_err(|_| Refusal::Stale)?;
+                        if session.signal.is_cancelled() || frame.current_data().is_none() {
+                            return Err(Refusal::Stale);
+                        }
+                        replayed |= verifier
+                            .replay_ordinary_history_original(
+                                &mut received.ledger,
+                                &received.view,
+                                saved.action(),
+                                &admission,
+                                &[],
+                                WORK_LIMIT,
+                            )
+                            .map_err(|_| Refusal::Failed)?
+                            == V2OrdinaryReceiveStatus::Retained(ActionState::Valid);
+                    }
+                    if !replayed {
+                        return Ok(FounderReceiveOutcome::Frame(None));
+                    }
+                    status = original
+                        .project_from_ledger(
+                            verifier,
+                            &mut received.ledger,
+                            &received.view,
+                            WORK_LIMIT,
+                        )
+                        .map_err(|_| Refusal::Failed)?;
+                }
                 let action = original.action_data();
                 Ok(FounderReceiveOutcome::Frame(
                     (status == V2OrdinaryReceiveStatus::Retained(ActionState::Valid))

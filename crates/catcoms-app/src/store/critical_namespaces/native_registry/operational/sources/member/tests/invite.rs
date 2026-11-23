@@ -555,7 +555,108 @@ async fn mounted_join_fixture(recover_stage: bool) {
             .unwrap()
             .is_some());
         founder_archived = Some(original.action_id_data());
-        drop((receiver, ledger, original));
+        drop((receiver, ledger));
+        let parent = original.action_id_data();
+        let reply = catcoms_replication::chat::Body::Create {
+            text: "Joined reply to the founder's saved original".into(),
+            reply_to: Some(parent),
+        };
+        let reply_dependency = [original.dependency_for_test()];
+        let reply_request = || V2MemberSignRequest {
+            token: [145; 32],
+            channel,
+            body: &reply,
+            parents: std::slice::from_ref(&parent),
+            dependencies: &reply_dependency,
+        };
+        assert_eq!(
+            inspect()
+                .prepare_member_save(&view, reply_request(), &fresh, &mut rng)
+                .unwrap(),
+            V2MemberSaveOutcome::Ready
+        );
+        let mut final_reply = Some(
+            inspect()
+                .finish_member_admission(view.clone(), reply_request().token, &fresh)
+                .unwrap(),
+        );
+        let job = NativeTextJoinedMemberFinalPreparation::try_admit_member_save(
+            &mut final_reply,
+            &fresh,
+            MemberSaveNativeAdmission::new((), fresh.clone()),
+        )
+        .unwrap();
+        assert_eq!(job.run(), MemberSaveJobReport::SavedLocal);
+        let Some((reply_id, _)) = inspect()
+            .lookup_saved_member(&view, &reply_request(), &fresh, &mut rng)
+            .unwrap()
+        else {
+            panic!("the original joined reply must be saved");
+        };
+        drop(original);
+        let mut founder_receiver = founder_capture()
+            .prepare_founder_member_ingress(channel, fresh.clone())
+            .unwrap()
+            .open()
+            .await
+            .unwrap();
+        let receipt = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let receipt = loop {
+                let prepared = inspect()
+                    .prepare_member_publication(&view, fresh.clone(), &mut rng)
+                    .unwrap()
+                    .expect("the original joined reply is owed");
+                match prepared.submit().await {
+                    Ok(Some(receipt)) => break receipt,
+                    Err(catcoms_sync::SyncError::Publication(
+                        catcoms_rt::PublishOnceError::NoPeers,
+                    )) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    }
+                    _ => panic!("expected the reply to reach the founder mesh"),
+                }
+            };
+            let Some(NativeChatMemberGossipEvent::Frame(frame)) = founder_receiver.next().await
+            else {
+                panic!("expected the original joined reply at the founder");
+            };
+            assert_eq!(
+                founder_capture()
+                    .receive_founder_member(&founder_receiver, &frame)
+                    .unwrap(),
+                Some(reply_id)
+            );
+            receipt
+        })
+        .await
+        .expect("bounded joined reply over the original TCP connection");
+        let projected = founder_capture()
+            .read_founder_member_projection(channel, reply_id, &fresh)
+            .unwrap()
+            .expect("the founder loaded its own exact saved parent");
+        assert!(projected
+            .with_publication(|view| matches!(
+                view, catcoms_replication::chat::GuardedProjection::Visible { text, .. }
+                if text == "Joined reply to the founder's saved original"
+            ))
+            .unwrap());
+        let parent_projection = founder_capture()
+            .read_founder_member_projection(channel, parent, &fresh)
+            .unwrap()
+            .expect("the original parent was replayed for its semantics");
+        assert!(parent_projection
+            .with_publication(|view| matches!(
+                view,
+                catcoms_replication::chat::GuardedProjection::Held { .. }
+            ))
+            .unwrap());
+        assert_eq!(
+            inspect()
+                .checkpoint_member_publication(receipt, &fresh, &mut rng)
+                .unwrap(),
+            1
+        );
+        drop((founder_receiver, projected, parent_projection));
         assert_eq!(
             inspect()
                 .prepare_member_save(&view, request(), &fresh, &mut rng)

@@ -1053,6 +1053,7 @@ impl SourceWork {
         channel: u128,
         operation: crate::store::persistence::v2_member_transport::FounderReceiveOperation<'_>,
         caller: &catcoms_rt::RequestCancellation,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
         keys: &mut crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounderKeys,
     ) -> Result<
         crate::store::persistence::v2_member_transport::FounderReceiveOutcome,
@@ -1067,6 +1068,7 @@ impl SourceWork {
             channel,
             operation,
             caller,
+            rng,
             crate::store::critical_namespaces::archive_bootstrap::founder::FounderAccess::Native(
                 keys,
             ),

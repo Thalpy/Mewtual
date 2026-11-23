@@ -123,6 +123,16 @@ impl NativeTextJoinedReceivedOriginal {
         let action = self.opened.action_data();
         action.spec().body.create().unwrap_or_else(|| action.id())
     }
+
+    #[cfg(test)]
+    pub(in crate::store::critical_namespaces::native_registry) fn dependency_for_test(
+        &self,
+    ) -> crate::store::V2MemberDependency<'_> {
+        crate::store::V2MemberDependency {
+            action: self.opened.action_data(),
+            admission: self.opened.admission_data(),
+        }
+    }
 }
 
 /// Paid current ledger for one channel in the original selected joined row.

@@ -170,6 +170,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberJob<T, R> {
             channel,
             operation,
             caller,
+            body.rng.as_mut().ok_or(Refusal::Unavailable)?,
             &mut inner.keys,
         );
         inner.loan.recorded = true;
