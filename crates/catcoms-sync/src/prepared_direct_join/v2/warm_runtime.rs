@@ -13,8 +13,9 @@ use crate::owner_v2::{
 };
 use catcoms_replication::chat::{
     join_bindings::SignedWelcomeBindingData, owner_facts::OwnerFactId, owner_header::OwnerHeaderId,
-    ActionDraft, ActionId, V2AuthenticatedAdmission, V2GeneralPrefixVerifier,
-    V2OrdinarySigningGuard, V2OrdinarySigningPlan,
+    owner_profile::AdmissionOrigin, owner_state::transition::ReplayBody, ActionDraft, ActionId,
+    V2AuthenticatedAdmission, V2GeneralCandidate, V2GeneralPrefixVerifier, V2OrdinarySigningGuard,
+    V2OrdinarySigningPlan,
 };
 
 /// Owns the original verified group, device, routing and runtime. Only a
@@ -139,6 +140,54 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
         }
         self.selected_join_data()?;
         Ok(verifier)
+    }
+
+    /// Prepare the Core successor for a later Add on this exact joined node.
+    /// The original stays at its selected epoch while the host prepares and
+    /// validates a separate MLS candidate for the same commit.
+    pub fn prepare_member_add_commit(
+        &self,
+        prefix: &PreparedV2JoinedPrefix,
+        step: V2AdmissionStepData<'_>,
+        commit: &[u8],
+    ) -> Result<V2GeneralCandidate, SyncError> {
+        use catcoms_replication::chat::join_bindings::MAX_JOIN_PAYLOAD_BYTES;
+        let reject = |_| SyncError::JoinRejected;
+        let verifier = self.member_prefix(prefix)?;
+        let AdmissionOrigin::Add {
+            commit: expected,
+            before_epoch,
+            after_epoch,
+            ..
+        } = step.admission.spec().origin
+        else {
+            return Err(SyncError::JoinRejected);
+        };
+        let epoch = self.node.epoch();
+        if commit.is_empty()
+            || commit.len() > MAX_JOIN_PAYLOAD_BYTES
+            || before_epoch != epoch
+            || before_epoch.checked_add(1) != Some(after_epoch)
+            || blake3::hash(commit).as_bytes() != &expected
+        {
+            return Err(SyncError::JoinRejected);
+        }
+        catcoms_mls::group::check_commit_header(
+            commit,
+            &step.admission.spec().group,
+            before_epoch,
+            epoch,
+        )
+        .map_err(|_| SyncError::JoinRejected)?;
+        let candidate = verifier
+            .derive_successor(
+                step.header,
+                ReplayBody::Admission(step.admission),
+                step.image,
+            )
+            .map_err(reject)?;
+        self.member_prefix(prefix)?;
+        Ok(candidate)
     }
 
     pub fn selected_member_topic_data(

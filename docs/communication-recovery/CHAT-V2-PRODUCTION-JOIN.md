@@ -327,6 +327,9 @@ The Sync reader for a later Welcome can verify a bounded sequence of signed
 governing records from the original genesis through the Add named by that
 Welcome. Each transition replays through Core, including the exact resulting
 state. A gap, reorder, or different final Admission refuses before MLS entry.
+The existing joined node can check a later Add against its own selected
+Core prefix, the signed commit digest and the exact MLS group and epoch. Its
+prepared successor leaves the installed member at the original epoch.
 Native storage and transport still need to produce and cover the later Add
 and advance the existing members to the new epoch.
 

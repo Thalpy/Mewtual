@@ -117,15 +117,18 @@ fn verify_later_governing_join_prefix(
     encoded
 }
 
-fn complete_second_governing_welcome(
+fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore>(
     node: &mut Node,
     first: &[u8],
     replay: &catcoms_replication::chat::owner_state::transition::ReplayMath,
     now: u64,
+    joined: &crate::ClosedV2JoinedNode<T, R>,
+    joined_prefix: &crate::PreparedV2JoinedPrefix,
+    foreign_prefix: &crate::PreparedV2JoinedPrefix,
 ) {
     use crate::{
-        DirectJoinLimits, PreparedV2JoinRequest, V2FirstAddProofData, V2GoverningJoinPrefixData,
-        V2GoverningJoinStepData, V2JoinRequestPacketData,
+        DirectJoinLimits, PreparedV2JoinRequest, V2AdmissionStepData, V2FirstAddProofData,
+        V2GoverningJoinPrefixData, V2GoverningJoinStepData, V2JoinRequestPacketData,
     };
     let mut fixture = Request::new(node, 96);
     fixture.change_invite(node, |spec| spec.expires_at_ms = now + 60_000);
@@ -179,6 +182,26 @@ fn complete_second_governing_welcome(
     .unwrap();
     let prefix = V2GoverningJoinPrefixData::decode(&encoded).unwrap();
     let result = node.completed_add_data().unwrap();
+    let step = || V2AdmissionStepData {
+        admission,
+        header,
+        image: output.image_data(),
+    };
+    let commit = result.commit_data();
+    let previously_selected = joined.selected_join_data().unwrap();
+    assert!(joined
+        .prepare_member_add_commit(foreign_prefix, step(), commit)
+        .is_err());
+    assert!(joined
+        .prepare_member_add_commit(joined_prefix, step(), &commit[..commit.len() - 1])
+        .is_err());
+    let selected = joined
+        .prepare_member_add_commit(joined_prefix, step(), commit)
+        .unwrap();
+    assert_eq!(selected.header_data().id(), header.id());
+    assert_eq!(selected.image_data(), output.image_data());
+    drop(selected);
+    assert_eq!(joined.selected_join_data().unwrap(), previously_selected);
     let response = node.join_response_data().unwrap();
     let only_first = V2FirstAddProofData::decode(first).unwrap();
     assert!(joiner.finish_first_welcome(response, &only_first).is_err());
@@ -630,7 +653,7 @@ async fn complete_original_welcome(native_joiner: bool) {
         prefix.own_admission_data()
     );
     assert!(warm_prefix.finish_host_selected(&wrong).is_err());
-    let _warm_parent = warm_prefix.finish_host_selected(&selected).unwrap();
+    drop(warm_prefix.finish_host_selected(&selected).unwrap());
     assert_eq!(
         warm_prefix.selected_replay_data().unwrap().header().id(),
         header_id
@@ -1087,6 +1110,17 @@ async fn complete_original_welcome(native_joiner: bool) {
             .bind_recovered_member_source(&prefix, &original, &old_member)
             .is_err());
     }
+    if !native_joiner {
+        complete_second_governing_welcome(
+            &mut node,
+            &proof,
+            g.verifier.replay_data(),
+            now,
+            &joined_node,
+            &warm_prefix,
+            &prefix,
+        );
+    }
     drop(warm_view.revoker().close());
     if let Some(submission) = revoked_submission {
         assert!(!submission.is_current_cached());
@@ -1100,9 +1134,6 @@ async fn complete_original_welcome(native_joiner: bool) {
     }
     assert!(joined_node.admit_member_save(&warm_plan).is_err());
     drop(cold_node.admit_member_save(&cold_plan).unwrap());
-    if !native_joiner {
-        complete_second_governing_welcome(&mut node, &proof, g.verifier.replay_data(), now);
-    }
     drop(node);
     if let Some(submission) = founder_after_drop {
         assert!(!submission.is_current_cached());
