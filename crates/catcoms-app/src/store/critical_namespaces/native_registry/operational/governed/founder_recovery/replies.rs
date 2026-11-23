@@ -110,10 +110,14 @@ impl NativeTextColdFounderSource {
     ) -> Result<Vec<u8>, AppError> {
         self.restore_first_add(caller)?;
         let original = self.governed.as_ref().ok_or_else(refused)?;
-        if !original.covers_request_data(request) {
-            return Err(refused());
-        }
-        let delivery = original.encode_join_delivery(&self.source)?;
+        let delivery =
+            self.work
+                .with_recovered_founder_store(&self.selection, &self.source, |store| {
+                    if caller.is_cancelled() {
+                        return Err(refused());
+                    }
+                    original.encode_join_delivery(store, &self.source, request)
+                })?;
         if delivery.len() > CHAT_V2_JOIN_RESPONSE_MAX_BYTES {
             return Err(refused());
         }

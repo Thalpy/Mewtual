@@ -4,8 +4,9 @@ use crate::store::persistence::v2_text::io::{
     archive_child, read_control_into, require_named, OpenedTextControl,
 };
 use catcoms_sync::{
-    V2AdmissionStepData, V2FirstAddProofData, V2GoverningJoinPrefixData, V2GoverningJoinStepData,
-    MAX_V2_GOVERNING_JOIN_PREFIX_BYTES, MAX_V2_GOVERNING_JOIN_STEPS,
+    V2AdmissionStepData, V2FirstAddProofData, V2FirstJoinDeliveryData, V2GoverningJoinDeliveryData,
+    V2GoverningJoinPrefixData, V2GoverningJoinStepData, MAX_V2_GOVERNING_JOIN_PREFIX_BYTES,
+    MAX_V2_GOVERNING_JOIN_STEPS, MAX_V2_JOIN_REQUEST_PACKET_BYTES,
 };
 use std::path::Path;
 
@@ -15,6 +16,7 @@ use std::path::Path;
 struct Predecessor {
     head: [u8; selected_head::FRAME_LEN],
     id: ArchiveHeadId,
+    first: bool,
     file: OpenedTextControl,
 }
 
@@ -29,8 +31,8 @@ pub(super) struct RecoveredArchiveChain {
     pub(super) journal: RecoveredAddJournal,
     first: PublicStep,
     successors: Vec<PublicStep>,
+    prior_requests: Vec<[u8; 32]>,
     pub(super) prefix: Vec<u8>,
-    pub(super) nonces: Vec<[u8; 16]>,
 }
 
 impl RecoveredArchiveChain {
@@ -43,6 +45,7 @@ impl RecoveredArchiveChain {
             + MAX_V2_GOVERNING_JOIN_STEPS
                 * (4 * std::mem::size_of::<Predecessor>()
                     + 4 * std::mem::size_of::<PublicStep>()
+                    + 4 * std::mem::size_of::<[u8; 32]>()
                     + 128)
     }
 
@@ -88,24 +91,14 @@ impl RecoveredArchiveChain {
         let (first_add, mut replay) =
             authenticate_first_archive(key, &first.head, &archive.frame, context, trusted)?;
         buffer = Some(std::mem::take(&mut archive.frame));
-        let first_proof = V2FirstAddProofData::encode(
-            trusted.profile,
-            V2AdmissionStepData {
-                admission: trusted.admission,
-                header: trusted.header,
-                image: trusted.image,
-            },
-            V2AdmissionStepData {
-                admission: &first_add.admission,
-                header: &first_add.header,
-                image: first_add.image_data()?,
-            },
-        )?;
         let first = PublicStep {
             image: first_add.image_data()?.to_vec(),
             header: first_add.header.clone(),
             admission: first_add.admission.clone(),
         };
+        let first_proof = first.first_proof(trusted)?;
+        let mut prior_requests = Vec::with_capacity(count - 1);
+        prior_requests.push(*blake3::hash(&first_add.request).as_bytes());
         drop(first_add);
         let mut successors = Vec::with_capacity(count - 1);
         let mut public_bytes = first_proof.len();
@@ -113,6 +106,7 @@ impl RecoveredArchiveChain {
             require_original()?;
             let mut archive = original.reread(directory, &mut buffer)?;
             let journal = replay.verify_later_add(key, &original.head, &archive.frame, trusted)?;
+            prior_requests.push(*blake3::hash(&journal.request).as_bytes());
             buffer = Some(std::mem::take(&mut archive.frame));
             successors.push(journal.public_step(&mut public_bytes)?);
         }
@@ -123,17 +117,9 @@ impl RecoveredArchiveChain {
         let prefix = V2GoverningJoinPrefixData::encode(&first_proof, &steps)?;
         // In-place changes during the forward replay keep the same file ID.
         // Recheck each authenticated archive digest before publishing the chain.
-        for (index, original) in predecessors.iter().enumerate() {
+        for original in &predecessors {
             require_original()?;
             let mut archive = original.reread(directory, &mut buffer)?;
-            let id = if index == 0 {
-                id_data(&archive.frame)
-            } else {
-                later_id(&archive.frame)
-            };
-            if id != original.id {
-                return Err(refused());
-            }
             buffer = Some(std::mem::take(&mut archive.frame));
         }
         require_original()?;
@@ -142,8 +128,8 @@ impl RecoveredArchiveChain {
             journal,
             first,
             successors,
+            prior_requests,
             prefix,
-            nonces: replay.nonces,
         };
         chain.require_original_predecessors(directory)?;
         Ok(chain)
@@ -161,6 +147,79 @@ impl RecoveredArchiveChain {
 
     pub(super) fn public_steps(&self) -> impl Iterator<Item = &PublicStep> {
         std::iter::once(&self.first).chain(&self.successors)
+    }
+
+    pub(super) fn encode_join_delivery(
+        &self,
+        key: &[u8; 32],
+        directory: &Path,
+        trusted: &GenesisPublicData<'_>,
+        request: &[u8],
+    ) -> Result<Vec<u8>, AppError> {
+        if !(1..=MAX_V2_JOIN_REQUEST_PACKET_BYTES).contains(&request.len()) {
+            return Err(refused());
+        }
+        if self.journal.request.as_slice() == request {
+            return Ok(V2GoverningJoinDeliveryData::encode(
+                &self.journal.response,
+                &self.prefix,
+            )?);
+        }
+        let requested = blake3::hash(request);
+        let index = self
+            .prior_requests
+            .iter()
+            .position(|digest| digest == requested.as_bytes())
+            .ok_or_else(refused)?;
+        let original = self.predecessors.get(index).ok_or_else(refused)?;
+        let selected = selected_head::GovernedHeadData::open_governed_data(key, &original.head)?;
+        let mut buffer = Some(Zeroizing::new(Vec::with_capacity(MAX_BYTES + 1)));
+        let archive = original.reread(directory, &mut buffer)?;
+        let first_proof = self.first.first_proof(trusted)?;
+        if index == 0 {
+            let (first, _) = authenticate_first_archive(
+                key,
+                &original.head,
+                &archive.frame,
+                selected.transition.context,
+                trusted,
+            )?;
+            if first.request.as_slice() != request {
+                return Err(refused());
+            }
+            return Ok(V2FirstJoinDeliveryData::encode(
+                &first.response,
+                &first_proof,
+            )?);
+        }
+        let mut replay = AddReplay::from_genesis(trusted)?.core;
+        for step in self.public_steps().take(index) {
+            replay = replay
+                .derive_successor(
+                    &step.header,
+                    ReplayBody::Admission(&step.admission),
+                    &step.image,
+                )
+                .map_err(|_| refused())?
+                .next;
+        }
+        let plain = open_later_data(key, &selected, &archive.frame)?;
+        let (labels, frames) = decode_later_data(&plain)?;
+        let (journal, _) = authenticate_add_journal(key, labels, &frames, trusted, &replay)?;
+        if journal.request.as_slice() != request {
+            return Err(refused());
+        }
+        let steps: Vec<_> = self
+            .successors
+            .iter()
+            .take(index)
+            .map(PublicStep::proof_data)
+            .collect();
+        let proof = V2GoverningJoinPrefixData::encode(&first_proof, &steps)?;
+        Ok(V2GoverningJoinDeliveryData::encode(
+            &journal.response,
+            &proof,
+        )?)
     }
 }
 
@@ -199,6 +258,7 @@ fn capture_predecessors(
         predecessors.push(Predecessor {
             head,
             id: prior.archive,
+            first: prior.transition.epoch == 1,
             file,
         });
         if predecessors.len() >= count {
@@ -233,7 +293,12 @@ impl Predecessor {
         let path = archive_child(directory, self.id.as_bytes())?;
         require_named(&path, &self.file)?;
         let archive = read_control_into(&path, MAX_BYTES, buffer)?;
-        if archive.id != self.file.id {
+        let expected = if self.first {
+            id_data(&archive.frame)
+        } else {
+            later_id(&archive.frame)
+        };
+        if archive.id != self.file.id || expected != self.id {
             return Err(refused());
         }
         require_named(&path, &self.file)?;
@@ -257,6 +322,22 @@ impl RecoveredAddJournal {
 }
 
 impl PublicStep {
+    fn first_proof(&self, trusted: &GenesisPublicData<'_>) -> Result<Vec<u8>, AppError> {
+        Ok(V2FirstAddProofData::encode(
+            trusted.profile,
+            V2AdmissionStepData {
+                admission: trusted.admission,
+                header: trusted.header,
+                image: trusted.image,
+            },
+            V2AdmissionStepData {
+                admission: &self.admission,
+                header: &self.header,
+                image: &self.image,
+            },
+        )?)
+    }
+
     fn proof_data(&self) -> V2GoverningJoinStepData<'_> {
         V2GoverningJoinStepData {
             header: &self.header,

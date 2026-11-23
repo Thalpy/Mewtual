@@ -93,12 +93,19 @@ fn governed_archive_chain_discovery_requires_named_original_files_and_the_pinned
     assert_eq!(observed.frame.as_slice(), first_archive.as_slice());
     drop(observed);
 
+    let mut corrupt = (*first_archive).clone();
+    corrupt[0] ^= 1;
+    let mut buffer = Some(Zeroizing::new(Vec::with_capacity(MAX_BYTES + 1)));
+    std::fs::write(&expected, &corrupt).unwrap();
+    assert!(original.reread(dir, &mut buffer).is_err());
+    std::fs::write(&expected, &*first_archive).unwrap();
+    let mut buffer = Some(Zeroizing::new(Vec::with_capacity(MAX_BYTES + 1)));
+    assert!(original.reread(dir, &mut buffer).is_ok());
+
     std::fs::rename(&expected, dir.join("original-file.bin")).unwrap();
     std::fs::write(&expected, &*first_archive).unwrap();
     let mut buffer = Some(Zeroizing::new(Vec::with_capacity(MAX_BYTES + 1)));
     assert!(original.reread(dir, &mut buffer).is_err());
-    let mut corrupt = (*first_archive).clone();
-    corrupt[0] ^= 1;
     std::fs::write(&expected, corrupt).unwrap();
     assert!(capture(anchor).is_err());
 }

@@ -350,6 +350,9 @@ complete governing prefix and the original bootstrap genesis. It checks the
 selected Header and Admission, the resulting state commitment and epoch, the
 original founder key, the SDK authenticator, and the full active roster.
 The native store still owns the durable archive selection and cold activation.
+Cold recovery can answer an exact repeat from a predecessor archive. It matches
+the original request bytes, checks the retained file identity and ciphertext,
+then returns the Welcome and governing proof through that request's own Add.
 
 A new member can verify a later Welcome against the complete prefix from its
 original pin. It prepares the final Add for host selection and retains its

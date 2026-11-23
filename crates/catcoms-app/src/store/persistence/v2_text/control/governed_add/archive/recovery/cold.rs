@@ -28,8 +28,7 @@ use catcoms_storage::kept::{session_id, SessionId};
 use catcoms_storage::VaultPhysicalWorkLease;
 use catcoms_sync::owner_v2::{PreparedV2FounderRecoveredAdd, V2InstalledFounderAddData};
 use catcoms_sync::{
-    V2AdmissionStepData, V2FirstAddProofData, V2FirstJoinDeliveryData, V2GoverningJoinDeliveryData,
-    V2GoverningJoinPrefixData,
+    V2AdmissionStepData, V2FirstAddProofData, V2FirstJoinDeliveryData, V2GoverningJoinPrefixData,
 };
 use std::sync::Arc;
 use std::{
@@ -61,16 +60,6 @@ enum ColdRecoveredArchive {
 }
 
 impl ColdRecoveredArchive {
-    fn covers_request(&self, request: &[u8]) -> bool {
-        match self {
-            Self::First(first) => first.request.as_slice() == request,
-            Self::Later(chain) => {
-                chain.nonces.last() == Some(&chain.journal.nonce)
-                    && chain.journal.request.as_slice() == request
-            }
-        }
-    }
-
     fn selected_admission(&self) -> OwnerFactId {
         match self {
             Self::First(first) => first.admission.admission_id(),
@@ -326,10 +315,6 @@ struct ColdFounderCore {
 }
 
 impl HeldColdFounderAdd {
-    pub(in crate::store) fn covers_request_data(&self, request: &[u8]) -> bool {
-        self.recovered.covers_request(request)
-    }
-
     pub(in crate::store) fn member_parts(
         &self,
     ) -> Result<(&V2GeneralPrefixVerifier, &ProjectionGroupView), AppError> {
@@ -358,22 +343,33 @@ impl HeldColdFounderAdd {
 
     pub(in crate::store) fn encode_join_delivery(
         &self,
+        store: &ServerStore,
         source: &RetainedBootstrapSourceData,
+        request: &[u8],
     ) -> Result<Vec<u8>, AppError> {
         self.files.origin.original.require_same_original(source)?;
         if self.core.is_none() {
             return Err(refused());
         }
+        let genesis = source.data().genesis_public_data();
         let first = match &self.recovered {
-            ColdRecoveredArchive::First(first) => first,
+            ColdRecoveredArchive::First(first) if first.request.as_slice() == request => first,
+            ColdRecoveredArchive::First(_) => return Err(refused()),
             ColdRecoveredArchive::Later(chain) => {
-                return Ok(V2GoverningJoinDeliveryData::encode(
-                    &chain.journal.response,
-                    &chain.prefix,
-                )?);
+                let key = Zeroizing::new(store.keys.db_key()?);
+                return chain.encode_join_delivery(
+                    &key,
+                    source.original_target_data().0,
+                    &GenesisPublicData {
+                        profile: genesis.profile_data(),
+                        admission: genesis.admission_data(),
+                        header: genesis.header_data(),
+                        image: genesis.image_data(),
+                    },
+                    request,
+                );
             }
         };
-        let genesis = source.data().genesis_public_data();
         let proof = V2FirstAddProofData::encode(
             genesis.profile_data(),
             V2AdmissionStepData {
