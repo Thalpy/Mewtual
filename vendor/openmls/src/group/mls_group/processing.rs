@@ -335,12 +335,40 @@ impl MlsGroup {
         expected_sender: LeafNodeIndex,
         expected_removed: LeafNodeIndex,
     ) -> Result<ProcessedMessage, ProcessMessageError<Provider::StorageError>> {
+        if expected_removed == self.own_leaf_index() {
+            return Err(
+                LibraryError::custom("Surviving text member cannot remove its own leaf").into(),
+            );
+        }
         self.process_private_text_membership(
             provider,
             message,
             expected_sender,
             Some(expected_removed),
         )
+    }
+
+    /// Authenticate the exact local leaf's eviction on a disposable old graph.
+    /// The receiver must discard the staged result without merging or taking keys.
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        not(any(
+            feature = "extensions-draft",
+            feature = "virtual-clients-draft",
+            feature = "targeted-messages-draft",
+            feature = "migration-import",
+            feature = "fork-resolution",
+            feature = "draft-ietf-mls-pq-ciphersuites",
+        ))
+    ))]
+    pub fn process_private_text_eviction<Provider: OpenMlsProvider>(
+        &mut self,
+        provider: &Provider,
+        message: ProtocolMessage,
+        expected_sender: LeafNodeIndex,
+    ) -> Result<ProcessedMessage, ProcessMessageError<Provider::StorageError>> {
+        let own = self.own_leaf_index();
+        self.process_private_text_membership(provider, message, expected_sender, Some(own))
     }
 
     #[cfg(all(
@@ -367,8 +395,7 @@ impl MlsGroup {
         if !Self::private_text_add_profile_supported_data()
             || !self.is_active()
             || self.own_leaf_index() == expected_sender
-            || expected_removed
-                .is_some_and(|leaf| leaf == expected_sender || leaf == self.own_leaf_index())
+            || expected_removed == Some(expected_sender)
             || self.pending_commit().is_some()
             || self.has_pending_proposals()
             || message.wire_format() != WireFormat::PrivateMessage

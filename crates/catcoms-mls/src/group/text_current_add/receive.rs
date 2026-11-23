@@ -1,4 +1,4 @@
-//! Existing-member Add verification and merge on a separately paid closed graph.
+//! Verify one exact private membership Commit on a separately paid graph.
 use super::*;
 use crate::device::key_package_identity::credential_digest_with;
 use openmls_traits::OpenMlsProvider;
@@ -33,7 +33,9 @@ enum Change {
         key_package: [u8; 32],
         credential: [u8; 32],
     },
-    Remove,
+    Remove {
+        local: bool,
+    },
 }
 
 struct Expected<'a> {
@@ -43,6 +45,64 @@ struct Expected<'a> {
     committer: [u8; 32],
     subject: [u8; 32],
     change: Change,
+}
+
+struct StagedMembership {
+    graph: CandidateGraph,
+    staged: Box<StagedCommit>,
+    original: OriginalParent,
+    roster: Vec<DeviceId>,
+    subject: DeviceId,
+    epoch: u64,
+}
+
+/// This node was the exact leaf removed by the authenticated Commit. The
+/// disposable graph is retired before this proof is returned.
+pub struct VerifiedTextCurrentEviction {
+    original: OriginalParent,
+    epoch: u64,
+    digest: [u8; 32],
+}
+
+impl VerifiedTextCurrentEviction {
+    pub fn verify_own_eviction(
+        device: &MlsDevice,
+        group: &ServerGroup,
+        request: TextCurrentReceivedRemoveData<'_>,
+        admission: TextCurrentAddAdmission,
+    ) -> Result<Self, MlsError> {
+        let expected = remove_request(request, true);
+        let proof =
+            PreparedTextCurrentReceivedAdd::stage_change(device, group, &expected, admission)?;
+        Ok(Self {
+            original: proof.original,
+            epoch: proof.epoch,
+            digest: expected.digest,
+        })
+    }
+
+    pub fn require_original_data(
+        &self,
+        device: &MlsDevice,
+        group: &ServerGroup,
+    ) -> Result<(), MlsError> {
+        self.original.require_same(device, group)
+    }
+
+    pub fn removed_data(&self) -> (u64, [u8; 32]) {
+        (self.epoch, self.digest)
+    }
+}
+
+fn remove_request(request: TextCurrentReceivedRemoveData<'_>, local: bool) -> Expected<'_> {
+    Expected {
+        commit: request.commit,
+        digest: request.digest,
+        epoch: request.epoch,
+        committer: request.committer,
+        subject: request.subject,
+        change: Change::Remove { local },
+    }
 }
 
 /// Owns the closed candidate and original receiver identity. There is no
@@ -86,27 +146,84 @@ impl PreparedTextCurrentReceivedAdd {
         request: TextCurrentReceivedRemoveData<'_>,
         admission: TextCurrentAddAdmission,
     ) -> Result<Self, MlsError> {
-        Self::prepare_change(
-            device,
-            group,
-            Expected {
-                commit: request.commit,
-                digest: request.digest,
-                epoch: request.epoch,
-                committer: request.committer,
-                subject: request.subject,
-                change: Change::Remove,
-            },
-            admission,
-        )
+        Self::prepare_change(device, group, remove_request(request, false), admission)
     }
 
     fn prepare_change(
         device: &MlsDevice,
         group: &ServerGroup,
         request: Expected<'_>,
-        mut admission: TextCurrentAddAdmission,
+        admission: TextCurrentAddAdmission,
     ) -> Result<Self, MlsError> {
+        let limits = admission.limits();
+        let StagedMembership {
+            mut graph,
+            staged,
+            original,
+            roster,
+            subject,
+            epoch,
+        } = Self::stage_change(device, group, &request, admission)?;
+        if matches!(request.change, Change::Remove { local: true }) {
+            return Err(bad());
+        }
+        let provider = graph.device.provider();
+        graph.policy.enter_received_merge().map_err(|_| bad())?;
+        graph
+            .group
+            .group
+            .merge_staged_commit(provider, *staged)
+            .map_err(proto)?;
+        graph
+            .policy
+            .close_merged(provider.storage())
+            .map_err(|_| bad())?;
+        let next = graph.group.member_device_ids();
+        let roster_matches = match request.change {
+            Change::Add { .. } => {
+                next.len() == roster.len() + 1
+                    && next.contains(&subject)
+                    && roster.iter().all(|device| next.contains(device))
+            }
+            Change::Remove { .. } => {
+                next.len() + 1 == roster.len()
+                    && !next.contains(&subject)
+                    && roster
+                        .iter()
+                        .filter(|device| **device != subject)
+                        .all(|device| next.contains(device))
+            }
+        };
+        if !graph.group.is_active()
+            || graph.group.epoch() != epoch
+            || graph.group.group.own_leaf_index().u32() != original.own
+            || !roster_matches
+        {
+            return Err(bad());
+        }
+        let authenticator = graph.group.epoch_authenticator_id();
+        let snapshot = crate::persist::snapshot_server_bounded(
+            &graph.device,
+            &graph.group,
+            limits.max_snapshot_bytes,
+            limits.max_provider_backing_bytes,
+        )?;
+        original.require_same(device, group)?;
+        Ok(Self {
+            graph,
+            snapshot,
+            original,
+            epoch,
+            authenticator,
+        })
+    }
+
+    fn stage_change(
+        device: &MlsDevice,
+        group: &ServerGroup,
+        request: &Expected<'_>,
+        mut admission: TextCurrentAddAdmission,
+    ) -> Result<StagedMembership, MlsError> {
         if request.commit.is_empty()
             || request.commit.len() > MAX_TEXT_RECEIVED_ADD_COMMIT_BYTES
             || blake3::hash(request.commit).as_bytes() != &request.digest
@@ -135,13 +252,13 @@ impl PreparedTextCurrentReceivedAdd {
         let removed = match request.change {
             Change::Add { .. } if !roster.contains(&subject) => None,
             Change::Add { .. } => return Err(bad()),
-            Change::Remove => Some(
+            Change::Remove { local } => Some(
                 group
                     .group
                     .members()
                     .find(|member| member.signature_key.as_slice() == request.subject)
                     .map(|member| member.index)
-                    .filter(|leaf| leaf.u32() != original.own && *leaf != sender)
+                    .filter(|leaf| (leaf.u32() == original.own) == local && *leaf != sender)
                     .ok_or_else(bad)?,
             ),
         };
@@ -190,7 +307,12 @@ impl PreparedTextCurrentReceivedAdd {
         }
         graph.policy.enter_receive().map_err(|_| bad())?;
         let provider = graph.device.provider();
+        let locally_removed = matches!(request.change, Change::Remove { local: true });
         let processed = match removed {
+            Some(_) if locally_removed => graph
+                .group
+                .group
+                .process_private_text_eviction(provider, message, sender),
             Some(leaf) => graph
                 .group
                 .group
@@ -205,7 +327,7 @@ impl PreparedTextCurrentReceivedAdd {
             return Err(bad());
         };
         let epoch = request.epoch.checked_add(1).ok_or_else(bad)?;
-        if staged.self_removed() || staged.epoch().as_u64() != epoch {
+        if staged.self_removed() != locally_removed || staged.epoch().as_u64() != epoch {
             return Err(bad());
         }
         if let Change::Add {
@@ -232,53 +354,14 @@ impl PreparedTextCurrentReceivedAdd {
                 return Err(bad());
             }
         }
-        graph.policy.enter_received_merge().map_err(|_| bad())?;
-        graph
-            .group
-            .group
-            .merge_staged_commit(provider, *staged)
-            .map_err(proto)?;
-        graph
-            .policy
-            .close_merged(provider.storage())
-            .map_err(|_| bad())?;
-        let next = graph.group.member_device_ids();
-        let roster_matches = match request.change {
-            Change::Add { .. } => {
-                next.len() == roster.len() + 1
-                    && next.contains(&subject)
-                    && roster.iter().all(|device| next.contains(device))
-            }
-            Change::Remove => {
-                next.len() + 1 == roster.len()
-                    && !next.contains(&subject)
-                    && roster
-                        .iter()
-                        .filter(|device| **device != subject)
-                        .all(|device| next.contains(device))
-            }
-        };
-        if !graph.group.is_active()
-            || graph.group.epoch() != epoch
-            || graph.group.group.own_leaf_index().u32() != original.own
-            || !roster_matches
-        {
-            return Err(bad());
-        }
-        let authenticator = graph.group.epoch_authenticator_id();
-        let snapshot = crate::persist::snapshot_server_bounded(
-            &graph.device,
-            &graph.group,
-            limits.max_snapshot_bytes,
-            limits.max_provider_backing_bytes,
-        )?;
         original.require_same(device, group)?;
-        Ok(Self {
+        Ok(StagedMembership {
             graph,
-            snapshot,
+            staged,
             original,
+            roster,
+            subject,
             epoch,
-            authenticator,
         })
     }
 
@@ -330,6 +413,8 @@ impl PreparedTextReceivedAddInstallation<'_> {
 
 pub(crate) const fn metadata_layout_bytes() -> usize {
     4 * (std::mem::size_of::<PreparedTextCurrentReceivedAdd>()
+        + std::mem::size_of::<StagedMembership>()
+        + std::mem::size_of::<VerifiedTextCurrentEviction>()
         + std::mem::size_of::<PreparedTextReceivedAddInstallation<'static>>()
         + std::mem::size_of::<RetiredTextReceivedAdd>())
 }

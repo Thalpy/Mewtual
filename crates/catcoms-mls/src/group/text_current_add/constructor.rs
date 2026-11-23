@@ -74,6 +74,44 @@ fn private_text_remove_stages_only_the_exact_surviving_membership() {
         payment,
     )
     .is_err());
+    let (payment, _, _) = admission(TextCurrentAddLimits::governed_text_v2());
+    assert!(VerifiedTextCurrentEviction::verify_own_eviction(
+        &survivor,
+        &joined,
+        packet(*removed.target_data()),
+        payment,
+    )
+    .is_err());
+    let mut corrupt = removed.commit_data().to_vec();
+    *corrupt.last_mut().unwrap() ^= 1;
+    let (payment, _, _) = admission(TextCurrentAddLimits::governed_text_v2());
+    assert!(VerifiedTextCurrentEviction::verify_own_eviction(
+        &target,
+        &evicted,
+        TextCurrentReceivedRemoveData {
+            commit: &corrupt,
+            digest: *blake3::hash(&corrupt).as_bytes(),
+            ..packet(*removed.target_data())
+        },
+        payment,
+    )
+    .is_err());
+    let (payment, evicted_payment, _) = admission(TextCurrentAddLimits::governed_text_v2());
+    let eviction = VerifiedTextCurrentEviction::verify_own_eviction(
+        &target,
+        &evicted,
+        packet(*removed.target_data()),
+        payment,
+    )
+    .unwrap();
+    assert_eq!(evicted_payment.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        eviction.removed_data(),
+        (epoch + 1, *blake3::hash(removed.commit_data()).as_bytes())
+    );
+    assert!(eviction.require_original_data(&survivor, &joined).is_err());
+    eviction.require_original_data(&target, &evicted).unwrap();
+    assert_eq!(evicted.epoch(), epoch);
     assert_eq!(retained.load(Ordering::SeqCst), 0);
     let (payment, _, _) = admission(TextCurrentAddLimits::governed_text_v2());
     assert!(PreparedTextCurrentReceivedAdd::prepare_remove(
