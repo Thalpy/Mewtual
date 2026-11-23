@@ -10,8 +10,11 @@ use catcoms_replication::chat::{
 };
 
 const TAG: &[u8] = b"mewtual/chat/governing-join-prefix/v2\0";
+const DELIVERY_TAG: &[u8] = b"mewtual/chat/governing-join-delivery/v2\0";
+const DELIVERY_OVERHEAD: usize = 4 + DELIVERY_TAG.len() + 2 + 2 * 4;
 pub const MAX_V2_GOVERNING_JOIN_STEPS: usize = 64;
 pub const MAX_V2_GOVERNING_JOIN_PREFIX_BYTES: usize = 512 * 1024;
+pub const MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES: usize = catcoms_rt::CHAT_V2_JOIN_RESPONSE_MAX_BYTES;
 
 /// One signed governing successor and the exact resulting public image.
 pub struct V2GoverningJoinStepData<'a> {
@@ -172,6 +175,81 @@ impl<'a> V2GoverningJoinPrefixData<'a> {
             Some((header, BodyData::Admission(admission))) => Ok((header, admission)),
             _ => Err(SyncError::JoinRejected),
         }
+    }
+
+    pub(super) fn frame_bytes(&self) -> usize {
+        self.bytes
+    }
+}
+
+/// A later Welcome and its complete public proof fit in one bounded Join
+/// response. The original first-Add delivery retains its separate grammar.
+pub struct V2GoverningJoinDeliveryData<'a> {
+    response: V2JoinResponsePacketData<'a>,
+    proof: V2GoverningJoinPrefixData<'a>,
+    proof_bytes: &'a [u8],
+    bytes: usize,
+}
+
+impl<'a> V2GoverningJoinDeliveryData<'a> {
+    pub fn encode(response: &[u8], proof: &[u8]) -> Result<Vec<u8>, SyncError> {
+        let length = DELIVERY_OVERHEAD
+            .checked_add(response.len())
+            .and_then(|length| length.checked_add(proof.len()))
+            .filter(|length| *length <= MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES)
+            .ok_or(SyncError::Malformed)?;
+        V2GoverningJoinDeliveryData::pair(response, proof)?;
+        let mut out = Encoder::with_capacity(length);
+        out.put_bytes(DELIVERY_TAG)
+            .map_err(|_| SyncError::Malformed)?;
+        out.put_u16(VERSION);
+        out.put_bytes(response).map_err(|_| SyncError::Malformed)?;
+        out.put_bytes(proof).map_err(|_| SyncError::Malformed)?;
+        Ok(out.finish())
+    }
+
+    pub fn decode(raw: &'a [u8]) -> Result<Self, SyncError> {
+        if raw.len() > MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES {
+            return Err(SyncError::Malformed);
+        }
+        let malformed = |_| SyncError::Malformed;
+        let mut input = Decoder::new(raw);
+        if input.get_bytes().map_err(malformed)? != DELIVERY_TAG
+            || input.get_u16().map_err(malformed)? != VERSION
+        {
+            return Err(SyncError::Malformed);
+        }
+        let response = input.get_bytes().map_err(malformed)?;
+        let proof = input.get_bytes().map_err(malformed)?;
+        input.finish().map_err(malformed)?;
+        Self::pair(response, proof)
+    }
+
+    fn pair(response: &'a [u8], proof_bytes: &'a [u8]) -> Result<Self, SyncError> {
+        let bytes = DELIVERY_OVERHEAD + response.len() + proof_bytes.len();
+        let response = V2JoinResponsePacketData::decode(response)?;
+        let proof = V2GoverningJoinPrefixData::decode(proof_bytes)?;
+        let (header, admission) = proof.last_admission()?;
+        let binding = response.response_data().binding.spec_data();
+        if header.header().id().as_bytes() != &binding.add_header
+            || admission.admission_id().as_bytes() != &binding.admission
+        {
+            return Err(SyncError::JoinRejected);
+        }
+        Ok(Self {
+            response,
+            proof,
+            proof_bytes,
+            bytes,
+        })
+    }
+
+    pub fn governing_proof_data(&self) -> (&V2GoverningJoinPrefixData<'a>, &'a [u8]) {
+        (&self.proof, self.proof_bytes)
+    }
+
+    pub(super) fn response_data(&self) -> V2JoinResponseData<'_> {
+        self.response.response_data()
     }
 
     pub(super) fn frame_bytes(&self) -> usize {

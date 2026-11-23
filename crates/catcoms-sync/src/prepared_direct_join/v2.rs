@@ -25,7 +25,8 @@ pub use first_add_proof::{
     MAX_V2_FIRST_ADD_PROOF_BYTES, MAX_V2_FIRST_JOIN_DELIVERY_BYTES,
 };
 pub use governing_prefix::{
-    V2GoverningJoinPrefixData, V2GoverningJoinStepData, MAX_V2_GOVERNING_JOIN_PREFIX_BYTES,
+    V2GoverningJoinDeliveryData, V2GoverningJoinPrefixData, V2GoverningJoinStepData,
+    MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES, MAX_V2_GOVERNING_JOIN_PREFIX_BYTES,
     MAX_V2_GOVERNING_JOIN_STEPS,
 };
 pub use warm_runtime::{ClosedV2JoinedNode, V2JoinedRuntimeInputs};

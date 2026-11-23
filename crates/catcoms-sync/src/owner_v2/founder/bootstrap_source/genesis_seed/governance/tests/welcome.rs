@@ -128,7 +128,8 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
 ) {
     use crate::{
         DirectJoinLimits, PreparedV2JoinRequest, V2AdmissionStepData, V2FirstAddProofData,
-        V2GoverningJoinPrefixData, V2GoverningJoinStepData, V2JoinRequestPacketData,
+        V2FirstJoinDeliveryData, V2GoverningJoinDeliveryData, V2GoverningJoinPrefixData,
+        V2GoverningJoinStepData, V2JoinRequestPacketData, MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES,
     };
     let mut fixture = Request::new(node, 96);
     fixture.change_invite(node, |spec| spec.expires_at_ms = now + 60_000);
@@ -180,7 +181,6 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
         }],
     )
     .unwrap();
-    let prefix = V2GoverningJoinPrefixData::decode(&encoded).unwrap();
     let result = node.completed_add_data().unwrap();
     let step = || V2AdmissionStepData {
         admission,
@@ -205,7 +205,18 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     let response = node.join_response_data().unwrap();
     let only_first = V2FirstAddProofData::decode(first).unwrap();
     assert!(joiner.finish_first_welcome(response, &only_first).is_err());
-    let candidate = joiner.finish_governing_welcome(response, &prefix).unwrap();
+    let packet = response.encode_packet_data().unwrap();
+    let wire = V2GoverningJoinDeliveryData::encode(&packet, &encoded).unwrap();
+    assert!(V2FirstJoinDeliveryData::decode(&wire).is_err());
+    assert!(V2GoverningJoinDeliveryData::decode(&wire[..wire.len() - 1]).is_err());
+    assert!(V2GoverningJoinDeliveryData::encode(
+        &packet,
+        &vec![0; MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES]
+    )
+    .is_err());
+    let delivery = V2GoverningJoinDeliveryData::decode(&wire).unwrap();
+    assert_eq!(delivery.governing_proof_data().1, encoded);
+    let candidate = joiner.finish_governing_join_delivery(&delivery).unwrap();
     candidate.validate_initial_state_data().unwrap();
     assert_eq!(candidate.facts_data().join_epoch_data(), 2);
     assert_eq!(
@@ -218,7 +229,7 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     );
     let original = candidate as *const _;
     assert_eq!(
-        joiner.finish_governing_welcome(response, &prefix).unwrap() as *const _,
+        joiner.finish_governing_join_delivery(&delivery).unwrap() as *const _,
         original
     );
 
@@ -247,6 +258,16 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
                 .map_err(|_| catcoms_replication::chat::ChatError::Dependency)
         })
         .unwrap();
+    let mismatched = V2GoverningJoinPrefixData::encode(
+        first,
+        &[V2GoverningJoinStepData {
+            header: &signed_sibling,
+            image: sibling.image_data(),
+            body: ReplayBody::Admission(&sibling_body),
+        }],
+    )
+    .unwrap();
+    assert!(V2GoverningJoinDeliveryData::encode(&packet, &mismatched).is_err());
     assert!(joined
         .prepare_member_add_commit(
             joined_prefix,

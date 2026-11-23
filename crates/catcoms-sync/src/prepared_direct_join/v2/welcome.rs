@@ -329,6 +329,18 @@ impl PreparedV2JoinRequest {
         )
     }
 
+    /// Finish a later Welcome from its bounded connected response. Retain the
+    /// original private request and separately verify the entire public proof.
+    pub fn finish_governing_join_delivery(
+        &mut self,
+        delivery: &V2GoverningJoinDeliveryData<'_>,
+    ) -> Result<&CompletedV2JoinCandidate, SyncError> {
+        if delivery.frame_bytes() > self.limits.exchange {
+            return Err(SyncError::Malformed);
+        }
+        self.finish_governing_welcome(delivery.response_data(), delivery.governing_proof_data().0)
+    }
+
     fn finish_first_welcome_with(
         &mut self,
         response: V2JoinResponseData<'_>,
