@@ -1296,11 +1296,12 @@ async fn mounted_join_fixture(recover_stage: bool, governing: bool) {
         let third_exchange = capture_third()
             .prepare_exchange(&invite_two, fresh.clone())
             .unwrap();
+        let third_scheduler = catcoms_discovery::EndpointDialScheduler::new(Default::default());
         third_exchange
             .connect_approved_host(
                 &invite_two,
                 std::net::Ipv4Addr::LOCALHOST.into(),
-                &scheduler,
+                &third_scheduler,
             )
             .await
             .unwrap();
