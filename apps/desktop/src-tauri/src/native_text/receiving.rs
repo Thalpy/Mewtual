@@ -228,47 +228,26 @@ pub(super) async fn serve_founder_dependencies<R: tauri::Runtime>(
             preparation.attach_founder_dependency_provider(channel, caller)
         })
         .await;
-        let mut provider = match opened {
-            Ok(Ok(provider)) => provider,
-            _other => {
-                #[cfg(test)]
-                if let Ok(Err(error)) = _other {
-                    eprintln!("native founder dependency provider could not attach: {error:?}");
-                }
-                continue;
-            }
+        let Ok(Ok(mut provider)) = opened else {
+            continue;
         };
-        #[cfg(test)]
-        eprintln!("native founder dependency provider attached");
         while let Some(request) = provider.next().await {
-            #[cfg(test)]
-            eprintln!("native founder dependency provider received a request");
             let Some(permit) = local.foreground(scope.clone()).await else {
                 return;
             };
             let Some(preparation) = source.capture(&state).await else {
-                #[cfg(test)]
-                eprintln!("native founder dependency provider could not recapture its row");
                 continue;
             };
             let processed = tauri::async_runtime::spawn_blocking(move || {
                 let _permit = permit;
-                let _result = preparation.serve_founder_dependency_request(&provider, request);
-                #[cfg(test)]
-                if let Err(error) = &_result {
-                    eprintln!("native founder dependency reply refused: {error:?}");
-                }
+                let _ = preparation.serve_founder_dependency_request(&provider, request);
                 provider
             })
             .await;
-            provider = match processed {
-                Ok(next) => next,
-                Err(_error) => {
-                    #[cfg(test)]
-                    eprintln!("native founder dependency handler stopped: {_error:?}");
-                    break;
-                }
+            let Ok(next) = processed else {
+                break;
             };
+            provider = next;
         }
     }
 }

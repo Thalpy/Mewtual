@@ -1953,6 +1953,7 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
         recovered_parent.is_ok(),
         "the cold founder's native worker did not answer: {last_refusal}"
     );
+    drop(joined_work);
     let close = register_vault_close(&joined_state).await.unwrap();
     sources::close_server_rows(&joined_state, &SystemClock)
         .await
