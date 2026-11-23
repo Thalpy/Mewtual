@@ -756,7 +756,7 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
             &removal,
             &header,
             &observed.commit()[..observed.commit().len() - 1],
-            super::admission(&payment),
+            super::admission(&member_payment),
         )
         .is_err());
     let mut candidate = Some(
@@ -766,7 +766,7 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
                 &removal,
                 &header,
                 observed.commit(),
-                super::admission(&payment),
+                super::admission(&member_payment),
             )
             .unwrap(),
     );
