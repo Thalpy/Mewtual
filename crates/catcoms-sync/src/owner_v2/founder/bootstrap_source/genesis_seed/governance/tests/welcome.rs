@@ -119,6 +119,7 @@ fn verify_later_governing_join_prefix(
 
 fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore>(
     node: &mut Node,
+    original: &OpenedBootstrapSourceData,
     first: &[u8],
     verifier: &mut catcoms_replication::chat::V2GeneralPrefixVerifier,
     now: u64,
@@ -131,6 +132,15 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
         V2FirstJoinDeliveryData, V2GoverningJoinDeliveryData, V2GoverningJoinPrefixData,
         V2GoverningJoinStepData, V2JoinRequestPacketData, MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES,
     };
+    use catcoms_mls::persist::{
+        TextCurrentSdkGraphReservation, TextCurrentSdkRestoreAdmission, TextCurrentSdkRestoreLimits,
+    };
+    struct RestorePayment(TextCurrentSdkRestoreLimits);
+    impl TextCurrentSdkGraphReservation for RestorePayment {
+        fn limits(&self) -> TextCurrentSdkRestoreLimits {
+            self.0
+        }
+    }
     let replay = verifier.replay_data();
     let used = node.installed_invites[0].unwrap();
     let mut reused = Request::new(node, used[0]);
@@ -250,6 +260,54 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     .is_err());
     let delivery = V2GoverningJoinDeliveryData::decode(&wire).unwrap();
     assert_eq!(delivery.governing_proof_data().1, encoded);
+    let expected = V2InstalledFounderAddData {
+        epoch: result.after_epoch_data(),
+        header: header.id(),
+        state: header.spec().state,
+        authenticator: *result.after_authenticator_data(),
+    };
+    let payment = || {
+        TextCurrentSdkRestoreAdmission::new(RestorePayment(TextCurrentSdkRestoreLimits {
+            max_typed_bytes: limits.restore_typed_bytes,
+            max_work: limits.restore_work,
+        }))
+        .unwrap()
+    };
+    let proof = delivery.governing_proof_data().0;
+    let reopened = PreparedV2FounderRecoveredAdd::restore_from_governing_prefix(
+        original,
+        expected,
+        admission.admission_id(),
+        proof,
+        result.secret_snapshot_data(),
+        payment(),
+    )
+    .unwrap();
+    assert_eq!(reopened.fingerprint_data(), expected);
+    let mut wrong = expected;
+    wrong.authenticator[0] ^= 1;
+    assert!(
+        PreparedV2FounderRecoveredAdd::restore_from_governing_prefix(
+            original,
+            wrong,
+            admission.admission_id(),
+            proof,
+            result.secret_snapshot_data(),
+            payment(),
+        )
+        .is_err()
+    );
+    assert!(
+        PreparedV2FounderRecoveredAdd::restore_from_governing_prefix(
+            original,
+            expected,
+            node.genesis_data().admission.admission_id(),
+            proof,
+            result.secret_snapshot_data(),
+            payment(),
+        )
+        .is_err()
+    );
     let candidate = joiner.finish_governing_join_delivery(&delivery).unwrap();
     candidate.validate_initial_state_data().unwrap();
     assert_eq!(candidate.facts_data().join_epoch_data(), 2);
@@ -394,7 +452,7 @@ async fn complete_original_welcome(native_joiner: bool) {
     // MLS itself places a lifetime on the live KeyPackage. Use the same
     // current clock for the founder fixture, then keep it fixed through Add.
     let now = catcoms_rt::Clock::now_ms(&catcoms_rt::SystemClock);
-    let (original, _reservation, _opened, _old_fee) =
+    let (original, _reservation, opened, _old_fee) =
         prepared_node_with_clock(0xeb10, Box::new(ManualClock::new(now)));
     let original_seed = original
         .borrow_genesis_seed_data()
@@ -1256,6 +1314,7 @@ async fn complete_original_welcome(native_joiner: bool) {
     if !native_joiner {
         complete_second_governing_welcome(
             &mut node,
+            &opened,
             &proof,
             &mut g.verifier,
             now,

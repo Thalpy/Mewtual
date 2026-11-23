@@ -343,6 +343,12 @@ covered journals before enabling later cold Adds.
 Native storage and transport still need to produce and cover the later Add
 and advance the existing members to the new epoch.
 
+The closed founder SDK can be reopened from a later Add snapshot using the
+complete governing prefix and the original bootstrap genesis. It checks the
+selected Header and Admission, the resulting state commitment and epoch, the
+original founder key, the SDK authenticator, and the full active roster.
+The native store still owns the durable archive selection and cold activation.
+
 An independently reopened Pending with neither Welcome file can resend the
 exact original request over the same connected protocol. It verifies the
 reply against that request and the original held files before covering Entry

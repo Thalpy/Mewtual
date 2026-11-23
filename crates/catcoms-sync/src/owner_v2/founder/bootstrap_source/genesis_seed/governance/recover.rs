@@ -3,7 +3,8 @@ use super::*;
 use catcoms_crypto::DeviceId;
 use catcoms_mls::persist::{restore_server_text_current_bounded, TextCurrentSdkRestoreAdmission};
 use catcoms_replication::chat::{
-    owner_facts::OwnerFactId, owner_header::HeaderKind, owner_state::StateFrame,
+    join_bindings::GenesisAnchorBindingData, owner_facts::OwnerFactId, owner_header::HeaderKind,
+    owner_state::StateFrame,
 };
 
 mod member_signing;
@@ -86,6 +87,60 @@ impl PreparedV2FounderRecoveredAdd {
         )
     }
 
+    /// Reopen a closed founder graph for a later selected Add. The complete
+    /// prefix must match the exact original bootstrap genesis and terminate
+    /// at the named signed Admission. The host owns the separate archive and
+    /// selector proof and funds the full prefix replay independently.
+    pub fn restore_from_governing_prefix(
+        original: &OpenedBootstrapSourceData,
+        expected: V2InstalledFounderAddData,
+        selected_admission: OwnerFactId,
+        proof: &crate::V2GoverningJoinPrefixData<'_>,
+        snapshot: &[u8],
+        admission: TextCurrentSdkRestoreAdmission,
+    ) -> Result<Self, SyncError> {
+        if expected.epoch < 2 {
+            return Err(unavailable());
+        }
+        let genesis = original.genesis_public_data();
+        let context = genesis.context_data().spec_data();
+        let profile = genesis.profile_data();
+        let founder = genesis.admission_data().admission_id();
+        let genesis_header = genesis.header_data();
+        let anchor = GenesisAnchorBindingData {
+            group: context.group.to_vec(),
+            founder: context.signer,
+            profile: *profile.id().as_bytes(),
+            admission: *founder.as_bytes(),
+            tenure: *profile.tenure().as_bytes(),
+            header: *genesis_header.id().as_bytes(),
+            state: *genesis_header.spec().state.as_bytes(),
+        };
+        let replay = proof.verify_selected_add(&anchor, expected.header, selected_admission)?;
+        if replay.header().spec().state != expected.state
+            || replay.mls_epoch_data() != expected.epoch
+        {
+            return Err(unavailable());
+        }
+        let state = StateFrame::decode(replay.image()).map_err(|_| unavailable())?;
+        state
+            .verify_header_binding(replay.header())
+            .map_err(|_| unavailable())?;
+        Self::restore_graph(
+            GenesisRestoreScope {
+                group: context.group,
+                signer: context.signer,
+                profile: profile.id(),
+                header: genesis_header.id(),
+                founder,
+            },
+            expected,
+            &state,
+            snapshot,
+            admission,
+        )
+    }
+
     fn restore_checked(
         context: GenesisRestoreScope<'_>,
         expected: V2InstalledFounderAddData,
@@ -109,6 +164,22 @@ impl PreparedV2FounderRecoveredAdd {
             || state.meta().profile != context.profile
             || state.slots().len() != 2
         {
+            return Err(unavailable());
+        }
+        Self::restore_graph(context, expected, &state, snapshot, admission)
+    }
+
+    fn restore_graph(
+        context: GenesisRestoreScope<'_>,
+        expected: V2InstalledFounderAddData,
+        state: &StateFrame<'_>,
+        snapshot: &[u8],
+        admission: TextCurrentSdkRestoreAdmission,
+    ) -> Result<Self, SyncError> {
+        if !state.slots().any(|slot| {
+            slot.admission.as_bytes() == context.founder.as_bytes()
+                && slot.subject == context.signer
+        }) {
             return Err(unavailable());
         }
         let limits =
