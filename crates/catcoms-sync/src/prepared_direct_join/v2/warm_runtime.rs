@@ -5,14 +5,16 @@ use super::*;
 pub type V2JoinedRuntimeInputs<T, R> = (T, R, Box<dyn Clock + Send>);
 use crate::owner_v2::{
     open_v2_member_envelope_data, seal_v2_member_envelope_data, v2_member_envelope_topic_data,
-    JoinFactsSlot, JoinedFenceNode, PreparedV2MemberSubmission, SelectedV2MemberEnvelope,
-    V2JoinFacts, V2JoinedFenceAdmission, V2JoinedSourceFence, V2MemberDraftInputs,
-    V2MemberEnvelopeScopeData, V2MemberPublicationObservation, V2MemberSignRefusal,
+    JoinFactsSlot, JoinedFenceNode, OpenedV2MemberDependencyRequest,
+    PreparedV2MemberDependencyRequest, PreparedV2MemberSubmission, SelectedV2MemberEnvelope,
+    V2JoinFacts, V2JoinedFenceAdmission, V2JoinedSourceFence, V2MemberDependencyRoute,
+    V2MemberDraftInputs, V2MemberEnvelopeScopeData, V2MemberPublicationObservation,
+    V2MemberSignRefusal,
 };
 use catcoms_replication::chat::{
     join_bindings::SignedWelcomeBindingData, owner_facts::OwnerFactId, owner_header::OwnerHeaderId,
-    ActionDraft, V2AuthenticatedAdmission, V2GeneralPrefixVerifier, V2OrdinarySigningGuard,
-    V2OrdinarySigningPlan,
+    ActionDraft, ActionId, V2AuthenticatedAdmission, V2GeneralPrefixVerifier,
+    V2OrdinarySigningGuard, V2OrdinarySigningPlan,
 };
 
 /// Owns the original verified group, device, routing and runtime. Only a
@@ -198,6 +200,100 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
             recipient_id: self.admission_id,
             observation,
         })
+    }
+
+    pub fn prepare_member_dependency_request(
+        &self,
+        prefix: &PreparedV2JoinedPrefix,
+        channel: u128,
+        route: V2MemberDependencyRoute,
+        action: ActionId,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<PreparedV2MemberDependencyRequest, SyncError> {
+        if route.requester != self.local_peer_data() {
+            return Err(SyncError::JoinRejected);
+        }
+        let scope =
+            V2MemberEnvelopeScopeData::for_selected_prefix(self.member_prefix(prefix)?, channel)?;
+        PreparedV2MemberDependencyRequest::prepare(
+            &self.node.group,
+            &self.node.device,
+            scope,
+            route,
+            action,
+            rng,
+        )
+    }
+
+    pub fn open_member_dependency_request(
+        &self,
+        prefix: &PreparedV2JoinedPrefix,
+        channel: u128,
+        route: V2MemberDependencyRoute,
+        wire: &[u8],
+    ) -> Result<OpenedV2MemberDependencyRequest, SyncError> {
+        if route.provider != self.local_peer_data() {
+            return Err(SyncError::JoinRejected);
+        }
+        let scope =
+            V2MemberEnvelopeScopeData::for_selected_prefix(self.member_prefix(prefix)?, channel)?;
+        OpenedV2MemberDependencyRequest::open(
+            &self.node.group,
+            &self.node.device,
+            scope,
+            route,
+            wire,
+        )
+    }
+
+    pub fn seal_member_dependency_reply(
+        &self,
+        prefix: &PreparedV2JoinedPrefix,
+        channel: u128,
+        route: V2MemberDependencyRoute,
+        request: &OpenedV2MemberDependencyRequest,
+        saved: Option<(OwnerFactId, &[u8])>,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Vec<u8>, SyncError> {
+        if route.provider != self.local_peer_data()
+            || saved.is_some_and(|(id, _)| id != self.admission_id)
+        {
+            return Err(SyncError::JoinRejected);
+        }
+        let scope =
+            V2MemberEnvelopeScopeData::for_selected_prefix(self.member_prefix(prefix)?, channel)?;
+        request.seal_reply(
+            &self.node.group,
+            &self.node.device,
+            &scope,
+            route,
+            saved,
+            rng,
+        )
+    }
+
+    pub fn open_member_dependency_reply(
+        &self,
+        prefix: &PreparedV2JoinedPrefix,
+        channel: u128,
+        route: V2MemberDependencyRoute,
+        request: &PreparedV2MemberDependencyRequest,
+        wire: &[u8],
+    ) -> Result<Option<SelectedV2MemberEnvelope>, SyncError> {
+        if route.requester != self.local_peer_data() {
+            return Err(SyncError::JoinRejected);
+        }
+        let observation = self.observe_member_publication(prefix)?;
+        let scope =
+            V2MemberEnvelopeScopeData::for_selected_prefix(self.member_prefix(prefix)?, channel)?;
+        let opened =
+            request.open_reply(&self.node.group, &self.node.device, &scope, route, wire)?;
+        Ok(opened.map(|opened| SelectedV2MemberEnvelope {
+            opened,
+            recipient: self.admission.clone(),
+            recipient_id: self.admission_id,
+            observation,
+        }))
     }
 
     /// Prepare one paid host-selected original for the actual mesh driver.

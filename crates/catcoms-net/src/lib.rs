@@ -87,7 +87,8 @@ use catcoms_rt::{
     Clock, ConnectionDirection, ConnectionFamily, ConnectionPath, ConnectionTransport,
     CryptoRngCore, DiscoveredPeer, MeshTransport, OsCryptoRng, PeerConnectionSnapshot, PeerId,
     ProtocolId, RendezvousRegistration, RequestCancellation, Responder, SharedRequestKeepalive,
-    SystemClock, Topic, TransportError, TransportEvent, CHAT_V2_JOIN_KIND,
+    SystemClock, Topic, TransportError, TransportEvent, CHAT_V2_DEPENDENCY_KIND,
+    CHAT_V2_DEPENDENCY_REQUEST_MAX_BYTES, CHAT_V2_DEPENDENCY_RESPONSE_MAX_BYTES, CHAT_V2_JOIN_KIND,
     CHAT_V2_JOIN_REQUEST_MAX_BYTES, CHAT_V2_JOIN_RESPONSE_MAX_BYTES, FILE_BRIDGE_KIND,
     FILE_SERVICE_REQUEST_MAX_BYTES, FILE_SERVICE_RESPONSE_MAX_BYTES, FILE_SOURCE_KIND,
     MAX_PEER_DIAL_BATCH,
@@ -125,6 +126,11 @@ mod native_chat_members;
 pub use native_chat_members::{
     NativeChatMemberFrame, NativeChatMemberFrameObservation, NativeChatMemberGossip,
     NativeChatMemberGossipError, NativeChatMemberGossipEvent, NativeChatMemberIngress,
+};
+mod native_chat_member_dependencies;
+pub use native_chat_member_dependencies::{
+    NativeChatMemberDependencies, NativeChatMemberDependencyExchange,
+    NativeChatMemberDependencyIncoming, NativeChatMemberDependencyRequests,
 };
 mod publication;
 
@@ -446,6 +452,10 @@ impl BytesCodec {
             Some(CHAT_V2_JOIN_KIND) => (
                 CHAT_V2_JOIN_REQUEST_MAX_BYTES,
                 CHAT_V2_JOIN_RESPONSE_MAX_BYTES,
+            ),
+            Some(CHAT_V2_DEPENDENCY_KIND) => (
+                CHAT_V2_DEPENDENCY_REQUEST_MAX_BYTES,
+                CHAT_V2_DEPENDENCY_RESPONSE_MAX_BYTES,
             ),
             _ => (MAX_FRAME, MAX_FRAME),
         };
@@ -3642,6 +3652,7 @@ struct Actor {
     cmd_rx: mpsc::Receiver<Command>,
     event_tx: mpsc::Sender<TransportEvent>,
     native_chat_join: Option<Arc<native_chat_join::Slot>>,
+    native_chat_dependencies: Option<Arc<native_chat_join::Slot>>,
     native_member_gossip: Option<native_chat_members::Registration>,
     delivery: event_dispatch::Dispatcher,
     delivery_budget: Arc<event_dispatch::Budget>,
@@ -5417,11 +5428,16 @@ impl Actor {
                         return;
                     };
                     let kind = request.first().copied();
-                    let (join_slot, service) = if kind == Some(CHAT_V2_JOIN_KIND) {
-                        let Some((permit, authority)) = self
-                            .native_chat_join
-                            .as_deref()
-                            .and_then(native_chat_join::try_reserve)
+                    let dedicated = match kind {
+                        Some(CHAT_V2_JOIN_KIND) => Some(self.native_chat_join.as_deref()),
+                        Some(CHAT_V2_DEPENDENCY_KIND) => {
+                            Some(self.native_chat_dependencies.as_deref())
+                        }
+                        _ => None,
+                    };
+                    let (native_slot, service) = if let Some(dedicated) = dedicated {
+                        let Some((permit, authority)) =
+                            dedicated.and_then(native_chat_join::try_reserve)
                         else {
                             return;
                         };
@@ -5450,7 +5466,7 @@ impl Actor {
                         data: event_dispatch::charged_bytes(Bytes::from(request), credit.clone()),
                         responder,
                     };
-                    if let Some(permit) = join_slot {
+                    if let Some(permit) = native_slot {
                         drop(permit.send(event));
                     } else if !self.delivery.queue(event, from, ingress) {
                         return;
@@ -5809,6 +5825,8 @@ pub struct MeshService {
     publish_once_slots: Arc<Semaphore>,
     event_rx: Mutex<mpsc::Receiver<TransportEvent>>,
     native_chat_join: Option<NativeChatJoinIngress>,
+    native_chat_dependencies: Option<NativeChatJoinIngress>,
+    native_chat_dependency_outbound: Option<Arc<Semaphore>>,
     native_member_gossip_slot: Option<Arc<Semaphore>>,
     #[cfg(test)]
     test_event_tx: mpsc::Sender<TransportEvent>,
@@ -5874,6 +5892,13 @@ impl MeshService {
         let native_chat_join = join_slot
             .as_ref()
             .map(|slot| NativeChatJoinIngress(Arc::downgrade(slot)));
+        let dependency_slot = native
+            .as_ref()
+            .map(|_| Arc::new(native_chat_join::Slot::default()));
+        let native_chat_dependencies = dependency_slot
+            .as_ref()
+            .map(|slot| NativeChatJoinIngress(Arc::downgrade(slot)));
+        let native_chat_dependency_outbound = native.as_ref().map(|_| Arc::new(Semaphore::new(1)));
         let native_member_gossip_slot = native.as_ref().map(|_| Arc::new(Semaphore::new(1)));
         #[cfg(test)]
         let test_event_tx = event_tx.clone();
@@ -5913,6 +5938,7 @@ impl MeshService {
             cmd_rx,
             event_tx,
             native_chat_join: join_slot,
+            native_chat_dependencies: dependency_slot,
             native_member_gossip: None,
             delivery: event_dispatch::Dispatcher::default(),
             delivery_budget: delivery_budget.clone(),
@@ -5987,6 +6013,8 @@ impl MeshService {
             publish_once_slots: Arc::new(Semaphore::new(publication::MAX_IN_FLIGHT)),
             event_rx: Mutex::new(event_rx),
             native_chat_join,
+            native_chat_dependencies,
+            native_chat_dependency_outbound,
             native_member_gossip_slot,
             #[cfg(test)]
             test_event_tx,
@@ -6014,6 +6042,17 @@ impl MeshService {
     /// have no lane and drop this request kind before application delivery.
     pub fn native_chat_join_ingress(&self) -> Option<NativeChatJoinIngress> {
         self.native_chat_join.clone()
+    }
+
+    /// Capture one addressed dependency lane of this original native mesh.
+    pub fn native_chat_member_dependencies(&self) -> Option<NativeChatMemberDependencies> {
+        Some(NativeChatMemberDependencies {
+            ingress: self.native_chat_dependencies.clone()?,
+            commands: self.cmd_tx.downgrade(),
+            connections: Arc::downgrade(&self.connection_leases),
+            outbound: Arc::downgrade(self.native_chat_dependency_outbound.as_ref()?),
+            local: self.local,
+        })
     }
 
     /// Capture only the original native actor's bounded ordinary gossip lane.

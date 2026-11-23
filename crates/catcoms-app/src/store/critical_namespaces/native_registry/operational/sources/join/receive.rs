@@ -18,6 +18,12 @@ use catcoms_rt::Topic;
 use catcoms_sync::owner_v2::{SelectedV2MemberEnvelope, MAX_V2_MEMBER_TRANSPORT_BYTES};
 use catcoms_sync::PreparedV2JoinedPrefix;
 
+mod dependencies;
+pub use dependencies::{
+    NativeTextJoinedDependencyExchange, NativeTextJoinedDependencyProvider,
+    NativeTextJoinedDependencyResponse,
+};
+
 const INGRESS_FEE: usize = 8 * 1024;
 // Padded plaintext, canonical signed action and its original frame may overlap.
 const OPEN_FEE: usize = 4 * MAX_V2_MEMBER_TRANSPORT_BYTES + 4096;
@@ -73,15 +79,35 @@ impl NativeTextJoinedMemberReceiver {
 pub struct NativeTextJoinedReceivedOriginal {
     opened: SelectedV2MemberEnvelope,
     selection: NativeTextJoinedRowSelection,
-    frame: NativeChatMemberFrameObservation,
+    origin: ReceiveOrigin,
     _fee: CatalogReadReservation,
+}
+
+enum ReceiveOrigin {
+    Gossip(NativeChatMemberFrameObservation),
+    Dependency {
+        connection: catcoms_rt::ConnectionLease,
+        signal: RequestCancellation,
+        _invocation: watch::Sender<bool>,
+    },
+}
+
+impl ReceiveOrigin {
+    fn is_current_cached(&self) -> bool {
+        match self {
+            Self::Gossip(frame) => frame.is_current_cached(),
+            Self::Dependency {
+                connection, signal, ..
+            } => connection.is_live() && !signal.is_cancelled(),
+        }
+    }
 }
 
 impl NativeTextJoinedReceivedOriginal {
     pub fn is_for_original_row_cached(&self, selection: &NativeTextJoinedRowSelection) -> bool {
         self.selection.same_original(selection)
             && selection.is_current_cached()
-            && self.frame.is_current_cached()
+            && self.origin.is_current_cached()
             && self.opened.is_current_cached()
     }
 
@@ -258,7 +284,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             Ok(NativeTextJoinedReceivedOriginal {
                 opened,
                 selection: selection.clone(),
-                frame: frame.observe(),
+                origin: ReceiveOrigin::Gossip(frame.observe()),
                 _fee: fee,
             })
         })
@@ -370,34 +396,8 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         caller: &RequestCancellation,
         rng: &mut impl CryptoRngCore,
     ) -> Result<Option<MemberSavedOriginal>, V2MemberSaveRefusal> {
-        use V2MemberSaveRefusal as Refusal;
         self.with_member_receiver(selection, caller, |source| {
-            let store = source.store;
-            let mount = store
-                .member_outbox_mount()
-                .map_err(|_| Refusal::Unavailable)?;
-            let key = member_outbox_key(store).map_err(|_| Refusal::Unavailable)?;
-            let context = source
-                .registration
-                .member_outbox_context_data()
-                .map_err(|_| Refusal::Failed)?;
-            let saved = mount
-                .lookup_existing_action(store, context, &key, action, rng)
-                .map_err(|_| Refusal::Failed)?;
-            if saved.as_ref().is_some_and(|saved| {
-                saved.action().spec().realm.channel() != channel
-                    || saved.receipt().admission != source.registration.selected_data().1
-            }) {
-                return Err(Refusal::Stale);
-            }
-            if !source
-                .node
-                .observe_member_publication(source.prefix)
-                .is_ok_and(|original| original.is_current_cached())
-            {
-                return Err(Refusal::Stale);
-            }
-            Ok(saved)
+            source.read_dependency(channel, action, rng)
         })
     }
 
@@ -541,5 +541,39 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             return Err(Refusal::Stale);
         }
         Ok(result)
+    }
+}
+
+impl<R: CryptoRngCore> ReceiverSource<'_, R> {
+    fn read_dependency(
+        &self,
+        channel: u128,
+        action: ActionId,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Option<MemberSavedOriginal>, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        let mount = self
+            .store
+            .member_outbox_mount()
+            .map_err(|_| Refusal::Unavailable)?;
+        let key = member_outbox_key(self.store).map_err(|_| Refusal::Unavailable)?;
+        let context = self
+            .registration
+            .member_outbox_context_data()
+            .map_err(|_| Refusal::Failed)?;
+        let saved = mount
+            .lookup_existing_action(self.store, context, &key, action, rng)
+            .map_err(|_| Refusal::Failed)?;
+        if saved.as_ref().is_some_and(|saved| {
+            saved.action().spec().realm.channel() != channel
+                || saved.receipt().admission != self.registration.selected_data().1
+        }) || !self
+            .node
+            .observe_member_publication(self.prefix)
+            .is_ok_and(|original| original.is_current_cached())
+        {
+            return Err(Refusal::Stale);
+        }
+        Ok(saved)
     }
 }

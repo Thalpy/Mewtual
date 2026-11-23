@@ -358,8 +358,10 @@ handoff. `Duplicate`, revocation and transport errors leave the debt open. A rea
 
 The mounted source can look up an exact local dependency by ActionId after its debt
 has settled. The action, ordinal and request-token indices must name the same immutable
-original. The current catch-up preparation also checks the channel and Admission.
-Opening a peer request and returning the sealed response still need transport wiring.
+original. The mounted catch-up source checks the channel and Admission before returning
+the sealed original. A request binds its exact connected endpoints and selected MLS
+scope. A reply binds the exact request and can reveal only that ActionId. Desktop retry
+and dependency scheduling remain open.
 
 After removal and rejoin under A2, A1's receipts stay readable (attributed to A1), A1's
 unsent entries are settled as `Held` (kept in the audit for the separately authorised

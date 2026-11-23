@@ -102,6 +102,11 @@ requires the receiver's actual view and current sender Admission. An original op
 one source cannot be applied through another source with equal cryptographic bytes.
 The receiver resolves parents and targets from that ledger's Valid originals. Missing
 dependencies return their exact IDs without importing the child or making it visible.
+The mounted sources can exchange one sealed original per dependency request over an
+existing authenticated TCP connection. The request binds both peers, the selected MLS
+channel and its one ActionId. The exact encrypted request binds the reply. An unavailable
+reply describes only that provider's selected source. It cannot clear another member's
+history or justify importing a child with missing parents.
 The mounted joined row can prepare a paid channel ledger and apply frames from its own
 receiver. A final native callback checks the original receiving scope and the prepared
 Core view before revealing a body. The ledger holds up to 64 originals or 1 MiB of

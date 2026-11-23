@@ -19,13 +19,15 @@ mod invite;
 pub use invite::NativeTextInvitePublication;
 mod join;
 pub use join::{
-    NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,
-    NativeTextJoinedMemberFinalPreparation, NativeTextJoinedMemberIngressPreparation,
-    NativeTextJoinedMemberLedger, NativeTextJoinedMemberProjection,
-    NativeTextJoinedMemberPublication, NativeTextJoinedMemberPublicationReceipt,
-    NativeTextJoinedMemberReceiver, NativeTextJoinedMemberSaveJob,
-    NativeTextJoinedReceivedOriginal, NativeTextJoinedRequestPreparation,
-    NativeTextJoinedRowSelection, NativeTextJoinedSelectionPreparation,
+    NativeTextJoinedDelivery, NativeTextJoinedDependencyExchange,
+    NativeTextJoinedDependencyProvider, NativeTextJoinedDependencyResponse,
+    NativeTextJoinedExchange, NativeTextJoinedInstallation, NativeTextJoinedMemberFinalPreparation,
+    NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberLedger,
+    NativeTextJoinedMemberProjection, NativeTextJoinedMemberPublication,
+    NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
+    NativeTextJoinedMemberSaveJob, NativeTextJoinedReceivedOriginal,
+    NativeTextJoinedRequestPreparation, NativeTextJoinedRowSelection,
+    NativeTextJoinedSelectionPreparation,
 };
 mod member;
 mod network;

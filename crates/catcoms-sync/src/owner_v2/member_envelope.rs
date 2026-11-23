@@ -326,10 +326,19 @@ fn key(
     device: &MlsDevice,
     scope: &V2MemberEnvelopeScopeData,
 ) -> Result<Zeroizing<[u8; 32]>, SyncError> {
+    member_exporter_key(group, device, scope, KEY)
+}
+
+pub(super) fn member_exporter_key(
+    group: &ServerGroup,
+    device: &MlsDevice,
+    scope: &V2MemberEnvelopeScopeData,
+    domain: &'static str,
+) -> Result<Zeroizing<[u8; 32]>, SyncError> {
     require_group(group, device, scope)?;
     // This MLS exporter does not advance an application sender ratchet.
     let base = Zeroizing::new(group.channel_secret(device, DocType::Channel, scope.channel)?);
-    Ok(Zeroizing::new(domain_hash(KEY, &base, scope)))
+    Ok(Zeroizing::new(domain_hash(domain, &base, scope)))
 }
 
 /// Blinded topic from the distinct MLS metadata exporter. A topic value is

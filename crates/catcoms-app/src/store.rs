@@ -98,13 +98,15 @@ pub use critical_namespaces::{
     NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,
 };
 pub use critical_namespaces::{
-    NativeTextJoinedMemberFinalPreparation, NativeTextJoinedMemberSaveJob,
+    NativeTextJoinedDependencyExchange, NativeTextJoinedDependencyProvider,
+    NativeTextJoinedDependencyResponse, NativeTextJoinedMemberIngressPreparation,
+    NativeTextJoinedMemberLedger, NativeTextJoinedMemberProjection,
+    NativeTextJoinedMemberPublication, NativeTextJoinedMemberPublicationReceipt,
+    NativeTextJoinedMemberReceiver, NativeTextJoinedReceivedOriginal,
+    NativeTextJoinedSelectionPreparation,
 };
 pub use critical_namespaces::{
-    NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberLedger,
-    NativeTextJoinedMemberProjection, NativeTextJoinedMemberPublication,
-    NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
-    NativeTextJoinedReceivedOriginal, NativeTextJoinedSelectionPreparation,
+    NativeTextJoinedMemberFinalPreparation, NativeTextJoinedMemberSaveJob,
 };
 pub(crate) use mounted::LegacyStoreCustody;
 pub use mounted::{MountedLeaseRefusal, MountedLeaseRefusalKind, MountedVault};

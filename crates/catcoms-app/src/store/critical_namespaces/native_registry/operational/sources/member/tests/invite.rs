@@ -747,7 +747,22 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 .unwrap().expect("settled parents remain readable by exact ActionId");
             assert_eq!(recovered_original.receipt().action, action);
             assert!(recovered_row().read_member_dependency(&selection, channel + 1, action, &live, &mut history_rng).is_err());
+            let mut provider = recovered_row().attach_dependency_provider(&selection, live.clone()).unwrap();
+            let malformed = relay.request_connected(
+                local_transport.0,
+                catcoms_rt::ProtocolId(catcoms_net::RR_PROTOCOL),
+                bytes::Bytes::from_static(&[catcoms_rt::CHAT_V2_DEPENDENCY_KIND, 1]),
+            );
+            let serve = async {
+                let request = provider.next().await.expect("the mounted exact dependency lane");
+                assert!(recovered_row()
+                    .serve_dependency_request(&selection, channel, request, live.clone(), &mut history_rng)
+                    .is_err());
+            };
+            let (reply, ()) = tokio::join!(malformed, serve);
+            assert!(matches!(reply, Err(catcoms_rt::TransportError::NoResponse)));
             retire.send_replace(true);
+            assert!(provider.next().await.is_none());
             assert!(result.with_publication(|_| panic!("retired original view escaped")).is_err());
             assert!(!received.is_for_original_row_cached(&selection));
         }).await.expect("bounded joined message and exact acknowledgement over native TCP");

@@ -14,6 +14,14 @@ dependencies, duplicate originals and wrong-view refusal.
 [Publication CI](https://github.com/Thalpy/Mewtual/actions/runs/45080872913) and
 [receiver CI](https://github.com/Thalpy/Mewtual/actions/runs/45081739366).
 
+At `2a0dd213` both platforms passed the mounted TCP relay regression, exact
+projection and durable submission checkpoint. Both also passed the focused
+desktop join and send checks. The earlier relay fixture reached the intended
+dial refusal because it supplied no terminal peer ID. The corrected fixture
+uses the original reserved actor's public peer ID.
+[Mounted TCP and history CI](https://github.com/Thalpy/Mewtual/actions/runs/45084623807)
+and [desktop CI](https://github.com/Thalpy/Mewtual/actions/runs/45084622145).
+
 The desktop still needs to drive shared peer catch-up and persist received
 history. Later governed membership changes, broader cold startup and physical
 acceptance remain open. Chat V2 remains disabled. The full suite is scheduled

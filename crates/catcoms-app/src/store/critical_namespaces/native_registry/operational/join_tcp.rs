@@ -1,7 +1,9 @@
 //! The original reserved TCP actor temporarily belongs to one invitation job.
 use super::sources::NativeTextSourceRetirementRefusal;
 use super::*;
-use catcoms_net::{MeshService, NativeChatMemberIngress, NativeTcpPreparation};
+use catcoms_net::{
+    MeshService, NativeChatMemberDependencies, NativeChatMemberIngress, NativeTcpPreparation,
+};
 use catcoms_rt::{MeshTransport, PeerId};
 use std::sync::Mutex;
 use zeroize::Zeroizing;
@@ -16,6 +18,7 @@ struct Attempt {
     original: NativeTcpPreparation,
     state: State,
     members: Option<NativeChatMemberIngress>,
+    dependencies: Option<NativeChatMemberDependencies>,
     #[cfg(test)]
     peer_name: Option<String>,
 }
@@ -79,6 +82,7 @@ impl Transport {
                 original,
                 state: State::Starting,
                 members: None,
+                dependencies: None,
                 #[cfg(test)]
                 peer_name: None,
             });
@@ -90,6 +94,7 @@ impl Transport {
                         attempt.peer_name = Some(_public_peer.to_string());
                     }
                     attempt.members = service.native_chat_member_ingress();
+                    attempt.dependencies = service.native_chat_member_dependencies();
                     attempt.state = State::Idle(Box::new(service));
                 }
                 Ok(_) => return Err(refused()),
@@ -126,6 +131,18 @@ impl Transport {
             .as_ref()
             .filter(|attempt| matches!(attempt.state, State::Attached | State::Loaned))
             .and_then(|attempt| attempt.members.clone())
+            .ok_or_else(refused)
+    }
+
+    pub(super) fn capture_member_dependencies(
+        &self,
+    ) -> Result<NativeChatMemberDependencies, AppError> {
+        self.attempt
+            .try_lock()
+            .map_err(|_| refused())?
+            .as_ref()
+            .filter(|attempt| matches!(attempt.state, State::Attached | State::Loaned))
+            .and_then(|attempt| attempt.dependencies.clone())
             .ok_or_else(refused)
     }
 

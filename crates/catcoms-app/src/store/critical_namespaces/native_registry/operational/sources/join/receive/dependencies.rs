@@ -1,0 +1,341 @@
+//! Connected catch-up of one exact ActionId. No method may dial or sign anew.
+use super::*;
+use catcoms_net::{
+    NativeChatMemberDependencies, NativeChatMemberDependencyExchange,
+    NativeChatMemberDependencyIncoming, NativeChatMemberDependencyRequests,
+};
+use catcoms_rt::{ConnectionLease, TransportError};
+use catcoms_sync::owner_v2::{
+    PreparedV2MemberDependencyRequest, V2MemberDependencyRoute, V2MemberPublicationObservation,
+    MAX_V2_DEPENDENCY_REPLY_BYTES,
+};
+
+// Overlapping network buffers, nested sealed original and role-specific AEAD scratch.
+const REPLY_FEE: usize = OPEN_FEE + 5 * MAX_V2_DEPENDENCY_REPLY_BYTES + 16 * 1024;
+
+/// One fixed ActionId and original live route, ready outside the metadata slot.
+pub struct NativeTextJoinedDependencyExchange {
+    exchange: NativeChatMemberDependencyExchange,
+    selected: NativeTextJoinedRowSelection,
+    channel: u128,
+    route: V2MemberDependencyRoute,
+    request: PreparedV2MemberDependencyRequest,
+    signal: RequestCancellation,
+    invocation: watch::Sender<bool>,
+}
+
+/// One bounded reply on the exact original connection. Only a fresh mounted
+/// capture can open it under the matching selected Core and MLS state.
+pub struct NativeTextJoinedDependencyResponse {
+    wire: bytes::Bytes,
+    selected: NativeTextJoinedRowSelection,
+    channel: u128,
+    route: V2MemberDependencyRoute,
+    request: PreparedV2MemberDependencyRequest,
+    connection: ConnectionLease,
+    signal: RequestCancellation,
+    invocation: watch::Sender<bool>,
+}
+
+pub struct NativeTextJoinedDependencyProvider {
+    _invocation: watch::Sender<bool>,
+    requests: NativeChatMemberDependencyRequests,
+}
+
+impl NativeTextJoinedDependencyProvider {
+    pub async fn next(&mut self) -> Option<NativeChatMemberDependencyIncoming> {
+        self.requests.next().await
+    }
+}
+
+impl NativeTextJoinedDependencyExchange {
+    pub async fn receive(self) -> Result<NativeTextJoinedDependencyResponse, TransportError> {
+        let connection = self.exchange.observe_connection();
+        let wire = self
+            .exchange
+            .request(self.request.wire_data(), self.signal.clone())
+            .await?;
+        if self.signal.is_cancelled() || !connection.is_live() {
+            return Err(TransportError::Cancelled);
+        }
+        Ok(NativeTextJoinedDependencyResponse {
+            wire,
+            selected: self.selected,
+            channel: self.channel,
+            route: self.route,
+            request: self.request,
+            connection,
+            signal: self.signal,
+            invocation: self.invocation,
+        })
+    }
+}
+
+struct ScopeAuthority(RequestCancellation);
+impl std::fmt::Debug for ScopeAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScopeAuthority").finish_non_exhaustive()
+    }
+}
+
+#[async_trait::async_trait]
+impl RequestAuthority for ScopeAuthority {
+    fn authorized(&self) -> bool {
+        !self.0.is_cancelled()
+    }
+
+    async fn revoked(&self) {
+        self.0.clone().cancelled().await;
+    }
+}
+
+struct ReplyPayment {
+    _invocation: watch::Sender<bool>,
+    _fee: CatalogReadReservation,
+}
+
+impl std::fmt::Debug for ReplyPayment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReplyPayment").finish_non_exhaustive()
+    }
+}
+
+impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
+    pub fn prepare_dependency_exchange(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        channel: u128,
+        provider: PeerId,
+        action: ActionId,
+        caller: RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<NativeTextJoinedDependencyExchange, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        let exchange = self
+            .dependency_lane()?
+            .capture_request(provider)
+            .ok_or(Refusal::Unavailable)?;
+        let (requester, provider) = exchange.route_data();
+        let route = V2MemberDependencyRoute {
+            requester,
+            provider,
+        };
+        let (request, observed, auth, fee) =
+            self.with_member_receiver(selection, &caller, |source| {
+                let fee = source
+                    .metadata
+                    .reserve_join_node(REPLY_FEE)
+                    .map_err(|_| Refusal::Busy)?;
+                let request = source
+                    .node
+                    .prepare_member_dependency_request(source.prefix, channel, route, action, rng)
+                    .map_err(|_| Refusal::Failed)?;
+                let (observed, auth) = source.effect_data()?;
+                Ok((request, observed, auth, fee))
+            })?;
+        let (signal, invocation) = self.dependency_signal(selection, caller, auth, observed);
+        let signal = signal.retain_custody(Arc::new(JoinFramePayment { _fee: fee }));
+        Ok(NativeTextJoinedDependencyExchange {
+            exchange,
+            selected: selection.clone(),
+            channel,
+            route,
+            request,
+            signal,
+            invocation,
+        })
+    }
+
+    pub fn open_dependency_response(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        response: NativeTextJoinedDependencyResponse,
+        caller: &RequestCancellation,
+    ) -> Result<Option<NativeTextJoinedReceivedOriginal>, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        if !selection.same_original(&response.selected)
+            || response.signal.is_cancelled()
+            || !response.connection.is_live()
+        {
+            return Err(Refusal::Stale);
+        }
+        self.with_member_receiver(selection, caller, |source| {
+            let response = response;
+            let fee = source
+                .metadata
+                .reserve_join_node(OPEN_FEE)
+                .map_err(|_| Refusal::Busy)?;
+            let opened = source
+                .node
+                .open_member_dependency_reply(
+                    source.prefix,
+                    response.channel,
+                    response.route,
+                    &response.request,
+                    &response.wire,
+                )
+                .map_err(|_| Refusal::Failed)?;
+            let NativeTextJoinedDependencyResponse {
+                wire,
+                connection,
+                signal,
+                invocation,
+                ..
+            } = response;
+            drop(wire);
+            let origin = ReceiveOrigin::Dependency {
+                connection,
+                signal,
+                _invocation: invocation,
+            };
+            if !origin.is_current_cached() {
+                return Err(Refusal::Stale);
+            }
+            Ok(opened.map(|opened| NativeTextJoinedReceivedOriginal {
+                opened,
+                selection: selection.clone(),
+                origin,
+                _fee: fee,
+            }))
+        })
+    }
+
+    pub fn attach_dependency_provider(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        caller: RequestCancellation,
+    ) -> Result<NativeTextJoinedDependencyProvider, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        let lane = self.dependency_lane()?;
+        let (observed, auth, fee) = self.with_member_receiver(selection, &caller, |source| {
+            let fee = source
+                .metadata
+                .reserve_join_node(INGRESS_FEE)
+                .map_err(|_| Refusal::Busy)?;
+            let (observed, auth) = source.effect_data()?;
+            Ok((observed, auth, fee))
+        })?;
+        let (signal, invocation) = self.dependency_signal(selection, caller, auth, observed);
+        let signal = signal.retain_custody(Arc::new(JoinFramePayment { _fee: fee }));
+        let requests = lane
+            .try_attach(Arc::new(ScopeAuthority(signal)))
+            .ok_or(Refusal::Busy)?;
+        Ok(NativeTextJoinedDependencyProvider {
+            _invocation: invocation,
+            requests,
+        })
+    }
+
+    pub fn serve_dependency_request(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        channel: u128,
+        request: NativeChatMemberDependencyIncoming,
+        caller: RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        if !self.dependency_lane()?.owns_request(&request) {
+            return Err(Refusal::Stale);
+        }
+        let waiting = request.cancellation_authority();
+        let (reply, observed, auth, fee) =
+            self.with_member_receiver(selection, &caller, |source| {
+                if !waiting.authorized() {
+                    return Err(Refusal::Cancelled);
+                }
+                let (requester, wire) = request.current_data().ok_or(Refusal::Cancelled)?;
+                let route = V2MemberDependencyRoute {
+                    requester,
+                    provider: source.node.local_peer_data(),
+                };
+                let fee = source
+                    .metadata
+                    .reserve_join_node(REPLY_FEE)
+                    .map_err(|_| Refusal::Busy)?;
+                let original = source
+                    .node
+                    .open_member_dependency_request(source.prefix, channel, route, wire)
+                    .map_err(|_| Refusal::Failed)?;
+                let dependency = source.read_dependency(channel, original.action_id_data(), rng)?;
+                let saved = dependency
+                    .as_ref()
+                    .map(|saved| (saved.receipt().admission, saved.original_bytes()));
+                let reply = source
+                    .node
+                    .seal_member_dependency_reply(
+                        source.prefix,
+                        channel,
+                        route,
+                        &original,
+                        saved,
+                        rng,
+                    )
+                    .map_err(|_| Refusal::Failed)?;
+                let (observed, auth) = source.effect_data()?;
+                Ok((reply, observed, auth, fee))
+            })?;
+        if !waiting.authorized() {
+            return Err(Refusal::Cancelled);
+        }
+        let (signal, invocation) = self.dependency_signal(selection, caller, auth, observed);
+        request
+            .respond(
+                bytes::Bytes::from(reply),
+                Arc::new(ScopeAuthority(signal)),
+                Arc::new(ReplyPayment {
+                    _invocation: invocation,
+                    _fee: fee,
+                }),
+            )
+            .map_err(|_| Refusal::Cancelled)
+    }
+
+    fn dependency_lane(&self) -> Result<NativeChatMemberDependencies, V2MemberSaveRefusal> {
+        self.original
+            .tcp
+            .upgrade()
+            .ok_or(V2MemberSaveRefusal::Unavailable)?
+            .capture_member_dependencies()
+            .map_err(|_| V2MemberSaveRefusal::Unavailable)
+    }
+
+    fn dependency_signal(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        caller: RequestCancellation,
+        authentication: AuthenticationNegative,
+        observed: V2MemberPublicationObservation,
+    ) -> (RequestCancellation, watch::Sender<bool>) {
+        let (invocation, live) = watch::channel(false);
+        let authority = Arc::new(JoinEffect {
+            scope: self.original.scope,
+            ui: self.original.command.ui.into_effect_negative(),
+            authentication,
+            invocation: live,
+            caller: caller.clone(),
+            row: Some(selection.clone()),
+        });
+        (
+            observed.constrain(caller.with_authority(authority)),
+            invocation,
+        )
+    }
+}
+
+impl<R: CryptoRngCore> ReceiverSource<'_, R> {
+    fn effect_data(
+        &self,
+    ) -> Result<(V2MemberPublicationObservation, AuthenticationNegative), V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        let original = self
+            .node
+            .observe_member_publication(self.prefix)
+            .map_err(|_| Refusal::Unavailable)?;
+        let auth = self
+            .metadata
+            .authentication_negative()
+            .map_err(|_| Refusal::Unavailable)?;
+        Ok((original, auth))
+    }
+}

@@ -1,5 +1,10 @@
 use super::*;
+use crate::owner_v2::{
+    OpenedV2MemberDependencyRequest, PreparedV2MemberDependencyRequest, V2MemberDependencyRoute,
+    MAX_V2_DEPENDENCY_REPLY_BYTES, MAX_V2_DEPENDENCY_REQUEST_BYTES,
+};
 use catcoms_replication::chat::{ActionDraft, ActionSpec, BasisId, Body, GrantId, Realm};
+use catcoms_rt::PeerId;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
@@ -70,6 +75,103 @@ fn member_envelope_uses_the_real_mls_group_and_exact_signed_original() {
         assert_eq!(opened.action_data().id(), action.id());
         assert_eq!(opened.original_data(), original);
     }
+    let route = V2MemberDependencyRoute {
+        requester: PeerId::from_u64(12),
+        provider: PeerId::from_u64(13),
+    };
+    let request = PreparedV2MemberDependencyRequest::prepare(
+        &alice_group,
+        &alice,
+        scope,
+        route,
+        action.id(),
+        &mut rng,
+    )
+    .unwrap();
+    assert_eq!(request.wire_data().len(), MAX_V2_DEPENDENCY_REQUEST_BYTES);
+    let wrong_route = V2MemberDependencyRoute {
+        requester: PeerId::from_u64(14),
+        ..route
+    };
+    assert!(OpenedV2MemberDependencyRequest::open(
+        &bob_group,
+        &bob,
+        scope,
+        wrong_route,
+        request.wire_data()
+    )
+    .is_err());
+    let provider =
+        OpenedV2MemberDependencyRequest::open(&bob_group, &bob, scope, route, request.wire_data())
+            .unwrap();
+    assert_eq!(provider.action_id_data(), action.id());
+    let answer = provider
+        .seal_reply(
+            &bob_group,
+            &bob,
+            &scope,
+            route,
+            Some((admission, &original)),
+            &mut rng,
+        )
+        .unwrap();
+    assert!(answer.len() <= MAX_V2_DEPENDENCY_REPLY_BYTES);
+    let recovered = request
+        .open_reply(&alice_group, &alice, &scope, route, &answer)
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.original_data(), original);
+    assert_eq!(recovered.admission_data(), admission);
+    assert!(request
+        .open_reply(&alice_group, &alice, &scope, wrong_route, &answer)
+        .is_err());
+    let again = PreparedV2MemberDependencyRequest::prepare(
+        &alice_group,
+        &alice,
+        scope,
+        route,
+        action.id(),
+        &mut rng,
+    )
+    .unwrap();
+    assert_ne!(again.wire_data(), request.wire_data());
+    assert!(again
+        .open_reply(&alice_group, &alice, &scope, route, &answer)
+        .is_err());
+    let absent = provider
+        .seal_reply(&bob_group, &bob, &scope, route, None, &mut rng)
+        .unwrap();
+    assert!(request
+        .open_reply(&alice_group, &alice, &scope, route, &absent)
+        .unwrap()
+        .is_none());
+    let wrong_action = PreparedV2MemberDependencyRequest::prepare(
+        &alice_group,
+        &alice,
+        scope,
+        route,
+        catcoms_replication::chat::ActionId::from_bytes([15; 32]),
+        &mut rng,
+    )
+    .unwrap();
+    let original_request = OpenedV2MemberDependencyRequest::open(
+        &bob_group,
+        &bob,
+        scope,
+        route,
+        wrong_action.wire_data(),
+    )
+    .unwrap();
+    assert!(original_request
+        .seal_reply(
+            &bob_group,
+            &bob,
+            &scope,
+            route,
+            Some((admission, &original)),
+            &mut rng
+        )
+        .is_err());
     for changed in [
         V2MemberEnvelopeScopeData {
             channel: 43,
@@ -120,4 +222,10 @@ fn member_envelope_uses_the_real_mls_group_and_exact_signed_original() {
     );
     assert!(open_v2_member_envelope_data(&alice_group, &alice, &scope, &frame).is_err());
     assert!(open_v2_member_envelope_data(&alice_group, &alice, &current, &frame).is_err());
+    assert!(request
+        .open_reply(&alice_group, &alice, &current, route, &answer)
+        .is_err());
+    assert!(request
+        .open_reply(&alice_group, &alice, &scope, route, &answer)
+        .is_err());
 }

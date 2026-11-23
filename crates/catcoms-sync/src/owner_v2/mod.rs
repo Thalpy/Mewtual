@@ -20,6 +20,7 @@ mod joined_source;
 // Ordinary-member signing seams (founder genesis node and joined ChannelSync). No owner
 // certification, Append lane, export or publication is reachable through them.
 mod member;
+mod member_dependencies;
 mod member_envelope;
 pub use founder::{
     open_bootstrap_source_data, prepare_v2_genesis_seed, prepare_v2_genesis_seed_native_warm,
@@ -50,6 +51,10 @@ pub use joined_fence::{
 pub(crate) use joined_source::JoinFactsSlot;
 pub use joined_source::V2JoinFacts;
 pub use member::{V2MemberDraftInputs, V2MemberSignRefusal};
+pub use member_dependencies::{
+    OpenedV2MemberDependencyRequest, PreparedV2MemberDependencyRequest, V2MemberDependencyRoute,
+    MAX_V2_DEPENDENCY_REPLY_BYTES, MAX_V2_DEPENDENCY_REQUEST_BYTES,
+};
 pub use member_envelope::{
     open_v2_member_envelope_data, seal_v2_member_envelope_data, v2_member_envelope_topic_data,
     OpenedV2MemberEnvelopeData, PreparedV2MemberSubmission, SelectedV2MemberEnvelope,
