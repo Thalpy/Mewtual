@@ -24,6 +24,7 @@ COHORTS = {
     "add-sdk-budget": ("catcoms-app", "governed_add_sdk_budget_", 1),
     "remove-sdk": ("catcoms-mls", "private_text_remove_stages_only_the_exact_surviving_membership", 1),
     "governing-key-cuts": ("catcoms-rt", "native_chat_key_governing_", 2),
+    "joined-eviction-order": ("catcoms-sync", "selected_eviction_orders_against_the_original_save_admission", 1),
     "add-package-preflight": ("catcoms-sync", "expired_actual_package_refuses_with_a_still_valid_signed_invite", 1),
     "add-outcome": ("catcoms-app", "governed_add_outcome_", 4),
     "add-header-signing": ("catcoms-app", "governed_add_header_signing_", 1),

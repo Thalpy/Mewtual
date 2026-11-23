@@ -5,7 +5,7 @@ use super::*;
 use catcoms_mls::{
     group::text_current_add::{
         PreparedTextCurrentReceivedAdd, RetiredTextReceivedAdd, TextCurrentReceivedAddData,
-        TextCurrentReceivedRemoveData,
+        TextCurrentReceivedRemoveData, VerifiedTextCurrentEviction,
     },
     persist::text_current_add::TextCurrentAddAdmission,
 };
@@ -24,9 +24,9 @@ use catcoms_replication::chat::{
     owner_facts::OwnerFactId,
     owner_header::{HeaderKind, OwnerHeaderId, SignedOwnerHeader},
     owner_profile::AdmissionOrigin,
-    ActionDraft, ActionId, V2AuthenticatedAdmission, V2GeneralCandidate, V2GeneralPrefixVerifier,
-    V2GeneralRetiredData, V2HostSelectionExpectation, V2OrdinarySigningGuard,
-    V2OrdinarySigningPlan, V2PreparedSelectedHistoryData,
+    ActionDraft, ActionId, V2AdmissionCloseCompletion, V2AuthenticatedAdmission, V2FrozenAdmission,
+    V2GeneralCandidate, V2GeneralPrefixVerifier, V2GeneralRetiredData, V2HostSelectionExpectation,
+    V2OrdinarySigningGuard, V2OrdinarySigningPlan, V2PreparedSelectedHistoryData,
 };
 
 /// Owns the original verified group, device, routing and runtime. Only a
@@ -54,6 +54,54 @@ pub struct PreparedV2JoinedMembership {
 }
 
 pub type PreparedV2JoinedAdd = PreparedV2JoinedMembership;
+
+pub struct PreparedV2JoinedEviction {
+    core: Option<V2GeneralCandidate>,
+    sdk: VerifiedTextCurrentEviction,
+    frame: blake3::Hash,
+}
+
+impl PreparedV2JoinedEviction {
+    pub fn matches_frame_data(&self, bytes: &[u8]) -> bool {
+        bytes.len() <= MAX_V2_MEMBER_TRANSITION_FRAME_BYTES && blake3::hash(bytes) == self.frame
+    }
+
+    pub fn header_data(&self) -> &SignedOwnerHeader {
+        self.core
+            .as_ref()
+            .expect("held eviction candidate")
+            .header_data()
+    }
+
+    pub fn selected_history_data(&self) -> &V2PreparedSelectedHistoryData {
+        self.core
+            .as_ref()
+            .expect("held eviction candidate")
+            .selected_history_append_data()
+    }
+
+    pub fn removed_data(&self) -> (u64, [u8; 32]) {
+        self.sdk.removed_data()
+    }
+}
+
+/// The actual Core cut and original publication close debt. The inactive
+/// receiver itself can retire outside the host's final writers.
+#[must_use = "retire the evicted admission after leaving the host writers"]
+pub struct RetiredV2JoinedEviction {
+    core: V2GeneralRetiredData,
+    _original: PreparedV2JoinedEviction,
+}
+
+impl RetiredV2JoinedEviction {
+    pub fn take_frozen_admission(&mut self) -> Option<V2FrozenAdmission> {
+        self.core.take_frozen_data()
+    }
+
+    pub fn take_close_completion(&mut self) -> Option<V2AdmissionCloseCompletion> {
+        self.core.take_close_completion()
+    }
+}
 
 /// The displaced Core state and SDK graph. The host drops this after leaving
 /// the final native and Current writers.
@@ -336,6 +384,40 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
         prefix.observe_member_successor_header(frame.header_data())
     }
 
+    /// Authenticate the original member's own Remove without producing a
+    /// selectable successor SDK or usable new epoch keys.
+    pub fn prepare_member_eviction_frame(
+        &self,
+        prefix: &mut PreparedV2JoinedPrefix,
+        frame: &V2MemberTransitionFrameData<'_>,
+        payment: TextCurrentAddAdmission,
+    ) -> Result<PreparedV2JoinedEviction, SyncError> {
+        self.observe_member_transition_header(prefix, frame)?;
+        let (TransitionBody::Removal(body), image, commit) = frame.body_data()? else {
+            return Err(SyncError::JoinRejected);
+        };
+        let spec = body.spec();
+        if spec.frozen_tip.context.admission != self.admission_id
+            || spec.subject != self.admission.admission_data().spec().subject
+            || spec.before_epoch != self.epoch
+        {
+            return Err(SyncError::JoinRejected);
+        }
+        let header = frame.header_data();
+        let core = prefix.prepare_member_removal(header, &body, image)?;
+        let sdk = VerifiedTextCurrentEviction::verify_own_eviction(
+            &self.node.device,
+            &self.node.group,
+            removal_request(header, &body, commit),
+            payment,
+        )?;
+        Ok(PreparedV2JoinedEviction {
+            core: Some(core),
+            sdk,
+            frame: frame.digest_data(),
+        })
+    }
+
     fn prepare_observed_removal_candidate(
         &self,
         prefix: &mut PreparedV2JoinedPrefix,
@@ -353,13 +435,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
         let sdk = PreparedTextCurrentReceivedAdd::prepare_remove(
             &self.node.device,
             &self.node.group,
-            TextCurrentReceivedRemoveData {
-                commit,
-                digest: spec.commit,
-                epoch: spec.before_epoch,
-                committer: header.spec().issuer,
-                subject: spec.subject,
-            },
+            removal_request(header, body, commit),
             payment,
         )?;
         Ok(PreparedV2JoinedMembership {
@@ -453,6 +529,38 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
         let retired = self.install_member_transition(prefix, candidate, selection, selected_sdk)?;
         *pending = None;
         Ok(retired)
+    }
+
+    pub fn install_host_selected_eviction(
+        &mut self,
+        prefix: &mut PreparedV2JoinedPrefix,
+        pending: &mut Option<PreparedV2JoinedEviction>,
+        selection: &V2HostSelectionExpectation,
+        removed: (u64, [u8; 32]),
+    ) -> Result<RetiredV2JoinedEviction, SyncError> {
+        let verifier = self.member_prefix(prefix)?;
+        let candidate = pending.as_mut().ok_or(SyncError::JoinRejected)?;
+        let core = candidate.core.as_ref().ok_or(SyncError::JoinRejected)?;
+        verifier
+            .check_host_selection_data(selection, core)
+            .map_err(|_| SyncError::JoinRejected)?;
+        if candidate.removed_data() != removed {
+            return Err(SyncError::JoinRejected);
+        }
+        candidate
+            .sdk
+            .require_original_data(&self.node.device, &self.node.group)?;
+        let before = (self.epoch, self.node.group.epoch_authenticator_id());
+        let fence = self
+            .fence
+            .prepare_selected_eviction(*self.admission_id.as_bytes(), before, removed.0)
+            .map_err(|_| SyncError::JoinRejected)?;
+        let core = prefix.select_member_successor(selection, &mut candidate.core)?;
+        fence.finish();
+        Ok(RetiredV2JoinedEviction {
+            core,
+            _original: pending.take().expect("checked original eviction candidate"),
+        })
     }
 
     fn install_member_transition(
@@ -765,6 +873,21 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
             admission_id,
             native_origin: None,
         })
+    }
+}
+
+fn removal_request<'a>(
+    header: &SignedOwnerHeader,
+    body: &RemovalBody,
+    commit: &'a [u8],
+) -> TextCurrentReceivedRemoveData<'a> {
+    let spec = body.spec();
+    TextCurrentReceivedRemoveData {
+        commit,
+        digest: spec.commit,
+        epoch: spec.before_epoch,
+        committer: header.spec().issuer,
+        subject: spec.subject,
     }
 }
 

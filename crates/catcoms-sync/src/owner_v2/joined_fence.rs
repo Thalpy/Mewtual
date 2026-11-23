@@ -378,6 +378,21 @@ impl V2JoinedMembershipSettlement<'_> {
         self.state.selected = Some(self.next);
     }
 }
+
+pub(crate) struct V2JoinedEvictionSettlement<'a> {
+    _unwind: CloseOnUnwind<'a>,
+    state: MutexGuard<'a, FenceState>,
+    inner: &'a FenceInner,
+}
+
+impl V2JoinedEvictionSettlement<'_> {
+    pub(crate) fn finish(mut self) {
+        self.inner.retire_publications();
+        self.state
+            .terminate(&self.inner.closed, V2JoinedFenceTerminal::Removed);
+    }
+}
+
 impl V2JoinedSourceFence {
     pub(crate) fn prepare_selected_membership(
         &self,
@@ -385,14 +400,7 @@ impl V2JoinedSourceFence {
         before: (u64, [u8; 32]),
         after: (u64, [u8; 32]),
     ) -> Result<V2JoinedMembershipSettlement<'_>, V2JoinedFenceRefusal> {
-        let state = self.inner.try_lock()?;
-        state.authorized(&self.inner.closed, &own)?;
-        if state.settled != before
-            || before.0.checked_add(1) != Some(after.0)
-            || !state.transitions.is_empty()
-        {
-            return Err(V2JoinedFenceRefusal::Unknown);
-        }
+        let state = self.require_membership_parent(own, before, after.0)?;
         Ok(V2JoinedMembershipSettlement {
             _unwind: CloseOnUnwind(&self.inner.closed),
             state,
@@ -403,6 +411,37 @@ impl V2JoinedSourceFence {
                 own,
             },
         })
+    }
+
+    pub(crate) fn prepare_selected_eviction(
+        &self,
+        own: [u8; 32],
+        before: (u64, [u8; 32]),
+        removed_epoch: u64,
+    ) -> Result<V2JoinedEvictionSettlement<'_>, V2JoinedFenceRefusal> {
+        let state = self.require_membership_parent(own, before, removed_epoch)?;
+        Ok(V2JoinedEvictionSettlement {
+            _unwind: CloseOnUnwind(&self.inner.closed),
+            state,
+            inner: &self.inner,
+        })
+    }
+
+    fn require_membership_parent(
+        &self,
+        own: [u8; 32],
+        before: (u64, [u8; 32]),
+        after_epoch: u64,
+    ) -> Result<MutexGuard<'_, FenceState>, V2JoinedFenceRefusal> {
+        let state = self.inner.try_lock()?;
+        state.authorized(&self.inner.closed, &own)?;
+        if state.settled != before
+            || before.0.checked_add(1) != Some(after_epoch)
+            || !state.transitions.is_empty()
+        {
+            return Err(V2JoinedFenceRefusal::Unknown);
+        }
+        Ok(state)
     }
 
     pub(crate) fn observe_publication(

@@ -545,9 +545,12 @@ The cold archive reader also follows mixed Add and Remove predecessors.
 It checks the same named encrypted archive files, authenticates each signed
 step and restores the founder SDK only when its roster and fingerprint agree
 with the selected Core history. An existing Add keeps its original Welcome
-reply and each Remove can serve its exact Commit to holders of the preceding
-epoch's proof. The founder's durable governing writer and evicted member
-retirement still need integration.
+reply and each Remove archive can serve its exact Commit to holders of the
+preceding epoch's proof. The evicted member can authenticate its own Remove
+without merging or deriving successor keys. Sync can select the original
+frozen Core admission and close the same fence that admits final saves.
+The founder's durable governing writer and the native terminal record for
+an evicted member still need integration.
 
 ## Acceptance before enabling
 

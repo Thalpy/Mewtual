@@ -81,6 +81,39 @@ fn settle_at_join(node: &Node, fence: &V2JoinedSourceFence) {
 }
 
 #[test]
+fn selected_eviction_orders_against_the_original_save_admission() {
+    let mut founder = founder(0xd251);
+    let (member, fence, _) = join(&mut founder, 0xd252, 0x91);
+    settle_at_join(&member, &fence);
+    let before = (member.epoch(), member.group.epoch_authenticator_id());
+    let publication = fence.observe_publication(&OWN).unwrap();
+    let saving = fence.admit_final(&OWN).unwrap();
+    assert!(matches!(
+        fence.prepare_selected_eviction(OWN, before, before.0 + 1),
+        Err(V2JoinedFenceRefusal::Busy)
+    ));
+    assert!(publication.is_current_cached());
+    drop(saving);
+    let eviction = fence
+        .prepare_selected_eviction(OWN, before, before.0 + 1)
+        .unwrap();
+    assert!(matches!(
+        fence.admit_final(&OWN),
+        Err(V2JoinedFenceRefusal::Busy)
+    ));
+    eviction.finish();
+    assert_eq!(
+        fence.observe_data().unwrap().terminal,
+        Some(V2JoinedFenceTerminal::Removed)
+    );
+    assert!(matches!(
+        fence.admit_final(&OWN),
+        Err(V2JoinedFenceRefusal::Closed)
+    ));
+    assert!(!publication.is_current_cached());
+}
+
+#[test]
 fn stale_join_and_same_epoch_mismatch_cannot_replace_a_consumed_newer_selection() {
     let mut f = founder(0xd1f1);
     let (mut b, fence, _) = join(&mut f, 0xd1f2, 0x81);

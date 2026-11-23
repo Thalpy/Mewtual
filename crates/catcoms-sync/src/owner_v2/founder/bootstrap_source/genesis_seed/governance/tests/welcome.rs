@@ -532,10 +532,10 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
         candidate.facts_data().key_package_data(),
         &request.request.spec_data().key_package_reference
     );
-    let original = candidate as *const _;
+    let original_warm_welcome = candidate as *const _;
     assert_eq!(
         joiner.finish_governing_join_delivery(&delivery).unwrap() as *const _,
-        original
+        original_warm_welcome
     );
     let sealed = joiner
         .seal_joined_outcome(&keys, context, &mut journal_rng)
@@ -582,7 +582,7 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     assert!(joiner
         .take_closed_warm_node(&cold, &mut warm_inputs)
         .is_err());
-    let installed_warm = joiner
+    let mut installed_warm = joiner
         .take_closed_warm_node(&warm, &mut warm_inputs)
         .unwrap();
     let mut cold_inputs = inputs(122);
@@ -930,6 +930,47 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
         (header.id(), old.1, epoch.0)
     );
     drop(retired);
+    let evicted_original = installed_warm.selected_join_data().unwrap();
+    let evicted_publication = installed_warm.observe_member_publication(&warm).unwrap();
+    assert!(installed_warm
+        .prepare_member_transition_frame(&mut warm, &frame, super::admission(&member_payment))
+        .is_err());
+    assert!(recovered
+        .prepare_member_eviction_frame(foreign_prefix, &frame, super::admission(&member_payment))
+        .is_err());
+    let mut eviction = Some(
+        installed_warm
+            .prepare_member_eviction_frame(&mut warm, &frame, super::admission(&member_payment))
+            .unwrap(),
+    );
+    assert!(eviction.as_ref().unwrap().matches_frame_data(&wire));
+    assert!(!eviction
+        .as_ref()
+        .unwrap()
+        .matches_frame_data(missing_commit_byte));
+    let removed = eviction.as_ref().unwrap().removed_data();
+    assert_eq!(removed.0, epoch.0);
+    assert!(installed_warm
+        .install_host_selected_eviction(&mut warm, &mut eviction, &selected, (removed.0, [0; 32]),)
+        .is_err());
+    assert_eq!(
+        installed_warm.selected_join_data().unwrap(),
+        evicted_original
+    );
+    assert!(evicted_publication.is_current_cached());
+    let mut retired_own = installed_warm
+        .install_host_selected_eviction(&mut warm, &mut eviction, &selected, removed)
+        .unwrap();
+    assert!(eviction.is_none());
+    assert!(retired_own.take_close_completion().unwrap().try_complete());
+    assert!(retired_own.take_frozen_admission().is_some());
+    assert!(!evicted_publication.is_current_cached());
+    assert!(installed_warm.selected_join_data().is_err());
+    assert!(installed_warm
+        .selected_member_topic_data(&warm, 42)
+        .is_err());
+    assert_eq!(installed_warm.original_join_data(), evicted_original);
+    drop(retired_own);
     let old_founder = node.prepare_member_subscription(verifier, 42).unwrap().1;
     let old_target = verifier.observe_live_member(removed_id).unwrap();
     let mut next = Some(node.derive_removal_selection_data(verifier).unwrap());
