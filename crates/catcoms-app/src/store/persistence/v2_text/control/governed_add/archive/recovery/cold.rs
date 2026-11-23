@@ -19,9 +19,10 @@ use crate::store::persistence::v2_text::{
 use crate::store::persistence::{open_archive_directory, OriginalBootstrapReadObservation};
 use crate::store::{RetainedBootstrapSourceData, ServerStore};
 use catcoms_replication::chat::{
-    owner_header::OwnerHeaderId, owner_state::transition::REPLAY_MATH_PRIVATE_INVOICE,
-    FounderGenesisAnchorData, ProjectionGroup, ProjectionGroupView, V2GeneralExpectation,
-    V2GeneralPrefixVerifier, V2GeneralRetiredData, V2HostSelectionExpectation, V2ProjectionOrigin,
+    owner_facts::OwnerFactId, owner_header::OwnerHeaderId,
+    owner_state::transition::REPLAY_MATH_PRIVATE_INVOICE, FounderGenesisAnchorData,
+    ProjectionGroup, ProjectionGroupView, V2GeneralExpectation, V2GeneralPrefixVerifier,
+    V2GeneralRetiredData, V2HostSelectionExpectation, V2ProjectionOrigin,
 };
 use catcoms_storage::kept::{session_id, SessionId};
 use catcoms_storage::VaultPhysicalWorkLease;
