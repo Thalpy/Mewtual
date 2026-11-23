@@ -1429,11 +1429,29 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     refused(join("localhost", "Member").await.unwrap());
     refused(join("0.0.0.0", "Member").await.unwrap());
     assert!(joiner_queue.lock().unwrap().is_empty());
+    let joiner_state = joiner.state::<AppState>();
+    let occupied = {
+        let store = joiner_state.store.lock().await;
+        let vault = store.as_ref().unwrap().as_text_v2().unwrap();
+        vault.prepare_native_authentication(joiner_state.native_text.ui_budget.prepare().unwrap())
+    };
+    assert!(!occupied.is_capture_busy_cached());
     let original = join("127.0.0.1", "Member");
-    tokio::time::timeout(Duration::from_secs(30), run(&joiner_queue))
-        .await
-        .expect("the native Join completes over the founder TCP actor");
-    let original = found_value(original.await.unwrap());
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let release = async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            drop(occupied);
+        };
+        tokio::join!(run(&joiner_queue), release);
+    })
+    .await
+    .expect("the native Join completes over the founder TCP actor");
+    let initial_response = original.await.unwrap();
+    assert!(
+        matches!(initial_response, tauri::ipc::InvokeResponse::Ok(_)),
+        "initial native join after metadata capture release"
+    );
+    let original = found_value(initial_response);
     assert_eq!(original["backend"], "text-v2");
     assert_eq!(original["name"], "My joined group");
     assert_eq!(original["display_name"], "Member");
@@ -1871,7 +1889,12 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
         }),
     );
     run(&queue).await;
-    assert_eq!(found_value(reconnect.await.unwrap()), original);
+    let reconnect_response = reconnect.await.unwrap();
+    assert!(
+        matches!(reconnect_response, tauri::ipc::InvokeResponse::Ok(_)),
+        "original joined row reconnect after restart"
+    );
+    assert_eq!(found_value(reconnect_response), original);
     for (window, queue, row, action, expected) in [
         (
             &window,

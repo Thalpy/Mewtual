@@ -16,6 +16,22 @@ const CREDITS: usize = 8;
 
 type SelectionPreparation = NativeTextJoinedSelectionPreparation<OsCryptoRng>;
 
+trait JoinCapture {
+    fn is_capture_busy(&self) -> bool;
+}
+
+impl JoinCapture for NativeTextJoinedRequestPreparation {
+    fn is_capture_busy(&self) -> bool {
+        self.is_capture_busy_cached()
+    }
+}
+
+impl JoinCapture for SelectionPreparation {
+    fn is_capture_busy(&self) -> bool {
+        self.is_capture_busy_cached()
+    }
+}
+
 struct Invocation {
     generation: u64,
     target: Arc<NativeTextVaultAuthenticationCheck>,
@@ -174,7 +190,32 @@ fn capture_input(state: &AppState, payload: &InvokeBody) -> Result<Invocation, &
     })
 }
 
-async fn capture_active<T>(
+async fn capture_active<T: JoinCapture>(
+    state: &AppState,
+    invocation: &Invocation,
+    capture: impl Fn(
+        &catcoms_app::store::NativeTextSources<catcoms_net::MeshService, OsCryptoRng>,
+        NativeTextSourceCommand,
+    ) -> T,
+) -> Result<T, String> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let original = capture_once(state, invocation, &capture).await?;
+        if !original.is_capture_busy() {
+            return Ok(original);
+        }
+        drop(original);
+        if invocation.account.is_cancelled() {
+            return Err(listing::STALE.to_owned());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(BUSY.to_owned());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+async fn capture_once<T>(
     state: &AppState,
     invocation: &Invocation,
     capture: impl FnOnce(

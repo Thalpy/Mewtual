@@ -158,6 +158,16 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSources<T, R> {
 }
 
 impl NativeTextJoinedRequestPreparation {
+    /// The original command and source are still current, but the physical
+    /// metadata slot was occupied at capture. This cannot admit any work.
+    pub fn is_capture_busy_cached(&self) -> bool {
+        self.end.is_some()
+            && Arc::ptr_eq(&self.scope, &self.command.scope)
+            && self.scope.is_open()
+            && self.command.ui.is_current_cached()
+            && self.work.is_none()
+    }
+
     fn require_current(&self, negative: &RequestCancellation) -> Result<(), AppError> {
         if self.end.is_none()
             || !Arc::ptr_eq(&self.scope, &self.command.scope)
@@ -713,6 +723,12 @@ impl<R: CryptoRngCore> std::fmt::Debug for NativeTextJoinedSelectionPreparation<
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NativeTextJoinedSelectionPreparation")
             .finish_non_exhaustive()
+    }
+}
+
+impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
+    pub fn is_capture_busy_cached(&self) -> bool {
+        self.original.is_capture_busy_cached()
     }
 }
 
