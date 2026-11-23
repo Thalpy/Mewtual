@@ -133,7 +133,8 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
         RecoveredV2PendingJoinSource, V2AdmissionStepData, V2FirstAddProofData,
         V2FirstJoinDeliveryData, V2GoverningJoinDeliveryData, V2GoverningJoinPrefixData,
         V2GoverningJoinStepData, V2JoinDeliveryData, V2JoinRequestPacketData, V2MemberAddFrameData,
-        V2MemberAddRequestData, V2PendingJoinContextData, MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES,
+        V2MemberAddRequestData, V2MemberTransitionFrameData, V2PendingJoinContextData,
+        MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES,
     };
     use catcoms_mls::persist::{
         TextCurrentSdkGraphReservation, TextCurrentSdkRestoreAdmission, TextCurrentSdkRestoreLimits,
@@ -750,26 +751,39 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     let old_publication = recovered
         .observe_member_publication(foreign_prefix)
         .unwrap();
+    let wire = V2MemberTransitionFrameData::encode_removal(
+        &header,
+        removal.body_data(),
+        removal.image_data(),
+        observed.commit(),
+    )
+    .unwrap();
+    assert!(V2MemberAddFrameData::decode(&wire).is_err());
+    let missing_commit_byte = &wire[..wire.len() - 1];
+    let incomplete = V2MemberTransitionFrameData::decode(missing_commit_byte).unwrap();
+    assert_eq!(incomplete.header_data(), &header);
     assert!(recovered
-        .prepare_member_removal_commit(
+        .prepare_member_transition_frame(
             foreign_prefix,
-            &removal,
-            &header,
-            &observed.commit()[..observed.commit().len() - 1],
+            &incomplete,
             super::admission(&member_payment),
         )
         .is_err());
+    let frame = V2MemberTransitionFrameData::decode(&wire).unwrap();
     let mut candidate = Some(
         recovered
-            .prepare_member_removal_commit(
+            .prepare_member_transition_frame(
                 foreign_prefix,
-                &removal,
-                &header,
-                observed.commit(),
+                &frame,
                 super::admission(&member_payment),
             )
             .unwrap(),
     );
+    assert!(candidate.as_ref().unwrap().matches_frame_data(&wire));
+    assert!(!candidate
+        .as_ref()
+        .unwrap()
+        .matches_frame_data(missing_commit_byte));
     assert_eq!(recovered.selected_join_data().unwrap(), old);
     let epoch = (
         removed_group.epoch(),
@@ -777,13 +791,16 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     );
     assert_eq!(candidate.as_ref().unwrap().selected_epoch_data(), epoch);
     let selected = V2HostSelectionExpectation::from_trusted_host(header.id(), header.spec().state);
+    assert!(recovered
+        .install_host_selected_add(foreign_prefix, &mut candidate, &selected, epoch)
+        .is_err());
     let failed_epoch = (epoch.0 - 1, epoch.1);
     assert!(recovered
-        .install_host_selected_removal(foreign_prefix, &mut candidate, &selected, failed_epoch,)
+        .install_host_selected_membership(foreign_prefix, &mut candidate, &selected, failed_epoch,)
         .is_err());
     assert!(old_publication.is_current_cached());
     let retired = recovered
-        .install_host_selected_removal(foreign_prefix, &mut candidate, &selected, epoch)
+        .install_host_selected_membership(foreign_prefix, &mut candidate, &selected, epoch)
         .unwrap();
     assert!(retired.frozen_admission_data().is_some());
     assert!(candidate.is_none());

@@ -532,9 +532,14 @@ derives the unsigned frozen cut from the selected admission slot. Sync pairs
 the signed Core step and the closed SDK candidate under the existing joined
 save fence and returns the original frozen admission with retirement custody.
 The MLS committer can also build the exact private Remove once on a paid
-closed candidate while the original graph stays selected. The native
-governing writer, durable removal handoff and evicted member retirement
-still need integration.
+closed candidate while the original graph stays selected. Surviving members
+accept a bounded Remove frame through the same joined-row handoff as Add.
+They observe the signed Header before reading its body or Commit, then cover
+the exact Core history page and the verified MLS epoch in an encrypted
+continuation of the original Welcome. Existing Add continuations retain their
+encoding. A Remove uses its own record version, which older readers refuse.
+The founder's native governing writer and evicted member retirement still
+need integration.
 
 ## Acceptance before enabling
 

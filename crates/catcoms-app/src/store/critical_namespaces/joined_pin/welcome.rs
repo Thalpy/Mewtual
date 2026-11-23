@@ -3,9 +3,11 @@ use super::*;
 use catcoms_replication::chat::cold_selected_history::{
     SelectedHistoryNodePage, MAX_SELECTED_HISTORY_NODE_PAGE_BYTES,
 };
+use catcoms_replication::chat::owner_header::HeaderKind;
 use catcoms_sync::{
-    PreparedV2JoinedAdd, SealedV2JoinedOutcome, V2JoinDeliveryData, V2MemberAddFrameData,
-    V2PendingJoinContextData, MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES, MAX_V2_MEMBER_ADD_FRAME_BYTES,
+    PreparedV2JoinedMembership, SealedV2JoinedOutcome, V2JoinDeliveryData,
+    V2MemberTransitionFrameData, V2PendingJoinContextData, MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES,
+    MAX_V2_MEMBER_TRANSITION_FRAME_BYTES,
 };
 
 const ENTRY_TAG: &[u8] = b"catcoms/private-chat-v2-welcome-entry/v1\0";
@@ -17,6 +19,7 @@ const MEMBER_ADD_KEY: &str = "catcoms/private-chat-v2-joined-member-add-key/v1";
 const VERSION: u16 = 1;
 const LATER_ENTRY: u16 = 2;
 const OUTCOME_WITH_HISTORY: u16 = 2;
+const MEMBER_REMOVAL: u16 = 2;
 const SEALED_OVERHEAD: usize = 40;
 const DIGESTS: usize = 5 * 36;
 const MAX_OUTCOME_CIPHERTEXT: usize = 512 * 1024 + 4096;
@@ -42,7 +45,7 @@ pub(in crate::store) const MEMBER_ADD_FRAME: usize = 4
     + 4
     + 32
     + 4
-    + MAX_V2_MEMBER_ADD_FRAME_BYTES
+    + MAX_V2_MEMBER_TRANSITION_FRAME_BYTES
     + 4
     + MAX_SELECTED_HISTORY_NODE_PAGE_BYTES
     + SEALED_OVERHEAD;
@@ -57,7 +60,7 @@ impl OpenedMemberAdd {
     pub(in crate::store) fn require_original_candidate(
         &self,
         vault: &[u8; 32],
-        candidate: &PreparedV2JoinedAdd,
+        candidate: &PreparedV2JoinedMembership,
     ) -> Result<(u64, [u8; 32]), AppError> {
         if !candidate.matches_frame_data(&self.delivery)
             || self.sdk != candidate.selected_epoch_data()
@@ -78,13 +81,14 @@ pub(in crate::store) fn seal_member_add(
     context: V2PendingJoinContextData,
     predecessor: &[u8],
     delivery: &[u8],
-    candidate: &PreparedV2JoinedAdd,
+    candidate: &PreparedV2JoinedMembership,
     rng: &mut dyn CryptoRngCore,
 ) -> Result<Zeroizing<Vec<u8>>, AppError> {
     if predecessor.is_empty() || !candidate.matches_frame_data(delivery) {
         return Err(refused());
     }
     let (epoch, authenticator) = candidate.selected_epoch_data();
+    let version = member_transition_version(candidate.header_data().spec().kind)?;
     let history =
         catcoms_replication::chat::cold_selected_history::encode_selected_history_node_page(
             &context.vault,
@@ -95,7 +99,7 @@ pub(in crate::store) fn seal_member_add(
         key,
         MEMBER_ADD_KEY,
         MEMBER_ADD_TAG,
-        VERSION,
+        version,
         context_fields(context, predecessor),
         &[&epoch.to_be_bytes(), &authenticator, delivery, &history],
         rng,
@@ -128,16 +132,27 @@ pub(in crate::store) fn open_member_add(
     let delivery = d.get_bytes().map_err(bad)?;
     let history = d.get_bytes().map_err(bad)?;
     d.finish().map_err(bad)?;
-    if version != VERSION || epoch < 2 {
+    let frame = V2MemberTransitionFrameData::decode(delivery)?;
+    if version != member_transition_version(frame.kind_data())?
+        || frame.kind_data() != frame.header_data().spec().kind
+        || epoch < 2
+    {
         return Err(refused());
     }
-    V2MemberAddFrameData::decode(delivery)?;
     SelectedHistoryNodePage::decode(history).map_err(|_| refused())?;
     Ok(OpenedMemberAdd {
         delivery: delivery.to_vec(),
         history: Zeroizing::new(history.to_vec()),
         sdk: (epoch, authenticator),
     })
+}
+
+fn member_transition_version(kind: HeaderKind) -> Result<u16, AppError> {
+    match kind {
+        HeaderKind::Admission => Ok(VERSION),
+        HeaderKind::Removal => Ok(MEMBER_REMOVAL),
+        _ => Err(refused()),
+    }
 }
 
 fn context_fields(context: V2PendingJoinContextData, parent: &[u8]) -> [[u8; 32]; 5] {

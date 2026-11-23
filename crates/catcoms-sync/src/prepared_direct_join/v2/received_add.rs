@@ -1,27 +1,43 @@
-//! A bounded member Add delivery. The signed Header is readable separately
+//! A bounded member transition delivery. The signed Header is readable separately
 //! from the untrusted body so corrupt bytes cannot hide a signed sibling.
 use super::*;
 use catcoms_mls::group::text_current_add::MAX_TEXT_RECEIVED_ADD_COMMIT_BYTES;
 use catcoms_replication::chat::{
-    owner_header::{OwnerHeaderId, SignedOwnerHeader, MAX_HEADER_BYTES},
+    owner_bodies::{RemovalBody, MAX_REMOVAL_BODY_BYTES},
+    owner_header::{HeaderKind, OwnerHeaderId, SignedOwnerHeader, MAX_HEADER_BYTES},
     owner_profile::{AdmissionBody, AdmissionOrigin, MAX_ADMISSION_BYTES},
     owner_state::{transition::ReplayMath, MAX_STATE_BYTES},
 };
 
 const TAG: &[u8] = b"mewtual/chat/member-add-delivery/v2\0";
+const REMOVE_TAG: &[u8] = b"mewtual/chat/member-remove-delivery/v2\0";
 const REQUEST: &[u8] = b"mewtual/chat/next-member-add/v2\0";
 const REQUEST_BYTES: usize = 4 + REQUEST.len() + 2 + 36 + 8 + 36;
 const FETCH_TOKEN: &str = "mewtual/chat/next-member-add-token/v2";
 const FETCH_VERIFIER: &str = "mewtual/chat/next-member-add-verifier/v2";
 const _: () = assert!(REQUEST_BYTES < catcoms_rt::CHAT_V2_GOVERNING_REQUEST_MAX_BYTES);
-const OVERHEAD: usize = 4 + TAG.len() + 2 + 3 * 4;
+const OVERHEAD: usize = 4 + 2 + 3 * 4;
 pub const MAX_V2_MEMBER_ADD_FRAME_BYTES: usize = OVERHEAD
+    + TAG.len()
     + MAX_HEADER_BYTES
     + MAX_ADMISSION_BYTES
     + MAX_STATE_BYTES
     + MAX_TEXT_RECEIVED_ADD_COMMIT_BYTES;
-const _: () =
-    assert!(MAX_V2_MEMBER_ADD_FRAME_BYTES <= catcoms_rt::CHAT_V2_GOVERNING_RESPONSE_MAX_BYTES);
+const MAX_REMOVE_FRAME: usize = OVERHEAD
+    + REMOVE_TAG.len()
+    + MAX_HEADER_BYTES
+    + MAX_REMOVAL_BODY_BYTES
+    + MAX_STATE_BYTES
+    + MAX_TEXT_RECEIVED_ADD_COMMIT_BYTES;
+pub const MAX_V2_MEMBER_TRANSITION_FRAME_BYTES: usize =
+    if MAX_REMOVE_FRAME > MAX_V2_MEMBER_ADD_FRAME_BYTES {
+        MAX_REMOVE_FRAME
+    } else {
+        MAX_V2_MEMBER_ADD_FRAME_BYTES
+    };
+const _: () = assert!(
+    MAX_V2_MEMBER_TRANSITION_FRAME_BYTES <= catcoms_rt::CHAT_V2_GOVERNING_RESPONSE_MAX_BYTES
+);
 
 /// A bearer request for the immediate successor to one original selected MLS
 /// epoch. The founder can retain the one-way verifier separately from the key.
@@ -121,10 +137,18 @@ impl V2MemberAddRequestData {
     }
 }
 
-pub struct V2MemberAddFrameData<'a> {
+pub struct V2MemberAddFrameData<'a>(V2MemberTransitionFrameData<'a>);
+
+pub struct V2MemberTransitionFrameData<'a> {
     header: SignedOwnerHeader,
+    kind: HeaderKind,
     remainder: &'a [u8],
     digest: blake3::Hash,
+}
+
+pub(super) enum TransitionBody {
+    Add(AdmissionBody),
+    Removal(RemovalBody),
 }
 
 impl<'a> V2MemberAddFrameData<'a> {
@@ -132,23 +156,75 @@ impl<'a> V2MemberAddFrameData<'a> {
         let AdmissionOrigin::Add { commit: digest, .. } = step.admission.spec().origin else {
             return Err(SyncError::JoinRejected);
         };
-        if step.image.is_empty()
-            || step.image.len() > MAX_STATE_BYTES
-            || commit.is_empty()
-            || commit.len() > MAX_TEXT_RECEIVED_ADD_COMMIT_BYTES
-            || blake3::hash(commit).as_bytes() != &digest
-        {
+        if step.header.spec().kind != HeaderKind::Admission {
             return Err(SyncError::JoinRejected);
         }
-        let header = step.header.encode();
-        let body = step.admission.encode();
+        V2MemberTransitionFrameData::encode(
+            TAG,
+            step.header,
+            &step.admission.encode(),
+            step.image,
+            commit,
+            digest,
+        )
+    }
+
+    pub fn decode(raw: &'a [u8]) -> Result<Self, SyncError> {
+        let frame = V2MemberTransitionFrameData::decode(raw)?;
+        if frame.kind != HeaderKind::Admission {
+            return Err(SyncError::Malformed);
+        }
+        Ok(Self(frame))
+    }
+
+    pub fn header_data(&self) -> &SignedOwnerHeader {
+        self.0.header_data()
+    }
+
+    pub(super) fn transition_data(&self) -> &V2MemberTransitionFrameData<'a> {
+        &self.0
+    }
+}
+
+impl<'a> V2MemberTransitionFrameData<'a> {
+    pub fn encode_removal(
+        header: &SignedOwnerHeader,
+        body: &RemovalBody,
+        image: &[u8],
+        commit: &[u8],
+    ) -> Result<Vec<u8>, SyncError> {
+        body.verify_header_binding(header)
+            .map_err(|_| SyncError::JoinRejected)?;
+        Self::encode(
+            REMOVE_TAG,
+            header,
+            &body.encode(),
+            image,
+            commit,
+            body.spec().commit,
+        )
+    }
+
+    fn encode(
+        tag: &[u8],
+        header: &SignedOwnerHeader,
+        body: &[u8],
+        image: &[u8],
+        commit: &[u8],
+        digest: [u8; 32],
+    ) -> Result<Vec<u8>, SyncError> {
+        Self::require_bounds(image, commit)?;
+        if blake3::hash(commit).as_bytes() != &digest {
+            return Err(SyncError::JoinRejected);
+        }
+        let header = header.encode();
         let mut encoder = Encoder::with_capacity(
-            OVERHEAD + header.len() + body.len() + step.image.len() + commit.len(),
+            OVERHEAD + tag.len() + header.len() + body.len() + image.len() + commit.len(),
         );
         let bad = |_| SyncError::Malformed;
-        encoder.put_bytes(TAG).map_err(bad)?;
+        encoder.put_bytes(tag).map_err(bad)?;
         encoder.put_u16(VERSION);
-        for bytes in [header.as_slice(), body.as_slice(), step.image] {
+        for bytes in [header.as_slice(), body, image] {
             encoder.put_bytes(bytes).map_err(bad)?;
         }
         let mut bytes = encoder.finish();
@@ -157,18 +233,24 @@ impl<'a> V2MemberAddFrameData<'a> {
     }
 
     pub fn decode(raw: &'a [u8]) -> Result<Self, SyncError> {
-        if raw.len() > MAX_V2_MEMBER_ADD_FRAME_BYTES {
+        if raw.len() > MAX_V2_MEMBER_TRANSITION_FRAME_BYTES {
             return Err(SyncError::Malformed);
         }
         let mut decoder = Decoder::new(raw);
         let bad = |_| SyncError::Malformed;
-        if decoder.get_bytes().map_err(bad)? != TAG || decoder.get_u16().map_err(bad)? != VERSION {
+        let kind = match decoder.get_bytes().map_err(bad)? {
+            TAG if raw.len() <= MAX_V2_MEMBER_ADD_FRAME_BYTES => HeaderKind::Admission,
+            REMOVE_TAG if raw.len() <= MAX_REMOVE_FRAME => HeaderKind::Removal,
+            _ => return Err(SyncError::Malformed),
+        };
+        if decoder.get_u16().map_err(bad)? != VERSION {
             return Err(SyncError::Malformed);
         }
         let header = SignedOwnerHeader::decode(decoder.get_bytes().map_err(bad)?)
             .map_err(|_| SyncError::JoinRejected)?;
         Ok(Self {
             header,
+            kind,
             remainder: &raw[raw.len() - decoder.remaining()..],
             digest: blake3::hash(raw),
         })
@@ -178,16 +260,38 @@ impl<'a> V2MemberAddFrameData<'a> {
         &self.header
     }
 
+    pub fn kind_data(&self) -> HeaderKind {
+        self.kind
+    }
+
     pub(super) fn digest_data(&self) -> blake3::Hash {
         self.digest
     }
 
-    pub(super) fn body_data(&self) -> Result<(AdmissionBody, &'a [u8], &'a [u8]), SyncError> {
+    pub(super) fn body_data(&self) -> Result<(TransitionBody, &'a [u8], &'a [u8]), SyncError> {
         let mut decoder = Decoder::new(self.remainder);
         let bad = |_| SyncError::Malformed;
         let body = decoder.get_bytes().map_err(bad)?;
         let image = decoder.get_bytes().map_err(bad)?;
         let commit = &self.remainder[self.remainder.len() - decoder.remaining()..];
+        Self::require_bounds(image, commit)?;
+        if self.kind != self.header.spec().kind {
+            return Err(SyncError::JoinRejected);
+        }
+        let bad_body = |_| SyncError::JoinRejected;
+        let body = match self.kind {
+            HeaderKind::Admission => {
+                TransitionBody::Add(AdmissionBody::decode(body).map_err(bad_body)?)
+            }
+            HeaderKind::Removal => {
+                TransitionBody::Removal(RemovalBody::decode(body).map_err(bad_body)?)
+            }
+            _ => return Err(SyncError::Malformed),
+        };
+        Ok((body, image, commit))
+    }
+
+    fn require_bounds(image: &[u8], commit: &[u8]) -> Result<(), SyncError> {
         if image.is_empty()
             || image.len() > MAX_STATE_BYTES
             || commit.is_empty()
@@ -195,7 +299,6 @@ impl<'a> V2MemberAddFrameData<'a> {
         {
             return Err(SyncError::Malformed);
         }
-        let admission = AdmissionBody::decode(body).map_err(|_| SyncError::JoinRejected)?;
-        Ok((admission, image, commit))
+        Ok(())
     }
 }

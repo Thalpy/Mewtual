@@ -20,7 +20,8 @@ pub use pending_source::{
     SealedV2PendingJoinSource, V2PendingJoinContextData,
 };
 pub use received_add::{
-    V2MemberAddFrameData, V2MemberAddRequestData, MAX_V2_MEMBER_ADD_FRAME_BYTES,
+    V2MemberAddFrameData, V2MemberAddRequestData, V2MemberTransitionFrameData,
+    MAX_V2_MEMBER_ADD_FRAME_BYTES, MAX_V2_MEMBER_TRANSITION_FRAME_BYTES,
 };
 mod warm_runtime;
 mod welcome;
@@ -34,7 +35,7 @@ pub use governing_prefix::{
     MAX_V2_GOVERNING_JOIN_STEPS,
 };
 pub use warm_runtime::{
-    ClosedV2JoinedNode, PreparedV2JoinedAdd, PreparedV2JoinedRemoval, RetiredV2JoinedAdd,
+    ClosedV2JoinedNode, PreparedV2JoinedAdd, PreparedV2JoinedMembership, RetiredV2JoinedAdd,
     V2JoinedRuntimeInputs,
 };
 pub use welcome::{

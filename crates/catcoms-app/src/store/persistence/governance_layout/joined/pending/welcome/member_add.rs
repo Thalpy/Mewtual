@@ -1,8 +1,8 @@
 //! Covered continuations of one original joined Welcome.
 use super::*;
 use catcoms_sync::{
-    ClosedV2JoinedNode, PreparedV2JoinedAdd, RetiredV2JoinedAdd, V2MemberAddFrameData,
-    MAX_V2_GOVERNING_JOIN_STEPS,
+    ClosedV2JoinedNode, PreparedV2JoinedMembership, RetiredV2JoinedAdd,
+    V2MemberTransitionFrameData, MAX_V2_GOVERNING_JOIN_STEPS,
 };
 
 const MAX_EPOCH: u64 = MAX_V2_GOVERNING_JOIN_STEPS as u64;
@@ -24,7 +24,7 @@ struct Pending {
     path: PathBuf,
     sealed: Zeroizing<Vec<u8>>,
     original: Option<CreatedStage>,
-    candidate: Option<PreparedV2JoinedAdd>,
+    candidate: Option<PreparedV2JoinedMembership>,
     fee: CatalogReadReservation,
 }
 
@@ -109,8 +109,8 @@ impl MemberAdds {
             let fee = reserve(store)?;
             self.reserve_output()?;
             let payment = crate::store::persistence::v2_text::prepare_sdk_admission(store)?;
-            let frame = V2MemberAddFrameData::decode(delivery)?;
-            let candidate = node.prepare_member_add_frame(core, &frame, payment)?;
+            let frame = V2MemberTransitionFrameData::decode(delivery)?;
+            let candidate = node.prepare_member_transition_frame(core, &frame, payment)?;
             let sealed = codec::seal_member_add(
                 &key,
                 context,
@@ -139,8 +139,8 @@ impl MemberAdds {
                 .ok_or_else(denied)?
                 .matches_frame_data(delivery)
         {
-            let frame = V2MemberAddFrameData::decode(delivery)?;
-            node.observe_member_add_header(core, &frame)?;
+            let frame = V2MemberTransitionFrameData::decode(delivery)?;
+            node.observe_member_transition_header(core, &frame)?;
             return Err(denied());
         }
         require_live()?;
@@ -153,13 +153,20 @@ impl MemberAdds {
             candidate.header_data().id(),
             candidate.header_data().spec().state,
         );
-        let retired =
-            node.install_host_selected_add(core, &mut pending.candidate, &expected, selected)?;
-        let pending = self.pending.take().expect("covered exact joined Add");
+        let retired = node.install_host_selected_membership(
+            core,
+            &mut pending.candidate,
+            &expected,
+            selected,
+        )?;
+        let pending = self
+            .pending
+            .take()
+            .expect("covered exact membership transition");
         self.covered.push(Covered {
             path: pending.path,
             file: (
-                pending.original.expect("held covered Add").file,
+                pending.original.expect("held covered transition").file,
                 pending.sealed,
             ),
             _fee: pending.fee,
@@ -192,10 +199,10 @@ impl MemberAdds {
             let fee = reserve(store)?;
             let file = read(&path, codec::MEMBER_ADD_FRAME)?.ok_or_else(denied)?;
             let opened = codec::open_member_add(&key, context, self.predecessor(welcome), &file.1)?;
-            let frame = V2MemberAddFrameData::decode(&opened.delivery)?;
+            let frame = V2MemberTransitionFrameData::decode(&opened.delivery)?;
             self.reserve_output()?;
             let payment = crate::store::persistence::v2_text::prepare_sdk_admission(store)?;
-            let mut candidate = Some(node.prepare_member_add_frame(core, &frame, payment)?);
+            let mut candidate = Some(node.prepare_member_transition_frame(core, &frame, payment)?);
             let facts = candidate.as_ref().ok_or_else(denied)?;
             let selected = opened.require_original_candidate(&context.vault, facts)?;
             if selected.0 != expected_epoch {
@@ -208,7 +215,7 @@ impl MemberAdds {
             exact_held(&path, &file.0, session_id(&file.0).map_err(io)?, &file.1)?;
             store.validate_mounted_governance_layout()?;
             let retired =
-                node.install_host_selected_add(core, &mut candidate, &expected, selected)?;
+                node.install_host_selected_membership(core, &mut candidate, &expected, selected)?;
             self.covered.push(Covered {
                 path,
                 file,
