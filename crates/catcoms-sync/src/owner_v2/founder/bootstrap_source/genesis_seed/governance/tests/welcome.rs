@@ -125,7 +125,7 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     now: u64,
     joined: &crate::ClosedV2JoinedNode<T, R>,
     joined_prefix: &mut crate::PreparedV2JoinedPrefix,
-    recovered: &crate::ClosedV2JoinedNode<T, R>,
+    recovered: &mut crate::ClosedV2JoinedNode<T, R>,
     foreign_prefix: &mut crate::PreparedV2JoinedPrefix,
 ) {
     use crate::{
@@ -261,9 +261,79 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
         (2, *result.after_authenticator_data())
     );
     assert!(!member_candidate.snapshot_data().is_empty());
-    drop(member_candidate);
     assert_eq!(joined.selected_join_data().unwrap(), previously_selected);
     assert_eq!(recovered.selected_join_data().unwrap(), previously_selected);
+    let original_member = foreign_prefix
+        .selected_member_verifier()
+        .unwrap()
+        .admission(previously_selected.1)
+        .unwrap();
+    let member_observation = recovered
+        .observe_member_publication(foreign_prefix)
+        .unwrap();
+    let previous_topic = recovered
+        .selected_member_topic_data(foreign_prefix, 42)
+        .unwrap();
+    let mut member_candidate = Some(member_candidate);
+    let sdk_selection = (2, *result.after_authenticator_data());
+    let core_selection =
+        V2HostSelectionExpectation::from_trusted_host(header.id(), header.spec().state);
+    let wrong_selection =
+        V2HostSelectionExpectation::from_trusted_host(previously_selected.0, header.spec().state);
+    assert!(recovered
+        .install_host_selected_add(
+            joined_prefix,
+            &mut member_candidate,
+            &core_selection,
+            sdk_selection
+        )
+        .is_err());
+    assert!(recovered
+        .install_host_selected_add(
+            foreign_prefix,
+            &mut member_candidate,
+            &wrong_selection,
+            sdk_selection
+        )
+        .is_err());
+    assert!(recovered
+        .install_host_selected_add(
+            foreign_prefix,
+            &mut member_candidate,
+            &core_selection,
+            (2, [0; 32])
+        )
+        .is_err());
+    assert!(member_observation.is_current_cached());
+    assert_eq!(recovered.selected_join_data().unwrap(), previously_selected);
+    drop(
+        recovered
+            .install_host_selected_add(
+                foreign_prefix,
+                &mut member_candidate,
+                &core_selection,
+                sdk_selection,
+            )
+            .unwrap(),
+    );
+    assert!(member_candidate.is_none());
+    assert_eq!(
+        recovered.selected_join_data().unwrap(),
+        (header.id(), previously_selected.1, 2)
+    );
+    assert!(foreign_prefix
+        .selected_member_verifier()
+        .unwrap()
+        .admission(previously_selected.1)
+        .unwrap()
+        .same_original(&original_member));
+    assert!(!member_observation.is_current_cached());
+    assert_ne!(
+        recovered
+            .selected_member_topic_data(foreign_prefix, 42)
+            .unwrap(),
+        previous_topic
+    );
     let response = node.join_response_data().unwrap();
     let only_first = V2FirstAddProofData::decode(first).unwrap();
     assert!(joiner.finish_first_welcome(response, &only_first).is_err());
@@ -439,7 +509,13 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
         .same_original(&original_founder));
     assert_eq!(verifier.replay_data().slots().len(), 3);
     assert!(!old_transport.is_current_cached());
-    assert!(node.prepare_member_subscription(verifier, 42).is_ok());
+    let (new_topic, _) = node.prepare_member_subscription(verifier, 42).unwrap();
+    assert_eq!(
+        recovered
+            .selected_member_topic_data(foreign_prefix, 42)
+            .unwrap(),
+        new_topic
+    );
 }
 
 async fn complete_original_welcome(native_joiner: bool) {
@@ -1338,7 +1414,7 @@ async fn complete_original_welcome(native_joiner: bool) {
             now,
             &joined_node,
             &mut warm_prefix,
-            &cold_node,
+            &mut cold_node,
             &mut prefix,
         );
     }

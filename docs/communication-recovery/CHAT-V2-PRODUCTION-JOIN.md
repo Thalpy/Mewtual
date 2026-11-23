@@ -353,8 +353,12 @@ An existing joined member can stage and merge the exact later Add on a closed
 candidate graph while its live epoch remains unchanged. The SDK checks the
 authenticated committer, one inline Add, the joining device and signed
 KeyPackage and credential bindings, and the successor roster. It retains the
-new graph and snapshot with the corresponding Core candidate for a later
-durable selection.
+new graph and snapshot with the corresponding Core candidate. After the host
+selects the exact signed Header, state and SDK authenticator, Sync installs
+the pair under the original joined fence. The member keeps its original
+Admission and the old transport observation retires. This handoff is exercised
+with a separately paid restored graph. The mounted durable writer and delivery
+to existing members remain open work.
 
 An independently reopened Pending with neither Welcome file can resend the
 exact original request over the same connected protocol. It verifies the

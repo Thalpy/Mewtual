@@ -362,7 +362,49 @@ impl std::fmt::Debug for V2JoinedFenceAdmission<'_> {
     }
 }
 
+/// The selected SDK swap and Core advance share this fence order with save
+/// admission. The Sync owner holds both actual graphs through settlement.
+pub(crate) struct V2JoinedAddSettlement<'a> {
+    _unwind: CloseOnUnwind<'a>,
+    state: MutexGuard<'a, FenceState>,
+    inner: &'a FenceInner,
+    next: Selected,
+}
+
+impl V2JoinedAddSettlement<'_> {
+    pub(crate) fn finish(mut self) {
+        self.inner.retire_publications();
+        self.state.settled = (self.next.epoch, self.next.authenticator);
+        self.state.selected = Some(self.next);
+    }
+}
 impl V2JoinedSourceFence {
+    pub(crate) fn prepare_selected_add(
+        &self,
+        own: [u8; 32],
+        before: (u64, [u8; 32]),
+        after: (u64, [u8; 32]),
+    ) -> Result<V2JoinedAddSettlement<'_>, V2JoinedFenceRefusal> {
+        let state = self.inner.try_lock()?;
+        state.authorized(&self.inner.closed, &own)?;
+        if state.settled != before
+            || before.0.checked_add(1) != Some(after.0)
+            || !state.transitions.is_empty()
+        {
+            return Err(V2JoinedFenceRefusal::Unknown);
+        }
+        Ok(V2JoinedAddSettlement {
+            _unwind: CloseOnUnwind(&self.inner.closed),
+            state,
+            inner: &self.inner,
+            next: Selected {
+                epoch: after.0,
+                authenticator: after.1,
+                own,
+            },
+        })
+    }
+
     pub(crate) fn observe_publication(
         &self,
         own: &[u8; 32],

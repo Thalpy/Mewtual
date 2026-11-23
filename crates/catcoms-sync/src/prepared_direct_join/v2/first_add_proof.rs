@@ -290,6 +290,17 @@ impl PreparedV2JoinedPrefix {
             .map_err(|_| SyncError::JoinRejected)
     }
 
+    pub(super) fn select_member_successor(
+        &mut self,
+        selection: &V2HostSelectionExpectation,
+        candidate: &mut Option<V2GeneralCandidate>,
+    ) -> Result<V2GeneralRetiredData, SyncError> {
+        self.selected_member_verifier()?;
+        self.verifier
+            .advance_host_selected(selection, candidate)
+            .map_err(|_| SyncError::JoinRejected)
+    }
+
     pub(super) fn observe_member_successor_header(
         &mut self,
         header: &SignedOwnerHeader,

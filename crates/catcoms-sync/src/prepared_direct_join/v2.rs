@@ -29,7 +29,9 @@ pub use governing_prefix::{
     MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES, MAX_V2_GOVERNING_JOIN_PREFIX_BYTES,
     MAX_V2_GOVERNING_JOIN_STEPS,
 };
-pub use warm_runtime::{ClosedV2JoinedNode, PreparedV2JoinedAdd, V2JoinedRuntimeInputs};
+pub use warm_runtime::{
+    ClosedV2JoinedNode, PreparedV2JoinedAdd, RetiredV2JoinedAdd, V2JoinedRuntimeInputs,
+};
 pub use welcome::{
     CompletedV2JoinCandidate, V2JoinResponseData, V2JoinResponsePacketData,
     MAX_V2_JOIN_RESPONSE_PACKET_BYTES,

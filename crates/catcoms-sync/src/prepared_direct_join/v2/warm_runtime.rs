@@ -2,7 +2,9 @@
 use super::first_add_proof::SelectedJoinData;
 use super::*;
 use catcoms_mls::{
-    group::text_current_add::{PreparedTextCurrentReceivedAdd, TextCurrentReceivedAddData},
+    group::text_current_add::{
+        PreparedTextCurrentReceivedAdd, RetiredTextReceivedAdd, TextCurrentReceivedAddData,
+    },
     persist::text_current_add::TextCurrentAddAdmission,
 };
 
@@ -11,14 +13,14 @@ use crate::owner_v2::{
     open_v2_member_envelope_data, seal_v2_member_envelope_data, v2_member_envelope_topic_data,
     JoinFactsSlot, JoinedFenceNode, MemberTransportFence, OpenedV2MemberDependencyRequest,
     PreparedV2MemberDependencyRequest, PreparedV2MemberSubmission, SelectedV2MemberEnvelope,
-    V2JoinFacts, V2JoinedFenceAdmission, V2JoinedSourceFence, V2MemberDependencyRoute,
-    V2MemberDraftInputs, V2MemberEnvelopeScopeData, V2MemberPublicationObservation,
-    V2MemberSignRefusal,
+    V2JoinedFenceAdmission, V2JoinedSourceFence, V2MemberDependencyRoute, V2MemberDraftInputs,
+    V2MemberEnvelopeScopeData, V2MemberPublicationObservation, V2MemberSignRefusal,
 };
 use catcoms_replication::chat::{
     join_bindings::SignedWelcomeBindingData, owner_facts::OwnerFactId, owner_header::OwnerHeaderId,
     owner_profile::AdmissionOrigin, ActionDraft, ActionId, V2AuthenticatedAdmission,
-    V2GeneralCandidate, V2GeneralPrefixVerifier, V2OrdinarySigningGuard, V2OrdinarySigningPlan,
+    V2GeneralCandidate, V2GeneralPrefixVerifier, V2GeneralRetiredData, V2HostSelectionExpectation,
+    V2OrdinarySigningGuard, V2OrdinarySigningPlan, V2PreparedSelectedHistoryData,
 };
 
 /// Owns the original verified group, device, routing and runtime. Only a
@@ -26,38 +28,58 @@ use catcoms_replication::chat::{
 /// durable selection and native admission.
 pub struct ClosedV2JoinedNode<T: MeshTransport, R: CryptoRngCore> {
     node: Box<ChannelSync<T, R>>,
-    origin: JoinedOrigin,
+    recovered: bool,
     fence: V2JoinedSourceFence,
     head: OwnerHeaderId,
+    epoch: u64,
     admission: V2AuthenticatedAdmission,
     admission_id: OwnerFactId,
     native_origin: Option<NativeChatSourceObservation>,
-}
-
-enum JoinedOrigin {
-    Warm(V2JoinFacts),
-    Recovered(u64),
 }
 
 /// The exact Core successor paired with one closed existing-member MLS
 /// candidate. A host still needs its independent durable selection and the
 /// original installed row before swapping the pair.
 pub struct PreparedV2JoinedAdd {
-    core: V2GeneralCandidate,
-    sdk: PreparedTextCurrentReceivedAdd,
+    core: Option<V2GeneralCandidate>,
+    sdk: Option<PreparedTextCurrentReceivedAdd>,
+}
+
+/// The displaced Core state and SDK graph. The host drops this after leaving
+/// the final native and Current writers.
+#[must_use = "retire the displaced joined state after leaving the final writers"]
+pub struct RetiredV2JoinedAdd {
+    _core: V2GeneralRetiredData,
+    _sdk: RetiredTextReceivedAdd,
 }
 
 impl PreparedV2JoinedAdd {
     pub fn header_data(&self) -> &catcoms_replication::chat::owner_header::SignedOwnerHeader {
-        self.core.header_data()
+        self.core
+            .as_ref()
+            .expect("held Core candidate")
+            .header_data()
+    }
+
+    pub fn selected_history_data(&self) -> &V2PreparedSelectedHistoryData {
+        self.core
+            .as_ref()
+            .expect("held Core candidate")
+            .selected_history_append_data()
     }
 
     pub fn selected_epoch_data(&self) -> (u64, [u8; 32]) {
-        self.sdk.selected_epoch_data()
+        self.sdk
+            .as_ref()
+            .expect("held SDK candidate")
+            .selected_epoch_data()
     }
 
     pub fn snapshot_data(&self) -> &[u8] {
-        self.sdk.snapshot_data()
+        self.sdk
+            .as_ref()
+            .expect("held SDK candidate")
+            .snapshot_data()
     }
 }
 
@@ -78,14 +100,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
         self.fence
             .require_authorized(self.admission_id.as_bytes())
             .map_err(|_| SyncError::JoinRejected)?;
-        let epoch = match &self.origin {
-            JoinedOrigin::Warm(facts) => facts.join_epoch_data(),
-            JoinedOrigin::Recovered(epoch) => *epoch,
-        };
-        if self.node.epoch() != epoch {
+        if self.node.epoch() != self.epoch {
             return Err(SyncError::JoinRejected);
         }
-        Ok((self.head, self.admission_id, epoch))
+        Ok((self.head, self.admission_id, self.epoch))
     }
 
     /// Hold the real installed node's final fence while the host issues its
@@ -160,7 +178,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
         let expected = verifier
             .admission(self.admission_id)
             .map_err(|_| SyncError::JoinRejected)?;
-        if !self.admission.same_original(&expected) {
+        if !self.admission.same_original(&expected)
+            || verifier.replay_data().header().id() != self.head
+        {
             return Err(SyncError::JoinRejected);
         }
         self.selected_join_data()?;
@@ -243,7 +263,52 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
             },
             admission,
         )?;
-        Ok(PreparedV2JoinedAdd { core, sdk })
+        Ok(PreparedV2JoinedAdd {
+            core: Some(core),
+            sdk: Some(sdk),
+        })
+    }
+
+    /// Install the exact paid successor after the original host independently
+    /// covers the Core selection and the SDK epoch/authenticator on disk. A
+    /// refusal leaves both candidates and the original selected node intact.
+    pub fn install_host_selected_add(
+        &mut self,
+        prefix: &mut PreparedV2JoinedPrefix,
+        pending: &mut Option<PreparedV2JoinedAdd>,
+        selection: &V2HostSelectionExpectation,
+        selected_sdk: (u64, [u8; 32]),
+    ) -> Result<RetiredV2JoinedAdd, SyncError> {
+        let verifier = self.member_prefix(prefix)?;
+        let candidate = pending.as_mut().ok_or(SyncError::JoinRejected)?;
+        let core = candidate.core.as_ref().ok_or(SyncError::JoinRejected)?;
+        verifier
+            .check_host_selection_data(selection, core)
+            .map_err(|_| SyncError::JoinRejected)?;
+        let header = core.header_data().id();
+        if candidate.selected_epoch_data() != selected_sdk {
+            return Err(SyncError::JoinRejected);
+        }
+        let before = (self.epoch, self.node.group.epoch_authenticator_id());
+        let sdk = PreparedTextCurrentReceivedAdd::prepare_install(
+            &mut candidate.sdk,
+            &mut self.node.device,
+            &mut self.node.group,
+        )?;
+        let fence = self
+            .fence
+            .prepare_selected_add(*self.admission_id.as_bytes(), before, selected_sdk)
+            .map_err(|_| SyncError::JoinRejected)?;
+        let core = prefix.select_member_successor(selection, &mut candidate.core)?;
+        let sdk = sdk.install();
+        self.head = header;
+        self.epoch = selected_sdk.0;
+        fence.finish();
+        *pending = None;
+        Ok(RetiredV2JoinedAdd {
+            _core: core,
+            _sdk: sdk,
+        })
     }
 
     pub fn selected_member_topic_data(
@@ -482,7 +547,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
     }
 
     pub fn was_recovered_data(&self) -> bool {
-        matches!(self.origin, JoinedOrigin::Recovered(_))
+        self.recovered
     }
 
     pub fn local_peer_data(&self) -> catcoms_rt::PeerId {
@@ -510,9 +575,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
             .map_err(|_| SyncError::JoinRejected)?;
         Ok(Self {
             node: Box::new(node),
-            origin: JoinedOrigin::Recovered(epoch),
+            recovered: true,
             fence,
             head,
+            epoch,
             admission,
             admission_id,
             native_origin: None,
@@ -578,9 +644,10 @@ impl PreparedV2JoinRequest {
             .map_err(|_| SyncError::JoinRejected)?;
         Ok(ClosedV2JoinedNode {
             node: Box::new(node),
-            origin: JoinedOrigin::Warm(facts),
+            recovered: false,
             fence,
             head: OwnerHeaderId::from_bytes(welcome.spec_data().add_header),
+            epoch: facts.join_epoch_data(),
             admission,
             admission_id,
             native_origin: self.native_origin.clone(),
