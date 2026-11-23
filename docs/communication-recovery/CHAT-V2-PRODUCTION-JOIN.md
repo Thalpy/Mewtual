@@ -522,8 +522,10 @@ Core guard. Joined dependency repair is bounded to the original authenticated
 carrier. The installed founder can recover its own saved direct dependencies
 and show its saved received messages after the live receiver retires. Cold
 founder startup restores ordinary member history and its original listener
-from a covered Add. New cold-founder invitations, later governing writes and
-automatic peer discovery still need implementation.
+from a covered Add. If no governing Add has entered, startup authenticates the
+original promoted genesis and exposes its singleton roster and saved local
+history. New cold-founder invitations, authoring before the first governing
+Add, later governing writes and automatic peer discovery still need implementation.
 
 The warm joined node can draw and sign an ordinary action through the original
 native Joiner Source. Its signing cut requires the ordinary member purpose and

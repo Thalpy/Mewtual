@@ -1242,7 +1242,8 @@ fn invite_command(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_text_membership_dispatch_uses_the_original_founder_row() {
     let root = tempfile::tempdir().unwrap();
-    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    let path = root.path().join("vault");
+    let (app, main, queue) = app(path.clone(), None, true);
     unlock_current(&app, &main, &queue).await;
     let found = found_request(&main, 5, "Roster source");
     run(&queue).await;
@@ -1273,6 +1274,9 @@ async fn native_text_membership_dispatch_uses_the_original_founder_row() {
     assert_eq!(original["you"], true);
     assert_eq!(roster["canRemove"], false);
     assert_eq!(original["admission"].as_str().unwrap().len(), 64);
+    let saved = native_send_request(&main, &found, 45, "Saved before the first Add");
+    run(&queue).await;
+    let saved = found_value(saved.await.unwrap());
 
     let stale = invite_command(&main, "get_native_chat_members", request);
     let worker = run(&queue);
@@ -1283,6 +1287,27 @@ async fn native_text_membership_dispatch_uses_the_original_founder_row() {
     sources::close_server_rows(&state, &SystemClock)
         .await
         .unwrap();
+    drop(_close);
+    drop(state);
+    drop((other, main, app));
+
+    let (reopened, window, cold_queue) = self::app(path, None, true);
+    unlock_current(&reopened, &window, &cold_queue).await;
+    let restored = invite_command(
+        &window,
+        "get_native_chat_members",
+        serde_json::json!({ "server": found["server"] }),
+    );
+    run(&cold_queue).await;
+    assert_eq!(found_value(restored.await.unwrap()), roster);
+    let page = native_history_request(&window, &found, "0", None, 1);
+    run(&cold_queue).await;
+    let page = found_value(page.await.unwrap());
+    assert_eq!(page["items"][0]["action"], saved["message_id"]);
+    assert_eq!(
+        page["items"][0]["body"]["text"],
+        "Saved before the first Add"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

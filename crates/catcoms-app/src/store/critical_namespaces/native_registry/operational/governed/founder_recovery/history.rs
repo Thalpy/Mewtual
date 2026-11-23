@@ -23,13 +23,27 @@ impl NativeTextColdFounderSource {
         caller: &RequestCancellation,
     ) -> Result<crate::store::NativeTextRoster, AppError> {
         use crate::store::NativeTextRoster;
-        self.restore_first_add(caller)?;
-        let own = self
-            .source
-            .data()
-            .genesis_public_data()
-            .admission_data()
-            .id();
+        let (_, epoch) = self.require_recovered_checkpoint(caller)?;
+        let genesis = self.source.data().genesis_public_data();
+        let own = genesis.admission_data().id();
+        if epoch == 0 {
+            let signer = genesis.admission_data().spec().subject;
+            let roster =
+                self.work
+                    .with_recovered_founder_store(&self.selection, &self.source, |store| {
+                        NativeTextRoster::prepare(
+                            store,
+                            std::iter::once(crate::store::NativeTextRosterMember {
+                                admission: own,
+                                signer,
+                                founder: true,
+                                you: true,
+                            }),
+                        )
+                    })?;
+            self.prove_promoted_genesis(caller)?;
+            return Ok(roster);
+        }
         let governed = self.governed.as_deref_mut().ok_or_else(refused)?;
         let roster = self.work.with_recovered_founder_layout(
             &self.selection,
@@ -56,7 +70,8 @@ impl NativeTextColdFounderSource {
         rng: &mut impl CryptoRngCore,
     ) -> Result<MemberHistoryPage, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
-        self.restore_first_add(caller).map_err(|_| Refusal::Stale)?;
+        self.require_recovered_checkpoint(caller)
+            .map_err(|_| Refusal::Stale)?;
         let result = self
             .work
             .with_recovered_founder_layout(&self.selection, &self.source, |layout, _| {
@@ -68,7 +83,8 @@ impl NativeTextColdFounderSource {
                 )
             })
             .map_err(|_| Refusal::Unavailable)?;
-        self.restore_first_add(caller).map_err(|_| Refusal::Stale)?;
+        self.require_recovered_checkpoint(caller)
+            .map_err(|_| Refusal::Stale)?;
         result
     }
 
@@ -88,7 +104,8 @@ impl NativeTextColdFounderSource {
             Ok(())
         };
         require_caller()?;
-        self.restore_first_add(caller).map_err(|_| Refusal::Stale)?;
+        self.require_recovered_checkpoint(caller)
+            .map_err(|_| Refusal::Stale)?;
         let context = self.outbox_context().map_err(|_| Refusal::Stale)?;
         let original = &self.source;
         let founder = original
@@ -116,7 +133,8 @@ impl NativeTextColdFounderSource {
             })
             .map_err(|_| Refusal::Failed)?;
         require_caller()?;
-        self.restore_first_add(caller).map_err(|_| Refusal::Stale)?;
+        self.require_recovered_checkpoint(caller)
+            .map_err(|_| Refusal::Stale)?;
         let receipt = receipt.map_err(|error| Refusal::from(&error))?;
         if receipt
             .as_ref()

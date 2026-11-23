@@ -200,7 +200,7 @@ impl NativeTextColdFounderSource {
         budget: crate::store::NativeUiInvocationBudget,
         caller: &RequestCancellation,
     ) -> Result<crate::store::NativeTextVault, AppError> {
-        self.restore_first_add(caller)?;
+        self.require_recovered_checkpoint(caller)?;
         crate::store::NativeTextVault::from_recovered_joined_index(
             self.index.take().ok_or_else(refused)?,
             atoms,
@@ -232,7 +232,7 @@ impl NativeTextColdFounderSource {
             .prepare_native_authentication(ui_budget.prepare()?)
             .verify(secret)?;
         self.bind_original_tcp(caller)?;
-        self.restore_first_add(caller)?;
+        self.require_recovered_checkpoint(caller)?;
         let mut sources = vault
             .capture_native_sources(policy.prepare()?)
             .finish()
@@ -240,6 +240,23 @@ impl NativeTextColdFounderSource {
         let row =
             sources.install_recovered_founder(&vault, &authentication, self, inputs, caller)?;
         Ok((vault, sources, row, authentication))
+    }
+
+    /// Genesis and governed heads are independently authenticated closures.
+    /// A mounted genesis exposes saved reads under its original files.
+    fn require_recovered_checkpoint(
+        &mut self,
+        caller: &RequestCancellation,
+    ) -> Result<(OwnerHeaderId, u64), AppError> {
+        if self.genesis.is_some() {
+            return self.prove_promoted_genesis(caller).map(|head| (head, 0));
+        }
+        if self.governed.is_none() {
+            if let Ok(head) = self.prove_promoted_genesis(caller) {
+                return Ok((head, 0));
+            }
+        }
+        self.restore_first_add(caller)
     }
 
     pub(in crate::store::critical_namespaces::native_registry) fn runtime_labels(

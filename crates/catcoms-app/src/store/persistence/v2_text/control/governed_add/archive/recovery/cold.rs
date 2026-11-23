@@ -192,6 +192,7 @@ impl HeldColdFounderGenesis {
         self.origin.require_current(store, source)?;
         let (target, target_file, target_id) = source.original_target_data();
         require_add_not_entered(target)?;
+        require_successor_stages_absent(target, TextHeadIdData::of_data(&self.head.frame))?;
         require_directory_name(&self.pages_path, &self.pages, self.pages_id)?;
         require_exact_held(&fixed_child(target, "head.bin")?, &mut self.head)?;
         require_exact_held(&self.archive.0, &mut self.archive.1)?;
@@ -225,6 +226,7 @@ fn require_add_not_entered(target: &Path) -> Result<(), AppError> {
         "text.add.welcome-attempt.v2",
         "text.add.raw-welcome.v2",
         "text.add.response.v2",
+        selected_head::NAME,
     ] {
         if !matches!(fs::symlink_metadata(fixed_child(target, name)?),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound)
