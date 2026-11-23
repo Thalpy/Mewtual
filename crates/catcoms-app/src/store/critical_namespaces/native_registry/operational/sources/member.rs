@@ -251,15 +251,17 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
                 command: self.command.take().unwrap(),
             },
         };
-        if job
-            .inner
-            .loan
-            .body
-            .as_ref()
-            .unwrap()
-            .driver
-            .as_ref()
-            .is_none_or(|driver| !driver.is_ready_data())
+        let body = job.inner.loan.body.as_ref().unwrap();
+        let ready = match (&body.driver, &body.recovered_founder) {
+            (Some(driver), None) => !self.row.original.recovered_founder && driver.is_ready_data(),
+            (None, Some(_)) => self.row.original.recovered_founder,
+            _ => false,
+        };
+        if !ready
+            || !body
+                .selection
+                .as_ref()
+                .is_some_and(|row| self.row.same_original(row))
         {
             return Err(Error::Unavailable);
         }
