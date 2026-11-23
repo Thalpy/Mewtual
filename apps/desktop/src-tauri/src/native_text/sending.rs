@@ -64,7 +64,7 @@ struct Invocation {
     instance: u64,
     scope: RequestCancellation,
     persist: Arc<Mutex<()>>,
-    member_work: Option<Arc<server_table::JoinedMemberWork>>,
+    member_work: Arc<server_table::NativeMemberWork>,
     intent: Intent,
     payment: Arc<Payment>, // LAST through every blocking worker/result
 }
@@ -259,7 +259,7 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
                         resolver.resolve(InvokeResponseBody::Json(reply.body));
                         original_row
                             .filter(|_| reply.saved_local)
-                            .and_then(|row| row.data().member_work.clone())
+                            .map(|row| row.data().member_work.clone())
                     }
                     Err(error) => {
                         resolver.reject(error);
@@ -397,7 +397,7 @@ impl PrepareWork<Preparation> {
 async fn prepare(
     state: &AppState,
     invocation: &Invocation,
-    local: Option<Arc<OwnedMutexGuard<()>>>,
+    local: Arc<OwnedMutexGuard<()>>,
 ) -> Result<V2MemberSaveOutcome, String> {
     let preparation = capture(state, invocation).await?;
     let work = PrepareWork {
@@ -569,14 +569,13 @@ struct Reply {
 }
 
 async fn execute(state: &AppState, invocation: &Invocation) -> Result<Reply, String> {
-    let local = match &invocation.member_work {
-        Some(work) => Some(Arc::new(
-            work.foreground(invocation.scope.clone())
-                .await
-                .ok_or(STALE)?,
-        )),
-        None => None,
-    };
+    let local = Arc::new(
+        invocation
+            .member_work
+            .foreground(invocation.scope.clone())
+            .await
+            .ok_or(STALE)?,
+    );
     let mut outcome = prepare(state, invocation, local.clone()).await?;
     if outcome == V2MemberSaveOutcome::Ready {
         let preparation = capture(state, invocation).await?;

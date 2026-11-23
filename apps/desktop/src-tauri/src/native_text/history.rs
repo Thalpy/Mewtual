@@ -66,7 +66,7 @@ struct Invocation {
     selection: server_table::NativeSelection,
     instance: u64,
     scope: RequestCancellation,
-    member_work: Option<Arc<server_table::JoinedMemberWork>>,
+    member_work: Arc<server_table::NativeMemberWork>,
     read: Read,
     payment: Arc<Payment>, // LAST, including unpolled/cancelled reply futures
 }
@@ -387,7 +387,7 @@ struct Work {
     scope: RequestCancellation,
     read: OwnRead,
     channel: u128,
-    _local: Option<OwnedMutexGuard<()>>,
+    _local: OwnedMutexGuard<()>,
     #[cfg(test)]
     watch: Option<Arc<DropWatch>>,
     payment: Arc<Payment>, // LAST during unrun/unwind/returned response
@@ -461,14 +461,7 @@ fn received_body(scope: &'static str, projection: Option<&GuardedProjection>) ->
 }
 
 async fn execute_received(call: &Invocation, action: ActionId) -> Result<ReceivedOutput, String> {
-    let Some(local) = call.member_work.clone() else {
-        return Ok(ReceivedOutput {
-            scope: "received-live",
-            projection: None,
-            _archive_permit: None,
-            _payment: call.payment.clone(),
-        });
-    };
+    let local = call.member_work.clone();
     let guard = local.foreground(call.scope.clone()).await.ok_or(STALE)?;
     let payment = call.payment.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -499,7 +492,8 @@ async fn execute_archive(
     let channel = call.read.channel;
     let scope = call.scope.clone();
     let payment = call.payment.clone();
-    let original = if let Some(local) = &call.member_work {
+    let original = if matches!(&call.selection, server_table::NativeSelection::Joined(_)) {
+        let local = &call.member_work;
         let guard = local.foreground(scope.clone()).await.ok_or(STALE)?;
         let Preparation::Joined(original, selection) = capture(state, call).await? else {
             return Err(STALE.to_owned());
@@ -592,10 +586,11 @@ impl Work {
     }
 }
 async fn execute(state: &AppState, call: &Invocation, read: OwnRead) -> Result<Output, String> {
-    let local = match &call.member_work {
-        Some(work) => Some(work.foreground(call.scope.clone()).await.ok_or(STALE)?),
-        None => None,
-    };
+    let local = call
+        .member_work
+        .foreground(call.scope.clone())
+        .await
+        .ok_or(STALE)?;
     let work = Work {
         preparation: capture(state, call).await?,
         scope: call.scope.clone(),

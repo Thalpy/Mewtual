@@ -32,9 +32,7 @@ pub(super) async fn run<R: tauri::Runtime>(
     initial: Option<NativeTextJoinedMemberReceiver>,
     _payment: NativeUiInvocationMetadata,
 ) {
-    let Some(local) = source.member_work() else {
-        return;
-    };
+    let local = source.member_work();
     let mut scope = source.negative();
     let mut receiver = initial;
     loop {
@@ -123,9 +121,7 @@ async fn receive(
 }
 
 async fn prepare_ledger(state: &AppState, source: &Arc<Source>) -> bool {
-    let Some(local) = source.member_work() else {
-        return false;
-    };
+    let local = source.member_work();
     if local.received.try_lock().is_ok_and(|slot| {
         slot.as_ref()
             .is_some_and(|ledger| ledger.is_current_cached())
@@ -213,7 +209,7 @@ fn archive_original(
     selected: &NativeTextJoinedSelectionPreparation<OsCryptoRng>,
     ledger: &NativeTextJoinedMemberLedger,
     original: &NativeTextJoinedReceivedOriginal,
-    local: &server_table::JoinedMemberWork,
+    local: &server_table::NativeMemberWork,
     scope: &RequestCancellation,
 ) {
     let result = selected.archive_received_member(ledger, original, scope, &mut OsCryptoRng);
@@ -234,13 +230,13 @@ async fn with_row<T: Send + 'static>(
     perform: impl FnOnce(
             NativeTextJoinedSelectionPreparation<OsCryptoRng>,
             NativeTextJoinedRowSelection,
-            &server_table::JoinedMemberWork,
+            &server_table::NativeMemberWork,
             RequestCancellation,
         ) -> Option<T>
         + Send
         + 'static,
 ) -> Option<T> {
-    let local = source.member_work()?.clone();
+    let local = source.member_work().clone();
     let scope = source.negative();
     let guard = local.foreground(scope.clone()).await?;
     let (original, selected) = source.capture_joined(state).await?;

@@ -192,8 +192,10 @@ different verifier, a changed selection, or a retired founder source refuses the
 transport operation. The mounted founder source now reads its exact outbox debt,
 rechecks the original held governing Head, and releases the runtime loan before
 the mesh wait. Only a submission acknowledged by the original driver can
-checkpoint that debt on a fresh capture of the same row. The desktop worker and
-founder receiver still need to call this path.
+checkpoint that debt on a fresh capture of the same row. The desktop worker
+wakes after the saved receipt and the first governed Join. It shares the row's
+local work permit with saves, history, and the founder's Join handler and releases
+it before awaiting the driver. The founder's desktop receiver remains open work.
 Original audit chunks and request receipts remain retained after scheduling debt clears.
 Removal changes active view, never deletes the audit. Unproven late removed actions stay
 Held pending the separately authorized moderation path; ordinary concurrent edits resolve

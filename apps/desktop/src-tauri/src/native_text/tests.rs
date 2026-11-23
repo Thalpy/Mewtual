@@ -1367,6 +1367,34 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     refused(probe.await.unwrap());
     assert!(joiner_queue.lock().unwrap().is_empty());
 
+    let founder_text = "Founder message on the installed native mesh";
+    let sent = native_send_request(&founder_window, &found, 21, founder_text);
+    run(&founder_queue).await;
+    let sent = found_value(sent.await.unwrap());
+    assert_eq!(sent["disposition"], "saved-local");
+    let founder_action = sent["message_id"].as_str().unwrap();
+    let mut raw = [0; 32];
+    hex::decode_to_slice(founder_action, &mut raw).unwrap();
+    let action = catcoms_replication::chat::ActionId::from_bytes(raw);
+    {
+        let work = joined_work(&state, id).await;
+        timeout(Duration::from_secs(15), async {
+            loop {
+                let guarded = work.received.try_lock().ok().and_then(|slot| {
+                    slot.as_ref()?.read_message_projection(action).ok().flatten()
+                });
+                if let Some(guarded) = guarded {
+                    assert!(guarded.with_publication(|projection| matches!(
+                        projection, catcoms_replication::chat::GuardedProjection::Visible { text, .. }
+                        if text == founder_text
+                    )).unwrap());
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.expect("the automatic founder worker sent exact saved text to the joined receiver");
+    }
+
     // The saved native row can be reported after the actual founder retires.
     let locked = snapshot_request(&founder_window, None);
     run(&founder_queue).await;
@@ -1482,7 +1510,28 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
         ),
     );
     run(&queue).await;
-    assert_eq!(found_value(probe.await.unwrap()), empty_archive);
+    assert_eq!(
+        found_value(probe.await.unwrap()),
+        serde_json::json!({
+            "backend":"text-v2","scope":"received-archive-index","available":true,"ids":[founder_action],"more":false,
+        })
+    );
+    let probe = invite_command(
+        &window,
+        "get_message_page",
+        archive_request(
+            &restored[0],
+            serde_json::json!({"archivedAction":founder_action}),
+        ),
+    );
+    run(&queue).await;
+    assert_eq!(
+        found_value(probe.await.unwrap()),
+        serde_json::json!({
+            "backend":"text-v2","scope":"received-archive",
+            "item":{"action":founder_action,"text":founder_text,"certainty":"provisional"},
+        })
+    );
     assert_eq!(
         std::fs::read(joiner_path.join("chat-critical-namespaces.joined-pin.index")).unwrap(),
         saved_pins
@@ -1498,7 +1547,7 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
 async fn assert_joined_connected_workers(
     state: &AppState,
     id: u64,
-) -> std::sync::Weak<server_table::JoinedMemberWork> {
+) -> std::sync::Weak<server_table::NativeMemberWork> {
     let generation = state.ui_session_generation.load(Ordering::SeqCst);
     let work = joined_work(state, id).await;
     let _local = work
@@ -1571,7 +1620,7 @@ async fn capture_joined_worker(
     (preparation.unwrap(), selection, channel, scope)
 }
 
-async fn joined_work(state: &AppState, id: u64) -> Arc<server_table::JoinedMemberWork> {
+async fn joined_work(state: &AppState, id: u64) -> Arc<server_table::NativeMemberWork> {
     state
         .servers
         .lock()
@@ -1581,11 +1630,10 @@ async fn joined_work(state: &AppState, id: u64) -> Arc<server_table::JoinedMembe
         .data()
         .member_work
         .clone()
-        .unwrap()
 }
 
 async fn assert_joined_publication_stopped(
-    original: std::sync::Weak<server_table::JoinedMemberWork>,
+    original: std::sync::Weak<server_table::NativeMemberWork>,
 ) {
     tokio::time::timeout(Duration::from_secs(3), async {
         while original.strong_count() != 0 {

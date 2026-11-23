@@ -86,30 +86,23 @@ pub(super) struct NativeRowData {
     pub(super) display_name: String,
     pub(super) is_dm: bool,
     pub(super) channel: u128,
-    pub(super) member_work: Option<Arc<JoinedMemberWork>>,
+    pub(super) member_work: Arc<NativeMemberWork>,
     retiring: bool,
     // LAST: actual dedicated native row payment follows all retained DATA.
     _credit: NativeUiInvocationMetadata,
 }
 
-/// Serialize the original joined row's local reads and writes. A waiter holds
+/// Serialize the original native row's local reads and writes. A waiter holds
 /// no UI guard or Core loan, and network effects never retain this permit.
-pub(super) struct JoinedMemberWork {
+pub(super) struct NativeMemberWork {
     pub(super) publication_wake: tokio::sync::Notify,
     pub(super) received: StdMutex<Option<Box<NativeTextJoinedMemberLedger>>>,
     archive_changes: StdMutex<ArchiveChanges>,
     local: Arc<tokio::sync::Mutex<()>>,
 }
 
-const MAX_UNSETTLED_ARCHIVE_CHANGES: usize = 16;
+const MAX_UNSETTLED_ARCHIVE_CHANGES: usize = 8;
 const MAX_NATIVE_NAME_BYTES: usize = 256;
-const _: () = assert!(
-    std::mem::size_of::<NativeRowData>()
-        + std::mem::size_of::<JoinedMemberWork>()
-        + 2 * MAX_NATIVE_NAME_BYTES
-        + 512
-        <= NativeUiInvocationBudget::metadata_bytes()
-);
 
 #[derive(Default)]
 struct ArchiveChanges {
@@ -117,7 +110,7 @@ struct ArchiveChanges {
     overflow: bool,
 }
 
-impl JoinedMemberWork {
+impl NativeMemberWork {
     fn new() -> Self {
         Self {
             publication_wake: tokio::sync::Notify::new(),
@@ -198,8 +191,7 @@ impl PreparedNativeRow {
             return Err("Invalid native server details.".into());
         }
         let (name, display_name) = bounded_native_names(spec.name, spec.display_name)?;
-        let member_work = matches!(&spec.selection, NativeSelection::Joined(_))
-            .then(|| Arc::new(JoinedMemberWork::new()));
+        let member_work = Arc::new(NativeMemberWork::new());
         let data = NativeRowData {
             selection: spec.selection,
             files: keep_session::EntryOwner::new(),
@@ -493,12 +485,12 @@ impl ServerTable {
 const _: () = assert!(
     2 * std::mem::size_of::<NativeRowData>()
         + 2 * std::mem::size_of::<Row>()
-        + 4 * 256
+        + 4 * MAX_NATIVE_NAME_BYTES
         + 1024
-        + 2 * (std::mem::size_of::<JoinedMemberWork>()
+        + 2 * (std::mem::size_of::<NativeMemberWork>()
             + std::mem::size_of::<tokio::sync::Mutex<()>>()
             + 64)
-        <= 4096
+        <= NativeUiInvocationBudget::metadata_bytes()
 );
 
 // Fixture construction is intentionally unavailable in production. Existing
