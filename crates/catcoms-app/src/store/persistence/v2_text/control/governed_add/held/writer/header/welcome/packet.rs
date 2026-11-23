@@ -4,11 +4,12 @@ use super::*;
 use crate::store::critical_namespaces::archive_current_codec::GenesisPublicData;
 use crate::store::native_text_invite::PreparedNativeTextJoinResponse;
 use crate::store::NativeTextSavedJoinResponse;
-use catcoms_replication::chat::owner_header::SignedOwnerHeader;
+use catcoms_replication::chat::owner_header::{OwnerHeaderId, SignedOwnerHeader};
 use catcoms_replication::chat::owner_state::transition::ReplayBody;
 use catcoms_sync::{
     V2AdmissionStepData, V2FirstAddProofData, V2GoverningJoinDeliveryData, V2GoverningJoinStepData,
-    V2JoinResponseData, MAX_V2_FIRST_ADD_PROOF_BYTES, MAX_V2_GOVERNING_JOIN_PREFIX_BYTES,
+    V2JoinResponseData, V2MemberAddFrameData, V2MemberAddRequestData, MAX_V2_FIRST_ADD_PROOF_BYTES,
+    MAX_V2_GOVERNING_JOIN_PREFIX_BYTES, MAX_V2_MEMBER_ADD_FRAME_BYTES,
 };
 
 mod archive_file;
@@ -16,8 +17,14 @@ mod archive_file;
 pub(super) struct PreparedResponse {
     record: PreparedSmallControl,
     packet: PreparedNativeTextJoinResponse,
+    member_add: Option<PreparedMemberAddFrame>,
     archive: Option<archive_file::PreparedArchive>,
     _fee: CatalogReadReservation,
+}
+
+struct PreparedMemberAddFrame {
+    parent: (OwnerHeaderId, u64),
+    frame: Vec<u8>,
 }
 
 impl PreparedGovernedAddFence {
@@ -92,6 +99,7 @@ impl PreparedGovernedAddFence {
             };
             let bytes = 6 * (response::MAX_BYTES + 1)
                 + 4 * proof_bound
+                + 4 * MAX_V2_MEMBER_ADD_FRAME_BYTES * usize::from(later.is_some())
                 + 4 * std::mem::size_of::<PreparedResponse>()
                 + 4096;
             let pool = &store
@@ -149,9 +157,33 @@ impl PreparedGovernedAddFence {
             let frame = response::seal_data(&key, raw_frame, &packet, rng)?;
             let packet =
                 PreparedNativeTextJoinResponse::prepare(pool, packet, proof, later.is_some())?;
+            let member_add = if later.is_some() {
+                let catcoms_replication::chat::owner_profile::AdmissionOrigin::Add {
+                    before_epoch,
+                    ..
+                } = outcome.admission_data().spec().origin
+                else {
+                    return Err(refused());
+                };
+                let frame = V2MemberAddFrameData::encode(
+                    V2AdmissionStepData {
+                        admission: outcome.admission_data(),
+                        header: signed_header,
+                        image: outcome.unsigned_data().image_data(),
+                    },
+                    result.commit_data(),
+                )?;
+                Some(PreparedMemberAddFrame {
+                    parent: (signed_header.spec().parent, before_epoch),
+                    frame,
+                })
+            } else {
+                None
+            };
             stage.response = Some(PreparedResponse {
                 record: PreparedSmallControl::new(frame),
                 packet,
+                member_add,
                 archive: None,
                 _fee: fee,
             });
@@ -204,5 +236,41 @@ impl PreparedGovernedAddFence {
             .and_then(|header| header.welcome_signing.as_ref()?.response.as_ref())
             .ok_or_else(refused)?;
         Ok(response.packet.saved_data())
+    }
+
+    pub(in crate::store) fn encode_selected_member_add(
+        &mut self,
+        store: &ServerStore,
+        guard: &V2TextCurrentGroupGuard<'_, '_>,
+        selected: &SelectedV2TextHead,
+        installed: TextHeadIdData,
+        request: &V2MemberAddRequestData,
+    ) -> Result<Vec<u8>, AppError> {
+        self.require_selected_head2(guard, selected, installed)?;
+        let latest = self
+            .header
+            .as_ref()
+            .and_then(|header| header.welcome_signing.as_ref()?.response.as_ref())
+            .and_then(|response| response.member_add.as_ref())
+            .ok_or_else(refused)?;
+        let (_, epoch) = request.parent_data();
+        let frame = if epoch == latest.parent.1 {
+            if request.parent_data() != latest.parent
+                || !self
+                    .fetch_verifier
+                    .is_some_and(|expected| request.matches_verifier_data(expected))
+            {
+                return Err(refused());
+            }
+            latest.frame.clone()
+        } else {
+            self.held
+                .later
+                .as_ref()
+                .ok_or_else(refused)?
+                .encode_retained_member_add(store, guard.source().source(), request)?
+        };
+        self.require_selected_head2(guard, selected, installed)?;
+        Ok(frame)
     }
 }

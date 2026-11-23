@@ -69,6 +69,17 @@ pub(super) async fn start_current<R: tauri::Runtime>(
         })
         .await;
         if let Ok(Ok(requests)) = opened {
+            let governing = if let Some(prepared) = source.capture(state).await {
+                let scope = source.negative();
+                tauri::async_runtime::spawn_blocking(move || {
+                    prepared.open_connected_governing_requests(scope)
+                })
+                .await
+                .ok()
+                .and_then(Result::ok)
+            } else {
+                None
+            };
             let source = Arc::new(source);
             let app = app.clone();
             drop(tauri::async_runtime::spawn(async move {
@@ -82,6 +93,11 @@ pub(super) async fn start_current<R: tauri::Runtime>(
                             drain_outbox(&app, &source),
                             super::receiving::run_founder(&app, &source),
                             super::receiving::serve_founder_dependencies(&app, &source),
+                            async {
+                                if let Some(requests) = governing {
+                                    serve_governing(&app, &source, requests).await;
+                                }
+                            },
                         );
                     } => {}
                 }
@@ -489,5 +505,35 @@ async fn serve<R: tauri::Runtime>(
         if matches!(served, Ok(Ok(()))) {
             source.member_work.publication_wake.notify_one();
         }
+    }
+}
+
+async fn serve_governing<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    source: &Source,
+    mut requests: catcoms_net::NativeChatJoinRequests,
+) {
+    while let Some(TransportEvent::Request {
+        proto,
+        data,
+        responder,
+        ..
+    }) = requests.next().await
+    {
+        if !responder.is_current() {
+            continue;
+        }
+        let Some(local) = source.member_work.try_background() else {
+            continue;
+        };
+        let Some(prepared) = source.capture(&app.state::<AppState>()).await else {
+            continue;
+        };
+        let scope = source.negative();
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            let _local = local;
+            prepared.serve_connected_governing_request(proto, &data, responder, scope)
+        })
+        .await;
     }
 }

@@ -1236,6 +1236,19 @@ impl SourceWork {
         )
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn encode_selected_member_add<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
+        &self,
+        driver: &mut crate::store::PreparedFreshV2TextFounder<T, R>,
+        request: &catcoms_sync::V2MemberAddRequestData,
+        keys: &crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounderKeys,
+        caller: &catcoms_rt::RequestCancellation,
+    ) -> Result<Vec<u8>, AppError> {
+        driver.encode_selected_member_add(self.physical.current()?, request, keys, caller)
+    }
+
     #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store::critical_namespaces::native_registry) fn current_for_governed_add_test(
         &self,

@@ -2743,6 +2743,25 @@ async fn native_governed_add_fixture(case: JoinCase) {
             cold.recovered_join_outcome_data().unwrap(),
             Some((add_header, 1))
         );
+        let (recovered_mesh, _) = catcoms_net::MeshService::new_tcp(None, &[]).unwrap();
+        let mut recovered_member = cold
+            .bind_recovered_join_runtime(
+                recovered_mesh,
+                rand_chacha::ChaCha20Rng::seed_from_u64(0xe723),
+                Box::new(catcoms_rt::SystemClock),
+            )
+            .ok()
+            .unwrap();
+        recovered_member.complete_recovery(&negative).unwrap();
+        let governing_request = recovered_member
+            .recovered_member_add_request_for_test()
+            .unwrap();
+        assert_eq!(governing_request.parent_data(), (add_header, 1));
+        let mut wire = vec![catcoms_rt::CHAT_V2_GOVERNING_KIND];
+        wire.extend_from_slice(&governing_request.encode().unwrap());
+        let mut forged = wire.clone();
+        *forged.last_mut().unwrap() ^= 1;
+        let governing_wire = bytes::Bytes::from(wire);
         let message = body("founder message after governed Add");
         let request = || V2MemberSignRequest {
             token: [0xe8; 32],
@@ -2845,6 +2864,61 @@ async fn native_governed_add_fixture(case: JoinCase) {
             exact.governing_proof_bytes_data().as_ptr(),
             next_join.governing_proof_bytes_data().as_ptr()
         );
+        use crate::store::critical_namespaces::native_registry::operational::governed::JOIN_PROTOCOL;
+        use catcoms_rt::MeshTransport as _;
+        let mut governing = capture()
+            .open_connected_governing_requests(negative.clone())
+            .unwrap();
+        assert!(matches!(
+            capture().open_connected_governing_requests(negative.clone()),
+            Err(V2MemberSaveRefusal::Busy)
+        ));
+        let peer = invite.connected_peer_data();
+        let warm_frame = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            let mut selected = None;
+            for (wire, valid) in [
+                (bytes::Bytes::from(forged), false),
+                (governing_wire.clone(), true),
+            ] {
+                let send = client.request_connected(peer, JOIN_PROTOCOL, wire);
+                let serve = async {
+                    let Some(TransportEvent::Request {
+                        proto,
+                        data,
+                        responder,
+                        ..
+                    }) = governing.next().await
+                    else {
+                        panic!("the native founder's governing request");
+                    };
+                    capture().serve_connected_governing_request(
+                        proto,
+                        &data,
+                        responder,
+                        negative.clone(),
+                    )
+                };
+                let (reply, served) = tokio::join!(send, serve);
+                if valid {
+                    served.unwrap();
+                    selected = Some(reply.unwrap());
+                } else {
+                    assert!(served.is_err());
+                    assert!(matches!(reply, Err(catcoms_rt::TransportError::NoResponse)));
+                }
+            }
+            selected.unwrap()
+        })
+        .await
+        .expect("bounded governing exchange with the warm founder");
+        assert_eq!(
+            catcoms_sync::V2MemberAddFrameData::decode(&warm_frame)
+                .unwrap()
+                .header_data()
+                .id(),
+            later_head
+        );
+        drop(governing);
         drop(client);
         let mut close = owner.prepare_retirement().unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(8), async {
@@ -2881,6 +2955,27 @@ async fn native_governed_add_fixture(case: JoinCase) {
         assert!(cold
             .encode_recovered_join_delivery(replacement.packet_bytes_data(), &negative)
             .is_err());
+        cold.bind_original_tcp(&negative).unwrap();
+        let mut governing = cold
+            .open_recovered_governing_requests(negative.clone())
+            .unwrap();
+        let (probe, _) = catcoms_net::MeshService::new_tcp(None, &[]).unwrap();
+        let address = invite.direct_address_data(std::net::Ipv4Addr::LOCALHOST.into());
+        assert_eq!(
+            probe.dial_outcome(address.parse().unwrap()).await.unwrap(),
+            catcoms_rt::DialSubmission::Submitted
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            probe.wait_for_peer_connected(peer).await.unwrap();
+            let send = probe.request_connected(peer, JOIN_PROTOCOL, governing_wire);
+            let serve =
+                async { cold.serve_recovered_governing_request(governing.next().await.unwrap()) };
+            let (reply, served) = tokio::join!(send, serve);
+            served.unwrap();
+            assert_eq!(reply.unwrap(), warm_frame);
+        })
+        .await
+        .expect("bounded governing exchange with the original reopened founder");
         return;
     }
     let preparation = owner.capture_member(

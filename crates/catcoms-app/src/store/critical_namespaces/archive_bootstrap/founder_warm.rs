@@ -240,6 +240,22 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
             .handle_received_join_request(layout, incoming, routing_plan, keys, cuts, rng, negative)
     }
 
+    pub(in crate::store) fn encode_selected_member_add(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        request: &catcoms_sync::V2MemberAddRequestData,
+        keys: &super::founder::NativeFounderKeys,
+        caller: &catcoms_rt::RequestCancellation,
+    ) -> Result<Vec<u8>, AppError> {
+        if !self.is_ready_data() {
+            return Err(refused());
+        }
+        self.host
+            .as_mut()
+            .ok_or_else(refused)?
+            .encode_selected_member_add(layout, request, keys, caller)
+    }
+
     #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store) fn host_for_governed_add_test(
         &mut self,

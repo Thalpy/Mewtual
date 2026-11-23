@@ -43,6 +43,7 @@ pub(super) struct Reservation {
     active: Option<crate::store::NativeCreationStatusData>,
     actual_peer: Option<String>,
     pub(super) join_ingress: Option<catcoms_net::NativeChatJoinIngress>,
+    pub(super) governing_ingress: Option<catcoms_net::NativeChatJoinIngress>,
     pub(super) member_ingress: Option<catcoms_net::NativeChatMemberIngress>,
     pub(super) dependency_lane: Option<catcoms_net::NativeChatMemberDependencies>,
     factory_started: bool,
@@ -117,6 +118,7 @@ impl Reservation {
             active: None,
             actual_peer: None,
             join_ingress: None,
+            governing_ingress: None,
             member_ingress: None,
             dependency_lane: None,
             factory_started: false,
@@ -676,6 +678,7 @@ impl<R: CryptoRngCore> NativeTextCreationJob<catcoms_net::MeshService, R> {
                 }
             };
             network.join_ingress = transport.native_chat_join_ingress();
+            network.governing_ingress = transport.native_chat_governing_ingress();
             network.member_ingress = transport.native_chat_member_ingress();
             network.dependency_lane = transport.native_chat_member_dependencies();
             body.transport = Some(transport); // cache before every late check

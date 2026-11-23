@@ -258,6 +258,32 @@ std::thread_local! {
 }
 
 impl ServerStore {
+    #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(in crate::store) fn recovered_member_add_request_for_test<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
+        &self,
+        node: &catcoms_sync::ClosedV2JoinedNode<T, R>,
+    ) -> Result<catcoms_sync::V2MemberAddRequestData, AppError> {
+        let original = self.recovered_join_outcome_data()?.ok_or_else(denied)?;
+        let prefix = {
+            let slot = self.joined_pin_index.lock().map_err(|_| denied())?;
+            slot.as_ref()
+                .and_then(|index| index.pending.as_ref())
+                .and_then(|pending| pending.welcome.as_ref())
+                .ok_or_else(denied)?
+                .capture_member_prefix()?
+        };
+        let request = node.member_add_request_data(prefix.member_parts().0)?;
+        if request.parent_data() != original
+            || self.recovered_join_outcome_data()? != Some(original)
+        {
+            return Err(denied());
+        }
+        Ok(request)
+    }
+
     pub(in crate::store) fn capture_recovered_member_prefix(
         &self,
         expected: NativeTextJoinedRegistrationData,

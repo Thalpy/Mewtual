@@ -13,7 +13,8 @@ use catcoms_mls::persist::text_current_add::{
     TextCurrentAddAdmission, TextCurrentAddLimits, TextCurrentAddReservation,
 };
 use catcoms_sync::{
-    owner_v2::V2InstalledFounderAddData, V2JoinRequestPacketData, MAX_V2_JOIN_REQUEST_PACKET_BYTES,
+    owner_v2::V2InstalledFounderAddData, V2JoinRequestPacketData, V2MemberAddRequestData,
+    MAX_V2_JOIN_REQUEST_PACKET_BYTES,
 };
 use std::sync::Arc;
 
@@ -34,6 +35,18 @@ impl PendingGovernedAdd {
         guard: &crate::store::critical_namespaces::current_layout::V2TextCurrentGroupGuard<'_, '_>,
         replay: &catcoms_replication::chat::owner_state::transition::ReplayMath,
     ) -> Result<(), AppError> {
+        let head = self.require_selected_replay(replay)?;
+        self.fence.require_selected_head2(
+            guard,
+            self.parent.selected_data().ok_or_else(refused)?,
+            head,
+        )
+    }
+
+    fn require_selected_replay(
+        &self,
+        replay: &catcoms_replication::chat::owner_state::transition::ReplayMath,
+    ) -> Result<TextHeadIdData, AppError> {
         let (head, installed) = self.installed.ok_or_else(refused)?;
         if replay.header().id() != installed.header
             || replay.header().spec().state != installed.state
@@ -41,11 +54,7 @@ impl PendingGovernedAdd {
         {
             return Err(refused());
         }
-        self.fence.require_selected_head2(
-            guard,
-            self.parent.selected_data().ok_or_else(refused)?,
-            head,
-        )
+        Ok(head)
     }
 
     pub(super) fn prepare(
@@ -120,6 +129,41 @@ impl PendingGovernedAdd {
 }
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextHost<T, R> {
+    pub(in crate::store) fn encode_selected_member_add(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        request: &V2MemberAddRequestData,
+        keys: &NativeFounderKeys,
+        caller: &catcoms_rt::RequestCancellation,
+    ) -> Result<Vec<u8>, AppError> {
+        let require_live = || {
+            if caller.is_cancelled() {
+                return Err(refused());
+            }
+            keys.preflight(&self.origin)
+        };
+        require_live()?;
+        let store = layout.checked_store()?;
+        let owner = self.owner.borrow_current()?;
+        let verifier = self
+            .member
+            .as_ref()
+            .ok_or_else(refused)?
+            .selected_invite_verifier()?;
+        let pending = self.governed_add.as_mut().ok_or_else(refused)?;
+        let head = pending.require_selected_replay(verifier.replay_data())?;
+        let selected = pending.parent.selected_data().ok_or_else(refused)?;
+        let frame = store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, pending.parent.resources())?;
+            require_live()?;
+            pending
+                .fence
+                .encode_selected_member_add(store, &guard, selected, head, request)
+        })?;
+        require_live()?;
+        Ok(frame)
+    }
+
     pub(in crate::store) fn handle_received_join_request(
         &mut self,
         layout: &V2CurrentLayoutStore,

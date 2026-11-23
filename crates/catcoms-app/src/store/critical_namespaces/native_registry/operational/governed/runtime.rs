@@ -140,6 +140,16 @@ fn runtime_invoice<T: MeshTransport, R: CryptoRngCore>() -> usize {
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> NativeTextJoinedRuntime<T, R> {
+    #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(in crate::store::critical_namespaces::native_registry) fn recovered_member_add_request_for_test(
+        &self,
+    ) -> Result<catcoms_sync::V2MemberAddRequestData, AppError> {
+        self.storage
+            .index
+            .actual_store_for_test()?
+            .recovered_member_add_request_for_test(self.node.as_ref().ok_or_else(refused)?)
+    }
+
     pub fn local_peer_data(&self) -> Option<catcoms_rt::PeerId> {
         self.node.as_ref().map(ClosedV2JoinedNode::local_peer_data)
     }

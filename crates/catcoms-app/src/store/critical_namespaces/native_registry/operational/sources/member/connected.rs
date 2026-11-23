@@ -3,9 +3,12 @@
 use super::*;
 use crate::store::critical_namespaces::native_registry::operational::governed::JOIN_PROTOCOL;
 use catcoms_rt::{
-    NativeChatKeyCurrentCheck, ProtocolId, RequestAuthority, Responder, CHAT_V2_JOIN_KIND,
-    CHAT_V2_JOIN_REQUEST_MAX_BYTES, CHAT_V2_JOIN_RESPONSE_MAX_BYTES,
+    NativeChatKeyCurrentCheck, NativeChatKeyPurpose, ProtocolId, RequestAuthority, Responder,
+    CHAT_V2_GOVERNING_KIND, CHAT_V2_GOVERNING_REQUEST_MAX_BYTES,
+    CHAT_V2_GOVERNING_RESPONSE_MAX_BYTES, CHAT_V2_JOIN_KIND, CHAT_V2_JOIN_REQUEST_MAX_BYTES,
+    CHAT_V2_JOIN_RESPONSE_MAX_BYTES,
 };
+use catcoms_sync::V2MemberAddRequestData;
 use tokio::sync::watch;
 
 struct JoinAuthority {
@@ -89,6 +92,24 @@ impl<R: CryptoRngCore> NativeTextMemberPreparation<catcoms_net::MeshService, R> 
         self,
         caller: RequestCancellation,
     ) -> Result<catcoms_net::NativeChatJoinRequests, V2MemberSaveRefusal> {
+        let ingress = self.row.original.join_ingress.clone();
+        self.open_connected_requests(ingress, NativeChatKeyPurpose::JoinWelcome, caller)
+    }
+
+    pub fn open_connected_governing_requests(
+        self,
+        caller: RequestCancellation,
+    ) -> Result<catcoms_net::NativeChatJoinRequests, V2MemberSaveRefusal> {
+        let ingress = self.row.original.governing_ingress.clone();
+        self.open_connected_requests(ingress, NativeChatKeyPurpose::GoverningHeader, caller)
+    }
+
+    fn open_connected_requests(
+        self,
+        ingress: Option<catcoms_net::NativeChatJoinIngress>,
+        purpose: NativeChatKeyPurpose,
+        caller: RequestCancellation,
+    ) -> Result<catcoms_net::NativeChatJoinRequests, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Error;
         let fee = self
             .budget
@@ -98,16 +119,11 @@ impl<R: CryptoRngCore> NativeTextMemberPreparation<catcoms_net::MeshService, R> 
             .map_err(|_| Error::Busy)?;
         let (_, source) = self.prepare_using_issuer(|owner, command| {
             owner
-                .prepare_cut(command, catcoms_rt::NativeChatKeyPurpose::JoinWelcome)
+                .prepare_cut(command, purpose)
                 .map(|cut| cut.observe_current())
                 .map_err(|_| refused())
         })?;
-        let ingress = self
-            .row
-            .original
-            .join_ingress
-            .as_ref()
-            .ok_or(Error::Unavailable)?;
+        let ingress = ingress.ok_or(Error::Unavailable)?;
         let authority = Arc::new(JoinAuthority {
             mount: self.scope.clone(),
             source: Arc::new(source),
@@ -122,6 +138,71 @@ impl<R: CryptoRngCore> NativeTextMemberPreparation<catcoms_net::MeshService, R> 
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
+    /// Serve an immediate Add from the mounted founder's warm or recovered
+    /// archive on the same native request and with the same row lifetime.
+    pub fn serve_connected_governing_request(
+        self,
+        proto: ProtocolId,
+        wire: &[u8],
+        responder: Responder,
+        caller: RequestCancellation,
+    ) -> Result<(), V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Error;
+        if proto != JOIN_PROTOCOL || wire.len() > CHAT_V2_GOVERNING_REQUEST_MAX_BYTES {
+            return Err(Error::Failed);
+        }
+        let body = wire
+            .strip_prefix(&[CHAT_V2_GOVERNING_KIND])
+            .ok_or(Error::Failed)?;
+        let waiting = responder.cancellation_authority();
+        if caller.is_cancelled() || !waiting.authorized() {
+            return Err(Error::Cancelled);
+        }
+        let request = V2MemberAddRequestData::decode(body).map_err(|_| Error::Failed)?;
+        let fee = self
+            .budget
+            .metadata
+            .pool
+            .try_reserve(4 * CHAT_V2_GOVERNING_RESPONSE_MAX_BYTES + 4096)
+            .map_err(|_| Error::Busy)?;
+        let (cell, (keys, source)) = self.prepare_using_issuer(|owner, command| {
+            let cut = owner
+                .prepare_cut(command, NativeChatKeyPurpose::GoverningHeader)
+                .map_err(|_| refused())?;
+            Ok((
+                NativeFounderKeys::prepare(owner, command)?,
+                cut.observe_current(),
+            ))
+        })?;
+        let source = Arc::new(source);
+        let mount = self.scope.clone();
+        let work = caller.clone().with_authority(Arc::new(JoinAuthority {
+            mount: mount.clone(),
+            source: source.clone(),
+            caller: caller.clone(),
+            waiting: Some(waiting),
+        }));
+        let frame = self
+            .finish_prepared((cell, keys))?
+            .run_governing_response(&request, &work)?;
+        if work.is_cancelled() || frame.len() > CHAT_V2_GOVERNING_RESPONSE_MAX_BYTES {
+            return Err(Error::Cancelled);
+        }
+        let authority = Arc::new(JoinAuthority {
+            mount,
+            source,
+            caller,
+            waiting: None,
+        });
+        responder
+            .try_respond_with_custody(
+                bytes::Bytes::from(frame),
+                authority,
+                Arc::new(JoinPayment { _fee: fee }),
+            )
+            .map_err(|_| Error::Cancelled)
+    }
+
     /// Respond to a classified connection event through the original native
     /// founder. Success reports local queue acceptance.
     pub fn serve_connected_join_request(
@@ -191,6 +272,30 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberJob<T, R> {
+    fn run_governing_response(
+        mut self,
+        request: &V2MemberAddRequestData,
+        caller: &RequestCancellation,
+    ) -> Result<Vec<u8>, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Error;
+        self.inner.require_current().map_err(|_| Error::Cancelled)?;
+        let inner = &mut self.inner;
+        let runtime = inner.loan.body.as_mut().ok_or(Error::Unavailable)?;
+        let frame = if let Some(founder) = runtime.recovered_founder.as_mut() {
+            founder.encode_recovered_member_add(request, caller)
+        } else {
+            runtime.work.encode_selected_member_add(
+                runtime.driver.as_mut().ok_or(Error::Unavailable)?,
+                request,
+                &inner.keys,
+                caller,
+            )
+        };
+        inner.loan.recorded = true;
+        inner.require_current().map_err(|_| Error::Cancelled)?;
+        frame.map_err(|_| Error::Failed)
+    }
+
     fn run_recovered_join_response(
         mut self,
         request: &[u8],

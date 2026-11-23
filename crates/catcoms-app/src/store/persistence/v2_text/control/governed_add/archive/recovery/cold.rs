@@ -24,7 +24,7 @@ use catcoms_replication::chat::{
     owner_facts::OwnerFactId, owner_header::OwnerHeaderId,
     owner_state::transition::REPLAY_MATH_PRIVATE_INVOICE, FounderGenesisAnchorData,
     ProjectionGroup, ProjectionGroupView, V2GeneralExpectation, V2GeneralPrefixVerifier,
-    V2GeneralRetiredData, V2HostSelectionExpectation, V2ProjectionOrigin,
+    V2HostSelectionExpectation, V2ProjectionOrigin,
 };
 use catcoms_storage::kept::{session_id, SessionId};
 use catcoms_storage::VaultPhysicalWorkLease;
@@ -311,7 +311,6 @@ impl OpenedColdFounderOrigin {
 
 struct ColdFounderCore {
     verifier: V2GeneralPrefixVerifier,
-    _retired: V2GeneralRetiredData,
     _view: ProjectionGroupView,
     _group: ProjectionGroup,
     _fee: CatalogReadReservation,
@@ -486,13 +485,24 @@ impl HeldColdFounderAdd {
         source: &RetainedBootstrapSourceData,
         request: &V2MemberAddRequestData,
     ) -> Result<Vec<u8>, AppError> {
+        if self.core.is_none() {
+            return Err(refused());
+        }
+        self.encode_retained_member_add(store, source, request)
+    }
+
+    /// Use a retained predecessor under a newer writer's exact selected
+    /// archive checks. The current native guard is checked by that writer.
+    pub(in crate::store::persistence::v2_text) fn encode_retained_member_add(
+        &self,
+        store: &ServerStore,
+        source: &RetainedBootstrapSourceData,
+        request: &V2MemberAddRequestData,
+    ) -> Result<Vec<u8>, AppError> {
         self.files.origin.original.require_same_original(source)?;
         let ColdRecoveredArchive::Later(chain) = &self.recovered else {
             return Err(refused());
         };
-        if self.core.is_none() {
-            return Err(refused());
-        }
         let genesis = source.data().genesis_public_data();
         let key = Zeroizing::new(store.keys.db_key()?);
         chain.encode_member_add(
@@ -709,7 +719,7 @@ impl HeldColdFounderAdd {
             )
             .map_err(|_| refused())?;
             self.require_current(store, source)?;
-            let retired = match &self.recovered {
+            match &self.recovered {
                 ColdRecoveredArchive::First(first) => select_archived_step(
                     &mut verifier,
                     &first.header,
@@ -717,22 +727,19 @@ impl HeldColdFounderAdd {
                     first.image_data()?,
                 )?,
                 ColdRecoveredArchive::Later(chain) => {
-                    let mut retired = None;
                     for step in chain.public_steps() {
-                        retired = Some(select_archived_step(
+                        select_archived_step(
                             &mut verifier,
                             &step.header,
                             &step.admission,
                             &step.image,
-                        )?);
+                        )?;
                     }
-                    retired.ok_or_else(refused)?
                 }
-            };
+            }
             self.require_current(store, source)?;
             self.core = Some(ColdFounderCore {
                 verifier,
-                _retired: retired,
                 _view: view,
                 _group: group,
                 _fee: fee,
@@ -760,7 +767,7 @@ fn select_archived_step(
     header: &SignedOwnerHeader,
     admission: &AdmissionBody,
     image: &[u8],
-) -> Result<V2GeneralRetiredData, AppError> {
+) -> Result<(), AppError> {
     let predecessor = verifier.replay_data().header().id();
     let mut candidate = Some(
         verifier
@@ -775,7 +782,10 @@ fn select_archived_step(
     if retired.parent_data().header().id() != predecessor {
         return Err(refused());
     }
-    Ok(retired)
+    // The old model holds the verifier's only candidate slot. The next
+    // archived step can be replayed only after this owner has drained.
+    drop(retired);
+    Ok(())
 }
 
 impl ColdFounderFiles {

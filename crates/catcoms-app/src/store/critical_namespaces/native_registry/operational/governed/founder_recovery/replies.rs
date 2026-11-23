@@ -115,7 +115,7 @@ impl NativeTextColdFounderSource {
     ) -> Result<(Owner, NativeChatJoinRequests), AppError> {
         self.restore_first_add(&caller)?;
         let mesh = self.actor.as_ref().ok_or_else(refused)?.borrow()?;
-        let ingress = lane(&mesh).ok_or_else(refused)?;
+        let ingress = lane(mesh).ok_or_else(refused)?;
         let (mount, fee) = self.work.recovered_founder_resources(4096)?;
         let (owner, lifetime) = watch::channel(());
         let scope = Arc::new(IngressScope {

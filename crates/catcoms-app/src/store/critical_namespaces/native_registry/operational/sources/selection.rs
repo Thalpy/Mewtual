@@ -18,6 +18,7 @@ pub(super) struct Selection<T: MeshTransport, R: CryptoRngCore> {
     pub(super) invocation: [u8; 32],
     pub(super) request: [u8; 32],
     pub(super) join_ingress: Option<catcoms_net::NativeChatJoinIngress>,
+    pub(super) governing_ingress: Option<catcoms_net::NativeChatJoinIngress>,
     pub(super) member_ingress: Option<catcoms_net::NativeChatMemberIngress>,
     pub(super) dependency_lane: Option<catcoms_net::NativeChatMemberDependencies>,
     pub(super) source_close: catcoms_rt::NativeChatSourceClose,
@@ -59,6 +60,10 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextRuntimeSelection<T, R> {
                     .network
                     .as_ref()
                     .and_then(|network| network.join_ingress.clone()),
+                governing_ingress: body
+                    .network
+                    .as_ref()
+                    .and_then(|network| network.governing_ingress.clone()),
                 member_ingress: body
                     .network
                     .as_ref()
