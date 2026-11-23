@@ -1240,6 +1240,52 @@ fn invite_command(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_membership_dispatch_uses_the_original_founder_row() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, main, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let found = found_request(&main, 5, "Roster source");
+    run(&queue).await;
+    let found = found_value(found.await.unwrap());
+    let request = serde_json::json!({ "server": found["server"] });
+    let legacy = invite_command(&main, "get_members", request.clone());
+    let tauri::ipc::InvokeResponse::Err(error) = legacy.await.unwrap() else {
+        panic!("legacy membership uses the existing backend");
+    };
+    assert_eq!(error.0, serde_json::json!("existing backend"));
+    let other =
+        tauri::WebviewWindowBuilder::new(&app, "unregistered-membership", Default::default())
+            .build()
+            .unwrap();
+    refused(
+        invite_command(&other, "get_native_chat_members", request.clone())
+            .await
+            .unwrap(),
+    );
+    assert!(queue.lock().unwrap().is_empty());
+    let roster = invite_command(&main, "get_native_chat_members", request.clone());
+    run(&queue).await;
+    let roster = found_value(roster.await.unwrap());
+    let [original] = roster["members"].as_array().unwrap().as_slice() else {
+        panic!("selected genesis has one original founder");
+    };
+    assert_eq!(original["founder"], true);
+    assert_eq!(original["you"], true);
+    assert_eq!(roster["canRemove"], false);
+    assert_eq!(original["admission"].as_str().unwrap().len(), 64);
+
+    let stale = invite_command(&main, "get_native_chat_members", request);
+    let worker = run(&queue);
+    let state = app.state::<AppState>();
+    let _close = register_vault_close(&state).await.unwrap();
+    worker.await;
+    refused(stale.await.unwrap());
+    sources::close_server_rows(&state, &SystemClock)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_text_connected_join_retries_original_welcome_after_authenticated_unlock() {
     use catcoms_rt::{MeshTransport, ProtocolId, TransportError, CHAT_V2_JOIN_KIND};
     use catcoms_sync::{DirectJoinLimits, PreparedV2JoinRequest};

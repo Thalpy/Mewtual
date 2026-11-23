@@ -271,10 +271,13 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
             .map_err(|_| Error::Unavailable)?;
         let inner = &mut job.inner;
         let body = inner.loan.body.as_mut().ok_or(Error::Unavailable)?;
-        let driver = body.driver.as_mut().ok_or(Error::Unavailable)?;
-        let result = body
-            .work
-            .governed_roster_native(driver, &inner.keys, negative);
+        let result = if let Some(founder) = body.recovered_founder.as_mut() {
+            founder.governed_roster(negative)
+        } else {
+            let driver = body.driver.as_mut().ok_or(Error::Unavailable)?;
+            body.work
+                .governed_roster_native(driver, &inner.keys, negative)
+        };
         inner.loan.recorded = true;
         if negative.is_cancelled() {
             return Err(Error::Cancelled);

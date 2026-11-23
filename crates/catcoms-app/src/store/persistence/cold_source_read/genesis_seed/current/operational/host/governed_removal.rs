@@ -47,7 +47,8 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
                 let guard = store.lock_v2_text_current_group(admission, &resources)?;
                 current.require_selected_member_head(&guard, replay)?;
                 require()?;
-                let roster = NativeTextRoster::from_selected(store, replay, own)?;
+                let roster =
+                    NativeTextRoster::from_selected(store, replay, own)?.with_founder_removal();
                 require()?;
                 Ok(roster)
             });

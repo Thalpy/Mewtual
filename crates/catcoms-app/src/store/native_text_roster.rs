@@ -16,12 +16,22 @@ pub struct NativeTextRosterMember {
 
 pub struct NativeTextRoster {
     members: Vec<NativeTextRosterMember>,
+    can_remove: bool,
     _payment: CatalogReadReservation,
 }
 
 impl NativeTextRoster {
     pub fn members(&self) -> &[NativeTextRosterMember] {
         &self.members
+    }
+
+    pub fn can_remove(&self) -> bool {
+        self.can_remove
+    }
+
+    pub(super) fn with_founder_removal(mut self) -> Self {
+        self.can_remove = true;
+        self
     }
 
     pub(super) fn from_selected(
@@ -69,6 +79,7 @@ impl NativeTextRoster {
         payment.validate(pool, bytes)?;
         Ok(Self {
             members,
+            can_remove: false,
             _payment: payment,
         })
     }

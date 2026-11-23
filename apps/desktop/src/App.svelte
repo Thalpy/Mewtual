@@ -4532,20 +4532,23 @@
     }
   }
   type NativeRosterMember = Member & { admission: string; founder: boolean };
-  type NativeRosterSnapshot = { server: number; generation: number; entries: NativeRosterMember[]; failure: string; loading: boolean };
+  type NativeRoster = { members: NativeRosterMember[]; canRemove: boolean };
+  type NativeRosterSnapshot = NativeRoster & { server: number; mount: number; failure: string; loading: boolean };
   let nativeRoster = $state<NativeRosterSnapshot | null>(null);
+  let nativeRosterRequest = 0;
   let removingNativeAdmission = $state("");
   let confirmNativeRemoval = $state("");
-  async function refreshNativeMembers(server: number, generation: number) {
-    nativeRoster = { server, generation, entries: [], failure: "", loading: true };
+  async function refreshNativeMembers(server: number, generation: number, mount = chatLedgerMount) {
+    const request = ++nativeRosterRequest;
+    nativeRoster = { server, mount, members: [], canRemove: false, failure: "", loading: true };
     try {
-      const entries = await invoke<NativeRosterMember[]>("get_members", { server });
-      if (viewCurrent(generation, server) && cur?.backend === "text-v2") {
-        nativeRoster = { server, generation, entries, failure: "", loading: false };
+      const roster = await invoke<NativeRoster>("get_native_chat_members", { server });
+      if (request === nativeRosterRequest && membersOpen && unlockedViewCurrent(generation, server) && cur?.backend === "text-v2") {
+        nativeRoster = { ...roster, server, mount, failure: "", loading: false };
       }
     } catch (error) {
-      if (viewCurrent(generation, server) && cur?.backend === "text-v2") {
-        nativeRoster = { server, generation, entries: [], failure: String(error), loading: false };
+      if (request === nativeRosterRequest && membersOpen && unlockedViewCurrent(generation, server) && cur?.backend === "text-v2") {
+        nativeRoster = { server, mount, members: [], canRemove: false, failure: String(error), loading: false };
       }
     }
   }
@@ -4556,18 +4559,23 @@
     confirmNativeRemoval = "";
     removingNativeAdmission = member.admission;
     try {
-      await invoke("remove_member", { server, expectedAdmission: member.admission });
-      if (viewCurrent(generation, server) && cur?.backend === "text-v2") await refreshNativeMembers(server, generation);
+      await invoke("remove_native_chat_member", { server, expectedAdmission: member.admission });
+      if (membersOpen && unlockedViewCurrent(generation, server) && cur?.backend === "text-v2") await refreshNativeMembers(server, generation);
     } catch (cause) {
-      if (viewCurrent(generation, server) && cur?.backend === "text-v2") error = String(cause);
+      if (unlockedViewCurrent(generation, server) && cur?.backend === "text-v2") error = String(cause);
     } finally {
       removingNativeAdmission = "";
     }
   }
   $effect(() => {
-    if (membersOpen && !locked && uiStateReady && cur?.backend === "text-v2" && activeServerId !== null) {
+    const server = activeServerId;
+    const mount = chatLedgerMount;
+    if (membersOpen && !locked && uiStateReady && cur?.backend === "text-v2" && server !== null) {
       confirmNativeRemoval = "";
-      void refreshNativeMembers(activeServerId, viewGeneration);
+      untrack(() => { void refreshNativeMembers(server, viewGeneration, mount); });
+    } else {
+      nativeRosterRequest++;
+      nativeRoster = null;
     }
   });
   type StorageHealth = {
@@ -30517,20 +30525,19 @@
       <!-- Studio reserves this width for the drawing and its controls. The member-list
            preference is preserved for chat; call frame claims remain in Studio's Art tab. -->
       {#if !dmHome && cur?.backend === "text-v2" && !cur.isDm && membersOpen}
-        {@const snapshot = nativeRoster?.server === activeServerId && nativeRoster.generation === viewGeneration ? nativeRoster : null}
-        {@const canRemove = snapshot?.entries.some((member) => member.you && member.founder)}
+        {@const snapshot = nativeRoster?.server === activeServerId && nativeRoster.mount === chatLedgerMount ? nativeRoster : null}
         <aside id="native-member-list" class="members-col" aria-label="Members">
-          <h3><span>Members{snapshot && !snapshot.loading && !snapshot.failure ? ` (${snapshot.entries.length})` : ""}</span></h3>
+          <h3><span>Members{snapshot && !snapshot.loading && !snapshot.failure ? ` (${snapshot.members.length})` : ""}</span></h3>
           {#if !snapshot || snapshot.loading}
             <p class="muted small" role="status">Loading members…</p>
           {:else if snapshot.failure}
             <p class="muted small" role="status">{snapshot.failure}</p>
           {:else}
             <ul>
-              {#each snapshot.entries as member (member.admission)}
+              {#each snapshot.members as member (member.admission)}
                 <li>
                   <span title={member.identity}>{member.fingerprint}{member.you ? " (you)" : ""}{member.founder ? " · Founder" : ""}</span>
-                  {#if canRemove && !member.founder}
+                  {#if snapshot.canRemove && !member.founder}
                     {#if confirmNativeRemoval === member.admission}
                       <button type="button" class="danger-btn small" disabled={!!removingNativeAdmission} onclick={() => void removeNativeMember(member)}>Confirm removal</button>
                       <button type="button" class="ghost small" onclick={() => (confirmNativeRemoval = "")}>Cancel</button>

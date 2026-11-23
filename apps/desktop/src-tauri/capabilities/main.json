@@ -50,6 +50,7 @@
     "allow-group-communication-mode",
     "allow-check-invite-routes",
     "allow-get-members",
+    "allow-get-native-chat-members",
     "allow-get-profiles",
     "allow-get-livery",
     "allow-get-file-size-limit",
@@ -194,6 +195,7 @@
     "allow-resolve-kick-case",
     "allow-set-admin",
     "allow-remove-member",
+    "allow-remove-native-chat-member",
     "allow-revoke-device",
 
     "allow-change-vault-secret",

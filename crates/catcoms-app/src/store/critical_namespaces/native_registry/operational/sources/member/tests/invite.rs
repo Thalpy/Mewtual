@@ -1473,6 +1473,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 let target = OwnerBodyId::from_bytes(*third_own.as_bytes());
                 let old_founder = OwnerBodyId::from_bytes(anchor.admission);
                 let roster = capture().governed_roster(&fresh).unwrap();
+                assert!(roster.can_remove());
                 assert_eq!(roster.members().len(), 3);
                 assert!(roster
                     .members()
@@ -1569,6 +1570,16 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 }
                 assert!(selection.is_current_cached());
                 assert!(!third_selection.is_current_cached());
+                let survivor_roster = recovered_row().governed_roster(&selection, &fresh).unwrap();
+                assert!(!survivor_roster.can_remove());
+                assert_eq!(survivor_roster.members().len(), 2);
+                assert!(survivor_roster.members().iter().any(|member| member.you
+                    && member.admission.as_bytes() == own_add.as_bytes()
+                    && !member.founder));
+                drop(survivor_roster);
+                assert!(third_row()
+                    .governed_roster(&third_selection, &fresh)
+                    .is_err());
                 assert!(third_row()
                     .prepare_member_ingress(&third_selection, channel, fresh.clone())
                     .is_err());
@@ -1657,6 +1668,16 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     cold.restore_first_add(&fresh).unwrap(),
                     (removed_head, removed_epoch)
                 );
+                let roster = cold.governed_roster(&fresh).unwrap();
+                assert!(!roster.can_remove());
+                assert_eq!(roster.members().len(), 2);
+                assert!(roster
+                    .members()
+                    .iter()
+                    .any(|member| member.founder && member.you));
+                let (_cancel, signal) = tokio::sync::watch::channel(true);
+                let closed = RequestCancellation::new(signal, None);
+                assert!(cold.governed_roster(&closed).is_err());
             })
             .await;
             return;

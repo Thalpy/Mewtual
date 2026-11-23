@@ -289,10 +289,19 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 .prefix
                 .selected_member_verifier()
                 .map_err(|_| V2MemberSaveRefusal::Unavailable)?;
-            let own = catcoms_replication::chat::owner_header::OwnerBodyId::from_bytes(
-                *source.prefix.own_admission_data().as_bytes(),
-            );
-            crate::store::NativeTextRoster::from_selected(source.store, verifier.replay_data(), own)
+            let replay = verifier.replay_data();
+            let own = source.prefix.own_admission_data();
+            if source
+                .node
+                .selected_join_data()
+                .map_err(|_| V2MemberSaveRefusal::Unavailable)?
+                != (replay.header().id(), own, replay.mls_epoch_data())
+            {
+                return Err(V2MemberSaveRefusal::Stale);
+            }
+            let own =
+                catcoms_replication::chat::owner_header::OwnerBodyId::from_bytes(*own.as_bytes());
+            crate::store::NativeTextRoster::from_selected(source.store, replay, own)
                 .map_err(|_| V2MemberSaveRefusal::Failed)
         })
     }

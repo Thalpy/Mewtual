@@ -559,8 +559,10 @@ Add and Remove share the exact-file Head replacement under the original
 Current writer. A lost reply after Head replacement can finish the same
 cached Core and MLS selection. The desktop founder chooses the exact
 admission shown by the selected roster, and the original native row checks
-permission again before issuing the operation. A cold restart during an
-incomplete governing transaction still needs recovery work.
+permission again before issuing the operation. A surviving joined row and a
+reopened founder read the roster from their authenticated selected history.
+A cold restart during an incomplete governing transaction still needs recovery
+work.
 
 ## Acceptance before enabling
 

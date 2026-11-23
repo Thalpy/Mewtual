@@ -5,10 +5,16 @@ use tauri::ipc::InvokeResponseBody;
 
 const BUSY: &str = "Chat membership is busy. Retry the request.";
 const FAILED: &str = "Chat membership is unavailable for this conversation.";
+const LIST: &str = "get_native_chat_members";
+const REMOVE: &str = "remove_native_chat_member";
 
 enum Operation {
     List,
     Remove(OwnerBodyId),
+}
+
+pub(super) fn handles(command: &str) -> bool {
+    matches!(command, LIST | REMOVE)
 }
 
 pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task)) -> bool {
@@ -49,9 +55,14 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
         if !founder && matches!(operation, Operation::Remove(_)) {
             return Err(FAILED);
         }
-        let source =
-            connected::Source::for_installed(generation, &target, row, account, &mut source_payment)
-                .ok_or(listing::STALE)?;
+        let source = connected::Source::for_installed(
+            generation,
+            &target,
+            row,
+            account,
+            &mut source_payment,
+        )
+        .ok_or(listing::STALE)?;
         Ok((source, operation, founder, permit))
     })();
     let (source, operation, founder, permit) = match captured {
@@ -152,7 +163,11 @@ fn encode(
             })
         })
         .collect();
-    let body = serde_json::to_string(&data).map_err(|_| FAILED)?;
+    let body = serde_json::to_string(&serde_json::json!({
+        "members": data,
+        "canRemove": roster.can_remove(),
+    }))
+    .map_err(|_| FAILED)?;
     Ok((body, Some(roster)))
 }
 
@@ -167,8 +182,8 @@ fn parse(command: &str, body: &InvokeBody) -> Result<(u64, Operation), &'static 
         .filter(|id| *id != 0)
         .ok_or(FAILED)?;
     let operation = match command {
-        "get_members" if fields.len() == 1 => Operation::List,
-        "remove_member" if fields.len() == 2 => {
+        LIST if fields.len() == 1 => Operation::List,
+        REMOVE if fields.len() == 2 => {
             let label = fields
                 .get("expectedAdmission")
                 .and_then(serde_json::Value::as_str)
@@ -199,14 +214,16 @@ mod tests {
     #[test]
     fn native_membership_requires_the_exact_admission() {
         let body = |json| InvokeBody::Json(json);
+        assert!(!handles("get_members"));
+        assert!(!handles("remove_member"));
         assert!(matches!(
-            parse("get_members", &body(serde_json::json!({"server": 1}))),
+            parse(LIST, &body(serde_json::json!({"server": 1}))),
             Ok((1, Operation::List))
         ));
         let label = "ab".repeat(32);
         let target = OwnerBodyId::from_bytes([0xab; 32]);
         assert!(
-            matches!(parse("remove_member", &body(serde_json::json!({"server": 1, "expectedAdmission": &label}))), Ok((1, Operation::Remove(actual))) if actual == target)
+            matches!(parse(REMOVE, &body(serde_json::json!({"server": 1, "expectedAdmission": &label}))), Ok((1, Operation::Remove(actual))) if actual == target)
         );
         for value in [
             serde_json::json!({"server": 1, "fp": &label}),
@@ -216,7 +233,7 @@ mod tests {
             serde_json::json!({"server": 1, "expectedAdmission": &label, "force": true}),
             serde_json::json!({"server": 0, "expectedAdmission": &label}),
         ] {
-            assert!(parse("remove_member", &body(value)).is_err());
+            assert!(parse(REMOVE, &body(value)).is_err());
         }
     }
 }

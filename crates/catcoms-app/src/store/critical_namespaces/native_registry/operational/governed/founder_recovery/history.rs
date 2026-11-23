@@ -18,6 +18,37 @@ use crate::store::{
 use catcoms_replication::chat::{ActionId, ChatLedger, LedgerLimits, Realm, MAX_ACTION_BYTES};
 
 impl NativeTextColdFounderSource {
+    pub(in crate::store::critical_namespaces::native_registry) fn governed_roster(
+        &mut self,
+        caller: &RequestCancellation,
+    ) -> Result<crate::store::NativeTextRoster, AppError> {
+        use crate::store::NativeTextRoster;
+        self.restore_first_add(caller)?;
+        let own = self
+            .source
+            .data()
+            .genesis_public_data()
+            .admission_data()
+            .admission_id();
+        let governed = self.governed.as_deref_mut().ok_or_else(refused)?;
+        let roster = self.work.with_recovered_founder_layout(
+            &self.selection,
+            &self.source,
+            |_, store| {
+                governed.with_checked_member_parts(store, &self.source, |verifier, _, require| {
+                    let roster =
+                        NativeTextRoster::from_selected(store, verifier.replay_data(), own)?;
+                    require()?;
+                    Ok(roster)
+                })
+            },
+        )?;
+        if caller.is_cancelled() {
+            return Err(refused());
+        }
+        Ok(roster)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn read_own_history(
         &mut self,
         request: MemberHistoryRead,

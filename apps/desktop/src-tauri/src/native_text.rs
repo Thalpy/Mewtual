@@ -261,7 +261,7 @@ fn router<R: tauri::Runtime>(
         if enabled && invoke.message.command() == "mint_invite_fresh" {
             return invite_mint::route(invoke, &spawn);
         }
-        if enabled && matches!(invoke.message.command(), "get_members" | "remove_member") {
+        if enabled && membership::handles(invoke.message.command()) {
             return membership::route(invoke, &spawn);
         }
         if enabled
