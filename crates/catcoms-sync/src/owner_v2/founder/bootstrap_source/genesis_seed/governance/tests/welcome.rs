@@ -117,6 +117,89 @@ fn verify_later_governing_join_prefix(
     encoded
 }
 
+fn complete_second_governing_welcome(
+    node: &mut Node,
+    first: &[u8],
+    replay: &catcoms_replication::chat::owner_state::transition::ReplayMath,
+    now: u64,
+) {
+    use crate::{
+        DirectJoinLimits, PreparedV2JoinRequest, V2FirstAddProofData, V2GoverningJoinPrefixData,
+        V2GoverningJoinStepData, V2JoinRequestPacketData,
+    };
+    let mut fixture = Request::new(node, 96);
+    fixture.change_invite(node, |spec| spec.expires_at_ms = now + 60_000);
+    let anchor = &fixture.invite.spec_data().anchor;
+    let mut joiner = PreparedV2JoinRequest::prepare(
+        MlsDevice::generate().unwrap(),
+        anchor,
+        &fixture.invite,
+        [97; 32],
+        now,
+        DirectJoinLimits::new(RAW, RAW, 256 * 1024).unwrap(),
+    )
+    .unwrap();
+    let wire = joiner.request_bytes_data().to_vec();
+    let request = V2JoinRequestPacketData::decode(&wire).unwrap();
+    let request = request.founder_add_data();
+    let genesis = node.genesis_data();
+    let stale = catcoms_replication::chat::owner_state::transition::ReplayMath::from_genesis(
+        genesis.profile,
+        genesis.admission,
+        genesis.header,
+        genesis.state,
+    )
+    .unwrap();
+    let limits = TextCurrentAddLimits::governed_text_v2();
+    assert!(node
+        .preflight_subsequent_add_package_data(&stale, request, limits)
+        .is_err());
+    node.preflight_subsequent_add_package_data(replay, request, limits)
+        .unwrap();
+    let native = Native::new();
+    let payment = Arc::new(AtomicUsize::new(0));
+    begin(node, &native, &payment, request);
+    node.execute_add_data_native(request).unwrap();
+    node.prepare_admission_data(replay).unwrap();
+    node.sign_admission_native().unwrap();
+    node.materialize_admission_data().unwrap();
+    node.prepare_welcome_data().unwrap();
+    node.sign_welcome_native().unwrap();
+    node.materialize_welcome_data().unwrap();
+    let header = node.signed_admission_data().unwrap();
+    let (admission, output) = node.unsigned_admission_data().unwrap();
+    let encoded = V2GoverningJoinPrefixData::encode(
+        first,
+        &[V2GoverningJoinStepData {
+            header,
+            image: output.image_data(),
+            body: ReplayBody::Admission(admission),
+        }],
+    )
+    .unwrap();
+    let prefix = V2GoverningJoinPrefixData::decode(&encoded).unwrap();
+    let result = node.completed_add_data().unwrap();
+    let response = node.join_response_data().unwrap();
+    let only_first = V2FirstAddProofData::decode(first).unwrap();
+    assert!(joiner.finish_first_welcome(response, &only_first).is_err());
+    let candidate = joiner.finish_governing_welcome(response, &prefix).unwrap();
+    candidate.validate_initial_state_data().unwrap();
+    assert_eq!(candidate.facts_data().join_epoch_data(), 2);
+    assert_eq!(
+        candidate.facts_data().admission_state_data(),
+        result.after_authenticator_data()
+    );
+    assert_eq!(
+        candidate.facts_data().key_package_data(),
+        &request.request.spec_data().key_package_reference
+    );
+    let original = candidate as *const _;
+    assert_eq!(
+        joiner.finish_governing_welcome(response, &prefix).unwrap() as *const _,
+        original
+    );
+}
+
 async fn complete_original_welcome(native_joiner: bool) {
     use crate::{
         DirectJoinLimits, NativeV2JoinKeyEntry, PreparedV2JoinRequest, RecoveredV2JoinedOutcome,
@@ -1017,6 +1100,9 @@ async fn complete_original_welcome(native_joiner: bool) {
     }
     assert!(joined_node.admit_member_save(&warm_plan).is_err());
     drop(cold_node.admit_member_save(&cold_plan).unwrap());
+    if !native_joiner {
+        complete_second_governing_welcome(&mut node, &proof, g.verifier.replay_data(), now);
+    }
     drop(node);
     if let Some(submission) = founder_after_drop {
         assert!(!submission.is_current_cached());

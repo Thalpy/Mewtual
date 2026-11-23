@@ -95,6 +95,15 @@ impl<T, R> UnboundV2GenesisNode<T, R> {
         limits: catcoms_mls::persist::text_current_add::TextCurrentAddLimits,
     ) -> Result<(), SyncError> {
         ordinary_create::source(self).map_err(|_| unavailable())?;
+        self.check_add_package(request, limits)?;
+        ordinary_create::source(self).map_err(|_| unavailable())
+    }
+
+    fn check_add_package(
+        &self,
+        request: V2FounderAddRequestData<'_>,
+        limits: catcoms_mls::persist::text_current_add::TextCurrentAddLimits,
+    ) -> Result<(), SyncError> {
         let seed = &self.seed.body;
         drop(request.verify_seed(seed)?);
         let now = self._parts.body._clock.now_ms();
@@ -116,8 +125,7 @@ impl<T, R> UnboundV2GenesisNode<T, R> {
             packet,
             limits,
         )
-        .map_err(|_| unavailable())?;
-        ordinary_create::source(self).map_err(|_| unavailable())
+        .map_err(|_| unavailable())
     }
 }
 
@@ -320,6 +328,28 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
             return Err(unavailable());
         }
         self.node.preflight_first_add_package_data(request, limits)
+    }
+
+    /// Verify a subsequent package against this installed MLS parent and the
+    /// matching replay before a host reserves the next governing operation.
+    pub fn preflight_subsequent_add_package_data(
+        &self,
+        replay: &ReplayMath,
+        request: V2FounderAddRequestData<'_>,
+        limits: catcoms_mls::persist::text_current_add::TextCurrentAddLimits,
+    ) -> Result<(), SyncError> {
+        self.require_sdk_current_data()?;
+        let installed = self.installed.ok_or_else(unavailable)?;
+        if self.pending.is_some()
+            || replay.profile() != &self.node.seed.body.genesis.profile
+            || replay.header().id() != installed.header
+            || replay.header().spec().state != installed.state
+            || replay.mls_epoch_data() != installed.epoch
+        {
+            return Err(unavailable());
+        }
+        self.node.check_add_package(request, limits)?;
+        self.require_sdk_current_data()
     }
 
     /// Original immutable provenance, always the initial pin/source context.
