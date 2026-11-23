@@ -467,6 +467,69 @@ fn ordinary_receiver_waits_for_exact_valid_dependencies_then_projects() {
 }
 
 #[test]
+fn ordinary_history_replay_restores_dependencies_without_publishing_removed_originals() {
+    let mut f = Fixture::new();
+    let author = DeviceKeypair::from_seed(&[92; 32]);
+    let responder = DeviceKeypair::from_seed(&[93; 32]);
+    let first = f.add(&author, 20);
+    let second = f.add(&responder, 21);
+    let target = create(&author, &first, 1);
+    let reply = action(
+        &responder,
+        &second,
+        2,
+        Body::Create {
+            text: "reply from the archive".into(),
+            reply_to: Some(target.id()),
+        },
+        vec![target.id()],
+    );
+    let mut removed = f.remove(&first);
+    assert!(removed.take_close_completion().unwrap().try_complete());
+    let (mut ledger, view) = f.ledger();
+    let replay = |ledger: &mut ChatLedger, action, admission| {
+        f.verifier
+            .replay_ordinary_history_original(ledger, &view, action, admission, 64)
+    };
+    assert_eq!(
+        replay(&mut ledger, &reply, &second).unwrap(),
+        V2OrdinaryReceiveStatus::WaitingForDependencies(vec![target.id()])
+    );
+    assert!(ledger.action(reply.id()).is_none());
+    assert_eq!(
+        replay(&mut ledger, &target, &second),
+        Err(ChatError::Authority)
+    );
+    assert!(ledger.action(target.id()).is_none());
+    assert_eq!(
+        replay(&mut ledger, &target, &first).unwrap(),
+        V2OrdinaryReceiveStatus::Retained(ActionState::Valid)
+    );
+    assert_eq!(
+        replay(&mut ledger, &reply, &second).unwrap(),
+        V2OrdinaryReceiveStatus::Retained(ActionState::Valid)
+    );
+    for original in [&target, &reply] {
+        assert_eq!(ledger.action(original.id()), Some(original));
+        assert!(ledger
+            .guarded_projection(original.id(), 64)
+            .unwrap()
+            .with_publication(|item| matches!(item, GuardedProjection::Held { .. }))
+            .unwrap());
+    }
+    assert!(f
+        .verifier
+        .project_provisional_from_ledger(&mut ledger, &view, &target, &first, 64)
+        .is_err());
+    assert_eq!(
+        f.verifier
+            .project_provisional_from_ledger(&mut ledger, &view, &reply, &second, 64)
+            .unwrap(),
+        V2OrdinaryReceiveStatus::Retained(ActionState::Valid)
+    );
+}
+
+#[test]
 fn actual_twenty_and_fifty_independent_keys_edit_delete_reply_and_merge_without_owner_signatures() {
     for count in [20, 50] {
         let mut f = Fixture::new();

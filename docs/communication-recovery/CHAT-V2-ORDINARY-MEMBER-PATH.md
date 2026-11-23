@@ -119,6 +119,9 @@ An exact Valid original can be prepared as encrypted action chunks and a manifes
 bound to the local vault, Profile, initial tenure and channel. The manifest preserves
 the action's original Admission and signed bytes across transport epochs. Native
 storage must select the manifest before cold replay can treat it as saved history.
+Semantic replay restores dependency knowledge only after the original signature and
+governing Admission verify. It issues no provisional projection. A reopened joined
+row can already replay an exact original from its own outbox by ActionId.
 The history disk implementation verifies a complete WAL, keeps the original file
 identities through the barriers and selects the exact manifest under a keyed ActionId
 locator. Recovery completes the same bytes after a torn bundle or selector. Native
@@ -140,6 +143,8 @@ selected MLS fence must still authorize it at the driver's submission boundary. 
 checkpoint. A successful desktop joined send or exact saved retry resolves the local receipt,
 then wakes the single worker for that installed row. The worker retries unchanged debt after
 interruption, polls for debt after an authenticated reopen and stops when the row retires.
+Foreground reads and saves share the row's local work permit with publication preparation
+and checkpointing. Transport submission runs after that permit is released.
 Desktop inbound processing and durable shared history remain open.
 Original audit chunks and request receipts remain retained after scheduling debt clears.
 Removal changes active view, never deletes the audit. Unproven late removed actions stay

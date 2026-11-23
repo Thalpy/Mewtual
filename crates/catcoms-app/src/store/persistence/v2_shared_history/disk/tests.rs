@@ -215,4 +215,20 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
             .original_bytes(),
         first.encode()
     );
+    let relocated = directory.path().join("relocated");
+    std::fs::rename(&path, &relocated).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    assert!(disk.read(&KEY, expected.action, &session, pay()).is_err());
+    assert!(disk
+        .prepare_save(&KEY, fourth, &bundle, &mut rng, &session, pay())
+        .unwrap()
+        .commit(&KEY)
+        .is_err());
+    assert_eq!(std::fs::read_dir(&path).unwrap().count(), 0);
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::rename(&relocated, &path).unwrap();
+    assert!(disk
+        .read(&KEY, expected.action, &session, pay())
+        .unwrap()
+        .is_some());
 }

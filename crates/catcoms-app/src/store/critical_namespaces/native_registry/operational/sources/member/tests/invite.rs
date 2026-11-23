@@ -752,6 +752,17 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 .read_member_dependency(&selection, channel, action, &live, &mut history_rng)
                 .unwrap().expect("settled parents remain readable by exact ActionId");
             assert_eq!(recovered_original.receipt().action, action);
+            drop(recovered_original);
+            let mut replay = recovered_row()
+                .prepare_member_ledger(&selection, channel, live.clone()).unwrap();
+            assert_eq!(
+                recovered_row().replay_saved_member_dependency(&mut replay, action, &live, &mut history_rng).unwrap(),
+                Some(V2OrdinaryReceiveStatus::Retained(ActionState::Valid))
+            );
+            assert!(replay.prepare_message_projection(action).unwrap().with_publication(|view| {
+                matches!(view, GuardedProjection::Held { .. })
+            }).unwrap());
+            drop(replay);
             assert!(recovered_row().read_member_dependency(&selection, channel + 1, action, &live, &mut history_rng).is_err());
             let mut provider = recovered_row().attach_dependency_provider(&selection, live.clone()).unwrap();
             let malformed = relay.request_connected(

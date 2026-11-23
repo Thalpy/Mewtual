@@ -385,6 +385,48 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         })
     }
 
+    /// Restore a dependency from the original installed row's selected local
+    /// receipt. The application's saved bytes supply historical semantics only.
+    pub fn replay_saved_member_dependency(
+        self,
+        ledger: &mut NativeTextJoinedMemberLedger,
+        action: ActionId,
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Option<V2OrdinaryReceiveStatus>, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        if ledger.signal.is_cancelled() {
+            return Err(Refusal::Stale);
+        }
+        self.with_member_receiver(&ledger.selection, caller, |source| {
+            let channel = ledger.ledger.realm().channel();
+            let saved = source.read_dependency(channel, action, rng)?;
+            if ledger.signal.is_cancelled() {
+                return Err(Refusal::Stale);
+            }
+            let Some(saved) = saved else {
+                return Ok(None);
+            };
+            let verifier = source
+                .prefix
+                .selected_member_verifier()
+                .map_err(|_| Refusal::Unavailable)?;
+            let admission = verifier
+                .admission(saved.receipt().admission)
+                .map_err(|_| Refusal::Stale)?;
+            verifier
+                .replay_ordinary_history_original(
+                    &mut ledger.ledger,
+                    &ledger.view,
+                    saved.action(),
+                    &admission,
+                    RECEIVE_WORK,
+                )
+                .map(Some)
+                .map_err(|_| Refusal::Failed)
+        })
+    }
+
     /// Find one exact selected own original for dependency catch-up. A
     /// request handler still needs a distinct current sealed response and
     /// the original requesting peer's authenticated scope.

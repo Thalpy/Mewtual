@@ -28,6 +28,11 @@ pub enum V2OrdinaryReceiveStatus {
     Retained(ActionState),
 }
 
+struct LedgerDependencies<'a> {
+    missing: Vec<ActionId>,
+    exact: Vec<(&'a SignedAction, V2AuthenticatedAdmission)>,
+}
+
 impl V2GeneralPrefixVerifier {
     fn require_admission(&self, admission: &V2AuthenticatedAdmission) -> Result<(), ChatError> {
         if !Arc::ptr_eq(&self.identity, &admission.core.identity)
@@ -199,7 +204,20 @@ impl V2GeneralPrefixVerifier {
         verified: VerifiedAuthorityBasis,
         token: ProjectionAdmissionToken,
     ) -> Result<ActionState, ChatError> {
-        let id = token.binding.action;
+        let state = Self::apply_verified(ledger, action, work, verified)?;
+        if state == ActionState::Valid {
+            ledger.admit_projection(&token, work)?;
+        }
+        Ok(state)
+    }
+
+    fn apply_verified(
+        ledger: &mut ChatLedger,
+        action: &SignedAction,
+        work: usize,
+        verified: VerifiedAuthorityBasis,
+    ) -> Result<ActionState, ChatError> {
+        let id = action.id();
         match ledger.action(id) {
             Some(original) if original == action => {}
             Some(_) => return Err(ChatError::AuthorityConflict),
@@ -209,11 +227,7 @@ impl V2GeneralPrefixVerifier {
         }
         ledger.authorize(id, verified)?;
         ledger.advance(work);
-        let state = ledger.state(id).ok_or(ChatError::Unknown)?;
-        if state == ActionState::Valid {
-            ledger.admit_projection(&token, work)?;
-        }
-        Ok(state)
+        ledger.state(id).ok_or(ChatError::Unknown)
     }
 
     /// Resolve only the action's exact canonical dependencies from this
@@ -228,6 +242,55 @@ impl V2GeneralPrefixVerifier {
         work: usize,
     ) -> Result<V2OrdinaryReceiveStatus, ChatError> {
         self.require_receiver_ledger(ledger, view, action)?;
+        let LedgerDependencies { missing, exact } = self.ledger_dependencies(ledger, action)?;
+        if !missing.is_empty() {
+            self.require_admission(admission)?;
+            admission.core.body.matches_action_delegation(action)?;
+            self.observe_live_member(admission.core.body.admission_id())?;
+            return Ok(V2OrdinaryReceiveStatus::WaitingForDependencies(missing));
+        }
+        let dependencies = exact
+            .iter()
+            .map(|(original, owner)| V2OrdinaryDependency::new(original, owner))
+            .collect::<Vec<_>>();
+        let (verified, token) =
+            self.provisional_evidence(action, admission, &dependencies, view)?;
+        Self::apply_provisional(ledger, action, work, verified, token)
+            .map(V2OrdinaryReceiveStatus::Retained)
+    }
+
+    /// Rebuild semantic history from exact stored originals and the verified
+    /// governing prefix. Replay restores dependency knowledge without issuing
+    /// an OPEN observation, projection token or current transport authority.
+    pub fn replay_ordinary_history_original(
+        &self,
+        ledger: &mut ChatLedger,
+        view: &ProjectionView,
+        action: &SignedAction,
+        admission: &V2AuthenticatedAdmission,
+        work: usize,
+    ) -> Result<V2OrdinaryReceiveStatus, ChatError> {
+        self.require_receiver_ledger(ledger, view, action)?;
+        let LedgerDependencies { missing, exact } = self.ledger_dependencies(ledger, action)?;
+        if !missing.is_empty() {
+            self.require_admission(admission)?;
+            admission.core.body.matches_action_delegation(action)?;
+            self.live()?;
+            return Ok(V2OrdinaryReceiveStatus::WaitingForDependencies(missing));
+        }
+        let dependencies = exact
+            .iter()
+            .map(|(original, owner)| V2OrdinaryDependency::new(original, owner))
+            .collect::<Vec<_>>();
+        let verified = self.verify_action_semantics(action, admission, &dependencies)?;
+        Self::apply_verified(ledger, action, work, verified).map(V2OrdinaryReceiveStatus::Retained)
+    }
+
+    fn ledger_dependencies<'a>(
+        &self,
+        ledger: &'a ChatLedger,
+        action: &SignedAction,
+    ) -> Result<LedgerDependencies<'a>, ChatError> {
         let profile = self.math.profile();
         let required = action.dependencies();
         let mut missing = Vec::new();
@@ -268,20 +331,10 @@ impl V2GeneralPrefixVerifier {
             }
             owners.push((&entry.action, self.admission(*owner)?));
         }
-        if !missing.is_empty() {
-            self.require_admission(admission)?;
-            admission.core.body.matches_action_delegation(action)?;
-            self.observe_live_member(admission.core.body.admission_id())?;
-            return Ok(V2OrdinaryReceiveStatus::WaitingForDependencies(missing));
-        }
-        let dependencies = owners
-            .iter()
-            .map(|(original, owner)| V2OrdinaryDependency::new(original, owner))
-            .collect::<Vec<_>>();
-        let (verified, token) =
-            self.provisional_evidence(action, admission, &dependencies, view)?;
-        Self::apply_provisional(ledger, action, work, verified, token)
-            .map(V2OrdinaryReceiveStatus::Retained)
+        Ok(LedgerDependencies {
+            missing,
+            exact: owners,
+        })
     }
 
     fn require_receiver_ledger(

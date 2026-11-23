@@ -42,6 +42,7 @@ fn regular(metadata: &fs::Metadata) -> bool {
 /// A directory held by native identity. Every barrier re-proves the name still refers to it.
 pub(in crate::store::persistence) struct HeldDirectory {
     path: PathBuf,
+    original: File,
     id: SessionId,
 }
 impl std::fmt::Debug for HeldDirectory {
@@ -56,13 +57,18 @@ impl HeldDirectory {
         crate::store::persistence::v2_genesis_activation::require_directory_name(
             &path, &directory, id,
         )?;
-        Ok(Self { path, id })
+        Ok(Self {
+            path,
+            original: directory,
+            id,
+        })
     }
     /// Hold an ALREADY captured directory by its original native identity (the namespace5
     /// mount's parent). Unlike [`Self::open`] this never adopts whatever the name refers to
     /// now: it refuses unless the name still refers to exactly that directory object.
     pub(super) fn adopt(path: PathBuf, id: SessionId) -> Result<Self, AppError> {
-        let held = Self { path, id };
+        let original = crate::store::persistence::open_archive_directory(&path)?;
+        let held = Self { path, original, id };
         held.require()?;
         Ok(held)
     }
@@ -70,9 +76,10 @@ impl HeldDirectory {
         &self.path
     }
     pub(in crate::store::persistence) fn require(&self) -> Result<(), AppError> {
-        let directory = crate::store::persistence::open_archive_directory(&self.path)?;
         crate::store::persistence::v2_genesis_activation::require_directory_name(
-            &self.path, &directory, self.id,
+            &self.path,
+            &self.original,
+            self.id,
         )
     }
     /// Directory durability barrier, bracketed by identity checks.
