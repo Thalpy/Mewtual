@@ -520,6 +520,9 @@ The desktop history route pages the original locally saved actions through
 the same context, including after a cold reopen. For a founder the desktop
 context comes from the original creation invocation in the covered row. The
 vault also retains the request digest for verifying the original settings.
+After a cold reopen, a lost founding reply can be recovered through the
+original invocation and settings on that authenticated row. A conflicting
+retry cannot create a new group or start the original network again.
 A separate desktop view
 pages saved received messages on both desktop roles through the held history
 namespace. Each body replays the exact selected actions under the current

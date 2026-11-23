@@ -93,6 +93,11 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextRuntimeSelection<T, R> {
         self.original.invocation
     }
 
+    /// Check whether a frozen retry names the original invocation and settings.
+    pub fn matches_creation_request_data(&self, request: &NativeTextCreationRequest) -> bool {
+        self.original.invocation == request.invocation && self.original.request == request.digest
+    }
+
     pub fn is_recovered_from_original_vault_cached(&self, vault: &NativeTextVault) -> bool {
         self.original.recovered_founder
             && self.original.scope.is_open()

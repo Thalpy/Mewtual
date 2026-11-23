@@ -1309,6 +1309,19 @@ async fn native_text_membership_dispatch_uses_the_original_founder_row() {
 
     let (reopened, window, cold_queue) = self::app(path, None, true);
     unlock_current(&reopened, &window, &cold_queue).await;
+    let conflicting = invite_command(
+        &window,
+        "found_server",
+        serde_json::json!({
+            "requestId": found["context"], "displayName": "Founder", "serverName": "Roster source",
+            "advertise": "127.0.0.1:46955", "relay": "", "rendezvous": "", "isDm": false,
+        }),
+    );
+    run(&cold_queue).await;
+    refused(conflicting.await.unwrap());
+    let exact = found_request(&window, 5, "Roster source");
+    run(&cold_queue).await;
+    assert_eq!(found_value(exact.await.unwrap()), found);
     let restored = invite_command(&window, "get_native_chat_members", request.clone());
     run(&cold_queue).await;
     assert_eq!(found_value(restored.await.unwrap()), roster);

@@ -286,6 +286,33 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
         result.map_err(|_| Error::Failed)
     }
 
+    /// Recheck the selected physical files before returning the original founding receipt.
+    pub fn verify_recovered_founder(
+        self,
+        caller: &RequestCancellation,
+    ) -> Result<(), V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Error;
+        if caller.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let mut job = self.finish()?;
+        let inner = &mut job.inner;
+        inner.require_current().map_err(|_| Error::Unavailable)?;
+        let result = inner
+            .loan
+            .body
+            .as_mut()
+            .and_then(|body| body.recovered_founder.as_mut())
+            .ok_or(Error::Unavailable)?
+            .require_recovered_checkpoint(caller);
+        inner.loan.recorded = true;
+        if caller.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        inner.require_current().map_err(|_| Error::Unavailable)?;
+        result.map(drop).map_err(|_| Error::Unavailable)
+    }
+
     fn prepare_join_keys(&self) -> Result<JoinKeys<T, R>, V2MemberSaveRefusal> {
         use catcoms_rt::NativeChatKeyPurpose as Purpose;
         let (cell, (keys, cuts)) = self.prepare_using_issuer(|source, command| {

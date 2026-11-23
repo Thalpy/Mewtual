@@ -244,7 +244,7 @@ impl NativeTextColdFounderSource {
 
     /// Genesis and governed heads are independently authenticated closures.
     /// A mounted genesis exposes saved reads under its original files.
-    fn require_recovered_checkpoint(
+    pub(in crate::store::critical_namespaces::native_registry) fn require_recovered_checkpoint(
         &mut self,
         caller: &RequestCancellation,
     ) -> Result<(OwnerHeaderId, u64), AppError> {
