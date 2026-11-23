@@ -12,7 +12,7 @@ on:
       scope:
         description: Workspaces to execute; all is the normal validation run.
         type: choice
-        options: [all, root, native, native-focused, native-lock, native-join, native-mutations, native-founder-restart]
+        options: [all, root, native, native-focused, native-lock, native-join, native-mutations, native-founder-restart, native-membership]
         default: all
       run_deferred_catchup:
         description: Include the slow case at final Chat V2 acceptance (scope all or root).
@@ -127,10 +127,10 @@ jobs:
       - name: Install frontend dependencies
         run: npm --prefix apps/desktop ci
       - name: Run the complete frontend tests
-        if: runner.os == 'Linux' && inputs.scope != 'native-lock' && inputs.scope != 'native-join' && inputs.scope != 'native-mutations' && inputs.scope != 'native-founder-restart'
+        if: runner.os == 'Linux' && inputs.scope != 'native-lock' && inputs.scope != 'native-join' && inputs.scope != 'native-mutations' && inputs.scope != 'native-founder-restart' && inputs.scope != 'native-membership'
         run: npm --prefix apps/desktop test
       - name: Check focused Chat V2 renderer history and session retirement
-        if: runner.os == 'Linux' && github.event_name == 'workflow_dispatch' && (inputs.scope == 'native-join' || inputs.scope == 'native-mutations')
+        if: runner.os == 'Linux' && github.event_name == 'workflow_dispatch' && (inputs.scope == 'native-join' || inputs.scope == 'native-mutations' || inputs.scope == 'native-membership')
         working-directory: apps/desktop
         run: >-
           node --experimental-strip-types --import ./scripts/test-dom.mjs
@@ -153,7 +153,7 @@ jobs:
         if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || inputs.scope == 'all' || inputs.scope == 'native') }}
         run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --no-fail-fast
       - uses: actions/setup-python@v5
-        if: github.event_name == 'workflow_dispatch' && (inputs.scope == 'native-focused' || inputs.scope == 'native-lock' || inputs.scope == 'native-join' || inputs.scope == 'native-mutations' || inputs.scope == 'native-founder-restart')
+        if: github.event_name == 'workflow_dispatch' && (inputs.scope == 'native-focused' || inputs.scope == 'native-lock' || inputs.scope == 'native-join' || inputs.scope == 'native-mutations' || inputs.scope == 'native-founder-restart' || inputs.scope == 'native-membership')
         with:
           python-version: '3.12'
       - name: Run exact native gate regressions (focused, not complete acceptance)
@@ -181,7 +181,7 @@ jobs:
           guard['validate'](''.join(summaries), code, 4)
           PY
       - name: Check focused native chat dispatch and restart
-        if: github.event_name == 'workflow_dispatch' && (inputs.scope == 'native-join' || inputs.scope == 'native-mutations' || inputs.scope == 'native-founder-restart')
+        if: github.event_name == 'workflow_dispatch' && (inputs.scope == 'native-join' || inputs.scope == 'native-mutations' || inputs.scope == 'native-founder-restart' || inputs.scope == 'native-membership')
         shell: bash
         env:
           RUST_BACKTRACE: '1'
@@ -195,15 +195,19 @@ jobs:
           guard = runpy.run_path('.github/scripts/check-chat-v2-member-save.py')
           directory = Path('logs/chat-v2-native-gates')
           directory.mkdir(parents=True, exist_ok=True)
+          membership = [
+              ('native-membership-parser', 'native_text::membership::tests::native_membership_requires_the_exact_admission', 1),
+              ('native-membership-dispatch', 'native_text::tests::native_text_membership_dispatch_uses_the_original_founder_row', 1),
+          ]
           cases = [
               ('native-send-parser', 'native_text_send_parser_', 1),
               ('native-mutation-dispatch', 'native_text_mutations_', 1),
               ('native-retry-continuity', 'native_text::continuity::tests::', 3),
-              ('native-membership-parser', 'native_text::membership::tests::native_membership_requires_the_exact_admission', 1),
-              ('native-membership-dispatch', 'native_text::tests::native_text_membership_dispatch_uses_the_original_founder_row', 1),
-          ]
+          ] + membership
           scope = os.environ['CHAT_V2_NATIVE_SCOPE']
-          if scope == 'native-join':
+          if scope == 'native-membership':
+              cases = membership
+          elif scope == 'native-join':
               cases.insert(0, ('native-join-dispatch', 'native_text_connected_join_', 5))
           elif scope == 'native-founder-restart':
               cases = [(
@@ -214,21 +218,13 @@ jobs:
                   'native-founder-welcome-retry',
                   'native_text::tests::native_text_connected_join_retries_original_welcome_after_authenticated_unlock',
                   1,
-              ), (
-                  'native-membership-parser',
-                  'native_text::membership::tests::native_membership_requires_the_exact_admission',
-                  1,
-              ), (
-                  'native-membership-dispatch',
-                  'native_text::tests::native_text_membership_dispatch_uses_the_original_founder_row',
-                  1,
-              )]
+              )] + membership
           failures = []
           for name, pattern, count in cases:
               command = ['cargo', 'test', '--locked', '--manifest-path',
                          'apps/desktop/src-tauri/Cargo.toml', '--lib', pattern,
                          '--', '--test-threads=1']
-              if scope == 'native-founder-restart':
+              if scope in ('native-founder-restart', 'native-membership'):
                   command.append('--exact')
               code, summaries, timed_out, _ = guard['run_logged'](
                   name, command, directory, limit=45 * 60,
