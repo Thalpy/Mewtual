@@ -133,19 +133,30 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     };
     let replay = verifier.replay_data();
     let used = node.installed_invites[0].unwrap();
-    let mut reused = Request::with_package_times(node, used[0], now / 1000 - 60, now / 1000 + 3600);
+    let mut reused = Request::new(node, used[0]);
     assert_eq!(reused.invite.spec_data().nonce, used);
     reused.change_invite(node, |spec| spec.expires_at_ms = now + 90_000);
     let limits = TextCurrentAddLimits::governed_text_v2();
-    node.node.check_add_package(reused.data(), limits).unwrap();
+    let repeat = PreparedV2JoinRequest::prepare(
+        MlsDevice::generate().unwrap(),
+        &reused.invite.spec_data().anchor,
+        &reused.invite,
+        [94; 32],
+        now,
+        DirectJoinLimits::new(RAW, RAW, 256 * 1024).unwrap(),
+    )
+    .unwrap();
+    let packet = V2JoinRequestPacketData::decode(repeat.request_bytes_data()).unwrap();
+    let request = packet.founder_add_data();
+    node.node.check_add_package(request, limits).unwrap();
     assert!(node
-        .preflight_subsequent_add_package_data(replay, reused.data(), limits)
+        .preflight_subsequent_add_package_data(replay, request, limits)
         .is_err());
     let refused_source = Native::new();
     let refused_payment = Arc::new(AtomicUsize::new(0));
     assert!(node
         .prepare_add_data(
-            reused.data(),
+            request,
             refused_source.source.observe(),
             super::admission(&refused_payment),
             refused_source.cut(NativeChatKeyPurpose::AddSdk),
