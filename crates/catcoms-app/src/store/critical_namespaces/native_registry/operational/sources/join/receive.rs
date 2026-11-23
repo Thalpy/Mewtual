@@ -2,8 +2,8 @@
 use super::*;
 use crate::store::persistence::v2_member_outbox::{member_outbox_key, MemberSavedOriginal};
 use crate::store::persistence::v2_shared_history::{
-    PreparedSharedHistoryRecord, SharedHistoryActionPage, SharedHistoryScope,
-    SHARED_HISTORY_RECORD_FEE,
+    PreparedSharedHistoryRecord, SharedHistoryActionPage, SharedHistoryActionQuery,
+    SharedHistoryScope, SHARED_HISTORY_RECORD_FEE,
 };
 use crate::store::ServerStore;
 use catcoms_net::{
@@ -255,7 +255,14 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             }
             source
                 .store
-                .shared_history_action_page(source.history_scope(channel), after, limit)
+                .shared_history_action_page(
+                    source.history_scope(channel),
+                    SharedHistoryActionQuery {
+                        target: None,
+                        after,
+                        limit,
+                    },
+                )
                 .map(|page| Some(NativeTextJoinedArchivedActions(page)))
                 .map_err(|_| Refusal::Failed)
         })

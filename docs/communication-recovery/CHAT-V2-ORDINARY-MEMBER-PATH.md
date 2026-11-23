@@ -150,10 +150,12 @@ exposing native rows. Migration of populated vaults remains open. The disk owner
 physical inventory against separate record and byte limits before admitting a new WAL.
 The quota check charges partially written files at their final size. At capacity,
 existing originals and idempotent retries remain readable and new writes are refused.
-The native reader can page exact archived action IDs in byte order under the held
-directory. It checks the authenticated selectors against the physical bundle inventory,
-and an unsettled WAL refuses the page. Each candidate still needs its full selected
-bundle and governing replay before a message body can be shown.
+The native reader can page exact archived Create IDs or find actions for a single
+Create in byte order under the held directory. New encrypted selectors bind the
+target found in the signed original. The reader opens the full bundle to derive
+the target from an older selector. Both versions require the same physical bundle
+inventory, and an unsettled WAL refuses the page. Each candidate still needs its
+full selected bundle and governing replay before a message body can be shown.
 The mounted joined source prepares one exact debt item for its original mesh and releases
 the metadata slot before awaiting the driver. The caller, original Core Admission and
 selected MLS fence must still authorize it at the driver's submission boundary. A real

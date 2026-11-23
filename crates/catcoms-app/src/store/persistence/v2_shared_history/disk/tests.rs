@@ -7,6 +7,14 @@ use rand_core::SeedableRng;
 
 const KEY: [u8; 32] = [90; 32];
 
+fn creates(after: Option<ActionId>, limit: usize) -> SharedHistoryActionQuery {
+    SharedHistoryActionQuery {
+        target: None,
+        after,
+        limit,
+    }
+}
+
 fn original(scope: &SharedHistoryScope, byte: u8) -> SignedAction {
     SignedAction::sign(
         &DeviceKeypair::from_seed(&[1; 32]),
@@ -115,7 +123,8 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
 
     let second = original(&scope, 20);
     let (selected, bundle) = encode(&scope, &second, admission, &mut rng);
-    let selector = disk.seal_selector(&KEY, selected, &mut rng).unwrap();
+    let selector = disk.seal_selector(&KEY, selected, None, &mut rng).unwrap();
+    assert_eq!(selector.len(), LEGACY_SELECTOR_BYTES);
     let wal = encode_wal(&selector, &bundle).unwrap();
     let wal_name = disk.directory.child(WAL_NAME);
     let mut original_wal = ensure_exact_held(&wal_name, &wal).unwrap();
@@ -132,7 +141,9 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
     std::fs::write(disk.bundle_path(selected.manifest), &bundle[..17]).unwrap();
     std::fs::write(disk.selector_path(&KEY, selected.action), &selector[..15]).unwrap();
     assert!(disk.read(&KEY, selected.action, &session, pay()).is_err());
-    assert!(disk.action_page(&KEY, None, 3, &session, pay()).is_err());
+    assert!(disk
+        .action_page(&KEY, creates(None, 3), &session, pay())
+        .is_err());
     drop(disk);
     let disk = owner();
     assert_eq!(disk.recover(&KEY, &session, pay()).unwrap(), Some(selected));
@@ -174,14 +185,15 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
     let disk = owner();
     let mut expected_actions = [expected.action, second_selected.action, selected.action];
     expected_actions.sort_unstable();
-    let first_page = disk.action_page(&KEY, None, 1, &session, pay()).unwrap();
+    let first_page = disk
+        .action_page(&KEY, creates(None, 1), &session, pay())
+        .unwrap();
     assert_eq!(first_page.actions, expected_actions[..1]);
     assert!(first_page.more);
     let last_page = disk
         .action_page(
             &KEY,
-            first_page.actions.first().copied(),
-            2,
+            creates(first_page.actions.first().copied(), 2),
             &session,
             pay(),
         )
@@ -190,20 +202,31 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
     assert!(!last_page.more);
     drop((first_page, last_page));
     let at_end = disk
-        .action_page(&KEY, expected_actions.last().copied(), 1, &session, pay())
+        .action_page(
+            &KEY,
+            creates(expected_actions.last().copied(), 1),
+            &session,
+            pay(),
+        )
         .unwrap();
     assert!(at_end.actions.is_empty());
     assert!(!at_end.more);
     drop(at_end);
-    assert!(disk.action_page(&KEY, None, 0, &session, pay()).is_err());
-    assert!(disk.action_page(&KEY, None, 65, &session, pay()).is_err());
     assert!(disk
-        .action_page(&[255; 32], None, 1, &session, pay())
+        .action_page(&KEY, creates(None, 0), &session, pay())
+        .is_err());
+    assert!(disk
+        .action_page(&KEY, creates(None, 65), &session, pay())
+        .is_err());
+    assert!(disk
+        .action_page(&[255; 32], creates(None, 1), &session, pay())
         .is_err());
     let expected_bundle = disk.bundle_path(expected.manifest);
     let foreign_bundle = disk.bundle_path(PrivateChatPageId::from_bytes([254; 32]));
     std::fs::rename(&expected_bundle, &foreign_bundle).unwrap();
-    assert!(disk.action_page(&KEY, None, 1, &session, pay()).is_err());
+    assert!(disk
+        .action_page(&KEY, creates(None, 1), &session, pay())
+        .is_err());
     std::fs::rename(&foreign_bundle, &expected_bundle).unwrap();
 
     let (fourth, bundle) = encode(&scope, &original(&scope, 22), admission, &mut rng);
@@ -255,7 +278,9 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
     std::fs::rename(&path, &relocated).unwrap();
     std::fs::create_dir(&path).unwrap();
     assert!(disk.read(&KEY, expected.action, &session, pay()).is_err());
-    assert!(disk.action_page(&KEY, None, 1, &session, pay()).is_err());
+    assert!(disk
+        .action_page(&KEY, creates(None, 1), &session, pay())
+        .is_err());
     assert!(disk
         .prepare_save(&KEY, fourth, &bundle, &mut rng, &session, pay())
         .unwrap()
@@ -268,4 +293,104 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
         .read(&KEY, expected.action, &session, pay())
         .unwrap()
         .is_some());
+}
+
+#[test]
+fn shared_history_disk_resolves_exact_creation_targets_across_selector_versions() {
+    let scope = SharedHistoryScope {
+        vault: [31; 32],
+        group: [32; 16],
+        profile: OwnerFactId::from_bytes([33; 32]),
+        tenure: OwnerTenureId::from_bytes([34; 32]),
+        creation: [35; 32],
+        channel: 36,
+    };
+    let path = tempfile::tempdir().unwrap();
+    let session = acquire_vault_session(path.path()).unwrap();
+    let directory = path.path().join("received");
+    std::fs::create_dir(&directory).unwrap();
+    let pool = CriticalCatalogReadPool::new(DISK_FEE).unwrap();
+    let pay = || pool.try_reserve(DISK_FEE).unwrap();
+    let disk = SharedHistoryDisk::from_held(
+        HeldDirectory::open(directory).unwrap(),
+        scope,
+        SharedHistoryDiskQuota::native(),
+        pool.clone(),
+        &KEY,
+    )
+    .unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(37);
+    let admission = OwnerFactId::from_bytes([38; 32]);
+    let create = original(&scope, 39);
+    let unrelated = original(&scope, 40);
+    let mutation = |nonce, body| {
+        let mut spec = create.spec().clone();
+        spec.nonce = [nonce; 16];
+        spec.parents = vec![create.id()];
+        spec.body = body;
+        SignedAction::sign(&DeviceKeypair::from_seed(&[1; 32]), spec).unwrap()
+    };
+    let edit = mutation(
+        41,
+        Body::Edit {
+            create: create.id(),
+            text: "edited".into(),
+        },
+    );
+    let delete = mutation(
+        42,
+        Body::Delete {
+            create: create.id(),
+        },
+    );
+    for action in [&create, &unrelated, &delete] {
+        let (expected, bytes) = encode(&scope, action, admission, &mut rng);
+        disk.prepare_save(&KEY, expected, &bytes, &mut rng, &session, pay())
+            .unwrap()
+            .commit(&KEY)
+            .unwrap();
+    }
+    let (expected, bytes) = encode(&scope, &edit, admission, &mut rng);
+    let wal_path = disk.directory.child(WAL_NAME);
+    let wrong = disk
+        .seal_selector(&KEY, expected, Some(unrelated.id()), &mut rng)
+        .unwrap();
+    let wal = encode_wal(&wrong, &bytes).unwrap();
+    std::fs::write(&wal_path, &wal[..]).unwrap();
+    assert!(disk.recover(&KEY, &session, pay()).is_err());
+    assert!(!disk.selector_path(&KEY, edit.id()).exists());
+    assert!(!disk.bundle_path(expected.manifest).exists());
+    assert_eq!(std::fs::read(&wal_path).unwrap(), &wal[..]);
+    std::fs::remove_file(&wal_path).unwrap();
+
+    let legacy = disk.seal_selector(&KEY, expected, None, &mut rng).unwrap();
+    std::fs::write(&wal_path, &encode_wal(&legacy, &bytes).unwrap()[..]).unwrap();
+    assert_eq!(disk.recover(&KEY, &session, pay()).unwrap(), Some(expected));
+    let mut expected_creates = [create.id(), unrelated.id()];
+    expected_creates.sort_unstable();
+    let page = disk
+        .action_page(&KEY, creates(None, 8), &session, pay())
+        .unwrap();
+    assert_eq!(page.actions, expected_creates);
+    assert!(!page.more);
+    drop(page);
+    let mut expected_target = [create.id(), edit.id(), delete.id()];
+    expected_target.sort_unstable();
+    let page = disk
+        .action_page(
+            &KEY,
+            SharedHistoryActionQuery {
+                target: Some(create.id()),
+                after: None,
+                limit: 8,
+            },
+            &session,
+            pay(),
+        )
+        .unwrap();
+    assert_eq!(page.actions, expected_target);
+    assert!(!page.more);
+    drop(page);
+    std::fs::write(disk.selector_path(&KEY, edit.id()), &wrong[..]).unwrap();
+    assert!(disk.read(&KEY, edit.id(), &session, pay()).is_err());
 }

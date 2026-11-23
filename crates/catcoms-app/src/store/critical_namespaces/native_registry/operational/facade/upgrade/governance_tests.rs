@@ -152,7 +152,9 @@ fn shared_history_physical_stage_retains_the_original_catalog_claim_and_marker()
 fn shared_history_physical_selection_reopens_the_original_promoted_files() {
     use crate::store::persistence::{
         v2_member_outbox::member_outbox_key,
-        v2_shared_history::{PreparedSharedHistoryRecord, SharedHistoryScope},
+        v2_shared_history::{
+            PreparedSharedHistoryRecord, SharedHistoryActionQuery, SharedHistoryScope,
+        },
     };
     use catcoms_replication::chat::{
         owner_facts::OwnerFactId, owner_header::OwnerTenureId, ActionSpec, BasisId, Body, GrantId,
@@ -251,7 +253,12 @@ fn shared_history_physical_selection_reopens_the_original_promoted_files() {
     assert!(store
         .read_shared_history_record(foreign, action.id())
         .is_err());
-    assert!(store.shared_history_action_page(foreign, None, 1).is_err());
+    let query = || SharedHistoryActionQuery {
+        target: None,
+        after: None,
+        limit: 1,
+    };
+    assert!(store.shared_history_action_page(foreign, query()).is_err());
     drop(key);
     drop(selected);
     let selected = NativeTextJoinedStorage::open_for_native_startup(
@@ -262,7 +269,7 @@ fn shared_history_physical_selection_reopens_the_original_promoted_files() {
     )
     .unwrap();
     let store = selected.actual_store_for_test().unwrap();
-    let page = store.shared_history_action_page(scope, None, 1).unwrap();
+    let page = store.shared_history_action_page(scope, query()).unwrap();
     assert_eq!(page.actions, [action.id()]);
     assert!(!page.more);
     drop(page);

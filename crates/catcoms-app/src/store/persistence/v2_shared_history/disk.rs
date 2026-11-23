@@ -21,7 +21,9 @@ use std::sync::Mutex;
 const SELECTOR_TAG: &[u8] = b"catcoms/private-chat-v2-shared-history-selector/v1\0";
 const SELECTOR_KEY: &[u8] = b"chat-v2/shared-history/selector";
 const LOCATOR_KEY: &[u8] = b"chat-v2/shared-history/locator";
-const SELECTOR_BYTES: usize = 4 + SELECTOR_TAG.len() + 2 + 3 * 36 + 40;
+const LEGACY_SELECTOR_BYTES: usize = 4 + SELECTOR_TAG.len() + 2 + 3 * 36 + 40;
+const SELECTOR_BYTES: usize = LEGACY_SELECTOR_BYTES + 36;
+const TARGET_SELECTOR_VERSION: u16 = 2;
 const WAL_TAG: &[u8] = b"catcoms/private-chat-v2-shared-history-wal/v1\0";
 const WAL_NAME: &str = "history.wal";
 const WAL_BYTES: usize = 4 + WAL_TAG.len() + 2 + 4 + SELECTOR_BYTES + 4 + MAX_SHARED_HISTORY_BUNDLE;
@@ -63,6 +65,25 @@ impl SharedHistoryDiskQuota {
 pub(in crate::store::persistence) struct SelectedHistoryRecord {
     pub(in crate::store::persistence) action: ActionId,
     pub(in crate::store::persistence) manifest: PrivateChatPageId,
+}
+
+struct HistorySelector {
+    record: SelectedHistoryRecord,
+    target: Option<ActionId>,
+}
+
+impl HistorySelector {
+    fn require_target(&self, action: &SignedAction) -> Result<ActionId, AppError> {
+        let target = projection_target(action, self.record.action);
+        if self.target.is_some_and(|selected| selected != target) {
+            return Err(refused());
+        }
+        Ok(target)
+    }
+}
+
+fn projection_target(action: &SignedAction, id: ActionId) -> ActionId {
+    action.spec().body.create().unwrap_or(id)
 }
 
 pub(in crate::store::persistence) struct SharedHistoryDisk {
@@ -114,7 +135,8 @@ impl SharedHistoryDisk {
             (expected.action, expected.manifest),
             bundle,
         )?;
-        let selector = self.seal_selector(key, expected, rng)?;
+        let target = projection_target(original.action(), expected.action);
+        let selector = self.seal_selector(key, expected, Some(target), rng)?;
         Ok(PreparedSharedHistorySave {
             disk: self,
             expected,
@@ -186,14 +208,13 @@ impl SharedHistoryDisk {
     pub(in crate::store::persistence) fn action_page(
         &self,
         key: &[u8; 32],
-        after: Option<ActionId>,
-        limit: usize,
+        query: SharedHistoryActionQuery,
         session: &VaultSessionGuard,
         payment: CatalogReadReservation,
     ) -> Result<SharedHistoryActionPage, AppError> {
         payment.validate(&self.pool, DISK_FEE)?;
         self.require_key(key)?;
-        if !(1..=MAX_ACTIONS_PER_PAGE).contains(&limit) {
+        if !(1..=MAX_ACTIONS_PER_PAGE).contains(&query.limit) {
             return Err(refused());
         }
         let _lease = session.retain_for_physical_work();
@@ -216,17 +237,27 @@ impl SharedHistoryDisk {
                     bundles.push(manifest);
                 }
                 HistoryLeaf::Selector => {
-                    if actions.len() == self.quota.records {
+                    if selected_bundles.len() == self.quota.records {
                         return Err(refused());
                     }
                     let (file, identity, raw) = read_bounded_held(&path, SELECTOR_BYTES, false)?;
                     let selected = self.open_selector(key, &raw)?;
-                    if path != self.selector_path(key, selected.action) {
+                    let record = selected.record;
+                    if path != self.selector_path(key, record.action) {
                         return Err(refused());
                     }
+                    let target = match selected.target {
+                        Some(target) => target,
+                        None => {
+                            let (_, original) = self.open_selected_bundle(key, &selected)?;
+                            selected.require_target(original.action())?
+                        }
+                    };
                     require_exact_held(&path, &mut (file, identity), &raw)?;
-                    actions.push(selected.action);
-                    selected_bundles.push(selected.manifest);
+                    if target == query.target.unwrap_or(record.action) {
+                        actions.push(record.action);
+                    }
+                    selected_bundles.push(record.manifest);
                 }
             }
         }
@@ -239,13 +270,13 @@ impl SharedHistoryDisk {
         }
         self.directory.require()?;
         actions.sort_unstable();
-        let start = after.map_or(0, |cursor| {
+        let start = query.after.map_or(0, |cursor| {
             actions.partition_point(|action| *action <= cursor)
         });
         let remaining = &actions[start..];
         Ok(SharedHistoryActionPage {
-            actions: remaining.iter().take(limit).copied().collect(),
-            more: remaining.len() > limit,
+            actions: remaining.iter().take(query.limit).copied().collect(),
+            more: remaining.len() > query.limit,
             _payment: payment,
         })
     }
@@ -268,16 +299,19 @@ impl SharedHistoryDisk {
     ) -> Result<SelectedHistoryRecord, AppError> {
         let (selector, bundle) = decode_wal(wal)?;
         let selected = self.open_selector(key, selector)?;
-        open_shared_history_bundle(
+        let (_, action) = open_shared_history_bundle(
             &self.scope,
             key,
-            (selected.action, selected.manifest),
+            (selected.record.action, selected.record.manifest),
             bundle,
         )?;
+        selected.require_target(action.action())?;
+        drop(action);
+        let selected = selected.record;
         self.directory.require()?;
         let wal_path = self.directory.child(WAL_NAME);
         require_exact_held(&wal_path, original, wal)?;
-        self.require_archive_capacity(key, selected, bundle.len())?;
+        self.require_archive_capacity(key, selected, selector.len(), bundle.len())?;
         let mut barrier = open_exact_write(&wal_path, WriteMode::Existing)?;
         if barrier.1 != original.1 {
             return Err(refused());
@@ -324,6 +358,7 @@ impl SharedHistoryDisk {
         &self,
         key: &[u8; 32],
         selected: SelectedHistoryRecord,
+        selector_bytes: usize,
         bundle_bytes: usize,
     ) -> Result<(), AppError> {
         let limit = 2 * self.quota.records + 1;
@@ -335,14 +370,14 @@ impl SharedHistoryDisk {
         let target_bundle = self.bundle_path(selected.manifest);
         let mut selectors = 1;
         let mut bundles = 1;
-        let mut used = SELECTOR_BYTES + bundle_bytes;
+        let mut used = selector_bytes + bundle_bytes;
         for name in names {
             let (leaf, role) = history_leaf(&name)?;
             let path = self.directory.child(leaf);
             let (maximum, candidate_bytes, target, count) = match role {
                 HistoryLeaf::Selector => (
                     SELECTOR_BYTES,
-                    SELECTOR_BYTES,
+                    selector_bytes,
                     &target_selector,
                     &mut selectors,
                 ),
@@ -387,22 +422,29 @@ impl SharedHistoryDisk {
         let (selector_file, selector_id, selector) =
             read_bounded_held(&path, SELECTOR_BYTES, false)?;
         let selected = self.open_selector(key, &selector)?;
-        if selected.action != action {
+        if selected.record.action != action {
             return Err(refused());
         }
-        let bundle_path = self.bundle_path(selected.manifest);
+        let (admission, original) = self.open_selected_bundle(key, &selected)?;
+        require_exact_held(&path, &mut (selector_file, selector_id), &selector)?;
+        self.directory.require()?;
+        Ok(Some((selected.record, admission, original)))
+    }
+
+    fn open_selected_bundle(
+        &self,
+        key: &[u8; 32],
+        selected: &HistorySelector,
+    ) -> Result<(OwnerFactId, AssembledActionOriginal), AppError> {
+        let record = selected.record;
+        let bundle_path = self.bundle_path(record.manifest);
         let (bundle_file, bundle_id, bytes) =
             read_bounded_held(&bundle_path, MAX_SHARED_HISTORY_BUNDLE, false)?;
-        let (admission, original) = open_shared_history_bundle(
-            &self.scope,
-            key,
-            (selected.action, selected.manifest),
-            &bytes,
-        )?;
-        require_exact_held(&path, &mut (selector_file, selector_id), &selector)?;
+        let (admission, original) =
+            open_shared_history_bundle(&self.scope, key, (record.action, record.manifest), &bytes)?;
+        selected.require_target(original.action())?;
         require_exact_held(&bundle_path, &mut (bundle_file, bundle_id), &bytes)?;
-        self.directory.require()?;
-        Ok(Some((selected, admission, original)))
+        Ok((admission, original))
     }
 
     fn selector_path(&self, key: &[u8; 32], action: ActionId) -> std::path::PathBuf {
@@ -421,37 +463,56 @@ impl SharedHistoryDisk {
         &self,
         key: &[u8; 32],
         data: SelectedHistoryRecord,
+        target: Option<ActionId>,
         rng: &mut impl CryptoRngCore,
     ) -> Result<Zeroizing<Vec<u8>>, AppError> {
         let context = self.scope.key(key);
         let key = Zeroizing::new(*blake3::keyed_hash(&context, SELECTOR_KEY).as_bytes());
         let mut plain = Encoder::with_capacity(SELECTOR_BYTES - 40);
-        wire(plain.put_bytes(SELECTOR_TAG))?.put_u16(VERSION);
+        wire(plain.put_bytes(SELECTOR_TAG))?.put_u16(if target.is_some() {
+            TARGET_SELECTOR_VERSION
+        } else {
+            VERSION
+        });
         wire(plain.put_bytes(&self.scope.id()))?;
         wire(plain.put_bytes(data.action.as_bytes()))?;
         wire(plain.put_bytes(data.manifest.as_bytes()))?;
+        if let Some(target) = target {
+            wire(plain.put_bytes(target.as_bytes()))?;
+        }
         let sealed = catcoms_crypto::seal(&key, &Zeroizing::new(plain.finish()), rng)?;
         Ok(Zeroizing::new(frame(&sealed)))
     }
 
-    fn open_selector(&self, key: &[u8; 32], raw: &[u8]) -> Result<SelectedHistoryRecord, AppError> {
-        if raw.len() != SELECTOR_BYTES {
+    fn open_selector(&self, key: &[u8; 32], raw: &[u8]) -> Result<HistorySelector, AppError> {
+        if !valid_selector_size(raw.len()) {
             return Err(refused());
         }
         let context = self.scope.key(key);
         let key = Zeroizing::new(*blake3::keyed_hash(&context, SELECTOR_KEY).as_bytes());
         let plain = Zeroizing::new(catcoms_crypto::unseal(&key, &unframe(raw)?)?);
         let mut input = Decoder::new(&plain);
-        if wire(input.get_bytes())? != SELECTOR_TAG
-            || wire(input.get_u16())? != VERSION
-            || digest(&mut input)? != self.scope.id()
-        {
+        if wire(input.get_bytes())? != SELECTOR_TAG {
+            return Err(refused());
+        }
+        let version = wire(input.get_u16())?;
+        if digest(&mut input)? != self.scope.id() {
             return Err(refused());
         }
         let action = ActionId::from_bytes(digest(&mut input)?);
         let manifest = PrivateChatPageId::from_bytes(digest(&mut input)?);
+        let target = match (version, raw.len()) {
+            (VERSION, LEGACY_SELECTOR_BYTES) => None,
+            (TARGET_SELECTOR_VERSION, SELECTOR_BYTES) => {
+                Some(ActionId::from_bytes(digest(&mut input)?))
+            }
+            _ => return Err(refused()),
+        };
         wire(input.finish())?;
-        Ok(SelectedHistoryRecord { action, manifest })
+        Ok(HistorySelector {
+            record: SelectedHistoryRecord { action, manifest },
+            target,
+        })
     }
 }
 
@@ -493,6 +554,13 @@ pub(in crate::store) struct SharedHistoryActionPage {
     _payment: CatalogReadReservation,
 }
 
+pub(in crate::store) struct SharedHistoryActionQuery {
+    /// None selects Creates. An exact Create ID selects all of its actions.
+    pub(in crate::store) target: Option<ActionId>,
+    pub(in crate::store) after: Option<ActionId>,
+    pub(in crate::store) limit: usize,
+}
+
 pub(in crate::store::persistence) struct PreparedSharedHistorySave<'disk> {
     disk: &'disk SharedHistoryDisk,
     expected: SelectedHistoryRecord,
@@ -520,8 +588,8 @@ impl PreparedSharedHistorySave<'_> {
             if let Some(selected) = self.prior_selection(key)? {
                 return Ok(selected);
             }
-            let (_, bundle) = decode_wal(&self.wal)?;
-            disk.require_archive_capacity(key, self.expected, bundle.len())?;
+            let (selector, bundle) = decode_wal(&self.wal)?;
+            disk.require_archive_capacity(key, self.expected, selector.len(), bundle.len())?;
             self.attempt = Some(open_exact_write(&path, WriteMode::Create)?);
         } else if observe(&path)? == Presence::Absent {
             // The selection may already be durable when the final cleanup
@@ -563,7 +631,7 @@ pub(in crate::store) struct SavedSharedOriginal {
 }
 
 fn encode_wal(selector: &[u8], bundle: &[u8]) -> Result<Zeroizing<Vec<u8>>, AppError> {
-    if selector.len() != SELECTOR_BYTES || bundle.len() > MAX_SHARED_HISTORY_BUNDLE {
+    if !valid_selector_size(selector.len()) || bundle.len() > MAX_SHARED_HISTORY_BUNDLE {
         return Err(refused());
     }
     let mut out = Encoder::with_capacity(WAL_BYTES);
@@ -584,10 +652,14 @@ fn decode_wal(wal: &[u8]) -> Result<(&[u8], &[u8]), AppError> {
     let selector = wire(input.get_bytes())?;
     let bundle = wire(input.get_bytes())?;
     wire(input.finish())?;
-    if selector.len() != SELECTOR_BYTES || bundle.len() > MAX_SHARED_HISTORY_BUNDLE {
+    if !valid_selector_size(selector.len()) || bundle.len() > MAX_SHARED_HISTORY_BUNDLE {
         return Err(refused());
     }
     Ok((selector, bundle))
+}
+
+fn valid_selector_size(bytes: usize) -> bool {
+    matches!(bytes, LEGACY_SELECTOR_BYTES | SELECTOR_BYTES)
 }
 
 #[cfg(test)]

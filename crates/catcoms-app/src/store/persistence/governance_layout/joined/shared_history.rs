@@ -13,7 +13,7 @@ use crate::store::persistence::v2_shared_history::{
         SavedSharedOriginal, SelectedHistoryRecord, SharedHistoryDisk, SharedHistoryDiskQuota,
         DISK_FEE,
     },
-    SharedHistoryActionPage, SharedHistoryScope,
+    SharedHistoryActionPage, SharedHistoryActionQuery, SharedHistoryScope,
 };
 use catcoms_replication::chat::ActionId;
 use catcoms_storage::private_chat_page::PrivateChatPageId;
@@ -209,11 +209,10 @@ impl ServerStore {
     pub(in crate::store) fn shared_history_action_page(
         &self,
         scope: SharedHistoryScope,
-        after: Option<ActionId>,
-        limit: usize,
+        query: SharedHistoryActionQuery,
     ) -> Result<SharedHistoryActionPage, AppError> {
         self.with_shared_history(scope, |disk, key, payment| {
-            disk.action_page(key, after, limit, &self._session, payment)
+            disk.action_page(key, query, &self._session, payment)
         })
     }
 
