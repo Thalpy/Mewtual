@@ -13,8 +13,7 @@ use catcoms_replication::chat::{
     V2HostSelectionExpectation, V2ProjectionOrigin,
 };
 use catcoms_sync::{
-    PreparedV2JoinedPrefix, RecoveredV2JoinedOutcome, V2FirstJoinDeliveryData,
-    V2PendingJoinContextData, MAX_V2_FIRST_ADD_PROOF_BYTES,
+    PreparedV2JoinedPrefix, RecoveredV2JoinedOutcome, V2JoinDeliveryData, V2PendingJoinContextData,
 };
 use critical_namespaces::joined_pin::pending::SelectedJoinData;
 use critical_namespaces::joined_pin::welcome as codec;
@@ -285,10 +284,12 @@ impl JoinedCore {
         const CORE_FEE: usize = 2 * REPLAY_MATH_PRIVATE_INVOICE
             + V2GeneralPrefixVerifier::metadata_layout_bytes()
             + ProjectionGroup::initial_metadata_layout_bytes()
-            + 4 * std::mem::size_of::<JoinedCore>()
-            + 2 * MAX_V2_FIRST_ADD_PROOF_BYTES;
+            + 4 * std::mem::size_of::<JoinedCore>();
         let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
-        let fee = policy.current.archive.pending.pool.try_reserve(CORE_FEE)?;
+        let bytes = CORE_FEE
+            .checked_add(delivery.len().checked_mul(2).ok_or_else(denied)?)
+            .ok_or_else(denied)?;
+        let fee = policy.current.archive.pending.pool.try_reserve(bytes)?;
         let mut group = ProjectionGroup::new(group).map_err(|_| denied())?;
         let mut view = group.begin_view();
         if !view.try_ready() {
@@ -297,9 +298,8 @@ impl JoinedCore {
         let origin = V2ProjectionOrigin::new(Arc::new(
             store.chat_mount.capture_cached_physical_negative(),
         ));
-        let decoded = V2FirstJoinDeliveryData::decode(delivery).map_err(|_| denied())?;
-        let (proof, bytes) = decoded.governing_proof_data();
-        let public_headers = proof.header_ids_data();
+        let decoded = V2JoinDeliveryData::decode(delivery).map_err(|_| denied())?;
+        let (public_headers, bytes) = decoded.proof_data().map_err(|_| denied())?;
         let public_proof = Zeroizing::new(bytes.to_vec());
         drop(decoded);
         let (core, expected) = prepare(&view, origin)?;
@@ -556,10 +556,15 @@ pub(super) fn recover(
     let (request, context) = pending.pending_data();
     let delivery = codec::open_entry(key, context, pending_frame, &entry.1)?;
     request
-        .validate_first_join_delivery_data(&delivery)
+        .validate_pinned_join_delivery_data(&delivery)
         .map_err(|_| denied())?;
     let outcome = if let Some(outcome) = read(&outcome_path, codec::OUTCOME_FRAME)? {
         let opened = codec::open_outcome(key, context, &entry.1, &outcome.1)?;
+        if opened.history.is_none()
+            && V2JoinDeliveryData::later_frame_data(&delivery).map_err(|_| denied())?
+        {
+            return Err(denied());
+        }
         let admission = reserve_sdk_graph(store)?;
         let recovered =
             RecoveredV2JoinedOutcome::open(&opened.sealed, key, request, &delivery, admission)

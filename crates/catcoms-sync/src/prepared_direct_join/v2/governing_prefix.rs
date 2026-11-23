@@ -210,16 +210,28 @@ pub enum V2JoinDeliveryData<'a> {
 
 impl<'a> V2JoinDeliveryData<'a> {
     pub fn decode(raw: &'a [u8]) -> Result<Self, SyncError> {
+        if Self::later_frame_data(raw)? {
+            V2GoverningJoinDeliveryData::decode(raw).map(Self::Later)
+        } else {
+            V2FirstJoinDeliveryData::decode(raw).map(Self::First)
+        }
+    }
+
+    /// Classify the bounded outer tag for a storage record. The caller still
+    /// decodes and authenticates the original complete delivery.
+    pub fn later_frame_data(raw: &[u8]) -> Result<bool, SyncError> {
         if raw.len() > MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES {
             return Err(SyncError::Malformed);
         }
-        let tag = Decoder::new(raw)
-            .get_bytes()
-            .map_err(|_| SyncError::Malformed)?;
-        if tag == FIRST_JOIN_DELIVERY_TAG {
-            V2FirstJoinDeliveryData::decode(raw).map(Self::First)
+        let mut decoder = Decoder::new(raw);
+        let tag = decoder.get_bytes().map_err(|_| SyncError::Malformed)?;
+        if decoder.get_u16().map_err(|_| SyncError::Malformed)? != VERSION {
+            return Err(SyncError::Malformed);
+        }
+        if tag == FIRST_JOIN_DELIVERY_TAG && raw.len() <= MAX_V2_FIRST_JOIN_DELIVERY_BYTES {
+            Ok(false)
         } else if tag == DELIVERY_TAG {
-            V2GoverningJoinDeliveryData::decode(raw).map(Self::Later)
+            Ok(true)
         } else {
             Err(SyncError::Malformed)
         }

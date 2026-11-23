@@ -514,7 +514,7 @@ pub(super) async fn receive_connected_join(
         )
         .await
         .map_err(|_| refused())?;
-    if !authority.authorized() || delivery.len() > MAX_V2_FIRST_JOIN_DELIVERY_BYTES {
+    if !authority.authorized() || delivery.len() > CHAT_V2_JOIN_RESPONSE_MAX_BYTES {
         return Err(refused());
     }
     Ok(ConnectedJoinDelivery {

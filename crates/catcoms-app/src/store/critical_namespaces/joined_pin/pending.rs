@@ -223,7 +223,7 @@ impl PreparedPinnedPending {
 
     pub(in crate::store) fn validate_delivery_data(&self, delivery: &[u8]) -> Result<(), AppError> {
         self.source
-            .validate_first_join_delivery_data(delivery)
+            .validate_pinned_join_delivery_data(delivery)
             .map_err(|_| refused())
     }
 
@@ -242,18 +242,10 @@ impl PreparedPinnedPending {
         negative: Option<&catcoms_rt::RequestCancellation>,
         key: Option<NativeV2JoinKeyEntry<'_>>,
     ) -> Result<(), AppError> {
-        match (negative, key) {
-            (Some(negative), Some(key)) => self
-                .source
-                .finish_native_first_join_delivery(delivery, negative, key),
-            (Some(negative), None) => self
-                .source
-                .finish_first_join_delivery_cancellable(delivery, negative),
-            (None, None) => self.source.finish_first_join_delivery(delivery),
-            (None, Some(_)) => return Err(refused()),
-        }
-        .map(|_| ())
-        .map_err(|_| refused())
+        self.source
+            .finish_pinned_join_delivery(delivery, negative, key)
+            .map(|_| ())
+            .map_err(|_| refused())
     }
 
     pub(in crate::store) fn seal_outcome(

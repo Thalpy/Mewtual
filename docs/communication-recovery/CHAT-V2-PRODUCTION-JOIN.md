@@ -351,6 +351,14 @@ selected Header and Admission, the resulting state commitment and epoch, the
 original founder key, the SDK authenticator, and the full active roster.
 The native store still owns the durable archive selection and cold activation.
 
+A new member can verify a later Welcome against the complete prefix from its
+original pin. It prepares the final Add for host selection and retains its
+own Admission from that Add. The native joined journal writes a distinct
+later-entry version and requires the exact new selected-history page on cold
+open. The original first-entry version and legacy first outcome remain
+readable. The native founder's later writer is still needed to exercise the
+connected exchange and physical reopen together.
+
 An existing joined member can stage and merge the exact later Add on a closed
 candidate graph while its live epoch remains unchanged. The SDK checks the
 authenticated committer, one inline Add, the joining device and signed

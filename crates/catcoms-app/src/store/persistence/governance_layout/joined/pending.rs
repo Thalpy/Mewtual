@@ -5,7 +5,8 @@ use crate::store::NativeTextJoinedRegistrationData;
 use catcoms_replication::chat::join_bindings::{GenesisAnchorBindingData, SignedInviteBindingData};
 use catcoms_replication::chat::owner_header::OwnerHeaderId;
 use catcoms_sync::{
-    DirectJoinLimits, NativeV2JoinKeyEntry, PreparedV2JoinRequest, MAX_V2_FIRST_JOIN_DELIVERY_BYTES,
+    DirectJoinLimits, NativeV2JoinKeyEntry, PreparedV2JoinRequest,
+    MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES,
 };
 use critical_namespaces::joined_pin::pending::{
     JoinedTransportReservation, PreparedPinnedPending, RecoveredPinnedPending, MAX_FRAME,
@@ -20,11 +21,11 @@ mod welcome;
 pub(in crate::store) use registration::JoinedRegistrationDependency;
 pub(in crate::store) use welcome::RecoveredMemberPrefix;
 
-fn first_join_limits() -> Result<DirectJoinLimits, AppError> {
+fn joined_welcome_limits() -> Result<DirectJoinLimits, AppError> {
     DirectJoinLimits::new(
         512 * 1024,
         2 * 1024 * 1024,
-        MAX_V2_FIRST_JOIN_DELIVERY_BYTES,
+        MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES,
     )
     .map_err(|_| denied())
 }
@@ -129,7 +130,7 @@ pub(super) fn select(
     {
         return Err(denied());
     }
-    let pending = RecoveredPinnedPending::open(key, layout, &original.1, first_join_limits()?)?;
+    let pending = RecoveredPinnedPending::open(key, layout, &original.1, joined_welcome_limits()?)?;
     let (before, after) = pending.index_frames();
     let (request, context) = pending.pending_data();
     if context.original_pending
@@ -323,7 +324,7 @@ impl ServerStore {
             let pool = &policy.current.archive.pending.pool;
             let _fee = pool.try_reserve(PREPARATION_BYTES)?;
             require_live()?;
-            let limits = first_join_limits()?;
+            let limits = joined_welcome_limits()?;
             let source = match accepted.transport {
                 AcceptedJoinTransport::External => PreparedV2JoinRequest::prepare(
                     catcoms_mls::MlsDevice::generate()?,
@@ -399,7 +400,7 @@ impl ServerStore {
             &key,
             selected.index.layout_data(),
             raw,
-            first_join_limits()?,
+            joined_welcome_limits()?,
             native,
         )?;
         let output = JoinedPendingIo {
@@ -487,7 +488,8 @@ impl ServerStore {
             rng,
         )?;
         let exact = Zeroizing::new(prepared.seal(&key, rng)?.to_vec());
-        let recovered = RecoveredPinnedPending::open(&key, layout, &exact, first_join_limits()?)?;
+        let recovered =
+            RecoveredPinnedPending::open(&key, layout, &exact, joined_welcome_limits()?)?;
         if recovered.index_frames().0 != selected.selected.1.as_slice() {
             return Err(denied());
         }
@@ -686,7 +688,7 @@ impl ServerStore {
             return Err(denied());
         }
         source
-            .validate_first_join_delivery_data(delivery)
+            .validate_pinned_join_delivery_data(delivery)
             .map_err(|_| denied())?;
         self.require_recovered_request(selected).map(|_| ())
     }
@@ -788,7 +790,7 @@ impl JoinedPendingIo {
             &key,
             selected.index.layout_data(),
             &self.exact,
-            first_join_limits()?,
+            joined_welcome_limits()?,
         )?;
         if expected.index_frames().0 != selected.selected.1.as_slice() {
             return Err(denied());

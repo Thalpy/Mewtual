@@ -153,7 +153,9 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextJoinedRuntime<T, R> {
         negative: &RequestCancellation,
     ) -> Result<bytes::Bytes, AppError> {
         let node = self.node.as_ref().ok_or_else(refused)?;
-        if negative.is_cancelled() || node.selected_join_data().map_err(|_| refused())?.0 != child {
+        if negative.is_cancelled()
+            || !matches!(node.selected_join_data(), Ok((head, _, 1)) if head == child)
+        {
             return Err(refused());
         }
         let (mount, fee) = self.storage.index.joined_exchange_resources(
