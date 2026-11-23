@@ -519,6 +519,20 @@ impl Store {
             .validate_recovered_join_delivery(request, delivery)
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn cover_recovered_member_add<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
+        &self,
+        node: &mut catcoms_sync::ClosedV2JoinedNode<T, R>,
+        delivery: &[u8],
+        caller: &catcoms_rt::RequestCancellation,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+    ) -> Result<(), AppError> {
+        self.physical
+            .cover_recovered_member_add(node, delivery, caller, rng)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn attach_recovered_joined_node<
         T: catcoms_rt::MeshTransport,
         R: catcoms_rt::CryptoRngCore,

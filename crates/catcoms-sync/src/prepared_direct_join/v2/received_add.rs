@@ -124,6 +124,7 @@ impl V2MemberAddRequestData {
 pub struct V2MemberAddFrameData<'a> {
     header: SignedOwnerHeader,
     remainder: &'a [u8],
+    digest: blake3::Hash,
 }
 
 impl<'a> V2MemberAddFrameData<'a> {
@@ -169,11 +170,16 @@ impl<'a> V2MemberAddFrameData<'a> {
         Ok(Self {
             header,
             remainder: &raw[raw.len() - decoder.remaining()..],
+            digest: blake3::hash(raw),
         })
     }
 
     pub fn header_data(&self) -> &SignedOwnerHeader {
         &self.header
+    }
+
+    pub(super) fn digest_data(&self) -> blake3::Hash {
+        self.digest
     }
 
     pub(super) fn body_data(&self) -> Result<(AdmissionBody, &'a [u8], &'a [u8]), SyncError> {

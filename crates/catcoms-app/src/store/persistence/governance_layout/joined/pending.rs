@@ -258,6 +258,33 @@ std::thread_local! {
 }
 
 impl ServerStore {
+    pub(in crate::store) fn cover_recovered_member_add<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
+        &self,
+        node: &mut catcoms_sync::ClosedV2JoinedNode<T, R>,
+        delivery: &[u8],
+        caller: &catcoms_rt::RequestCancellation,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+    ) -> Result<catcoms_sync::RetiredV2JoinedAdd, AppError> {
+        let (_, context) = self.selected_pending_join_data()?.ok_or_else(denied)?;
+        let (retired, verified) = {
+            let mut slot = self.joined_pin_index.try_lock().map_err(|_| denied())?;
+            let selected = slot.as_mut().ok_or_else(denied)?;
+            selected.require(self)?;
+            let welcome = selected
+                .pending
+                .as_mut()
+                .and_then(|pending| pending.welcome.as_mut())
+                .ok_or_else(denied)?;
+            let retired = welcome.cover_member_add(self, context, node, delivery, caller, rng)?;
+            (retired, selected.require(self))
+        };
+        verified?;
+        Ok(retired)
+    }
+
     #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store) fn check_recovered_member_add_frame_for_test<
         T: catcoms_rt::MeshTransport,
@@ -265,19 +292,41 @@ impl ServerStore {
     >(
         &self,
         node: &catcoms_sync::ClosedV2JoinedNode<T, R>,
-        frame: &catcoms_sync::V2MemberAddFrameData<'_>,
+        wire: &[u8],
+        rng: &mut impl catcoms_rt::CryptoRngCore,
     ) -> Result<(OwnerHeaderId, u64), AppError> {
         let original = self.recovered_join_outcome_data()?.ok_or_else(denied)?;
+        let (_, context) = self.selected_pending_join_data()?.ok_or_else(denied)?;
+        let frame = catcoms_sync::V2MemberAddFrameData::decode(wire)?;
+        let key = Zeroizing::new(self.keys.db_key()?);
         let allowance = super::super::v2_text::prepare_sdk_admission(self)?;
         let pending = {
             let mut slot = self.joined_pin_index.try_lock().map_err(|_| denied())?;
-            let prefix = slot
+            let welcome = slot
                 .as_mut()
                 .and_then(|index| index.pending.as_mut())
                 .and_then(|pending| pending.welcome.as_mut())
-                .ok_or_else(denied)?
-                .member_prefix_mut_for_test()?;
-            node.prepare_member_add_frame(prefix, frame, allowance)?
+                .ok_or_else(denied)?;
+            let prefix = welcome.member_prefix_mut_for_test()?;
+            let pending = node.prepare_member_add_frame(prefix, &frame, allowance)?;
+            let (_, (_, predecessor)) = welcome.registration_files()?;
+            use critical_namespaces::joined_pin::welcome as record;
+            let raw = record::seal_member_add(&key, context, predecessor, wire, &pending, rng)?;
+            let opened = record::open_member_add(&key, context, predecessor, &raw)?;
+            if opened.delivery != wire
+                || opened.require_original_candidate(&context.vault, &pending)?
+                    != pending.selected_epoch_data()
+            {
+                return Err(denied());
+            }
+            assert!(record::open_member_add(&key, context, &predecessor[1..], &raw).is_err());
+            let mut foreign = context;
+            foreign.pin[0] ^= 1;
+            assert!(record::open_member_add(&key, foreign, predecessor, &raw).is_err());
+            assert!(
+                record::open_member_add(&key, context, predecessor, &raw[..raw.len() - 1]).is_err()
+            );
+            pending
         };
         let (head, _, epoch) = node.selected_join_data()?;
         if (head, epoch) != original || self.recovered_join_outcome_data()? != Some(original) {
@@ -322,12 +371,13 @@ impl ServerStore {
         let slot = self.joined_pin_index.lock().map_err(|_| denied())?;
         let selected = slot.as_ref().ok_or_else(denied)?;
         selected.require(self)?;
-        let data = selected
+        let welcome = selected
             .pending
             .as_ref()
             .and_then(|pending| pending.welcome.as_ref())
-            .ok_or_else(denied)?
-            .capture_member_prefix()?;
+            .ok_or_else(denied)?;
+        welcome.require_member_adds()?;
+        let data = welcome.capture_member_prefix()?;
         selected.require(self)?;
         Ok(data)
     }
@@ -772,6 +822,18 @@ impl ServerStore {
         if self.recovered_join_outcome_data()? != Some(original) {
             return Err(denied());
         }
+        let (_, context) = self.selected_pending_join_data()?.ok_or_else(denied)?;
+        let node = output.as_mut().ok_or_else(denied)?;
+        let mut slot = self.joined_pin_index.try_lock().map_err(|_| denied())?;
+        let selected = slot.as_mut().ok_or_else(denied)?;
+        selected.require(self)?;
+        selected
+            .pending
+            .as_mut()
+            .and_then(|pending| pending.welcome.as_mut())
+            .ok_or_else(denied)?
+            .recover_member_adds(self, context, node)?;
+        selected.require(self)?;
         Ok(())
     }
 }

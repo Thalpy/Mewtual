@@ -344,6 +344,11 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
             super::admission(&member_payment),
         )
         .unwrap();
+    assert!(warm_candidate.matches_frame_data(&original_frame));
+    let mut changed_frame = original_frame.clone();
+    *changed_frame.last_mut().unwrap() ^= 1;
+    assert!(!warm_candidate.matches_frame_data(&changed_frame));
+    assert!(!warm_candidate.matches_frame_data(&original_frame[..original_frame.len() - 1]));
     assert_eq!(warm_candidate.header_data().id(), header.id());
     assert_eq!(
         warm_candidate.selected_epoch_data(),

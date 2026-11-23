@@ -19,6 +19,8 @@ use critical_namespaces::joined_pin::pending::SelectedJoinData;
 use critical_namespaces::joined_pin::welcome as codec;
 use std::sync::Arc;
 
+mod member_add;
+
 pub(super) const ENTRY: &str = "chat-critical-namespaces.joined-welcome-entry.bin";
 pub(super) const OUTCOME: &str = "chat-critical-namespaces.joined-welcome-outcome.bin";
 type RegistrationFiles<'a> = ((&'a File, &'a [u8]), (&'a File, &'a [u8]));
@@ -247,6 +249,7 @@ struct ClosedOutcome {
     file: OpenedArchiveObject,
     graph: RecoveredV2JoinedOutcome,
     selection: Arc<JoinedCore>,
+    member_adds: member_add::MemberAdds,
 }
 
 /// Paid capture of the exact independently replayed cold prefix. It retains
@@ -417,11 +420,64 @@ impl ClosedOutcome {
             file,
             graph,
             selection: Arc::new(selection),
+            member_adds: member_add::MemberAdds::default(),
         })
     }
 }
 
 impl RecoveredWelcome {
+    pub(super) fn recover_member_adds<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
+        &mut self,
+        store: &ServerStore,
+        context: V2PendingJoinContextData,
+        node: &mut catcoms_sync::ClosedV2JoinedNode<T, R>,
+    ) -> Result<(), AppError> {
+        self.require(store)?;
+        let outcome = self.outcome.as_mut().ok_or_else(denied)?;
+        let selected = Arc::get_mut(&mut outcome.selection).ok_or_else(denied)?;
+        selected.initial.ok_or_else(denied)?;
+        outcome
+            .member_adds
+            .recover(store, context, &outcome.file.1, &mut selected.core, node)?;
+        self.require(store)
+    }
+
+    pub(super) fn cover_member_add<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore>(
+        &mut self,
+        store: &ServerStore,
+        context: V2PendingJoinContextData,
+        node: &mut catcoms_sync::ClosedV2JoinedNode<T, R>,
+        delivery: &[u8],
+        caller: &catcoms_rt::RequestCancellation,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+    ) -> Result<catcoms_sync::RetiredV2JoinedAdd, AppError> {
+        self.require(store)?;
+        let outcome = self.outcome.as_mut().ok_or_else(denied)?;
+        let selected = Arc::get_mut(&mut outcome.selection).ok_or_else(denied)?;
+        selected.initial.ok_or_else(denied)?;
+        outcome.member_adds.cover(
+            store,
+            context,
+            &outcome.file.1,
+            &mut selected.core,
+            node,
+            delivery,
+            caller,
+            rng,
+        )
+    }
+
+    pub(super) fn require_member_adds(&self) -> Result<(), AppError> {
+        self.outcome
+            .as_ref()
+            .ok_or_else(denied)?
+            .member_adds
+            .require_current()
+    }
+
     /// Checked by the cold graph restore and the independently derived Core
     /// candidate before startup selects it. This grants no live source.
     pub(super) fn registration_candidate_data(&self) -> Option<SelectedJoinData> {

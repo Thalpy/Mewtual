@@ -30,6 +30,7 @@ pub struct ClosedV2JoinedNode<T: MeshTransport, R: CryptoRngCore> {
     node: Box<ChannelSync<T, R>>,
     recovered: bool,
     fence: V2JoinedSourceFence,
+    initial: (OwnerHeaderId, u64),
     head: OwnerHeaderId,
     epoch: u64,
     admission: V2AuthenticatedAdmission,
@@ -43,6 +44,7 @@ pub struct ClosedV2JoinedNode<T: MeshTransport, R: CryptoRngCore> {
 pub struct PreparedV2JoinedAdd {
     core: Option<V2GeneralCandidate>,
     sdk: Option<PreparedTextCurrentReceivedAdd>,
+    frame: Option<blake3::Hash>,
 }
 
 /// The displaced Core state and SDK graph. The host drops this after leaving
@@ -54,6 +56,12 @@ pub struct RetiredV2JoinedAdd {
 }
 
 impl PreparedV2JoinedAdd {
+    /// Check that the bytes about to be retained by the host are the same
+    /// ones this SDK candidate consumed, including the signed Core image.
+    pub fn matches_frame_data(&self, bytes: &[u8]) -> bool {
+        bytes.len() <= MAX_V2_MEMBER_ADD_FRAME_BYTES && self.frame == Some(blake3::hash(bytes))
+    }
+
     pub fn header_data(&self) -> &catcoms_replication::chat::owner_header::SignedOwnerHeader {
         self.core
             .as_ref()
@@ -104,6 +112,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
             return Err(SyncError::JoinRejected);
         }
         Ok((self.head, self.admission_id, self.epoch))
+    }
+
+    /// The permanent registration established by this node's own Welcome.
+    pub fn original_join_data(&self) -> (OwnerHeaderId, OwnerFactId, u64) {
+        (self.initial.0, self.admission_id, self.initial.1)
     }
 
     /// Hold the real installed node's final fence while the host issues its
@@ -256,10 +269,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
         frame: &V2MemberAddFrameData<'_>,
         payment: TextCurrentAddAdmission,
     ) -> Result<PreparedV2JoinedAdd, SyncError> {
-        self.member_prefix(prefix)?;
-        prefix.observe_member_successor_header(frame.header_data())?;
+        self.observe_member_add_header(prefix, frame)?;
         let (body, image, commit) = frame.body_data()?;
-        self.prepare_observed_add_candidate(
+        let mut candidate = self.prepare_observed_add_candidate(
             prefix,
             V2AdmissionStepData {
                 header: frame.header_data(),
@@ -268,7 +280,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
             },
             commit,
             payment,
-        )
+        )?;
+        candidate.frame = Some(frame.digest_data());
+        Ok(candidate)
+    }
+
+    pub fn observe_member_add_header(
+        &self,
+        prefix: &mut PreparedV2JoinedPrefix,
+        frame: &V2MemberAddFrameData<'_>,
+    ) -> Result<(), SyncError> {
+        self.member_prefix(prefix)?;
+        prefix.observe_member_successor_header(frame.header_data())
     }
 
     /// Request only the successor to this original selected joined epoch.
@@ -321,6 +344,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
         Ok(PreparedV2JoinedAdd {
             core: Some(core),
             sdk: Some(sdk),
+            frame: None,
         })
     }
 
@@ -632,6 +656,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
             node: Box::new(node),
             recovered: true,
             fence,
+            initial: (head, epoch),
             head,
             epoch,
             admission,
@@ -690,9 +715,11 @@ impl PreparedV2JoinRequest {
             .take_v2_joined_join_facts(&instance)
             .map_err(|_| SyncError::JoinRejected)?;
         let admission_id = prefix.own_admission_data();
+        let head = OwnerHeaderId::from_bytes(welcome.spec_data().add_header);
+        let epoch = facts.join_epoch_data();
         fence
             .install_selected(
-                facts.join_epoch_data(),
+                epoch,
                 *facts.admission_state_data(),
                 *admission_id.as_bytes(),
             )
@@ -701,8 +728,9 @@ impl PreparedV2JoinRequest {
             node: Box::new(node),
             recovered: false,
             fence,
-            head: OwnerHeaderId::from_bytes(welcome.spec_data().add_header),
-            epoch: facts.join_epoch_data(),
+            initial: (head, epoch),
+            head,
+            epoch,
             admission,
             admission_id,
             native_origin: self.native_origin.clone(),

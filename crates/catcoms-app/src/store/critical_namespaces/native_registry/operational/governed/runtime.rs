@@ -140,17 +140,44 @@ fn runtime_invoice<T: MeshTransport, R: CryptoRngCore>() -> usize {
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> NativeTextJoinedRuntime<T, R> {
+    /// Cover a signed governing Add for this independently reopened joined
+    /// graph. The original Welcome and its registration remain historical.
+    pub fn cover_recovered_member_add(
+        &mut self,
+        delivery: &[u8],
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(OwnerHeaderId, OwnerFactId, u64), AppError> {
+        if self.storage.pending.is_some() || caller.is_cancelled() {
+            return Err(refused());
+        }
+        let node = self
+            .node
+            .as_mut()
+            .filter(|node| node.was_recovered_data())
+            .ok_or_else(refused)?;
+        self.storage
+            .index
+            .cover_recovered_member_add(node, delivery, caller, rng)?;
+        if caller.is_cancelled() {
+            return Err(refused());
+        }
+        Ok(node.selected_join_data()?)
+    }
+
     #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store::critical_namespaces::native_registry) fn check_recovered_member_add_frame_for_test(
         &self,
-        frame: &catcoms_sync::V2MemberAddFrameData<'_>,
+        wire: &[u8],
+        rng: &mut impl CryptoRngCore,
     ) -> Result<(OwnerHeaderId, u64), AppError> {
         self.storage
             .index
             .actual_store_for_test()?
             .check_recovered_member_add_frame_for_test(
                 self.node.as_ref().ok_or_else(refused)?,
-                frame,
+                wire,
+                rng,
             )
     }
 
@@ -226,15 +253,16 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextJoinedRuntime<T, R> {
                 .storage
                 .recovered_join_registration_data()?
                 .ok_or_else(refused)?;
-            if receipt.selected_data() != (head, own, epoch)
+            if receipt.selected_data() != node.original_join_data()
                 || receipt.transport_data().0 != node.local_peer_data()
             {
                 return Err(refused());
             }
             self.storage.index.require_registered_native_join(receipt)?;
         }
+        let (initial_head, _, initial_epoch) = node.original_join_data();
         if negative.is_cancelled()
-            || self.storage.recovered_join_outcome_data()? != Some((head, epoch))
+            || self.storage.recovered_join_outcome_data()? != Some((initial_head, initial_epoch))
         {
             return Err(refused());
         }

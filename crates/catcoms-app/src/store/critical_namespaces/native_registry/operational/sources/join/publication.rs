@@ -139,7 +139,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                     let selected = node
                         .selected_join_data()
                         .map_err(|_| Refusal::Unavailable)?;
-                    if selected != data.selected_data() {
+                    if node.original_join_data() != data.selected_data() {
                         return Err(Refusal::Stale);
                     }
                     let (_, admission, _) = selected;
@@ -281,7 +281,8 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             || runtime
                 .node
                 .as_ref()
-                .and_then(|node| node.selected_join_data().ok())
+                .filter(|node| node.selected_join_data().is_ok())
+                .map(ClosedV2JoinedNode::original_join_data)
                 != Some(data.selected_data())
         {
             return Err(Refusal::Stale);

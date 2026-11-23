@@ -484,7 +484,8 @@ impl<R: CryptoRngCore> NativeTextSources<catcoms_net::MeshService, R> {
             .ok_or_else(refused)?;
         if !self.scope.is_open()
             || !self.work.is_live_cached()
-            || checked.selected_join_data().map_err(|_| refused())? != receipt.selected_data()
+            || checked.selected_join_data().is_err()
+            || checked.original_join_data() != receipt.selected_data()
             || checked.local_peer_data() != receipt.transport_data().0
         {
             return Err(refused());
@@ -783,7 +784,9 @@ impl<R: CryptoRngCore> MountedNode<R> {
         data: NativeTextJoinedRegistrationData,
     ) -> Result<(NativeTextJoinedRegistryRowData, LocalNames), AppError> {
         let actual = self.node.as_ref().ok_or_else(refused)?;
-        if data.selected_data() != actual.selected_join_data().map_err(|_| refused())? {
+        if actual.selected_join_data().is_err()
+            || data.selected_data() != actual.original_join_data()
+        {
             return Err(refused());
         }
         metadata.observe_registered_joined_row(data, self.registration.as_deref())
@@ -1224,7 +1227,8 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             let mut slot = mounted.try_lock().map_err(|_| refused())?;
             let runtime = slot.as_mut().ok_or_else(refused)?;
             let node = runtime.node.as_ref().ok_or_else(refused)?;
-            let selected = node.selected_join_data().map_err(|_| refused())?;
+            node.selected_join_data().map_err(|_| refused())?;
+            let selected = node.original_join_data();
             let metadata = self.original.work.as_ref().ok_or_else(refused)?;
             if let Some(recovered) = runtime.recovered {
                 if recovered.invocation != token
@@ -1284,7 +1288,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         let slot = mounted.try_lock().map_err(|_| refused())?;
         let result = if let Some(runtime) = slot.as_ref() {
             let node = runtime.node.as_ref().ok_or_else(refused)?;
-            let (head, admission, epoch) = node.selected_join_data().map_err(|_| refused())?;
+            node.selected_join_data().map_err(|_| refused())?;
             let metadata = self.original.work.as_ref().ok_or_else(refused)?;
             let receipt = if let Some(recovered) = runtime.recovered {
                 if recovered.invocation != token || recovered.invite != invite.binding().id_data() {
@@ -1299,7 +1303,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                     token,
                 )?
             };
-            if receipt.selected_data() != (head, admission, epoch) {
+            if receipt.selected_data() != node.original_join_data() {
                 return Err(refused());
             }
             Some(receipt)

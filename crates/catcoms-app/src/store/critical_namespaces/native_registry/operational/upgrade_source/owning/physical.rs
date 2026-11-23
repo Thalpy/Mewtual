@@ -112,6 +112,29 @@ impl Physical {
             .attach_recovered_joined_node(inputs, output)
     }
 
+    pub(super) fn cover_recovered_member_add<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
+        &self,
+        node: &mut catcoms_sync::ClosedV2JoinedNode<T, R>,
+        delivery: &[u8],
+        caller: &catcoms_rt::RequestCancellation,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+    ) -> Result<(), AppError> {
+        self.handler.require()?;
+        self.handler.require_idle_cached()?;
+        if !self.handler.uses_joined_pin_layout() {
+            return Err(refused());
+        }
+        let retired = self
+            .current()?
+            .checked_store()?
+            .cover_recovered_member_add(node, delivery, caller, rng)?;
+        drop(retired);
+        self.handler.require()
+    }
+
     pub(super) fn joined_exchange_resources(
         &self,
         byte_count: usize,

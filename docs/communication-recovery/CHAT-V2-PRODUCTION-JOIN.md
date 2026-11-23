@@ -391,7 +391,13 @@ desktop founder dispatcher serves the governing lane with bounded background
 work for both warm and recovered native rows. Joined Welcome recovery keeps
 the original signed proof and registration while releasing its retired Core
 model, so the existing member can stage the successor on that same verifier.
-The mounted receiver still needs durable selection and a catch-up worker.
+A reopened joined runtime can cover that exact received frame, the candidate's
+selected-history page and its MLS epoch authenticator in an encrypted record.
+Each record names the original pin and commits to the previous covered record.
+The original Welcome remains the registration receipt. Startup replays the
+contiguous chain on the original Core and MLS pair and refuses a missing
+intermediate record or a mismatched authenticator. The desktop joined
+receiver still needs to drive this path from the mounted row.
 
 An independently reopened Pending with neither Welcome file can resend the
 exact original request over the same connected protocol. It verifies the

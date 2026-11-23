@@ -2920,11 +2920,57 @@ async fn native_governed_add_fixture(case: JoinCase) {
         );
         assert_eq!(
             recovered_member
-                .check_recovered_member_add_frame_for_test(
-                    &catcoms_sync::V2MemberAddFrameData::decode(&warm_frame).unwrap(),
-                )
+                .check_recovered_member_add_frame_for_test(&warm_frame, &mut join_rng)
                 .unwrap(),
             (later_head, 2)
+        );
+        let (_, own, _) = recovered_member.complete_recovery(&negative).unwrap();
+        assert_eq!(
+            recovered_member
+                .cover_recovered_member_add(&warm_frame, &negative, &mut join_rng)
+                .unwrap(),
+            (later_head, own, 2)
+        );
+        let covered_path = std::fs::read_dir(join_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("chat-critical-namespaces.joined-member-add.")
+            })
+            .expect("the exact covered member Add");
+        let parked = covered_path.with_extension("held");
+        std::fs::rename(&covered_path, &parked).unwrap();
+        std::fs::copy(&parked, &covered_path).unwrap();
+        assert!(recovered_member.complete_recovery(&negative).is_err());
+        std::fs::remove_file(&covered_path).unwrap();
+        std::fs::rename(&parked, &covered_path).unwrap();
+        assert_eq!(
+            recovered_member.complete_recovery(&negative).unwrap(),
+            (later_head, own, 2)
+        );
+        drop(recovered_member);
+        let storage =
+            NativeTextJoinedStorage::open(join_dir, SECRET, &mut join_rng, current_policy())
+                .unwrap();
+        assert_eq!(
+            storage.recovered_join_outcome_data().unwrap(),
+            Some((add_header, 1))
+        );
+        let (mesh, _) = catcoms_net::MeshService::new_tcp(None, &[]).unwrap();
+        let mut reopened_member = storage
+            .bind_recovered_join_runtime(
+                mesh,
+                rand_chacha::ChaCha20Rng::seed_from_u64(0xe724),
+                Box::new(catcoms_rt::SystemClock),
+            )
+            .ok()
+            .unwrap();
+        assert_eq!(
+            reopened_member.complete_recovery(&negative).unwrap(),
+            (later_head, own, 2)
         );
         drop(governing);
         drop(client);

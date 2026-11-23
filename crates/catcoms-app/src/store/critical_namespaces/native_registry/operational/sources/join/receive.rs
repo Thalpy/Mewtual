@@ -740,11 +740,9 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 runtime.registration.as_deref(),
                 selection.original.row,
                 |_, store| {
-                    if node
-                        .selected_join_data()
-                        .map_err(|_| Refusal::Unavailable)?
-                        != data.selected_data()
-                    {
+                    node.selected_join_data()
+                        .map_err(|_| Refusal::Unavailable)?;
+                    if node.original_join_data() != data.selected_data() {
                         return Err(Refusal::Stale);
                     }
                     let recovered = runtime
