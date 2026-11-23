@@ -198,7 +198,7 @@ jobs:
           cases = [
               ('native-send-parser', 'native_text_send_parser_', 1),
               ('native-mutation-dispatch', 'native_text_mutations_', 1),
-              ('native-retry-continuity', 'native_continuity_', 3),
+              ('native-retry-continuity', 'native_text::continuity::tests::', 3),
           ]
           if os.environ['CHAT_V2_NATIVE_SCOPE'] == 'native-join':
               cases.insert(0, ('native-join-dispatch', 'native_text_connected_join_', 5))
