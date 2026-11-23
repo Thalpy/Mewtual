@@ -1,7 +1,8 @@
 //! Rebuild one archived projection from the cold founder's selected history.
 use super::*;
 use crate::store::persistence::v2_member_outbox::{
-    member_outbox_key, MemberOutboxContextData, MemberOutboxContextSpec, MemberSavedOriginal,
+    member_outbox_key, MemberOutboxContextData, MemberOutboxContextSpec, MemberRequestData,
+    MemberRequestToken, MemberSavedOriginal,
 };
 use crate::store::persistence::v2_member_transport::{
     FOUNDER_RECEIVE_ACTIONS as ACTION_LIMIT, FOUNDER_RECEIVE_BYTES as ACTION_BYTES,
@@ -12,11 +13,67 @@ use crate::store::persistence::v2_shared_history::{
 };
 use crate::store::{
     NativeTextJoinedArchivedActions, NativeTextJoinedMemberProjection, ServerStore,
-    V2MemberSaveRefusal,
+    V2MemberSaveRefusal, V2MemberSignRequest,
 };
 use catcoms_replication::chat::{ActionId, ChatLedger, LedgerLimits, Realm, MAX_ACTION_BYTES};
 
 impl NativeTextColdFounderSource {
+    /// Resolve an exact retry against the existing authenticated founder outbox
+    /// before preparing a signed action. This is independent of TCP recovery.
+    pub fn lookup_saved_member(
+        &mut self,
+        request: &V2MemberSignRequest<'_>,
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Option<(ActionId, u64)>, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        let require_caller = || {
+            if caller.is_cancelled() {
+                return Err(Refusal::Cancelled);
+            }
+            Ok(())
+        };
+        require_caller()?;
+        self.restore_first_add(caller).map_err(|_| Refusal::Stale)?;
+        let context = self.outbox_context().map_err(|_| Refusal::Stale)?;
+        let original = &self.source;
+        let founder = original
+            .data()
+            .genesis_public_data()
+            .admission_data()
+            .admission_id();
+        let receipt = self
+            .storage
+            .index
+            .with_recovered_founder_store(&self.selection, original, |store| {
+                let mount = store.member_outbox_mount()?;
+                let key = member_outbox_key(store)?;
+                Ok(mount.lookup_existing(
+                    store,
+                    context,
+                    &key,
+                    &MemberRequestData {
+                        token: MemberRequestToken::from_bytes(request.token),
+                        channel: request.channel,
+                        body: request.body,
+                        parents: request.parents,
+                    },
+                    rng,
+                ))
+            })
+            .map_err(|_| Refusal::Failed)?;
+        require_caller()?;
+        self.restore_first_add(caller).map_err(|_| Refusal::Stale)?;
+        let receipt = receipt.map_err(|error| Refusal::from(&error))?;
+        if receipt
+            .as_ref()
+            .is_some_and(|value| value.admission != founder)
+        {
+            return Err(Refusal::Stale);
+        }
+        Ok(receipt.map(|value| (value.action, value.ordinal)))
+    }
+
     pub fn archived_action_page(
         &mut self,
         channel: u128,

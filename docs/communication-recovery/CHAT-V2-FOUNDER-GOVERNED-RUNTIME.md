@@ -30,6 +30,9 @@ The recovered graph also seals the exact outstanding founder outbox original
 for its reserved mesh. Only acceptance by that driver yields a receipt that
 can advance the same outbox. Revocation, duplicate submission, and a mesh
 with no peers leave the original pending.
+An exact retry of a previously saved request resolves the original action and
+ordinal before transport starts. A changed body under the same request token
+returns a conflict, including after publication is checkpointed.
 
 The same restored graph can open a bounded ordinary-member subscription on
 the original TCP actor. The live receiver uses the selected Core, validates

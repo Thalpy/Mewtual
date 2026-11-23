@@ -126,5 +126,5 @@ fn prepare_history(
     }
     owner
         .history_page(&key, read.start, read.end, read.maximum, payment)
-        .map_err(|error| refusal_of(&error))
+        .map_err(|error| V2MemberSaveRefusal::from(&error))
 }

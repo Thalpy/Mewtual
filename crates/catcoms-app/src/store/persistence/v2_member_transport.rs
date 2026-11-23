@@ -35,7 +35,7 @@ pub(in crate::store) fn project_founder_member(
     ledger: &mut ChatLedger,
     view: &ProjectionView,
     mut saved_dependency: impl FnMut(ActionId) -> Result<Option<MemberSavedOriginal>, Refusal>,
-    require_current: impl Fn() -> Result<(), Refusal>,
+    mut require_current: impl FnMut() -> Result<(), Refusal>,
 ) -> Result<bool, Refusal> {
     require_current()?;
     let mut status = original

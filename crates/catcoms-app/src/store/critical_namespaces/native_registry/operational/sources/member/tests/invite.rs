@@ -1391,6 +1391,39 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 .archived_message_projection(channel + 1, reply_id, &fresh, &mut founder_rng)
                 .is_err());
             let (action, ordinal, topic) = founder_debt.expect("unsent original founder action");
+            let exact_body = super::body("Founder action saved before the process closed");
+            let retry = V2MemberSignRequest {
+                channel,
+                token: [146; 32],
+                body: &exact_body,
+                parents: &[],
+                dependencies: &[],
+            };
+            assert_eq!(
+                original
+                    .lookup_saved_member(&retry, &fresh, &mut founder_rng)
+                    .unwrap(),
+                Some((action, ordinal))
+            );
+            let altered_body = super::body("Changed text for the same token");
+            let altered = V2MemberSignRequest {
+                body: &altered_body,
+                ..retry
+            };
+            assert_eq!(
+                original.lookup_saved_member(&altered, &fresh, &mut founder_rng),
+                Err(V2MemberSaveRefusal::Conflict)
+            );
+            let other_token = V2MemberSignRequest {
+                token: [247; 32],
+                ..retry
+            };
+            assert_eq!(
+                original
+                    .lookup_saved_member(&other_token, &fresh, &mut founder_rng)
+                    .unwrap(),
+                None
+            );
             original.bind_original_tcp(&fresh).unwrap();
             let (cancelled, signal) = tokio::sync::watch::channel(false);
             let pending = original
@@ -1468,6 +1501,12 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 .prepare_member_publication(fresh.clone(), &mut founder_rng)
                 .unwrap()
                 .is_none());
+            assert_eq!(
+                original
+                    .lookup_saved_member(&retry, &fresh, &mut founder_rng)
+                    .unwrap(),
+                Some((action, ordinal))
+            );
             assert_eq!(reply_topic, topic);
             let mut damaged = reply_wire.to_vec();
             *damaged.last_mut().unwrap() ^= 1;
@@ -1483,7 +1522,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
                             _ => panic!("expected the TCP probe to carry the joined ciphertext"),
                         }
                     }
-                    let Some(NativeChatMemberGossipEvent::Frame(frame)) = cold_receiver.next().await
+                    let Some(catcoms_net::NativeChatMemberGossipEvent::Frame(frame)) = cold_receiver.next().await
                     else {
                         panic!("expected the recovered founder's original listener to receive the frame");
                     };

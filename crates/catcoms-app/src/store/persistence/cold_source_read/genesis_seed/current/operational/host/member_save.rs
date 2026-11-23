@@ -168,16 +168,16 @@ pub enum MemberSaveJobReport {
     Uncertain,
 }
 
-fn refusal_of(error: &MemberOutboxError) -> V2MemberSaveRefusal {
-    use MemberOutboxRefusal as R;
-    match error.refusal() {
-        None => V2MemberSaveRefusal::Failed,
-        Some(R::Busy | R::NeedsRecovery | R::Payment) => V2MemberSaveRefusal::Busy,
-        Some(R::Pressure(_) | R::IndexExhausted) => V2MemberSaveRefusal::Pressure,
-        Some(R::TokenConflict(_) | R::Foreign) => V2MemberSaveRefusal::Conflict,
-        Some(R::DuplicateAction | R::Incomplete) => V2MemberSaveRefusal::Incomplete,
-        Some(R::Absent | R::AlreadySaved(_) | R::Stale | R::NotPublishable) => {
-            V2MemberSaveRefusal::Stale
+impl From<&MemberOutboxError> for V2MemberSaveRefusal {
+    fn from(error: &MemberOutboxError) -> Self {
+        use MemberOutboxRefusal as R;
+        match error.refusal() {
+            None => Self::Failed,
+            Some(R::Busy | R::NeedsRecovery | R::Payment) => Self::Busy,
+            Some(R::Pressure(_) | R::IndexExhausted) => Self::Pressure,
+            Some(R::TokenConflict(_) | R::Foreign) => Self::Conflict,
+            Some(R::DuplicateAction | R::Incomplete) => Self::Incomplete,
+            Some(R::Absent | R::AlreadySaved(_) | R::Stale | R::NotPublishable) => Self::Stale,
         }
     }
 }
@@ -258,7 +258,7 @@ fn ensure_owner<'s>(
         let owner = env
             .mount
             .open_owner(env.store, context, env.key, &mut *env.rng)
-            .map_err(|error| refusal_of(&error))?;
+            .map_err(|error| V2MemberSaveRefusal::from(&error))?;
         *slot = Some(owner);
     }
     let owner = slot.as_mut().ok_or(V2MemberSaveRefusal::Stale)?;
@@ -268,7 +268,7 @@ fn ensure_owner<'s>(
     if owner.needs_recovery() {
         env.mount
             .recover_owner(env.store, owner, env.key, &mut *env.rng)
-            .map_err(|error| refusal_of(&error))?;
+            .map_err(|error| V2MemberSaveRefusal::from(&error))?;
     }
     Ok(owner)
 }
@@ -494,7 +494,7 @@ impl<T: MeshTransport, R: CryptoRngCore> MemberSavePath<'_, T, R> {
                 },
                 payment,
             )
-            .map_err(|error| refusal_of(&error))?;
+            .map_err(|error| V2MemberSaveRefusal::from(&error))?;
         drop(request_parents);
         match lookup {
             MemberLookup::Hit(hit) => {
@@ -823,7 +823,7 @@ impl<T: MeshTransport, R: CryptoRngCore> MemberSavePath<'_, T, R> {
                 &request_of_spec(token, original.action().spec()),
                 payment,
             )
-            .map_err(|error| refusal_of(&error))?;
+            .map_err(|error| V2MemberSaveRefusal::from(&error))?;
         match lookup {
             MemberLookup::Hit(hit) => {
                 let receipt = *hit.receipt();
@@ -874,7 +874,7 @@ impl<T: MeshTransport, R: CryptoRngCore> MemberSavePath<'_, T, R> {
                             original,
                             lost,
                         });
-                        Err(refusal_of(&error))
+                        Err(V2MemberSaveRefusal::from(&error))
                     }
                 }
             }
@@ -947,7 +947,7 @@ impl<T: MeshTransport, R: CryptoRngCore> MemberSavePath<'_, T, R> {
                     original,
                     lost: false,
                 });
-                Err(refusal_of(&error))
+                Err(V2MemberSaveRefusal::from(&error))
             }
         }
     }
@@ -1045,7 +1045,7 @@ impl<T: MeshTransport, R: CryptoRngCore> MemberSavePath<'_, T, R> {
                 // Never saveable here and it never left this process: retire the request.
                 drop(host.restore_member_signed_original(*token.as_bytes(), original));
                 drop(host.abandon_member_request(*token.as_bytes()));
-                Err(refusal_of(error))
+                Err(V2MemberSaveRefusal::from(error))
             }
             _ => {
                 state.custody = Some(MemberOriginalCustody::Unresolved {
@@ -1053,7 +1053,7 @@ impl<T: MeshTransport, R: CryptoRngCore> MemberSavePath<'_, T, R> {
                     original,
                     lost: false,
                 });
-                Err(refusal_of(error))
+                Err(V2MemberSaveRefusal::from(error))
             }
         }
     }

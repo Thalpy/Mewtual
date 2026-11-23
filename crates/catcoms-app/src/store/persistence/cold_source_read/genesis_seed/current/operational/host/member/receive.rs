@@ -139,7 +139,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     lane.admission,
                     outbox,
                 )?;
-                let require_current = || {
+                let mut require_current = || {
                     check_governed_member(&self.owner, governed, &lane.domain, verifier, store)
                         .map_err(|_| Refusal::Stale)?;
                     if session.signal.is_cancelled() || frame.current_data().is_none() {
@@ -159,7 +159,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                         let key = member_outbox_key(store).map_err(|_| Refusal::Unavailable)?;
                         history.saved(&mount, &key, id, rng)
                     },
-                    require_current,
+                    &mut require_current,
                 )? {
                     return Ok(FounderReceiveOutcome::Frame(None));
                 }
