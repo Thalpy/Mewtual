@@ -16,6 +16,10 @@ const TAG: &[u8] = b"catcoms/private-chat-text-governed-add-archive/v2\0";
 const KEY_DOMAIN: &str = "catcoms/private-chat-text-governed-add-archive-key/v2";
 const ID_DOMAIN: &str = "catcoms/private-chat-text-governed-add-archive-id/v2";
 const VERSION: u16 = 2;
+const LATER_TAG: &[u8] = b"catcoms/private-chat-text-governed-add-archive/v3\0";
+const LATER_KEY_DOMAIN: &str = "catcoms/private-chat-text-governed-add-archive-key/v3";
+const LATER_ID_DOMAIN: &str = "catcoms/private-chat-text-governed-add-archive-id/v3";
+const LATER_VERSION: u16 = 3;
 const BODY_CAPS: [(usize, usize); 13] = [
     (41, MAX_TEXT_HEAD_FRAME),
     (41, MAX_ARCHIVE_PLAIN + 40),
@@ -32,15 +36,25 @@ const BODY_CAPS: [(usize, usize); 13] = [
     (response::MIN_BYTES, response::MAX_BYTES),
 ];
 const OVERHEAD: usize = 4 + TAG.len() + 2 + 6 * 36 + 8 + 4 * BODY_CAPS.len() + 40;
-pub(super) const MAX_BYTES: usize = {
-    let mut max = OVERHEAD;
+const LATER_OVERHEAD: usize = OVERHEAD - TAG.len() + LATER_TAG.len();
+const LATER_BODY_CAPS: [(usize, usize); BODY_CAPS.len()] = {
+    let mut caps = BODY_CAPS;
+    caps[0] = (selected_head::FRAME_LEN, selected_head::FRAME_LEN);
+    // The immutable predecessor archive stays in its own named file.
+    caps[1] = (0, 0);
+    caps
+};
+const fn max_bytes(overhead: usize, caps: &[(usize, usize)]) -> usize {
+    let mut max = overhead;
     let mut i = 0;
-    while i < BODY_CAPS.len() {
-        max += BODY_CAPS[i].1;
+    while i < caps.len() {
+        max += caps[i].1;
         i += 1;
     }
     max
-};
+}
+pub(super) const MAX_BYTES: usize = max_bytes(OVERHEAD, &BODY_CAPS);
+const MAX_LATER_BYTES: usize = max_bytes(LATER_OVERHEAD, &LATER_BODY_CAPS);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct GovernedArchiveLabels {
@@ -89,10 +103,18 @@ impl<'a> GovernedArchiveFrames<'a> {
     }
 
     pub(super) fn frame_bytes(&self) -> Result<usize, AppError> {
+        self.bytes_with_caps(OVERHEAD, BODY_CAPS)
+    }
+
+    fn bytes_with_caps(
+        &self,
+        overhead: usize,
+        caps: [(usize, usize); BODY_CAPS.len()],
+    ) -> Result<usize, AppError> {
         self.ordered()
             .iter()
-            .zip(BODY_CAPS)
-            .try_fold(OVERHEAD, |total, (bytes, (min, max))| {
+            .zip(caps)
+            .try_fold(overhead, |total, (bytes, (min, max))| {
                 if !(min..=max).contains(&bytes.len()) {
                     return Err(refused());
                 }
@@ -112,12 +134,56 @@ pub(super) fn seal_data(
     rng: &mut dyn CryptoRngCore,
 ) -> Result<Zeroizing<Vec<u8>>, AppError> {
     let size = frames.frame_bytes()?;
-    if labels.epoch == 0 {
+    if labels.epoch != 1 {
         return Err(refused());
     }
+    seal_archive(key, labels, frames, (TAG, VERSION, KEY_DOMAIN, size), rng)
+}
+
+/// Exact bytes to stage after independently validating the predecessor and
+/// before covering the new archive and the selector under the same writer.
+struct LaterArchive {
+    archive: Zeroizing<Vec<u8>>,
+    head: Zeroizing<Vec<u8>>,
+}
+
+fn seal_later_data(
+    key: &[u8; 32],
+    labels: GovernedArchiveLabels,
+    frames: &GovernedArchiveFrames<'_>,
+    rng: &mut dyn CryptoRngCore,
+) -> Result<LaterArchive, AppError> {
+    if labels.epoch < 2 {
+        return Err(refused());
+    }
+    let size = frames.bytes_with_caps(LATER_OVERHEAD, LATER_BODY_CAPS)?;
+    let archive = seal_archive(
+        key,
+        labels,
+        frames,
+        (LATER_TAG, LATER_VERSION, LATER_KEY_DOMAIN, size),
+        rng,
+    )?;
+    let head = selected_head::GovernedHeadData::after_governed_archive(
+        key,
+        frames.parent_head,
+        labels,
+        later_id(&archive),
+    )?
+    .seal_later_data(key, rng)?;
+    Ok(LaterArchive { archive, head })
+}
+
+fn seal_archive(
+    key: &[u8; 32],
+    labels: GovernedArchiveLabels,
+    frames: &GovernedArchiveFrames<'_>,
+    (tag, version, domain, size): (&[u8], u16, &str, usize),
+    rng: &mut dyn CryptoRngCore,
+) -> Result<Zeroizing<Vec<u8>>, AppError> {
     let mut e = Encoder::with_capacity(size - 40);
-    put(&mut e, TAG)?;
-    e.put_u16(VERSION);
+    put(&mut e, tag)?;
+    e.put_u16(version);
     for field in [
         labels.context.as_bytes(),
         labels.before_head.as_bytes(),
@@ -133,7 +199,7 @@ pub(super) fn seal_data(
         put(&mut e, field)?;
     }
     let plain = Zeroizing::new(e.finish());
-    let key = Zeroizing::new(blake3::derive_key(KEY_DOMAIN, key));
+    let key = Zeroizing::new(blake3::derive_key(domain, key));
     let raw = Zeroizing::new(frame(&seal(&key, &plain, rng)?));
     if raw.len() != size {
         return Err(refused());
@@ -155,11 +221,51 @@ pub(super) fn open_data(
     Ok(plain)
 }
 
+fn later_id(raw: &[u8]) -> ArchiveHeadId {
+    ArchiveHeadId::from_bytes(blake3::derive_key(LATER_ID_DOMAIN, raw))
+}
+
+fn open_later_data(
+    key: &[u8; 32],
+    head: &selected_head::GovernedHeadData,
+    raw: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, AppError> {
+    if !(LATER_OVERHEAD..=MAX_LATER_BYTES).contains(&raw.len()) || later_id(raw) != head.archive {
+        return Err(refused());
+    }
+    let archive_key = Zeroizing::new(blake3::derive_key(LATER_KEY_DOMAIN, key));
+    let plain = Zeroizing::new(unseal(&archive_key, &unframe(raw)?)?);
+    let (labels, frames) = decode_later_data(&plain)?;
+    let expected = selected_head::GovernedHeadData::after_governed_archive(
+        key,
+        frames.parent_head,
+        labels,
+        head.archive,
+    )?;
+    if expected != *head {
+        return Err(refused());
+    }
+    Ok(plain)
+}
+
 pub(super) fn decode_data(
     plain: &[u8],
 ) -> Result<(GovernedArchiveLabels, GovernedArchiveFrames<'_>), AppError> {
+    decode_archive(plain, (TAG, VERSION, BODY_CAPS))
+}
+
+fn decode_later_data(
+    plain: &[u8],
+) -> Result<(GovernedArchiveLabels, GovernedArchiveFrames<'_>), AppError> {
+    decode_archive(plain, (LATER_TAG, LATER_VERSION, LATER_BODY_CAPS))
+}
+
+fn decode_archive<'a>(
+    plain: &'a [u8],
+    (tag, version, caps): (&[u8], u16, [(usize, usize); BODY_CAPS.len()]),
+) -> Result<(GovernedArchiveLabels, GovernedArchiveFrames<'a>), AppError> {
     let mut d = Decoder::new(plain);
-    if field(&mut d, TAG.len())? != TAG || d.get_u16().map_err(|_| refused())? != VERSION {
+    if field(&mut d, tag.len())? != tag || d.get_u16().map_err(|_| refused())? != version {
         return Err(refused());
     }
     let labels = GovernedArchiveLabels {
@@ -172,14 +278,14 @@ pub(super) fn decode_data(
         epoch: d.get_u64().map_err(|_| refused())?,
     };
     let mut frames = [&[][..]; BODY_CAPS.len()];
-    for (body, (min, max)) in frames.iter_mut().zip(BODY_CAPS) {
+    for (body, (min, max)) in frames.iter_mut().zip(caps) {
         *body = field(&mut d, max)?;
         if body.len() < min {
             return Err(refused());
         }
     }
     d.finish().map_err(|_| refused())?;
-    if labels.epoch == 0 {
+    if (version == VERSION && labels.epoch != 1) || (version == LATER_VERSION && labels.epoch < 2) {
         return Err(refused());
     }
     let [parent_head, parent_archive, fence, request, entry, outcome, header_attempt, raw_header, governing, welcome_intent, welcome_attempt, raw_welcome, response] =

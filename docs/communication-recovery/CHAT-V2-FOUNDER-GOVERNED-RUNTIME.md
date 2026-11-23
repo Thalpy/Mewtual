@@ -365,6 +365,14 @@ The first-Add selector requires the original generation-one head and epoch-one
 outcome. Journal authentication separately checks the Add's before-epoch and
 signed successor against the authenticated parent's Core replay.
 
+A subsequent Add has a version-three archive and Head. The archive retains
+the exact encrypted predecessor Head and names its immutable archive by ID.
+The previous archive stays in its own file. The new selector checks the same
+context, consecutive generation and epoch, and exact predecessor ciphertext.
+Recovery still has to open the named archives and replay the signed journals
+before restoring an SDK graph. Physical staging and selection need their own
+writer admission.
+
 The Host stages `text.add.head-stage.v2` against that exact archive. The
 selector uses the established Head envelope with a new version. Prior
 readers recognize its MAC and refuse to interpret it as their operational

@@ -1,5 +1,5 @@
-//! Logical Head2 selector for a covered governed Add archive. Use the known
-//! Head envelope so older readers authenticate the box and refuse version 2.
+//! Selectors for covered governed Add archives. Both versions use the known
+//! Head envelope so older readers authenticate the box before refusing it.
 use super::archive::GovernedArchiveLabels;
 use super::*;
 use catcoms_replication::chat::{
@@ -9,7 +9,8 @@ use catcoms_replication::chat::{
 
 const KIND: TextControlKindData = TextControlKindData::Head;
 const TAG: &[u8] = KIND.domains().0;
-const VERSION: u16 = 2;
+const FIRST_ADD_VERSION: u16 = 2;
+const LATER_ADD_VERSION: u16 = 3;
 pub(super) const NAME: &str = "text.add.head-stage.v2";
 pub(super) const FRAME_LEN: usize = 4 + TAG.len() + 2 + 7 * 36 + 2 * 8 + 40;
 
@@ -43,10 +44,58 @@ impl GovernedHeadData {
         key: &[u8; 32],
         rng: &mut dyn CryptoRngCore,
     ) -> Result<Zeroizing<Vec<u8>>, AppError> {
-        self.require_valid()?;
+        self.require_version(FIRST_ADD_VERSION)?;
+        self.seal_version(key, rng, FIRST_ADD_VERSION)
+    }
+
+    /// Prepare a later selector against the exact encrypted predecessor. The
+    /// caller still holds the original files and its independently selected
+    /// archive/Core replay before covering this selector.
+    pub(super) fn after_governed_archive(
+        key: &[u8; 32],
+        predecessor: &[u8],
+        transition: GovernedArchiveLabels,
+        archive: ArchiveHeadId,
+    ) -> Result<Self, AppError> {
+        let original = Self::open_governed_data(key, predecessor)?;
+        let generation = original.generation.checked_add(1).ok_or_else(refused)?;
+        let next = Self {
+            transition,
+            archive,
+            generation,
+        };
+        next.require_version(LATER_ADD_VERSION)?;
+        if transition.context != original.transition.context
+            || transition.before_head != TextHeadIdData::of_data(predecessor)
+            || transition.before_archive != original.archive
+            || original.transition.epoch.checked_add(1) != Some(transition.epoch)
+            || transition.header == original.transition.header
+            || transition.state == original.transition.state
+            || transition.authenticator == original.transition.authenticator
+        {
+            return Err(refused());
+        }
+        Ok(next)
+    }
+
+    pub(super) fn seal_later_data(
+        self,
+        key: &[u8; 32],
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<Zeroizing<Vec<u8>>, AppError> {
+        self.require_version(LATER_ADD_VERSION)?;
+        self.seal_version(key, rng, LATER_ADD_VERSION)
+    }
+
+    fn seal_version(
+        self,
+        key: &[u8; 32],
+        rng: &mut dyn CryptoRngCore,
+        version: u16,
+    ) -> Result<Zeroizing<Vec<u8>>, AppError> {
         let mut e = Encoder::with_capacity(FRAME_LEN - 40);
         put(&mut e, TAG)?;
-        e.put_u16(VERSION);
+        e.put_u16(version);
         let a = &self.transition;
         for value in [
             a.context.as_bytes(),
@@ -70,15 +119,28 @@ impl GovernedHeadData {
     }
 
     pub(super) fn open_data(key: &[u8; 32], raw: &[u8]) -> Result<Self, AppError> {
+        let (selected, version) = Self::decode_governed_data(key, raw)?;
+        if version != FIRST_ADD_VERSION {
+            return Err(refused());
+        }
+        Ok(selected)
+    }
+
+    pub(super) fn open_governed_data(key: &[u8; 32], raw: &[u8]) -> Result<Self, AppError> {
+        Self::decode_governed_data(key, raw).map(|(head, _)| head)
+    }
+
+    fn decode_governed_data(key: &[u8; 32], raw: &[u8]) -> Result<(Self, u16), AppError> {
         if raw.len() != FRAME_LEN {
             return Err(refused());
         }
         let key = Zeroizing::new(blake3::derive_key(KIND.domains().1, key));
         let plain = Zeroizing::new(unseal(&key, &unframe(raw)?)?);
         let mut d = Decoder::new(&plain);
-        if field(&mut d, TAG.len())? != TAG || d.get_u16().map_err(|_| refused())? != VERSION {
+        if field(&mut d, TAG.len())? != TAG {
             return Err(refused());
         }
+        let version = d.get_u16().map_err(|_| refused())?;
         let context = TextContextIdData::from_bytes(b32(&mut d)?);
         let before_head = TextHeadIdData::from_bytes(b32(&mut d)?);
         let before_archive = ArchiveHeadId::from_bytes(b32(&mut d)?);
@@ -103,15 +165,20 @@ impl GovernedHeadData {
             archive,
             generation,
         };
-        selected.require_valid()?;
-        Ok(selected)
+        selected.require_version(version)?;
+        Ok((selected, version))
     }
 
-    fn require_valid(&self) -> Result<(), AppError> {
-        if self.generation < 2
-            || self.transition.epoch == 0
-            || self.archive == self.transition.before_archive
-        {
+    fn require_version(&self, version: u16) -> Result<(), AppError> {
+        let valid = match version {
+            FIRST_ADD_VERSION => self.transition.epoch == 1 && self.generation == 2,
+            LATER_ADD_VERSION => {
+                self.transition.epoch >= 2
+                    && self.transition.epoch.checked_add(1) == Some(self.generation)
+            }
+            _ => false,
+        };
+        if !valid || self.archive == self.transition.before_archive {
             return Err(refused());
         }
         Ok(())
