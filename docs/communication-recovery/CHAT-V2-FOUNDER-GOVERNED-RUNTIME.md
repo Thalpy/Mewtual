@@ -371,10 +371,11 @@ The previous archive stays in its own file. The new selector checks the same
 context, consecutive generation and epoch, and exact predecessor ciphertext.
 The replay verifier advances only after checking the complete signed journal
 and records the consumed nonce from that journal. It checks the exact
-predecessor Head and archive before advancing again. Cold recovery still has
-to walk the named files from the pinned first Add and match the complete replay
-to the restored SDK. Physical staging and selection need their own writer
-admission.
+predecessor Head and archive before advancing again. Cold recovery follows
+the named files back to the pinned first Add, then replays their signed
+journals forward. It rechecks the original file identities and archive digests
+before retaining the prefix, and matches the selected Header and state to the
+restored SDK. Physical staging and selection need their own writer admission.
 
 The Host stages `text.add.head-stage.v2` against that exact archive. The
 selector uses the established Head envelope with a new version. Prior

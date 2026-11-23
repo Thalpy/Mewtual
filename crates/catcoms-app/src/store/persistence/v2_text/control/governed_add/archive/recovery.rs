@@ -13,6 +13,7 @@ use catcoms_replication::chat::{
 };
 use catcoms_sync::V2JoinResponsePacketData;
 
+mod chain;
 mod cold;
 mod held;
 pub(in crate::store) use cold::{HeldColdFounderAdd, HeldColdFounderGenesis};

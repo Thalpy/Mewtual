@@ -1,5 +1,5 @@
 //! A read-only cold founder role for the original selected first Add.
-use super::*;
+use super::{chain::RecoveredArchiveChain, *};
 use crate::store::critical_namespaces::{
     archive_current_codec as genesis, read_pool::CatalogReadReservation,
 };
@@ -26,7 +26,10 @@ use catcoms_replication::chat::{
 use catcoms_storage::kept::{session_id, SessionId};
 use catcoms_storage::VaultPhysicalWorkLease;
 use catcoms_sync::owner_v2::{PreparedV2FounderRecoveredAdd, V2InstalledFounderAddData};
-use catcoms_sync::{V2AdmissionStepData, V2FirstAddProofData, V2FirstJoinDeliveryData};
+use catcoms_sync::{
+    V2AdmissionStepData, V2FirstAddProofData, V2FirstJoinDeliveryData, V2GoverningJoinDeliveryData,
+    V2GoverningJoinPrefixData,
+};
 use std::sync::Arc;
 use std::{
     fs,
@@ -45,9 +48,42 @@ const SEED_FRAME_LIMIT: usize = 32768 + 40;
 pub(in crate::store) struct HeldColdFounderAdd {
     core: Option<ColdFounderCore>,
     files: ColdFounderFiles,
-    recovered: RecoveredGovernedAdd,
+    recovered: ColdRecoveredArchive,
     _lease: VaultPhysicalWorkLease,
+    _chain_fee: Option<CatalogReadReservation>,
     _fee: CatalogReadReservation,
+}
+
+enum ColdRecoveredArchive {
+    First(RecoveredGovernedAdd),
+    Later(RecoveredArchiveChain),
+}
+
+impl ColdRecoveredArchive {
+    fn covers_request(&self, request: &[u8]) -> bool {
+        match self {
+            Self::First(first) => first.request.as_slice() == request,
+            Self::Later(chain) => {
+                chain.nonces.last() == Some(&chain.journal.nonce)
+                    && chain.journal.request.as_slice() == request
+            }
+        }
+    }
+
+    fn selected_admission(&self) -> OwnerFactId {
+        match self {
+            Self::First(first) => first.admission.admission_id(),
+            Self::Later(chain) => chain.journal.admission.admission_id(),
+        }
+    }
+
+    fn require_predecessors(&self, source: &RetainedBootstrapSourceData) -> Result<(), AppError> {
+        if let Self::Later(chain) = self {
+            let (directory, _, _) = source.original_target_data();
+            chain.require_original_predecessors(directory)?;
+        }
+        Ok(())
+    }
 }
 
 struct ColdFounderFiles {
@@ -290,7 +326,7 @@ struct ColdFounderCore {
 
 impl HeldColdFounderAdd {
     pub(in crate::store) fn covers_request_data(&self, request: &[u8]) -> bool {
-        self.recovered.request.as_slice() == request
+        self.recovered.covers_request(request)
     }
 
     pub(in crate::store) fn member_parts(
@@ -311,7 +347,10 @@ impl HeldColdFounderAdd {
         ) -> Result<T, AppError>,
     ) -> Result<T, AppError> {
         let core = self.core.as_ref().ok_or_else(refused)?;
-        let mut require = || self.files.require_current(store, source).map(drop);
+        let mut require = || {
+            self.recovered.require_predecessors(source)?;
+            self.files.require_current(store, source).map(drop)
+        };
         require()?;
         perform(&core.verifier, &core._view, &mut require)
     }
@@ -324,6 +363,15 @@ impl HeldColdFounderAdd {
         if self.core.is_none() {
             return Err(refused());
         }
+        let first = match &self.recovered {
+            ColdRecoveredArchive::First(first) => first,
+            ColdRecoveredArchive::Later(chain) => {
+                return Ok(V2GoverningJoinDeliveryData::encode(
+                    &chain.journal.response,
+                    &chain.prefix,
+                )?);
+            }
+        };
         let genesis = source.data().genesis_public_data();
         let proof = V2FirstAddProofData::encode(
             genesis.profile_data(),
@@ -333,15 +381,12 @@ impl HeldColdFounderAdd {
                 image: genesis.image_data(),
             },
             V2AdmissionStepData {
-                admission: &self.recovered.admission,
-                header: &self.recovered.header,
-                image: self.recovered.image_data()?,
+                admission: &first.admission,
+                header: &first.header,
+                image: first.image_data()?,
             },
         )?;
-        Ok(V2FirstJoinDeliveryData::encode(
-            &self.recovered.response,
-            &proof,
-        )?)
+        Ok(V2FirstJoinDeliveryData::encode(&first.response, &proof)?)
     }
 
     pub(in crate::store) fn capture(
@@ -371,19 +416,24 @@ impl HeldColdFounderAdd {
             image: data.image_data(),
         };
         let opened = OpenedColdFounderOrigin::capture(store, source, pin_id, &public)?;
-        let (retained, key, plain) = (opened.retained, opened.key, opened.plain);
+        let (mut retained, key, plain) = (opened.retained, opened.key, opened.plain);
         let promotion = parse_data(&plain)?;
         let context = &promotion.context;
         let (target, _, _) = source.original_target_data();
 
         let head = read_control(&fixed_child(target, "head.bin")?, selected_head::FRAME_LEN)?;
-        let selected = selected_head::GovernedHeadData::open_data(&key, &head.frame)?;
-        if selected.transition.context != context.id_data()?
-            || selected.transition.before_head != TextHeadIdData::of_data(promotion.head_frame)
-            || selected.transition.before_archive.as_bytes()
-                != TextControlKindData::Archive
-                    .id_data(promotion.archive_frame)
-                    .as_bytes()
+        let selected = selected_head::GovernedHeadData::open_governed_data(&key, &head.frame)?;
+        let context = context.id_data()?;
+        let original_head = TextHeadIdData::of_data(promotion.head_frame);
+        let original_archive = ArchiveHeadId::from_bytes(
+            *TextControlKindData::Archive
+                .id_data(promotion.archive_frame)
+                .as_bytes(),
+        );
+        if selected.transition.context != context
+            || (selected.transition.epoch == 1
+                && (selected.transition.before_head != original_head
+                    || selected.transition.before_archive != original_archive))
         {
             return Err(refused());
         }
@@ -393,13 +443,22 @@ impl HeldColdFounderAdd {
             MAX_BYTES,
             &mut Some(Zeroizing::new(Vec::with_capacity(MAX_BYTES + 1))),
         )?;
-        let recovered = authenticate_selected(
-            &key,
-            &head.frame,
-            &archive.frame,
-            context.id_data()?,
-            &public,
-        )?;
+        let (recovered, chain_fee) = if selected.transition.epoch == 1 {
+            let first = authenticate_selected(&key, &head.frame, &archive.frame, context, &public)?;
+            (ColdRecoveredArchive::First(first), None)
+        } else {
+            let fee = pool.try_reserve(RecoveredArchiveChain::invoice_bytes())?;
+            let chain = RecoveredArchiveChain::capture(
+                &key,
+                target,
+                &head.frame,
+                &archive.frame,
+                (context, original_head, original_archive),
+                &public,
+                || retained.require_current(store, source),
+            )?;
+            (ColdRecoveredArchive::Later(chain), Some(fee))
+        };
         let mut result = Self {
             core: None,
             files: ColdFounderFiles {
@@ -411,6 +470,7 @@ impl HeldColdFounderAdd {
             },
             recovered,
             _lease: lease,
+            _chain_fee: chain_fee,
             _fee: fee,
         };
         result.require_current(store, source)?;
@@ -422,6 +482,7 @@ impl HeldColdFounderAdd {
         store: &ServerStore,
         source: &RetainedBootstrapSourceData,
     ) -> Result<(OwnerHeaderId, u64), AppError> {
+        self.recovered.require_predecessors(source)?;
         self.files.require_current(store, source)
     }
 
@@ -432,19 +493,35 @@ impl HeldColdFounderAdd {
     ) -> Result<PreparedV2FounderRecoveredAdd, AppError> {
         self.require_current(store, source)?;
         let head = self.files.selected.transition;
-        let restored = PreparedV2FounderRecoveredAdd::restore_from_bootstrap(
-            source.data(),
-            V2InstalledFounderAddData {
-                epoch: head.epoch,
-                authenticator: head.authenticator,
-                header: head.header,
-                state: head.state,
-            },
-            &self.recovered.header,
-            self.recovered.image_data()?,
-            self.recovered.snapshot_data()?,
-            super::held::restore_admission(store)?,
-        )?;
+        let expected = V2InstalledFounderAddData {
+            epoch: head.epoch,
+            authenticator: head.authenticator,
+            header: head.header,
+            state: head.state,
+        };
+        let admission = super::held::restore_admission(store)?;
+        let restored = match &self.recovered {
+            ColdRecoveredArchive::First(first) => {
+                PreparedV2FounderRecoveredAdd::restore_from_bootstrap(
+                    source.data(),
+                    expected,
+                    &first.header,
+                    first.image_data()?,
+                    first.snapshot_data()?,
+                    admission,
+                )?
+            }
+            ColdRecoveredArchive::Later(chain) => {
+                PreparedV2FounderRecoveredAdd::restore_from_governing_prefix(
+                    source.data(),
+                    expected,
+                    chain.journal.admission.admission_id(),
+                    &V2GoverningJoinPrefixData::decode(&chain.prefix)?,
+                    outcome::archive_snapshot(&chain.journal.entry, &chain.journal.outcome)?,
+                    admission,
+                )?
+            }
+        };
         self.require_current(store, source)?;
         Ok(restored)
     }
@@ -466,9 +543,9 @@ impl HeldColdFounderAdd {
         }
         let original = source.data().genesis_public_data();
         let founder = original.admission_data().admission_id();
-        let joined = self.recovered.admission.admission_id();
+        let joined = self.recovered.selected_admission();
         if self.core.is_none() {
-            const BYTES: usize = 2 * REPLAY_MATH_PRIVATE_INVOICE
+            const BYTES: usize = 3 * REPLAY_MATH_PRIVATE_INVOICE
                 + V2GeneralPrefixVerifier::metadata_layout_bytes()
                 + ProjectionGroup::initial_metadata_layout_bytes()
                 + 4 * std::mem::size_of::<ColdFounderCore>();
@@ -511,24 +588,28 @@ impl HeldColdFounderAdd {
                 origin,
             )
             .map_err(|_| refused())?;
-            let mut candidate = Some(
-                verifier
-                    .derive_successor(
-                        &self.recovered.header,
-                        ReplayBody::Admission(&self.recovered.admission),
-                        self.recovered.image_data()?,
-                    )
-                    .map_err(|_| refused())?,
-            );
             self.require_current(store, source)?;
-            let expectation =
-                V2HostSelectionExpectation::from_trusted_host(head.header, head.state);
-            let retired = verifier
-                .advance_host_selected(&expectation, &mut candidate)
-                .map_err(|_| refused())?;
-            if retired.parent_data().header().id() != genesis.id() {
-                return Err(refused());
-            }
+            let retired = match &self.recovered {
+                ColdRecoveredArchive::First(first) => select_archived_step(
+                    &mut verifier,
+                    &first.header,
+                    &first.admission,
+                    first.image_data()?,
+                )?,
+                ColdRecoveredArchive::Later(chain) => {
+                    let mut retired = None;
+                    for step in chain.public_steps() {
+                        retired = Some(select_archived_step(
+                            &mut verifier,
+                            &step.header,
+                            &step.admission,
+                            &step.image,
+                        )?);
+                    }
+                    retired.ok_or_else(refused)?
+                }
+            };
+            self.require_current(store, source)?;
             self.core = Some(ColdFounderCore {
                 verifier,
                 _retired: retired,
@@ -552,6 +633,29 @@ impl HeldColdFounderAdd {
         }
         self.require_current(store, source)
     }
+}
+
+fn select_archived_step(
+    verifier: &mut V2GeneralPrefixVerifier,
+    header: &SignedOwnerHeader,
+    admission: &AdmissionBody,
+    image: &[u8],
+) -> Result<V2GeneralRetiredData, AppError> {
+    let predecessor = verifier.replay_data().header().id();
+    let mut candidate = Some(
+        verifier
+            .derive_successor(header, ReplayBody::Admission(admission), image)
+            .map_err(|_| refused())?,
+    );
+    let expectation =
+        V2HostSelectionExpectation::from_trusted_host(header.id(), header.spec().state);
+    let retired = verifier
+        .advance_host_selected(&expectation, &mut candidate)
+        .map_err(|_| refused())?;
+    if retired.parent_data().header().id() != predecessor {
+        return Err(refused());
+    }
+    Ok(retired)
 }
 
 impl ColdFounderFiles {
