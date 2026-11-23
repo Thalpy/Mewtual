@@ -19,6 +19,7 @@ mod invite_mint;
 mod invite_preview;
 mod joining;
 mod listing;
+mod receiving;
 pub(super) mod retirement;
 mod sending;
 pub(super) mod sources;

@@ -111,6 +111,10 @@ Frame-triggered recovery can request a signed direct dependency on the exact ori
 TCP carrier. Its reply remains bound to both the receive scope and that connection.
 The desktop attaches the provider to the original joined row after Join or authenticated
 reopen. Each incoming request captures that same installed row again before doing work.
+That row also attaches an exact native gossip listener. It can recover up to four direct
+dependencies per frame through the selected local outbox or the frame's original carrier,
+with one network request in flight. Unresolved originals stay outside the ledger.
+The receiver retries its subscription while the row remains installed.
 The mounted joined row can prepare a paid channel ledger and apply frames from its own
 receiver. A final native callback checks the original receiving scope and the prepared
 Core view before revealing a body. The ledger holds up to 64 originals or 1 MiB of
@@ -145,7 +149,8 @@ then wakes the single worker for that installed row. The worker retries unchange
 interruption, polls for debt after an authenticated reopen and stops when the row retires.
 Foreground reads and saves share the row's local work permit with publication preparation
 and checkpointing. Transport submission runs after that permit is released.
-Desktop inbound processing and durable shared history remain open.
+Shared history mounting, renderer access and recovery beyond the live worker's bounded
+direct dependency window remain open.
 Original audit chunks and request receipts remain retained after scheduling debt clears.
 Removal changes active view, never deletes the audit. Unproven late removed actions stay
 Held pending the separately authorized moderation path; ordinary concurrent edits resolve

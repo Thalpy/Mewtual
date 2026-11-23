@@ -149,6 +149,10 @@ pub(in crate::store::critical_namespaces::native_registry) struct NativeTextJoin
 }
 
 impl NativeTextJoinedMemberLedger {
+    pub fn is_current_cached(&self) -> bool {
+        !self.signal.is_cancelled() && self.selection.is_current_cached()
+    }
+
     /// Prepare the exact view and bounded body outside the final UI guard.
     /// One paid query can borrow this ledger at a time.
     pub fn prepare_message_projection(
@@ -259,6 +263,16 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         frame: &NativeChatMemberFrame,
         caller: &RequestCancellation,
     ) -> Result<NativeTextJoinedReceivedOriginal, V2MemberSaveRefusal> {
+        self.open_member_frame_for(selection, channel, frame, caller)
+    }
+
+    fn open_member_frame_for(
+        &self,
+        selection: &NativeTextJoinedRowSelection,
+        channel: u128,
+        frame: &NativeChatMemberFrame,
+        caller: &RequestCancellation,
+    ) -> Result<NativeTextJoinedReceivedOriginal, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
         let ingress = self.require_member_ingress()?;
         if !ingress.owns_frame(frame) {
@@ -360,6 +374,34 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
     /// dependency leaves the child outside the ledger for bounded recovery.
     pub fn project_received_member(
         self,
+        ledger: &mut NativeTextJoinedMemberLedger,
+        original: &NativeTextJoinedReceivedOriginal,
+        caller: &RequestCancellation,
+    ) -> Result<V2OrdinaryReceiveStatus, V2MemberSaveRefusal> {
+        self.project_received_for(ledger, original, caller)
+    }
+
+    /// Apply one exact frame on the same paid mounted row. Waiting children
+    /// retain their original carrier for an addressed dependency attempt.
+    pub fn receive_member_frame(
+        self,
+        ledger: &mut NativeTextJoinedMemberLedger,
+        frame: &NativeChatMemberFrame,
+        caller: &RequestCancellation,
+    ) -> Result<(NativeTextJoinedReceivedOriginal, V2OrdinaryReceiveStatus), V2MemberSaveRefusal>
+    {
+        let original = self.open_member_frame_for(
+            &ledger.selection,
+            ledger.ledger.realm().channel(),
+            frame,
+            caller,
+        )?;
+        let status = self.project_received_for(ledger, &original, caller)?;
+        Ok((original, status))
+    }
+
+    fn project_received_for(
+        &self,
         ledger: &mut NativeTextJoinedMemberLedger,
         original: &NativeTextJoinedReceivedOriginal,
         caller: &RequestCancellation,

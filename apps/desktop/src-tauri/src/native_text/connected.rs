@@ -112,7 +112,7 @@ impl Source {
         })
     }
 
-    async fn capture_joined(
+    pub(super) async fn capture_joined(
         &self,
         state: &AppState,
     ) -> Option<(
@@ -151,6 +151,14 @@ impl Source {
 
     pub(super) fn negative(&self) -> RequestCancellation {
         self.scope.clone()
+    }
+
+    pub(super) fn member_work(&self) -> Option<&Arc<server_table::JoinedMemberWork>> {
+        self.member_work.as_ref()
+    }
+
+    pub(super) fn channel(&self) -> u128 {
+        self.channel
     }
 
     pub(super) fn still_installed(
@@ -217,10 +225,21 @@ async fn start_dependencies<R: tauri::Runtime>(
     .await;
     if let Ok(Ok(provider)) = opened {
         let app = app.clone();
+        let receive = match state.native_text.ui_budget.prepare() {
+            Ok(payment) => Some((super::receiving::open(state, &source).await, payment)),
+            Err(_) => None,
+        };
         drop(tauri::async_runtime::spawn(async move {
             tokio::select! {
                 _ = serve_dependencies(app.clone(), source.clone(), provider) => {}
                 _ = drain_joined_outbox(&app, &source) => {}
+                _ = async {
+                    if let Some((initial, payment)) = receive {
+                        super::receiving::run(&app, &source, initial, payment).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {}
             }
         }));
     }

@@ -1391,6 +1391,42 @@ async fn assert_joined_connected_workers(
         .foreground(keep_session::current(state, generation).unwrap())
         .await
         .unwrap();
+    assert!(Arc::strong_count(&work) >= 3);
+    let (preparation, selection, _, scope) = capture_joined_worker(state, id, generation).await;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        preparation.attach_dependency_provider(&selection, scope)
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        result,
+        Err(catcoms_app::store::V2MemberSaveRefusal::Busy)
+    ));
+    let (preparation, selection, channel, scope) =
+        capture_joined_worker(state, id, generation).await;
+    let listener = tauri::async_runtime::spawn_blocking(move || {
+        preparation.prepare_member_ingress(&selection, channel, scope)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        listener.open().await,
+        Err(catcoms_net::NativeChatMemberGossipError::Busy)
+    ));
+    Arc::downgrade(&work)
+}
+
+async fn capture_joined_worker(
+    state: &AppState,
+    id: u64,
+    generation: u64,
+) -> (
+    catcoms_app::store::NativeTextJoinedSelectionPreparation<OsCryptoRng>,
+    catcoms_app::store::NativeTextJoinedRowSelection,
+    u128,
+    catcoms_rt::RequestCancellation,
+) {
     let target = state.native_text.ui_state.original_target().unwrap();
     let mut ui = Some(
         founding::ui_capture(state, generation, &target)
@@ -1398,7 +1434,7 @@ async fn assert_joined_connected_workers(
             .unwrap(),
     );
     let mut preparation = None;
-    let (selection, scope, publication) = {
+    let (selection, channel, scope) = {
         let _commit = require_ui_session_generation(state, generation)
             .await
             .unwrap();
@@ -1408,8 +1444,6 @@ async fn assert_joined_connected_workers(
         let server_table::NativeSelection::Joined(selection) = &original.data().selection else {
             panic!("the registered row must still be the original joined source");
         };
-        let wake = original.data().member_work.as_ref().unwrap();
-        assert!(Arc::strong_count(wake) >= 3);
         let scope = original
             .scope(keep_session::current(state, generation).unwrap())
             .unwrap();
@@ -1418,20 +1452,9 @@ async fn assert_joined_connected_workers(
             .sources
             .capture_joined_member(&store, &mut ui, selection, &mut preparation)
             .unwrap();
-        (selection.clone(), scope, Arc::downgrade(wake))
+        (selection.clone(), original.data().channel, scope)
     };
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        preparation
-            .unwrap()
-            .attach_dependency_provider(&selection, scope)
-    })
-    .await
-    .unwrap();
-    assert!(matches!(
-        result,
-        Err(catcoms_app::store::V2MemberSaveRefusal::Busy)
-    ));
-    publication
+    (preparation.unwrap(), selection, channel, scope)
 }
 
 async fn joined_work(state: &AppState, id: u64) -> Arc<server_table::JoinedMemberWork> {

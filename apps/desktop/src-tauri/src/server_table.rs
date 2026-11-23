@@ -4,8 +4,9 @@
 //! of native guard scopes. Native founding must supply a real Root selection.
 use super::*;
 use catcoms_app::store::{
-    CriticalCatalogReadPool, NativeTextJoinedRowSelection, NativeTextRuntimeSelection,
-    NativeTextVaultAuthenticationCheck, NativeUiInvocationBudget, NativeUiInvocationMetadata,
+    CriticalCatalogReadPool, NativeTextJoinedMemberLedger, NativeTextJoinedRowSelection,
+    NativeTextRuntimeSelection, NativeTextVaultAuthenticationCheck, NativeUiInvocationBudget,
+    NativeUiInvocationMetadata,
 };
 use tokio::sync::OwnedMutexGuard;
 
@@ -94,6 +95,7 @@ pub(super) struct NativeRowData {
 /// no UI guard or Core loan, and network effects never retain this permit.
 pub(super) struct JoinedMemberWork {
     pub(super) publication_wake: tokio::sync::Notify,
+    pub(super) received: StdMutex<Option<Box<NativeTextJoinedMemberLedger>>>,
     local: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -101,6 +103,7 @@ impl JoinedMemberWork {
     fn new() -> Self {
         Self {
             publication_wake: tokio::sync::Notify::new(),
+            received: StdMutex::new(None),
             local: Arc::new(tokio::sync::Mutex::new(())),
         }
     }

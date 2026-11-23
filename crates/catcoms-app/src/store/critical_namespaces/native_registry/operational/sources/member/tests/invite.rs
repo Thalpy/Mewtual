@@ -718,8 +718,8 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 panic!("expected the relayed original");
             };
             assert!(recovered_row().open_member_frame(&selection, channel + 1, &frame, &live).is_err());
-            let received = recovered_row()
-                .open_member_frame(&selection, channel, &frame, &live)
+            let (received, status) = recovered_row()
+                .receive_member_frame(&mut ledger, &frame, &live)
                 .unwrap();
             assert_eq!(received.action_id_data(), action);
             assert!(matches!(
@@ -729,7 +729,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 Err(crate::store::V2MemberSaveRefusal::Failed)
             ));
             assert_eq!(
-                recovered_row().project_received_member(&mut ledger, &received, &live).unwrap(),
+                status,
                 V2OrdinaryReceiveStatus::Retained(ActionState::Valid)
             );
             let prepared_history = recovered_row()
