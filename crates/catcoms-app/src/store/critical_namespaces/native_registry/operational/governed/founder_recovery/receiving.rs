@@ -2,8 +2,8 @@
 use super::*;
 use crate::store::persistence::native_registry::network::NetworkDependency;
 use crate::store::persistence::v2_member_transport::{
-    archive_founder_member, project_founder_member, FOUNDER_RECEIVE_ACTIONS, FOUNDER_RECEIVE_BYTES,
-    FOUNDER_RECEIVE_LEDGER_FEE, FOUNDER_RECEIVE_WORK,
+    archive_founder_member, project_founder_member, FounderReceiveSession, FOUNDER_RECEIVE_ACTIONS,
+    FOUNDER_RECEIVE_BYTES, FOUNDER_RECEIVE_LEDGER_FEE, FOUNDER_RECEIVE_WORK,
 };
 use crate::store::{
     NativeTextFounderReceived, NativeTextJoinedMemberProjection, V2MemberSaveRefusal,
@@ -16,19 +16,39 @@ use catcoms_replication::chat::{
     ActionId, ChatLedger, LedgerLimits, ProjectionView, Realm, MAX_ACTION_BYTES,
 };
 use catcoms_rt::Topic;
-use catcoms_sync::owner_v2::MAX_V2_MEMBER_TRANSPORT_BYTES;
+use catcoms_sync::owner_v2::{V2MemberPublicationObservation, MAX_V2_MEMBER_TRANSPORT_BYTES};
 
 const INGRESS_FEE: usize = 2 * MAX_V2_MEMBER_TRANSPORT_BYTES + 8192;
 const FRAME_FEE: usize = 5 * MAX_V2_MEMBER_TRANSPORT_BYTES + 4096;
+
+#[derive(Debug)]
+struct ProjectionScope {
+    receiver: RequestCancellation,
+    caller: RequestCancellation,
+}
+
+#[async_trait::async_trait]
+impl RequestAuthority for ProjectionScope {
+    fn authorized(&self) -> bool {
+        !self.receiver.is_cancelled() && !self.caller.is_cancelled()
+    }
+
+    async fn revoked(&self) {
+        let (mut receiver, mut caller) = (self.receiver.clone(), self.caller.clone());
+        tokio::select! {
+            _ = receiver.cancelled() => {},
+            _ = caller.cancelled() => {},
+        }
+    }
+}
 
 pub struct NativeTextColdFounderMemberIngress {
     ingress: NativeChatMemberIngress,
     original: Arc<NetworkDependency>,
     topic: Topic,
     channel: u128,
-    signal: RequestCancellation,
     owner: watch::Sender<()>,
-    scope: Arc<IngressScope>,
+    session: FounderReceiveSession,
 }
 
 pub struct NativeTextColdFounderMemberReceiver {
@@ -37,8 +57,7 @@ pub struct NativeTextColdFounderMemberReceiver {
     ingress: NativeChatMemberIngress,
     original: Arc<NetworkDependency>,
     channel: u128,
-    signal: RequestCancellation,
-    scope: Arc<IngressScope>,
+    session: FounderReceiveSession,
 }
 
 impl NativeTextColdFounderMemberIngress {
@@ -51,7 +70,7 @@ impl NativeTextColdFounderMemberIngress {
             .open(
                 self.topic,
                 MAX_V2_MEMBER_TRANSPORT_BYTES,
-                self.signal.clone(),
+                self.session.signal.clone(),
             )
             .await?;
         Ok(NativeTextColdFounderMemberReceiver {
@@ -60,8 +79,7 @@ impl NativeTextColdFounderMemberIngress {
             ingress: self.ingress,
             original: self.original,
             channel: self.channel,
-            signal: self.signal,
-            scope: self.scope,
+            session: self.session,
         })
     }
 }
@@ -75,7 +93,7 @@ impl NativeTextColdFounderMemberReceiver {
 pub(super) struct Ledger {
     view: ProjectionView,
     ledger: ChatLedger,
-    scope: Arc<IngressScope>,
+    session: FounderReceiveSession,
     _fee: CatalogReadReservation,
 }
 
@@ -85,13 +103,10 @@ impl NativeTextColdFounderSource {
         channel: u128,
         caller: RequestCancellation,
     ) -> Result<NativeTextColdFounderMemberIngress, AppError> {
-        self.restore_first_add(&caller)?;
         let mesh = self.actor.as_ref().ok_or_else(refused)?.borrow()?;
         let ingress = mesh.native_chat_member_ingress().ok_or_else(refused)?;
-        let (mount, fee) = self.work.recovered_founder_resources(INGRESS_FEE)?;
-        let (verifier, _) = self.governed.as_ref().ok_or_else(refused)?.member_parts()?;
-        let sdk = self.sdk.as_ref().ok_or_else(refused)?;
-        let (topic, observation) = sdk.prepare_member_topic(verifier, channel, mount.clone())?;
+        let (topic, observation, fee) = self.prepare_member_subscription(channel, &caller)?;
+        let (mount, _) = self.work.recovered_founder_resources(4096)?;
         let caller = observation.constrain(caller);
         let (owner, lifetime) = watch::channel(());
         let scope = Arc::new(IngressScope {
@@ -110,10 +125,33 @@ impl NativeTextColdFounderSource {
             original: self.selection.network.clone(),
             topic,
             channel,
-            signal,
             owner,
-            scope,
+            session: FounderReceiveSession {
+                identity: Arc::new(()),
+                signal,
+            },
         })
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn prepare_member_subscription(
+        &mut self,
+        channel: u128,
+        caller: &RequestCancellation,
+    ) -> Result<
+        (
+            Topic,
+            V2MemberPublicationObservation,
+            CatalogReadReservation,
+        ),
+        AppError,
+    > {
+        self.restore_first_add(caller)?;
+        let (mount, fee) = self.work.recovered_founder_resources(INGRESS_FEE)?;
+        let (verifier, _) = self.governed.as_ref().ok_or_else(refused)?.member_parts()?;
+        let sdk = self.sdk.as_ref().ok_or_else(refused)?;
+        let (topic, observation) = sdk.prepare_member_topic(verifier, channel, mount)?;
+        self.restore_first_add(caller)?;
+        Ok((topic, observation, fee))
     }
 
     pub fn receive_member_frame(
@@ -127,17 +165,31 @@ impl NativeTextColdFounderSource {
         {
             return Err(refused());
         }
-        self.restore_first_add(&receiver.signal)?;
-        let scope = self.history_scope(receiver.channel)?;
+        self.receive_selected_member_frame(receiver.channel, &receiver.session, frame, rng)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn receive_selected_member_frame(
+        &mut self,
+        channel: u128,
+        session: &FounderReceiveSession,
+        frame: &NativeChatMemberFrame,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Option<NativeTextFounderReceived>, AppError> {
+        let ingress = self.runtime_ingress()?.1;
+        if !ingress.owns_frame(frame) {
+            return Err(refused());
+        }
+        self.restore_first_add(&session.signal)?;
+        let scope = self.history_scope(channel)?;
         let (verifier, group) = self.governed.as_ref().ok_or_else(refused)?.member_parts()?;
         let sdk = self.sdk.as_ref().ok_or_else(refused)?;
         let (mount, _payment) = self.work.recovered_founder_resources(FRAME_FEE)?;
         let (topic, _, wire) = frame.current_data().ok_or_else(refused)?;
-        let original = sdk.open_member_envelope(verifier, receiver.channel, topic, wire, mount)?;
+        let original = sdk.open_member_envelope(verifier, channel, topic, wire, mount)?;
         if self
             .received
             .as_ref()
-            .is_some_and(|ledger| !ledger.scope.authorized())
+            .is_some_and(|ledger| ledger.session.signal.is_cancelled())
         {
             self.received = None;
         }
@@ -145,7 +197,7 @@ impl NativeTextColdFounderSource {
             let (_, fee) = self
                 .work
                 .recovered_founder_resources(FOUNDER_RECEIVE_LEDGER_FEE)?;
-            let realm = Realm::new(&scope.group, receiver.channel).map_err(|_| refused())?;
+            let realm = Realm::new(&scope.group, channel).map_err(|_| refused())?;
             let mut ledger = ChatLedger::new(
                 realm,
                 LedgerLimits {
@@ -163,7 +215,7 @@ impl NativeTextColdFounderSource {
             self.received = Some(Ledger {
                 view,
                 ledger,
-                scope: receiver.scope.clone(),
+                session: session.clone(),
                 _fee: fee,
             });
         }
@@ -173,10 +225,13 @@ impl NativeTextColdFounderSource {
         let ledger = self
             .received
             .as_mut()
-            .filter(|ledger| Arc::ptr_eq(&ledger.scope, &receiver.scope))
+            .filter(|ledger| {
+                Arc::ptr_eq(&ledger.session.identity, &session.identity)
+                    && ledger.ledger.realm().channel() == channel
+            })
             .ok_or_else(refused)?;
         let check_lifetime = || {
-            if receiver.signal.is_cancelled() || frame.current_data().is_none() {
+            if session.signal.is_cancelled() || frame.current_data().is_none() {
                 return Err(refused());
             }
             work.require_recovered_founder_source(selection, source)
@@ -198,13 +253,13 @@ impl NativeTextColdFounderSource {
         if !retained {
             return Ok(None);
         }
-        self.restore_first_add(&receiver.signal)?;
+        self.restore_first_add(&session.signal)?;
         let governed = self.governed.as_mut().ok_or_else(refused)?;
         let archived = self
             .work
             .with_recovered_founder_store(&self.selection, &self.source, |store| {
                 archive_founder_member(store, scope, &original, rng, || {
-                    if receiver.signal.is_cancelled() || frame.current_data().is_none() {
+                    if session.signal.is_cancelled() || frame.current_data().is_none() {
                         return Err(refused());
                     }
                     governed.require_current(store, &self.source)?;
@@ -212,8 +267,8 @@ impl NativeTextColdFounderSource {
                 })
             })
             .unwrap_or(Some(false));
-        self.restore_first_add(&receiver.signal)?;
-        if !receiver.ingress.owns_frame(frame) {
+        self.restore_first_add(&session.signal)?;
+        if !ingress.owns_frame(frame) {
             return Err(refused());
         }
         let action = original.action_data();
@@ -232,7 +287,7 @@ impl NativeTextColdFounderSource {
     ) -> Result<Option<NativeTextJoinedMemberProjection>, AppError> {
         self.restore_first_add(caller)?;
         let Some(received) = self.received.as_ref().filter(|received| {
-            received.scope.authorized()
+            !received.session.signal.is_cancelled()
                 && received.ledger.realm().channel() == channel
                 && received.ledger.action(create).is_some()
         }) else {
@@ -245,9 +300,8 @@ impl NativeTextColdFounderSource {
             .ledger
             .guarded_projection(create, FOUNDER_RECEIVE_WORK)
             .map_err(|_| refused())?;
-        let signal = caller.clone().with_authority(Arc::new(IngressScope {
-            lifetime: received.scope.lifetime.clone(),
-            mount: received.scope.caller.clone(),
+        let signal = caller.clone().with_authority(Arc::new(ProjectionScope {
+            receiver: received.session.signal.clone(),
             caller: caller.clone(),
         }));
         if signal.is_cancelled() {

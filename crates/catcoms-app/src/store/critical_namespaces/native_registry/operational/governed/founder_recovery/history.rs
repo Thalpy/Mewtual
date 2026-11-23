@@ -1,8 +1,8 @@
 //! Rebuild one archived projection from the cold founder's selected history.
 use super::*;
 use crate::store::persistence::v2_member_outbox::{
-    member_outbox_key, MemberOutboxContextData, MemberOutboxContextSpec, MemberRequestData,
-    MemberRequestToken, MemberSavedOriginal,
+    member_outbox_key, MemberHistoryPage, MemberHistoryRead, MemberOutboxContextData,
+    MemberOutboxContextSpec, MemberRequestData, MemberRequestToken, MemberSavedOriginal,
 };
 use crate::store::persistence::v2_member_transport::{
     FOUNDER_RECEIVE_ACTIONS as ACTION_LIMIT, FOUNDER_RECEIVE_BYTES as ACTION_BYTES,
@@ -18,6 +18,29 @@ use crate::store::{
 use catcoms_replication::chat::{ActionId, ChatLedger, LedgerLimits, Realm, MAX_ACTION_BYTES};
 
 impl NativeTextColdFounderSource {
+    pub(in crate::store::critical_namespaces::native_registry) fn read_own_history(
+        &mut self,
+        request: MemberHistoryRead,
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<MemberHistoryPage, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        self.restore_first_add(caller).map_err(|_| Refusal::Stale)?;
+        let result = self
+            .work
+            .with_recovered_founder_layout(&self.selection, &self.source, |layout, _| {
+                let context = outbox_context_spec(&self.selection, &self.source);
+                Ok(
+                    crate::store::persistence::prepare_recovered_founder_history(
+                        layout, request, caller, rng, context,
+                    ),
+                )
+            })
+            .map_err(|_| Refusal::Unavailable)?;
+        self.restore_first_add(caller).map_err(|_| Refusal::Stale)?;
+        result
+    }
+
     /// Resolve an exact retry against the existing authenticated founder outbox
     /// before preparing a signed action. This is independent of TCP recovery.
     pub fn lookup_saved_member(
@@ -209,10 +232,17 @@ pub(super) fn outbox_context(
     selection: &ColdFounderSelection,
     source: &RetainedBootstrapSourceData,
 ) -> Result<MemberOutboxContextData, AppError> {
+    MemberOutboxContextData::from_spec(outbox_context_spec(selection, source))
+}
+
+fn outbox_context_spec<'a>(
+    selection: &'a ColdFounderSelection,
+    source: &RetainedBootstrapSourceData,
+) -> MemberOutboxContextSpec<'a> {
     let genesis = source.data().genesis_public_data();
     let profile = genesis.profile_data();
     let original = &selection.binding;
-    MemberOutboxContextData::from_spec(MemberOutboxContextSpec {
+    MemberOutboxContextSpec {
         vault: original.vault,
         layout: original.layout,
         pin: original.pin,
@@ -221,7 +251,7 @@ pub(super) fn outbox_context(
         group_nonce: profile.spec().creation,
         device: original.signer,
         group: &original.group,
-    })
+    }
 }
 
 pub(super) fn saved_dependency(

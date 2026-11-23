@@ -29,6 +29,23 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
 enum HistoryContext<'a> {
     Founder(V2TextOwnerRef<'a>),
     Joined(NativeTextJoinedRegistrationData),
+    RecoveredFounder(MemberOutboxContextSpec<'a>),
+}
+
+pub(in crate::store) fn prepare_recovered_founder_history(
+    layout: &V2CurrentLayoutStore,
+    read: MemberHistoryRead,
+    negative: &RequestCancellation,
+    rng: &mut impl CryptoRngCore,
+    spec: MemberOutboxContextSpec<'_>,
+) -> Result<MemberHistoryPage, V2MemberSaveRefusal> {
+    prepare_history(
+        layout,
+        read,
+        negative,
+        rng,
+        HistoryContext::RecoveredFounder(spec),
+    )
 }
 
 pub(in crate::store) fn prepare_joined_member_history(
@@ -90,6 +107,16 @@ fn prepare_history(
                     .member_outbox_context_data()
                     .map_err(|_| V2MemberSaveRefusal::Unavailable)?,
                 receipt.signer,
+            )
+        }
+        HistoryContext::RecoveredFounder(spec) => {
+            if spec.vault != mounted.vault || spec.layout != mounted.root {
+                return Err(V2MemberSaveRefusal::Stale);
+            }
+            let signer = spec.device;
+            (
+                MemberOutboxContextData::from_spec(spec).map_err(|_| V2MemberSaveRefusal::Stale)?,
+                signer,
             )
         }
     };

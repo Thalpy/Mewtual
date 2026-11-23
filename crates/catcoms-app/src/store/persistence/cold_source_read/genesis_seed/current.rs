@@ -619,8 +619,8 @@ mod tests;
 // inert owning wrappers escape; all receipt/guard/registration constructors stay private.
 mod operational;
 pub(in crate::store) use operational::{
-    prepare_joined_member_history, JoinedMemberLane, JoinedMemberSource,
-    OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
+    prepare_joined_member_history, prepare_recovered_founder_history, JoinedMemberLane,
+    JoinedMemberSource, OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
     PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
     PreparedV2UnsignedOriginalCustody, RecoveredMemberLane, RecoveredMemberSource,
     V2AdvancedAppendBasis,

@@ -72,7 +72,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 mod history;
-pub(in crate::store) use history::prepare_joined_member_history;
+pub(in crate::store) use history::{
+    prepare_joined_member_history, prepare_recovered_founder_history,
+};
 
 /// Native custody for ONE member-save admission.
 ///
@@ -390,11 +392,11 @@ impl JoinedMemberLane {
 }
 
 impl RecoveredMemberLane {
-    pub(in crate::store) fn prepare_member_save<R: CryptoRngCore>(
-        &mut self,
+    pub(in crate::store) fn prepare_member_save<'a, R: CryptoRngCore>(
+        &'a mut self,
         layout: &V2CurrentLayoutStore,
         request: V2MemberSignRequest<'_>,
-        source: RecoveredMemberSource<'_, R>,
+        source: RecoveredMemberSource<'a, R>,
         context: MemberOutboxContextData,
         negative: &RequestCancellation,
         rng: &mut impl CryptoRngCore,

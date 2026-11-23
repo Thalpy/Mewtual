@@ -1608,6 +1608,71 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
         .unwrap();
     assert_joined_publication_stopped(recovered_publication).await;
     drop(close);
+
+    let founder_state = founder.state::<AppState>();
+    let close = register_vault_close(&founder_state).await.unwrap();
+    sources::close_server_rows(&founder_state, &SystemClock)
+        .await
+        .unwrap();
+    drop(close);
+    drop(founder_window);
+    drop(founder);
+    let (reopened_founder, founder_window, founder_queue) =
+        app(root.path().join("founder"), None, true);
+    let wrong = invoke(&founder_window, "1", "different secret");
+    run(&founder_queue).await;
+    refused(wrong.await.unwrap());
+    let state = reopened_founder.state::<AppState>();
+    assert!(state.store.lock().await.is_none());
+    assert!(state.servers.lock().await.native_iter().next().is_none());
+    let unlock = invoke(&founder_window, "1", SECRET);
+    run(&founder_queue).await;
+    let restored = found_value(unlock.await.unwrap());
+    let rows = restored["servers"].as_array().unwrap();
+    let [founder_row] = rows.as_slice() else {
+        panic!("expected the restored founder row");
+    };
+    for field in ["server", "name", "display_name", "channel", "backend"] {
+        assert_eq!(founder_row[field], found[field], "restored founder {field}");
+    }
+    let probe = invite_command(
+        &founder_window,
+        "get_message_page",
+        archive_request(
+            founder_row,
+            serde_json::json!({ "archivedAction": member_action }),
+        ),
+    );
+    run(&founder_queue).await;
+    let archived = found_value(probe.await.unwrap());
+    assert_eq!(archived["item"]["action"], member_action);
+    assert_eq!(archived["item"]["text"], member_text);
+    let page = native_history_request(&founder_window, founder_row, "0", None, 8);
+    run(&founder_queue).await;
+    let own = found_value(page.await.unwrap());
+    assert_eq!(own["items"][0]["action"], founder_action);
+    assert_eq!(own["items"][0]["body"]["text"], founder_text);
+    let retry = native_send_request(&founder_window, founder_row, 21, founder_text);
+    run(&founder_queue).await;
+    assert_eq!(
+        found_value(retry.await.unwrap())["message_id"],
+        founder_action
+    );
+    let send = native_send_request(
+        &founder_window,
+        founder_row,
+        22,
+        "Founder message after restart",
+    );
+    run(&founder_queue).await;
+    let saved = found_value(send.await.unwrap());
+    assert_eq!(saved["disposition"], "saved-local");
+    assert_ne!(saved["message_id"], founder_action);
+    let close = register_vault_close(&state).await.unwrap();
+    sources::close_server_rows(&state, &SystemClock)
+        .await
+        .unwrap();
+    drop(close);
 }
 
 async fn assert_joined_connected_workers(

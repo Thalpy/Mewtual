@@ -148,8 +148,10 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
             .pool
             .try_reserve(4 * CHAT_V2_JOIN_RESPONSE_MAX_BYTES + 4096)
             .map_err(|_| Error::Busy)?;
-        let packet =
-            catcoms_sync::V2JoinRequestPacketData::decode(body).map_err(|_| Error::Failed)?;
+        let packet = (!self.row.original.recovered_founder)
+            .then(|| catcoms_sync::V2JoinRequestPacketData::decode(body))
+            .transpose()
+            .map_err(|_| Error::Failed)?;
         let (keys, [add, header, welcome]) = self.prepare_join_keys()?;
         let source = Arc::new(welcome.observe_current());
         let mount = self.scope.clone();
@@ -159,13 +161,16 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
             caller: caller.clone(),
             waiting: Some(waiting),
         }));
-        let response =
-            self.finish_prepared(keys)?
-                .run_join_request(&packet, [add, header, welcome], &work)?;
+        let job = self.finish_prepared(keys)?;
+        let delivery = if let Some(packet) = packet {
+            let response = job.run_join_request(&packet, [add, header, welcome], &work)?;
+            response.encode_delivery_data().map_err(|_| Error::Failed)?
+        } else {
+            job.run_recovered_join_response(body, &work)?
+        };
         if work.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        let delivery = response.encode_delivery_data().map_err(|_| Error::Failed)?;
         if delivery.len() > CHAT_V2_JOIN_RESPONSE_MAX_BYTES {
             return Err(Error::Failed);
         }
@@ -182,5 +187,29 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
                 Arc::new(JoinPayment { _fee: fee }),
             )
             .map_err(|_| Error::Cancelled)
+    }
+}
+
+impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberJob<T, R> {
+    fn run_recovered_join_response(
+        mut self,
+        request: &[u8],
+        caller: &RequestCancellation,
+    ) -> Result<Vec<u8>, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Error;
+        self.inner.require_current().map_err(|_| Error::Cancelled)?;
+        let founder = self
+            .inner
+            .loan
+            .body
+            .as_mut()
+            .and_then(|body| body.recovered_founder.as_mut())
+            .ok_or(Error::Unavailable)?;
+        let response = founder
+            .encode_recovered_join_delivery(request, caller)
+            .map_err(|_| Error::Failed);
+        self.inner.loan.recorded = true;
+        self.inner.require_current().map_err(|_| Error::Cancelled)?;
+        response
     }
 }

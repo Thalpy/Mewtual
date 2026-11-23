@@ -78,6 +78,14 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextRuntimeSelection<T, R> {
         self.original.request
     }
 
+    pub fn is_recovered_from_original_vault_cached(&self, vault: &NativeTextVault) -> bool {
+        self.original.recovered_founder
+            && self.original.scope.is_open()
+            && self.original.source_close.is_open()
+            && self.original.runtime.strong_count() != 0
+            && Arc::ptr_eq(&self.original.scope, &vault.sources.observe())
+    }
+
     /// Fence this exact original Source at native row retirement. SC-only and
     /// independent of runtime/book writers; already captured cuts cannot enter
     /// after this edge. No Leave, file, SDK or transport completion is claimed.

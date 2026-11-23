@@ -12,6 +12,11 @@ pub struct NativeChatSourceClose {
     original: Arc<Counter>,
 }
 impl NativeChatSourceClose {
+    /// Cached retirement state only. It does not authorize a native command.
+    pub fn is_open(&self) -> bool {
+        self.original.open()
+    }
+
     /// Irreversibly stop new key entry on this exact Source. SC atomics only:
     /// no notification, allocation, wait, payer release or positive permission.
     /// The original owner must still retire outside guards and drain actual

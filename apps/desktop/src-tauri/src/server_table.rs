@@ -175,9 +175,15 @@ impl PreparedNativeRow {
         &self,
         vault: &catcoms_app::store::NativeTextVault,
     ) -> bool {
-        matches!(&self.data.selection, NativeSelection::Joined(original)
-            if original.is_current_cached() && original.is_from_original_vault_cached(vault))
-            && self.data.target.is_for_original_vault(vault)
+        let original = match &self.data.selection {
+            NativeSelection::Founder(original) => {
+                original.is_recovered_from_original_vault_cached(vault)
+            }
+            NativeSelection::Joined(original) => {
+                original.is_current_cached() && original.is_from_original_vault_cached(vault)
+            }
+        };
+        original && self.data.target.is_for_original_vault(vault)
     }
 
     /// Called with already paid/frozen fields outside guards. No renderer DATA

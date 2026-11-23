@@ -113,6 +113,16 @@ impl NativeTextColdFounderSource {
         self.local
     }
 
+    pub fn display_name_data(&self) -> Result<String, AppError> {
+        self.work
+            .with_recovered_founder_store(&self.selection, &self.source, |store| {
+                Ok(self
+                    .source
+                    .saved_expectation_data(store)?
+                    .debit_display_name)
+            })
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn take_native_vault(
         &mut self,
         atoms: (Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicBool>),
@@ -142,6 +152,7 @@ impl NativeTextColdFounderSource {
             crate::store::NativeTextVault,
             crate::store::NativeTextSources<catcoms_net::MeshService, R>,
             crate::store::NativeTextRuntimeSelection<catcoms_net::MeshService, R>,
+            crate::store::NativeTextVaultAuthenticationCheck,
         ),
         AppError,
     > {
@@ -157,7 +168,7 @@ impl NativeTextColdFounderSource {
             .map_err(|_| refused())?;
         let row =
             sources.install_recovered_founder(&vault, &authentication, self, inputs, caller)?;
-        Ok((vault, sources, row))
+        Ok((vault, sources, row, authentication))
     }
 
     pub(in crate::store::critical_namespaces::native_registry) fn runtime_labels(

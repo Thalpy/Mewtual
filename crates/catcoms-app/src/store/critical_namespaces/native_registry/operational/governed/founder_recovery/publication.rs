@@ -4,6 +4,7 @@ use crate::store::persistence::native_registry::network::NetworkDependency;
 use crate::store::persistence::v2_member_outbox::{
     member_outbox_key, MemberDebtBatch, MemberDebtClass,
 };
+use crate::store::persistence::v2_member_transport::{FounderDebtOperation, FounderDebtOutcome};
 use catcoms_rt::{PublishOnceError, PublishSubmission};
 use catcoms_sync::owner_v2::{PreparedV2MemberSubmission, MAX_V2_MEMBER_TRANSPORT_BYTES};
 
@@ -69,7 +70,34 @@ impl NativeTextColdFounderSource {
         caller: RequestCancellation,
         rng: &mut impl CryptoRngCore,
     ) -> Result<Option<NativeTextColdFounderPublication>, AppError> {
-        self.restore_first_add(&caller)?;
+        match self.run_member_debt(FounderDebtOperation::Prepare, &caller, rng)? {
+            FounderDebtOutcome::Idle => Ok(None),
+            FounderDebtOutcome::Prepared {
+                submission,
+                batch,
+                fee,
+            } => Ok(Some(NativeTextColdFounderPublication {
+                submission,
+                batch,
+                original: self.selection.network.clone(),
+                signal: caller.retain_custody(Arc::new(JoinFramePayment { _fee: fee })),
+            })),
+            FounderDebtOutcome::Checkpointed(_) => Err(refused()),
+        }
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn run_member_debt(
+        &mut self,
+        operation: FounderDebtOperation,
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<FounderDebtOutcome, AppError> {
+        self.restore_first_add(caller)?;
+        if let FounderDebtOperation::Checkpoint(batch) = operation {
+            return self
+                .checkpoint_member_debt(batch, caller, rng)
+                .map(FounderDebtOutcome::Checkpointed);
+        }
         let original = &self.selection;
         let mesh = self.actor.as_ref().ok_or_else(refused)?.borrow()?;
         let sdk = self.sdk.as_ref().ok_or_else(refused)?;
@@ -90,7 +118,7 @@ impl NativeTextColdFounderSource {
                     .read_publication_debt(store, self.outbox_context()?, &key, founder, rng)
                     .map_err(|_| refused())?
                 else {
-                    return Ok(None);
+                    return Ok(FounderDebtOutcome::Idle);
                 };
                 let item = &batch.items()[0];
                 if item.class() != MemberDebtClass::Publishable
@@ -110,16 +138,13 @@ impl NativeTextColdFounderSource {
                 if !submission.is_current_cached() {
                     return Err(refused());
                 }
-                Ok(Some(NativeTextColdFounderPublication {
+                Ok(FounderDebtOutcome::Prepared {
                     submission,
                     batch,
-                    original: original.network.clone(),
-                    signal: caller
-                        .clone()
-                        .retain_custody(Arc::new(JoinFramePayment { _fee: payment })),
-                }))
+                    fee: payment,
+                })
             })?;
-        self.restore_first_add(&caller)?;
+        self.restore_first_add(caller)?;
         Ok(result)
     }
 
@@ -133,22 +158,38 @@ impl NativeTextColdFounderSource {
         {
             return Err(refused());
         }
-        self.restore_first_add(caller)?;
+        let (_owner, lifetime) = watch::channel(());
+        let signal = caller.clone().with_authority(Arc::new(IngressScope {
+            lifetime,
+            mount: receipt.signal,
+            caller: caller.clone(),
+        }));
+        let result = self.run_member_debt(
+            FounderDebtOperation::Checkpoint(receipt.batch),
+            &signal,
+            rng,
+        )?;
+        match result {
+            FounderDebtOutcome::Checkpointed(front) => Ok(front),
+            _ => Err(refused()),
+        }
+    }
+
+    fn checkpoint_member_debt(
+        &self,
+        batch: MemberDebtBatch,
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<u64, AppError> {
         self.work
             .with_recovered_founder_store(&self.selection, &self.source, |store| {
-                if caller.is_cancelled() || receipt.signal.is_cancelled() {
+                if caller.is_cancelled() {
                     return Err(refused());
                 }
                 let mount = store.member_outbox_mount()?;
                 let key = member_outbox_key(store)?;
                 mount
-                    .checkpoint_publication_debt(
-                        store,
-                        self.outbox_context()?,
-                        &key,
-                        receipt.batch,
-                        rng,
-                    )
+                    .checkpoint_publication_debt(store, self.outbox_context()?, &key, batch, rng)
                     .map(|checkpoint| checkpoint.front)
                     .map_err(|_| refused())
             })

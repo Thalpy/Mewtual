@@ -129,6 +129,42 @@ impl Bootstrap {
                             1 => {
                                 let (_owner, signal) = tokio::sync::watch::channel(false);
                                 let negative = catcoms_rt::RequestCancellation::new(signal, None);
+                                if storage
+                                    .recovered_join_registration_data()
+                                    .map_err(|_| EXISTING)?
+                                    .is_none()
+                                {
+                                    let founder = storage
+                                        .prepare_recovered_founder()
+                                        .map_err(|_| EXISTING)?;
+                                    let name = founder.registration_data().1.to_owned();
+                                    let display =
+                                        founder.display_name_data().map_err(|_| EXISTING)?;
+                                    let (vault, sources, selection, authentication) = founder
+                                        .into_recovered_native_sources(
+                                            atoms,
+                                            budget,
+                                            &source_policy,
+                                            secret,
+                                            catcoms_app::store::NativeTextCreationInputs::new(
+                                                rng,
+                                                OsCryptoRng,
+                                                Box::new(SystemClock),
+                                            ),
+                                            &negative,
+                                        )
+                                        .map_err(|_| EXISTING)?;
+                                    return super::sources::ReadyBundle::recovered_founder(
+                                        vault,
+                                        sources,
+                                        selection,
+                                        authentication,
+                                        &name,
+                                        &display,
+                                        &row.budget,
+                                        row.instance,
+                                    );
+                                }
                                 let runtime = storage
                                     .bind_recovered_native_runtime(
                                         rng,

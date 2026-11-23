@@ -150,6 +150,7 @@ impl<R: CryptoRngCore> NativeTextMemberPreparation<catcoms_net::MeshService, R> 
                     NativeTextJoinedMemberProjection::from_live(projection, signal, fee)
                 }))
             }
+            FounderReceiveOutcome::RecoveredProjection(projected) => Ok(projected),
             _ => Err(V2MemberSaveRefusal::Failed),
         }
     }
@@ -207,6 +208,7 @@ impl<R: CryptoRngCore> NativeTextMemberPreparation<catcoms_net::MeshService, R> 
                     original.lease,
                 )
             })),
+            FounderReceiveOutcome::RecoveredProjection(projected) => Ok(projected),
             _ => Err(V2MemberSaveRefusal::Failed),
         }
     }
@@ -225,14 +227,20 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberJob<T, R> {
             .map_err(|_| Refusal::Unavailable)?;
         let inner = &mut self.inner;
         let body = inner.loan.body.as_mut().ok_or(Refusal::Unavailable)?;
-        let result = body.work.run_founder_member_receive(
-            body.driver.as_mut().ok_or(Refusal::Unavailable)?,
-            channel,
-            operation,
-            caller,
-            body.rng.as_mut().ok_or(Refusal::Unavailable)?,
-            &mut inner.keys,
-        );
+        let rng = body.rng.as_mut().ok_or(Refusal::Unavailable)?;
+        let result = if let Some(founder) = body.recovered_founder.as_mut() {
+            run_recovered_receive(founder, channel, operation, caller, rng)
+                .map_err(|_| Refusal::Failed)
+        } else {
+            body.work.run_founder_member_receive(
+                body.driver.as_mut().ok_or(Refusal::Unavailable)?,
+                channel,
+                operation,
+                caller,
+                rng,
+                &mut inner.keys,
+            )
+        };
         inner.loan.recorded = true;
         self.inner
             .require_current()
@@ -242,4 +250,34 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberJob<T, R> {
         }
         result
     }
+}
+
+fn run_recovered_receive(
+    founder: &mut crate::store::NativeTextColdFounderSource,
+    channel: u128,
+    operation: FounderReceiveOperation<'_>,
+    caller: &RequestCancellation,
+    rng: &mut impl CryptoRngCore,
+) -> Result<FounderReceiveOutcome, AppError> {
+    Ok(match operation {
+        FounderReceiveOperation::Subscription => {
+            let (topic, observation, fee) = founder.prepare_member_subscription(channel, caller)?;
+            FounderReceiveOutcome::Subscription(topic, observation, fee)
+        }
+        FounderReceiveOperation::Frame(frame, session) => FounderReceiveOutcome::Frame(
+            founder.receive_selected_member_frame(channel, session, frame, rng)?,
+        ),
+        FounderReceiveOperation::Read(action) => FounderReceiveOutcome::RecoveredProjection(
+            founder.read_member_projection(channel, action, caller)?,
+        ),
+        FounderReceiveOperation::ArchivePage(query) => {
+            let page = founder.archived_action_page(channel, query.after, query.limit, caller)?;
+            FounderReceiveOutcome::ArchivePage(page.map(|page| page.0))
+        }
+        FounderReceiveOperation::ArchiveMessage(action) => {
+            FounderReceiveOutcome::RecoveredProjection(
+                founder.archived_message_projection(channel, action, caller, rng)?,
+            )
+        }
+    })
 }

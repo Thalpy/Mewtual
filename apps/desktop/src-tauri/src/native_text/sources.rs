@@ -23,6 +23,46 @@ pub(super) struct ReadyBundle {
     vault: NativeTextVault,
 }
 impl ReadyBundle {
+    pub(super) fn recovered_founder(
+        vault: NativeTextVault,
+        sources: Sources,
+        selection: catcoms_app::store::NativeTextRuntimeSelection<
+            catcoms_net::MeshService,
+            OsCryptoRng,
+        >,
+        authentication: NativeTextVaultAuthenticationCheck,
+        name: &str,
+        display_name: &str,
+        row_budget: &NativeUiInvocationBudget,
+        instance: u64,
+    ) -> Result<Self, String> {
+        const FAILED: &str = "Could not reopen the founder's Chat V2 group.";
+        if !selection.is_recovered_from_original_vault_cached(&vault)
+            || !authentication.is_for_original_vault(&vault)
+        {
+            return Err(FAILED.into());
+        }
+        let request = selection.request_data();
+        let row = server_table::PreparedNativeRow::new(
+            server_table::NativeRowSpec {
+                selection: server_table::NativeSelection::Founder(selection),
+                instance,
+                target: Arc::new(authentication),
+                request,
+                name,
+                display_name,
+                is_dm: false,
+                channel: channel_id("general"),
+            },
+            row_budget.prepare().map_err(|_| FAILED)?,
+        )?;
+        Ok(Self {
+            row: Some(row),
+            sources,
+            vault,
+        })
+    }
+
     pub(super) fn new(
         vault: NativeTextVault,
         policy: &NativeTextSourcePolicy,

@@ -81,10 +81,6 @@ impl NativeTextColdFounderSource {
             .is_some_and(|owner| Arc::ptr_eq(&owner.scope, &request.scope))
             || !request.scope.authorized()
             || !request.responder.is_current()
-            || !self
-                .governed
-                .as_ref()
-                .is_some_and(|add| add.covers_request_data(&request.bytes[1..]))
         {
             return Err(refused());
         }
@@ -93,16 +89,10 @@ impl NativeTextColdFounderSource {
             .caller
             .clone()
             .with_authority(request.responder.cancellation_authority());
-        self.restore_first_add(&caller)?;
         let (_, fee) = self
             .work
             .recovered_founder_resources(4 * CHAT_V2_JOIN_RESPONSE_MAX_BYTES + 4096)?;
-        let original = self.governed.as_ref().ok_or_else(refused)?;
-        let delivery = original.encode_join_delivery(&self.source)?;
-        if delivery.len() > CHAT_V2_JOIN_RESPONSE_MAX_BYTES || caller.is_cancelled() {
-            return Err(refused());
-        }
-        self.restore_first_add(&caller)?;
+        let delivery = self.encode_recovered_join_delivery(&request.bytes[1..], &caller)?;
         request
             .responder
             .try_respond_with_custody(
@@ -111,5 +101,23 @@ impl NativeTextColdFounderSource {
                 Arc::new(JoinFramePayment { _fee: fee }),
             )
             .map_err(|_| refused())
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn encode_recovered_join_delivery(
+        &mut self,
+        request: &[u8],
+        caller: &RequestCancellation,
+    ) -> Result<Vec<u8>, AppError> {
+        self.restore_first_add(caller)?;
+        let original = self.governed.as_ref().ok_or_else(refused)?;
+        if !original.covers_request_data(request) {
+            return Err(refused());
+        }
+        let delivery = original.encode_join_delivery(&self.source)?;
+        if delivery.len() > CHAT_V2_JOIN_RESPONSE_MAX_BYTES {
+            return Err(refused());
+        }
+        self.restore_first_add(caller)?;
+        Ok(delivery)
     }
 }

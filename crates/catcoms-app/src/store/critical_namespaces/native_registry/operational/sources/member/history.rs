@@ -103,19 +103,25 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberJob<T, R> {
             .body
             .as_mut()
             .ok_or(V2MemberSaveRefusal::Unavailable)?;
-        let result = body.work.prepare_native_member_history(
-            body.driver
-                .as_mut()
-                .ok_or(V2MemberSaveRefusal::Unavailable)?,
-            MemberHistoryRead {
-                start,
-                end: end_exclusive,
-                maximum,
-            },
-            negative,
-            body.rng.as_mut().ok_or(V2MemberSaveRefusal::Unavailable)?,
-            &mut self.inner.keys,
-        );
+        let request = MemberHistoryRead {
+            start,
+            end: end_exclusive,
+            maximum,
+        };
+        let rng = body.rng.as_mut().ok_or(V2MemberSaveRefusal::Unavailable)?;
+        let result = if let Some(founder) = body.recovered_founder.as_mut() {
+            founder.read_own_history(request, negative, rng)
+        } else {
+            body.work.prepare_native_member_history(
+                body.driver
+                    .as_mut()
+                    .ok_or(V2MemberSaveRefusal::Unavailable)?,
+                request,
+                negative,
+                rng,
+                &mut self.inner.keys,
+            )
+        };
         #[cfg(all(test, any(windows, target_os = "linux")))]
         super::tests::after_history();
         self.inner.loan.recorded = true; // known return, never new signing authority

@@ -6,7 +6,7 @@ use super::v2_shared_history::{
 };
 use crate::store::critical_namespaces::read_pool::CatalogReadReservation;
 use crate::store::critical_namespaces::refused;
-use crate::store::{ServerStore, V2MemberSaveRefusal as Refusal};
+use crate::store::{NativeTextJoinedMemberProjection, ServerStore, V2MemberSaveRefusal as Refusal};
 use crate::AppError;
 use catcoms_net::NativeChatMemberFrame;
 use catcoms_replication::chat::{
@@ -171,4 +171,5 @@ pub(in crate::store) enum FounderReceiveOutcome {
     ),
     ArchivePage(Option<SharedHistoryActionPage>),
     ArchiveMessage(Option<FounderArchivedMessage>),
+    RecoveredProjection(Option<NativeTextJoinedMemberProjection>),
 }

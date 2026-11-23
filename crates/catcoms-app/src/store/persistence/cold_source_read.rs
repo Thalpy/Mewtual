@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::sync::Weak;
 mod genesis_seed;
 pub(in crate::store) use genesis_seed::{
-    prepare_joined_member_history, JoinedMemberLane, JoinedMemberSource,
-    OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
+    prepare_joined_member_history, prepare_recovered_founder_history, JoinedMemberLane,
+    JoinedMemberSource, OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
     PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
     PreparedV2UnsignedOriginalCustody, RecoveredMemberLane, RecoveredMemberSource,
     V2AdvancedAppendBasis,

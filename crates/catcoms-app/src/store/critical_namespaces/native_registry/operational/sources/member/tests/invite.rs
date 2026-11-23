@@ -1711,7 +1711,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
         drop(requests);
         let expected = original.registration_data().0;
         let authorized = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let (vault, sources, recovered_row) = original
+        let (vault, sources, recovered_row, authentication) = original
             .into_recovered_native_sources(
                 (
                     Arc::new(std::sync::atomic::AtomicU64::new(7)),
@@ -1721,11 +1721,13 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 founder_budget.clone(),
                 &policy(),
                 SECRET,
-                inputs(),
+                super::inputs(),
                 &fresh,
             )
             .unwrap();
         assert_eq!(recovered_row.id_data(), expected.id);
+        assert!(authentication.is_for_original_vault(&vault));
+        assert!(recovered_row.is_recovered_from_original_vault_cached(&vault));
         authorized.store(7, std::sync::atomic::Ordering::SeqCst);
         let capture = || {
             sources.capture_member(

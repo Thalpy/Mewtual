@@ -55,7 +55,9 @@ pub(in crate::store) use member::{
     JoinedMemberLane, JoinedMemberSource, RecoveredMemberLane, RecoveredMemberSource,
 };
 pub use member::{V2MemberDependency, V2MemberSignRequest};
-pub(in crate::store) use member_save::prepare_joined_member_history;
+pub(in crate::store) use member_save::{
+    prepare_joined_member_history, prepare_recovered_founder_history,
+};
 pub use member_save::{
     MemberSaveJob, MemberSaveJobReport, MemberSaveNativeAdmission, V2MemberSaveOutcome,
     V2MemberSaveRefusal,

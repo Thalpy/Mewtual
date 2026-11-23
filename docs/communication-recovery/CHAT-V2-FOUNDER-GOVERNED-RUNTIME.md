@@ -1,8 +1,8 @@
 # Whole founder node: governed Add continuation
 
-The warm native runtime supports the first governed Add, the original signed
+The native runtime supports the first governed Add, the original signed
 Welcome, and ordinary founder and joined-member messages. Chat V2 remains OFF
-pending cold desktop activation and end-to-end acceptance.
+pending the remaining membership, reconnect, and end-to-end acceptance work.
 
 ## Implemented boundary
 
@@ -16,8 +16,9 @@ seed, authenticates the exact selected signed Add from its archive, and
 restores an independently paid closed MLS graph from the selected snapshot.
 The original pin also anchors the Core replay of genesis and the first Add.
 Selection rechecks the held files and confirms that the restored MLS epoch,
-governing Header, and both active Admissions agree. Desktop startup still
-requires native runtime activation before publishing a recovered founder row.
+governing Header, and both active Admissions agree. Desktop startup publishes
+the recovered first-Add founder row only after authenticating that vault and
+pairing the row with the recovered native Source.
 The bound cold actor can serve the original covered Welcome on its original
 join ingress. It accepts the exact stored signed JoinRequest and rebuilds
 the public proof from the checked genesis and Add. The transport response
@@ -44,8 +45,7 @@ access, while already covered history can still be opened under a fresh scope.
 The restored SDK can sign one ordinary action under an authenticated native
 MemberAction cut and the original live Core Admission. A different key
 purpose or a second Source with the same UI generation refuses. The request's
-timestamp and nonce remain bound to the SDK instance that drew them. Desktop
-startup still needs to install this Source.
+timestamp and nonce remain bound to the SDK instance that drew them.
 
 New ordinary actions from the authenticated recovered founder pass through
 the shared two-phase outbox. The sign step rechecks the held founder files
@@ -57,6 +57,9 @@ The recovered founder can enter the original native Source book after vault
 authentication. Its row is paired with the selected physical vault and its
 reserved mesh. Preparing a key still requires a current admitted UI command
 from that vault. Source retirement drains the original save work and TCP actor.
+The desktop uses the same ordinary IPC and workers for the reopened founder.
+Its display name comes from the original sealed bootstrap debit. The recovered
+request responder returns only the exact covered Welcome.
 
 The stage-lifetime continuation is under validation. Native key drainage is
 being separated from retained CLOSED snapshot DATA: an actual completed Cell

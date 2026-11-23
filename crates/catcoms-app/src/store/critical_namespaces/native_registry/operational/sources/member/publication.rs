@@ -125,13 +125,20 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberJob<T, R> {
             .map_err(|_| Refusal::Unavailable)?;
         let inner = &mut self.inner;
         let body = inner.loan.body.as_mut().ok_or(Refusal::Unavailable)?;
-        let result = body.work.run_founder_member_debt(
-            body.driver.as_mut().ok_or(Refusal::Unavailable)?,
-            operation,
-            caller,
-            body.rng.as_mut().ok_or(Refusal::Unavailable)?,
-            &mut inner.keys,
-        );
+        let rng = body.rng.as_mut().ok_or(Refusal::Unavailable)?;
+        let result = if let Some(founder) = body.recovered_founder.as_mut() {
+            founder
+                .run_member_debt(operation, caller, rng)
+                .map_err(|_| Refusal::Failed)
+        } else {
+            body.work.run_founder_member_debt(
+                body.driver.as_mut().ok_or(Refusal::Unavailable)?,
+                operation,
+                caller,
+                rng,
+                &mut inner.keys,
+            )
+        };
         inner.loan.recorded = true;
         self.inner
             .require_current()
