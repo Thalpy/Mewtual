@@ -268,7 +268,7 @@ jobs:
       - name: Check retirement of an approved native join dial
         if: inputs.scope == 'joined-storage' || inputs.scope == 'native-contact'
         run: python .github/scripts/check-chat-v2-invite-intent.py joined-contact
-        - name: Check mounted request restart, connected Welcome, and joined runtime ownership
+      - name: Check mounted request restart, connected Welcome, and joined runtime ownership
         if: github.event_name == 'pull_request' || inputs.scope == 'joined-storage' || inputs.scope == 'native-contact' || inputs.scope == 'joined-member'
         run: python .github/scripts/check-chat-v2-invite-intent.py mounted-join-request
       - name: Check joined registry labels and historical row encodings
