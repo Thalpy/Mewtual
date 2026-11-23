@@ -312,6 +312,11 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     let result = node.completed_add_data().unwrap();
     let remove_admission = admission.id();
     let removed_id = admission.admission_id();
+    let retained_later = (
+        header.clone(),
+        admission.clone(),
+        output.image_data().to_vec(),
+    );
     let step = || V2AdmissionStepData {
         admission,
         header,
@@ -728,44 +733,44 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
             .unwrap(),
         new_topic
     );
-    let original = native.source.observe();
+    let original_native = native.source.observe();
     let founder_body = node.genesis_data().admission.id();
     assert!(node
-        .prepare_removal_data(verifier, founder_body, original.clone())
+        .prepare_removal_data(verifier, founder_body, original_native.clone())
         .is_err());
     assert!(node
         .prepare_removal_data(
             foreign_prefix.selected_member_verifier().unwrap(),
             remove_admission,
-            original.clone()
+            original_native.clone()
         )
         .is_err());
-    node.prepare_removal_data(verifier, remove_admission, original.clone())
+    node.prepare_removal_data(verifier, remove_admission, original_native.clone())
         .unwrap();
     assert!(node
         .prepare_removal_data(verifier, remove_admission, invite_source.clone())
         .is_err());
     assert!(node.ordinary_member_signer_data().is_err());
-    let mut payment = Some(super::admission(&member_payment));
+    let mut remove_payment = Some(super::admission(&member_payment));
     let mut remove_ends = catcoms_rt::NativeChatKeyEnds::new();
     let mut wrong = native.cut(NativeChatKeyPurpose::AddSdk);
     assert!(node
         .execute_removal_native(
             verifier,
             remove_admission,
-            &original,
-            &mut payment,
+            &original_native,
+            &mut remove_payment,
             &mut wrong,
             &mut remove_ends
         )
         .is_err());
-    assert!(payment.is_some());
+    assert!(remove_payment.is_some());
     let mut sdk_cut = native.cut(NativeChatKeyPurpose::RemoveSdk);
     node.execute_removal_native(
         verifier,
         remove_admission,
-        &original,
-        &mut payment,
+        &original_native,
+        &mut remove_payment,
         &mut sdk_cut,
         &mut remove_ends,
     )
@@ -776,12 +781,12 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
         .result
         .commit_data()
         .as_ptr();
-    assert!(payment.is_none());
+    assert!(remove_payment.is_none());
     node.execute_removal_native(
         verifier,
         remove_admission,
-        &original,
-        &mut payment,
+        &original_native,
+        &mut remove_payment,
         &mut sdk_cut,
         &mut remove_ends,
     )
@@ -797,18 +802,18 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     let (_, mut signing) = node.removal_signing_parts_data(verifier).unwrap();
     let mut wrong = native.cut(NativeChatKeyPurpose::GoverningHeader);
     assert!(signing
-        .sign_header_native(&original, &mut wrong, &mut remove_ends)
+        .sign_header_native(&original_native, &mut wrong, &mut remove_ends)
         .is_err());
     assert!(node.raw_removal_signature_data().is_none());
     let (_, mut signing) = node.removal_signing_parts_data(verifier).unwrap();
     let mut header_cut = native.cut(NativeChatKeyPurpose::RemovalHeader);
     signing
-        .sign_header_native(&original, &mut header_cut, &mut remove_ends)
+        .sign_header_native(&original_native, &mut header_cut, &mut remove_ends)
         .unwrap();
     let raw = *node.raw_removal_signature_data().unwrap();
     let (_, mut signing) = node.removal_signing_parts_data(verifier).unwrap();
     signing
-        .sign_header_native(&original, &mut header_cut, &mut remove_ends)
+        .sign_header_native(&original_native, &mut header_cut, &mut remove_ends)
         .unwrap();
     assert_eq!(node.raw_removal_signature_data(), Some(&raw));
     let header = node.materialize_signed_removal_data().unwrap().clone();
@@ -852,6 +857,58 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
         .matches_frame_data(missing_commit_byte));
     assert_eq!(recovered.selected_join_data().unwrap(), old);
     let epoch = removal.result.selected_epoch_data();
+    let mixed = V2GoverningJoinPrefixData::encode(
+        first,
+        &[
+            V2GoverningJoinStepData {
+                header: &retained_later.0,
+                body: ReplayBody::Admission(&retained_later.1),
+                image: &retained_later.2,
+            },
+            V2GoverningJoinStepData {
+                header: &header,
+                body: ReplayBody::Removal(removal.unsigned.body_data()),
+                image: removal.unsigned.image_data(),
+            },
+        ],
+    )
+    .unwrap();
+    let mixed = V2GoverningJoinPrefixData::decode(&mixed).unwrap();
+    let selected_remove = V2InstalledFounderAddData {
+        header: header.id(),
+        state: header.spec().state,
+        epoch: epoch.0,
+        authenticator: epoch.1,
+    };
+    let snapshot = removal.result.secret_snapshot_data();
+    assert!(
+        PreparedV2FounderRecoveredAdd::restore_from_governing_prefix(
+            original,
+            selected_remove,
+            removed_id,
+            &mixed,
+            snapshot,
+            payment(),
+        )
+        .is_err()
+    );
+    assert!(PreparedV2FounderRecoveredAdd::restore_selected_removal(
+        original,
+        selected_remove,
+        proof,
+        snapshot,
+        payment(),
+    )
+    .is_err());
+    let restored = PreparedV2FounderRecoveredAdd::restore_selected_removal(
+        original,
+        selected_remove,
+        &mixed,
+        snapshot,
+        payment(),
+    )
+    .unwrap();
+    assert_eq!(restored.fingerprint_data(), selected_remove);
     assert_eq!(candidate.as_ref().unwrap().selected_epoch_data(), epoch);
     let selected = V2HostSelectionExpectation::from_trusted_host(header.id(), header.spec().state);
     assert!(recovered

@@ -301,6 +301,9 @@ jobs:
       - name: Check the later Add selector and its exact predecessor archive binding
         if: github.event_name == 'pull_request' || inputs.scope == 'selected-history'
         run: python .github/scripts/check-chat-v2-invite-intent.py governed-later-archive
+      - name: Check the Remove archive and the exact paid predecessor fetch
+        if: github.event_name == 'pull_request' || inputs.scope == 'selected-history'
+        run: python .github/scripts/check-chat-v2-invite-intent.py governed-remove-archive
       - name: Check legacy and later Add request records under the exact original fence
         if: inputs.scope == 'selected-history'
         run: python .github/scripts/check-chat-v2-invite-intent.py add-request-record

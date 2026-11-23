@@ -99,6 +99,34 @@ impl PreparedV2FounderRecoveredAdd {
         snapshot: &[u8],
         admission: TextCurrentSdkRestoreAdmission,
     ) -> Result<Self, SyncError> {
+        Self::restore_selected_membership(
+            original,
+            expected,
+            Some(selected_admission),
+            proof,
+            snapshot,
+            admission,
+        )
+    }
+
+    pub fn restore_selected_removal(
+        original: &OpenedBootstrapSourceData,
+        expected: V2InstalledFounderAddData,
+        proof: &crate::V2GoverningJoinPrefixData<'_>,
+        snapshot: &[u8],
+        admission: TextCurrentSdkRestoreAdmission,
+    ) -> Result<Self, SyncError> {
+        Self::restore_selected_membership(original, expected, None, proof, snapshot, admission)
+    }
+
+    fn restore_selected_membership(
+        original: &OpenedBootstrapSourceData,
+        expected: V2InstalledFounderAddData,
+        selected_admission: Option<OwnerFactId>,
+        proof: &crate::V2GoverningJoinPrefixData<'_>,
+        snapshot: &[u8],
+        admission: TextCurrentSdkRestoreAdmission,
+    ) -> Result<Self, SyncError> {
         if expected.epoch < 2 {
             return Err(unavailable());
         }
@@ -116,7 +144,10 @@ impl PreparedV2FounderRecoveredAdd {
             header: *genesis_header.id().as_bytes(),
             state: *genesis_header.spec().state.as_bytes(),
         };
-        let replay = proof.verify_selected_add(&anchor, expected.header, selected_admission)?;
+        let replay = match selected_admission {
+            Some(joined) => proof.verify_selected_add(&anchor, expected.header, joined)?,
+            None => proof.verify_selected_removal(&anchor, expected.header)?,
+        };
         if replay.header().spec().state != expected.state
             || replay.mls_epoch_data() != expected.epoch
         {

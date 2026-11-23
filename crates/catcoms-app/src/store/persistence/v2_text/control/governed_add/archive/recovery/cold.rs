@@ -1,4 +1,4 @@
-//! A read-only cold founder role for the original selected first Add.
+//! A read-only cold founder role for the original selected governing archive.
 use super::{chain::RecoveredArchiveChain, *};
 use crate::store::critical_namespaces::{
     archive_current_codec as genesis, read_pool::CatalogReadReservation,
@@ -63,10 +63,10 @@ enum ColdRecoveredArchive {
 }
 
 impl ColdRecoveredArchive {
-    fn selected_admission(&self) -> OwnerFactId {
+    fn selected_admission(&self) -> Option<OwnerFactId> {
         match self {
-            Self::First(first) => first.admission.admission_id(),
-            Self::Later(chain) => chain.journal.admission.admission_id(),
+            Self::First(first) => Some(first.admission.admission_id()),
+            Self::Later(chain) => chain.journal.selected_admission(),
         }
     }
 
@@ -642,14 +642,25 @@ impl HeldColdFounderAdd {
                 )?
             }
             ColdRecoveredArchive::Later(chain) => {
-                PreparedV2FounderRecoveredAdd::restore_from_governing_prefix(
-                    source.data(),
-                    expected,
-                    chain.journal.admission.admission_id(),
-                    &V2GoverningJoinPrefixData::decode(&chain.prefix)?,
-                    outcome::archive_snapshot(&chain.journal.entry, &chain.journal.outcome)?,
-                    admission,
-                )?
+                let proof = V2GoverningJoinPrefixData::decode(&chain.prefix)?;
+                let snapshot = chain.journal.snapshot_data()?;
+                match chain.journal.selected_admission() {
+                    Some(joined) => PreparedV2FounderRecoveredAdd::restore_from_governing_prefix(
+                        source.data(),
+                        expected,
+                        joined,
+                        &proof,
+                        snapshot,
+                        admission,
+                    )?,
+                    None => PreparedV2FounderRecoveredAdd::restore_selected_removal(
+                        source.data(),
+                        expected,
+                        &proof,
+                        snapshot,
+                        admission,
+                    )?,
+                }
             }
         };
         self.require_current(store, source)?;
@@ -723,7 +734,7 @@ impl HeldColdFounderAdd {
                 ColdRecoveredArchive::First(first) => select_archived_step(
                     &mut verifier,
                     &first.header,
-                    &first.admission,
+                    ReplayBody::Admission(&first.admission),
                     first.image_data()?,
                 )?,
                 ColdRecoveredArchive::Later(chain) => {
@@ -731,7 +742,7 @@ impl HeldColdFounderAdd {
                         select_archived_step(
                             &mut verifier,
                             &step.header,
-                            &step.admission,
+                            step.body_data(),
                             &step.image,
                         )?;
                     }
@@ -753,7 +764,7 @@ impl HeldColdFounderAdd {
         {
             return Err(refused());
         }
-        for admission in [founder, joined] {
+        for admission in std::iter::once(founder).chain(joined) {
             core.verifier
                 .observe_live_member(admission)
                 .map_err(|_| refused())?;
@@ -765,21 +776,27 @@ impl HeldColdFounderAdd {
 fn select_archived_step(
     verifier: &mut V2GeneralPrefixVerifier,
     header: &SignedOwnerHeader,
-    admission: &AdmissionBody,
+    body: ReplayBody<'_>,
     image: &[u8],
 ) -> Result<(), AppError> {
     let predecessor = verifier.replay_data().header().id();
     let mut candidate = Some(
         verifier
-            .derive_successor(header, ReplayBody::Admission(admission), image)
+            .derive_successor(header, body, image)
             .map_err(|_| refused())?,
     );
     let expectation =
         V2HostSelectionExpectation::from_trusted_host(header.id(), header.spec().state);
-    let retired = verifier
+    let mut retired = verifier
         .advance_host_selected(&expectation, &mut candidate)
         .map_err(|_| refused())?;
     if retired.parent_data().header().id() != predecessor {
+        return Err(refused());
+    }
+    if retired
+        .take_close_completion()
+        .is_some_and(|mut close| !close.try_complete())
+    {
         return Err(refused());
     }
     // The old model holds the verifier's only candidate slot. The next

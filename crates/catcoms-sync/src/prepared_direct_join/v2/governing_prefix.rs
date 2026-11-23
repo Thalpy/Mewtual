@@ -159,6 +159,28 @@ impl<'a> V2GoverningJoinPrefixData<'a> {
         if last.header().id() != selected_header || admission.admission_id() != selected_admission {
             return Err(SyncError::JoinRejected);
         }
+        self.replay_successors(accepted, after_epoch)
+    }
+
+    pub fn verify_selected_removal(
+        &self,
+        accepted: &GenesisAnchorBindingData,
+        selected_header: OwnerHeaderId,
+    ) -> Result<ReplayMath, SyncError> {
+        let Some((header, BodyData::Removal(body))) = self.successors.last() else {
+            return Err(SyncError::JoinRejected);
+        };
+        if header.header().id() != selected_header {
+            return Err(SyncError::JoinRejected);
+        }
+        self.replay_successors(accepted, body.spec().after_epoch)
+    }
+
+    fn replay_successors(
+        &self,
+        accepted: &GenesisAnchorBindingData,
+        after_epoch: u64,
+    ) -> Result<ReplayMath, SyncError> {
         let mut replay = self.first.replay_through_add(accepted)?;
         for (header, body) in &self.successors {
             replay = replay

@@ -11,6 +11,7 @@ use catcoms_replication::chat::{
 };
 
 pub(super) mod recovery;
+mod removal;
 
 const TAG: &[u8] = b"catcoms/private-chat-text-governed-add-archive/v2\0";
 const KEY_DOMAIN: &str = "catcoms/private-chat-text-governed-add-archive-key/v2";

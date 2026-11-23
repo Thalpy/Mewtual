@@ -541,8 +541,13 @@ encoding. A Remove uses its own record version, which older readers refuse.
 The live founder binds its paid Remove and governing signature to distinct
 native key cuts, the selected Core slot and the exact MLS parent. It can
 swap the checked Core and MLS successors together after host selection.
-The founder's durable governing writer and evicted member retirement still
-need integration.
+The cold archive reader also follows mixed Add and Remove predecessors.
+It checks the same named encrypted archive files, authenticates each signed
+step and restores the founder SDK only when its roster and fingerprint agree
+with the selected Core history. An existing Add keeps its original Welcome
+reply and each Remove can serve its exact Commit to holders of the preceding
+epoch's proof. The founder's durable governing writer and evicted member
+retirement still need integration.
 
 ## Acceptance before enabling
 

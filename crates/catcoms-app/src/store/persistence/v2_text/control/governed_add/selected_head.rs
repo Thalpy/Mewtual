@@ -1,4 +1,4 @@
-//! Selectors for covered governed Add archives. Both versions use the known
+//! Selectors for covered governing archives. All versions use the known
 //! Head envelope so older readers authenticate the box before refusing it.
 use super::archive::GovernedArchiveLabels;
 use super::*;
@@ -11,6 +11,7 @@ const KIND: TextControlKindData = TextControlKindData::Head;
 const TAG: &[u8] = KIND.domains().0;
 const FIRST_ADD_VERSION: u16 = 2;
 const LATER_ADD_VERSION: u16 = 3;
+const REMOVE_VERSION: u16 = 4;
 pub(super) const NAME: &str = "text.add.head-stage.v2";
 pub(super) const FRAME_LEN: usize = 4 + TAG.len() + 2 + 7 * 36 + 2 * 8 + 40;
 
@@ -21,6 +22,33 @@ pub(super) struct GovernedHeadData {
     pub(super) transition: GovernedArchiveLabels,
     pub(super) archive: ArchiveHeadId,
     pub(super) generation: u64,
+    pub(super) kind: GovernedHeadKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum GovernedHeadKind {
+    FirstAdd,
+    Add,
+    Remove,
+}
+
+impl GovernedHeadKind {
+    fn version(self) -> u16 {
+        match self {
+            Self::FirstAdd => FIRST_ADD_VERSION,
+            Self::Add => LATER_ADD_VERSION,
+            Self::Remove => REMOVE_VERSION,
+        }
+    }
+
+    fn decode(version: u16) -> Result<Self, AppError> {
+        match version {
+            FIRST_ADD_VERSION => Ok(Self::FirstAdd),
+            LATER_ADD_VERSION => Ok(Self::Add),
+            REMOVE_VERSION => Ok(Self::Remove),
+            _ => Err(refused()),
+        }
+    }
 }
 
 impl GovernedHeadData {
@@ -36,6 +64,7 @@ impl GovernedHeadData {
             transition,
             archive,
             generation: 2,
+            kind: GovernedHeadKind::FirstAdd,
         })
     }
 
@@ -44,8 +73,7 @@ impl GovernedHeadData {
         key: &[u8; 32],
         rng: &mut dyn CryptoRngCore,
     ) -> Result<Zeroizing<Vec<u8>>, AppError> {
-        self.require_version(FIRST_ADD_VERSION)?;
-        self.seal_version(key, rng, FIRST_ADD_VERSION)
+        self.seal_kind(key, rng, GovernedHeadKind::FirstAdd)
     }
 
     /// Prepare a later selector against the exact encrypted predecessor. The
@@ -57,14 +85,25 @@ impl GovernedHeadData {
         transition: GovernedArchiveLabels,
         archive: ArchiveHeadId,
     ) -> Result<Self, AppError> {
+        Self::after_successor(key, predecessor, transition, archive, GovernedHeadKind::Add)
+    }
+
+    pub(super) fn after_successor(
+        key: &[u8; 32],
+        predecessor: &[u8],
+        transition: GovernedArchiveLabels,
+        archive: ArchiveHeadId,
+        kind: GovernedHeadKind,
+    ) -> Result<Self, AppError> {
         let original = Self::open_governed_data(key, predecessor)?;
         let generation = original.generation.checked_add(1).ok_or_else(refused)?;
         let next = Self {
             transition,
             archive,
             generation,
+            kind,
         };
-        next.require_version(LATER_ADD_VERSION)?;
+        next.require_kind(kind)?;
         if transition.context != original.transition.context
             || transition.before_head != TextHeadIdData::of_data(predecessor)
             || transition.before_archive != original.archive
@@ -83,19 +122,19 @@ impl GovernedHeadData {
         key: &[u8; 32],
         rng: &mut dyn CryptoRngCore,
     ) -> Result<Zeroizing<Vec<u8>>, AppError> {
-        self.require_version(LATER_ADD_VERSION)?;
-        self.seal_version(key, rng, LATER_ADD_VERSION)
+        self.seal_kind(key, rng, GovernedHeadKind::Add)
     }
 
-    fn seal_version(
+    pub(super) fn seal_kind(
         self,
         key: &[u8; 32],
         rng: &mut dyn CryptoRngCore,
-        version: u16,
+        kind: GovernedHeadKind,
     ) -> Result<Zeroizing<Vec<u8>>, AppError> {
+        self.require_kind(kind)?;
         let mut e = Encoder::with_capacity(FRAME_LEN - 40);
         put(&mut e, TAG)?;
-        e.put_u16(version);
+        e.put_u16(kind.version());
         let a = &self.transition;
         for value in [
             a.context.as_bytes(),
@@ -119,18 +158,12 @@ impl GovernedHeadData {
     }
 
     pub(super) fn open_data(key: &[u8; 32], raw: &[u8]) -> Result<Self, AppError> {
-        let (selected, version) = Self::decode_governed_data(key, raw)?;
-        if version != FIRST_ADD_VERSION {
-            return Err(refused());
-        }
+        let selected = Self::open_governed_data(key, raw)?;
+        selected.require_kind(GovernedHeadKind::FirstAdd)?;
         Ok(selected)
     }
 
     pub(super) fn open_governed_data(key: &[u8; 32], raw: &[u8]) -> Result<Self, AppError> {
-        Self::decode_governed_data(key, raw).map(|(head, _)| head)
-    }
-
-    fn decode_governed_data(key: &[u8; 32], raw: &[u8]) -> Result<(Self, u16), AppError> {
         if raw.len() != FRAME_LEN {
             return Err(refused());
         }
@@ -141,6 +174,7 @@ impl GovernedHeadData {
             return Err(refused());
         }
         let version = d.get_u16().map_err(|_| refused())?;
+        let kind = GovernedHeadKind::decode(version)?;
         let context = TextContextIdData::from_bytes(b32(&mut d)?);
         let before_head = TextHeadIdData::from_bytes(b32(&mut d)?);
         let before_archive = ArchiveHeadId::from_bytes(b32(&mut d)?);
@@ -164,21 +198,21 @@ impl GovernedHeadData {
             transition,
             archive,
             generation,
+            kind,
         };
-        selected.require_version(version)?;
-        Ok((selected, version))
+        selected.require_kind(kind)?;
+        Ok(selected)
     }
 
-    fn require_version(&self, version: u16) -> Result<(), AppError> {
-        let valid = match version {
-            FIRST_ADD_VERSION => self.transition.epoch == 1 && self.generation == 2,
-            LATER_ADD_VERSION => {
+    fn require_kind(&self, kind: GovernedHeadKind) -> Result<(), AppError> {
+        let valid = match kind {
+            GovernedHeadKind::FirstAdd => self.transition.epoch == 1 && self.generation == 2,
+            GovernedHeadKind::Add | GovernedHeadKind::Remove => {
                 self.transition.epoch >= 2
                     && self.transition.epoch.checked_add(1) == Some(self.generation)
             }
-            _ => false,
         };
-        if !valid || self.archive == self.transition.before_archive {
+        if !valid || self.kind != kind || self.archive == self.transition.before_archive {
             return Err(refused());
         }
         Ok(())
