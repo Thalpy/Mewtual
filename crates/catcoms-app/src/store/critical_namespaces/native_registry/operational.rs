@@ -32,7 +32,7 @@ mod sources;
 pub use sources::{
     NativeTextCreationBudget, NativeTextCreationInputs, NativeTextCreationJob,
     NativeTextCreationPreparation, NativeTextCreationProgress, NativeTextCreationRefusal,
-    NativeTextCreationRequest, NativeTextCreationSettings,
+    NativeTextCreationRequest, NativeTextCreationSettings, NativeTextFounderDependencyProvider,
     NativeTextFounderMemberIngressPreparation, NativeTextFounderMemberPublication,
     NativeTextFounderMemberPublicationReceipt, NativeTextFounderMemberReceiver,
     NativeTextInvitePublication, NativeTextJoinedArchivedActions, NativeTextJoinedDelivery,

@@ -100,6 +100,56 @@ pub(super) async fn run_founder<R: tauri::Runtime>(
     }
 }
 
+pub(super) async fn serve_founder_dependencies<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    source: &Arc<Source>,
+) {
+    let mut scope = source.negative();
+    let channel = source.channel();
+    loop {
+        tokio::select! {
+            biased;
+            _ = scope.cancelled() => return,
+            _ = tokio::time::sleep(REOPEN_DELAY) => {},
+        }
+        let state = app.state::<AppState>();
+        let local = source.member_work();
+        let Some(permit) = local.try_background() else {
+            continue;
+        };
+        let Some(preparation) = source.capture(&state).await else {
+            continue;
+        };
+        let caller = scope.clone();
+        let Ok(Ok(mut provider)) = tauri::async_runtime::spawn_blocking(move || {
+            let _permit = permit;
+            preparation.attach_founder_dependency_provider(channel, caller)
+        })
+        .await
+        else {
+            continue;
+        };
+        while let Some(request) = provider.next().await {
+            let Some(permit) = local.try_background() else {
+                continue;
+            };
+            let Some(preparation) = source.capture(&state).await else {
+                continue;
+            };
+            let processed = tauri::async_runtime::spawn_blocking(move || {
+                let _permit = permit;
+                let _ = preparation.serve_founder_dependency_request(&provider, request);
+                provider
+            })
+            .await;
+            let Ok(next) = processed else {
+                break;
+            };
+            provider = next;
+        }
+    }
+}
+
 pub(super) async fn open(
     state: &AppState,
     source: &Arc<Source>,

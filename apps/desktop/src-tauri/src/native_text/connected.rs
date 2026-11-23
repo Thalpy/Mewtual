@@ -76,6 +76,7 @@ pub(super) async fn start_current<R: tauri::Runtime>(
                     _ = serve(&app, &source, requests) => {}
                     _ = drain_outbox(&app, &source) => {}
                     _ = super::receiving::run_founder(&app, &source) => {}
+                    _ = super::receiving::serve_founder_dependencies(&app, &source) => {}
                 }
             }));
         }

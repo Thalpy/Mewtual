@@ -36,6 +36,7 @@ impl<R: CryptoRngCore> NativeTextSources<catcoms_net::MeshService, R> {
         });
         let work = self.work.for_paid_runtime(&metadata).ok_or_else(refused)?;
         let (join_ingress, member_ingress) = founder.runtime_ingress()?;
+        let dependency_lane = founder.runtime_dependency_lane()?;
         let owner = NativeChatSourceOwner::for_trusted_authenticated_mount(
             &vault.observe_ui_mount(),
             metadata.clone(),
@@ -85,6 +86,7 @@ impl<R: CryptoRngCore> NativeTextSources<catcoms_net::MeshService, R> {
                 request,
                 join_ingress: Some(join_ingress),
                 member_ingress: Some(member_ingress),
+                dependency_lane: Some(dependency_lane),
                 source_close,
                 recovered_founder: true,
                 _metadata: metadata,

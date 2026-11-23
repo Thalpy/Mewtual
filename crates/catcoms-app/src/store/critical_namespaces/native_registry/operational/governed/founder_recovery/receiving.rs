@@ -2,15 +2,17 @@
 use super::*;
 use crate::store::persistence::native_registry::network::NetworkDependency;
 use crate::store::persistence::v2_member_transport::{
-    archive_founder_member, project_founder_member, FounderReceiveSession, FOUNDER_RECEIVE_ACTIONS,
-    FOUNDER_RECEIVE_BYTES, FOUNDER_RECEIVE_LEDGER_FEE, FOUNDER_RECEIVE_WORK,
+    archive_founder_member, prepare_founder_dependency_reply, project_founder_member,
+    FounderDependencyReply, FounderReceiveSession, FOUNDER_DEPENDENCY_REPLY_FEE,
+    FOUNDER_RECEIVE_ACTIONS, FOUNDER_RECEIVE_BYTES, FOUNDER_RECEIVE_LEDGER_FEE,
+    FOUNDER_RECEIVE_WORK,
 };
 use crate::store::{
     NativeTextFounderReceived, NativeTextJoinedMemberProjection, V2MemberSaveRefusal,
 };
 use catcoms_net::{
-    NativeChatMemberFrame, NativeChatMemberGossip, NativeChatMemberGossipError,
-    NativeChatMemberGossipEvent, NativeChatMemberIngress,
+    NativeChatMemberDependencyIncoming, NativeChatMemberFrame, NativeChatMemberGossip,
+    NativeChatMemberGossipError, NativeChatMemberGossipEvent, NativeChatMemberIngress,
 };
 use catcoms_replication::chat::{
     ActionId, ChatLedger, LedgerLimits, ProjectionView, Realm, MAX_ACTION_BYTES,
@@ -98,6 +100,47 @@ pub(super) struct Ledger {
 }
 
 impl NativeTextColdFounderSource {
+    pub(in crate::store::critical_namespaces::native_registry) fn prepare_dependency_reply(
+        &mut self,
+        channel: u128,
+        incoming: &NativeChatMemberDependencyIncoming,
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<FounderDependencyReply, AppError> {
+        if !self.runtime_dependency_lane()?.owns_request(incoming) {
+            return Err(refused());
+        }
+        self.restore_first_add(caller)?;
+        let scope = self.history_scope(channel)?;
+        let (mount, fee) = self
+            .work
+            .recovered_founder_resources(FOUNDER_DEPENDENCY_REPLY_FEE)?;
+        let (verifier, _) = self.governed.as_ref().ok_or_else(refused)?.member_parts()?;
+        let provider = self
+            .sdk
+            .as_ref()
+            .ok_or_else(refused)?
+            .select_member_dependency_provider(verifier, channel, self.local.0, mount)?;
+        let reply =
+            self.work
+                .with_recovered_founder_store(&self.selection, &self.source, |store| {
+                    let context = history::outbox_context(&self.selection, &self.source);
+                    prepare_founder_dependency_reply(
+                        provider,
+                        incoming,
+                        fee,
+                        caller,
+                        rng,
+                        |id, rng| {
+                            history::saved_dependency(store, context, &self.source, scope, id, rng)
+                        },
+                    )
+                    .map_err(|_| refused())
+                })?;
+        self.restore_first_add(caller)?;
+        Ok(reply)
+    }
+
     pub fn prepare_member_ingress(
         &mut self,
         channel: u128,

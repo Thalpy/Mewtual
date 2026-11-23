@@ -62,6 +62,7 @@ pub use governance_layout::{
 };
 pub use joined_pin::pending::NativeTextJoinedRegistrationData;
 pub use member_outbox_layout::V2MemberOutboxPolicy;
+pub use native_registry::NativeTextFounderDependencyProvider;
 pub use native_registry::NativeTextInvitePublication;
 pub use native_registry::NativeTextJoinedReconnect;
 pub use native_registry::NativeTextJoinedRegistryRowData;

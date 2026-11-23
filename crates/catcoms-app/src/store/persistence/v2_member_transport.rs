@@ -8,14 +8,15 @@ use crate::store::critical_namespaces::read_pool::CatalogReadReservation;
 use crate::store::critical_namespaces::refused;
 use crate::store::{NativeTextJoinedMemberProjection, ServerStore, V2MemberSaveRefusal as Refusal};
 use crate::AppError;
-use catcoms_net::NativeChatMemberFrame;
+use catcoms_net::{NativeChatMemberDependencyIncoming, NativeChatMemberFrame};
 use catcoms_replication::chat::{
     ActionId, ActionState, ChatLedger, GuardedMessageProjection, ProjectionView,
     V2GeneralPrefixVerifier, V2OrdinaryReceiveStatus, MAX_PARENTS,
 };
 use catcoms_rt::{CryptoRngCore, RequestCancellation, Topic};
 use catcoms_sync::owner_v2::{
-    PreparedV2MemberSubmission, SelectedV2MemberEnvelope, V2MemberPublicationObservation,
+    PreparedV2MemberSubmission, SelectedV2MemberEnvelope, V2FounderMemberDependencyProvider,
+    V2MemberPublicationObservation, MAX_V2_DEPENDENCY_REPLY_BYTES, MAX_V2_MEMBER_TRANSPORT_BYTES,
 };
 use std::sync::Arc;
 
@@ -27,6 +28,54 @@ pub(in crate::store) const FOUNDER_RECEIVE_LEDGER_FEE: usize = 2 * FOUNDER_RECEI
     + V2GeneralPrefixVerifier::ordinary_authorization_temporary_layout_bytes()
     + 16 * 1024;
 const LOCAL_DEPENDENCY_READS: usize = 8;
+pub(in crate::store) const FOUNDER_DEPENDENCY_REPLY_FEE: usize =
+    4 * MAX_V2_MEMBER_TRANSPORT_BYTES + 5 * MAX_V2_DEPENDENCY_REPLY_BYTES + 16 * 1024;
+
+pub(in crate::store) struct FounderDependencyReply {
+    pub(in crate::store) wire: bytes::Bytes,
+    pub(in crate::store) observation: V2MemberPublicationObservation,
+    pub(in crate::store) fee: CatalogReadReservation,
+}
+
+pub(in crate::store) fn prepare_founder_dependency_reply<R: CryptoRngCore>(
+    provider: V2FounderMemberDependencyProvider<'_>,
+    incoming: &NativeChatMemberDependencyIncoming,
+    fee: CatalogReadReservation,
+    caller: &RequestCancellation,
+    rng: &mut R,
+    saved_dependency: impl FnOnce(ActionId, &mut R) -> Result<Option<MemberSavedOriginal>, Refusal>,
+) -> Result<FounderDependencyReply, Refusal> {
+    if caller.is_cancelled() {
+        return Err(Refusal::Cancelled);
+    }
+    let (requester, wire) = incoming.current_data().ok_or(Refusal::Cancelled)?;
+    let route = provider.route_data(requester);
+    let request = provider
+        .open_request(route, wire)
+        .map_err(|_| Refusal::Failed)?;
+    if caller.is_cancelled() || incoming.current_data().is_none() {
+        return Err(Refusal::Cancelled);
+    }
+    let saved = saved_dependency(request.action_id_data(), rng)?;
+    if caller.is_cancelled() || incoming.current_data().is_none() {
+        return Err(Refusal::Cancelled);
+    }
+    let wire = provider
+        .seal_reply(
+            route,
+            &request,
+            saved
+                .as_ref()
+                .map(|entry| (entry.receipt().admission, entry.original_bytes())),
+            rng,
+        )
+        .map_err(|_| Refusal::Failed)?;
+    Ok(FounderDependencyReply {
+        wire: bytes::Bytes::from(wire),
+        observation: provider.into_observation(),
+        fee,
+    })
+}
 
 /// Project a live envelope, then retry with its bounded locally saved causal
 /// slice. The storage owner chooses which originals can be lent.
@@ -185,6 +234,7 @@ pub(in crate::store) struct FounderReceiveSession {
 pub(in crate::store) enum FounderReceiveOperation<'a> {
     Subscription,
     Frame(&'a NativeChatMemberFrame, &'a FounderReceiveSession),
+    Dependency(&'a NativeChatMemberDependencyIncoming),
     Read(ActionId),
     ArchivePage(SharedHistoryActionQuery),
     ArchiveMessage(ActionId),
@@ -207,6 +257,7 @@ pub(in crate::store) struct FounderArchivedMessage {
 }
 
 pub(in crate::store) enum FounderReceiveOutcome {
+    Dependency(FounderDependencyReply),
     Subscription(
         Topic,
         V2MemberPublicationObservation,

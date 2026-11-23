@@ -3,7 +3,8 @@ use super::*;
 use crate::owner_v2::{
     open_v2_member_envelope_data, seal_v2_member_envelope_data, v2_member_envelope_topic_data,
     MemberTransportFence, PreparedV2MemberSubmission, SelectedV2MemberEnvelope,
-    V2MemberEnvelopeScopeData, V2MemberPublicationObservation, MAX_V2_MEMBER_TRANSPORT_BYTES,
+    V2FounderMemberDependencyProvider, V2MemberEnvelopeScopeData, V2MemberPublicationObservation,
+    MAX_V2_MEMBER_TRANSPORT_BYTES,
 };
 use catcoms_replication::chat::{owner_facts::OwnerFactId, V2GeneralPrefixVerifier};
 use catcoms_rt::{PublishOnceError, Topic};
@@ -37,6 +38,24 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2FounderGovernanceNode<T, R> {
             },
         };
         Ok((scope, observation))
+    }
+
+    pub fn select_member_dependency_provider(
+        &self,
+        verifier: &V2GeneralPrefixVerifier,
+        channel: u128,
+    ) -> Result<V2FounderMemberDependencyProvider<'_>, SyncError> {
+        let (scope, observation) = self.observe_member(verifier, channel)?;
+        let seed = &self.node.seed.body;
+        let member = self.member.as_ref().ok_or_else(unavailable)?;
+        Ok(V2FounderMemberDependencyProvider {
+            group: &seed.group,
+            device: &seed.device,
+            scope,
+            member: member.admission_data().admission_id(),
+            local: self.node._parts.body._transport.local_peer(),
+            observation,
+        })
     }
 
     /// Topic and retirement fence for the founder's original selected group.

@@ -111,8 +111,10 @@ Frame-triggered recovery can request a signed direct dependency on the exact ori
 TCP carrier. When an authenticated reply itself needs a signed parent or target, the
 joined receiver can follow that edge on the same carrier while the reply and its
 ancestors are still current. Explicit standalone requests supply no follow-up route.
-The desktop attaches the provider to the original joined row after Join or authenticated
-reopen. Each incoming request captures that same installed row again before doing work.
+The desktop attaches a provider to the original joined row after Join or authenticated
+reopen. The founder attaches one on its original actor after the first Add, including
+after cold reopen. Each incoming request captures that same installed row again and
+can read only an exact original in its own selected outbox and Admission.
 That row also attaches an exact native gossip listener. It can attempt up to four
 dependency recoveries per frame through selected local storage or the original carrier,
 with one network request in flight. For each requested ActionId, local replay uses up to
@@ -215,8 +217,8 @@ retires. Both desktop roles use the same bounded archive replay and recheck
 the archive selection and active Core view before returning a body.
 The native founder can reopen a selected first Add after authenticated startup.
 The registered joined row can reconnect using an explicit retry of the same
-invitation and approved IP. Founder requests for missing peer dependencies
-remain open.
+invitation and approved IP. A joined member can request the founder's own saved
+original on that connection. Founder requests for missing peer dependencies remain open.
 
 The desktop reply composer seals the exact target ActionId with the existing
 Create token and body. Native checks the original durable receipt first. A

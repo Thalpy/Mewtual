@@ -23,6 +23,7 @@ pub(in crate::store::critical_namespaces) mod operational;
 pub(in crate::store) mod preparation;
 
 pub use lifecycle::joined::NativeTextJoinedRegistryRowData;
+pub use operational::NativeTextFounderDependencyProvider;
 pub use operational::NativeTextInvitePublication;
 pub use operational::NativeTextJoinedReconnect;
 pub use operational::NativeTextJoinedRequestPreparation;

@@ -32,6 +32,7 @@ pub use join::{
 mod member;
 mod network;
 mod recovered_founder;
+pub use member::NativeTextFounderDependencyProvider;
 pub use member::{
     NativeTextFounderMemberIngressPreparation, NativeTextFounderMemberPublication,
     NativeTextFounderMemberPublicationReceipt, NativeTextFounderMemberReceiver,

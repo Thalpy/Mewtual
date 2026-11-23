@@ -3,10 +3,11 @@ use super::*;
 use crate::owner_v2::{
     open_v2_member_envelope_data, seal_v2_member_envelope_data, v2_member_envelope_topic_data,
     MemberTransportFence, PreparedV2MemberSubmission, SelectedV2MemberEnvelope,
-    V2MemberEnvelopeScopeData, V2MemberPublicationObservation, MAX_V2_MEMBER_TRANSPORT_BYTES,
+    V2FounderMemberDependencyProvider, V2MemberEnvelopeScopeData, V2MemberPublicationObservation,
+    MAX_V2_MEMBER_TRANSPORT_BYTES,
 };
 use catcoms_replication::chat::V2GeneralPrefixVerifier;
-use catcoms_rt::{PublishOnceError, RequestCancellation, Topic};
+use catcoms_rt::{PeerId, PublishOnceError, RequestCancellation, Topic};
 
 impl PreparedV2FounderRecoveredAdd {
     /// Bind once after the original mounted founder has matched its restored
@@ -97,6 +98,24 @@ impl PreparedV2FounderRecoveredAdd {
             v2_member_envelope_topic_data(&self.group, &self.device, &scope)?,
             observation,
         ))
+    }
+
+    pub fn select_member_dependency_provider(
+        &self,
+        verifier: &V2GeneralPrefixVerifier,
+        channel: u128,
+        local: PeerId,
+        mount: RequestCancellation,
+    ) -> Result<V2FounderMemberDependencyProvider<'_>, SyncError> {
+        let (scope, observation) = self.observe_selected(verifier, channel, mount)?;
+        Ok(V2FounderMemberDependencyProvider {
+            group: &self.group,
+            device: &self.device,
+            scope,
+            member: self.founder,
+            local,
+            observation,
+        })
     }
 
     pub fn open_member_envelope(

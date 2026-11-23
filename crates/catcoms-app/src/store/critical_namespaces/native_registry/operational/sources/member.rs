@@ -18,7 +18,10 @@ pub use admission::{
 pub use publication::{
     NativeTextFounderMemberPublication, NativeTextFounderMemberPublicationReceipt,
 };
-pub use receiving::{NativeTextFounderMemberIngressPreparation, NativeTextFounderMemberReceiver};
+pub use receiving::{
+    NativeTextFounderDependencyProvider, NativeTextFounderMemberIngressPreparation,
+    NativeTextFounderMemberReceiver,
+};
 type MemberKeys<T, R> = (Arc<RuntimeCell<T, R>>, NativeFounderKeys);
 type JoinKeys<T, R> = (MemberKeys<T, R>, [NativeChatPreparedKeyCut; 3]);
 

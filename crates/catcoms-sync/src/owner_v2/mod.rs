@@ -52,8 +52,9 @@ pub(crate) use joined_source::JoinFactsSlot;
 pub use joined_source::V2JoinFacts;
 pub use member::{V2MemberDraftInputs, V2MemberSignRefusal};
 pub use member_dependencies::{
-    OpenedV2MemberDependencyRequest, PreparedV2MemberDependencyRequest, V2MemberDependencyRoute,
-    MAX_V2_DEPENDENCY_REPLY_BYTES, MAX_V2_DEPENDENCY_REQUEST_BYTES,
+    OpenedV2MemberDependencyRequest, PreparedV2MemberDependencyRequest,
+    V2FounderMemberDependencyProvider, V2MemberDependencyRoute, MAX_V2_DEPENDENCY_REPLY_BYTES,
+    MAX_V2_DEPENDENCY_REQUEST_BYTES,
 };
 pub(crate) use member_envelope::MemberTransportFence;
 pub use member_envelope::{

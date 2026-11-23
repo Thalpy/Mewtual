@@ -19,6 +19,7 @@ pub(super) struct Selection<T: MeshTransport, R: CryptoRngCore> {
     pub(super) request: [u8; 32],
     pub(super) join_ingress: Option<catcoms_net::NativeChatJoinIngress>,
     pub(super) member_ingress: Option<catcoms_net::NativeChatMemberIngress>,
+    pub(super) dependency_lane: Option<catcoms_net::NativeChatMemberDependencies>,
     pub(super) source_close: catcoms_rt::NativeChatSourceClose,
     pub(super) recovered_founder: bool,
     // LAST: actual weak RuntimeCell allocation and all copied metadata must
@@ -62,6 +63,10 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextRuntimeSelection<T, R> {
                     .network
                     .as_ref()
                     .and_then(|network| network.member_ingress.clone()),
+                dependency_lane: body
+                    .network
+                    .as_ref()
+                    .and_then(|network| network.dependency_lane.clone()),
                 source_close: body.source_close.clone(),
                 recovered_founder: false,
                 _metadata: body._metadata.clone(),

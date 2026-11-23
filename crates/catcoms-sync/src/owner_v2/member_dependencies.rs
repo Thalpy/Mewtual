@@ -4,7 +4,7 @@
 use super::member_envelope::member_exporter_key;
 use super::{
     open_v2_member_envelope_data, seal_v2_member_envelope_data, OpenedV2MemberEnvelopeData,
-    V2MemberEnvelopeScopeData, MAX_V2_MEMBER_TRANSPORT_BYTES,
+    V2MemberEnvelopeScopeData, V2MemberPublicationObservation, MAX_V2_MEMBER_TRANSPORT_BYTES,
 };
 use crate::SyncError;
 use catcoms_crypto::{seal, unseal, SealedBlob};
@@ -37,6 +37,71 @@ const _: () =
 pub struct V2MemberDependencyRoute {
     pub requester: PeerId,
     pub provider: PeerId,
+}
+
+/// A borrow of the original founder's selected MLS graph and Core Admission.
+/// The host still owns the connected request and selected outbox receipt.
+pub struct V2FounderMemberDependencyProvider<'a> {
+    pub(super) group: &'a ServerGroup,
+    pub(super) device: &'a MlsDevice,
+    pub(super) scope: V2MemberEnvelopeScopeData,
+    pub(super) member: OwnerFactId,
+    pub(super) local: PeerId,
+    pub(super) observation: V2MemberPublicationObservation,
+}
+
+impl V2FounderMemberDependencyProvider<'_> {
+    pub fn route_data(&self, requester: PeerId) -> V2MemberDependencyRoute {
+        V2MemberDependencyRoute {
+            requester,
+            provider: self.local,
+        }
+    }
+
+    pub fn open_request(
+        &self,
+        route: V2MemberDependencyRoute,
+        wire: &[u8],
+    ) -> Result<OpenedV2MemberDependencyRequest, SyncError> {
+        if route.provider != self.local || !self.observation.is_current_cached() {
+            return Err(SyncError::JoinRejected);
+        }
+        let request = OpenedV2MemberDependencyRequest::open(
+            self.group,
+            self.device,
+            self.scope,
+            route,
+            wire,
+        )?;
+        if !self.observation.is_current_cached() {
+            return Err(SyncError::JoinRejected);
+        }
+        Ok(request)
+    }
+
+    pub fn seal_reply(
+        &self,
+        route: V2MemberDependencyRoute,
+        request: &OpenedV2MemberDependencyRequest,
+        saved: Option<(OwnerFactId, &[u8])>,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Vec<u8>, SyncError> {
+        if route.provider != self.local
+            || !self.observation.is_current_cached()
+            || saved.is_some_and(|(admission, _)| admission != self.member)
+        {
+            return Err(SyncError::JoinRejected);
+        }
+        let reply = request.seal_reply(self.group, self.device, &self.scope, route, saved, rng)?;
+        if !self.observation.is_current_cached() {
+            return Err(SyncError::JoinRejected);
+        }
+        Ok(reply)
+    }
+
+    pub fn into_observation(self) -> V2MemberPublicationObservation {
+        self.observation
+    }
 }
 
 struct RequestBinding {

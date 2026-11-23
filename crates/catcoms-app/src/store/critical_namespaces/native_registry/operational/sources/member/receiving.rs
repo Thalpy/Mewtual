@@ -7,11 +7,12 @@ use crate::store::persistence::v2_member_transport::{
 use crate::store::persistence::v2_shared_history::SharedHistoryActionQuery;
 use crate::store::NativeTextJoinedArchivedActions;
 use catcoms_net::{
-    NativeChatMemberFrame, NativeChatMemberGossip, NativeChatMemberGossipError,
-    NativeChatMemberGossipEvent, NativeChatMemberIngress,
+    NativeChatMemberDependencyIncoming, NativeChatMemberDependencyRequests, NativeChatMemberFrame,
+    NativeChatMemberGossip, NativeChatMemberGossipError, NativeChatMemberGossipEvent,
+    NativeChatMemberIngress,
 };
 use catcoms_replication::chat::ActionId;
-use catcoms_rt::Topic;
+use catcoms_rt::{RequestAuthority, Topic};
 use catcoms_sync::owner_v2::MAX_V2_MEMBER_TRANSPORT_BYTES;
 use tokio::sync::watch;
 
@@ -45,6 +46,34 @@ pub struct NativeTextFounderMemberReceiver<R: CryptoRngCore> {
     session: FounderReceiveSession,
 }
 
+#[derive(Debug)]
+struct DependencyScope(RequestCancellation);
+
+#[async_trait::async_trait]
+impl RequestAuthority for DependencyScope {
+    fn authorized(&self) -> bool {
+        !self.0.is_cancelled()
+    }
+
+    async fn revoked(&self) {
+        self.0.clone().cancelled().await;
+    }
+}
+
+pub struct NativeTextFounderDependencyProvider<R: CryptoRngCore> {
+    _owner: watch::Sender<bool>,
+    row: NativeTextRuntimeSelection<catcoms_net::MeshService, R>,
+    channel: u128,
+    signal: RequestCancellation,
+    requests: NativeChatMemberDependencyRequests,
+}
+
+impl<R: CryptoRngCore> NativeTextFounderDependencyProvider<R> {
+    pub async fn next(&mut self) -> Option<NativeChatMemberDependencyIncoming> {
+        self.requests.next().await
+    }
+}
+
 impl<R: CryptoRngCore> NativeTextFounderMemberIngressPreparation<R> {
     pub async fn open(
         self,
@@ -73,6 +102,78 @@ impl<R: CryptoRngCore> NativeTextFounderMemberReceiver<R> {
 }
 
 impl<R: CryptoRngCore> NativeTextMemberPreparation<catcoms_net::MeshService, R> {
+    pub fn attach_founder_dependency_provider(
+        self,
+        channel: u128,
+        caller: RequestCancellation,
+    ) -> Result<NativeTextFounderDependencyProvider<R>, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        let row = self.row.clone();
+        let lane = row
+            .original
+            .dependency_lane
+            .as_ref()
+            .ok_or(Refusal::Unavailable)?;
+        let (cell, mut keys) = self.prepare_keys()?;
+        let source = keys.member_entry().1.observe_current();
+        let (owner, live) = watch::channel(false);
+        let caller =
+            connected::constrain_founder_transport(self.scope.clone(), source, caller, Some(live));
+        let FounderReceiveOutcome::Subscription(_, observation, fee) = self
+            .finish_prepared((cell, keys))?
+            .run_founder_member_receive(channel, FounderReceiveOperation::Subscription, &caller)?
+        else {
+            return Err(Refusal::Failed);
+        };
+        let signal = observation
+            .constrain(caller)
+            .retain_custody(Arc::new(IngressPayment { _fee: fee }));
+        let requests = lane
+            .try_attach(Arc::new(DependencyScope(signal.clone())))
+            .ok_or(Refusal::Busy)?;
+        Ok(NativeTextFounderDependencyProvider {
+            _owner: owner,
+            row,
+            channel,
+            signal,
+            requests,
+        })
+    }
+
+    pub fn serve_founder_dependency_request(
+        self,
+        provider: &NativeTextFounderDependencyProvider<R>,
+        incoming: NativeChatMemberDependencyIncoming,
+    ) -> Result<(), V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        if !self.row.same_original(&provider.row)
+            || !self
+                .row
+                .original
+                .dependency_lane
+                .as_ref()
+                .is_some_and(|lane| lane.owns_request(&incoming))
+        {
+            return Err(Refusal::Stale);
+        }
+        let FounderReceiveOutcome::Dependency(reply) = self.finish()?.run_founder_member_receive(
+            provider.channel,
+            FounderReceiveOperation::Dependency(&incoming),
+            &provider.signal,
+        )?
+        else {
+            return Err(Refusal::Failed);
+        };
+        let signal = reply.observation.constrain(provider.signal.clone());
+        incoming
+            .respond(
+                reply.wire,
+                Arc::new(DependencyScope(signal)),
+                Arc::new(IngressPayment { _fee: reply.fee }),
+            )
+            .map_err(|_| Refusal::Cancelled)
+    }
+
     pub fn prepare_founder_member_ingress(
         self,
         channel: u128,
@@ -266,6 +367,9 @@ fn run_recovered_receive(
         }
         FounderReceiveOperation::Frame(frame, session) => FounderReceiveOutcome::Frame(
             founder.receive_selected_member_frame(channel, session, frame, rng)?,
+        ),
+        FounderReceiveOperation::Dependency(incoming) => FounderReceiveOutcome::Dependency(
+            founder.prepare_dependency_reply(channel, incoming, caller, rng)?,
         ),
         FounderReceiveOperation::Read(action) => FounderReceiveOutcome::RecoveredProjection(
             founder.read_member_projection(channel, action, caller)?,

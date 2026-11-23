@@ -825,6 +825,41 @@ async fn mounted_join_fixture(recover_stage: bool) {
             .is_err());
         drop((archived, page));
 
+        let mut provider = founder_capture()
+            .attach_founder_dependency_provider(channel, fresh.clone())
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            for (wanted, expected) in [(parent, Some(parent)), (reply_id, None)] {
+                let exchange = inspect()
+                    .prepare_dependency_exchange(
+                        &view,
+                        channel,
+                        invite.connected_peer_data(),
+                        wanted,
+                        fresh.clone(),
+                        &mut rng,
+                    )
+                    .unwrap();
+                let serve = async {
+                    let incoming = provider
+                        .next()
+                        .await
+                        .expect("the exact connected founder request");
+                    founder_capture()
+                        .serve_founder_dependency_request(&provider, incoming)
+                        .unwrap();
+                };
+                let (answer, ()) = tokio::join!(exchange.receive(), serve);
+                let opened = inspect()
+                    .open_dependency_response(&view, answer.unwrap(), &fresh)
+                    .unwrap();
+                assert_eq!(opened.map(|original| original.action_id_data()), expected);
+            }
+        })
+        .await
+        .expect("the founder serves its own selected outbox and keeps the archive private");
+        drop(provider);
+
         let nested_text = "Joined reply with an archived parent and a saved grandparent";
         let nested = catcoms_replication::chat::Body::Create {
             text: nested_text.into(),

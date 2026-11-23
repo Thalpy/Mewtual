@@ -265,6 +265,13 @@ impl NativeTextColdFounderSource {
         ))
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn runtime_dependency_lane(
+        &self,
+    ) -> Result<catcoms_net::NativeChatMemberDependencies, AppError> {
+        let mesh = self.actor.as_ref().ok_or_else(refused)?.borrow()?;
+        mesh.native_chat_member_dependencies().ok_or_else(refused)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn try_retire(
         &mut self,
     ) -> Result<bool, crate::store::NativeTextSourceRetirementRefusal> {
