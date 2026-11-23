@@ -12,7 +12,7 @@ on:
       scope:
         description: Workspaces to execute; all is the normal validation run.
         type: choice
-        options: [all, root, native, native-focused, native-lock, native-join, native-mutations]
+        options: [all, root, native, native-focused, native-lock, native-join, native-mutations, native-founder-restart]
         default: all
       run_deferred_catchup:
         description: Include the slow case at final Chat V2 acceptance (scope all or root).
@@ -127,7 +127,7 @@ jobs:
       - name: Install frontend dependencies
         run: npm --prefix apps/desktop ci
       - name: Run the complete frontend tests
-        if: runner.os == 'Linux' && inputs.scope != 'native-lock' && inputs.scope != 'native-join' && inputs.scope != 'native-mutations'
+        if: runner.os == 'Linux' && inputs.scope != 'native-lock' && inputs.scope != 'native-join' && inputs.scope != 'native-mutations' && inputs.scope != 'native-founder-restart'
         run: npm --prefix apps/desktop test
       - name: Check focused Chat V2 renderer history and session retirement
         if: runner.os == 'Linux' && github.event_name == 'workflow_dispatch' && (inputs.scope == 'native-join' || inputs.scope == 'native-mutations')
@@ -144,7 +144,7 @@ jobs:
       - name: Build frontend assets
         run: npm --prefix apps/desktop run build
       - name: Check original native IPC and delayed-reply custody regressions
-        if: inputs.scope != 'native-lock' && inputs.scope != 'native-join' && inputs.scope != 'native-mutations'
+        if: inputs.scope != 'native-lock' && inputs.scope != 'native-join' && inputs.scope != 'native-mutations' && inputs.scope != 'native-founder-restart'
         run: >-
           cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --lib -- --exact --test-threads=1
           voice_activation_tests::admitted_ipc::admitted_commands_cross_real_tauri_json_dispatch_and_recover_locked_history
@@ -153,7 +153,7 @@ jobs:
         if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || inputs.scope == 'all' || inputs.scope == 'native') }}
         run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --no-fail-fast
       - uses: actions/setup-python@v5
-        if: github.event_name == 'workflow_dispatch' && (inputs.scope == 'native-focused' || inputs.scope == 'native-lock' || inputs.scope == 'native-join' || inputs.scope == 'native-mutations')
+        if: github.event_name == 'workflow_dispatch' && (inputs.scope == 'native-focused' || inputs.scope == 'native-lock' || inputs.scope == 'native-join' || inputs.scope == 'native-mutations' || inputs.scope == 'native-founder-restart')
         with:
           python-version: '3.12'
       - name: Run exact native gate regressions (focused, not complete acceptance)
@@ -180,8 +180,8 @@ jobs:
               raise RuntimeError('native UI retirement exceeded its deadline')
           guard['validate'](''.join(summaries), code, 4)
           PY
-      - name: Check native join or mutation dispatch and retry continuity
-        if: github.event_name == 'workflow_dispatch' && (inputs.scope == 'native-join' || inputs.scope == 'native-mutations')
+      - name: Check focused native chat dispatch and restart
+        if: github.event_name == 'workflow_dispatch' && (inputs.scope == 'native-join' || inputs.scope == 'native-mutations' || inputs.scope == 'native-founder-restart')
         shell: bash
         env:
           RUST_BACKTRACE: '1'
@@ -200,12 +200,21 @@ jobs:
               ('native-mutation-dispatch', 'native_text_mutations_', 1),
               ('native-retry-continuity', 'native_text::continuity::tests::', 3),
           ]
-          if os.environ['CHAT_V2_NATIVE_SCOPE'] == 'native-join':
+          scope = os.environ['CHAT_V2_NATIVE_SCOPE']
+          if scope == 'native-join':
               cases.insert(0, ('native-join-dispatch', 'native_text_connected_join_', 5))
+          elif scope == 'native-founder-restart':
+              cases = [(
+                  'native-founder-restart',
+                  'native_text::tests::native_text_connected_join_gated_route_publishes_one_original_joined_row',
+                  1,
+              )]
           for name, pattern, count in cases:
               command = ['cargo', 'test', '--locked', '--manifest-path',
                          'apps/desktop/src-tauri/Cargo.toml', '--lib', pattern,
                          '--', '--test-threads=1']
+              if scope == 'native-founder-restart':
+                  command.append('--exact')
               code, summaries, timed_out, _ = guard['run_logged'](
                   name, command, directory, limit=45 * 60,
               )
