@@ -22,6 +22,7 @@ use catcoms_wire::{Decoder, Encoder, WireError};
 use zeroize::Zeroizing;
 
 pub(in crate::store::persistence) mod disk;
+pub(in crate::store) use disk::SharedHistoryActionPage;
 
 const TAG: &[u8] = b"catcoms/private-chat-v2-shared-history-record/v1\0";
 const SCOPE_DOMAIN: &str = "catcoms/private-chat-v2-shared-history-context/v1";

@@ -251,6 +251,7 @@ fn shared_history_physical_selection_reopens_the_original_promoted_files() {
     assert!(store
         .read_shared_history_record(foreign, action.id())
         .is_err());
+    assert!(store.shared_history_action_page(foreign, None, 1).is_err());
     drop(key);
     drop(selected);
     let selected = NativeTextJoinedStorage::open_for_native_startup(
@@ -260,9 +261,12 @@ fn shared_history_physical_selection_reopens_the_original_promoted_files() {
         current_policy(),
     )
     .unwrap();
-    let saved = selected
-        .actual_store_for_test()
-        .unwrap()
+    let store = selected.actual_store_for_test().unwrap();
+    let page = store.shared_history_action_page(scope, None, 1).unwrap();
+    assert_eq!(page.actions, [action.id()]);
+    assert!(!page.more);
+    drop(page);
+    let saved = store
         .read_shared_history_record(scope, action.id())
         .unwrap()
         .unwrap();

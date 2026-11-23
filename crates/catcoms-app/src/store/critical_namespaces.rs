@@ -92,15 +92,15 @@ pub use native_registry::{
     NativeUiStateRead, NativeUiStateSaved, PreparedNativeRegistryMigration,
 };
 pub use native_registry::{
-    NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,
+    NativeTextJoinedArchivedActions, NativeTextJoinedDependencyExchange,
+    NativeTextJoinedDependencyProvider, NativeTextJoinedDependencyResponse,
+    NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberLedger,
+    NativeTextJoinedMemberProjection, NativeTextJoinedMemberPublication,
+    NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
+    NativeTextJoinedReceivedOriginal, NativeTextJoinedSelectionPreparation,
 };
 pub use native_registry::{
-    NativeTextJoinedDependencyExchange, NativeTextJoinedDependencyProvider,
-    NativeTextJoinedDependencyResponse, NativeTextJoinedMemberIngressPreparation,
-    NativeTextJoinedMemberLedger, NativeTextJoinedMemberProjection,
-    NativeTextJoinedMemberPublication, NativeTextJoinedMemberPublicationReceipt,
-    NativeTextJoinedMemberReceiver, NativeTextJoinedReceivedOriginal,
-    NativeTextJoinedSelectionPreparation,
+    NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,
 };
 pub use native_registry::{NativeTextJoinedMemberFinalPreparation, NativeTextJoinedMemberSaveJob};
 pub(super) mod read_pool;

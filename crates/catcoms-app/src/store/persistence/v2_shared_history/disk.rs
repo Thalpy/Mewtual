@@ -27,6 +27,7 @@ const WAL_NAME: &str = "history.wal";
 const WAL_BYTES: usize = 4 + WAL_TAG.len() + 2 + 4 + SELECTOR_BYTES + 4 + MAX_SHARED_HISTORY_BUNDLE;
 const _: () = assert!(WAL_BYTES <= MAX_FILE);
 const MAX_RECORDS_PER_DIRECTORY: usize = 2048;
+const MAX_ACTIONS_PER_PAGE: usize = 64;
 // Account for the full bounded native inventory, including the offending entry.
 const INVENTORY_FEE: usize = (2 * MAX_RECORDS_PER_DIRECTORY + 2) * 1024;
 
@@ -180,6 +181,75 @@ impl SharedHistoryDisk {
         self.directory.require()
     }
 
+    /// Bounded metadata only. A listed ActionId still needs its selected
+    /// manifest, exact signature and governing replay when opened.
+    pub(in crate::store::persistence) fn action_page(
+        &self,
+        key: &[u8; 32],
+        after: Option<ActionId>,
+        limit: usize,
+        session: &VaultSessionGuard,
+        payment: CatalogReadReservation,
+    ) -> Result<SharedHistoryActionPage, AppError> {
+        payment.validate(&self.pool, DISK_FEE)?;
+        self.require_key(key)?;
+        if !(1..=MAX_ACTIONS_PER_PAGE).contains(&limit) {
+            return Err(refused());
+        }
+        let _lease = session.retain_for_physical_work();
+        let _gate = self.gate.try_lock().map_err(|_| refused())?;
+        let maximum = 2 * self.quota.records;
+        let names = bounded_entries(&self.directory, maximum)?;
+        if names.len() > maximum {
+            return Err(refused());
+        }
+        let mut actions = Vec::with_capacity(self.quota.records);
+        let mut bundles = Vec::with_capacity(self.quota.records);
+        let mut selected_bundles = Vec::with_capacity(self.quota.records);
+        for name in names {
+            let (leaf, role) = history_leaf(&name)?;
+            let path = self.directory.child(leaf);
+            match role {
+                HistoryLeaf::Wal => return Err(refused()),
+                HistoryLeaf::Bundle(manifest) => {
+                    bounded_file_length(&path, MAX_SHARED_HISTORY_BUNDLE)?;
+                    bundles.push(manifest);
+                }
+                HistoryLeaf::Selector => {
+                    if actions.len() == self.quota.records {
+                        return Err(refused());
+                    }
+                    let (file, identity, raw) = read_bounded_held(&path, SELECTOR_BYTES, false)?;
+                    let selected = self.open_selector(key, &raw)?;
+                    if path != self.selector_path(key, selected.action) {
+                        return Err(refused());
+                    }
+                    require_exact_held(&path, &mut (file, identity), &raw)?;
+                    actions.push(selected.action);
+                    selected_bundles.push(selected.manifest);
+                }
+            }
+        }
+        bundles.sort_unstable();
+        selected_bundles.sort_unstable();
+        if bundles != selected_bundles
+            || observe(&self.directory.child(WAL_NAME))? == Presence::Present
+        {
+            return Err(refused());
+        }
+        self.directory.require()?;
+        actions.sort_unstable();
+        let start = after.map_or(0, |cursor| {
+            actions.partition_point(|action| *action <= cursor)
+        });
+        let remaining = &actions[start..];
+        Ok(SharedHistoryActionPage {
+            actions: remaining.iter().take(limit).copied().collect(),
+            more: remaining.len() > limit,
+            _payment: payment,
+        })
+    }
+
     fn recover_locked(&self, key: &[u8; 32]) -> Result<Option<SelectedHistoryRecord>, AppError> {
         let path = self.directory.child(WAL_NAME);
         if observe(&path)? == Presence::Absent {
@@ -267,35 +337,25 @@ impl SharedHistoryDisk {
         let mut bundles = 1;
         let mut used = SELECTOR_BYTES + bundle_bytes;
         for name in names {
-            let leaf = name.to_str().ok_or_else(refused)?;
+            let (leaf, role) = history_leaf(&name)?;
             let path = self.directory.child(leaf);
-            if leaf == WAL_NAME {
-                bounded_file_length(&path, WAL_BYTES)?;
-                continue;
-            }
-            let (prefix, digest) = leaf.split_once('-').ok_or_else(refused)?;
-            let digits = digest.strip_suffix(".bin").ok_or_else(refused)?;
-            if digits.len() != 64
-                || !digits
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            {
-                return Err(refused());
-            }
-            let (maximum, candidate_bytes, target, count) = match prefix {
-                "s" => (
+            let (maximum, candidate_bytes, target, count) = match role {
+                HistoryLeaf::Selector => (
                     SELECTOR_BYTES,
                     SELECTOR_BYTES,
                     &target_selector,
                     &mut selectors,
                 ),
-                "b" => (
+                HistoryLeaf::Bundle(_) => (
                     MAX_SHARED_HISTORY_BUNDLE,
                     bundle_bytes,
                     &target_bundle,
                     &mut bundles,
                 ),
-                _ => return Err(refused()),
+                HistoryLeaf::Wal => {
+                    bounded_file_length(&path, WAL_BYTES)?;
+                    continue;
+                }
             };
             let length = bounded_file_length(&path, maximum)?;
             if &path == target {
@@ -393,6 +453,44 @@ impl SharedHistoryDisk {
         wire(input.finish())?;
         Ok(SelectedHistoryRecord { action, manifest })
     }
+}
+
+enum HistoryLeaf {
+    Selector,
+    Bundle(PrivateChatPageId),
+    Wal,
+}
+
+fn history_leaf(value: &std::ffi::OsStr) -> Result<(&str, HistoryLeaf), AppError> {
+    let leaf = value.to_str().ok_or_else(refused)?;
+    if leaf == WAL_NAME {
+        return Ok((leaf, HistoryLeaf::Wal));
+    }
+    let (prefix, digest) = leaf.split_once('-').ok_or_else(refused)?;
+    let digits = digest.strip_suffix(".bin").ok_or_else(refused)?;
+    if digits.len() != 64
+        || !digits
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(refused());
+    }
+    let role = match prefix {
+        "s" => HistoryLeaf::Selector,
+        "b" => {
+            let mut manifest = [0; 32];
+            hex::decode_to_slice(digits, &mut manifest).map_err(|_| refused())?;
+            HistoryLeaf::Bundle(PrivateChatPageId::from_bytes(manifest))
+        }
+        _ => return Err(refused()),
+    };
+    Ok((leaf, role))
+}
+
+pub(in crate::store) struct SharedHistoryActionPage {
+    pub(in crate::store) actions: Vec<ActionId>,
+    pub(in crate::store) more: bool,
+    _payment: CatalogReadReservation,
 }
 
 pub(in crate::store::persistence) struct PreparedSharedHistorySave<'disk> {

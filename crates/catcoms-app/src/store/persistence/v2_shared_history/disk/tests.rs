@@ -132,6 +132,7 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
     std::fs::write(disk.bundle_path(selected.manifest), &bundle[..17]).unwrap();
     std::fs::write(disk.selector_path(&KEY, selected.action), &selector[..15]).unwrap();
     assert!(disk.read(&KEY, selected.action, &session, pay()).is_err());
+    assert!(disk.action_page(&KEY, None, 3, &session, pay()).is_err());
     drop(disk);
     let disk = owner();
     assert_eq!(disk.recover(&KEY, &session, pay()).unwrap(), Some(selected));
@@ -142,6 +143,7 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
         .unwrap();
     assert_eq!(saved.original.original_bytes(), second.encode());
     drop(saved);
+    let second_selected = selected;
     let third = original(&scope, 21);
     let (selected, bundle) = encode(&scope, &third, admission, &mut rng);
     let mut prepared = disk
@@ -170,6 +172,40 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
     drop(disk);
 
     let disk = owner();
+    let mut expected_actions = [expected.action, second_selected.action, selected.action];
+    expected_actions.sort_unstable();
+    let first_page = disk.action_page(&KEY, None, 1, &session, pay()).unwrap();
+    assert_eq!(first_page.actions, expected_actions[..1]);
+    assert!(first_page.more);
+    let last_page = disk
+        .action_page(
+            &KEY,
+            first_page.actions.first().copied(),
+            2,
+            &session,
+            pay(),
+        )
+        .unwrap();
+    assert_eq!(last_page.actions, expected_actions[1..]);
+    assert!(!last_page.more);
+    drop((first_page, last_page));
+    let at_end = disk
+        .action_page(&KEY, expected_actions.last().copied(), 1, &session, pay())
+        .unwrap();
+    assert!(at_end.actions.is_empty());
+    assert!(!at_end.more);
+    drop(at_end);
+    assert!(disk.action_page(&KEY, None, 0, &session, pay()).is_err());
+    assert!(disk.action_page(&KEY, None, 65, &session, pay()).is_err());
+    assert!(disk
+        .action_page(&[255; 32], None, 1, &session, pay())
+        .is_err());
+    let expected_bundle = disk.bundle_path(expected.manifest);
+    let foreign_bundle = disk.bundle_path(PrivateChatPageId::from_bytes([254; 32]));
+    std::fs::rename(&expected_bundle, &foreign_bundle).unwrap();
+    assert!(disk.action_page(&KEY, None, 1, &session, pay()).is_err());
+    std::fs::rename(&foreign_bundle, &expected_bundle).unwrap();
+
     let (fourth, bundle) = encode(&scope, &original(&scope, 22), admission, &mut rng);
     assert!(disk
         .prepare_save(&KEY, fourth, &bundle, &mut rng, &session, pay())
@@ -219,6 +255,7 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
     std::fs::rename(&path, &relocated).unwrap();
     std::fs::create_dir(&path).unwrap();
     assert!(disk.read(&KEY, expected.action, &session, pay()).is_err());
+    assert!(disk.action_page(&KEY, None, 1, &session, pay()).is_err());
     assert!(disk
         .prepare_save(&KEY, fourth, &bundle, &mut rng, &session, pay())
         .unwrap()

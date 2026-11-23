@@ -2,7 +2,8 @@
 use super::*;
 use crate::store::persistence::v2_member_outbox::{member_outbox_key, MemberSavedOriginal};
 use crate::store::persistence::v2_shared_history::{
-    PreparedSharedHistoryRecord, SharedHistoryScope, SHARED_HISTORY_RECORD_FEE,
+    PreparedSharedHistoryRecord, SharedHistoryActionPage, SharedHistoryScope,
+    SHARED_HISTORY_RECORD_FEE,
 };
 use crate::store::ServerStore;
 use catcoms_net::{
@@ -204,6 +205,18 @@ pub struct NativeTextJoinedMemberProjection {
     _fee: CatalogReadReservation,
 }
 
+pub struct NativeTextJoinedArchivedActions(SharedHistoryActionPage);
+
+impl NativeTextJoinedArchivedActions {
+    pub fn actions(&self) -> &[ActionId] {
+        &self.0.actions
+    }
+
+    pub fn has_more(&self) -> bool {
+        self.0.more
+    }
+}
+
 impl NativeTextJoinedMemberProjection {
     /// Resolve inside the already acquired outer native UI guard.
     pub fn with_publication<T>(
@@ -223,6 +236,31 @@ impl NativeTextJoinedMemberProjection {
 }
 
 impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
+    pub fn archived_action_page(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        channel: u128,
+        after: Option<ActionId>,
+        limit: usize,
+        caller: &RequestCancellation,
+    ) -> Result<Option<NativeTextJoinedArchivedActions>, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        self.with_member_receiver(selection, caller, |source| {
+            if !source
+                .store
+                .has_mounted_shared_history()
+                .map_err(|_| Refusal::Busy)?
+            {
+                return Ok(None);
+            }
+            source
+                .store
+                .shared_history_action_page(source.history_scope(channel), after, limit)
+                .map(|page| Some(NativeTextJoinedArchivedActions(page)))
+                .map_err(|_| Refusal::Failed)
+        })
+    }
+
     #[cfg(test)]
     pub(in crate::store::critical_namespaces::native_registry) fn mesh_peer_name_for_test(
         self,

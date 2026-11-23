@@ -50,15 +50,15 @@ pub use operational::{
     NativeUiStatePreparation, NativeUiStateRead, NativeUiStateSaved,
 };
 pub use operational::{
-    NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,
+    NativeTextJoinedArchivedActions, NativeTextJoinedDependencyExchange,
+    NativeTextJoinedDependencyProvider, NativeTextJoinedDependencyResponse,
+    NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberLedger,
+    NativeTextJoinedMemberProjection, NativeTextJoinedMemberPublication,
+    NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
+    NativeTextJoinedReceivedOriginal, NativeTextJoinedSelectionPreparation,
 };
 pub use operational::{
-    NativeTextJoinedDependencyExchange, NativeTextJoinedDependencyProvider,
-    NativeTextJoinedDependencyResponse, NativeTextJoinedMemberIngressPreparation,
-    NativeTextJoinedMemberLedger, NativeTextJoinedMemberProjection,
-    NativeTextJoinedMemberPublication, NativeTextJoinedMemberPublicationReceipt,
-    NativeTextJoinedMemberReceiver, NativeTextJoinedReceivedOriginal,
-    NativeTextJoinedSelectionPreparation,
+    NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,
 };
 pub use operational::{NativeTextJoinedMemberFinalPreparation, NativeTextJoinedMemberSaveJob};
 pub use preparation::{
