@@ -45,7 +45,13 @@ The restored SDK can sign one ordinary action under an authenticated native
 MemberAction cut and the original live Core Admission. A different key
 purpose or a second Source with the same UI generation refuses. The request's
 timestamp and nonce remain bound to the SDK instance that drew them. Desktop
-startup and the durable save path still need to carry this Source.
+startup still needs to install this Source.
+
+New ordinary actions from the authenticated recovered founder pass through
+the shared two-phase outbox. The sign step rechecks the held founder files
+before entering the native key. Cancelling final admission leaves the original
+presealed action ready for the next authorized attempt. The saved receipt is
+resolved from the same outbox used by the founder before restart.
 
 The stage-lifetime continuation is under validation. Native key drainage is
 being separated from retained CLOSED snapshot DATA: an actual completed Cell

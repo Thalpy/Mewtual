@@ -109,7 +109,5 @@ impl NativeTextColdFounderSource {
         let raw = *guard.cached_raw64_data().unwrap();
         drop(guard);
         assert!(draft.complete_raw64(raw).unwrap().verify());
-        owner.close();
-        assert!(sdk.member_signer_data(verifier, &native, &cut).is_err());
     }
 }

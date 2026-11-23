@@ -635,7 +635,8 @@ mod persistence {
         prepare_joined_member_history, JoinedMemberLane, JoinedMemberSource,
         OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
         PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
-        PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis,
+        PreparedV2UnsignedOriginalCustody, RecoveredMemberLane, RecoveredMemberSource,
+        V2AdvancedAppendBasis,
     };
     mod current_group;
     mod current_layout;

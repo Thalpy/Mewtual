@@ -622,7 +622,8 @@ pub(in crate::store) use operational::{
     prepare_joined_member_history, JoinedMemberLane, JoinedMemberSource,
     OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
     PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
-    PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis,
+    PreparedV2UnsignedOriginalCustody, RecoveredMemberLane, RecoveredMemberSource,
+    V2AdvancedAppendBasis,
 };
 mod text;
 pub(in crate::store) use operational::negative::V2TextSourceNegativeObserver;

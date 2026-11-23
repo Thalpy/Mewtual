@@ -842,6 +842,34 @@ impl SourceWork {
             .with_recovered_founder_store(original, source, read)
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn with_recovered_founder_layout<
+        T,
+    >(
+        &self,
+        original: &ColdFounderSelection,
+        source: &crate::store::RetainedBootstrapSourceData,
+        work: impl FnOnce(&V2CurrentLayoutStore, &ServerStore) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        self.physical
+            .require_recovered_founder_source(original, source)?;
+        let layout = self.physical.current()?;
+        let result = work(layout, layout.checked_store()?)?;
+        self.physical
+            .require_recovered_founder_source(original, source)?;
+        Ok(result)
+    }
+
+    /// The final native commit edge is allocation- and IO-free. Its caller
+    /// must have already proved the same physical founder selection.
+    pub(in crate::store::critical_namespaces::native_registry) fn cached_founder_save_layout(
+        &self,
+    ) -> Result<&V2CurrentLayoutStore, AppError> {
+        if !self.is_live_cached() {
+            return Err(refused());
+        }
+        self.physical.current()
+    }
+
     /// Configuration is negative only, but an incompatible DATA-only mount
     /// must refuse BEFORE retaining an authoring entry or generating any key.
     pub(in crate::store::critical_namespaces::native_registry) fn require_native_founder_configuration(

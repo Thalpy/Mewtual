@@ -1583,14 +1583,88 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 catcoms_rt::NativeChatSourceOwner::for_trusted_source(&command.ui.command, payment)
                     .unwrap()
             };
+            let native_owner = key_owner();
             original.sign_recovered_member_for_test(
                 channel,
-                &key_owner(),
+                &native_owner,
                 &key_owner(),
                 &command.ui.command,
                 &fresh,
                 &mut founder_rng,
             );
+            let body = super::body("New founder message saved after the physical restart");
+            let send = || V2MemberSignRequest {
+                channel,
+                token: [156; 32],
+                body: &body,
+                parents: &[],
+                dependencies: &[],
+            };
+            let clock = catcoms_rt::ManualClock::new(10_124);
+            let mut draws = rand_chacha::ChaCha20Rng::seed_from_u64(56031);
+            let mut prepare_save =
+                |original: &mut crate::store::NativeTextColdFounderSource,
+                 rng: &mut rand_chacha::ChaCha20Rng| {
+                    original.prepare_member_save(
+                        send(),
+                        &native_owner,
+                        &command.ui.command,
+                        &fresh,
+                        (&clock, &mut draws),
+                        rng,
+                    )
+                };
+            assert_eq!(
+                prepare_save(&mut original, &mut founder_rng).unwrap(),
+                V2MemberSaveOutcome::Ready
+            );
+            let commit = Arc::new(tokio::sync::Mutex::new(()));
+            let (stop_save, stop_signal) = tokio::sync::watch::channel(false);
+            let cancelled = RequestCancellation::new(stop_signal, None);
+            let first = original
+                .finish_member_save(send().token, &native_owner, &command.ui.command, cancelled)
+                .unwrap();
+            let (custody, _) = super::admission::custody(&commit, &fresh).await;
+            stop_save.send_replace(true);
+            let result = original.admit_member_save::<rand_chacha::ChaCha20Rng>(&first, custody);
+            assert!(matches!(result, Err((_, V2MemberSaveRefusal::Cancelled))));
+            assert_eq!(
+                prepare_save(&mut original, &mut founder_rng).unwrap(),
+                V2MemberSaveOutcome::Ready
+            );
+            let final_save = original
+                .finish_member_save(
+                    send().token,
+                    &native_owner,
+                    &command.ui.command,
+                    fresh.clone(),
+                )
+                .unwrap();
+            let (custody, _) = super::admission::custody(&commit, &fresh).await;
+            let job = original
+                .admit_member_save::<rand_chacha::ChaCha20Rng>(&final_save, custody)
+                .unwrap_or_else(|(_, error)| {
+                    panic!("recovered founder save admission refused: {error:?}")
+                });
+            assert_eq!(job.run(), MemberSaveJobReport::SavedLocal);
+            let (action, ordinal) = original
+                .lookup_saved_member(&send(), &fresh, &mut founder_rng)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                prepare_save(&mut original, &mut founder_rng).unwrap(),
+                V2MemberSaveOutcome::Saved { action, ordinal }
+            );
+            drop(prepare_save);
+            native_owner.close();
+            assert!(original
+                .finish_member_save(
+                    send().token,
+                    &native_owner,
+                    &command.ui.command,
+                    fresh.clone()
+                )
+                .is_err());
             drop((command, vault));
             drop(original);
             assert!(archived

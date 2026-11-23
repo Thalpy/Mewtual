@@ -9,6 +9,7 @@ use catcoms_rt::PeerId;
 use catcoms_sync::owner_v2::PreparedV2FounderRecoveredAdd;
 use tokio::sync::watch;
 
+mod authoring;
 mod history;
 mod publication;
 mod receiving;
@@ -56,6 +57,7 @@ impl RequestAuthority for IngressScope {
 pub struct NativeTextColdFounderSource {
     ingress: Option<replies::Owner>,
     received: Option<receiving::Ledger>,
+    member: Option<Box<crate::store::persistence::RecoveredMemberLane>>,
     actor: Option<super::super::join_tcp::Loan>,
     tcp: Option<Arc<super::super::join_tcp::Transport>>,
     sdk: Option<PreparedV2FounderRecoveredAdd>,
@@ -84,6 +86,7 @@ impl NativeTextJoinedStorage {
                 Ok(NativeTextColdFounderSource {
                     ingress: None,
                     received: None,
+                    member: None,
                     actor: None,
                     tcp: None,
                     sdk: None,

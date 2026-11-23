@@ -72,7 +72,9 @@ use catcoms_sync::owner_v2::{V2MemberDraftInputs, MAX_V2_MEMBER_TRANSPORT_BYTES}
 use catcoms_sync::{ClosedV2JoinedNode, PreparedV2JoinedPrefix};
 use std::collections::VecDeque;
 mod receive;
+mod recovered;
 use receive::FounderReceivedLedger;
+pub(in crate::store) use recovered::{RecoveredMemberLane, RecoveredMemberSource};
 
 /// Bounded live channel views per lane. Refuse beyond it; a view with a live Plan is never
 /// evicted (that would revoke the Plan's channel lifetime under an in-flight request).
@@ -477,6 +479,31 @@ impl PendingMemberRequest {
         Ok(())
     }
 
+    fn sign_and_complete(
+        &mut self,
+        sign: impl FnOnce(
+            &V2MemberDraftInputs,
+            &ActionDraft,
+            &mut V2OrdinarySigningPlan,
+        ) -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
+        let result = if self.has_cached_raw() {
+            Ok(())
+        } else {
+            sign(
+                &self.inputs,
+                self.draft.as_ref().ok_or_else(refused)?,
+                self.plan.as_mut().ok_or_else(refused)?,
+            )
+        };
+        self.complete_cached();
+        result?;
+        if matches!(self.signed, SignedState::Pending) {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
     fn prepare_plan(
         &mut self,
         verifier: &V2GeneralPrefixVerifier,
@@ -550,6 +577,41 @@ pub(super) struct MemberRequests {
     request: Option<Box<PendingMemberRequest>>,
     finished: VecDeque<[u8; 32]>,
     retired_unsaved: Vec<[u8; 32]>,
+}
+
+fn member_channel_view<'a>(
+    channels: &'a mut Vec<MemberChannel>,
+    group: &[u8],
+    channel: u128,
+    projection: &catcoms_replication::chat::ProjectionGroupView,
+) -> Result<&'a ProjectionView, AppError> {
+    if let Some(index) = channels.iter().position(|view| view.channel == channel) {
+        return Ok(&channels[index].view);
+    }
+    if channels.len() >= MAX_MEMBER_CHANNELS {
+        return Err(refused());
+    }
+    let realm = Realm::new(group, channel).map_err(|_| refused())?;
+    let mut ledger = ChatLedger::new(
+        realm,
+        LedgerLimits {
+            max_actions: 1,
+            max_action_bytes: MAX_ACTION_BYTES,
+        },
+    )
+    .map_err(|_| refused())?;
+    let mut view = ledger
+        .begin_projection_view_in(projection)
+        .map_err(|_| refused())?;
+    if !view.try_ready() {
+        return Err(refused());
+    }
+    channels.push(MemberChannel {
+        view,
+        _ledger: ledger,
+        channel,
+    });
+    Ok(&channels.last().ok_or_else(refused)?.view)
 }
 
 /// The joined member uses the same request and save-source custody as the
@@ -683,73 +745,24 @@ impl JoinedMemberLane {
             pending.prepare_draft(group, signer, &own)?;
         }
         if pending.plan.is_none() {
-            let channel = pending.channel;
-            let index = if let Some(index) = self
-                .channels
-                .iter()
-                .position(|view| view.channel == channel)
-            {
-                index
-            } else {
-                if self.channels.len() >= MAX_MEMBER_CHANNELS {
-                    return Err(refused());
-                }
-                let realm = Realm::new(group, channel).map_err(|_| refused())?;
-                let mut ledger = ChatLedger::new(
-                    realm,
-                    LedgerLimits {
-                        max_actions: 1,
-                        max_action_bytes: MAX_ACTION_BYTES,
-                    },
-                )
-                .map_err(|_| refused())?;
-                let mut view = ledger
-                    .begin_projection_view_in(source.view)
-                    .map_err(|_| refused())?;
-                if !view.try_ready() {
-                    return Err(refused());
-                }
-                self.channels.push(MemberChannel {
-                    view,
-                    _ledger: ledger,
-                    channel,
-                });
-                self.channels.len() - 1
-            };
-            pending.prepare_plan(
-                verifier,
-                &own,
-                request.dependencies,
-                &self.channels[index].view,
-            )?;
+            let view =
+                member_channel_view(&mut self.channels, group, pending.channel, source.view)?;
+            pending.prepare_plan(verifier, &own, request.dependencies, view)?;
         }
-        let mut signed = Ok(());
-        if !pending.has_cached_raw() {
-            let PendingMemberRequest {
-                inputs,
-                draft,
-                plan,
-                ..
-            } = pending;
-            signed = source
+        pending.sign_and_complete(|inputs, draft, plan| {
+            source
                 .node
                 .sign_member_action_native(
                     inputs,
-                    draft.as_ref().ok_or_else(refused)?,
-                    plan.as_mut().ok_or_else(refused)?,
+                    draft,
+                    plan,
                     source.native,
                     source.cut,
                     source.ends,
                 )
                 .map(drop)
-                .map_err(|_| refused());
-        }
-        pending.complete_cached();
-        signed?;
-        if matches!(pending.signed, SignedState::Pending) {
-            return Err(refused());
-        }
-        Ok(())
+                .map_err(|_| refused())
+        })
     }
 }
 

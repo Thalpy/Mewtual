@@ -11,6 +11,25 @@ use catcoms_rt::{
 };
 
 impl PreparedV2FounderRecoveredAdd {
+    pub fn selected_member_admission(
+        &self,
+        verifier: &V2GeneralPrefixVerifier,
+    ) -> Result<&V2AuthenticatedAdmission, V2MemberSignRefusal> {
+        self.bound_member(verifier)
+            .map_err(|_| V2MemberSignRefusal::Source)
+    }
+
+    /// A warmed save plan carries the original OPEN admission. The host still
+    /// supplies its separately authenticated native generation and final edge.
+    pub fn require_member_save_plan_cached(
+        &self,
+        plan: &V2OrdinarySigningPlan,
+    ) -> Result<(), V2MemberSignRefusal> {
+        let member = self.member.as_ref().ok_or(V2MemberSignRefusal::Source)?;
+        plan.require_original_selected_admission(member)
+            .map_err(|_| V2MemberSignRefusal::Source)
+    }
+
     /// Bind the first genuine native MemberAction cut after the host proves
     /// its physical selection and installs a fresh authenticated Source.
     pub fn bind_native_member_source(
@@ -93,11 +112,7 @@ impl PreparedV2FounderRecoveredAdd {
     ) -> Result<V2OrdinarySigningGuard<'a>, V2MemberSignRefusal> {
         let signer = self.member_signer_data(verifier, original, cut)?;
         inputs.require_recovered_founder_origin(&self.lifetime)?;
-        let selected = self
-            .bound_member(verifier)
-            .map_err(|_| V2MemberSignRefusal::Source)?;
-        plan.require_original_selected_admission(selected)
-            .map_err(|_| V2MemberSignRefusal::Source)?;
+        self.require_member_save_plan_cached(plan)?;
         let guard = plan
             .admit_signing(draft, &signer)
             .map_err(|_| V2MemberSignRefusal::Source)?;

@@ -42,6 +42,13 @@ const SEED_FRAME_LIMIT: usize = 32768 + 40;
 
 pub(in crate::store) struct HeldColdFounderAdd {
     core: Option<ColdFounderCore>,
+    files: ColdFounderFiles,
+    recovered: RecoveredGovernedAdd,
+    _lease: VaultPhysicalWorkLease,
+    _fee: CatalogReadReservation,
+}
+
+struct ColdFounderFiles {
     group: PathBuf,
     directory: File,
     directory_id: SessionId,
@@ -51,10 +58,7 @@ pub(in crate::store) struct HeldColdFounderAdd {
     archive_path: PathBuf,
     archive: OpenedTextControl,
     selected: selected_head::GovernedHeadData,
-    recovered: RecoveredGovernedAdd,
     original: OriginalBootstrapReadObservation,
-    _lease: VaultPhysicalWorkLease,
-    _fee: CatalogReadReservation,
 }
 
 struct ColdFounderCore {
@@ -77,11 +81,27 @@ impl HeldColdFounderAdd {
         Ok((&core.verifier, &core._view))
     }
 
+    pub(in crate::store) fn with_checked_member_parts<T>(
+        &mut self,
+        store: &ServerStore,
+        source: &RetainedBootstrapSourceData,
+        perform: impl FnOnce(
+            &V2GeneralPrefixVerifier,
+            &ProjectionGroupView,
+            &mut dyn FnMut() -> Result<(), AppError>,
+        ) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        let core = self.core.as_ref().ok_or_else(refused)?;
+        let mut require = || self.files.require_current(store, source).map(drop);
+        require()?;
+        perform(&core.verifier, &core._view, &mut require)
+    }
+
     pub(in crate::store) fn encode_join_delivery(
         &self,
         source: &RetainedBootstrapSourceData,
     ) -> Result<Vec<u8>, AppError> {
-        self.original.require_same_original(source)?;
+        self.files.original.require_same_original(source)?;
         if self.core.is_none() {
             return Err(refused());
         }
@@ -203,17 +223,19 @@ impl HeldColdFounderAdd {
             authenticate_selected(&key, &selected, &archive.frame, context.id_data()?, &public)?;
         let mut result = Self {
             core: None,
-            group,
-            directory,
-            directory_id,
-            pin,
-            seed,
-            head,
-            archive_path,
-            archive,
-            selected,
+            files: ColdFounderFiles {
+                group,
+                directory,
+                directory_id,
+                pin,
+                seed,
+                head,
+                archive_path,
+                archive,
+                selected,
+                original: source.observe_original(),
+            },
             recovered,
-            original: source.observe_original(),
             _lease: lease,
             _fee: fee,
         };
@@ -226,24 +248,7 @@ impl HeldColdFounderAdd {
         store: &ServerStore,
         source: &RetainedBootstrapSourceData,
     ) -> Result<(OwnerHeaderId, u64), AppError> {
-        self.original.require_same_original(source)?;
-        source.validate_original(store)?;
-        store.validate_mounted_current_layout()?;
-        let (target, directory, id) = source.original_target_data();
-        require_directory_name(target, directory, id)?;
-        require_directory_name(&self.group, &self.directory, self.directory_id)?;
-        require_exact_held(&self.group.join("pin.bin"), &mut self.pin)?;
-        require_exact_held(&fixed_child(target, "text.seed")?, &mut self.seed)?;
-        require_exact_held(&self.archive_path, &mut self.archive)?;
-        require_exact_held(&fixed_child(target, "head.bin")?, &mut self.head)?;
-        require_stages_absent(target)?;
-        require_directory_name(target, directory, id)?;
-        require_directory_name(&self.group, &self.directory, self.directory_id)?;
-        source.require_original_negative(store)?;
-        Ok((
-            self.selected.transition.header,
-            self.selected.transition.epoch,
-        ))
+        self.files.require_current(store, source)
     }
 
     pub(in crate::store) fn restore_sdk(
@@ -252,7 +257,7 @@ impl HeldColdFounderAdd {
         source: &RetainedBootstrapSourceData,
     ) -> Result<PreparedV2FounderRecoveredAdd, AppError> {
         self.require_current(store, source)?;
-        let head = self.selected.transition;
+        let head = self.files.selected.transition;
         let restored = PreparedV2FounderRecoveredAdd::restore_from_bootstrap(
             source.data(),
             V2InstalledFounderAddData {
@@ -277,7 +282,7 @@ impl HeldColdFounderAdd {
         sdk: V2InstalledFounderAddData,
     ) -> Result<(OwnerHeaderId, u64), AppError> {
         let selected = self.require_current(store, source)?;
-        let head = self.selected.transition;
+        let head = self.files.selected.transition;
         if sdk.header != head.header
             || sdk.state != head.state
             || sdk.epoch != head.epoch
@@ -372,6 +377,33 @@ impl HeldColdFounderAdd {
                 .map_err(|_| refused())?;
         }
         self.require_current(store, source)
+    }
+}
+
+impl ColdFounderFiles {
+    fn require_current(
+        &mut self,
+        store: &ServerStore,
+        source: &RetainedBootstrapSourceData,
+    ) -> Result<(OwnerHeaderId, u64), AppError> {
+        self.original.require_same_original(source)?;
+        source.validate_original(store)?;
+        store.validate_mounted_current_layout()?;
+        let (target, directory, id) = source.original_target_data();
+        require_directory_name(target, directory, id)?;
+        require_directory_name(&self.group, &self.directory, self.directory_id)?;
+        require_exact_held(&self.group.join("pin.bin"), &mut self.pin)?;
+        require_exact_held(&fixed_child(target, "text.seed")?, &mut self.seed)?;
+        require_exact_held(&self.archive_path, &mut self.archive)?;
+        require_exact_held(&fixed_child(target, "head.bin")?, &mut self.head)?;
+        require_stages_absent(target)?;
+        require_directory_name(target, directory, id)?;
+        require_directory_name(&self.group, &self.directory, self.directory_id)?;
+        source.require_original_negative(store)?;
+        Ok((
+            self.selected.transition.header,
+            self.selected.transition.epoch,
+        ))
     }
 }
 

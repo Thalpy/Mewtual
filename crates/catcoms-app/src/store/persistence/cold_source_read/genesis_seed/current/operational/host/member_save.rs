@@ -40,7 +40,8 @@
 //! fixtures that build [`MemberSaveNativeAdmission`] from a test guard establish no native
 //! authorization; that needs the native consumer's checked factory and its own barrier tests.
 use super::member::{
-    FinishMode, JoinedMemberLane, JoinedMemberSource, V2MemberLane, V2MemberSignRequest,
+    FinishMode, JoinedMemberLane, JoinedMemberSource, RecoveredMemberLane, RecoveredMemberSource,
+    V2MemberLane, V2MemberSignRequest,
 };
 use super::projection::V2TextProjectionNegative;
 use super::{FounderAccess, PreparedV2TextHost};
@@ -63,8 +64,9 @@ use crate::store::ServerStore;
 use crate::store::{NativeTextJoinedRegistrationData, NativeTextJoinedRowSelection};
 use crate::AppError;
 use catcoms_replication::chat::{ActionId, ActionSpec};
-use catcoms_rt::{CryptoRngCore, MeshTransport, RequestCancellation};
+use catcoms_rt::{CryptoRngCore, MeshTransport, NativeChatPreparedKeyCut, RequestCancellation};
 use catcoms_storage::VaultPhysicalWorkLease;
+use catcoms_sync::owner_v2::PreparedV2FounderRecoveredAdd;
 use catcoms_sync::ClosedV2JoinedNode;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
@@ -280,6 +282,11 @@ enum MemberSavePath<'a, T: MeshTransport, R: CryptoRngCore> {
         JoinedMemberSource<'a, T, R>,
         NativeTextJoinedRegistrationData,
     ),
+    Recovered(
+        &'a mut RecoveredMemberLane,
+        RecoveredMemberSource<'a, R>,
+        Option<MemberOutboxContextData>,
+    ),
 }
 
 enum MemberSaveFinal<'a, 'key, T: MeshTransport, R: CryptoRngCore> {
@@ -292,6 +299,11 @@ enum MemberSaveFinal<'a, 'key, T: MeshTransport, R: CryptoRngCore> {
         lane: &'a JoinedMemberLane,
         row: &'a NativeTextJoinedRowSelection,
         node: &'a ClosedV2JoinedNode<T, R>,
+    },
+    Recovered {
+        lane: &'a RecoveredMemberLane,
+        sdk: &'a PreparedV2FounderRecoveredAdd,
+        cut: &'a NativeChatPreparedKeyCut,
     },
 }
 
@@ -372,6 +384,40 @@ impl JoinedMemberLane {
             lane: self,
             row,
             node,
+        }
+        .admit(layout, token, native)
+    }
+}
+
+impl RecoveredMemberLane {
+    pub(in crate::store) fn prepare_member_save<R: CryptoRngCore>(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        request: V2MemberSignRequest<'_>,
+        source: RecoveredMemberSource<'_, R>,
+        context: MemberOutboxContextData,
+        negative: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<V2MemberSaveOutcome, V2MemberSaveRefusal> {
+        MemberSavePath::<catcoms_net::MeshService, R>::Recovered(self, source, Some(context))
+            .prepare(layout, request, negative, rng)
+    }
+
+    pub(in crate::store) fn admit_member_save<R: CryptoRngCore>(
+        &self,
+        layout: &V2CurrentLayoutStore,
+        token: [u8; 32],
+        sdk: &PreparedV2FounderRecoveredAdd,
+        cut: &NativeChatPreparedKeyCut,
+        native: MemberSaveNativeAdmission,
+    ) -> Result<MemberSaveJob, (MemberSaveNativeAdmission, V2MemberSaveRefusal)> {
+        if self.require_cut(cut).is_err() {
+            return Err((native, V2MemberSaveRefusal::Unavailable));
+        }
+        MemberSaveFinal::<catcoms_net::MeshService, R>::Recovered {
+            lane: self,
+            sdk,
+            cut,
         }
         .admit(layout, token, native)
     }
@@ -562,7 +608,7 @@ impl<T: MeshTransport, R: CryptoRngCore> MemberSavePath<'_, T, R> {
     }
 
     fn outbox_context(
-        &self,
+        &mut self,
         layout: CurrentLayoutData,
     ) -> Result<(MemberOutboxContextData, [u8; 32]), V2MemberSaveRefusal> {
         match self {
@@ -593,6 +639,16 @@ impl<T: MeshTransport, R: CryptoRngCore> MemberSavePath<'_, T, R> {
                     return Err(V2MemberSaveRefusal::Stale);
                 }
                 Ok((context, original.signer))
+            }
+            Self::Recovered(lane, source, original) => {
+                let original = original.take().ok_or(V2MemberSaveRefusal::Stale)?;
+                if original.id() != lane.context() {
+                    return Err(V2MemberSaveRefusal::Stale);
+                }
+                let signer = lane
+                    .signer(source)
+                    .map_err(|_| V2MemberSaveRefusal::Unavailable)?;
+                Ok((original, signer))
             }
         }
     }
@@ -625,6 +681,13 @@ impl<T: MeshTransport, R: CryptoRngCore> MemberSavePath<'_, T, R> {
                 }
             }
             Self::Joined(lane, source, _) => {
+                lane.retry_request(env.store, &request, source)
+                    .map_err(|_| V2MemberSaveRefusal::Signing)?;
+                lane.requests
+                    .take_signed(token)
+                    .map_err(|_| V2MemberSaveRefusal::Unresolved)
+            }
+            Self::Recovered(lane, source, _) => {
                 lane.retry_request(env.store, &request, source)
                     .map_err(|_| V2MemberSaveRefusal::Signing)?;
                 lane.requests
@@ -688,6 +751,7 @@ impl<T: MeshTransport, R: CryptoRngCore> MemberSaveFinal<'_, '_, T, R> {
         let context = match &self {
             Self::Founder { lane, .. } => lane.outbox_context(),
             Self::Joined { lane, .. } => Some(lane.outbox_context()),
+            Self::Recovered { lane, .. } => Some(lane.context()),
         };
         let Some(context) = context else {
             return Err((native, V2MemberSaveRefusal::Stale));
@@ -731,6 +795,7 @@ impl<T: MeshTransport, R: CryptoRngCore> MemberSaveFinal<'_, '_, T, R> {
                 facts.admission,
             ),
             Self::Joined { lane, node, .. } => lane.admit_save_source(facts, node),
+            Self::Recovered { lane, sdk, cut } => lane.admit_save_source(facts, sdk, cut),
         };
         let Ok(source) = source else {
             return Err((native, V2MemberSaveRefusal::Stale));
@@ -748,6 +813,7 @@ impl<T: MeshTransport, R: CryptoRngCore> MemberSaveFinal<'_, '_, T, R> {
         let current = match self {
             Self::Founder { origin, access, .. } => access.require(origin),
             Self::Joined { lane, row, .. } => lane.require_original_row(row),
+            Self::Recovered { lane, cut, .. } => lane.require_cut(cut),
         };
         if current.is_err() {
             drop(guard);
@@ -981,6 +1047,13 @@ impl<T: MeshTransport, R: CryptoRngCore> MemberSavePath<'_, T, R> {
                 lane.require_retained_original(*token.as_bytes(), original)
                     .map_err(|_| V2MemberSaveRefusal::Unresolved)
             }
+            Self::Recovered(lane, source, _) => {
+                if lane.context() != env.id || lane.require_cut(source.cut).is_err() {
+                    return Err(V2MemberSaveRefusal::Stale);
+                }
+                lane.require_retained(*token.as_bytes(), original)
+                    .map_err(|_| V2MemberSaveRefusal::Unresolved)
+            }
         }
     }
 
@@ -998,6 +1071,10 @@ impl<T: MeshTransport, R: CryptoRngCore> MemberSavePath<'_, T, R> {
                 None => Ok(None),
             },
             Self::Joined(lane, _, _) => {
+                lane.requests
+                    .reconcile_saved(*token.as_bytes(), action, spec)
+            }
+            Self::Recovered(lane, _, _) => {
                 lane.requests
                     .reconcile_saved(*token.as_bytes(), action, spec)
             }
@@ -1025,6 +1102,9 @@ impl<T: MeshTransport, R: CryptoRngCore> MemberSavePath<'_, T, R> {
                         host.finish_member_request_saved(*token.as_bytes(), receipt.action)
                     }
                     Self::Joined(lane, _, _) => lane
+                        .requests
+                        .finish(*token.as_bytes(), FinishMode::Saved(receipt.action)),
+                    Self::Recovered(lane, _, _) => lane
                         .requests
                         .finish(*token.as_bytes(), FinishMode::Saved(receipt.action)),
                 }
@@ -1269,6 +1349,7 @@ struct SaveSourceBody {
 enum SaveSourceNegative {
     Founder(V2TextProjectionNegative),
     Joined(NativeTextJoinedRowSelection),
+    RecoveredFounder(catcoms_sync::owner_v2::V2MemberPublicationObservation),
 }
 
 impl SaveSourceNegative {
@@ -1276,6 +1357,10 @@ impl SaveSourceNegative {
         match self {
             Self::Founder(original) => original.validate_negative(),
             Self::Joined(original) => original
+                .is_current_cached()
+                .then_some(())
+                .ok_or_else(refused),
+            Self::RecoveredFounder(original) => original
                 .is_current_cached()
                 .then_some(())
                 .ok_or_else(refused),
@@ -1309,6 +1394,13 @@ impl V2MemberSaveSource {
         row: NativeTextJoinedRowSelection,
     ) -> Result<Self, AppError> {
         Self::from_negative(pool, SaveSourceNegative::Joined(row))
+    }
+
+    pub(super) fn prepare_recovered_founder(
+        pool: &CriticalCatalogReadPool,
+        original: catcoms_sync::owner_v2::V2MemberPublicationObservation,
+    ) -> Result<Self, AppError> {
+        Self::from_negative(pool, SaveSourceNegative::RecoveredFounder(original))
     }
 
     fn from_negative(

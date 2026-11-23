@@ -14,7 +14,8 @@ pub(in crate::store) use genesis_seed::{
     prepare_joined_member_history, JoinedMemberLane, JoinedMemberSource,
     OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
     PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
-    PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis,
+    PreparedV2UnsignedOriginalCustody, RecoveredMemberLane, RecoveredMemberSource,
+    V2AdvancedAppendBasis,
 };
 #[cfg(all(test, windows))]
 pub(in crate::store) use genesis_seed::{
