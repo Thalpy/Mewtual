@@ -1,6 +1,6 @@
-//! Finite pages of the current member's saved originals, not a shared chat
-//! projection. The Root page owns its own debit; this route separately pays
-//! native copies/serialization, then rechecks the actual installed objects.
+//! Bounded own receipts and separately guarded live and archived projections.
+//! Root owns the reads. Native pays its response copies and rechecks the
+//! installed objects before resolving an invocation.
 use super::*;
 use catcoms_app::store::{
     NativeTextHistoryResponseCredit, NativeTextJoinedMemberProjection,
@@ -38,10 +38,27 @@ struct Read {
     server: u64,
     channel: u128,
     context: [u8; 32],
+    request: ReadRequest,
+}
+#[derive(Clone, Copy)]
+enum ReadRequest {
+    Own(OwnRead),
+    Live(ActionId),
+    Archived(ArchiveRead),
+}
+#[derive(Clone, Copy)]
+struct OwnRead {
     start: u64,
     end: Option<u64>,
     maximum: usize,
-    received_action: Option<ActionId>,
+}
+#[derive(Clone, Copy)]
+enum ArchiveRead {
+    Page {
+        after: Option<ActionId>,
+        limit: usize,
+    },
+    Message(ActionId),
 }
 struct Invocation {
     generation: u64,
@@ -78,6 +95,8 @@ fn parse(payload: &InvokeBody) -> Result<Read, &'static str> {
                     | "endExclusive"
                     | "limit"
                     | "receivedAction"
+                    | "archivedAction"
+                    | "archiveAfter"
                     | "trace"
             )
         })
@@ -111,35 +130,70 @@ fn parse(payload: &InvokeBody) -> Result<Read, &'static str> {
     if context == [0; 32] {
         return Err("Invalid chat context.");
     }
-    let (start, end, maximum, received_action) = if object.contains_key("receivedAction") {
-        if ["start", "endExclusive", "limit"]
-            .iter()
-            .any(|key| object.contains_key(*key))
-        {
-            return Err("Invalid history request.");
-        }
+    let action_id = |encoded: &str| -> Result<ActionId, &'static str> {
         let mut id = [0; 32];
-        hex::decode_to_slice(string("receivedAction", 64)?, &mut id)
-            .map_err(|_| "Invalid message.")?;
-        (0, None, 1, Some(ActionId::from_bytes(id)))
-    } else {
-        let start = decimal(string("start", 20)?)?;
-        let end = match object.get("endExclusive") {
-            None | Some(serde_json::Value::Null) => None,
-            Some(serde_json::Value::String(value)) if value.len() <= 20 => Some(decimal(value)?),
-            _ => return Err("Invalid history cursor."),
-        };
-        let maximum = object
+        hex::decode_to_slice(encoded, &mut id).map_err(|_| "Invalid message.")?;
+        Ok(ActionId::from_bytes(id))
+    };
+    let limit = || {
+        object
             .get("limit")
             .and_then(serde_json::Value::as_u64)
             .filter(|n| (1..=8).contains(n))
-            .ok_or("Invalid history page size.")? as usize;
-        (start, end, maximum, None)
+            .map(|n| n as usize)
+            .ok_or("Invalid history page size.")
     };
-    if end.is_some_and(|end| start > end)
-        || object
-            .get("trace")
-            .is_some_and(|v| !v.is_null() && v.as_str().is_none_or(|s| s.len() > 128))
+    let own = object.contains_key("start") || object.contains_key("endExclusive");
+    let request = match (
+        object.contains_key("receivedAction"),
+        object.contains_key("archivedAction"),
+        object.get("archiveAfter"),
+        own,
+    ) {
+        (true, false, None, false) if !object.contains_key("limit") => {
+            ReadRequest::Live(action_id(string("receivedAction", 64)?)?)
+        }
+        (false, true, None, false) if !object.contains_key("limit") => ReadRequest::Archived(
+            ArchiveRead::Message(action_id(string("archivedAction", 64)?)?),
+        ),
+        (false, false, Some(after), false) => {
+            let after = match after {
+                serde_json::Value::Null => None,
+                serde_json::Value::String(value)
+                    if value.len() == 64 && !value.bytes().any(|c| c.is_ascii_uppercase()) =>
+                {
+                    Some(action_id(value)?)
+                }
+                _ => return Err("Invalid history cursor."),
+            };
+            ReadRequest::Archived(ArchiveRead::Page {
+                after,
+                limit: limit()?,
+            })
+        }
+        (false, false, None, true) => {
+            let start = decimal(string("start", 20)?)?;
+            let end = match object.get("endExclusive") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(value)) if value.len() <= 20 => {
+                    Some(decimal(value)?)
+                }
+                _ => return Err("Invalid history cursor."),
+            };
+            if end.is_some_and(|end| start > end) {
+                return Err("Invalid history cursor.");
+            }
+            ReadRequest::Own(OwnRead {
+                start,
+                end,
+                maximum: limit()?,
+            })
+        }
+        _ => return Err("Invalid history request."),
+    };
+    if object
+        .get("trace")
+        .is_some_and(|v| !v.is_null() && v.as_str().is_none_or(|s| s.len() > 128))
     {
         return Err("Invalid history request.");
     }
@@ -147,10 +201,7 @@ fn parse(payload: &InvokeBody) -> Result<Read, &'static str> {
         server,
         channel,
         context,
-        start,
-        end,
-        maximum,
-        received_action,
+        request,
     })
 }
 pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task)) -> bool {
@@ -229,12 +280,14 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
         // Owning result is outside ALL final guards. Resolver unwind must not
         // destroy the paid Root page or its invoice while those guards exist.
         let state = app.state::<AppState>();
-        let mut result = if let Some(action) = invocation.read.received_action {
-            execute_received(&invocation, action)
+        let mut result = match invocation.read.request {
+            ReadRequest::Live(action) => execute_received(&invocation, action)
                 .await
-                .map(Response::Received)
-        } else {
-            execute(&state, &invocation).await.map(Response::Saved)
+                .map(Response::Received),
+            ReadRequest::Own(read) => execute(&state, &invocation, read)
+                .await
+                .map(Response::Saved),
+            ReadRequest::Archived(read) => execute_archive(&state, &invocation, read).await,
         };
         #[cfg(test)]
         {
@@ -254,6 +307,9 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
                     resolver.resolve(InvokeResponseBody::Json(output.body.take().unwrap()))
                 }
                 Ok(Response::Received(output)) => output.resolve(resolver),
+                Ok(Response::ArchivePage(output)) => {
+                    resolver.resolve(InvokeResponseBody::Json(output.body.take().unwrap()))
+                }
                 Err(error) => resolver.reject(&*error),
             }
         }
@@ -329,7 +385,8 @@ async fn capture(state: &AppState, call: &Invocation) -> Result<Preparation, Str
 struct Work {
     preparation: Preparation,
     scope: RequestCancellation,
-    read: Read,
+    read: OwnRead,
+    channel: u128,
     _local: Option<OwnedMutexGuard<()>>,
     #[cfg(test)]
     watch: Option<Arc<DropWatch>>,
@@ -346,9 +403,16 @@ struct Output {
 enum Response {
     Saved(Output),
     Received(ReceivedOutput),
+    ArchivePage(ArchivePageOutput),
+}
+
+struct ArchivePageOutput {
+    body: Option<String>,
+    _payment: Arc<Payment>,
 }
 
 struct ReceivedOutput {
+    scope: &'static str,
     projection: Option<NativeTextJoinedMemberProjection>,
     _payment: Arc<Payment>,
 }
@@ -356,7 +420,7 @@ struct ReceivedOutput {
 impl ReceivedOutput {
     fn resolve<R: tauri::Runtime>(&self, resolver: tauri::ipc::InvokeResolver<R>) {
         let Some(projection) = &self.projection else {
-            resolver.resolve(InvokeResponseBody::Json(received_body(None)));
+            resolver.resolve(InvokeResponseBody::Json(received_body(self.scope, None)));
             return;
         };
         let mut resolver = Some(resolver);
@@ -364,7 +428,10 @@ impl ReceivedOutput {
             resolver
                 .take()
                 .unwrap()
-                .resolve(InvokeResponseBody::Json(received_body(Some(result))));
+                .resolve(InvokeResponseBody::Json(received_body(
+                    self.scope,
+                    Some(result),
+                )));
         });
         if let Some(resolver) = resolver {
             resolver.reject(STALE);
@@ -372,7 +439,7 @@ impl ReceivedOutput {
     }
 }
 
-fn received_body(projection: Option<&GuardedProjection>) -> String {
+fn received_body(scope: &'static str, projection: Option<&GuardedProjection>) -> String {
     let item = match projection {
         Some(GuardedProjection::Visible {
             create,
@@ -389,12 +456,13 @@ fn received_body(projection: Option<&GuardedProjection>) -> String {
         }),
         _ => serde_json::Value::Null,
     };
-    serde_json::json!({"backend":"text-v2","scope":"received-live","item":item}).to_string()
+    serde_json::json!({"backend":"text-v2","scope":scope,"item":item}).to_string()
 }
 
 async fn execute_received(call: &Invocation, action: ActionId) -> Result<ReceivedOutput, String> {
     let Some(local) = call.member_work.clone() else {
         return Ok(ReceivedOutput {
+            scope: "received-live",
             projection: None,
             _payment: call.payment.clone(),
         });
@@ -411,9 +479,72 @@ async fn execute_received(call: &Invocation, action: ActionId) -> Result<Receive
             .map_err(|_| STALE.to_owned())?
             .flatten();
         Ok(ReceivedOutput {
+            scope: "received-live",
             projection,
             _payment: payment,
         })
+    })
+    .await
+    .map_err(|_| STALE.to_owned())?
+}
+
+async fn execute_archive(
+    state: &AppState,
+    call: &Invocation,
+    read: ArchiveRead,
+) -> Result<Response, String> {
+    let channel = call.read.channel;
+    let scope = call.scope.clone();
+    let payment = call.payment.clone();
+    let original = if let Some(local) = &call.member_work {
+        let guard = local.foreground(scope.clone()).await.ok_or(STALE)?;
+        let Preparation::Joined(original, selection) = capture(state, call).await? else {
+            return Err(STALE.to_owned());
+        };
+        Some((original, selection, guard))
+    } else {
+        None
+    };
+    tauri::async_runtime::spawn_blocking(move || match read {
+        ArchiveRead::Page { after, limit } => {
+            let page = match original {
+                Some((original, row, _guard)) => original
+                    .archived_action_page(&row, channel, after, limit, &scope)
+                    .map_err(|_| "Saved received messages could not be read. Try again.")?,
+                None => None,
+            };
+            let ids = page.as_ref().map_or_else(Vec::new, |page| {
+                page.actions()
+                    .iter()
+                    .map(|id| hex::encode(id.as_bytes()))
+                    .collect()
+            });
+            let body = serde_json::json!({
+                "backend": "text-v2",
+                "scope": "received-archive-index",
+                "available": page.is_some(),
+                "ids": ids,
+                "more": page.as_ref().is_some_and(|page| page.has_more()),
+            })
+            .to_string();
+            Ok(Response::ArchivePage(ArchivePageOutput {
+                body: Some(body),
+                _payment: payment,
+            }))
+        }
+        ArchiveRead::Message(action) => {
+            let projection = match original {
+                Some((original, row, _guard)) => original
+                    .archived_message_projection(&row, channel, action, scope, &mut OsCryptoRng)
+                    .map_err(|_| "Saved received messages could not be read. Try again.")?,
+                None => None,
+            };
+            Ok(Response::Received(ReceivedOutput {
+                scope: "received-archive",
+                projection,
+                _payment: payment,
+            }))
+        }
     })
     .await
     .map_err(|_| STALE.to_owned())?
@@ -437,7 +568,7 @@ impl Work {
         }
         .map_err(|_| "Chat history could not be read. Try again.")?;
         // Consuming the Root job restores its runtime before any native await.
-        let body = serialize_page(&page, self.read.channel, SERIALIZED_LIMIT)?;
+        let body = serialize_page(&page, self.channel, SERIALIZED_LIMIT)?;
         Ok(Output {
             _page: page,
             body: Some(body),
@@ -450,7 +581,7 @@ impl Work {
         })
     }
 }
-async fn execute(state: &AppState, call: &Invocation) -> Result<Output, String> {
+async fn execute(state: &AppState, call: &Invocation, read: OwnRead) -> Result<Output, String> {
     let local = match &call.member_work {
         Some(work) => Some(work.foreground(call.scope.clone()).await.ok_or(STALE)?),
         None => None,
@@ -458,7 +589,8 @@ async fn execute(state: &AppState, call: &Invocation) -> Result<Output, String> 
     let work = Work {
         preparation: capture(state, call).await?,
         scope: call.scope.clone(),
-        read: call.read,
+        read,
+        channel: call.read.channel,
         _local: local,
         #[cfg(test)]
         watch: state.native_text.history_drop_watch.lock().unwrap().clone(),

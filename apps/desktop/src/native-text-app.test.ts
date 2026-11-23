@@ -89,6 +89,44 @@ test("received text is fetched for the exact installed view and discarded after 
   app.done();
 });
 
+test("real App reads saved received bodies and suppresses them after a live change", async () => {
+  const app = pendingManagerApp({});
+  await app.hydrate();
+  app.nativeConversation(7, "9", context);
+  const index = { backend: "text-v2", scope: "received-archive-index", available: true, ids: [row.action], more: false };
+  const item = { action: row.action, text: "Received before restart", certainty: "provisional" };
+  const saved = { backend: "text-v2", scope: "received-archive", item };
+  app.nativeHistory(index, saved);
+  await app.nativeArchiveRefresh();
+  assert.deepEqual(app.archive().items, [item]);
+  assert.deepEqual(app.state().nativeHistoryCalls, [
+    { server: 7, channel: "9", expectedContext: context, archiveAfter: null, limit: 8 },
+    { server: 7, channel: "9", expectedContext: context, archivedAction: row.action },
+  ]);
+
+  const pending = deferred<unknown>();
+  app.nativeHistory(index, pending.promise, { backend: "text-v2", scope: "received-live", item: null });
+  const read = app.nativeArchiveRefresh();
+  await settle();
+  await app.receiveNotice({ server: 7, channel: "9", context, action: row.action });
+  pending.resolve(saved);
+  await read;
+  assert.deepEqual(app.archive().items, []);
+  app.nativeHistory(index, saved);
+  await app.nativeArchiveRefresh();
+  assert.deepEqual(app.archive().items, []);
+
+  const retired = deferred<unknown>();
+  app.nativeHistory(index, retired.promise);
+  const old = app.nativeArchiveRefresh();
+  await settle();
+  app.retireFoundUiForReauth();
+  retired.resolve(saved);
+  await old;
+  assert.equal(app.archive(), null);
+  app.done();
+});
+
 test("a slow initial history read excludes the real automatic scheduler and manual send until it retires",async()=>{
  const app=pendingManagerApp(retained);await app.hydrate();app.nativeConversation(7,"9",context);const gate=deferred<unknown>();
  app.nativeHistory(gate.promise);const read=app.nativeRefresh();await settle();app.syncRetry();

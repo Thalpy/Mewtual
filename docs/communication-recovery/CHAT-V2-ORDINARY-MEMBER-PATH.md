@@ -173,8 +173,12 @@ Foreground reads and saves share the row's local work permit with publication pr
 and checkpointing. Transport submission runs after that permit is released.
 The main renderer receives an action ID notification and reads the exact live projection
 through a fresh authenticated invocation. Provisional bodies are labelled separately from
-local receipts. Browsing shared history across restart and recovery beyond the live worker's
-bounded direct dependency window remain open.
+local receipts. **Saved received messages** pages the selected joined archive after
+restart. For each of at most eight Create IDs, a separate native invocation enters the
+guarded projection before returning a body. A live update in the active view retires the
+older saved body and cancels a pending archive read. The renderer labels a partial page
+when any individual original cannot be replayed. Recovery beyond the live worker's
+bounded direct dependency window remains open.
 Original audit chunks and request receipts remain retained after scheduling debt clears.
 Removal changes active view, never deletes the audit. Unproven late removed actions stay
 Held pending the separately authorized moderation path; ordinary concurrent edits resolve

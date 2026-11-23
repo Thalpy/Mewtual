@@ -30,3 +30,27 @@ test("native chat displays an authenticated live projection with provisional sta
   await unmount(app);
   target.remove();
 });
+
+test("saved received messages retain their status and coexist with a partial page", async () => {
+  const target = document.createElement("div");
+  document.body.append(target);
+  const calls: boolean[] = [];
+  const app = mount(NativeSavedChat, { target, props: {
+    rows: [], archive: {
+      items: [{ action: "73".repeat(32), text: "Saved after receiving", certainty: "provisional" }],
+      note: "Some saved received messages could not be loaded.", loading: false, more: true,
+    },
+    readArchive: append => calls.push(append),
+    loading: false, loaded: true, failure: null, more: false, text: "", busy: false,
+    send: () => {}, refresh: () => {}, loadMore: () => {}, change: () => {},
+  } });
+  flushSync();
+  assert.match(target.textContent ?? "", /Saved after receiving/);
+  assert.match(target.textContent ?? "", /Saved received · Provisional/);
+  assert.match(target.textContent ?? "", /Some saved received messages could not be loaded/);
+  assert.doesNotMatch(target.textContent ?? "", /Nothing saved here yet/);
+  [...target.querySelectorAll("button")].find(button => button.textContent === "Load more received messages")!.click();
+  assert.deepEqual(calls, [true]);
+  await unmount(app);
+  target.remove();
+});

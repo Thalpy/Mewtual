@@ -215,7 +215,7 @@
   import type { NativeTextIntents } from "./native-text-intents";
   import { createNativeTextDriver } from "./native-text-driver";
   import { decodeRestoredChatSession, type NativeTextServer } from "./native-text-session";
-  import { decodeNativeReceived, decodeNativeReceivedNotice, readNativeOriginals, updateNativeReceived, type NativeOriginal, type NativeReceived } from "./native-text-history";
+  import { decodeNativeReceived, decodeNativeReceivedNotice, readNativeOriginals, readNativeReceivedArchive, updateNativeReceived, type NativeOriginal, type NativeReceived } from "./native-text-history";
   import NativeSavedChat from "./NativeSavedChat.svelte";
   import {
     captureLockContinuity, closeContinuityAcknowledgement, NativeVaultLockCoordinator, type NativeVaultCloseOutcome, type NativeVaultLockOutcome,
@@ -390,6 +390,13 @@
   let nativeReceivedScope = $state.raw<{ server: number; channel: string; context: string } | null>(null);
   let nativeReceivedRevision = 0;
   const nativeReceivedReads = new Map<string, { dirty: boolean }>();
+  let nativeArchive = $state.raw<{
+    server: number; channel: string; context: string; items: NativeReceived[];
+    after: string | null; more: boolean; loading: boolean; note: string | null;
+  } | null>(null);
+  let nativeArchiveRevision = 0;
+  const nativeArchiveTouched = new Set<string>();
+  let nativeArchiveSaturated = false;
   let nativeCursor = $state<{next:string;end:string}|null>(null);
   let nativeHistoryLoading = $state(false);
   let nativeHistoryLoaded = $state(false);
@@ -6953,6 +6960,7 @@
     nativeReceivedScope = null;
     nativeReceivedRevision++;
     nativeReceivedReads.clear();
+    resetNativeArchive();
     nativeHistoryLoaded=false;nativeHistoryError=null;
     nativeRetryGeneration=null;
   }
@@ -7055,11 +7063,27 @@
       && cur?.backend === "text-v2" && cur.active === channel && cur.context === context;
     if (!current()) return;
     if (action === null) {
+      nativeArchiveRevision++;
+      nativeArchive = null;
       nativeReceivedRevision++;
       nativeReceived = [];
       nativeReceivedScope = null;
       nativeReceivedReads.clear();
       return;
+    }
+    // A live observation retires the corresponding archive body immediately.
+    // A read already in flight must not put that old body back on the screen.
+    if (!nativeArchiveTouched.has(action)) {
+      if (nativeArchiveTouched.size === 64) nativeArchiveSaturated = true;
+      else nativeArchiveTouched.add(action);
+    }
+    if (nativeArchive) {
+      nativeArchiveRevision++;
+      nativeArchive = {
+        ...nativeArchive,
+        items: nativeArchiveSaturated ? [] : nativeArchive.items.filter(item => item.action !== action),
+        loading: false,
+      };
     }
     const earlier = nativeReceivedReads.get(action);
     if (earlier) { earlier.dirty = true; return; }
@@ -7081,6 +7105,49 @@
     } catch { /* The original scope may close while the read is pending. */ }
     finally {
       if (nativeReceivedReads.get(action) === work) nativeReceivedReads.delete(action);
+    }
+  }
+
+  function resetNativeArchive() {
+    nativeArchiveRevision++;
+    nativeArchive = null;
+    nativeArchiveTouched.clear();
+    nativeArchiveSaturated = false;
+  }
+
+  async function refreshNativeArchive(append = false) {
+    const selected = cur, server = activeServerId;
+    if (server === null || selected?.backend !== "text-v2" || !selected.context
+      || locked || !uiStateReady || uiSessionRetired || windowCloseInFlight
+      || sending || busy || nativeHistoryLoading || nativeRetryGeneration !== null || nativeArchive?.loading) return;
+    const { active: channel, context } = selected;
+    const session = uiStateLoadGeneration, view = viewGeneration, revision = ++nativeArchiveRevision;
+    const current = () => !locked && !uiSessionRetired && uiStateReady && !windowCloseInFlight
+      && session === uiStateLoadGeneration && view === viewGeneration && revision === nativeArchiveRevision
+      && activeServerId === server && cur?.backend === "text-v2" && cur.active === channel && cur.context === context;
+    const base = append && nativeArchive?.server === server && nativeArchive.channel === channel && nativeArchive.context === context
+      ? nativeArchive : null;
+    const previous = { server, channel, context, items: base?.items ?? [], after: base?.after ?? null, more: base?.more ?? false };
+    nativeArchive = { ...previous, note: null, loading: true };
+    try {
+      if (nativeArchiveSaturated) throw new Error("Too many received updates in this view.");
+      const page = await readNativeReceivedArchive((_command, args) => invoke<unknown>("get_message_page", args),
+        { server, channel, context }, current, previous.after);
+      if (!page || !current()) return;
+      const items = page.items.filter(item => !nativeArchiveTouched.has(item.action));
+      const note = !page.available ? "Saved received messages are unavailable for this group."
+        : page.incomplete ? "Some saved received messages could not be loaded."
+        : null;
+      nativeArchive = {
+        ...previous,
+        items: [...previous.items, ...items].slice(-64),
+        after: page.ids.at(-1) ?? previous.after,
+        more: page.more,
+        note,
+        loading: false,
+      };
+    } catch {
+      if (current()) nativeArchive = { ...previous, note: "Saved received messages could not be loaded. Try again.", loading: false };
     }
   }
   async function sendNativeText(text:string,server:number,channel:string):Promise<SendOutcome> {
@@ -7569,6 +7636,7 @@
     // Inline edit plaintext belongs to this view. Lock/switch/removal must drop it
     // and invalidate old admission callbacks, including after a failed first seal.
     cancelEdit();
+    resetNativeArchive();
     view = "chat";
     moderationSelected = new Set();
     moderationDeleteArmed = false;
@@ -28477,9 +28545,11 @@
           </nav>
         {/if}
         {#if cur?.backend === "text-v2"}
+          {@const archive = nativeArchive !== null && nativeArchive.server === activeServerId && nativeArchive.channel === cur.active && nativeArchive.context === cur.context ? nativeArchive : null}
           <NativeSavedChat rows={nativeOriginals}
             received={nativeReceivedScope !== null && nativeReceivedScope.server === activeServerId && nativeReceivedScope.channel === cur.active && nativeReceivedScope.context === cur.context ? nativeReceived : []}
             loading={nativeHistoryLoading} loaded={nativeHistoryLoaded} failure={nativeHistoryError} more={!!nativeCursor && nativeCursor.next!==nativeCursor.end}
+            {archive} readArchive={(append)=>{void refreshNativeArchive(append);}}
             text={draft} busy={sending || nativeHistoryLoading || nativeRetryGeneration!==null} send={()=>{void send();}} refresh={()=>{void refreshNativeHistory();}} loadMore={()=>{void refreshNativeHistory(true);}}
             change={(value)=>{draft=value;saveDraftFor(chanKey());}} />
         {:else if view === "chat"}

@@ -34,10 +34,14 @@ export function decodeNativeReceivedNotice(value: unknown): NativeReceivedTarget
   };
 }
 
-export function decodeNativeReceived(value: unknown, expectedAction: string): NativeReceived | null {
+export function decodeNativeReceived(
+  value: unknown,
+  expectedAction: string,
+  scope: "received-live" | "received-archive" = "received-live",
+): NativeReceived | null {
   const root = object(value);
   fields(root, ["backend", "scope", "item"]);
-  if (root.backend !== "text-v2" || root.scope !== "received-live") return fail();
+  if (root.backend !== "text-v2" || root.scope !== scope) return fail();
   if (root.item === null) return null;
   const row = object(root.item);
   fields(row, ["action", "text", "certainty"]);
@@ -46,6 +50,49 @@ export function decodeNativeReceived(value: unknown, expectedAction: string): Na
   const body = text(row.text);
   if (!body) return fail();
   return { action, text: body, certainty: row.certainty };
+}
+
+type NativeHistoryTarget = { server: number; channel: string; context: string };
+type NativeInvoke = (command: string, args: Record<string, unknown>) => Promise<unknown>;
+
+/** Fetch one bounded page, resolving each body under its own native guard. */
+export async function readNativeReceivedArchive(
+  invoke: NativeInvoke,
+  target: NativeHistoryTarget,
+  current: () => boolean,
+  after: string | null,
+): Promise<{ available: boolean; ids: string[]; more: boolean; items: NativeReceived[]; incomplete: boolean } | null> {
+  if (!current()) return null;
+  const address = { server: target.server, channel: target.channel, expectedContext: target.context };
+  const raw = await invoke("get_message_page", { ...address, archiveAfter: after, limit: 8 });
+  if (!current()) return null;
+  const root = object(raw);
+  fields(root, ["backend", "scope", "available", "ids", "more"]);
+  if (root.backend !== "text-v2" || root.scope !== "received-archive-index"
+    || typeof root.available !== "boolean" || typeof root.more !== "boolean"
+    || !Array.isArray(root.ids) || root.ids.length > 8
+    || (!root.available && root.ids.length > 0) || (root.more && root.ids.length !== 8)) return fail();
+  const ids = root.ids.map(hex);
+  let previous = after;
+  for (const id of ids) {
+    if (previous !== null && previous >= id) return fail();
+    previous = id;
+  }
+  const items: NativeReceived[] = [];
+  let incomplete = false;
+  for (const id of ids) {
+    if (!current()) return null;
+    try {
+      const raw = await invoke("get_message_page", { ...address, archivedAction: id });
+      if (!current()) return null;
+      const item = decodeNativeReceived(raw, id, "received-archive");
+      if (item) items.push(item);
+    } catch {
+      if (!current()) return null;
+      incomplete = true;
+    }
+  }
+  return { available: root.available, ids, more: root.more, items, incomplete };
 }
 
 export function updateNativeReceived(rows: NativeReceived[], action: string, item: NativeReceived | null): NativeReceived[] {
@@ -80,8 +127,8 @@ export function decodeNativeOriginalPage(value: unknown, start: string, end: str
 /** At most16 native requests/128 originals per batch. Empty channel pages keep
  * advancing the original context cursor; a finite first end is reused exactly. */
 export async function readNativeOriginals(
-  invoke: (command: string, args: Record<string, unknown>) => Promise<unknown>,
-  target: { server: number; channel: string; context: string }, current: () => boolean,
+  invoke: NativeInvoke,
+  target: NativeHistoryTarget, current: () => boolean,
   cursor: { next: string; end: string } | null = null,
 ): Promise<{ items: NativeOriginal[]; next: string; end: string } | null> {
   let next = cursor?.next ?? "0", end: string | null = cursor?.end ?? null;

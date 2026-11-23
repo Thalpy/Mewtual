@@ -1291,6 +1291,47 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
         found_value(probe.await.unwrap()),
         serde_json::json!({"backend":"text-v2","scope":"received-live","item":null})
     );
+    let archive_request = |row: &serde_json::Value, payload: serde_json::Value| {
+        let mut body = payload;
+        body["server"] = row["server"].clone();
+        body["channel"] = row["channel"].clone();
+        body["expectedContext"] = row["context"].clone();
+        body
+    };
+    let empty_archive = serde_json::json!({
+        "backend":"text-v2","scope":"received-archive-index","available":true,"ids":[],"more":false,
+    });
+    let probe = invite_command(
+        &joiner_window,
+        "get_message_page",
+        archive_request(
+            &original,
+            serde_json::json!({"archiveAfter":null,"limit":8}),
+        ),
+    );
+    run(&joiner_queue).await;
+    assert_eq!(found_value(probe.await.unwrap()), empty_archive);
+    let missing = hex::encode([249; 32]);
+    let probe = invite_command(
+        &joiner_window,
+        "get_message_page",
+        archive_request(&original, serde_json::json!({"archivedAction":missing})),
+    );
+    run(&joiner_queue).await;
+    assert_eq!(
+        found_value(probe.await.unwrap()),
+        serde_json::json!({"backend":"text-v2","scope":"received-archive","item":null})
+    );
+    let probe = invite_command(
+        &joiner_window,
+        "get_message_page",
+        archive_request(
+            &original,
+            serde_json::json!({"archiveAfter":null,"limit":8,"archivedAction":missing}),
+        ),
+    );
+    refused(probe.await.unwrap());
+    assert!(joiner_queue.lock().unwrap().is_empty());
 
     // The saved native row can be reported after the actual founder retires.
     let locked = snapshot_request(&founder_window, None);
@@ -1398,6 +1439,16 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     let fixed_page = native_history_request(&window, &restored[0], "0", Some("1"), 8);
     run(&queue).await;
     assert_eq!(found_value(fixed_page.await.unwrap()), history);
+    let probe = invite_command(
+        &window,
+        "get_message_page",
+        archive_request(
+            &restored[0],
+            serde_json::json!({"archiveAfter":null,"limit":8}),
+        ),
+    );
+    run(&queue).await;
+    assert_eq!(found_value(probe.await.unwrap()), empty_archive);
     assert_eq!(
         std::fs::read(joiner_path.join("chat-critical-namespaces.joined-pin.index")).unwrap(),
         saved_pins
