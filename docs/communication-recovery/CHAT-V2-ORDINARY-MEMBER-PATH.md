@@ -124,8 +124,9 @@ bound to the local vault, Profile, initial tenure and channel. The manifest pres
 the action's original Admission and signed bytes across transport epochs. Native
 storage must select the manifest before cold replay can treat it as saved history.
 Semantic replay restores dependency knowledge only after the original signature and
-governing Admission verify. It issues no provisional projection. A reopened joined
-row can already replay an exact original from its own outbox by ActionId.
+governing Admission verify. A retired author's dependency also needs the exact frozen
+Admission from the same selected prefix. Replay issues no provisional projection.
+A reopened joined row can already replay an exact original from its own outbox by ActionId.
 The history disk implementation verifies a complete WAL, keeps the original file
 identities through the barriers and selects the exact manifest under a keyed ActionId
 locator. Recovery completes the same bytes after a torn bundle or selector. Native

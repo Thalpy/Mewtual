@@ -462,6 +462,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                     &ledger.view,
                     saved.action(),
                     &admission,
+                    &[],
                     RECEIVE_WORK,
                 )
                 .map(Some)

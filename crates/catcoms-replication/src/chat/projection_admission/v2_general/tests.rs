@@ -485,28 +485,46 @@ fn ordinary_history_replay_restores_dependencies_without_publishing_removed_orig
         vec![target.id()],
     );
     let mut removed = f.remove(&first);
+    let frozen = removed.take_frozen_data().unwrap();
     assert!(removed.take_close_completion().unwrap().try_complete());
     let (mut ledger, view) = f.ledger();
-    let replay = |ledger: &mut ChatLedger, action, admission| {
+    let replay = |ledger: &mut ChatLedger, action, admission, frozen: &[&V2FrozenAdmission]| {
         f.verifier
-            .replay_ordinary_history_original(ledger, &view, action, admission, 64)
+            .replay_ordinary_history_original(ledger, &view, action, admission, frozen, 64)
     };
     assert_eq!(
-        replay(&mut ledger, &reply, &second).unwrap(),
+        replay(&mut ledger, &reply, &second, &[]).unwrap(),
         V2OrdinaryReceiveStatus::WaitingForDependencies(vec![target.id()])
     );
     assert!(ledger.action(reply.id()).is_none());
     assert_eq!(
-        replay(&mut ledger, &target, &second),
+        replay(&mut ledger, &target, &second, &[]),
         Err(ChatError::Authority)
     );
     assert!(ledger.action(target.id()).is_none());
     assert_eq!(
-        replay(&mut ledger, &target, &first).unwrap(),
+        replay(&mut ledger, &target, &first, &[]).unwrap(),
         V2OrdinaryReceiveStatus::Retained(ActionState::Valid)
     );
     assert_eq!(
-        replay(&mut ledger, &reply, &second).unwrap(),
+        replay(&mut ledger, &reply, &second, &[]),
+        Err(ChatError::Dependency)
+    );
+    let mut other = Fixture::new();
+    let equal_data = other.add(&author, 20);
+    other.add(&responder, 21);
+    assert_eq!(
+        equal_data.admission_data().admission_id(),
+        first.admission_data().admission_id()
+    );
+    let foreign_frozen = other.remove(&equal_data).take_frozen_data().unwrap();
+    assert_eq!(
+        replay(&mut ledger, &reply, &second, &[&foreign_frozen]),
+        Err(ChatError::Scope)
+    );
+    assert!(ledger.action(reply.id()).is_none());
+    assert_eq!(
+        replay(&mut ledger, &reply, &second, &[&frozen]).unwrap(),
         V2OrdinaryReceiveStatus::Retained(ActionState::Valid)
     );
     for original in [&target, &reply] {
@@ -523,9 +541,8 @@ fn ordinary_history_replay_restores_dependencies_without_publishing_removed_orig
         .is_err());
     assert_eq!(
         f.verifier
-            .project_provisional_from_ledger(&mut ledger, &view, &reply, &second, 64)
-            .unwrap(),
-        V2OrdinaryReceiveStatus::Retained(ActionState::Valid)
+            .project_provisional_from_ledger(&mut ledger, &view, &reply, &second, 64),
+        Err(ChatError::Dependency)
     );
 }
 

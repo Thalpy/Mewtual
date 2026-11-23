@@ -242,7 +242,8 @@ impl V2GeneralPrefixVerifier {
         work: usize,
     ) -> Result<V2OrdinaryReceiveStatus, ChatError> {
         self.require_receiver_ledger(ledger, view, action)?;
-        let LedgerDependencies { missing, exact } = self.ledger_dependencies(ledger, action)?;
+        let LedgerDependencies { missing, exact } =
+            self.ledger_dependencies(ledger, action, &[])?;
         if !missing.is_empty() {
             self.require_admission(admission)?;
             admission.core.body.matches_action_delegation(action)?;
@@ -268,10 +269,12 @@ impl V2GeneralPrefixVerifier {
         view: &ProjectionView,
         action: &SignedAction,
         admission: &V2AuthenticatedAdmission,
+        frozen_dependencies: &[&V2FrozenAdmission],
         work: usize,
     ) -> Result<V2OrdinaryReceiveStatus, ChatError> {
         self.require_receiver_ledger(ledger, view, action)?;
-        let LedgerDependencies { missing, exact } = self.ledger_dependencies(ledger, action)?;
+        let LedgerDependencies { missing, exact } =
+            self.ledger_dependencies(ledger, action, frozen_dependencies)?;
         if !missing.is_empty() {
             self.require_admission(admission)?;
             admission.core.body.matches_action_delegation(action)?;
@@ -290,11 +293,19 @@ impl V2GeneralPrefixVerifier {
         &self,
         ledger: &'a ChatLedger,
         action: &SignedAction,
+        frozen_dependencies: &[&V2FrozenAdmission],
     ) -> Result<LedgerDependencies<'a>, ChatError> {
         let profile = self.math.profile();
         let required = action.dependencies();
+        if frozen_dependencies.len() > required.len() {
+            return Err(ChatError::Dependency);
+        }
         let mut missing = Vec::new();
         let mut owners = Vec::with_capacity(required.len());
+        let mut used_frozen = 0_u128;
+        const {
+            assert!(MAX_PARENTS + 1 <= u128::BITS as usize);
+        }
         for id in required {
             let Some(entry) = ledger.entries.get(&id) else {
                 missing.push(id);
@@ -329,7 +340,24 @@ impl V2GeneralPrefixVerifier {
             if *origin != profile.id() || *tenure != profile.tenure() {
                 return Err(ChatError::Scope);
             }
-            owners.push((&entry.action, self.admission(*owner)?));
+            let admission = match self.admission(*owner) {
+                Ok(current) => current,
+                Err(ChatError::Dependency) => {
+                    let (index, historical) = frozen_dependencies
+                        .iter()
+                        .enumerate()
+                        .find(|(_, frozen)| frozen.admission.core.body.admission_id() == *owner)
+                        .ok_or(ChatError::Dependency)?;
+                    self.require_admission(&historical.admission)?;
+                    used_frozen |= 1_u128 << index;
+                    historical.admission.clone()
+                }
+                Err(error) => return Err(error),
+            };
+            owners.push((&entry.action, admission));
+        }
+        if missing.is_empty() && used_frozen.count_ones() as usize != frozen_dependencies.len() {
+            return Err(ChatError::Dependency);
         }
         Ok(LedgerDependencies {
             missing,
