@@ -11,7 +11,7 @@ pub struct NativeTextJoinedReconnect {
     signal: RequestCancellation,
     mount: RequestCancellation,
     payment: Arc<JoinFramePayment>,
-    member: Option<(NativeTextJoinedRowSelection, PeerId)>,
+    member: Option<(NativeTextJoinedRowSelection, ApprovedMemberPeer)>,
     _end: retirement::PreparationEnd,
 }
 
@@ -24,7 +24,7 @@ impl NativeTextJoinedReconnect {
         mount: RequestCancellation,
         fee: CatalogReadReservation,
         end: retirement::PreparationEnd,
-        member: (NativeTextJoinedRowSelection, PeerId),
+        member: (NativeTextJoinedRowSelection, ApprovedMemberPeer),
     ) -> Self {
         Self {
             _invocation: invocation,

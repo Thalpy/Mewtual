@@ -415,7 +415,9 @@ listener and separately approve the destination IP in the desktop roster. The
 receiver checks the signature against the exact active admission in its own
 selected Profile, head and epoch before asking the existing dial scheduler for
 one authenticated connection. It can use that route for governing catch-up if
-the founder goes offline. A surviving peer only serves a covered transition to
+the founder goes offline. Before sending an epoch proof it rechecks that the
+approved route still belongs to an active admission at that epoch. A surviving
+peer only serves a covered transition to
 a connection that supplies the exact preceding epoch proof. Warm selection
 and cold replay derive the verifier from the original preceding MLS graph.
 The regression also exercises an old epoch, a changed signature, the local

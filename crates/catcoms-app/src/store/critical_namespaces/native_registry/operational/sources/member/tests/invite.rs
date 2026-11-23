@@ -1574,6 +1574,10 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     let exchange = recovered_row()
                         .prepare_governing_exchange(&selection, fresh.clone())
                         .unwrap();
+                    let retiring_contact = third_row().sign_member_contact(&third_selection, &fresh).unwrap();
+                    recovered_row().prepare_member_contact(
+                        &selection, &retiring_contact, std::net::Ipv4Addr::LOCALHOST.into(), fresh.clone(),
+                    ).unwrap().connect(&scheduler).await.unwrap();
                     let serve = async {
                         let Some(TransportEvent::Request {
                             proto,
@@ -1620,12 +1624,25 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 .await
                 .expect("the founder's original governing TCP actor drained before the relay");
                 drop(retirement);
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        if matches!(recovered_row().prepare_governing_exchange(&selection, fresh.clone()),
+                            Err(V2MemberSaveRefusal::Unavailable)) {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                }).await.expect("the removed admission cannot receive a newer epoch's proof over its still-connected peer route");
                 let mut relay = recovered_row()
                     .attach_governing_provider(&selection, fresh.clone())
                     .unwrap();
-                let wrong = third_row()
-                    .prepare_governing_exchange(&third_selection, fresh.clone())
-                    .unwrap();
+                let survivor_peer = recovered_row().inspect_registration(&invite, token, &fresh)
+                    .unwrap().unwrap().transport_data().0;
+                let relay_exchange = || (0..2).find_map(|_| {
+                    let attempt = third_row().prepare_governing_exchange(&third_selection, fresh.clone()).unwrap();
+                    (attempt.connected_peer_for_test() == survivor_peer).then_some(attempt)
+                }).expect("the old-epoch member has the approved original survivor route");
+                let wrong = relay_exchange();
                 let refuse = async {
                     let request = relay
                         .next()
@@ -1642,9 +1659,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 .await
                 .unwrap();
                 assert!(nonreply.is_err());
-                let exchange = third_row()
-                    .prepare_governing_exchange(&third_selection, fresh.clone())
-                    .unwrap();
+                let exchange = relay_exchange();
                 let serve = async {
                     let request = relay
                         .next()

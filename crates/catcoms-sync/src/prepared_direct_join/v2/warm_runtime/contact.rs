@@ -60,6 +60,10 @@ impl<'a> V2MemberContactData<'a> {
         (self.peer, self.port)
     }
 
+    pub fn admission_data(&self) -> OwnerBodyId {
+        self.admission
+    }
+
     fn verify_selected(&self, verifier: &V2GeneralPrefixVerifier) -> Result<(), SyncError> {
         let replay = verifier.replay_data();
         if replay.profile().id().as_bytes() != self.profile

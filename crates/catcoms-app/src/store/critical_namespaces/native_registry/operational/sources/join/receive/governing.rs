@@ -88,6 +88,13 @@ impl NativeTextJoinedGoverningResponse {
 
 impl NativeTextJoinedGoverningExchange {
     #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(in crate::store::critical_namespaces::native_registry) fn connected_peer_for_test(
+        &self,
+    ) -> PeerId {
+        self.exchange.route_data().1
+    }
+
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store::critical_namespaces::native_registry) async fn send_wrong_proof_for_test(
         self,
     ) -> Result<bytes::Bytes, TransportError> {
@@ -228,8 +235,13 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             .map_err(|_| Refusal::Unavailable)?;
         let (exchange, proof, observed, authentication, fee) =
             self.with_member_receiver(selection, &caller, |source| {
+                let replay = source
+                    .prefix
+                    .selected_member_verifier()
+                    .map_err(|_| Refusal::Unavailable)?
+                    .replay_data();
                 let exchange = selection
-                    .governing_connection(&lane, source.founder)
+                    .governing_connection(&lane, source.founder, replay)
                     .ok_or(Refusal::Unavailable)?;
                 let fee = source
                     .metadata

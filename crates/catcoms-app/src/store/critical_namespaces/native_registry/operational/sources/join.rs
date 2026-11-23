@@ -25,6 +25,7 @@ use crate::store::{
 use catcoms_replication::chat::join_bindings::GenesisAnchorBindingData;
 use catcoms_replication::chat::owner_facts::OwnerFactId;
 use catcoms_replication::chat::owner_header::OwnerHeaderId;
+use catcoms_replication::chat::{owner_header::OwnerBodyId, owner_state::transition::ReplayMath};
 use catcoms_rt::{
     Clock, NativeChatKeyEnds, NativeChatKeyPurpose, NativeChatSourceClose, NativeChatUiCommand,
     PeerId, RequestAuthority, RequestCancellation,
@@ -674,10 +675,16 @@ struct JoinedRowSelection {
     member_outbox: MemberOutboxContextId,
     scope: Arc<Scope>,
     retired: AtomicBool,
-    governing_peers: Mutex<[Option<PeerId>; 16]>,
+    governing_peers: Mutex<[Option<ApprovedMemberPeer>; 16]>,
     next_governing_peer: AtomicUsize,
     keys: Arc<OnceLock<NativeChatSourceClose>>,
     _metadata: Arc<retirement::Control>,
+}
+
+#[derive(Clone, Copy)]
+struct ApprovedMemberPeer {
+    peer: PeerId,
+    admission: OwnerBodyId,
 }
 
 impl std::fmt::Debug for NativeTextJoinedRowSelection {
@@ -712,7 +719,7 @@ impl NativeTextJoinedRowSelection {
         self.original.scope.is_open() && !self.original.retired.load(Ordering::SeqCst)
     }
 
-    fn remember_governing_peer(&self, peer: PeerId) -> Result<(), AppError> {
+    fn remember_governing_peer(&self, original: ApprovedMemberPeer) -> Result<(), AppError> {
         if !self.is_current_cached() {
             return Err(refused());
         }
@@ -721,13 +728,12 @@ impl NativeTextJoinedRowSelection {
             .governing_peers
             .try_lock()
             .map_err(|_| refused())?;
-        if !peers.contains(&Some(peer)) {
-            let next = peers
-                .iter_mut()
-                .find(|slot| slot.is_none())
-                .ok_or_else(refused)?;
-            *next = Some(peer);
-        }
+        let index = peers
+            .iter()
+            .position(|slot| slot.is_some_and(|slot| slot.peer == original.peer))
+            .or_else(|| peers.iter().position(Option::is_none))
+            .ok_or_else(refused)?;
+        peers[index] = Some(original);
         Ok(())
     }
 
@@ -735,9 +741,17 @@ impl NativeTextJoinedRowSelection {
         &self,
         lane: &catcoms_net::NativeChatMemberDependencies,
         founder: Option<PeerId>,
+        selected: &ReplayMath,
     ) -> Option<catcoms_net::NativeChatMemberDependencyExchange> {
-        let peers = self.original.governing_peers.try_lock().ok()?;
-        let candidates = founder.into_iter().chain(peers.iter().flatten().copied());
+        let mut peers = self.original.governing_peers.try_lock().ok()?;
+        for slot in peers.iter_mut() {
+            if slot.is_some_and(|slot| selected.slot(slot.admission).is_none()) {
+                *slot = None;
+            }
+        }
+        let candidates = founder
+            .into_iter()
+            .chain(peers.iter().flatten().map(|slot| slot.peer));
         let count = candidates.clone().count();
         let start = self
             .original
