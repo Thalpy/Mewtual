@@ -28,6 +28,15 @@ pub(in crate::store) struct RecoveredGovernedAdd {
     outcome: Zeroizing<Vec<u8>>,
 }
 
+struct RecoveredAddJournal {
+    request: Zeroizing<Vec<u8>>,
+    response: Zeroizing<Vec<u8>>,
+    header: SignedOwnerHeader,
+    admission: AdmissionBody,
+    entry: [u8; ENTRY_BYTES],
+    outcome: Zeroizing<Vec<u8>>,
+}
+
 impl RecoveredGovernedAdd {
     pub(in crate::store) fn snapshot_data(&self) -> Result<&[u8], AppError> {
         outcome::archive_snapshot(&self.entry, &self.outcome)
@@ -51,8 +60,36 @@ fn authenticate_selected(
         return Err(refused());
     }
     let parent = parent_head(key, head, &frames, trusted)?;
+    let prior = ReplayMath::from_genesis(
+        trusted.profile,
+        trusted.admission,
+        trusted.header,
+        trusted.image,
+    )
+    .map_err(|_| refused())?;
+    let journal = authenticate_add_journal(key, labels, &frames, trusted, &prior)?;
+    Ok(RecoveredGovernedAdd {
+        request: journal.request,
+        response: journal.response,
+        header: journal.header,
+        admission: journal.admission,
+        parent,
+        entry: journal.entry,
+        outcome: journal.outcome,
+    })
+}
+
+/// Verify a complete Add journal against the replay of its authenticated
+/// parent. The caller owns the separate proof of physical head selection.
+fn authenticate_add_journal(
+    key: &[u8; 32],
+    labels: GovernedArchiveLabels,
+    frames: &GovernedArchiveFrames<'_>,
+    trusted: &GenesisPublicData<'_>,
+    prior: &ReplayMath,
+) -> Result<RecoveredAddJournal, AppError> {
     let reservation = GovernedAddFenceData::open_data(key, frames.fence)?;
-    reservation.require_parent(context, labels.before_head)?;
+    reservation.require_parent(labels.context, labels.before_head)?;
     let request = request::open_data(key, frames.fence, frames.request)?;
     let packet = V2JoinRequestPacketData::decode(&request)?;
     reservation.require_packet(&packet)?;
@@ -66,6 +103,7 @@ fn authenticate_selected(
         || anchor.header != *trusted.header.id().as_bytes()
         || anchor.state != *original.state.as_bytes()
         || anchor.admission != *trusted.admission.admission_id().as_bytes()
+        || prior.profile().id() != trusted.profile.id()
     {
         return Err(refused());
     }
@@ -82,7 +120,10 @@ fn authenticate_selected(
     else {
         return Err(refused());
     };
-    if before_epoch != 0 || after_epoch != labels.epoch {
+    if before_epoch != prior.mls_epoch_data()
+        || before_epoch.checked_add(1) != Some(after_epoch)
+        || after_epoch != labels.epoch
+    {
         return Err(refused());
     }
     let admitted_at = outcome::verify_archive_fingerprint(
@@ -110,14 +151,9 @@ fn authenticate_selected(
     if header.id() != labels.header || header.spec().state != labels.state {
         return Err(refused());
     }
-    ReplayMath::from_genesis(
-        trusted.profile,
-        trusted.admission,
-        trusted.header,
-        trusted.image,
-    )
-    .and_then(|prior| prior.derive_successor(&header, ReplayBody::Admission(&admission), bodies[2]))
-    .map_err(|_| refused())?;
+    prior
+        .derive_successor(&header, ReplayBody::Admission(&admission), bodies[2])
+        .map_err(|_| refused())?;
     let spec = welcome_intent::open_data(key, frames.governing, frames.welcome_intent)?;
     let payloads = outcome::welcome_bodies(frames.entry, &outcome)?;
     welcome_intent::require_original_binding(
@@ -154,12 +190,11 @@ fn authenticate_selected(
         )
         .map_err(|_| refused())?;
     let entry = frames.entry.try_into().map_err(|_| refused())?;
-    Ok(RecoveredGovernedAdd {
+    Ok(RecoveredAddJournal {
         request,
         response,
         header,
         admission,
-        parent,
         entry,
         outcome,
     })

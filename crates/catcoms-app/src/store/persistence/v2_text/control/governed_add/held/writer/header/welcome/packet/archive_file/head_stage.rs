@@ -33,7 +33,7 @@ impl PreparedGovernedAddFence {
             return Err(refused());
         }
         if archive.head.is_none() {
-            let head = GovernedHeadData::after_archive(
+            let head = GovernedHeadData::after_first_archive(
                 archive.labels,
                 archive.id,
                 selected.head_data().generation,

@@ -23,18 +23,18 @@ pub(super) struct GovernedHeadData {
 }
 
 impl GovernedHeadData {
-    pub(super) fn after_archive(
+    pub(super) fn after_first_archive(
         transition: GovernedArchiveLabels,
         archive: ArchiveHeadId,
         parent_generation: u64,
     ) -> Result<Self, AppError> {
-        if parent_generation == 0 || transition.epoch == 0 || archive == transition.before_archive {
+        if parent_generation != 1 || transition.epoch != 1 || archive == transition.before_archive {
             return Err(refused());
         }
         Ok(Self {
             transition,
             archive,
-            generation: parent_generation.checked_add(1).ok_or_else(refused)?,
+            generation: 2,
         })
     }
 

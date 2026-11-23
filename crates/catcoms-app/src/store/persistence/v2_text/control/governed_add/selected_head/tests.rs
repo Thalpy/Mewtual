@@ -16,7 +16,7 @@ fn governed_add_head2_preserves_the_old_head_envelope_and_refuses_legacy_selecti
     let archive = ArchiveHeadId::from_bytes([7; 32]);
     let key = [28; 32];
     let mut rng = ChaCha20Rng::seed_from_u64(166);
-    let data = GovernedHeadData::after_archive(transition, archive, 1).unwrap();
+    let data = GovernedHeadData::after_first_archive(transition, archive, 1).unwrap();
     assert_eq!(data.generation, 2);
     let raw = data.seal_data(&key, &mut rng).unwrap();
     assert_eq!(raw.len(), FRAME_LEN);
@@ -27,6 +27,14 @@ fn governed_add_head2_preserves_the_old_head_envelope_and_refuses_legacy_selecti
     ));
     assert!(open_control_data(&key, KIND.id_data(&raw), &raw).is_err());
     assert!(GovernedHeadData::open_data(&key, &raw[1..]).is_err());
-    assert!(GovernedHeadData::after_archive(transition, transition.before_archive, 1).is_err());
-    assert!(GovernedHeadData::after_archive(transition, archive, u64::MAX).is_err());
+    assert!(
+        GovernedHeadData::after_first_archive(transition, transition.before_archive, 1).is_err()
+    );
+    assert!(GovernedHeadData::after_first_archive(transition, archive, u64::MAX).is_err());
+    let later = GovernedArchiveLabels {
+        epoch: 2,
+        ..transition
+    };
+    assert!(GovernedHeadData::after_first_archive(later, archive, 1).is_err());
+    assert!(GovernedHeadData::after_first_archive(later, archive, 2).is_err());
 }

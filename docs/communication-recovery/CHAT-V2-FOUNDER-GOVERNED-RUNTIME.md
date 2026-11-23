@@ -361,6 +361,10 @@ the restored group's epoch, authenticator, founder device and exact active
 roster. Reinstalling a recovered SDK graph and its replayed Core state remains
 a separate recovery step.
 
+The first-Add selector requires the original generation-one head and epoch-one
+outcome. Journal authentication separately checks the Add's before-epoch and
+signed successor against the authenticated parent's Core replay.
+
 The Host stages `text.add.head-stage.v2` against that exact archive. The
 selector uses the established Head envelope with a new version. Prior
 readers recognize its MAC and refuse to interpret it as their operational
