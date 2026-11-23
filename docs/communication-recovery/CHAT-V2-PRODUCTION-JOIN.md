@@ -322,6 +322,14 @@ reconnect an already registered desktop row after restart. The selected row
 and stored invitation are checked again before using the existing joined TCP
 actor. The local row reply is independent of the dial outcome, and reconnect
 only establishes the transport handshake for the existing membership.
+
+The Sync reader for a later Welcome can verify a bounded sequence of signed
+governing records from the original genesis through the Add named by that
+Welcome. Each transition replays through Core, including the exact resulting
+state. A gap, reorder, or different final Admission refuses before MLS entry.
+Native storage and transport still need to produce and cover the later Add
+and advance the existing members to the new epoch.
+
 An independently reopened Pending with neither Welcome file can resend the
 exact original request over the same connected protocol. It verifies the
 reply against that request and the original held files before covering Entry

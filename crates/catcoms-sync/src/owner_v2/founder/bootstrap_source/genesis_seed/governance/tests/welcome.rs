@@ -12,6 +12,111 @@ async fn native_joiner_welcome_requires_the_original_device_source_and_sdk_cut()
     complete_original_welcome(true).await;
 }
 
+fn verify_later_governing_join_prefix(
+    node: &Node,
+    first: &[u8],
+    anchor: &GenesisAnchorBindingData,
+    replay: &catcoms_replication::chat::owner_state::transition::ReplayMath,
+) -> Vec<u8> {
+    use crate::{
+        V2GoverningJoinPrefixData, V2GoverningJoinStepData, MAX_V2_GOVERNING_JOIN_PREFIX_BYTES,
+    };
+    use catcoms_replication::chat::owner_profile::{AdmissionOrigin, AdmissionSpec};
+    let next_public_add =
+        |replay: &catcoms_replication::chat::owner_state::transition::ReplayMath, marker: u8| {
+            let subject = MlsDevice::generate()
+                .unwrap()
+                .public_key_bytes()
+                .try_into()
+                .unwrap();
+            let before_epoch = replay.mls_epoch_data();
+            let body = AdmissionBody::new(AdmissionSpec {
+                group: anchor.group.clone(),
+                profile: replay.profile().id(),
+                subject,
+                origin: AdmissionOrigin::Add {
+                    commit: [marker; 32],
+                    before_epoch,
+                    after_epoch: before_epoch + 1,
+                    key_package: [marker + 1; 32],
+                    credential: [marker + 2; 32],
+                },
+            })
+            .unwrap();
+            let output = replay.prepare_admission_data(&body).unwrap();
+            let header =
+                SignedOwnerHeader::sign_using(output.header_spec_data().clone(), |bytes| {
+                    node.node
+                        .seed
+                        .body
+                        .device
+                        .sign_retained_ed25519_bounded(
+                            &anchor.founder,
+                            bytes,
+                            catcoms_replication::chat::owner_header::MAX_HEADER_BYTES,
+                        )
+                        .map_err(|_| catcoms_replication::chat::ChatError::Dependency)
+                })
+                .unwrap();
+            (body, header, output)
+        };
+    let (second, second_header, second_output) = next_public_add(replay, 110);
+    let second_selected = replay
+        .derive_successor(
+            &second_header,
+            ReplayBody::Admission(&second),
+            second_output.image_data(),
+        )
+        .unwrap()
+        .next;
+    let (third, third_header, third_output) = next_public_add(&second_selected, 120);
+    let second_step = || V2GoverningJoinStepData {
+        header: &second_header,
+        image: second_output.image_data(),
+        body: ReplayBody::Admission(&second),
+    };
+    let third_step = || V2GoverningJoinStepData {
+        header: &third_header,
+        image: third_output.image_data(),
+        body: ReplayBody::Admission(&third),
+    };
+    let encoded = V2GoverningJoinPrefixData::encode(first, &[second_step(), third_step()]).unwrap();
+    let proof = V2GoverningJoinPrefixData::decode(&encoded).unwrap();
+    let selected = proof
+        .verify_selected_add(anchor, third_header.id(), third.admission_id())
+        .unwrap();
+    assert_eq!(selected.mls_epoch_data(), 3);
+    assert_eq!(selected.image(), third_output.image_data());
+    assert!(proof
+        .verify_selected_add(anchor, second_header.id(), second.admission_id())
+        .is_err());
+    assert!(proof
+        .verify_selected_add(anchor, third_header.id(), second.admission_id())
+        .is_err());
+    let mut other_anchor = anchor.clone();
+    other_anchor.state[0] ^= 1;
+    assert!(proof
+        .verify_selected_add(&other_anchor, third_header.id(), third.admission_id())
+        .is_err());
+    let skipped = V2GoverningJoinPrefixData::encode(first, &[third_step()]).unwrap();
+    assert!(V2GoverningJoinPrefixData::decode(&skipped)
+        .unwrap()
+        .verify_selected_add(anchor, third_header.id(), third.admission_id())
+        .is_err());
+    let reordered =
+        V2GoverningJoinPrefixData::encode(first, &[third_step(), second_step()]).unwrap();
+    assert!(V2GoverningJoinPrefixData::decode(&reordered)
+        .unwrap()
+        .verify_selected_add(anchor, second_header.id(), second.admission_id())
+        .is_err());
+    assert!(V2GoverningJoinPrefixData::decode(&encoded[..encoded.len() - 1]).is_err());
+    assert!(
+        V2GoverningJoinPrefixData::decode(&vec![0; MAX_V2_GOVERNING_JOIN_PREFIX_BYTES + 1])
+            .is_err()
+    );
+    encoded
+}
+
 async fn complete_original_welcome(native_joiner: bool) {
     use crate::{
         DirectJoinLimits, NativeV2JoinKeyEntry, PreparedV2JoinRequest, RecoveredV2JoinedOutcome,
@@ -233,6 +338,12 @@ async fn complete_original_welcome(native_joiner: bool) {
         .finish_host_selected(&mut g.verifier, &mut candidate)
         .unwrap();
     assert!(candidate.is_none());
+    if !native_joiner {
+        let later =
+            verify_later_governing_join_prefix(&node, &proof, anchor, g.verifier.replay_data());
+        let later = crate::V2GoverningJoinPrefixData::decode(&later).unwrap();
+        assert!(prepared.finish_governing_welcome(response, &later).is_err());
+    }
     assert_eq!(
         node.installed_add_data().unwrap().authenticator,
         after_authenticator

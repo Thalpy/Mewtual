@@ -7,7 +7,7 @@ use catcoms_mls::group::text_current_add::MAX_TEXT_ADD_ROUTING_PLAIN_BYTES;
 use catcoms_replication::chat::{
     join_bindings::{SignedWelcomeBindingData, MAX_JOIN_PAYLOAD_BYTES},
     owner_facts::OwnerFactId,
-    owner_header::SignedOwnerHeader,
+    owner_header::{OwnerHeaderId, SignedOwnerHeader},
     owner_profile::{AdmissionBody, AdmissionOrigin, SignedOwnerProfile},
     owner_state::StateFrame,
     V2GeneralPrefixVerifier,
@@ -291,6 +291,42 @@ impl PreparedV2JoinRequest {
         proof: &V2FirstAddProofData<'_>,
     ) -> Result<&CompletedV2JoinCandidate, SyncError> {
         self.finish_first_welcome_with(response, proof, WelcomeAuthority::default())
+    }
+
+    /// Verify the complete prefix through the exact Add named by this Welcome,
+    /// then process the same private MLS candidate and check its resulting state.
+    pub fn finish_governing_welcome(
+        &mut self,
+        response: V2JoinResponseData<'_>,
+        proof: &V2GoverningJoinPrefixData<'_>,
+    ) -> Result<&CompletedV2JoinCandidate, SyncError> {
+        let cap = self
+            .limits
+            .exchange
+            .checked_sub(proof.frame_bytes())
+            .ok_or(SyncError::Malformed)?;
+        let request_bytes = self.request.clone();
+        let packet = V2JoinRequestPacketData::decode(&request_bytes)?;
+        let signed = response.binding.spec_data();
+        let replay = proof.verify_selected_add(
+            &packet.invite.spec_data().anchor,
+            OwnerHeaderId::from_bytes(signed.add_header),
+            OwnerFactId::from_bytes(signed.admission),
+        )?;
+        let (_, body) = proof.last_admission()?;
+        self.finish_verified_welcome(
+            &packet,
+            response,
+            WelcomeAdmission {
+                profile: replay.profile(),
+                body,
+                header: replay.header(),
+                state_image: replay.image(),
+                epoch: replay.mls_epoch_data(),
+            },
+            cap,
+            WelcomeAuthority::default(),
+        )
     }
 
     fn finish_first_welcome_with(

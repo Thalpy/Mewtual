@@ -30,6 +30,11 @@ pub use v2::{
     MAX_V2_FIRST_JOIN_DELIVERY_BYTES, MAX_V2_JOIN_REQUEST_PACKET_BYTES,
     MAX_V2_JOIN_RESPONSE_PACKET_BYTES,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use v2::{
+    V2GoverningJoinPrefixData, V2GoverningJoinStepData, MAX_V2_GOVERNING_JOIN_PREFIX_BYTES,
+    MAX_V2_GOVERNING_JOIN_STEPS,
+};
 
 /// Exact inert request labels for a local sealed-journal binding. No field can admit a device,
 /// reopen an admission or finish a join; the original actual source and mounted capture remain

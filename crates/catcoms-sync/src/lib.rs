@@ -98,6 +98,11 @@ pub use prepared_direct_join::{
     MAX_V2_FIRST_JOIN_DELIVERY_BYTES, MAX_V2_JOIN_REQUEST_PACKET_BYTES,
     MAX_V2_JOIN_RESPONSE_PACKET_BYTES,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use prepared_direct_join::{
+    V2GoverningJoinPrefixData, V2GoverningJoinStepData, MAX_V2_GOVERNING_JOIN_PREFIX_BYTES,
+    MAX_V2_GOVERNING_JOIN_STEPS,
+};
 pub mod local_chat_scope;
 pub mod owner_evidence;
 mod owner_tenure;

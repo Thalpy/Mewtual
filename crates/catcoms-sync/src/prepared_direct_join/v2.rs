@@ -12,6 +12,7 @@ use catcoms_rt::{
 };
 use catcoms_wire::Encoder;
 mod first_add_proof;
+mod governing_prefix;
 mod pending_source;
 pub use pending_source::{
     RecoveredV2JoinedOutcome, RecoveredV2PendingJoinSource, SealedV2JoinedOutcome,
@@ -22,6 +23,10 @@ mod welcome;
 pub use first_add_proof::{
     PreparedV2JoinedPrefix, V2AdmissionStepData, V2FirstAddProofData, V2FirstJoinDeliveryData,
     MAX_V2_FIRST_ADD_PROOF_BYTES, MAX_V2_FIRST_JOIN_DELIVERY_BYTES,
+};
+pub use governing_prefix::{
+    V2GoverningJoinPrefixData, V2GoverningJoinStepData, MAX_V2_GOVERNING_JOIN_PREFIX_BYTES,
+    MAX_V2_GOVERNING_JOIN_STEPS,
 };
 pub use warm_runtime::{ClosedV2JoinedNode, V2JoinedRuntimeInputs};
 pub use welcome::{

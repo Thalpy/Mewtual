@@ -104,6 +104,14 @@ impl<'a> V2FirstAddProofData<'a> {
         &self,
         accepted: &GenesisAnchorBindingData,
     ) -> Result<(&SignedOwnerProfile, &AdmissionBody, &SignedOwnerHeader), SyncError> {
+        self.replay_through_add(accepted)?;
+        Ok((&self.profile, &self.admission, self.add.header()))
+    }
+
+    pub(super) fn replay_through_add(
+        &self,
+        accepted: &GenesisAnchorBindingData,
+    ) -> Result<ReplayMath, SyncError> {
         let genesis = self.genesis.header();
         if genesis.spec().group != accepted.group
             || genesis.spec().issuer != accepted.founder
@@ -115,16 +123,17 @@ impl<'a> V2FirstAddProofData<'a> {
         {
             return Err(SyncError::JoinRejected);
         }
-        ReplayMath::from_genesis(&self.profile, &self.founder, genesis, self.genesis.image())
-            .and_then(|prior| {
-                prior.derive_successor(
-                    self.add.header(),
-                    ReplayBody::Admission(&self.admission),
-                    self.add.image(),
-                )
-            })
-            .map_err(|_| SyncError::JoinRejected)?;
-        Ok((&self.profile, &self.admission, self.add.header()))
+        let through_add =
+            ReplayMath::from_genesis(&self.profile, &self.founder, genesis, self.genesis.image())
+                .and_then(|prior| {
+                    prior.derive_successor(
+                        self.add.header(),
+                        ReplayBody::Admission(&self.admission),
+                        self.add.image(),
+                    )
+                })
+                .map_err(|_| SyncError::JoinRejected)?;
+        Ok(through_add.next)
     }
 
     pub(super) fn frame_bytes(&self) -> usize {
