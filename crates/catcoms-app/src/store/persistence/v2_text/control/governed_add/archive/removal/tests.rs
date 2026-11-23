@@ -73,7 +73,7 @@ fn governed_remove_archive_binds_the_exact_encrypted_predecessor_and_fetch() {
         &[CurrentAdmissionSlot {
             admission: OwnerBodyId::from_bytes(*founder.admission.as_bytes()),
             subject: issuer,
-            tip_body: OwnerBodyId::from_bytes([28; 32]),
+            tip_body: OwnerBodyId::from_bytes(*founder.admission.as_bytes()),
             accepted_count: 0,
             accepted_root: founder.empty_hash(),
         }],

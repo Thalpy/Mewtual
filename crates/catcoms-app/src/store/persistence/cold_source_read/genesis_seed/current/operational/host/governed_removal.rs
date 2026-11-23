@@ -16,6 +16,13 @@ pub(super) struct PendingGovernedRemoval {
 }
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextHost<T, R> {
+    #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(in crate::store) fn after_governed_remove_selection_for_test(hook: Box<dyn FnOnce()>) {
+        super::governed_add::AFTER_GOVERNED_HEAD_SAVE.with(|slot| {
+            assert!(slot.replace(Some(hook)).is_none());
+        });
+    }
+
     pub(in crate::store) fn remove_governed_member_native(
         &mut self,
         layout: &V2CurrentLayoutStore,
@@ -135,6 +142,13 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             installation
                 .check_host_selection_data(verifier, pending.core.as_ref().ok_or_else(refused)?)?;
             let head = pending.fence.select(&guard, fingerprint)?;
+            #[cfg(test)]
+            super::governed_add::AFTER_GOVERNED_HEAD_SAVE.with(|hook| {
+                let hook = hook.borrow_mut().take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            });
             require_live()?;
             installation.finish_host_selected(verifier, &mut pending.core)?;
             Ok(head)
