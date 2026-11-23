@@ -292,6 +292,71 @@ impl MlsGroup {
         }
     }
 
+    /// Stage one authenticated, private ordinary text Add on a disposable
+    /// provider. This bounded lane admits only the specified existing sender
+    /// and one inline Add with the original supported tree geometry.
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        not(any(
+            feature = "extensions-draft",
+            feature = "virtual-clients-draft",
+            feature = "targeted-messages-draft",
+            feature = "migration-import",
+            feature = "fork-resolution",
+            feature = "draft-ietf-mls-pq-ciphersuites",
+        ))
+    ))]
+    pub fn process_private_text_add<Provider: OpenMlsProvider>(
+        &mut self,
+        provider: &Provider,
+        message: ProtocolMessage,
+        expected_sender: LeafNodeIndex,
+    ) -> Result<ProcessedMessage, ProcessMessageError<Provider::StorageError>> {
+        use crate::messages::proposals::{Proposal, ProposalOrRef};
+        use tls_codec::Size as _;
+        let unsupported = || LibraryError::custom("Unsupported private text Add receive");
+        if !Self::private_text_add_profile_supported_data()
+            || !self.is_active()
+            || self.own_leaf_index() == expected_sender
+            || self.pending_commit().is_some()
+            || self.has_pending_proposals()
+            || message.wire_format() != WireFormat::PrivateMessage
+            || message.content_type() != ContentType::Commit
+            || message.group_id() != self.group_id()
+            || message.epoch() != self.epoch()
+        {
+            return Err(unsupported().into());
+        }
+        let UnprotectedMessage::Unverified {
+            message,
+            ratchet_update,
+        } = self.unprotect_message(provider, message)?
+        else {
+            return Err(unsupported().into());
+        };
+        let verified = message.verify(self.ciphersuite(), provider.crypto(), self.version())?;
+        if verified.content.sender() != &Sender::Member(expected_sender) {
+            return Err(unsupported().into());
+        }
+        let FramedContentBody::Commit(commit) = verified.content.content() else {
+            return Err(unsupported().into());
+        };
+        let [ProposalOrRef::Proposal(proposal)] = commit.proposals.as_slice() else {
+            return Err(unsupported().into());
+        };
+        let path = commit.path.as_ref().ok_or_else(unsupported)?;
+        if !matches!(proposal.as_ref(), Proposal::Add(_))
+            || path.nodes().len() > 6
+            || commit.tls_serialized_len() > 32 * 1024
+        {
+            return Err(unsupported().into());
+        }
+        let processed = self.process_verified_message(provider, verified)?;
+        let update = ratchet_update.ok_or_else(unsupported)?;
+        self.apply_ratchet_update(provider, update)?;
+        Ok(processed)
+    }
+
     #[cfg(feature = "extensions-draft")]
     /// Returns a new helper struct for updating the app data
     pub fn app_data_dictionary_updater<'a>(&'a self) -> AppDataDictionaryUpdater<'a> {

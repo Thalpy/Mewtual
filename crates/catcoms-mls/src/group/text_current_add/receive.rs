@@ -1,0 +1,218 @@
+//! Existing-member Add verification and merge on a separately paid closed graph.
+use super::*;
+use crate::device::key_package_identity::credential_digest_with;
+use openmls_traits::OpenMlsProvider;
+
+const MAX_RECEIVED_COMMIT_BYTES: usize = 32 * 1024;
+
+/// Public expectations from one signed governing Admission. The host must
+/// authenticate the Admission and original selected prefix independently.
+pub struct TextCurrentReceivedAddData<'a> {
+    pub commit: &'a [u8],
+    pub digest: [u8; 32],
+    pub epoch: u64,
+    pub committer: [u8; 32],
+    pub subject: [u8; 32],
+    pub key_package: [u8; 32],
+    pub credential: [u8; 32],
+}
+
+/// Owns the closed candidate and original receiver identity. There is no
+/// raw extraction or live operation on the candidate before final selection.
+pub struct PreparedTextCurrentReceivedAdd {
+    graph: CandidateGraph,
+    snapshot: Zeroizing<Vec<u8>>,
+    original: OriginalParent,
+    epoch: u64,
+    authenticator: [u8; 32],
+}
+
+impl PreparedTextCurrentReceivedAdd {
+    pub fn prepare(
+        device: &MlsDevice,
+        group: &ServerGroup,
+        request: TextCurrentReceivedAddData<'_>,
+        mut admission: TextCurrentAddAdmission,
+    ) -> Result<Self, MlsError> {
+        if request.commit.is_empty()
+            || request.commit.len() > MAX_RECEIVED_COMMIT_BYTES
+            || blake3::hash(request.commit).as_bytes() != &request.digest
+        {
+            return Err(bad());
+        }
+        let original = OriginalParent::observe(device, group)?;
+        let (sender, signer) = group.designated_committer_leaf().ok_or_else(bad)?;
+        let added = DeviceId::from_public_key_bytes(&request.subject);
+        let roster = group.member_device_ids();
+        if signer != request.committer
+            || sender == original.own
+            || original.epoch != request.epoch
+            || roster.contains(&added)
+        {
+            return Err(bad());
+        }
+        check_commit_header(
+            request.commit,
+            &original.group,
+            request.epoch,
+            original.epoch,
+        )?;
+        let message = MlsMessageIn::tls_deserialize_exact(request.commit)
+            .map_err(proto)?
+            .try_into_protocol_message()
+            .map_err(|_| bad())?;
+        let limits = admission.limits();
+        invoice::require(limits, 0)?;
+        let work = limits
+            .max_provider_backing_bytes
+            .checked_mul(513)
+            .and_then(|work| work.checked_add(limits.max_snapshot_bytes.checked_mul(32)?))
+            .and_then(|work| work.checked_add(64 * 4096 + MAX_RECEIVED_COMMIT_BYTES))
+            .ok_or_else(bad)?;
+        if work > limits.prepare_work {
+            return Err(bad());
+        }
+        admission.enter_preparation()?;
+        let snapshot = crate::persist::snapshot_server_bounded(
+            device,
+            group,
+            limits.max_snapshot_bytes,
+            limits.max_provider_backing_bytes,
+        )?;
+        invoice::require(limits, snapshot.len())?;
+        let mut graph = text_current_add::restore_candidate(
+            &snapshot,
+            original.epoch,
+            original.own,
+            &admission,
+        )?;
+        drop(snapshot);
+        if graph.group.epoch() != original.epoch
+            || graph.group.epoch_authenticator_id() != original.authenticator
+            || graph.group.group_id_ref() != original.group
+            || graph.device.public_key_ref() != original.author
+        {
+            return Err(bad());
+        }
+        graph.policy.enter_receive().map_err(|_| bad())?;
+        let provider = graph.device.provider();
+        let processed = graph
+            .group
+            .group
+            .process_private_text_add(provider, message, LeafNodeIndex::new(sender))
+            .map_err(proto)?;
+        let ProcessedMessageContent::StagedCommitMessage(staged) = processed.into_content() else {
+            return Err(bad());
+        };
+        let epoch = request.epoch.checked_add(1).ok_or_else(bad)?;
+        if staged.self_removed() || staged.epoch().as_u64() != epoch {
+            return Err(bad());
+        }
+        {
+            let mut adds = staged.add_proposals();
+            let add = adds.next().ok_or_else(bad)?;
+            let package = add.add_proposal().key_package();
+            let leaf = package.leaf_node();
+            let membership = membership_from_key_package(package)?;
+            if adds.next().is_some()
+                || membership.group_id.as_slice() != original.group
+                || membership.device_id != added
+                || leaf.signature_key().as_slice() != request.subject
+                || package
+                    .hash_ref(provider.crypto())
+                    .map_err(proto)?
+                    .as_slice()
+                    != request.key_package
+                || credential_digest_with(leaf.credential(), || {})? != request.credential
+            {
+                return Err(bad());
+            }
+        }
+        graph.policy.enter_received_merge().map_err(|_| bad())?;
+        graph
+            .group
+            .group
+            .merge_staged_commit(provider, *staged)
+            .map_err(proto)?;
+        graph
+            .policy
+            .close_merged(provider.storage())
+            .map_err(|_| bad())?;
+        let next = graph.group.member_device_ids();
+        if !graph.group.is_active()
+            || graph.group.epoch() != epoch
+            || graph.group.group.own_leaf_index().u32() != original.own
+            || next.len() != roster.len() + 1
+            || !next.contains(&added)
+            || roster.iter().any(|device| !next.contains(device))
+        {
+            return Err(bad());
+        }
+        let authenticator = graph.group.epoch_authenticator_id();
+        let snapshot = crate::persist::snapshot_server_bounded(
+            &graph.device,
+            &graph.group,
+            limits.max_snapshot_bytes,
+            limits.max_provider_backing_bytes,
+        )?;
+        original.require_same(device, group)?;
+        Ok(Self {
+            graph,
+            snapshot,
+            original,
+            epoch,
+            authenticator,
+        })
+    }
+
+    pub fn selected_epoch_data(&self) -> (u64, [u8; 32]) {
+        (self.epoch, self.authenticator)
+    }
+
+    pub fn snapshot_data(&self) -> &[u8] {
+        &self.snapshot
+    }
+
+    /// Exclusive, already checked loans. The host must durably cover this
+    /// exact candidate and authorize its original Current before installing.
+    pub fn prepare_install<'a>(
+        slot: &'a mut Option<Self>,
+        device: &'a mut MlsDevice,
+        group: &'a mut ServerGroup,
+    ) -> Result<PreparedTextReceivedAddInstallation<'a>, MlsError> {
+        let original = slot.as_ref().ok_or_else(bad)?;
+        original.original.require_same(device, group)?;
+        Ok(PreparedTextReceivedAddInstallation {
+            slot,
+            device,
+            group,
+        })
+    }
+}
+
+#[must_use]
+pub struct PreparedTextReceivedAddInstallation<'a> {
+    slot: &'a mut Option<PreparedTextCurrentReceivedAdd>,
+    device: &'a mut MlsDevice,
+    group: &'a mut ServerGroup,
+}
+
+#[must_use = "drop the old SDK graph after releasing the final writer"]
+pub struct RetiredTextReceivedAdd {
+    _old: PreparedTextCurrentReceivedAdd,
+}
+
+impl PreparedTextReceivedAddInstallation<'_> {
+    pub fn install(self) -> RetiredTextReceivedAdd {
+        let mut candidate = self.slot.take().expect("exclusive received Add candidate");
+        std::mem::swap(self.device, &mut candidate.graph.device);
+        std::mem::swap(self.group, &mut candidate.graph.group);
+        RetiredTextReceivedAdd { _old: candidate }
+    }
+}
+
+pub(crate) const fn metadata_layout_bytes() -> usize {
+    4 * (std::mem::size_of::<PreparedTextCurrentReceivedAdd>()
+        + std::mem::size_of::<PreparedTextReceivedAddInstallation<'static>>()
+        + std::mem::size_of::<RetiredTextReceivedAdd>())
+}

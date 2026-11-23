@@ -245,6 +245,22 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     assert_eq!(selected.header_data().id(), header.id());
     assert_eq!(selected.image_data(), output.image_data());
     drop(selected);
+    let member_payment = Arc::new(AtomicUsize::new(0));
+    let member_candidate = joined
+        .prepare_member_add_candidate(
+            joined_prefix,
+            step(),
+            commit,
+            super::admission(&member_payment),
+        )
+        .unwrap();
+    assert_eq!(member_candidate.header_data().id(), header.id());
+    assert_eq!(
+        member_candidate.selected_epoch_data(),
+        (2, *result.after_authenticator_data())
+    );
+    assert!(!member_candidate.snapshot_data().is_empty());
+    drop(member_candidate);
     assert_eq!(joined.selected_join_data().unwrap(), previously_selected);
     let response = node.join_response_data().unwrap();
     let only_first = V2FirstAddProofData::decode(first).unwrap();

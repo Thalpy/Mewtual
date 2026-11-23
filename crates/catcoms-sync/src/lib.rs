@@ -91,12 +91,12 @@ pub use prepared_direct_join::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use prepared_direct_join::{
     ClosedV2JoinedNode, CompletedV2JoinCandidate, NativeV2JoinKeyEntry, PreparedV2JoinRequest,
-    PreparedV2JoinedPrefix, RecoveredV2JoinedOutcome, RecoveredV2PendingJoinSource,
-    SealedV2JoinedOutcome, SealedV2PendingJoinSource, V2AdmissionStepData, V2FirstAddProofData,
-    V2FirstJoinDeliveryData, V2JoinRequestPacketData, V2JoinResponseData, V2JoinResponsePacketData,
-    V2JoinedRuntimeInputs, V2PendingJoinContextData, MAX_V2_FIRST_ADD_PROOF_BYTES,
-    MAX_V2_FIRST_JOIN_DELIVERY_BYTES, MAX_V2_JOIN_REQUEST_PACKET_BYTES,
-    MAX_V2_JOIN_RESPONSE_PACKET_BYTES,
+    PreparedV2JoinedAdd, PreparedV2JoinedPrefix, RecoveredV2JoinedOutcome,
+    RecoveredV2PendingJoinSource, SealedV2JoinedOutcome, SealedV2PendingJoinSource,
+    V2AdmissionStepData, V2FirstAddProofData, V2FirstJoinDeliveryData, V2JoinRequestPacketData,
+    V2JoinResponseData, V2JoinResponsePacketData, V2JoinedRuntimeInputs, V2PendingJoinContextData,
+    MAX_V2_FIRST_ADD_PROOF_BYTES, MAX_V2_FIRST_JOIN_DELIVERY_BYTES,
+    MAX_V2_JOIN_REQUEST_PACKET_BYTES, MAX_V2_JOIN_RESPONSE_PACKET_BYTES,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use prepared_direct_join::{

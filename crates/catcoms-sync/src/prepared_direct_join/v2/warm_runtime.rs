@@ -1,6 +1,10 @@
 //! Move the actual private Welcome into one closed joined node.
 use super::first_add_proof::SelectedJoinData;
 use super::*;
+use catcoms_mls::{
+    group::text_current_add::{PreparedTextCurrentReceivedAdd, TextCurrentReceivedAddData},
+    persist::text_current_add::TextCurrentAddAdmission,
+};
 
 pub type V2JoinedRuntimeInputs<T, R> = (T, R, Box<dyn Clock + Send>);
 use crate::owner_v2::{
@@ -33,6 +37,28 @@ pub struct ClosedV2JoinedNode<T: MeshTransport, R: CryptoRngCore> {
 enum JoinedOrigin {
     Warm(V2JoinFacts),
     Recovered(u64),
+}
+
+/// The exact Core successor paired with one closed existing-member MLS
+/// candidate. A host still needs its independent durable selection and the
+/// original installed row before swapping the pair.
+pub struct PreparedV2JoinedAdd {
+    core: V2GeneralCandidate,
+    sdk: PreparedTextCurrentReceivedAdd,
+}
+
+impl PreparedV2JoinedAdd {
+    pub fn header_data(&self) -> &catcoms_replication::chat::owner_header::SignedOwnerHeader {
+        self.core.header_data()
+    }
+
+    pub fn selected_epoch_data(&self) -> (u64, [u8; 32]) {
+        self.sdk.selected_epoch_data()
+    }
+
+    pub fn snapshot_data(&self) -> &[u8] {
+        self.sdk.snapshot_data()
+    }
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
@@ -181,6 +207,43 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
         )
         .map_err(|_| SyncError::JoinRejected)?;
         prefix.prepare_member_successor(step)
+    }
+
+    pub fn prepare_member_add_candidate(
+        &self,
+        prefix: &mut PreparedV2JoinedPrefix,
+        step: V2AdmissionStepData<'_>,
+        commit: &[u8],
+        admission: TextCurrentAddAdmission,
+    ) -> Result<PreparedV2JoinedAdd, SyncError> {
+        let body = step.admission;
+        let committer = step.header.spec().issuer;
+        let core = self.prepare_member_add_commit(prefix, step, commit)?;
+        let AdmissionOrigin::Add {
+            commit: digest,
+            before_epoch,
+            key_package,
+            credential,
+            ..
+        } = body.spec().origin
+        else {
+            return Err(SyncError::JoinRejected);
+        };
+        let sdk = PreparedTextCurrentReceivedAdd::prepare(
+            &self.node.device,
+            &self.node.group,
+            TextCurrentReceivedAddData {
+                commit,
+                digest,
+                epoch: before_epoch,
+                committer,
+                subject: body.spec().subject,
+                key_package,
+                credential,
+            },
+            admission,
+        )?;
+        Ok(PreparedV2JoinedAdd { core, sdk })
     }
 
     pub fn selected_member_topic_data(

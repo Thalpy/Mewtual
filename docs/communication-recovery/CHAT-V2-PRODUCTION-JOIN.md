@@ -349,6 +349,13 @@ selected Header and Admission, the resulting state commitment and epoch, the
 original founder key, the SDK authenticator, and the full active roster.
 The native store still owns the durable archive selection and cold activation.
 
+An existing joined member can stage and merge the exact later Add on a closed
+candidate graph while its live epoch remains unchanged. The SDK checks the
+authenticated committer, one inline Add, the joining device and signed
+KeyPackage and credential bindings, and the successor roster. It retains the
+new graph and snapshot with the corresponding Core candidate for a later
+durable selection.
+
 An independently reopened Pending with neither Welcome file can resend the
 exact original request over the same connected protocol. It verifies the
 reply against that request and the original held files before covering Entry

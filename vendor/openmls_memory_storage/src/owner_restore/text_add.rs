@@ -16,6 +16,7 @@ const OUTPUTS: u8 = 3;
 const MERGING: u8 = 4;
 const CLOSED: u8 = 5;
 const FAILED: u8 = 6;
+const RECEIVING: u8 = 7;
 const MAX_PROVIDER_WRITES: usize = 64;
 const MAX_ROW: usize = 512 * 1024;
 
@@ -157,6 +158,21 @@ impl TextAddCandidateGuard {
     pub fn enter_add(&mut self) -> Result<(), MemoryStorageError> {
         self.candidate.transition(PREPARED, ADD).map_err(Into::into)
     }
+    /// One private member-side receive. Only the original epoch keypairs and
+    /// this group's message secrets are available during decryption/staging.
+    pub fn enter_receive(&mut self) -> Result<(), MemoryStorageError> {
+        self.candidate
+            .transition(PREPARED, RECEIVING)
+            .map_err(Into::into)
+    }
+
+    /// The receiver reached an actual staged Commit and the host's private
+    /// caller has checked its sender, Admission and single Add proposal.
+    pub fn enter_received_merge(&mut self) -> Result<(), MemoryStorageError> {
+        self.candidate
+            .transition(RECEIVING, MERGING)
+            .map_err(Into::into)
+    }
     /// Call only AFTER all actual returned SDK message objects are cached.
     pub fn outputs_cached(&mut self) -> Result<(), MemoryStorageError> {
         self.candidate.transition(ADD, OUTPUTS).map_err(Into::into)
@@ -294,6 +310,7 @@ impl MemoryStorage {
         let phase = p.phase.load(Ordering::Acquire);
         let row = Row::from_label(label)?;
         if !((phase == ADD && matches!(row, Row::State | Row::Messages))
+            || (phase == RECEIVING && matches!(row, Row::Messages))
             || (phase == MERGING
                 && matches!(
                     row,
@@ -354,7 +371,9 @@ impl MemoryStorage {
         let Some(p) = installed.as_ref() else {
             return Ok(None);
         };
-        p.active(MERGING)?;
+        if p.active(RECEIVING).is_err() {
+            p.active(MERGING)?;
+        }
         #[cfg(any(test, feature = "test-utils"))]
         test_support::event(test_support::TextAddTestEvent::MergeEpochRead)?;
         let mut a = p.account.lock().map_err(|_| Error)?;

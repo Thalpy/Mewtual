@@ -18,10 +18,16 @@ pub(super) mod observation;
 mod work;
 pub(crate) use installation::metadata_layout_bytes as installation_metadata_layout_bytes;
 pub use installation::{PreparedTextCurrentAddInstallation, RetiredTextCurrentAdd};
+mod receive;
 mod result;
 mod routing;
 #[cfg(test)]
 use faults::TestCut;
+pub(crate) use receive::metadata_layout_bytes as received_add_metadata_layout_bytes;
+pub use receive::{
+    PreparedTextCurrentReceivedAdd, PreparedTextReceivedAddInstallation, RetiredTextReceivedAdd,
+    TextCurrentReceivedAddData,
+};
 pub(crate) use result::metadata_layout_bytes as completed_result_metadata_layout_bytes;
 pub use result::{
     CompletedTextCurrentAddData, TextCurrentAddParentView, TextCurrentAddRequestView,
