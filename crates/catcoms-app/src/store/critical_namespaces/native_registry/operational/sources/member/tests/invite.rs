@@ -2793,7 +2793,14 @@ async fn native_governed_add_fixture(case: JoinCase) {
         std::fs::remove_file(&head).unwrap();
         std::fs::rename(&parked_head, &head).unwrap();
         let next_wire = next_request.request_bytes_data().to_vec();
-        let next_join = accept(&next_wire).expect("install and release the later Add");
+        let next_join = accept(&next_wire).unwrap_or_else(|error| {
+            let stages: Vec<_> = std::fs::read_dir(head.parent().unwrap())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .filter_map(|name| name.split_once(".next.").map(|(stage, _)| stage.to_owned()))
+                .collect();
+            panic!("install and release the later Add: {error:?}, covered stages: {stages:?}");
+        });
         let next_delivery = next_join.encode_delivery_data().unwrap();
         assert!(catcoms_sync::V2FirstJoinDeliveryData::decode(&next_delivery).is_err());
         let later = catcoms_sync::V2JoinDeliveryData::decode(&next_delivery).unwrap();
