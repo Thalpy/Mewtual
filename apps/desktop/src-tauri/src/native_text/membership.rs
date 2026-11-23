@@ -191,7 +191,7 @@ fn encode(
         .members()
         .iter()
         .map(|member| {
-            let identity = catcoms_crypto::DeviceId::from_public_key_bytes(&member.signer);
+            let identity = member.device_id();
             let full = hex::encode(identity.as_bytes());
             serde_json::json!({
                 "fingerprint": &full[..16], "identity": full, "you": member.you,

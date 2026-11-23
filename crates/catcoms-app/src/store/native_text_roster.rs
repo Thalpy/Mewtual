@@ -14,6 +14,12 @@ pub struct NativeTextRosterMember {
     pub you: bool,
 }
 
+impl NativeTextRosterMember {
+    pub fn device_id(&self) -> catcoms_crypto::DeviceId {
+        catcoms_crypto::DeviceId::from_public_key_bytes(&self.signer)
+    }
+}
+
 pub struct NativeTextRoster {
     members: Vec<NativeTextRosterMember>,
     can_remove: bool,
