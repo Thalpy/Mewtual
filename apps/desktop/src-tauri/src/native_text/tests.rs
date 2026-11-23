@@ -1322,6 +1322,40 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
         found_value(probe.await.unwrap()),
         serde_json::json!({"backend":"text-v2","scope":"received-archive","item":null})
     );
+    let work = joined_work(&state, id).await;
+    let scope =
+        keep_session::current(&state, state.ui_session_generation.load(Ordering::SeqCst)).unwrap();
+    let target = catcoms_replication::chat::ActionId::from_bytes([249; 32]);
+    let edit = catcoms_replication::chat::ActionId::from_bytes([248; 32]);
+    let delete = catcoms_replication::chat::ActionId::from_bytes([247; 32]);
+    {
+        let _permit = work.foreground(scope.clone()).await.unwrap();
+        work.note_archive_change(edit, target, false);
+        work.note_archive_change(delete, target, false);
+        work.note_archive_change(edit, target, true);
+    }
+    let probe = invite_command(
+        &joiner_window,
+        "get_message_page",
+        archive_request(&original, serde_json::json!({"archivedAction":missing})),
+    );
+    run(&joiner_queue).await;
+    refused(probe.await.unwrap());
+    {
+        let _permit = work.foreground(scope).await.unwrap();
+        work.note_archive_change(delete, target, true);
+    }
+    drop(work);
+    let probe = invite_command(
+        &joiner_window,
+        "get_message_page",
+        archive_request(&original, serde_json::json!({"archivedAction":missing})),
+    );
+    run(&joiner_queue).await;
+    assert_eq!(
+        found_value(probe.await.unwrap()),
+        serde_json::json!({"backend":"text-v2","scope":"received-archive","item":null})
+    );
     let probe = invite_command(
         &joiner_window,
         "get_message_page",

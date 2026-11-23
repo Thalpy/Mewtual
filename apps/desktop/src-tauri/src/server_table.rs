@@ -8,6 +8,7 @@ use catcoms_app::store::{
     NativeTextRuntimeSelection, NativeTextVaultAuthenticationCheck, NativeUiInvocationBudget,
     NativeUiInvocationMetadata,
 };
+use catcoms_replication::chat::ActionId;
 use tokio::sync::OwnedMutexGuard;
 
 pub(super) const NATIVE_ROWS: usize = 2;
@@ -96,7 +97,24 @@ pub(super) struct NativeRowData {
 pub(super) struct JoinedMemberWork {
     pub(super) publication_wake: tokio::sync::Notify,
     pub(super) received: StdMutex<Option<Box<NativeTextJoinedMemberLedger>>>,
+    archive_changes: StdMutex<ArchiveChanges>,
     local: Arc<tokio::sync::Mutex<()>>,
+}
+
+const MAX_UNSETTLED_ARCHIVE_CHANGES: usize = 16;
+const MAX_NATIVE_NAME_BYTES: usize = 256;
+const _: () = assert!(
+    std::mem::size_of::<NativeRowData>()
+        + std::mem::size_of::<JoinedMemberWork>()
+        + 2 * MAX_NATIVE_NAME_BYTES
+        + 512
+        <= NativeUiInvocationBudget::metadata_bytes()
+);
+
+#[derive(Default)]
+struct ArchiveChanges {
+    unsettled: [Option<(ActionId, ActionId)>; MAX_UNSETTLED_ARCHIVE_CHANGES],
+    overflow: bool,
 }
 
 impl JoinedMemberWork {
@@ -104,6 +122,7 @@ impl JoinedMemberWork {
         Self {
             publication_wake: tokio::sync::Notify::new(),
             received: StdMutex::new(None),
+            archive_changes: StdMutex::new(ArchiveChanges::default()),
             local: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -121,6 +140,40 @@ impl JoinedMemberWork {
 
     pub(super) fn try_background(&self) -> Option<OwnedMutexGuard<()>> {
         self.local.clone().try_lock_owned().ok()
+    }
+
+    /// The same local permit covers applying the live change, attempting the
+    /// archive write, and publishing any visible archive body.
+    pub(super) fn note_archive_change(&self, action: ActionId, target: ActionId, selected: bool) {
+        let Ok(mut changes) = self.archive_changes.lock() else {
+            return;
+        };
+        if let Some(existing) = changes
+            .unsettled
+            .iter_mut()
+            .find(|item| item.as_ref().is_some_and(|(pending, _)| *pending == action))
+        {
+            if selected {
+                *existing = None;
+            }
+        } else if !selected {
+            if let Some(empty) = changes.unsettled.iter_mut().find(|item| item.is_none()) {
+                *empty = Some((action, target));
+            } else {
+                changes.overflow = true;
+            }
+        }
+    }
+
+    pub(super) fn archive_target_settled(&self, target: ActionId) -> bool {
+        self.archive_changes.lock().is_ok_and(|changes| {
+            !changes.overflow
+                && !changes
+                    .unsettled
+                    .iter()
+                    .flatten()
+                    .any(|(_, pending)| *pending == target)
+        })
     }
 }
 
@@ -170,7 +223,11 @@ impl PreparedNativeRow {
 /// Copy only bounded borrowed DATA, never a caller's unbounded String capacity.
 /// This constructor work occurs after payment and outside all native guards.
 fn bounded_native_names(name: &str, display: &str) -> Result<(String, String), String> {
-    if name.is_empty() || name.len() > 256 || display.is_empty() || display.len() > 256 {
+    if name.is_empty()
+        || name.len() > MAX_NATIVE_NAME_BYTES
+        || display.is_empty()
+        || display.len() > MAX_NATIVE_NAME_BYTES
+    {
         return Err("Invalid native server details.".into());
     }
     Ok((name.to_owned(), display.to_owned()))

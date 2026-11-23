@@ -112,9 +112,10 @@ test("real App reads saved received bodies and suppresses them after a live chan
   pending.resolve(saved);
   await read;
   assert.deepEqual(app.archive().items, []);
-  app.nativeHistory(index, saved);
+  app.nativeHistory(index, new Error("A received change is waiting to be saved."));
   await app.nativeArchiveRefresh();
   assert.deepEqual(app.archive().items, []);
+  assert.match(app.archive().note, /could not be loaded/);
 
   const retired = deferred<unknown>();
   app.nativeHistory(index, retired.promise);

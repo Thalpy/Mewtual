@@ -499,7 +499,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
     /// Admit a live network original into this exact channel ledger. A missing
     /// dependency leaves the child outside the ledger for bounded recovery.
     pub fn project_received_member(
-        self,
+        &self,
         ledger: &mut NativeTextJoinedMemberLedger,
         original: &NativeTextJoinedReceivedOriginal,
         caller: &RequestCancellation,
@@ -510,7 +510,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
     /// Apply one exact frame on the same paid mounted row. Waiting children
     /// retain their original carrier for an addressed dependency attempt.
     pub fn receive_member_frame(
-        self,
+        &self,
         ledger: &mut NativeTextJoinedMemberLedger,
         frame: &NativeChatMemberFrame,
         caller: &RequestCancellation,
@@ -649,7 +649,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
     /// Persist an exact already verified original if the row has the selected
     /// history layout. Only the disk selector supplies the saved receipt.
     pub fn archive_received_member(
-        self,
+        &self,
         ledger: &NativeTextJoinedMemberLedger,
         original: &NativeTextJoinedReceivedOriginal,
         caller: &RequestCancellation,

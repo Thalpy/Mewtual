@@ -54,8 +54,7 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
     let nativePages = [], nativeHistoryCalls = [];
     let nativeReceived = [], nativeReceivedScope = null, nativeReceivedRevision = 0;
     const nativeReceivedReads = new Map();
-    let nativeArchive = null, nativeArchiveRevision = 0, nativeArchiveSaturated = false;
-    const nativeArchiveTouched = new Set();
+    let nativeArchive = null, nativeArchiveRevision = 0;
     let busy=false,showAdd=false,startTab="join";
     let displayName="Catte",newServerName="Group",advertise="",relay="",rendezvous="";
     const studioExit={begin(){const generation=viewGeneration;return{current:()=>generation===viewGeneration};}};

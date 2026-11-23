@@ -414,6 +414,7 @@ struct ArchivePageOutput {
 struct ReceivedOutput {
     scope: &'static str,
     projection: Option<NativeTextJoinedMemberProjection>,
+    _archive_permit: Option<OwnedMutexGuard<()>>,
     _payment: Arc<Payment>,
 }
 
@@ -464,6 +465,7 @@ async fn execute_received(call: &Invocation, action: ActionId) -> Result<Receive
         return Ok(ReceivedOutput {
             scope: "received-live",
             projection: None,
+            _archive_permit: None,
             _payment: call.payment.clone(),
         });
     };
@@ -481,6 +483,7 @@ async fn execute_received(call: &Invocation, action: ActionId) -> Result<Receive
         Ok(ReceivedOutput {
             scope: "received-live",
             projection,
+            _archive_permit: None,
             _payment: payment,
         })
     })
@@ -501,14 +504,14 @@ async fn execute_archive(
         let Preparation::Joined(original, selection) = capture(state, call).await? else {
             return Err(STALE.to_owned());
         };
-        Some((original, selection, guard))
+        Some((original, selection, guard, local.clone()))
     } else {
         None
     };
     tauri::async_runtime::spawn_blocking(move || match read {
         ArchiveRead::Page { after, limit } => {
             let page = match original {
-                Some((original, row, _guard)) => original
+                Some((original, row, _guard, _)) => original
                     .archived_action_page(&row, channel, after, limit, &scope)
                     .map_err(|_| "Saved received messages could not be read. Try again.")?,
                 None => None,
@@ -533,15 +536,22 @@ async fn execute_archive(
             }))
         }
         ArchiveRead::Message(action) => {
-            let projection = match original {
-                Some((original, row, _guard)) => original
-                    .archived_message_projection(&row, channel, action, scope, &mut OsCryptoRng)
-                    .map_err(|_| "Saved received messages could not be read. Try again.")?,
-                None => None,
+            let (projection, permit) = match original {
+                Some((original, row, permit, local)) => {
+                    if !local.archive_target_settled(action) {
+                        return Err("A received change is waiting to be saved.".into());
+                    }
+                    let projection = original
+                        .archived_message_projection(&row, channel, action, scope, &mut OsCryptoRng)
+                        .map_err(|_| "Saved received messages could not be read. Try again.")?;
+                    (projection, Some(permit))
+                }
+                None => (None, None),
             };
             Ok(Response::Received(ReceivedOutput {
                 scope: "received-archive",
                 projection,
+                _archive_permit: permit,
                 _payment: payment,
             }))
         }

@@ -395,8 +395,6 @@
     after: string | null; more: boolean; loading: boolean; note: string | null;
   } | null>(null);
   let nativeArchiveRevision = 0;
-  const nativeArchiveTouched = new Set<string>();
-  let nativeArchiveSaturated = false;
   let nativeCursor = $state<{next:string;end:string}|null>(null);
   let nativeHistoryLoading = $state(false);
   let nativeHistoryLoaded = $state(false);
@@ -7073,15 +7071,11 @@
     }
     // A live observation retires the corresponding archive body immediately.
     // A read already in flight must not put that old body back on the screen.
-    if (!nativeArchiveTouched.has(action)) {
-      if (nativeArchiveTouched.size === 64) nativeArchiveSaturated = true;
-      else nativeArchiveTouched.add(action);
-    }
     if (nativeArchive) {
       nativeArchiveRevision++;
       nativeArchive = {
         ...nativeArchive,
-        items: nativeArchiveSaturated ? [] : nativeArchive.items.filter(item => item.action !== action),
+        items: nativeArchive.items.filter(item => item.action !== action),
         loading: false,
       };
     }
@@ -7111,8 +7105,6 @@
   function resetNativeArchive() {
     nativeArchiveRevision++;
     nativeArchive = null;
-    nativeArchiveTouched.clear();
-    nativeArchiveSaturated = false;
   }
 
   async function refreshNativeArchive(append = false) {
@@ -7130,17 +7122,15 @@
     const previous = { server, channel, context, items: base?.items ?? [], after: base?.after ?? null, more: base?.more ?? false };
     nativeArchive = { ...previous, note: null, loading: true };
     try {
-      if (nativeArchiveSaturated) throw new Error("Too many received updates in this view.");
       const page = await readNativeReceivedArchive((_command, args) => invoke<unknown>("get_message_page", args),
         { server, channel, context }, current, previous.after);
       if (!page || !current()) return;
-      const items = page.items.filter(item => !nativeArchiveTouched.has(item.action));
       const note = !page.available ? "Saved received messages are unavailable for this group."
         : page.incomplete ? "Some saved received messages could not be loaded."
         : null;
       nativeArchive = {
         ...previous,
-        items: [...previous.items, ...items].slice(-64),
+        items: [...previous.items, ...page.items].slice(-64),
         after: page.ids.at(-1) ?? previous.after,
         more: page.more,
         note,

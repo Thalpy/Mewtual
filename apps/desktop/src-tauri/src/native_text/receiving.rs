@@ -1,9 +1,9 @@
-//! One bounded receiver on the installed joined row. Renderer history remains
-//! on its separate own-receipt route until shared archival selection mounts.
+//! One bounded receiver on the installed joined row, with guarded live
+//! projection and archive selection under the same local permit.
 use super::{connected::Source, *};
 use catcoms_app::store::{
-    NativeTextJoinedMemberReceiver, NativeTextJoinedReceivedOriginal, NativeTextJoinedRowSelection,
-    NativeTextJoinedSelectionPreparation, NativeUiInvocationMetadata,
+    NativeTextJoinedMemberLedger, NativeTextJoinedMemberReceiver, NativeTextJoinedReceivedOriginal,
+    NativeTextJoinedRowSelection, NativeTextJoinedSelectionPreparation, NativeUiInvocationMetadata,
 };
 use catcoms_net::{NativeChatMemberFrame, NativeChatMemberGossipEvent};
 use catcoms_replication::chat::{ActionId, ActionState, V2OrdinaryReceiveStatus};
@@ -96,9 +96,12 @@ async fn receive(
     }
     let Some((original, status)) = with_row(state, source, move |selected, _, local, scope| {
         let mut slot = local.received.lock().ok()?;
-        selected
-            .receive_member_frame(slot.as_deref_mut()?, &frame, &scope)
-            .ok()
+        let ledger = slot.as_deref_mut()?;
+        let (original, status) = selected.receive_member_frame(ledger, &frame, &scope).ok()?;
+        if status == V2OrdinaryReceiveStatus::Retained(ActionState::Valid) {
+            archive_original(&selected, ledger, &original, local, &scope);
+        }
+        Some((original, status))
     })
     .await
     else {
@@ -107,9 +110,7 @@ async fn receive(
     let original = Arc::new(original);
     match status {
         V2OrdinaryReceiveStatus::Retained(ActionState::Valid) => {
-            let target = original.projection_target_data();
-            archive_original(state, source, original).await;
-            Some(target)
+            Some(original.projection_target_data())
         }
         V2OrdinaryReceiveStatus::WaitingForDependencies(missing) => {
             for action in missing.into_iter().take(DEPENDENCIES_PER_FRAME) {
@@ -193,38 +194,38 @@ async fn apply_and_archive(
     source: &Arc<Source>,
     original: Arc<NativeTextJoinedReceivedOriginal>,
 ) -> Option<ActionId> {
-    let candidate = original.clone();
-    let result = with_row(state, source, move |selected, _, local, scope| {
+    with_row(state, source, move |selected, _, local, scope| {
         let mut slot = local.received.lock().ok()?;
-        selected
-            .project_received_member(slot.as_deref_mut()?, &candidate, &scope)
-            .ok()
+        let ledger = slot.as_deref_mut()?;
+        let status = selected
+            .project_received_member(ledger, &original, &scope)
+            .ok()?;
+        if status != V2OrdinaryReceiveStatus::Retained(ActionState::Valid) {
+            return None;
+        }
+        archive_original(&selected, ledger, &original, local, &scope);
+        Some(original.projection_target_data())
     })
-    .await;
-    if matches!(
-        result,
-        Some(V2OrdinaryReceiveStatus::Retained(ActionState::Valid))
-    ) {
-        let target = original.projection_target_data();
-        archive_original(state, source, original).await;
-        return Some(target);
-    }
-    None
+    .await
 }
 
-async fn archive_original(
-    state: &AppState,
-    source: &Arc<Source>,
-    original: Arc<NativeTextJoinedReceivedOriginal>,
+fn archive_original(
+    selected: &NativeTextJoinedSelectionPreparation<OsCryptoRng>,
+    ledger: &NativeTextJoinedMemberLedger,
+    original: &NativeTextJoinedReceivedOriginal,
+    local: &server_table::JoinedMemberWork,
+    scope: &RequestCancellation,
 ) {
-    let _ = with_row(state, source, move |selected, _, local, scope| {
-        let slot = local.received.lock().ok()?;
-        selected
-            .archive_received_member(slot.as_deref()?, &original, &scope, &mut OsCryptoRng)
-            .ok()?;
-        Some(())
-    })
-    .await;
+    let result = selected.archive_received_member(ledger, original, scope, &mut OsCryptoRng);
+    let action = original.action_id_data();
+    let target = original.projection_target_data();
+    if action != target {
+        match result {
+            Ok(Some(_)) => local.note_archive_change(action, target, true),
+            Err(_) => local.note_archive_change(action, target, false),
+            Ok(None) => {}
+        }
+    }
 }
 
 async fn with_row<T: Send + 'static>(

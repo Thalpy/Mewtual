@@ -179,6 +179,11 @@ guarded projection before returning a body. A live update in the active view ret
 older saved body and cancels a pending archive read. The renderer labels a partial page
 when any individual original cannot be replayed. Recovery beyond the live worker's
 bounded direct dependency window remains open.
+The native row serializes live application, archive selection and body publication.
+A failed archive write for a live mutation holds that target out of archive replies
+for the installed row. An exact selected retry clears its entry. This bounded in-session
+state stays with the row through receiver reattachment. Durable protection after
+unsettled mutations and a process or vault restart still needs a selected negative record.
 Original audit chunks and request receipts remain retained after scheduling debt clears.
 Removal changes active view, never deletes the audit. Unproven late removed actions stay
 Held pending the separately authorized moderation path; ordinary concurrent edits resolve
