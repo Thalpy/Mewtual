@@ -4544,10 +4544,12 @@
   let nativeContactStatus = $state("");
   let nativeContactBusy = $state(false);
   async function refreshNativeMembers(server: number, generation: number, mount = chatLedgerMount) {
+    if (cur?.backend !== "text-v2") return;
+    const expectedContext = cur.context;
     const request = ++nativeRosterRequest;
     nativeRoster = { server, mount, members: [], canRemove: false, failure: "", loading: true };
     try {
-      const roster = await invoke<NativeRoster>("get_native_chat_members", { server });
+      const roster = await invoke<NativeRoster>("get_native_chat_members", { server, expectedContext });
       if (request === nativeRosterRequest && membersOpen && unlockedViewCurrent(generation, server) && cur?.backend === "text-v2") {
         nativeRoster = { ...roster, server, mount, failure: "", loading: false };
       }
@@ -4564,7 +4566,7 @@
     confirmNativeRemoval = "";
     removingNativeAdmission = member.admission;
     try {
-      await invoke("remove_native_chat_member", { server, expectedAdmission: member.admission });
+      await invoke("remove_native_chat_member", { server, expectedContext: cur.context, expectedAdmission: member.admission });
       if (membersOpen && unlockedViewCurrent(generation, server) && cur?.backend === "text-v2") await refreshNativeMembers(server, generation);
     } catch (cause) {
       if (unlockedViewCurrent(generation, server) && cur?.backend === "text-v2") error = String(cause);
@@ -4576,15 +4578,16 @@
     const server = activeServerId;
     const generation = viewGeneration;
     if (server === null || locked || nativeContactBusy || cur?.backend !== "text-v2") return;
+    const expectedContext = cur.context;
     nativeContactStatus = "";
     nativeContactBusy = true;
     try {
       if (action === "share") {
-        const code = await invoke<string>("share_native_chat_contact", { server });
+        const code = await invoke<string>("share_native_chat_contact", { server, expectedContext });
         if (membersOpen && unlockedViewCurrent(generation, server)) nativeContactCode = code;
       } else {
         await invoke("connect_native_chat_contact", {
-          server, contact: nativeContactInput.trim(), approvedHost: nativeContactHost.trim(),
+          server, expectedContext, contact: nativeContactInput.trim(), approvedHost: nativeContactHost.trim(),
         });
         if (membersOpen && unlockedViewCurrent(generation, server)) {
           nativeContactInput = "";

@@ -44,7 +44,8 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
             .original_target()
             .ok_or(listing::STALE)?;
         let account = keep_session::current(&state, generation).ok_or(listing::STALE)?;
-        let (server, operation) = parse(invoke.message.command(), invoke.message.payload())?;
+        let (server, context, operation) =
+            parse(invoke.message.command(), invoke.message.payload())?;
         let permit = state
             .native_text
             .inflight
@@ -54,6 +55,9 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
         let mut source_payment = Some(state.native_text.ui_budget.prepare().map_err(|_| BUSY)?);
         let table = state.servers.try_lock().map_err(|_| BUSY)?;
         let row = table.native(&server).ok_or(listing::STALE)?;
+        if row.data().request != context {
+            return Err(listing::STALE);
+        }
         let founder = matches!(
             &row.data().selection,
             server_table::NativeSelection::Founder(_)
@@ -207,7 +211,7 @@ fn encode(
     Ok((body, Some(roster)))
 }
 
-fn parse(command: &str, body: &InvokeBody) -> Result<(u64, Operation), &'static str> {
+fn parse(command: &str, body: &InvokeBody) -> Result<(u64, [u8; 32], Operation), &'static str> {
     let InvokeBody::Json(value) = body else {
         return Err(FAILED);
     };
@@ -217,10 +221,19 @@ fn parse(command: &str, body: &InvokeBody) -> Result<(u64, Operation), &'static 
         .and_then(serde_json::Value::as_u64)
         .filter(|id| *id != 0)
         .ok_or(FAILED)?;
+    let context = decode_exact_hex(
+        fields
+            .get("expectedContext")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(FAILED)?,
+    )?;
+    if context == [0; 32] {
+        return Err(FAILED);
+    }
     let operation = match command {
-        LIST if fields.len() == 1 => Operation::List,
-        SHARE if fields.len() == 1 => Operation::Share,
-        CONNECT if fields.len() == 3 => {
+        LIST if fields.len() == 2 => Operation::List,
+        SHARE if fields.len() == 2 => Operation::Share,
+        CONNECT if fields.len() == 4 => {
             let contact = fields
                 .get("contact")
                 .and_then(serde_json::Value::as_str)
@@ -236,7 +249,7 @@ fn parse(command: &str, body: &InvokeBody) -> Result<(u64, Operation), &'static 
             }
             Operation::Connect(decode_exact_hex(contact)?, host)
         }
-        REMOVE if fields.len() == 2 => {
+        REMOVE if fields.len() == 3 => {
             let label = fields
                 .get("expectedAdmission")
                 .and_then(serde_json::Value::as_str)
@@ -249,7 +262,7 @@ fn parse(command: &str, body: &InvokeBody) -> Result<(u64, Operation), &'static 
         }
         _ => return Err(FAILED),
     };
-    Ok((server, operation))
+    Ok((server, context, operation))
 }
 
 fn decode_exact_hex<const N: usize>(text: &str) -> Result<[u8; N], &'static str> {
@@ -271,18 +284,29 @@ mod tests {
 
     #[test]
     fn native_membership_requires_the_exact_admission() {
-        let body = |json| InvokeBody::Json(json);
+        let original_context = [0x3c; 32];
+        let body = |mut json: serde_json::Value| {
+            json["expectedContext"] = serde_json::json!(hex::encode(original_context));
+            InvokeBody::Json(json)
+        };
         assert!(!handles("get_members"));
         assert!(!handles("remove_member"));
         assert!(matches!(
             parse(LIST, &body(serde_json::json!({"server": 1}))),
-            Ok((1, Operation::List))
+            Ok((1, context, Operation::List)) if context == original_context
         ));
         let label = "ab".repeat(32);
         let target = OwnerBodyId::from_bytes([0xab; 32]);
         assert!(
-            matches!(parse(REMOVE, &body(serde_json::json!({"server": 1, "expectedAdmission": &label}))), Ok((1, Operation::Remove(actual))) if actual == target)
+            matches!(parse(REMOVE, &body(serde_json::json!({"server": 1, "expectedAdmission": &label}))), Ok((1, context, Operation::Remove(actual))) if context == original_context && actual == target)
         );
+        for invalid in [
+            serde_json::json!({"server": 1}),
+            serde_json::json!({"server": 1, "expectedContext": "00".repeat(32)}),
+            serde_json::json!({"server": 1, "expectedContext": "3c".repeat(8)}),
+        ] {
+            assert!(parse(LIST, &InvokeBody::Json(invalid)).is_err());
+        }
         for value in [
             serde_json::json!({"server": 1, "fp": &label}),
             serde_json::json!({"server": 1, "expectedAdmission": &label[..16]}),
@@ -301,7 +325,7 @@ mod tests {
                     "server": 1, "contact": &contact, "approvedHost": "127.0.0.1",
                 }))
             ),
-            Ok((1, Operation::Connect(_, _)))
+            Ok((1, context, Operation::Connect(_, _))) if context == original_context
         ));
         for host in ["0.0.0.0", "localhost", "ff01::1", "::"] {
             assert!(parse(

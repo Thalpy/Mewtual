@@ -1248,12 +1248,28 @@ async fn native_text_membership_dispatch_uses_the_original_founder_row() {
     let found = found_request(&main, 5, "Roster source");
     run(&queue).await;
     let found = found_value(found.await.unwrap());
-    let request = serde_json::json!({ "server": found["server"] });
-    let legacy = invite_command(&main, "get_members", request.clone());
+    let request =
+        serde_json::json!({ "server": found["server"], "expectedContext": found["context"] });
+    let legacy = invite_command(
+        &main,
+        "get_members",
+        serde_json::json!({ "server": found["server"] }),
+    );
     let tauri::ipc::InvokeResponse::Err(error) = legacy.await.unwrap() else {
         panic!("legacy membership uses the existing backend");
     };
     assert_eq!(error.0, serde_json::json!("existing backend"));
+    refused(
+        invite_command(
+            &main,
+            "get_native_chat_members",
+            serde_json::json!({
+                "server": found["server"], "expectedContext": "73".repeat(32),
+            }),
+        )
+        .await
+        .unwrap(),
+    );
     let other =
         tauri::WebviewWindowBuilder::new(&app, "unregistered-membership", Default::default())
             .build()
@@ -1278,7 +1294,7 @@ async fn native_text_membership_dispatch_uses_the_original_founder_row() {
     run(&queue).await;
     let saved = found_value(saved.await.unwrap());
 
-    let stale = invite_command(&main, "get_native_chat_members", request);
+    let stale = invite_command(&main, "get_native_chat_members", request.clone());
     let worker = run(&queue);
     let state = app.state::<AppState>();
     let _close = register_vault_close(&state).await.unwrap();
@@ -1293,11 +1309,7 @@ async fn native_text_membership_dispatch_uses_the_original_founder_row() {
 
     let (reopened, window, cold_queue) = self::app(path, None, true);
     unlock_current(&reopened, &window, &cold_queue).await;
-    let restored = invite_command(
-        &window,
-        "get_native_chat_members",
-        serde_json::json!({ "server": found["server"] }),
-    );
+    let restored = invite_command(&window, "get_native_chat_members", request.clone());
     run(&cold_queue).await;
     assert_eq!(found_value(restored.await.unwrap()), roster);
     let resumed = resume_request(&window);
