@@ -1,6 +1,7 @@
 //! Hold and revalidate the fixed governed reservation under actual Current.
 //! The read path authenticates an existing file. It cannot adopt an owner,
 //! complete a partial write, enter MLS, or return a covering save receipt.
+use super::archive::recovery::HeldColdFounderAdd;
 use super::governing_record;
 use super::header_signing::{
     ATTEMPT_BYTES, ATTEMPT_NAME, RAW_BYTES, RAW_NAME, WELCOME_ATTEMPT_BYTES, WELCOME_ATTEMPT_NAME,
@@ -17,11 +18,13 @@ use crate::store::critical_namespaces::current_layout::V2TextCurrentGroupGuard;
 use crate::store::critical_namespaces::read_pool::CatalogReadReservation;
 use crate::store::persistence::v2_text::capture::SelectedV2TextHead;
 use crate::store::persistence::v2_text::io::{
-    fixed_child, read_control, require_named, OpenedTextControl, MAX_TEXT_PATH,
+    fixed_child, governed_add_successor_child, read_control, require_named, OpenedTextControl,
+    MAX_TEXT_PATH,
 };
 use crate::store::persistence::v2_text::V2TextReadResources;
 use crate::store::persistence::GenesisSourceDataRef;
 use crate::store::ServerStore;
+use catcoms_replication::chat::{cold_manifest::ArchiveHeadId, owner_header::OwnerHeaderId};
 use catcoms_storage::VaultPhysicalWorkLease;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
@@ -29,6 +32,45 @@ use std::path::{Path, PathBuf};
 
 pub(super) const STAGE: &str = "text.wal.stage.v1";
 const FILE_COMPARE_BYTES: usize = 8192;
+const ADD_STAGES: [&str; 12] = [
+    STAGE,
+    request::NAME,
+    SDK_ENTRY_NAME,
+    OUTCOME_NAME,
+    ATTEMPT_NAME,
+    RAW_NAME,
+    governing_record::NAME,
+    welcome_intent::NAME,
+    WELCOME_ATTEMPT_NAME,
+    WELCOME_RAW_NAME,
+    response::NAME,
+    selected_head::NAME,
+];
+
+fn add_stage_path(
+    target: &Path,
+    name: &'static str,
+    later: Option<TextHeadIdData>,
+) -> Result<PathBuf, AppError> {
+    if let Some(parent) = later {
+        if !ADD_STAGES.contains(&name) {
+            return Err(refused());
+        }
+        governed_add_successor_child(target, name, parent.as_bytes())
+    } else {
+        fixed_child(target, name)
+    }
+}
+
+pub(super) fn require_successor_stages_absent(
+    target: &Path,
+    selected: TextHeadIdData,
+) -> Result<(), AppError> {
+    for name in ADD_STAGES {
+        require_absent(&add_stage_path(target, name, Some(selected))?)?;
+    }
+    Ok(())
+}
 
 mod header_read;
 mod outcome_read;
@@ -58,6 +100,7 @@ pub(in crate::store) struct HeldGovernedAddFence {
     parent: (TextContextIdData, TextHeadIdData),
     expected: Option<GovernedAddFenceData>,
     authenticated: bool,
+    later: Option<Box<HeldColdFounderAdd>>,
     resources: V2TextReadResources,
     // The independent buffer payment includes the bounded path and file read,
     // copied AEAD input/plaintext and exact same-handle EOF comparison.
@@ -81,6 +124,15 @@ struct WelcomeControlPaths {
     raw: PathBuf,
     response: PathBuf,
     head_stage: PathBuf,
+}
+
+struct WriterParent<'a> {
+    context: TextContextIdData,
+    head: TextHeadIdData,
+    archive: ArchiveHeadId,
+    header: OwnerHeaderId,
+    head_frame: &'a [u8],
+    archive_frame: &'a [u8],
 }
 
 impl WelcomeControlPaths {
@@ -117,6 +169,33 @@ const FENCE_READ_BYTES: usize = 12 * MAX_TEXT_PATH
     + 1024;
 
 impl HeldGovernedAddFence {
+    fn writer_parent<'a>(
+        &'a self,
+        seed: &'a SelectedV2TextHead,
+    ) -> Result<WriterParent<'a>, AppError> {
+        if let Some(later) = self.later.as_deref() {
+            let (context, head, archive, header, head_frame) = later.writer_parent_data();
+            Ok(WriterParent {
+                context,
+                head,
+                archive,
+                header,
+                head_frame,
+                archive_frame: &[],
+            })
+        } else {
+            let physical = seed.physical_query_data();
+            Ok(WriterParent {
+                context: seed.head_data().context.id_data()?,
+                head: seed.head_id_data(),
+                archive: seed.head_data().archive,
+                header: seed.archive_data().spec_data().header.id(),
+                head_frame: physical.head_frame,
+                archive_frame: physical.archive_frame,
+            })
+        }
+    }
+
     /// Prepare outside Current. Keep this whole receiver outside the writers
     /// through capture and any late refusal, so its file and lease drain there.
     pub(in crate::store::persistence::v2_text) fn prepare(
@@ -125,10 +204,29 @@ impl HeldGovernedAddFence {
         selected: &SelectedV2TextHead,
         expected: Option<GovernedAddFenceData>,
     ) -> Result<Self, AppError> {
+        Self::prepare_with_parent(store, source, selected, expected, None)
+    }
+
+    fn prepare_with_parent(
+        store: &ServerStore,
+        source: &GenesisSourceDataRef<'_>,
+        selected: &SelectedV2TextHead,
+        expected: Option<GovernedAddFenceData>,
+        later: Option<Box<HeldColdFounderAdd>>,
+    ) -> Result<Self, AppError> {
         let parent = (
             selected.head_data().context.id_data()?,
             selected.head_id_data(),
         );
+        let parent = if let Some(later) = later.as_deref() {
+            let (context, head, _, _, _) = later.writer_parent_data();
+            if context != parent.0 {
+                return Err(refused());
+            }
+            (context, head)
+        } else {
+            parent
+        };
         if let Some(expected) = expected {
             expected.require_parent(parent.0, parent.1)?;
         }
@@ -144,29 +242,24 @@ impl HeldGovernedAddFence {
         fee.validate(pool, FENCE_READ_BYTES)?;
         let lease = store._session.retain_for_physical_work();
         let target = selected.physical_query_data().target;
-        let path = fixed_child(target, STAGE)?;
-        let request_path = fixed_child(target, request::NAME)?;
-        let entry_path = fixed_child(target, SDK_ENTRY_NAME)?;
-        let outcome_path = fixed_child(target, OUTCOME_NAME)?;
-        let header_attempt_path = fixed_child(target, ATTEMPT_NAME)?;
-        let raw_header_path = fixed_child(target, RAW_NAME)?;
-        let governing_path = fixed_child(target, governing_record::NAME)?;
+        let later_head = later.as_ref().map(|_| parent.1);
+        let path = |name| add_stage_path(target, name, later_head);
         let welcome_paths = WelcomeControlPaths {
-            intent: fixed_child(target, welcome_intent::NAME)?,
-            attempt: fixed_child(target, WELCOME_ATTEMPT_NAME)?,
-            raw: fixed_child(target, WELCOME_RAW_NAME)?,
-            response: fixed_child(target, response::NAME)?,
-            head_stage: fixed_child(target, selected_head::NAME)?,
+            intent: path(welcome_intent::NAME)?,
+            attempt: path(WELCOME_ATTEMPT_NAME)?,
+            raw: path(WELCOME_RAW_NAME)?,
+            response: path(response::NAME)?,
+            head_stage: path(selected_head::NAME)?,
         };
         resources.require_bound_original_negative(store, source)?;
         Ok(Self {
-            path,
-            request_path,
-            entry_path,
-            outcome_path,
-            header_attempt_path,
-            raw_header_path,
-            governing_path,
+            path: path(STAGE)?,
+            request_path: path(request::NAME)?,
+            entry_path: path(SDK_ENTRY_NAME)?,
+            outcome_path: path(OUTCOME_NAME)?,
+            header_attempt_path: path(ATTEMPT_NAME)?,
+            raw_header_path: path(RAW_NAME)?,
+            governing_path: path(governing_record::NAME)?,
             welcome_paths,
             original: None,
             request: None,
@@ -176,6 +269,7 @@ impl HeldGovernedAddFence {
             parent,
             expected,
             authenticated: false,
+            later,
             resources,
             _lease: lease,
             _fee: fee,
@@ -299,7 +393,7 @@ impl HeldGovernedAddFence {
     }
 
     fn require_parent(
-        &self,
+        &mut self,
         guard: &V2TextCurrentGroupGuard<'_, '_>,
         selected: &SelectedV2TextHead,
     ) -> Result<(), AppError> {
@@ -308,6 +402,16 @@ impl HeldGovernedAddFence {
             return Err(refused());
         }
         self.resources.require_same_original(selected.resources())?;
+        self.resources.require_same_original(guard.resources())?;
+        if let Some(later) = self.later.as_mut() {
+            let (context, head, _, _, _) = later.writer_parent_data();
+            if (context, head) != self.parent
+                || context != selected.head_data().context.id_data()?
+            {
+                return Err(refused());
+            }
+            return later.require_writer_parent_current(guard);
+        }
         if self.parent
             != (
                 selected.head_data().context.id_data()?,

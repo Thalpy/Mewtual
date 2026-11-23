@@ -2200,6 +2200,7 @@ enum JoinCase {
 }
 
 async fn native_governed_add_fixture(case: JoinCase) {
+    use super::super::super::tests::selected_joined;
     use crate::store::critical_namespaces::native_registry::preparation::tests::{
         current_policy, SECRET,
     };
@@ -2208,7 +2209,11 @@ async fn native_governed_add_fixture(case: JoinCase) {
     use catcoms_sync::{DirectJoinLimits, PreparedV2JoinRequest};
     use rand_core::SeedableRng;
     let directory = tempfile::tempdir().unwrap();
-    let (vault, budget) = selected_governed(directory.path());
+    let (vault, budget) = if matches!(case, JoinCase::NativeResponse) {
+        selected_joined(directory.path())
+    } else {
+        selected_governed(directory.path())
+    };
     let seed = match case {
         JoinCase::Staged => 0xe710,
         JoinCase::InterruptedInstall => 0xe717,
@@ -2763,7 +2768,7 @@ async fn native_governed_add_fixture(case: JoinCase) {
             next_saved.packet_bytes_data()
         );
         assert_eq!(std::fs::read(&raw).unwrap(), original);
-        let next_request = PreparedV2JoinRequest::prepare(
+        let mut next_request = PreparedV2JoinRequest::prepare(
             catcoms_mls::MlsDevice::generate().unwrap(),
             &next_invite.binding().spec_data().anchor,
             next_invite.binding(),
@@ -2787,6 +2792,26 @@ async fn native_governed_add_fixture(case: JoinCase) {
             .is_err());
         std::fs::remove_file(&head).unwrap();
         std::fs::rename(&parked_head, &head).unwrap();
+        let next_wire = next_request.request_bytes_data().to_vec();
+        let next_join = accept(&next_wire).expect("install and release the later Add");
+        let next_delivery = next_join.encode_delivery_data().unwrap();
+        assert!(catcoms_sync::V2FirstJoinDeliveryData::decode(&next_delivery).is_err());
+        let later = catcoms_sync::V2JoinDeliveryData::decode(&next_delivery).unwrap();
+        let ((parent, later_head), _) = later.proof_data().unwrap();
+        assert_eq!(parent, add_header);
+        let next_candidate = next_request
+            .finish_pinned_join_delivery(&next_delivery, None, None)
+            .unwrap();
+        assert_eq!(next_candidate.facts_data().join_epoch_data(), 2);
+        let exact = accept(&next_wire).unwrap();
+        assert_eq!(
+            exact.packet_bytes_data().as_ptr(),
+            next_join.packet_bytes_data().as_ptr()
+        );
+        assert_eq!(
+            exact.governing_proof_bytes_data().as_ptr(),
+            next_join.governing_proof_bytes_data().as_ptr()
+        );
         assert_eq!(
             prepare(&owner, &row, &vault, &budget).prepare_member_save(request(), &negative),
             Ok(V2MemberSaveOutcome::Ready),
@@ -2808,6 +2833,30 @@ async fn native_governed_add_fixture(case: JoinCase) {
         let mut close = owner.prepare_retirement().unwrap();
         close.try_retire().unwrap();
         assert_eq!(saved.packet_bytes_data(), retry.packet_bytes_data());
+        drop((close, owner, row, vault));
+        let mut cold = NativeTextJoinedStorage::open_for_native_startup(
+            directory.path(),
+            SECRET,
+            &mut join_rng,
+            current_policy(),
+        )
+        .unwrap()
+        .prepare_recovered_founder()
+        .unwrap_or_else(|(_, error)| panic!("cold later founder refused: {error}"));
+        assert_eq!(cold.restore_first_add(&negative).unwrap(), (later_head, 2));
+        assert_eq!(
+            cold.encode_recovered_join_delivery(&next_wire, &negative)
+                .unwrap(),
+            next_delivery
+        );
+        assert_eq!(
+            cold.encode_recovered_join_delivery(&original_request, &negative)
+                .unwrap(),
+            delivery
+        );
+        assert!(cold
+            .encode_recovered_join_delivery(replacement.packet_bytes_data(), &negative)
+            .is_err());
         return;
     }
     let preparation = owner.capture_member(

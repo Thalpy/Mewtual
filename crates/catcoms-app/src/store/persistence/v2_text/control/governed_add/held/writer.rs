@@ -5,7 +5,7 @@ use super::super::outcome::{SealedGovernedAddOutcome, MAX_FRAME};
 use super::*;
 use crate::store::persistence::v2_text::head::TextPendingData;
 use catcoms_storage::kept::session_id;
-use catcoms_sync::owner_v2::V2FounderAddOutcomeData;
+use catcoms_sync::owner_v2::{V2FounderAddOutcomeData, V2InstalledFounderAddData};
 use std::fs::OpenOptions;
 use std::io::Write;
 
@@ -109,6 +109,18 @@ impl PreparedGovernedAddFence {
         self.outcome.is_some()
     }
 
+    pub(in crate::store) fn later_parent_data(&self) -> Option<TextHeadIdData> {
+        self.held.later.as_ref().map(|_| self.held.parent.1)
+    }
+
+    pub(in crate::store) fn require_parent_current(
+        &mut self,
+        guard: &V2TextCurrentGroupGuard<'_, '_>,
+        seed: &SelectedV2TextHead,
+    ) -> Result<(), AppError> {
+        self.held.require_parent(guard, seed)
+    }
+
     /// This must run before entering Current, under the caller's authenticated
     /// original request and selected context. Retain the result across retries.
     pub(in crate::store) fn prepare(
@@ -117,6 +129,35 @@ impl PreparedGovernedAddFence {
         selected: &SelectedV2TextHead,
         packet: &V2JoinRequestPacketData<'_>,
         rng: &mut dyn CryptoRngCore,
+    ) -> Result<Self, AppError> {
+        Self::prepare_bound(store, source, selected, packet, rng, None)
+    }
+
+    pub(in crate::store) fn prepare_later(
+        store: &ServerStore,
+        source: &GenesisSourceDataRef<'_>,
+        seed: &SelectedV2TextHead,
+        packet: &V2JoinRequestPacketData<'_>,
+        installed: (TextHeadIdData, V2InstalledFounderAddData),
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<Self, AppError> {
+        source.require_original_negative(store)?;
+        let original = Box::new(HeldColdFounderAdd::capture(
+            store,
+            source.source(),
+            *seed.head_data().context.spec_data().pin.as_bytes(),
+        )?);
+        original.require_installed_parent(source.source(), installed.0, installed.1)?;
+        Self::prepare_bound(store, source, seed, packet, rng, Some(original))
+    }
+
+    fn prepare_bound(
+        store: &ServerStore,
+        source: &GenesisSourceDataRef<'_>,
+        selected: &SelectedV2TextHead,
+        packet: &V2JoinRequestPacketData<'_>,
+        rng: &mut dyn CryptoRngCore,
+        later: Option<Box<HeldColdFounderAdd>>,
     ) -> Result<Self, AppError> {
         if selected.head_data().generation != 1
             || selected.head_data().pending != TextPendingData::None
@@ -131,12 +172,17 @@ impl PreparedGovernedAddFence {
             .pool;
         let fee = pool.try_reserve(WRITER_BYTES)?;
         fee.validate(pool, WRITER_BYTES)?;
+        let head = later.as_deref().map_or_else(
+            || selected.head_id_data(),
+            |prior| prior.writer_parent_data().1,
+        );
         let data = GovernedAddFenceData::for_request(
             selected.head_data().context.id_data()?,
-            selected.head_id_data(),
+            head,
             packet,
         );
-        let held = HeldGovernedAddFence::prepare(store, source, selected, Some(data))?;
+        let held =
+            HeldGovernedAddFence::prepare_with_parent(store, source, selected, Some(data), later)?;
         let target = selected.physical_query_data().target;
         let other_paths = [
             fixed_child(target, "text.wal")?,
@@ -314,14 +360,10 @@ impl PreparedGovernedAddFence {
         self.held
             .resources
             .require_bound_original_negative(store, source)?;
-        let expected = GovernedAddFenceData::for_request(
-            selected.head_data().context.id_data()?,
-            selected.head_id_data(),
-            packet,
-        );
+        let parent = self.held.writer_parent(selected)?;
+        let expected = GovernedAddFenceData::for_request(parent.context, parent.head, packet);
         if Some(expected) != self.held.expected
-            || outcome.unsigned_data().header_spec_data().parent
-                != selected.archive_data().spec_data().header.id()
+            || outcome.unsigned_data().header_spec_data().parent != parent.header
         {
             return Err(refused());
         }

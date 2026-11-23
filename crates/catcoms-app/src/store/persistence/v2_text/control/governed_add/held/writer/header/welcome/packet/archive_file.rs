@@ -38,14 +38,11 @@ impl PreparedGovernedAddFence {
             .as_ref()
             .filter(|original| original.covered)
             .ok_or_else(refused)?;
+        let parent = self.held.writer_parent(selected)?;
         let unsigned = outcome.unsigned_data();
         if original.header_intent != unsigned.intent_commitment_data()
-            || unsigned.header_spec_data().parent != selected.archive_data().spec_data().header.id()
-            || self.held.parent
-                != (
-                    selected.head_data().context.id_data()?,
-                    selected.head_id_data(),
-                )
+            || unsigned.header_spec_data().parent != parent.header
+            || self.held.parent != (parent.context, parent.head)
         {
             return Err(refused());
         }
@@ -57,9 +54,9 @@ impl PreparedGovernedAddFence {
         let (_, raw_welcome) = welcome.raw.as_ref().ok_or_else(refused)?;
         let response = welcome.response.as_mut().ok_or_else(refused)?;
         let labels = GovernedArchiveLabels {
-            context: selected.head_data().context.id_data()?,
-            before_head: selected.head_id_data(),
-            before_archive: selected.head_data().archive,
+            context: parent.context,
+            before_head: parent.head,
+            before_archive: parent.archive,
             header: *id,
             state: unsigned.header_spec_data().state,
             epoch: outcome.result_data().after_epoch_data(),
@@ -70,7 +67,6 @@ impl PreparedGovernedAddFence {
                 return Err(refused());
             }
         } else {
-            let parent = selected.physical_query_data();
             let frames = GovernedArchiveFrames {
                 parent_head: parent.head_frame,
                 parent_archive: parent.archive_frame,
@@ -92,7 +88,13 @@ impl PreparedGovernedAddFence {
                 raw_welcome: raw_welcome.covered_frame()?,
                 response: response.record.covered_frame()?,
             };
-            let bytes = 5 * frames.frame_bytes()?
+            let later = self.held.later.is_some();
+            let size = if later {
+                archive::later_frame_bytes(&frames)?
+            } else {
+                frames.frame_bytes()?
+            };
+            let bytes = 5 * size
                 + MAX_TEXT_PATH
                 + 6 * selected_head::FRAME_LEN
                 + 4 * crate::store::persistence::v2_text::head::MAX_TEXT_HEAD_FRAME
@@ -107,15 +109,26 @@ impl PreparedGovernedAddFence {
             let fee = pool.try_reserve(bytes)?;
             fee.validate(pool, bytes)?;
             let key = Zeroizing::new(store.keys.db_key()?);
-            let frame = archive::seal_data(&key, labels, &frames, rng)?;
-            let id = archive::id_data(&frame);
-            let path = archive_child(parent.target, id.as_bytes())?;
+            let (frame, id, head) = if later {
+                let output = archive::seal_later_data(&key, labels, &frames, rng)?;
+                let id = archive::later_id(&output.archive);
+                (
+                    output.archive,
+                    id,
+                    Some(head_stage::PreparedHeadStage::from_frame(output.head)),
+                )
+            } else {
+                let frame = archive::seal_data(&key, labels, &frames, rng)?;
+                let id = archive::id_data(&frame);
+                (frame, id, None)
+            };
+            let path = archive_child(selected.physical_query_data().target, id.as_bytes())?;
             response.archive = Some(PreparedArchive {
                 record: PreparedSmallControl::new(frame),
                 path,
                 id,
                 labels,
-                head: None,
+                head,
                 _fee: fee,
             });
         }

@@ -10,6 +10,16 @@ pub(super) struct PreparedHeadStage {
     selection_entered: bool,
 }
 
+impl PreparedHeadStage {
+    pub(super) fn from_frame(frame: Zeroizing<Vec<u8>>) -> Self {
+        Self {
+            id: TextHeadIdData::of_data(&frame),
+            record: PreparedSmallControl::new(frame),
+            selection_entered: false,
+        }
+    }
+}
+
 impl PreparedGovernedAddFence {
     pub(in crate::store) fn prepare_head_stage(
         &mut self,
@@ -24,11 +34,13 @@ impl PreparedGovernedAddFence {
         self.held
             .resources
             .require_same_original(selected.resources())?;
+        let parent = self.held.writer_parent(selected)?;
+        let (context, head, before_archive) = (parent.context, parent.head, parent.archive);
         let archive = self.pending_archive()?;
         if !archive.record.covered
-            || archive.labels.before_head != selected.head_id_data()
-            || archive.labels.before_archive != selected.head_data().archive
-            || archive.labels.context != selected.head_data().context.id_data()?
+            || archive.labels.before_head != head
+            || archive.labels.before_archive != before_archive
+            || archive.labels.context != context
         {
             return Err(refused());
         }
@@ -40,11 +52,7 @@ impl PreparedGovernedAddFence {
             )?;
             let key = Zeroizing::new(store.keys.db_key()?);
             let frame = head.seal_data(&key, rng)?;
-            archive.head = Some(PreparedHeadStage {
-                id: TextHeadIdData::of_data(&frame),
-                record: PreparedSmallControl::new(frame),
-                selection_entered: false,
-            });
+            archive.head = Some(PreparedHeadStage::from_frame(frame));
         }
         self.held
             .resources

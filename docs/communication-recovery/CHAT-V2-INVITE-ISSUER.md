@@ -15,7 +15,7 @@ the same native job. The journal binds that intent, attempt and signature to
 the exact encrypted selected Head. It preserves the first invitation files
 and gives an exact retry at the same parent the same signed packet. The next
 JoinRequest must match the new journal and pass the SDK package preflight.
-The covered writer that will install its Add is a separate step.
+The Add writer repeats the journal check before covering the later reservation.
 
 The real `NativeTextMemberJob::prepare_invite_intent` now looks up its exact
 token/settings/public plan before asking the retained node for a new unsigned

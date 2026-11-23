@@ -149,6 +149,21 @@ impl RecoveredArchiveChain {
         std::iter::once(&self.first).chain(&self.successors)
     }
 
+    pub(super) fn encode_successor_proof(
+        &self,
+        trusted: &GenesisPublicData<'_>,
+        next: V2GoverningJoinStepData<'_>,
+    ) -> Result<Vec<u8>, AppError> {
+        let proof = self.first.first_proof(trusted)?;
+        let steps: Vec<_> = self
+            .successors
+            .iter()
+            .map(PublicStep::proof_data)
+            .chain(std::iter::once(next))
+            .collect();
+        Ok(V2GoverningJoinPrefixData::encode(&proof, &steps)?)
+    }
+
     pub(super) fn encode_join_delivery(
         &self,
         key: &[u8; 32],

@@ -34,7 +34,9 @@ impl PreparedGovernedAddFence {
             parent.head_path,
             crate::store::persistence::v2_text::head::MAX_TEXT_HEAD_FRAME,
         )?;
-        let parent_is_selected = current.frame.as_slice() == parent.head_frame;
+        let prior = self.held.writer_parent(selected)?;
+        let parent_is_selected = current.frame.as_slice() == prior.head_frame;
+        let (context, before_head, before_archive) = (prior.context, prior.head, prior.archive);
         if parent_is_selected {
             self.cover_head_stage(guard, selected)?;
         }
@@ -52,9 +54,9 @@ impl PreparedGovernedAddFence {
                     .as_mut()
             })
             .ok_or_else(refused)?;
-        if archive.labels.before_head != selected.head_id_data()
-            || archive.labels.before_archive != selected.head_data().archive
-            || archive.labels.context != selected.head_data().context.id_data()?
+        if archive.labels.before_head != before_head
+            || archive.labels.before_archive != before_archive
+            || archive.labels.context != context
             || installed.header != archive.labels.header
             || installed.state != archive.labels.state
             || installed.epoch != archive.labels.epoch
@@ -120,8 +122,10 @@ impl PreparedGovernedAddFence {
                     .as_mut()
             })
             .ok_or_else(refused)?;
-        if archive.labels.before_head != selected.head_id_data()
-            || archive.labels.before_archive != selected.head_data().archive
+        let prior = self.held.writer_parent(selected)?;
+        if archive.labels.before_head != prior.head
+            || archive.labels.before_archive != prior.archive
+            || archive.labels.context != prior.context
         {
             return Err(refused());
         }
@@ -133,6 +137,9 @@ impl PreparedGovernedAddFence {
         require_absent(stage)?;
         archive.record.require_covered(&archive.path)?;
         head.record.require_covered(parent.head_path)?;
+        if let Some(later) = self.held.later.as_mut() {
+            later.require_writer_parent_archive(guard)?;
+        }
         crate::store::persistence::v2_genesis_activation::require_directory_name(
             target, directory, id,
         )?;

@@ -209,6 +209,7 @@ pub(super) struct PreparedNativeTextJoinResponse(Arc<PaidJoinResponse>);
 struct PaidJoinResponse {
     packet: Zeroizing<Vec<u8>>,
     proof: Vec<u8>,
+    later: bool,
     _payment: CatalogReadReservation,
 }
 
@@ -217,11 +218,17 @@ impl PreparedNativeTextJoinResponse {
         pool: &CriticalCatalogReadPool,
         packet: Zeroizing<Vec<u8>>,
         proof: Vec<u8>,
+        later: bool,
     ) -> Result<Self, AppError> {
+        let proof_cap = if later {
+            catcoms_sync::MAX_V2_GOVERNING_JOIN_PREFIX_BYTES
+        } else {
+            catcoms_sync::MAX_V2_FIRST_ADD_PROOF_BYTES
+        };
         if packet.is_empty()
             || packet.capacity() > catcoms_sync::MAX_V2_JOIN_RESPONSE_PACKET_BYTES
             || proof.is_empty()
-            || proof.capacity() > catcoms_sync::MAX_V2_FIRST_ADD_PROOF_BYTES
+            || proof.capacity() > proof_cap
         {
             return Err(refused());
         }
@@ -234,6 +241,7 @@ impl PreparedNativeTextJoinResponse {
         Ok(Self(Arc::new(PaidJoinResponse {
             packet,
             proof,
+            later,
             _payment: payment,
         })))
     }
@@ -256,17 +264,24 @@ impl NativeTextSavedJoinResponse {
         self.0.packet_bytes_data()
     }
 
-    /// Exact signed genesis and first governing Add records for the joiner.
+    /// Exact signed governing records through the joiner's selected Add.
     pub fn governing_proof_bytes_data(&self) -> &[u8] {
         self.0.governing_proof_bytes_data()
     }
 
     /// The transport owner supplies the separate bounded output allocation.
     pub fn encode_delivery_data(&self) -> Result<Vec<u8>, AppError> {
-        Ok(catcoms_sync::V2FirstJoinDeliveryData::encode(
-            self.packet_bytes_data(),
-            self.governing_proof_bytes_data(),
-        )?)
+        let packet = self.packet_bytes_data();
+        let proof = self.governing_proof_bytes_data();
+        if self.0 .0.later {
+            Ok(catcoms_sync::V2GoverningJoinDeliveryData::encode(
+                packet, proof,
+            )?)
+        } else {
+            Ok(catcoms_sync::V2FirstJoinDeliveryData::encode(
+                packet, proof,
+            )?)
+        }
     }
 }
 

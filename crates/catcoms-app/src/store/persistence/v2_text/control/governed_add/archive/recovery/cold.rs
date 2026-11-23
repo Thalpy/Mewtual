@@ -7,7 +7,9 @@ use crate::store::persistence::v2_genesis_activation::require_directory_name;
 use crate::store::persistence::v2_group_directory::original_group_path;
 use crate::store::persistence::v2_text::{
     capture::original_context_from_genesis,
-    control::governed_add::held::{require_exact_held, STAGE as GOVERNED_ADD_FENCE},
+    control::governed_add::held::{
+        require_exact_held, require_successor_stages_absent, STAGE as GOVERNED_ADD_FENCE,
+    },
     head::TextRootData,
     io::{
         archive_child, fixed_child, read_control, read_control_into, OpenedTextControl,
@@ -29,6 +31,7 @@ use catcoms_storage::VaultPhysicalWorkLease;
 use catcoms_sync::owner_v2::{PreparedV2FounderRecoveredAdd, V2InstalledFounderAddData};
 use catcoms_sync::{
     V2AdmissionStepData, V2FirstAddProofData, V2FirstJoinDeliveryData, V2GoverningJoinPrefixData,
+    V2GoverningJoinStepData,
 };
 use std::sync::Arc;
 use std::{
@@ -315,6 +318,97 @@ struct ColdFounderCore {
 }
 
 impl HeldColdFounderAdd {
+    /// Check the authenticated archive against the earlier warm writer's
+    /// exact selected receipt before it can become a successor's parent.
+    pub(in crate::store::persistence::v2_text) fn require_installed_parent(
+        &self,
+        source: &RetainedBootstrapSourceData,
+        head: TextHeadIdData,
+        installed: V2InstalledFounderAddData,
+    ) -> Result<(), AppError> {
+        self.files.origin.original.require_same_original(source)?;
+        let selected = self.files.selected.transition;
+        if TextHeadIdData::of_data(&self.files.head.frame) != head
+            || selected.header != installed.header
+            || selected.state != installed.state
+            || selected.epoch != installed.epoch
+            || selected.authenticator != installed.authenticator
+        {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
+    pub(in crate::store::persistence::v2_text) fn writer_parent_data(
+        &self,
+    ) -> (
+        TextContextIdData,
+        TextHeadIdData,
+        ArchiveHeadId,
+        OwnerHeaderId,
+        &[u8],
+    ) {
+        let selected = self.files.selected;
+        (
+            selected.transition.context,
+            TextHeadIdData::of_data(&self.files.head.frame),
+            selected.archive,
+            selected.transition.header,
+            &self.files.head.frame,
+        )
+    }
+
+    pub(in crate::store::persistence::v2_text) fn require_writer_parent_current(
+        &mut self,
+        guard: &crate::store::critical_namespaces::current_layout::V2TextCurrentGroupGuard<'_, '_>,
+    ) -> Result<(), AppError> {
+        guard.require_governed_native_invite_parent()?;
+        guard.require_text_control_write_idle_for_query()?;
+        let source = guard.source().source();
+        self.files.origin.original.require_same_original(source)?;
+        let (target, directory, id) = guard.target_directory_data();
+        self.require_writer_parent_archive(guard)?;
+        require_exact_held(&fixed_child(target, "head.bin")?, &mut self.files.head)?;
+        require_directory_name(target, directory, id)?;
+        guard.validate_source_only()
+    }
+
+    pub(in crate::store::persistence::v2_text) fn require_writer_parent_archive(
+        &mut self,
+        guard: &crate::store::critical_namespaces::current_layout::V2TextCurrentGroupGuard<'_, '_>,
+    ) -> Result<(), AppError> {
+        let source = guard.source().source();
+        self.files.origin.original.require_same_original(source)?;
+        self.recovered.require_predecessors(source)?;
+        require_exact_held(&self.files.archive_path, &mut self.files.archive)
+    }
+
+    pub(in crate::store::persistence::v2_text) fn encode_successor_proof(
+        &self,
+        genesis: &GenesisPublicData<'_>,
+        next: V2GoverningJoinStepData<'_>,
+    ) -> Result<Vec<u8>, AppError> {
+        match &self.recovered {
+            ColdRecoveredArchive::First(first) => {
+                let proof = V2FirstAddProofData::encode(
+                    genesis.profile,
+                    V2AdmissionStepData {
+                        admission: genesis.admission,
+                        header: genesis.header,
+                        image: genesis.image,
+                    },
+                    V2AdmissionStepData {
+                        admission: &first.admission,
+                        header: &first.header,
+                        image: first.image_data()?,
+                    },
+                )?;
+                Ok(V2GoverningJoinPrefixData::encode(&proof, &[next])?)
+            }
+            ColdRecoveredArchive::Later(chain) => chain.encode_successor_proof(genesis, next),
+        }
+    }
+
     pub(in crate::store) fn member_parts(
         &self,
     ) -> Result<(&V2GeneralPrefixVerifier, &ProjectionGroupView), AppError> {
@@ -420,6 +514,7 @@ impl HeldColdFounderAdd {
 
         let head = read_control(&fixed_child(target, "head.bin")?, selected_head::FRAME_LEN)?;
         let selected = selected_head::GovernedHeadData::open_governed_data(&key, &head.frame)?;
+        require_successor_stages_absent(target, TextHeadIdData::of_data(&head.frame))?;
         let context = context.id_data()?;
         let original_head = TextHeadIdData::of_data(promotion.head_frame);
         let original_archive = ArchiveHeadId::from_bytes(
@@ -667,6 +762,7 @@ impl ColdFounderFiles {
         require_exact_held(&self.archive_path, &mut self.archive)?;
         require_exact_held(&fixed_child(target, "head.bin")?, &mut self.head)?;
         require_stages_absent(target)?;
+        require_successor_stages_absent(target, TextHeadIdData::of_data(&self.head.frame))?;
         require_directory_name(target, directory, id)?;
         require_directory_name(
             &self.origin.group,

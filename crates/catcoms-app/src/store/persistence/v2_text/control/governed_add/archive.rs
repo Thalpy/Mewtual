@@ -142,12 +142,12 @@ pub(super) fn seal_data(
 
 /// Exact bytes to stage after independently validating the predecessor and
 /// before covering the new archive and the selector under the same writer.
-struct LaterArchive {
-    archive: Zeroizing<Vec<u8>>,
-    head: Zeroizing<Vec<u8>>,
+pub(super) struct LaterArchive {
+    pub(super) archive: Zeroizing<Vec<u8>>,
+    pub(super) head: Zeroizing<Vec<u8>>,
 }
 
-fn seal_later_data(
+pub(super) fn seal_later_data(
     key: &[u8; 32],
     labels: GovernedArchiveLabels,
     frames: &GovernedArchiveFrames<'_>,
@@ -172,6 +172,10 @@ fn seal_later_data(
     )?
     .seal_later_data(key, rng)?;
     Ok(LaterArchive { archive, head })
+}
+
+pub(super) fn later_frame_bytes(frames: &GovernedArchiveFrames<'_>) -> Result<usize, AppError> {
+    frames.bytes_with_caps(LATER_OVERHEAD, LATER_BODY_CAPS)
 }
 
 fn seal_archive(
@@ -221,7 +225,7 @@ pub(super) fn open_data(
     Ok(plain)
 }
 
-fn later_id(raw: &[u8]) -> ArchiveHeadId {
+pub(super) fn later_id(raw: &[u8]) -> ArchiveHeadId {
     ArchiveHeadId::from_bytes(blake3::derive_key(LATER_ID_DOMAIN, raw))
 }
 

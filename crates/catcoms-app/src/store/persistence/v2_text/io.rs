@@ -44,7 +44,12 @@ fn regular(metadata: &fs::Metadata) -> bool {
 /// The only names accepted by the physical reader are fixed literals selected in this
 /// module or the complete hex encoding of an authenticated immutable control ID.
 pub(super) fn fixed_child(base: &Path, leaf: &'static str) -> Result<PathBuf, AppError> {
-    if !matches!(
+    require_fixed_leaf(leaf)?;
+    child(base, leaf)
+}
+
+fn require_fixed_leaf(leaf: &'static str) -> Result<(), AppError> {
+    if matches!(
         leaf,
         "head.bin"
             | "head.stage"
@@ -65,9 +70,19 @@ pub(super) fn fixed_child(base: &Path, leaf: &'static str) -> Result<PathBuf, Ap
             | "text.add.head-stage.v2"
             | "text.pages"
     ) {
-        return Err(refused());
+        Ok(())
+    } else {
+        Err(refused())
     }
-    child(base, leaf)
+}
+
+pub(super) fn governed_add_successor_child(
+    base: &Path,
+    stage: &'static str,
+    parent: &[u8; 32],
+) -> Result<PathBuf, AppError> {
+    require_fixed_leaf(stage)?;
+    child(base, &format!("{stage}.next.{}", hex::encode(parent)))
 }
 
 fn child(base: &Path, leaf: &str) -> Result<PathBuf, AppError> {

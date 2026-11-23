@@ -344,14 +344,19 @@ parent so a later selection cannot resume signing it. Its live Add owner records
 that handoff and refuses to spend it on a different request. The host still
 owns the durable selection proof and must restore consumed nonces from the
 covered journals before enabling later cold Adds.
-Native storage and transport still need to produce and cover the later Add
-and advance the existing members to the new epoch.
+The warm native writer covers a later Add under stage names bound to the exact
+selected predecessor. It writes the newer archive and selector after checking
+the original predecessor's physical files and the signed invitation journal.
+The writer releases the complete signed Welcome after the new selector is
+covered and the original Core and SDK are installed. An interrupted later
+transaction blocks cold activation at its old Head. Existing members still
+need native delivery and durable installation of the successor Commit.
 
 The closed founder SDK can be reopened from a later Add snapshot using the
 complete governing prefix and the original bootstrap genesis. It checks the
 selected Header and Admission, the resulting state commitment and epoch, the
 original founder key, the SDK authenticator, and the full active roster.
-The native store still owns the durable archive selection and cold activation.
+The native store checks the original physical archive selection for cold activation.
 Cold recovery can answer an exact repeat from a predecessor archive. It matches
 the original request bytes, checks the retained file identity and ciphertext,
 then returns the Welcome and governing proof through that request's own Add.
@@ -361,8 +366,8 @@ original pin. It prepares the final Add for host selection and retains its
 own Admission from that Add. The native joined journal writes a distinct
 later-entry version and requires the exact new selected-history page on cold
 open. The original first-entry version and legacy first outcome remain
-readable. The native founder's later writer is still needed to exercise the
-connected exchange and physical reopen together.
+readable. The connected later Welcome and physical joiner reopen still need
+end-to-end coverage.
 
 An existing joined member can stage and merge the exact later Add on a closed
 candidate graph while its live epoch remains unchanged. The SDK checks the

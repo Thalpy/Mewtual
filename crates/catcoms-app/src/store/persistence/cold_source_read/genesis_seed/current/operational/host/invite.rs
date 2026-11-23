@@ -281,8 +281,11 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         negative: &RequestCancellation,
     ) -> Result<(), AppError> {
         let store = layout.checked_store()?;
-        let first = self.governed_add.is_none();
-        if first {
+        let starts = self
+            .governed_add
+            .as_ref()
+            .is_none_or(|pending| pending.installed.is_some() && !pending.matches_request(packet));
+        if starts {
             self.require_received_join_request(layout, packet, routing_plan, keys, negative)?;
         }
         let require_live = || {
@@ -298,30 +301,39 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             .ok_or_else(refused)?
             .require_quiescent_for_add()?;
         let owner = self.owner.borrow_current()?;
-        if first {
-            let mut parent = PreparedV2TextParentCapture::prepare(store, owner.source())?;
-            let resources = parent.resources().clone();
-            store.with_v2_text_current(&owner, |admission| {
-                let guard = store.lock_v2_text_current_group(admission, &resources)?;
-                guard.require_governed_native_invite_parent()?;
-                parent.capture(&guard)?.genesis_member_anchor_data(&guard)?;
-                require_live()
-            })?;
-            let original = PendingGovernedAdd::prepare(store, &owner, parent, packet, rng)?;
+        if starts {
+            let (parent, installed) = if let Some(previous) = &self.governed_add {
+                (
+                    previous.parent.clone(),
+                    Some(previous.installed.ok_or_else(refused)?),
+                )
+            } else {
+                let mut parent = PreparedV2TextParentCapture::prepare(store, owner.source())?;
+                let resources = parent.resources().clone();
+                store.with_v2_text_current(&owner, |admission| {
+                    let guard = store.lock_v2_text_current_group(admission, &resources)?;
+                    guard.require_governed_native_invite_parent()?;
+                    parent.capture(&guard)?.genesis_member_anchor_data(&guard)?;
+                    require_live()
+                })?;
+                (std::sync::Arc::new(parent), None)
+            };
+            let original =
+                PendingGovernedAdd::prepare(store, &owner, parent, packet, rng, installed)?;
             self.governed_add = Some(Box::new(original));
         }
         self.governed_add
             .as_ref()
             .ok_or_else(refused)?
             .require_request(store, packet)?;
-        let mut read = InviteRecoveryRead::prepare(store, None)?;
-        let p = self.governed_add.as_ref().ok_or_else(refused)?;
+        let p = self.governed_add.as_mut().ok_or_else(refused)?;
+        let mut read = InviteRecoveryRead::prepare(store, p.fence.later_parent_data())?;
         let resources = p.parent.resources().clone();
         let selected = p.parent.selected_data().ok_or_else(refused)?;
         store.with_v2_text_current(&owner, |admission| {
             let guard = store.lock_v2_text_current_group(admission, &resources)?;
             guard.require_governed_native_invite_parent()?;
-            selected.validate_under_current_guard(&guard)?;
+            p.fence.require_parent_current(&guard, selected)?;
             require_live()?;
             read.capture(&guard)
         })?;

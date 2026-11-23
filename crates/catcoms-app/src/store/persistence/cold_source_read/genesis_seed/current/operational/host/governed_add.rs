@@ -15,11 +15,12 @@ use catcoms_mls::persist::text_current_add::{
 use catcoms_sync::{
     owner_v2::V2InstalledFounderAddData, V2JoinRequestPacketData, MAX_V2_JOIN_REQUEST_PACKET_BYTES,
 };
+use std::sync::Arc;
 
 pub(super) struct PendingGovernedAdd {
     // Physical write handles drain before the associated selected capture.
     pub(super) fence: PreparedGovernedAddFence,
-    pub(super) parent: PreparedV2TextParentCapture,
+    pub(super) parent: Arc<PreparedV2TextParentCapture>,
     pub(super) sdk: Option<TextCurrentAddAdmission>,
     core: Option<catcoms_replication::chat::V2GeneralCandidate>,
     pub(super) installed: Option<(TextHeadIdData, V2InstalledFounderAddData)>,
@@ -50,9 +51,10 @@ impl PendingGovernedAdd {
     pub(super) fn prepare(
         store: &ServerStore,
         owner: &super::super::owner::V2TextOwnerRef<'_>,
-        parent: PreparedV2TextParentCapture,
+        parent: Arc<PreparedV2TextParentCapture>,
         packet: &V2JoinRequestPacketData<'_>,
         rng: &mut dyn catcoms_rt::CryptoRngCore,
+        installed: Option<(TextHeadIdData, V2InstalledFounderAddData)>,
     ) -> Result<Self, AppError> {
         let frame = packet.packet_bytes_data();
         let selected = parent.selected_data().ok_or_else(refused)?;
@@ -69,8 +71,18 @@ impl PendingGovernedAdd {
         let fee = pool.try_reserve(bytes)?;
         fee.validate(pool, bytes)?;
         let sdk = prepare_sdk_admission(store)?;
-        let fence =
-            PreparedGovernedAddFence::prepare(store, owner.source(), selected, packet, rng)?;
+        let fence = if let Some(installed) = installed {
+            PreparedGovernedAddFence::prepare_later(
+                store,
+                owner.source(),
+                selected,
+                packet,
+                installed,
+                rng,
+            )?
+        } else {
+            PreparedGovernedAddFence::prepare(store, owner.source(), selected, packet, rng)?
+        };
         Ok(Self {
             fence,
             parent,
@@ -87,7 +99,7 @@ impl PendingGovernedAdd {
         store: &ServerStore,
         packet: &V2JoinRequestPacketData<'_>,
     ) -> Result<(), AppError> {
-        if self.request != packet.packet_bytes_data() {
+        if !self.matches_request(packet) {
             return Err(refused());
         }
         let pool = &store
@@ -100,6 +112,10 @@ impl PendingGovernedAdd {
             pool,
             4 * std::mem::size_of::<Self>() + self.request.len() + 4096,
         )
+    }
+
+    pub(super) fn matches_request(&self, packet: &V2JoinRequestPacketData<'_>) -> bool {
+        self.request == packet.packet_bytes_data()
     }
 }
 
@@ -114,10 +130,9 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         rng: &mut impl catcoms_rt::CryptoRngCore,
         negative: &catcoms_rt::RequestCancellation,
     ) -> Result<crate::store::NativeTextSavedJoinResponse, AppError> {
-        let continuing_selection = self
-            .governed_add
-            .as_mut()
-            .is_some_and(|pending| pending.fence.head_selection_entered());
+        let continuing_selection = self.governed_add.as_mut().is_some_and(|pending| {
+            pending.matches_request(packet) && pending.fence.head_selection_entered()
+        });
         if !continuing_selection {
             self.execute_governed_add_sdk(layout, packet, routing_plan, keys, cuts, rng, negative)?;
         }

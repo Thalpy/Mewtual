@@ -1,11 +1,14 @@
 //! Warm coverage of the exact complete SDK Welcome response. A covered
 //! response stays private until the same Add is selected and installed.
 use super::*;
+use crate::store::critical_namespaces::archive_current_codec::GenesisPublicData;
 use crate::store::native_text_invite::PreparedNativeTextJoinResponse;
 use crate::store::NativeTextSavedJoinResponse;
 use catcoms_replication::chat::owner_header::SignedOwnerHeader;
+use catcoms_replication::chat::owner_state::transition::ReplayBody;
 use catcoms_sync::{
-    V2AdmissionStepData, V2FirstAddProofData, V2JoinResponseData, MAX_V2_FIRST_ADD_PROOF_BYTES,
+    V2AdmissionStepData, V2FirstAddProofData, V2GoverningJoinDeliveryData, V2GoverningJoinStepData,
+    V2JoinResponseData, MAX_V2_FIRST_ADD_PROOF_BYTES, MAX_V2_GOVERNING_JOIN_PREFIX_BYTES,
 };
 
 mod archive_file;
@@ -81,8 +84,14 @@ impl PreparedGovernedAddFence {
                 return Err(refused());
             }
         } else {
-            const BYTES: usize = 6 * (response::MAX_BYTES + 1)
-                + 4 * MAX_V2_FIRST_ADD_PROOF_BYTES
+            let later = self.held.later.as_deref();
+            let proof_bound = if later.is_some() {
+                MAX_V2_GOVERNING_JOIN_PREFIX_BYTES
+            } else {
+                MAX_V2_FIRST_ADD_PROOF_BYTES
+            };
+            let bytes = 6 * (response::MAX_BYTES + 1)
+                + 4 * proof_bound
                 + 4 * std::mem::size_of::<PreparedResponse>()
                 + 4096;
             let pool = &store
@@ -91,8 +100,8 @@ impl PreparedGovernedAddFence {
                 .ok_or_else(refused)?
                 .pending
                 .pool;
-            let fee = pool.try_reserve(BYTES)?;
-            fee.validate(pool, BYTES)?;
+            let fee = pool.try_reserve(bytes)?;
+            fee.validate(pool, bytes)?;
             original.require_packet(response)?;
             let (signature, _) = header.raw.as_ref().ok_or_else(refused)?;
             governing_record::require_original_signature(
@@ -101,23 +110,45 @@ impl PreparedGovernedAddFence {
                 outcome.unsigned_data().signing_bytes_data(),
             )?;
             let genesis = source.data();
-            let proof = V2FirstAddProofData::encode(
-                genesis.profile,
-                V2AdmissionStepData {
-                    admission: genesis.admission,
-                    header: genesis.header,
-                    image: genesis.state,
-                },
-                V2AdmissionStepData {
-                    admission: outcome.admission_data(),
-                    header: signed_header,
-                    image: outcome.unsigned_data().image_data(),
-                },
-            )?;
+            let proof = if let Some(later) = later {
+                later.encode_successor_proof(
+                    &GenesisPublicData {
+                        profile: genesis.profile,
+                        admission: genesis.admission,
+                        header: genesis.header,
+                        image: genesis.state,
+                    },
+                    V2GoverningJoinStepData {
+                        header: signed_header,
+                        image: outcome.unsigned_data().image_data(),
+                        body: ReplayBody::Admission(outcome.admission_data()),
+                    },
+                )?
+            } else {
+                V2FirstAddProofData::encode(
+                    genesis.profile,
+                    V2AdmissionStepData {
+                        admission: genesis.admission,
+                        header: genesis.header,
+                        image: genesis.state,
+                    },
+                    V2AdmissionStepData {
+                        admission: outcome.admission_data(),
+                        header: signed_header,
+                        image: outcome.unsigned_data().image_data(),
+                    },
+                )?
+            };
             let packet = Zeroizing::new(response.encode_packet_data()?);
+            if later.is_some() {
+                // Verify the complete frame fits before covering the private
+                // archive and committing the governing successor.
+                drop(V2GoverningJoinDeliveryData::encode(&packet, &proof)?);
+            }
             let key = Zeroizing::new(store.keys.db_key()?);
             let frame = response::seal_data(&key, raw_frame, &packet, rng)?;
-            let packet = PreparedNativeTextJoinResponse::prepare(pool, packet, proof)?;
+            let packet =
+                PreparedNativeTextJoinResponse::prepare(pool, packet, proof, later.is_some())?;
             stage.response = Some(PreparedResponse {
                 record: PreparedSmallControl::new(frame),
                 packet,
