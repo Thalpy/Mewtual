@@ -446,14 +446,15 @@ impl NativeColdTail {
     pub(in crate::store::critical_namespaces) fn finish(
         &self,
         store: &ServerStore,
-        require_idle_joined: bool,
+        joined: crate::store::persistence::governance_layout::joined::JoinedPinOpening,
     ) -> Result<(), AppError> {
+        use crate::store::persistence::governance_layout::joined::JoinedPinOpening;
         match self {
             Self::Observed => {
                 super::native_registry::lifecycle::finish_governed_cold_observation(store)?;
-                store.finish_joined_pin_selection(require_idle_joined)
+                store.finish_joined_pin_selection(joined)
             }
-            Self::Declared { .. } if require_idle_joined => Err(refused()),
+            Self::Declared { .. } if joined != JoinedPinOpening::Any => Err(refused()),
             Self::Declared { declaration, fee } => {
                 let policy = store
                     .governance_layout_policy

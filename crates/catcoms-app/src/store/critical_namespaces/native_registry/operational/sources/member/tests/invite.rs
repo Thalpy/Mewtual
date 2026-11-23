@@ -77,7 +77,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
     use rand_core::{RngCore, SeedableRng};
 
     let founder_dir = tempfile::tempdir().unwrap();
-    let (founder, founder_budget) = selected_governed(founder_dir.path());
+    let (founder, founder_budget) = selected_joined(founder_dir.path());
     let (owner, row) = activate(
         prepared_mesh_founder_with_clock(
             &founder,
@@ -113,6 +113,11 @@ async fn mounted_join_fixture(recover_stage: bool) {
         .path()
         .join("chat-critical-namespaces.joined-pending.bin");
 
+    assert!(owner
+        .capture_join_request(command(&founder, &founder_budget))
+        .cover(&invite, anchor, token, now, &negative, &mut rng)
+        .is_err());
+    assert!(!founder_dir.path().join(path.file_name().unwrap()).exists());
     assert!(original
         .capture_join_request(command(&founder, &founder_budget))
         .cover(&invite, anchor, token, now, &negative, &mut rng)
@@ -168,6 +173,70 @@ async fn mounted_join_fixture(recover_stage: bool) {
         .unwrap();
     let local_transport = waiting.local_transport_data();
     assert!(waiting.receive().await.is_err());
+    let (original, vault) = if recover_stage {
+        let mut retirement = original.prepare_retirement().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while retirement.try_retire().unwrap()
+                == crate::store::NativeTextSourceRetirementStatus::Pending
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the original pending TCP actor drained before restart");
+        drop(retirement);
+        drop(original);
+        drop(vault);
+        let mut current = current_policy();
+        current.archive = current
+            .archive
+            .with_checkpoint_join_execution(2, 10_000)
+            .unwrap();
+        let cold = crate::store::NativeTextJoinedStorage::open_for_native_startup(
+            dir.path(),
+            SECRET,
+            &mut rng,
+            current,
+        )
+        .unwrap();
+        assert_eq!(cold.row_count_data().unwrap(), 0);
+        assert!(cold.pending_join_data().unwrap() == Some(selected));
+        assert_eq!(
+            cold.recovered_join_transport_data().unwrap(),
+            Some(local_transport)
+        );
+        let vault = cold
+            .into_native_vault_without_registered_row(
+                (
+                    Arc::new(std::sync::atomic::AtomicU64::new(7)),
+                    Arc::new(std::sync::atomic::AtomicU64::new(7)),
+                    Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                ),
+                budget.clone(),
+            )
+            .unwrap();
+        let original = vault
+            .capture_native_sources(policy().prepare().unwrap())
+            .finish()
+            .unwrap();
+        assert!(original
+            .prepare_creation(command(&vault, &budget), request(1, "Wrong role"), inputs())
+            .is_err());
+        let capture = || original.capture_join_request(command(&vault, &budget));
+        let mut untouched_rng = rng.clone();
+        assert!(capture()
+            .cover(&invite, anchor, [62; 32], after, &negative, &mut rng)
+            .is_err());
+        assert!(capture()
+            .cover(&invite, anchor, token, after, &negative, &mut rng)
+            .is_ok_and(|original| original == selected));
+        assert_eq!(rng.next_u64(), untouched_rng.next_u64());
+        assert_eq!(std::fs::read(&path).unwrap(), ciphertext);
+        (original, vault)
+    } else {
+        (original, vault)
+    };
+    let capture = || original.capture_join_request(command(&vault, &budget));
     let founder_capture = || {
         owner.capture_member(
             &row,
@@ -1526,6 +1595,14 @@ async fn native_governed_add_fixture(case: JoinCase) {
         assert!(ambiguous.recovered_join_outcome_data().unwrap().is_none());
         assert!(ambiguous.first_join_request_data().is_err());
         drop(ambiguous);
+        assert!(NativeTextJoinedStorage::open_for_native_startup(
+            join_dir,
+            SECRET,
+            &mut join_rng,
+            current_policy()
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&entry).unwrap(), exact_entry);
         let mut corrupt = exact_outcome.clone();
         *corrupt.last_mut().unwrap() ^= 1;
         std::fs::write(&outcome, &corrupt).unwrap();

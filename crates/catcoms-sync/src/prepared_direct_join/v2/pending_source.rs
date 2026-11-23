@@ -56,6 +56,82 @@ impl SealedV2PendingJoinSource {
     pub fn encrypted_parts(&self) -> (&[u8; 24], &[u8]) {
         (&self.blob.nonce, &self.blob.ciphertext)
     }
+
+    /// The native journal owner must hold the exact selected Pending, its
+    /// accepted pin, and the checked pre-Welcome state for this vault. Restore
+    /// its private package under a separate current native cut. The Welcome
+    /// SDK entry still requires the original durable Entry and its own cut.
+    pub fn restore_native_pre_welcome(
+        &self,
+        key: &[u8; 32],
+        expected: V2PendingJoinContextData,
+        accepted: &SignedInviteBindingData,
+        limits: DirectJoinLimits,
+        mut native: NativeV2JoinKeyEntry<'_>,
+    ) -> Result<PreparedV2JoinRequest, SyncError> {
+        expected.validate()?;
+        native.enter(NativeChatKeyPurpose::JoinerPendingSource)?;
+        let mut original = self.decode_source(key, expected, accepted, limits)?;
+        original.native_origin = Some(native.original.clone());
+        original.sealed_source = Some(Self {
+            blob: SealedBlob {
+                nonce: self.blob.nonce,
+                ciphertext: self.blob.ciphertext.clone(),
+            },
+            original: Some((expected, *blake3::keyed_hash(key, TAG).as_bytes())),
+        });
+        Ok(original)
+    }
+
+    fn decode_source(
+        &self,
+        key: &[u8; 32],
+        expected: V2PendingJoinContextData,
+        accepted: &SignedInviteBindingData,
+        limits: DirectJoinLimits,
+    ) -> Result<PreparedV2JoinRequest, SyncError> {
+        expected.validate()?;
+        let key = Zeroizing::new(blake3::derive_key(KEY_DOMAIN, key));
+        let plain = Zeroizing::new(unseal(&key, &self.blob).map_err(|_| SyncError::Malformed)?);
+        let mut d = Decoder::new(&plain);
+        let malformed = |_| SyncError::Malformed;
+        if d.get_bytes().map_err(malformed)? != TAG || d.get_u16().map_err(malformed)? != VERSION {
+            return Err(SyncError::Malformed);
+        }
+        for value in expected.fields() {
+            if d.get_bytes().map_err(malformed)? != value {
+                return Err(SyncError::JoinRejected);
+            }
+        }
+        let request = d.get_bytes().map_err(malformed)?;
+        let master = d.get_bytes().map_err(malformed)?;
+        d.finish().map_err(malformed)?;
+        if request.len() > limits.exchange
+            || master.is_empty()
+            || master.len() > limits.provider.min(MAX_MASTER)
+        {
+            return Err(SyncError::Malformed);
+        }
+        let packet = V2JoinRequestPacketData::decode(request)?;
+        if packet.invite.encode() != accepted.encode()
+            || packet.invite.spec_data().inviter != accepted.spec_data().anchor.founder
+        {
+            return Err(SyncError::JoinRejected);
+        }
+        let original = PreparedV2JoinRequest {
+            request: Bytes::copy_from_slice(request),
+            master: Zeroizing::new(master.to_vec()),
+            limits,
+            welcome_entered: false,
+            native_origin: None,
+            completed: None,
+            sealed_source: None,
+            sealed_outcome: None,
+            initial_prefix_origin: None,
+        };
+        original.validate_retained_package_data()?;
+        Ok(original)
+    }
 }
 
 impl PreparedV2JoinRequest {
@@ -123,46 +199,7 @@ impl RecoveredV2PendingJoinSource {
         accepted: &SignedInviteBindingData,
         limits: DirectJoinLimits,
     ) -> Result<Self, SyncError> {
-        expected.validate()?;
-        let key = Zeroizing::new(blake3::derive_key(KEY_DOMAIN, key));
-        let plain = Zeroizing::new(unseal(&key, &sealed.blob).map_err(|_| SyncError::Malformed)?);
-        let mut d = Decoder::new(&plain);
-        let malformed = |_| SyncError::Malformed;
-        if d.get_bytes().map_err(malformed)? != TAG || d.get_u16().map_err(malformed)? != VERSION {
-            return Err(SyncError::Malformed);
-        }
-        for value in expected.fields() {
-            if d.get_bytes().map_err(malformed)? != value {
-                return Err(SyncError::JoinRejected);
-            }
-        }
-        let request = d.get_bytes().map_err(malformed)?;
-        let master = d.get_bytes().map_err(malformed)?;
-        d.finish().map_err(malformed)?;
-        if request.len() > limits.exchange
-            || master.is_empty()
-            || master.len() > limits.provider.min(MAX_MASTER)
-        {
-            return Err(SyncError::Malformed);
-        }
-        let packet = V2JoinRequestPacketData::decode(request)?;
-        if packet.invite.encode() != accepted.encode()
-            || packet.invite.spec_data().inviter != accepted.spec_data().anchor.founder
-        {
-            return Err(SyncError::JoinRejected);
-        }
-        let original = PreparedV2JoinRequest {
-            request: Bytes::copy_from_slice(request),
-            master: Zeroizing::new(master.to_vec()),
-            limits,
-            welcome_entered: false,
-            native_origin: None,
-            completed: None,
-            sealed_source: None,
-            sealed_outcome: None,
-            initial_prefix_origin: None,
-        };
-        original.validate_retained_package_data()?;
+        let original = sealed.decode_source(key, expected, accepted, limits)?;
         Ok(Self {
             request: original.request,
             limits,

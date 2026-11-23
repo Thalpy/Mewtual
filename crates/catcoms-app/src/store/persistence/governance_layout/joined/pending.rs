@@ -301,9 +301,15 @@ impl ServerStore {
             if original.transport_data()?.is_some() != native {
                 return Err(denied());
             }
+        } else if self.selected_pending_join_data()?.is_some() {
+            let AcceptedJoinTransport::Native(key) = accepted.transport else {
+                return Err(denied());
+            };
+            *pending =
+                Some(self.restore_native_pending_before_welcome(binding, accepted.token, key)?);
+            require_live()?;
         } else {
             if binding.expired_at_data(accepted.now_ms)
-                || self.selected_pending_join_data()?.is_some()
                 || self
                     .selected_joined_pin_context_data(accepted.anchor)?
                     .is_some()
@@ -356,6 +362,72 @@ impl ServerStore {
         }
         require_live()?;
         Ok(selected)
+    }
+
+    fn restore_native_pending_before_welcome(
+        &self,
+        invite: &SignedInviteBindingData,
+        token: [u8; 32],
+        native: NativeV2JoinKeyEntry<'_>,
+    ) -> Result<JoinedPendingIo, AppError> {
+        self.validate_mounted_governance_layout()?;
+        let policy = self.governance_layout_policy.as_ref().ok_or_else(denied)?;
+        let pool = &policy.current.archive.pending.pool;
+        let fee = pool.try_reserve(SOURCE_FEE)?;
+        let catalog_fee = pool.try_reserve(governance::codec::DECLARATION_FEE)?;
+        let key = Zeroizing::new(self.keys.db_key()?);
+        let guard = self.joined_pin_index.lock().map_err(|_| denied())?;
+        let selected = guard.as_ref().ok_or_else(denied)?;
+        let exact_request = self
+            .require_recovered_request(selected)?
+            .request_bytes_data();
+        let original_catalog = selected.cold_catalog.as_ref().ok_or_else(denied)?;
+        let packet =
+            catcoms_sync::V2JoinRequestPacketData::decode(exact_request).map_err(|_| denied())?;
+        let original = packet.founder_add_data();
+        if original.invite.encode() != invite.encode()
+            || original.request.spec_data().request_token != token
+        {
+            return Err(denied());
+        }
+        let pending = selected.pending.as_ref().ok_or_else(denied)?;
+        if pending._pending.transport_data()?.is_none() {
+            return Err(denied());
+        }
+        let (file, raw) = &pending.original;
+        let prepared = RecoveredPinnedPending::restore_native_pre_welcome(
+            &key,
+            selected.index.layout_data(),
+            raw,
+            first_join_limits()?,
+            native,
+        )?;
+        let output = JoinedPendingIo {
+            prepared,
+            exact: Zeroizing::new(raw.to_vec()),
+            pending: Some(CreatedStage {
+                file: file.try_clone().map_err(io)?,
+                identity: Some(session_id(file).map_err(io)?),
+            }),
+            staged: true,
+            stage: None,
+            directory: GovernanceDirectoryCapture {
+                file: original_catalog.directory.file.try_clone().map_err(io)?,
+                identity: original_catalog.directory.identity,
+            },
+            catalog: (
+                original_catalog.current.0.try_clone().map_err(io)?,
+                Zeroizing::new(original_catalog.current.1.to_vec()),
+            ),
+            welcome: None,
+            _fee: fee,
+            _catalog_fee: catalog_fee,
+        };
+        output.require_catalog(self)?;
+        self.require_recovered_request(selected)?;
+        drop(guard);
+        output.request_data(self)?;
+        Ok(output)
     }
 
     pub(in crate::store) fn prepare_joined_pending(
@@ -570,6 +642,18 @@ impl ServerStore {
             .filter(|pending| pending.welcome.is_none())
             .ok_or_else(denied)?;
         Ok(pending._pending.pending_data().0)
+    }
+
+    pub(super) fn require_native_pre_welcome(
+        &self,
+        selected: &SelectedPinIndex,
+    ) -> Result<(), AppError> {
+        self.require_recovered_request(selected)?;
+        let pending = selected.pending.as_ref().ok_or_else(denied)?;
+        if pending._pending.transport_data()?.is_none() {
+            return Err(denied());
+        }
+        Ok(())
     }
 
     pub(in crate::store) fn copy_recovered_join_request(

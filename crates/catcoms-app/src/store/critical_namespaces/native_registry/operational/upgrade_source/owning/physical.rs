@@ -169,13 +169,20 @@ impl Physical {
     }
 
     pub(super) fn require_empty_mounted_joined_pins(&self) -> Result<(), AppError> {
+        self.require_mounted_joined_without_row(false)
+    }
+
+    pub(super) fn require_mounted_joined_without_row(
+        &self,
+        allow_native_pending: bool,
+    ) -> Result<(), AppError> {
         let cell = self.cell.try_lock().map_err(|_| refused())?;
         cell.require_idle()?;
         self.handler.require()?;
         self.handler.require_idle_cached()?;
         self.current()?
             .checked_store()?
-            .require_empty_mounted_joined_pins()
+            .require_mounted_joined_pin_without_row(allow_native_pending)
     }
 
     pub(super) fn require_registered_native_join(
@@ -420,9 +427,9 @@ impl Physical {
     pub(super) fn finish_governed_cold(
         &self,
         tail: &crate::store::critical_namespaces::governance_layout::NativeColdTail,
-        require_idle_joined: bool,
+        joined: JoinedPinOpening,
     ) -> Result<(), AppError> {
-        tail.finish(self.current()?.checked_store()?, require_idle_joined)
+        tail.finish(self.current()?.checked_store()?, joined)
     }
     #[cfg(test)]
     pub(super) fn handler_for_test(&self) -> lifecycle_admission::Handler {
@@ -643,6 +650,9 @@ impl SourceWork {
             .ok_or_else(refused)?;
         if configured.pending.execution.is_none() || store.member_outbox_policy().is_none() {
             return Err(refused());
+        }
+        if self.physical.handler.uses_joined_pin_layout() {
+            store.require_empty_mounted_joined_pins()?;
         }
         store.validate_mounted_member_outbox_layout()
     }
@@ -1397,6 +1407,13 @@ impl MetadataWork {
             require_caller()
         };
         self.with_joined_store(|store| {
+            if pending.is_none() {
+                let handler = &self.physical.handler;
+                let inventory = UpgradeInventory::capture(store, handler.debit(), handler.pool())?;
+                super::super::super::super::lifecycle::preparation::require_no_selected_native_founder(
+                    store, &inventory,
+                )?;
+            }
             store.cover_accepted_first_join(pending, accepted, require_current, rng)
         })
     }
@@ -1451,6 +1468,12 @@ impl MetadataWork {
                 ),
             ))
         })
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn has_covered_join_request(
+        &self,
+    ) -> Result<bool, AppError> {
+        self.with_joined_store(|store| Ok(store.selected_pending_join_data()?.is_some()))
     }
 
     pub(in crate::store::critical_namespaces::native_registry) fn cover_join_delivery(

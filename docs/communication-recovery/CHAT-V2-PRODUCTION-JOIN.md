@@ -232,6 +232,14 @@ The mounted request selects a revision-two Pending that encrypts a fresh local
 transport seed and its derived TCP port. The Pending identity binds the public
 transport commitment and port in addition to the exact request and predecessor
 pin index. The warm and cold read paths return the same public reservation.
+After a restart with an empty registry and neither Welcome file, an
+authenticated desktop Join can resume the exact previously accepted invite
+and request token. A separate native key purpose restores the original
+private package from the held Pending. The desktop reuses the original
+request bytes, TCP identity and port. An expired invite can only reach this
+path as an exact retry of the already covered request. An unresolved join
+prevents native Found on that vault. A selected native founder prevents the
+vault from covering a first join.
 Revision-one requests keep their current read path. The mounted owner starts
 one actual paid TCP actor from the covered seed and loans it to the original
 request invocation. Cancelling before installation returns that actor for the
@@ -295,9 +303,9 @@ independently restored graph into a closed node, using its own original
 verified prefix and held catalog, pin and outcome files. Equal-byte replacements
 of those files refuse, including after the closed node is attached. A prefix
 refusal before attachment preserves the original transport, RNG and clock
-inputs so that the same owner can retry. Cold attachment never re-enters
-Welcome or creates fresh join facts. Native registry installation, restoring
-the original native transport and ordinary-member save admission remain open.
+inputs so that the same owner can retry. The cold attachment for a completed
+Welcome uses the selected Outcome and restores the native row, transport and
+ordinary-member save source.
 Warm and recovered nodes can read the same original signed first governing
 proof by its genesis and selected Add Header IDs. This bounded archive read
 returns the original public proof from the covered delivery under a separate
@@ -309,10 +317,11 @@ using the signed TCP port and complete peer identity from the covered invite.
 One scheduler permit follows the exact dial into the transport, where stale
 caller, vault or invocation ownership refuses submission. The caller waits for
 the expected peer's authenticated handshake before exchanging the request.
-An independently reopened Pending with no Welcome files can resend the exact
-original request over the same connected protocol. It verifies the reply
-against that request and the original held files before returning delivery data.
-Restart authorization for new Welcome SDK entry remains a separate requirement.
+An independently reopened Pending with neither Welcome file can resend the
+exact original request over the same connected protocol. It verifies the
+reply against that request and the original held files before covering Entry
+and checking the separate Welcome SDK permission. Cold startup with only a
+covered Entry holds that state for inspection and refuses to re-enter Welcome.
 The warm exchange keeps the original connection and vault cancellation through response
 receipt and rechecks that authority before covering or entering the Welcome.
 Revocation after covering Entry and before SDK entry leaves no Outcome.
@@ -401,8 +410,11 @@ The approved joined row can look up a saved request through that context.
 An absent namespace stays absent. An ambiguous or damaged namespace refuses
 and preserves the original files.
 The desktop history route pages the original locally saved actions through
-the same context, including after a cold reopen. This is the local member
-outbox view. Peer catch-up and shared history projection remain open.
+the same context, including after a cold reopen. A separate desktop view
+pages the joined device's saved received messages through the held history
+namespace, replaying each exact selected action under the current Core
+guard. Joined dependency repair is bounded to the original authenticated
+carrier. General peer catch-up remains open.
 
 The warm joined node can draw and sign an ordinary action through the original
 native Joiner Source. Its signing cut requires the ordinary member purpose and

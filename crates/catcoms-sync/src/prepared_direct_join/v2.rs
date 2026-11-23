@@ -100,8 +100,8 @@ impl fmt::Debug for V2JoinRequestPacketData<'_> {
 }
 
 /// Retains one exact signed request and the same private KeyPackage bundle.
-/// Only fresh preparation can construct this owner. Neither a packet decoder
-/// nor historical labels can construct or extract its private provider.
+/// The fresh producer and the checked native cold Pending path can construct
+/// this owner. A packet decoder cannot construct or extract its provider.
 pub struct PreparedV2JoinRequest {
     request: Bytes,
     master: Zeroizing<Vec<u8>>,

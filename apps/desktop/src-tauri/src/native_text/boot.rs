@@ -1,6 +1,5 @@
-//! One owned warm startup chain and an explicit joined-aware cold opener
-//! for idle native vaults. Once a warm transaction exists, only that exact
-//! transaction may finish it.
+//! One owned warm startup chain and a joined-aware cold opener. A resumed
+//! native join uses its exact covered request or its completed Welcome.
 use super::*;
 use catcoms_app::store::{
     ArchiveBootstrapCatalogPolicy, CanonicalFilenameInventoryPolicy, CriticalCatalogReadPool,
@@ -123,7 +122,7 @@ impl Bootstrap {
                         match storage.row_count_data().map_err(|_| EXISTING)? {
                             0 => {
                                 let vault = storage
-                                    .into_idle_native_vault(atoms, budget)
+                                    .into_native_vault_without_registered_row(atoms, budget)
                                     .map_err(|_| EXISTING)?;
                                 super::sources::ReadyBundle::new(vault, &source_policy)
                             }

@@ -47,6 +47,7 @@ impl JoinedAnchorPin {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn open_pending_source(
         &self,
         key: &[u8; 32],

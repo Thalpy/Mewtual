@@ -200,8 +200,8 @@ impl NativeTextJoinedStorage {
         })
     }
 
-    /// Reopen once for native startup. The zero-row branch checks the original
-    /// joined catalog is empty before completing any pending Core selection.
+    /// Reopen once for native startup. An unpublished native Pending is
+    /// eligible only while the selected vault has neither Welcome file.
     pub fn open_for_native_startup(
         directory: &std::path::Path,
         secret: &[u8],
@@ -236,6 +236,21 @@ impl NativeTextJoinedStorage {
             return Err(refused());
         }
         self.index.require_empty_mounted_joined_pins()?;
+        crate::store::NativeTextVault::from_recovered_joined_index(self.index, session, budget)
+    }
+
+    /// Preserve the original covered Pending when there is still no native
+    /// row or Welcome entry. The next checked Join invocation must identify
+    /// the same accepted invite and request before restoring private custody.
+    pub fn into_native_vault_without_registered_row(
+        self,
+        session: (Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicBool>),
+        budget: crate::store::NativeUiInvocationBudget,
+    ) -> Result<crate::store::NativeTextVault, AppError> {
+        if self.pending.is_some() || self.recovered_tcp.is_some() || self.row_count_data()? != 0 {
+            return Err(refused());
+        }
+        self.index.require_native_joined_without_row()?;
         crate::store::NativeTextVault::from_recovered_joined_index(self.index, session, budget)
     }
 

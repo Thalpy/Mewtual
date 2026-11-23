@@ -368,6 +368,15 @@ pub(in crate::store) struct RecoveredPinnedPending {
     transport: Option<JoinedTransportReservation>,
 }
 
+struct PinnedPendingFields {
+    original: Zeroizing<Vec<u8>>,
+    candidate: Zeroizing<Vec<u8>>,
+    context: V2PendingJoinContextData,
+    transport: Option<JoinedTransportReservation>,
+    sealed: SealedV2PendingJoinSource,
+    accepted: SignedInviteBindingData,
+}
+
 impl RecoveredPinnedPending {
     pub(in crate::store) fn native_transport_seed(&self) -> Result<Zeroizing<[u8; 32]>, AppError> {
         self.transport
@@ -382,6 +391,56 @@ impl RecoveredPinnedPending {
         raw: &[u8],
         limits: DirectJoinLimits,
     ) -> Result<Self, AppError> {
+        let fields = Self::open_fields(key, layout, raw)?;
+        let pending = RecoveredV2PendingJoinSource::open(
+            &fields.sealed,
+            key,
+            fields.context,
+            &fields.accepted,
+            limits,
+        )
+        .map_err(|_| refused())?;
+        Ok(Self {
+            original: fields.original,
+            candidate: fields.candidate,
+            pending,
+            context: fields.context,
+            transport: fields.transport,
+        })
+    }
+
+    /// The physical caller already holds the original Pending and has
+    /// checked that neither Welcome file exists under the mounted vault.
+    pub(in crate::store) fn restore_native_pre_welcome(
+        key: &[u8; 32],
+        layout: CurrentLayoutData,
+        raw: &[u8],
+        limits: DirectJoinLimits,
+        native: NativeV2JoinKeyEntry<'_>,
+    ) -> Result<PreparedPinnedPending, AppError> {
+        let fields = Self::open_fields(key, layout, raw)?;
+        let transport = fields.transport.ok_or_else(refused)?;
+        let source = fields
+            .sealed
+            .restore_native_pre_welcome(key, fields.context, &fields.accepted, limits, native)
+            .map_err(|_| refused())?;
+        Ok(PreparedPinnedPending {
+            source,
+            context: fields.context,
+            invite: fields.accepted.encode(),
+            before: fields.original,
+            next: fields.candidate,
+            sealed: Some(Zeroizing::new(raw.to_vec())),
+            transport: Some(transport),
+            key_id: *blake3::keyed_hash(key, TAG).as_bytes(),
+        })
+    }
+
+    fn open_fields(
+        key: &[u8; 32],
+        layout: CurrentLayoutData,
+        raw: &[u8],
+    ) -> Result<PinnedPendingFields, AppError> {
         if !(HEAD + 40..=MAX_FRAME).contains(&raw.len()) {
             return Err(refused());
         }
@@ -452,15 +511,14 @@ impl RecoveredPinnedPending {
         {
             return Err(refused());
         }
-        let source =
-            SealedV2PendingJoinSource::from_encrypted_parts(nonce, bytes).map_err(|_| refused())?;
-        let pending = original_pin.open_pending_source(key, &source, limits)?;
-        Ok(Self {
+        Ok(PinnedPendingFields {
             original: Zeroizing::new(original.to_vec()),
             candidate: Zeroizing::new(candidate.to_vec()),
-            pending,
             context,
             transport,
+            sealed: SealedV2PendingJoinSource::from_encrypted_parts(nonce, bytes)
+                .map_err(|_| refused())?,
+            accepted,
         })
     }
 

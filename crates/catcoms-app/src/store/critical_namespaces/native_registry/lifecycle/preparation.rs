@@ -254,6 +254,21 @@ pub(in crate::store::critical_namespaces::native_registry) fn lookup_selected_cr
         .transpose()
 }
 
+pub(in crate::store::critical_namespaces::native_registry) fn require_no_selected_native_founder(
+    store: &crate::store::ServerStore,
+    inventory: &crate::store::persistence::native_registry::lifecycle::upgrade::UpgradeInventory,
+) -> Result<(), AppError> {
+    let (index, _) = decode_selected_data(store, inventory)?;
+    if index.rows.iter().any(|row| {
+        row.backend
+            .birth()
+            .is_some_and(|birth| birth.kind == super::data::BirthKind::NativeFounder)
+    }) {
+        return Err(refused());
+    }
+    Ok(())
+}
+
 pub(super) fn decode_selected_data(
     store: &crate::store::ServerStore,
     inventory: &crate::store::persistence::native_registry::lifecycle::upgrade::UpgradeInventory,

@@ -185,9 +185,10 @@ impl NativeTextJoinedRequestPreparation {
         require_current()?;
         let original = self.pending.upgrade().ok_or_else(refused)?;
         let mut pending = original.state.try_lock().map_err(|_| refused())?;
+        let recover = pending.io.is_none() && work.has_covered_join_request()?;
         if token == [0; 32]
             || anchor != &invite.binding().spec_data().anchor
-            || (pending.io.is_none() && invite.binding().expired_at_data(now_ms))
+            || (pending.io.is_none() && !recover && invite.binding().expired_at_data(now_ms))
         {
             return Err(refused());
         }
@@ -198,8 +199,13 @@ impl NativeTextJoinedRequestPreparation {
         }
         let owner = pending.owner.as_ref().ok_or_else(refused)?;
         let source = owner.observe();
+        let purpose = if recover {
+            NativeChatKeyPurpose::JoinerPendingSource
+        } else {
+            NativeChatKeyPurpose::JoinerDevice
+        };
         let mut cut = owner
-            .prepare_cut(&self.command.ui.command, NativeChatKeyPurpose::JoinerDevice)
+            .prepare_cut(&self.command.ui.command, purpose)
             .map_err(|_| refused())?;
         let accepted = AcceptedFirstJoin {
             invite,

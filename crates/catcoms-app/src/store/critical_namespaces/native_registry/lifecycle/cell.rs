@@ -256,6 +256,9 @@ fn change_metadata(
     let mut cell = cell.try_lock().map_err(|_| refused())?;
     handler.require()?;
     let store = current.checked_store()?;
+    if handler.uses_joined_pin_layout() && matches!(request, metadata::Input::FounderBirth(_)) {
+        store.require_empty_mounted_joined_pins()?;
+    }
     if let metadata::Input::RegisterJoined(request, proof) = request {
         if !handler.uses_joined_pin_layout() || request.original != proof.data() {
             return Err(refused());

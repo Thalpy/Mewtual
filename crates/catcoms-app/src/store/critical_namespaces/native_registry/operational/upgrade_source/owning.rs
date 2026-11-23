@@ -15,7 +15,9 @@ use crate::store::critical_namespaces::{
     native_registry::preparation::NativeRegistryHandler, pending_join_codec as grammar,
     shared_history_namespace::Opening,
 };
-use crate::store::persistence::governance_layout::joined::{AcceptedFirstJoin, JoinedPendingIo};
+use crate::store::persistence::governance_layout::joined::{
+    AcceptedFirstJoin, JoinedPendingIo, JoinedPinOpening,
+};
 use crate::store::persistence::native_registry::lifecycle::upgrade::{UpgradeInventory, UpgradeIo};
 use crate::store::{ServerStore, V2CurrentLayoutStore};
 use catcoms_crypto::unseal;
@@ -445,6 +447,12 @@ impl Store {
         self.physical.require_empty_mounted_joined_pins()
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn require_native_joined_without_row(
+        &self,
+    ) -> Result<(), AppError> {
+        self.physical.require_mounted_joined_without_row(true)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn require_registered_native_join(
         &self,
         data: crate::store::NativeTextJoinedRegistrationData,
@@ -706,13 +714,14 @@ impl Store {
             .expect("unexposed original governed physical")
             .install(current);
         let count = value.row_count_data()?;
-        let require_idle_joined = match (opening, count) {
-            (ColdOpening::IdleJoined | ColdOpening::NativeStartup, 0) => true,
+        let joined = match (opening, count) {
+            (ColdOpening::IdleJoined, 0) => JoinedPinOpening::Idle,
+            (ColdOpening::NativeStartup, 0) => JoinedPinOpening::NativeWithoutRow,
             (ColdOpening::NativeStartup, 1)
             | (
                 ColdOpening::Governed | ColdOpening::Joined | ColdOpening::SelectedSharedHistory,
                 _,
-            ) => false,
+            ) => JoinedPinOpening::Any,
             _ => return Err(refused()),
         };
         #[cfg(test)]
@@ -720,10 +729,7 @@ impl Store {
         // No file read follows this same-held proof. Existing4 consumes its
         // original observation; fresh4 retains its overlapping declaration.
         // On failure the destination must close before the tail is destroyed.
-        if let Err(error) = value
-            .physical
-            .finish_governed_cold(&tail, require_idle_joined)
-        {
+        if let Err(error) = value.physical.finish_governed_cold(&tail, joined) {
             drop(value);
             drop(tail);
             return Err(error);

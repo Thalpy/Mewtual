@@ -22,7 +22,7 @@ pub use source_close::NativeChatSourceClose;
 
 const CLOSED: usize = 1 << (usize::BITS - 1);
 const MAX_ENTRIES: usize = 32;
-const PURPOSES: usize = 11;
+const PURPOSES: usize = 12;
 
 /// Closed purposes selected by concrete producers, never a WebView permission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,6 +48,8 @@ pub enum NativeChatKeyPurpose {
     JoinerDevice,
     /// Enter the original joiner's private MLS Welcome operation.
     JoinerWelcomeSdk,
+    /// Reopen the covered pending KeyPackage provider before any Welcome entry.
+    JoinerPendingSource,
 }
 impl NativeChatKeyPurpose {
     fn slot(self) -> usize {
@@ -65,6 +67,7 @@ impl NativeChatKeyPurpose {
             Self::JoinInvite => 8,
             Self::JoinerDevice => 9,
             Self::JoinerWelcomeSdk => 10,
+            Self::JoinerPendingSource => 11,
         }
     }
 }

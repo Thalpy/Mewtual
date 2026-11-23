@@ -16,6 +16,13 @@ use critical_namespaces::{
 
 pub(in crate::store) const INDEX_NAME: &str = "chat-critical-namespaces.joined-pin.index";
 const INDEX_FEE: usize = 12 * MAX_INDEX_FRAME + 512 * 1024;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::store) enum JoinedPinOpening {
+    Any,
+    Idle,
+    NativeWithoutRow,
+}
 mod pending;
 pub(in crate::store) mod shared_history;
 pub(in crate::store) use pending::{
@@ -530,10 +537,14 @@ impl ServerStore {
 
     pub(in crate::store) fn finish_joined_pin_selection(
         &self,
-        require_idle: bool,
+        requirement: JoinedPinOpening,
     ) -> Result<(), AppError> {
         if !self.uses_joined_pin_layout() {
-            return if require_idle { Err(denied()) } else { Ok(()) };
+            return if requirement == JoinedPinOpening::Any {
+                Ok(())
+            } else {
+                Err(denied())
+            };
         }
         let mut selected = self
             .joined_pin_selection
@@ -542,8 +553,14 @@ impl ServerStore {
             .take()
             .ok_or_else(denied)?;
         selected.require(self)?;
-        if require_idle && (!selected.index.index.is_empty() || selected.index.pending.is_some()) {
-            return Err(denied());
+        match requirement {
+            JoinedPinOpening::Any => (),
+            JoinedPinOpening::Idle => {
+                self.require_joined_pin_without_row(&selected.index, false)?
+            }
+            JoinedPinOpening::NativeWithoutRow => {
+                self.require_joined_pin_without_row(&selected.index, true)?
+            }
         }
         if let Some(pending) = selected.index.pending.as_mut() {
             pending.finish_core()?;
@@ -605,14 +622,32 @@ impl ServerStore {
     }
 
     pub(in crate::store) fn require_empty_mounted_joined_pins(&self) -> Result<(), AppError> {
+        self.require_mounted_joined_pin_without_row(false)
+    }
+
+    pub(in crate::store) fn require_mounted_joined_pin_without_row(
+        &self,
+        allow_native_pending: bool,
+    ) -> Result<(), AppError> {
         self.validate_mounted_governance_layout()?;
         let slot = self.joined_pin_index.lock().map_err(|_| denied())?;
         let index = slot.as_ref().ok_or_else(denied)?;
         index.require(self)?;
-        if !index.index.is_empty() || index.pending.is_some() {
-            return Err(denied());
+        self.require_joined_pin_without_row(index, allow_native_pending)
+    }
+
+    fn require_joined_pin_without_row(
+        &self,
+        index: &SelectedPinIndex,
+        allow_native_pending: bool,
+    ) -> Result<(), AppError> {
+        if index.index.is_empty() && index.pending.is_none() {
+            Ok(())
+        } else if allow_native_pending {
+            self.require_native_pre_welcome(index)
+        } else {
+            Err(denied())
         }
-        Ok(())
     }
 
     pub(in crate::store) fn prepare_joined_pin_declaration(
