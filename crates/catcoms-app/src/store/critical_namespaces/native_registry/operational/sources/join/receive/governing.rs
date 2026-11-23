@@ -293,6 +293,18 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         caller: &RequestCancellation,
         rng: &mut impl CryptoRngCore,
     ) -> Result<(OwnerHeaderId, u64), V2MemberSaveRefusal> {
+        self.apply_governing_response_with_removal(selection, response, caller, rng)
+            .map(|(selected, _)| selected)
+    }
+
+    /// Also report whether this exact applied transition retired the local admission.
+    pub fn apply_governing_response_with_removal(
+        &self,
+        selection: &NativeTextJoinedRowSelection,
+        response: &NativeTextJoinedGoverningResponse,
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<((OwnerHeaderId, u64), bool), V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
         let require_live = || {
             self.original
@@ -398,12 +410,12 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         drop(retired_row);
         drop(retired);
         if evicted {
-            return selected;
+            return selected.map(|head| (head, true));
         }
         self.original
             .require_current(caller)
             .map_err(|_| Refusal::Cancelled)?;
-        selected
+        selected.map(|head| (head, false))
     }
 }
 

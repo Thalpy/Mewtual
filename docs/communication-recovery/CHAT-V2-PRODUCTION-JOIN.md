@@ -576,6 +576,9 @@ chain. The record retains the original Commit digest and frozen history
 page. Recovery authenticates that cut before refusing to activate that same
 old registration, and live application retires the original row and SDK.
 The desktop reports removal on that original row and retires its composer.
+The selected transition reports its terminal outcome directly. Local worker
+shutdown leaves the membership notification live until it can reach the
+original mounted row, subject to the desktop session's lifetime.
 An exact draft or saved retry survives eviction. The renderer stops dispatching
 new requests for that exact context, even when removal arrives during the local
 retry journal write.

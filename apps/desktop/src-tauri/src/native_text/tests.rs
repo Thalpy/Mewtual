@@ -1353,6 +1353,85 @@ async fn native_text_membership_dispatch_uses_the_original_founder_row() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_membership_selected_eviction_notifies_the_original_joined_row() {
+    use tauri::Listener;
+
+    let root = tempfile::tempdir().unwrap();
+    let (founder, main, founder_queue) = app(root.path().join("founder"), None, true);
+    let (member, window, member_queue) = app(root.path().join("member"), None, true);
+    unlock_current(&founder, &main, &founder_queue).await;
+    unlock_current(&member, &window, &member_queue).await;
+    let found = found_request(&main, 1, "Founder group");
+    run(&founder_queue).await;
+    let found = found_value(found.await.unwrap());
+    let invite = invite_command(
+        &main,
+        "mint_invite_fresh",
+        serde_json::json!({"server": found["server"]}),
+    );
+    run(&founder_queue).await;
+    let invite = found_value(invite.await.unwrap());
+    let joined = invite_command(
+        &window,
+        "join_server",
+        serde_json::json!({
+            "inviteHex": invite, "approvedHost": "127.0.0.1", "displayName": "Member",
+            "serverName": "Joined group", "isDm": false, "allowSwitchboards": false,
+        }),
+    );
+    timeout(Duration::from_secs(45), run(&member_queue))
+        .await
+        .expect("the member joins over the founder's original TCP listener");
+    let joined = found_value(joined.await.unwrap());
+
+    let roster = invite_command(
+        &main,
+        "get_native_chat_members",
+        serde_json::json!({"server": found["server"], "expectedContext": found["context"]}),
+    );
+    run(&founder_queue).await;
+    let roster = found_value(roster.await.unwrap());
+    let admission = roster["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["founder"] == false)
+        .expect("the selected roster names the joined admission");
+
+    let (notice, selected_eviction) = oneshot::channel();
+    member.once_any("chat-v2-membership", move |event| {
+        let notice_data: serde_json::Value = serde_json::from_str(event.payload()).unwrap();
+        let _ = notice.send(notice_data);
+    });
+    let removal = invite_command(
+        &main,
+        "remove_native_chat_member",
+        serde_json::json!({
+            "server": found["server"], "expectedContext": found["context"],
+            "expectedAdmission": admission["admission"],
+        }),
+    );
+    run(&founder_queue).await;
+    assert!(found_value(removal.await.unwrap()).is_null());
+    let selected_eviction = timeout(Duration::from_secs(40), selected_eviction)
+        .await
+        .expect("closing the joined worker must preserve the selected eviction notice")
+        .unwrap();
+    assert_eq!(
+        selected_eviction,
+        serde_json::json!({
+            "server": joined["server"], "context": joined["context"], "removed": true,
+        })
+    );
+    let send = native_send_request(&window, &joined, 45, "Removed admission cannot send");
+    let pending = member_queue.lock().unwrap().pop();
+    if let Some(work) = pending {
+        work.await;
+    }
+    refused(send.await.unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_text_connected_join_retries_original_welcome_after_authenticated_unlock() {
     use catcoms_rt::{MeshTransport, ProtocolId, TransportError, CHAT_V2_JOIN_KIND};
     use catcoms_sync::{DirectJoinLimits, PreparedV2JoinRequest};

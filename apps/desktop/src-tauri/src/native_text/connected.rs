@@ -312,32 +312,41 @@ async fn start_dependencies<R: tauri::Runtime>(
         return;
     };
     let payment = source.clone();
-    let opened = tauri::async_runtime::spawn_blocking(move || {
+    let Ok(Ok(provider)) = tauri::async_runtime::spawn_blocking(move || {
         original.attach_dependency_provider(&row, payment.scope.clone())
     })
-    .await;
-    if let Ok(Ok(provider)) = opened {
-        let app = app.clone();
-        let receive = match state.native_text.ui_budget.prepare() {
-            Ok(payment) => Some((super::receiving::open(state, &source).await, payment)),
-            Err(_) => None,
-        };
-        drop(tauri::async_runtime::spawn(async move {
-            tokio::select! {
-                _ = serve_dependencies(app.clone(), source.clone(), provider) => {}
-                _ = drain_outbox(&app, &source) => {}
-                _ = catch_up_governing(&app, &source) => {}
-                _ = serve_joined_governing(&app, &source) => {}
-                _ = async {
-                    if let Some((initial, payment)) = receive {
-                        super::receiving::run(&app, &source, initial, payment).await;
-                    } else {
-                        std::future::pending::<()>().await;
-                    }
-                } => {}
-            }
-        }));
-    }
+    .await
+    else {
+        return;
+    };
+    let receive = match state.native_text.ui_budget.prepare() {
+        Ok(payment) => Some((super::receiving::open(state, &source).await, payment)),
+        Err(_) => None,
+    };
+    let app = app.clone();
+    drop(tauri::async_runtime::spawn(async move {
+        let mut scope = source.negative();
+        tokio::select! {
+            biased;
+            _ = scope.cancelled() => {}
+            _ = catch_up_governing(&app, &source) => {}
+            // The covered eviction can close the dependency or receiver before
+            // its blocking worker returns. Keep the membership reply alive.
+            _ = async {
+                tokio::join!(
+                    serve_dependencies(app.clone(), source.clone(), provider),
+                    drain_outbox(&app, &source),
+                    serve_joined_governing(&app, &source),
+                    async {
+                        if let Some((initial, payment)) = receive {
+                            super::receiving::run(&app, &source, initial, payment).await;
+                        }
+                    },
+                );
+                std::future::pending::<()>().await;
+            } => {}
+        }
+    }));
 }
 
 const OUTBOX_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(250);
@@ -431,20 +440,24 @@ async fn catch_up_governing<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
         let caller = source.negative();
         let result = tauri::async_runtime::spawn_blocking(move || {
             let _local = local;
-            let result =
-                prepared.apply_governing_response(&row, &response, &caller, &mut OsCryptoRng);
-            (result, response, !row.is_current_cached())
+            let result = prepared.apply_governing_response_with_removal(
+                &row,
+                &response,
+                &caller,
+                &mut OsCryptoRng,
+            );
+            (result, response)
         })
         .await;
         match result {
-            Ok((Ok(_), _, removed)) => {
+            Ok((Ok((_, removed)), _)) => {
                 source.notify_membership(app, &state, removed).await;
                 if removed {
                     return;
                 }
                 source.member_work.publication_wake.notify_one();
             }
-            Ok((Err(catcoms_app::store::V2MemberSaveRefusal::Busy), response, _)) => {
+            Ok((Err(catcoms_app::store::V2MemberSaveRefusal::Busy), response)) => {
                 waiting = Some(response);
             }
             _ => {}
