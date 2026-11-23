@@ -135,14 +135,37 @@ async fn cold_native_founder_reuses_the_covered_source_and_listener() {
         invite.binding().spec_data().anchor.header,
     );
     assert_eq!(recovered.prove_promoted_genesis(&caller).unwrap(), genesis);
+    let genesis_budget = crate::store::GenesisSeedBudget::new(
+        8 * 1024 * 1024 + 64 * 1024,
+        8 * 1024 * 1024,
+        8 * 1024 * 1024,
+        1024 * 1024,
+        16 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(
+        recovered
+            .restore_promoted_genesis_sdk(genesis_budget, &caller)
+            .unwrap(),
+        genesis
+    );
     let head = only_named(dir.path(), "text.seed").with_file_name("head.bin");
     let original_head = head.with_extension("held-before-original-genesis-check");
     std::fs::rename(&head, &original_head).unwrap();
     std::fs::copy(&original_head, &head).unwrap();
     assert!(recovered.prove_promoted_genesis(&caller).is_err());
+    assert!(recovered
+        .restore_promoted_genesis_sdk(genesis_budget, &caller)
+        .is_err());
     std::fs::remove_file(&head).unwrap();
     std::fs::rename(original_head, head).unwrap();
     assert_eq!(recovered.prove_promoted_genesis(&caller).unwrap(), genesis);
+    assert_eq!(
+        recovered
+            .restore_promoted_genesis_sdk(genesis_budget, &caller)
+            .unwrap(),
+        genesis
+    );
     let (_closed, signal) = tokio::sync::watch::channel(true);
     assert!(recovered
         .bind_original_tcp(&RequestCancellation::new(signal, None))
@@ -1640,7 +1663,8 @@ async fn mounted_join_fixture(recover_stage: bool) {
             let (custody, _) = super::admission::custody(&commit, &fresh).await;
             stop_save.send_replace(true);
             let result = original.admit_member_save::<rand_chacha::ChaCha20Rng>(&first, custody);
-            assert!(matches!(result, Err((_, V2MemberSaveRefusal::Cancelled))));
+            assert!(matches!(&result, Err((_, V2MemberSaveRefusal::Cancelled))));
+            drop(result);
             assert_eq!(
                 prepare_save(&mut original, &mut founder_rng).unwrap(),
                 V2MemberSaveOutcome::Ready
@@ -1653,7 +1677,12 @@ async fn mounted_join_fixture(recover_stage: bool) {
                     fresh.clone(),
                 )
                 .unwrap();
-            let (custody, _) = super::admission::custody(&commit, &fresh).await;
+            let (custody, _) = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                super::admission::custody(&commit, &fresh),
+            )
+            .await
+            .expect("cancelled admission released the original commit guard");
             let job = original
                 .admit_member_save::<rand_chacha::ChaCha20Rng>(&final_save, custody)
                 .unwrap_or_else(|(_, error)| {

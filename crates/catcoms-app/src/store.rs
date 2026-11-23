@@ -653,6 +653,7 @@ mod persistence {
     pub(in crate::store) mod v2_text;
     pub(in crate::store) use cold_source_read::v2_genesis_activation;
     pub use cold_source_read::RetainedBootstrapSourceData;
+    pub(in crate::store) use cold_source_read::RetainedPromotedGenesisSdk;
     pub(super) use cold_source_read::{
         GenesisCurrentOwnerRef, GenesisSourceDataRef, OriginalBootstrapReadObservation,
         V2TextOwnedCurrent, V2TextOwnerRef, V2TextSourceNegativeObserver,

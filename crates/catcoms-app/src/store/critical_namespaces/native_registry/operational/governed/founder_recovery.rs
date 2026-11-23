@@ -62,6 +62,7 @@ pub struct NativeTextColdFounderSource {
     tcp: Option<Arc<super::super::join_tcp::Transport>>,
     sdk: Option<PreparedV2FounderRecoveredAdd>,
     governed: Option<Box<HeldColdFounderAdd>>,
+    genesis_sdk: Option<Box<crate::store::persistence::RetainedPromotedGenesisSdk>>,
     genesis: Option<Box<HeldColdFounderGenesis>>,
     source: RetainedBootstrapSourceData,
     selection: ColdFounderSelection,
@@ -92,6 +93,7 @@ impl NativeTextJoinedStorage {
                     tcp: None,
                     sdk: None,
                     governed: None,
+                    genesis_sdk: None,
                     genesis: None,
                     source,
                     selection,
@@ -154,6 +156,39 @@ impl NativeTextColdFounderSource {
             return Err(refused());
         }
         Ok(result)
+    }
+
+    /// Reopen the bounded original epoch-zero SDK as a closed graph, under
+    /// the exact held promoted genesis. Native activation remains separate.
+    pub fn restore_promoted_genesis_sdk(
+        &mut self,
+        budget: crate::store::GenesisSeedBudget,
+        caller: &RequestCancellation,
+    ) -> Result<OwnerHeaderId, AppError> {
+        let selected = self.prove_promoted_genesis(caller)?;
+        let proof = self.genesis.as_deref_mut().ok_or_else(refused)?;
+        let sdk = &mut self.genesis_sdk;
+        let header =
+            self.work
+                .with_recovered_founder_store(&self.selection, &self.source, |store| {
+                    if sdk.is_none() {
+                        if caller.is_cancelled() {
+                            return Err(refused());
+                        }
+                        *sdk = Some(Box::new(store.restore_promoted_genesis_sdk(
+                            proof,
+                            &self.source,
+                            budget,
+                        )?));
+                    }
+                    sdk.as_ref()
+                        .ok_or_else(refused)?
+                        .require_source(&self.source)
+                })?;
+        if header != selected || self.prove_promoted_genesis(caller)? != selected {
+            return Err(refused());
+        }
+        Ok(header)
     }
 
     pub(in crate::store::critical_namespaces::native_registry) fn take_native_vault(

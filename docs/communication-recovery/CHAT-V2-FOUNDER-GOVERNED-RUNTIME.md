@@ -64,7 +64,8 @@ request responder returns only the exact covered Welcome.
 Before the first Add, cold recovery can prove the original promoted genesis
 through the held pin, promotion seed, operational head, archive and directory
 page. An equal-byte replacement of a held head or any partial Add journal
-refuses. The genesis proof is available to the separate SDK startup step.
+refuses. The independently paid epoch-zero SDK restores from the original
+sealed source and rechecks this proof before returning its closed graph.
 
 The stage-lifetime continuation is under validation. Native key drainage is
 being separated from retained CLOSED snapshot DATA: an actual completed Cell
