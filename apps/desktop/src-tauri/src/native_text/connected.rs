@@ -15,6 +15,7 @@ pub(super) struct Source {
     instance: u64,
     channel: u128,
     scope: RequestCancellation,
+    publication_wake: Option<Arc<tokio::sync::Notify>>,
     _payment: NativeUiInvocationMetadata,
 }
 
@@ -106,6 +107,7 @@ impl Source {
             instance: data.instance,
             channel: data.channel,
             scope,
+            publication_wake: data.publication_wake.clone(),
             _payment: payment.take()?,
         })
     }
@@ -214,12 +216,74 @@ async fn start_dependencies<R: tauri::Runtime>(
     })
     .await;
     if let Ok(Ok(provider)) = opened {
-        drop(tauri::async_runtime::spawn(serve_dependencies(
-            app.clone(),
-            source,
-            provider,
-        )));
+        let app = app.clone();
+        drop(tauri::async_runtime::spawn(async move {
+            tokio::select! {
+                _ = serve_dependencies(app.clone(), source.clone(), provider) => {}
+                _ = drain_joined_outbox(&app, &source) => {}
+            }
+        }));
     }
+}
+
+const OUTBOX_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(250);
+const OUTBOX_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+
+async fn drain_joined_outbox<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source: &Arc<Source>) {
+    let Some(wake) = &source.publication_wake else {
+        return;
+    };
+    let mut scope = source.scope.clone();
+    let mut ready = false;
+    loop {
+        if !ready {
+            tokio::select! {
+                biased;
+                _ = scope.cancelled() => return,
+                _ = wake.notified() => {},
+                _ = tokio::time::sleep(OUTBOX_RETRY - OUTBOX_COOLDOWN) => {},
+            }
+        }
+        let state = app.state::<AppState>();
+        ready = tokio::select! {
+            biased;
+            _ = scope.cancelled() => return,
+            advanced = publish_joined_debt(&state, source) => advanced,
+        };
+        tokio::select! {
+            biased;
+            _ = scope.cancelled() => return,
+            _ = tokio::time::sleep(OUTBOX_COOLDOWN) => {},
+        }
+    }
+}
+
+async fn publish_joined_debt(state: &AppState, source: &Arc<Source>) -> bool {
+    let Some((original, row)) = source.capture_joined(state).await else {
+        return false;
+    };
+    let work = source.clone();
+    let prepared = tauri::async_runtime::spawn_blocking(move || {
+        original.prepare_member_publication(&row, work.scope.clone(), &mut OsCryptoRng)
+    })
+    .await;
+    let Ok(Ok(Some(prepared))) = prepared else {
+        return false;
+    };
+    let Ok(Some(receipt)) = prepared.submit().await else {
+        return false;
+    };
+    let Some((original, _)) = source.capture_joined(state).await else {
+        return false;
+    };
+    let work = source.clone();
+    matches!(
+        tauri::async_runtime::spawn_blocking(move || {
+            original.checkpoint_member_publication(receipt, &work.scope, &mut OsCryptoRng)
+        })
+        .await,
+        Ok(Ok(_))
+    )
 }
 
 async fn serve_dependencies<R: tauri::Runtime>(

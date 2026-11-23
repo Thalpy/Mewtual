@@ -83,6 +83,7 @@ pub(super) struct NativeRowData {
     pub(super) display_name: String,
     pub(super) is_dm: bool,
     pub(super) channel: u128,
+    pub(super) publication_wake: Option<Arc<tokio::sync::Notify>>,
     retiring: bool,
     // LAST: actual dedicated native row payment follows all retained DATA.
     _credit: NativeUiInvocationMetadata,
@@ -108,6 +109,8 @@ impl PreparedNativeRow {
             return Err("Invalid native server details.".into());
         }
         let (name, display_name) = bounded_native_names(spec.name, spec.display_name)?;
+        let publication_wake = matches!(&spec.selection, NativeSelection::Joined(_))
+            .then(|| Arc::new(tokio::sync::Notify::new()));
         let data = NativeRowData {
             selection: spec.selection,
             files: keep_session::EntryOwner::new(),
@@ -118,6 +121,7 @@ impl PreparedNativeRow {
             display_name,
             is_dm: spec.is_dm,
             channel: spec.channel,
+            publication_wake,
             retiring: false,
             _credit: credit,
         };
@@ -394,7 +398,11 @@ impl ServerTable {
 // This invoices actual layout/buckets plus transient metadata overlap; it is
 // not a whole-process RSS or IPC/WebView serialization bound.
 const _: () = assert!(
-    2 * std::mem::size_of::<NativeRowData>() + 2 * std::mem::size_of::<Row>() + 4 * 256 + 1024
+    2 * std::mem::size_of::<NativeRowData>()
+        + 2 * std::mem::size_of::<Row>()
+        + 4 * 256
+        + 1024
+        + 2 * (std::mem::size_of::<tokio::sync::Notify>() + 32)
         <= 4096
 );
 

@@ -225,7 +225,7 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
                 edge.wait_once().await;
             }
         }
-        let confirmed = {
+        let wake = {
             let _commit = state.ui_session_commit.lock().await;
             // A parked original can stay live after the Store/table has been
             // replaced. Reprove the installed objects through the resolver.
@@ -235,7 +235,7 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
                 .as_ref()
                 .and_then(MountedVault::as_text_v2)
                 .is_some_and(|vault| captured.target.is_for_original_vault(vault));
-            let original_row = table.native(&captured.intent.server).is_some_and(|row| {
+            let original_row = table.native(&captured.intent.server).filter(|row| {
                 row.matches(&captured.selection, captured.instance, &captured.target)
                     && row.data().request == captured.intent.context
                     && row.data().channel == captured.intent.channel
@@ -246,30 +246,27 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
                 || captured.scope.is_cancelled()
                 || state.native_text.sources.is_closing_cached()
                 || !original_mount
-                || !original_row
+                || original_row.is_none()
             {
                 resolver.reject(STALE);
-                false
+                None
             } else {
                 match result {
                     Ok(reply) => {
                         resolver.resolve(InvokeResponseBody::Json(reply.body));
-                        reply.saved_local
+                        original_row
+                            .filter(|_| reply.saved_local)
+                            .and_then(|row| row.data().publication_wake.clone())
                     }
                     Err(error) => {
                         resolver.reject(error);
-                        false
+                        None
                     }
                 }
             }
         };
-        if confirmed
-            && matches!(
-                &captured.selection,
-                server_table::NativeSelection::Joined(_)
-            )
-        {
-            publish_joined_debt(&state, &captured).await;
+        if let Some(wake) = wake {
+            wake.notify_one();
         }
     }));
     true
@@ -623,46 +620,6 @@ async fn execute(state: &AppState, invocation: &Invocation) -> Result<Reply, Str
     }
 }
 
-async fn publish_joined_debt(state: &AppState, invocation: &Invocation) {
-    let Ok(Preparation::Joined(original, row)) = capture(state, invocation).await else {
-        return;
-    };
-    let work = Worker {
-        value: (original, row, invocation.scope.clone()),
-        _payment: invocation.payment.clone(),
-    };
-    let prepared = tauri::async_runtime::spawn_blocking(move || {
-        work.run(|(original, row, scope)| {
-            original.prepare_member_publication(&row, scope, &mut OsCryptoRng)
-        })
-    })
-    .await;
-    let Ok(Ok(Some(prepared))) = prepared else {
-        return;
-    };
-    let mut scope = invocation.scope.clone();
-    let receipt = tokio::select! {
-        biased;
-        _ = scope.cancelled() => return,
-        receipt = prepared.submit() => receipt,
-    };
-    let Ok(Some(receipt)) = receipt else {
-        return;
-    };
-    let Ok(Preparation::Joined(original, _)) = capture(state, invocation).await else {
-        return;
-    };
-    let work = Worker {
-        value: (original, receipt, invocation.scope.clone()),
-        _payment: invocation.payment.clone(),
-    };
-    let _ = tauri::async_runtime::spawn_blocking(move || {
-        work.run(|(original, receipt, scope)| {
-            original.checkpoint_member_publication(receipt, &scope, &mut OsCryptoRng)
-        })
-    })
-    .await;
-}
 const _: () = assert!(
     std::mem::size_of::<Invocation>() + std::mem::size_of::<Attempt>() + 3 * TEXT_LIMIT + 4096
         <= 8 * 4096

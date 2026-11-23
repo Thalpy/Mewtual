@@ -1261,7 +1261,7 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
         .unwrap()
         .data()
         .instance;
-    assert_joined_dependency_provider(&state, id).await;
+    let original_publication = assert_joined_connected_workers(&state, id).await;
 
     // The saved native row can be reported after the actual founder retires.
     let locked = snapshot_request(&founder_window, None);
@@ -1320,6 +1320,7 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     sources::close_server_rows(&state, &SystemClock)
         .await
         .unwrap();
+    assert_joined_publication_stopped(original_publication).await;
     drop(close);
     drop(joiner);
     let (reopened, window, queue) = app(joiner_path.clone(), None, true);
@@ -1335,7 +1336,7 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     let restored = restored["servers"].as_array().unwrap();
     assert_eq!(restored.len(), 1);
     assert_eq!(restored[0], original);
-    assert_joined_dependency_provider(&state, id).await;
+    let recovered_publication = assert_joined_connected_workers(&state, id).await;
     let retry = native_send_request(&window, &restored[0], 9, "Joined message");
     run(&queue).await;
     assert_eq!(found_value(retry.await.unwrap()), saved);
@@ -1362,10 +1363,14 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     sources::close_server_rows(&state, &SystemClock)
         .await
         .unwrap();
+    assert_joined_publication_stopped(recovered_publication).await;
     drop(close);
 }
 
-async fn assert_joined_dependency_provider(state: &AppState, id: u64) {
+async fn assert_joined_connected_workers(
+    state: &AppState,
+    id: u64,
+) -> std::sync::Weak<tokio::sync::Notify> {
     let generation = state.ui_session_generation.load(Ordering::SeqCst);
     let target = state.native_text.ui_state.original_target().unwrap();
     let mut ui = Some(
@@ -1374,7 +1379,7 @@ async fn assert_joined_dependency_provider(state: &AppState, id: u64) {
             .unwrap(),
     );
     let mut preparation = None;
-    let (selection, scope) = {
+    let (selection, scope, publication) = {
         let _commit = require_ui_session_generation(state, generation)
             .await
             .unwrap();
@@ -1384,6 +1389,8 @@ async fn assert_joined_dependency_provider(state: &AppState, id: u64) {
         let server_table::NativeSelection::Joined(selection) = &original.data().selection else {
             panic!("the registered row must still be the original joined source");
         };
+        let wake = original.data().publication_wake.as_ref().unwrap();
+        assert!(Arc::strong_count(wake) >= 2);
         let scope = original
             .scope(keep_session::current(state, generation).unwrap())
             .unwrap();
@@ -1392,7 +1399,7 @@ async fn assert_joined_dependency_provider(state: &AppState, id: u64) {
             .sources
             .capture_joined_member(&store, &mut ui, selection, &mut preparation)
             .unwrap();
-        (selection.clone(), scope)
+        (selection.clone(), scope, Arc::downgrade(wake))
     };
     let result = tauri::async_runtime::spawn_blocking(move || {
         preparation
@@ -1405,6 +1412,17 @@ async fn assert_joined_dependency_provider(state: &AppState, id: u64) {
         result,
         Err(catcoms_app::store::V2MemberSaveRefusal::Busy)
     ));
+    publication
+}
+
+async fn assert_joined_publication_stopped(original: std::sync::Weak<tokio::sync::Notify>) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while original.strong_count() != 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the publication worker should release the original closed row");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
