@@ -131,6 +131,18 @@ async fn cold_native_founder_reuses_the_covered_source_and_listener() {
     let address = invite.direct_address_data(std::net::Ipv4Addr::LOCALHOST.into());
     assert!(address.contains(&format!("/tcp/{port}/")));
     assert!(recovered.restore_first_add(&caller).is_err());
+    let genesis = catcoms_replication::chat::owner_header::OwnerHeaderId::from_bytes(
+        invite.binding().spec_data().anchor.header,
+    );
+    assert_eq!(recovered.prove_promoted_genesis(&caller).unwrap(), genesis);
+    let head = only_named(dir.path(), "text.seed").with_file_name("head.bin");
+    let original_head = head.with_extension("held-before-original-genesis-check");
+    std::fs::rename(&head, &original_head).unwrap();
+    std::fs::copy(&original_head, &head).unwrap();
+    assert!(recovered.prove_promoted_genesis(&caller).is_err());
+    std::fs::remove_file(&head).unwrap();
+    std::fs::rename(original_head, head).unwrap();
+    assert_eq!(recovered.prove_promoted_genesis(&caller).unwrap(), genesis);
     let (_closed, signal) = tokio::sync::watch::channel(true);
     assert!(recovered
         .bind_original_tcp(&RequestCancellation::new(signal, None))
@@ -1361,6 +1373,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
             .prepare_recovered_founder()
             .unwrap_or_else(|(_, error)| panic!("the original founder refused: {error}"));
         assert_eq!(original.restore_first_add(&fresh).unwrap(), (head, epoch));
+        assert!(original.prove_promoted_genesis(&fresh).is_err());
         let path =
             only_named(founder_dir.path(), "text.add.response.v2").with_file_name("head.bin");
         let parked = path.with_extension("held-after-restore");

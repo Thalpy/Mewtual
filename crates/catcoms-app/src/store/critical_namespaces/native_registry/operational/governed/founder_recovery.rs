@@ -2,7 +2,7 @@
 use super::super::upgrade_source::owning::{SourceWork, Store};
 use super::*;
 use crate::store::critical_namespaces::native_registry::lifecycle::network::ColdFounderSelection;
-use crate::store::persistence::v2_text::HeldColdFounderAdd;
+use crate::store::persistence::v2_text::{HeldColdFounderAdd, HeldColdFounderGenesis};
 use crate::store::{NativeCreationStatusData, RetainedBootstrapSourceData};
 use catcoms_replication::chat::owner_header::OwnerHeaderId;
 use catcoms_rt::PeerId;
@@ -62,6 +62,7 @@ pub struct NativeTextColdFounderSource {
     tcp: Option<Arc<super::super::join_tcp::Transport>>,
     sdk: Option<PreparedV2FounderRecoveredAdd>,
     governed: Option<Box<HeldColdFounderAdd>>,
+    genesis: Option<Box<HeldColdFounderGenesis>>,
     source: RetainedBootstrapSourceData,
     selection: ColdFounderSelection,
     local: (PeerId, u16),
@@ -91,6 +92,7 @@ impl NativeTextJoinedStorage {
                     tcp: None,
                     sdk: None,
                     governed: None,
+                    genesis: None,
                     source,
                     selection,
                     local,
@@ -121,6 +123,37 @@ impl NativeTextColdFounderSource {
                     .saved_expectation_data(store)?
                     .debit_display_name)
             })
+    }
+
+    /// Check the exact covered native founder before the first accepted Add.
+    /// The returned Header identifies the original public genesis.
+    pub fn prove_promoted_genesis(
+        &mut self,
+        negative: &RequestCancellation,
+    ) -> Result<OwnerHeaderId, AppError> {
+        if negative.is_cancelled() {
+            return Err(refused());
+        }
+        let proof = &mut self.genesis;
+        let result =
+            self.work
+                .with_recovered_founder_store(&self.selection, &self.source, |store| {
+                    if proof.is_none() {
+                        *proof = Some(Box::new(HeldColdFounderGenesis::capture(
+                            store,
+                            &self.source,
+                            self.selection.binding.pin,
+                        )?));
+                    }
+                    proof
+                        .as_deref_mut()
+                        .ok_or_else(refused)?
+                        .require_current(store, &self.source)
+                })?;
+        if negative.is_cancelled() {
+            return Err(refused());
+        }
+        Ok(result)
     }
 
     pub(in crate::store::critical_namespaces::native_registry) fn take_native_vault(

@@ -15,7 +15,7 @@ use catcoms_sync::V2JoinResponsePacketData;
 
 mod cold;
 mod held;
-pub(in crate::store) use cold::HeldColdFounderAdd;
+pub(in crate::store) use cold::{HeldColdFounderAdd, HeldColdFounderGenesis};
 pub(in crate::store) use held::HeldGovernedArchiveRead;
 
 pub(in crate::store) struct RecoveredGovernedAdd {

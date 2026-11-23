@@ -61,6 +61,11 @@ The desktop uses the same ordinary IPC and workers for the reopened founder.
 Its display name comes from the original sealed bootstrap debit. The recovered
 request responder returns only the exact covered Welcome.
 
+Before the first Add, cold recovery can prove the original promoted genesis
+through the held pin, promotion seed, operational head, archive and directory
+page. An equal-byte replacement of a held head or any partial Add journal
+refuses. The genesis proof is available to the separate SDK startup step.
+
 The stage-lifetime continuation is under validation. Native key drainage is
 being separated from retained CLOSED snapshot DATA: an actual completed Cell
 proof precedes monotone SDK-continuation retirement and an outside-writer move

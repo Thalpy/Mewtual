@@ -8,11 +8,13 @@ use crate::store::persistence::v2_group_directory::original_group_path;
 use crate::store::persistence::v2_text::{
     capture::original_context_from_genesis,
     control::governed_add::held::require_exact_held,
+    head::TextRootData,
     io::{
         archive_child, fixed_child, read_control, read_control_into, OpenedTextControl,
         MAX_TEXT_PATH,
     },
     promotion::seed::parse_data,
+    promotion::{page_child, validate_initial_outputs},
 };
 use crate::store::persistence::{open_archive_directory, OriginalBootstrapReadObservation};
 use crate::store::{RetainedBootstrapSourceData, ServerStore};
@@ -32,10 +34,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const ABSENT: [&str; 4] = [
+const ABSENT: [&str; 5] = [
     "head.stage",
     "text.seed.stage.v1",
     "text.wal",
+    "text.wal.stage.v1",
     selected_head::NAME,
 ];
 const SEED_FRAME_LIMIT: usize = 32768 + 40;
@@ -49,16 +52,234 @@ pub(in crate::store) struct HeldColdFounderAdd {
 }
 
 struct ColdFounderFiles {
+    origin: ColdFounderOrigin,
+    head: OpenedTextControl,
+    archive_path: PathBuf,
+    archive: OpenedTextControl,
+    selected: selected_head::GovernedHeadData,
+}
+
+struct ColdFounderOrigin {
     group: PathBuf,
     directory: File,
     directory_id: SessionId,
     pin: OpenedTextControl,
     seed: OpenedTextControl,
-    head: OpenedTextControl,
-    archive_path: PathBuf,
-    archive: OpenedTextControl,
-    selected: selected_head::GovernedHeadData,
     original: OriginalBootstrapReadObservation,
+}
+
+struct OpenedColdFounderOrigin {
+    retained: ColdFounderOrigin,
+    key: Zeroizing<[u8; 32]>,
+    plain: Zeroizing<Vec<u8>>,
+}
+
+/// The original selected promoted genesis before any governing Add admission.
+/// This proof cannot restore a successor or authorize a new SDK operation.
+pub(in crate::store) struct HeldColdFounderGenesis {
+    origin: ColdFounderOrigin,
+    head: OpenedTextControl,
+    pages_path: PathBuf,
+    pages: File,
+    pages_id: SessionId,
+    archive: (PathBuf, OpenedTextControl),
+    directory_page: (PathBuf, OpenedTextControl),
+    header: OwnerHeaderId,
+    _lease: VaultPhysicalWorkLease,
+    _fee: CatalogReadReservation,
+}
+
+impl HeldColdFounderGenesis {
+    pub(in crate::store) fn capture(
+        store: &ServerStore,
+        source: &RetainedBootstrapSourceData,
+        pin_id: [u8; 32],
+    ) -> Result<Self, AppError> {
+        const FEE: usize = 8 * SEED_FRAME_LIMIT
+            + 12 * MAX_TEXT_PATH
+            + 32 * 1024
+            + 4 * std::mem::size_of::<HeldColdFounderGenesis>();
+        let pool = &store
+            .archive_bootstrap_policy
+            .as_ref()
+            .ok_or_else(refused)?
+            .pending
+            .pool;
+        let fee = pool.try_reserve(FEE)?;
+        let lease = store._session.retain_for_physical_work();
+        let public = genesis_public(source);
+        let opened = OpenedColdFounderOrigin::capture(store, source, pin_id, &public)?;
+        let (target, _, _) = source.original_target_data();
+        require_add_not_entered(target)?;
+        let seed = parse_data(&opened.plain)?;
+        let head = read_control(&fixed_child(target, "head.bin")?, seed.head_frame.len())?;
+        if head.frame.as_slice() != seed.head_frame {
+            return Err(refused());
+        }
+        let manifest = source.data().view_data().context.spec_data().manifest;
+        let initial = validate_initial_outputs(&opened.key, &seed, &public, manifest)?;
+        let TextRootData::Present(directory_ref) = initial.directory else {
+            return Err(refused());
+        };
+        let pages_path = fixed_child(target, "text.pages")?;
+        let pages = open_archive_directory(&pages_path)?;
+        let pages_id = session_id(&pages).map_err(|error| AppError::Io(error.to_string()))?;
+        require_directory_name(&pages_path, &pages, pages_id)?;
+        let archive_path = archive_child(&pages_path, initial.archive.as_bytes())?;
+        let archive = read_control(&archive_path, seed.archive_frame.len())?;
+        let directory_path = page_child(&pages_path, directory_ref.page.as_bytes())?;
+        let directory_page = read_control(&directory_path, seed.directory_frame.len())?;
+        if archive.frame.as_slice() != seed.archive_frame
+            || directory_page.frame.as_slice() != seed.directory_frame
+        {
+            return Err(refused());
+        }
+        let mut result = Self {
+            origin: opened.retained,
+            head,
+            pages_path,
+            pages,
+            pages_id,
+            archive: (archive_path, archive),
+            directory_page: (directory_path, directory_page),
+            header: public.header.id(),
+            _lease: lease,
+            _fee: fee,
+        };
+        result.require_current(store, source)?;
+        Ok(result)
+    }
+
+    pub(in crate::store) fn require_current(
+        &mut self,
+        store: &ServerStore,
+        source: &RetainedBootstrapSourceData,
+    ) -> Result<OwnerHeaderId, AppError> {
+        self.origin.require_current(store, source)?;
+        let (target, target_file, target_id) = source.original_target_data();
+        require_add_not_entered(target)?;
+        require_directory_name(&self.pages_path, &self.pages, self.pages_id)?;
+        require_exact_held(&fixed_child(target, "head.bin")?, &mut self.head)?;
+        require_exact_held(&self.archive.0, &mut self.archive.1)?;
+        require_exact_held(&self.directory_page.0, &mut self.directory_page.1)?;
+        require_directory_name(&self.pages_path, &self.pages, self.pages_id)?;
+        require_directory_name(target, target_file, target_id)?;
+        require_directory_name(
+            &self.origin.group,
+            &self.origin.directory,
+            self.origin.directory_id,
+        )?;
+        require_stages_absent(target)?;
+        require_add_not_entered(target)?;
+        source.require_original_negative(store)?;
+        Ok(self.header)
+    }
+}
+
+fn require_add_not_entered(target: &Path) -> Result<(), AppError> {
+    for name in [
+        "text.add.request.v2",
+        "text.add.sdk-entry.v2",
+        "text.add.outcome.v2",
+        "text.add.header-attempt.v2",
+        "text.add.raw-header.v2",
+        "text.add.governing.v2",
+        "text.add.welcome-intent.v2",
+        "text.add.welcome-attempt.v2",
+        "text.add.raw-welcome.v2",
+        "text.add.response.v2",
+    ] {
+        if !matches!(fs::symlink_metadata(fixed_child(target, name)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+        {
+            return Err(refused());
+        }
+    }
+    Ok(())
+}
+
+impl OpenedColdFounderOrigin {
+    fn capture(
+        store: &ServerStore,
+        source: &RetainedBootstrapSourceData,
+        pin_id: [u8; 32],
+        public: &GenesisPublicData<'_>,
+    ) -> Result<Self, AppError> {
+        store.validate_mounted_current_layout()?;
+        source.validate_original(store)?;
+        let expected = source.saved_expectation_data(store)?;
+        let (target, _, _) = source.original_target_data();
+        require_stages_absent(target)?;
+        let group = original_group_path(
+            store,
+            expected.layout_data(),
+            expected.context.spec_data().group,
+        )?;
+        let directory = open_archive_directory(&group)?;
+        let directory_id =
+            session_id(&directory).map_err(|error| AppError::Io(error.to_string()))?;
+        require_directory_name(&group, &directory, directory_id)?;
+        let pin = read_control(&group.join("pin.bin"), genesis::MAX_PIN_FRAME)?;
+        let actual_pin = genesis::V2GroupPinId::of(&pin.frame);
+        if actual_pin.as_bytes() != &pin_id {
+            return Err(refused());
+        }
+
+        let key = Zeroizing::new(store.keys.db_key()?);
+        let seed = read_control(&fixed_child(target, "text.seed")?, SEED_FRAME_LIMIT)?;
+        let plain = open_control_data(
+            &key,
+            TextControlKindData::Seed.id_data(&seed.frame),
+            &seed.frame,
+        )?;
+        let promotion = parse_data(&plain)?;
+        let context = original_context_from_genesis(
+            &expected,
+            promotion.original_head,
+            &pin.frame,
+            public,
+            &key,
+        )?;
+        let pin_data = genesis::open_pin_data(
+            &key,
+            expected.layout_data(),
+            expected.context.spec_data().group,
+            &pin.frame,
+        )?;
+        genesis::open_head_data(
+            &key,
+            &expected,
+            actual_pin,
+            &pin_data,
+            promotion.original_head,
+        )?
+        .require_original_public_data(&pin_data, public)?;
+        if promotion.context != context {
+            return Err(refused());
+        }
+        Ok(Self {
+            retained: ColdFounderOrigin {
+                group,
+                directory,
+                directory_id,
+                pin,
+                seed,
+                original: source.observe_original(),
+            },
+            key,
+            plain,
+        })
+    }
+}
+
+fn genesis_public(source: &RetainedBootstrapSourceData) -> GenesisPublicData<'_> {
+    let data = source.data().genesis_public_data();
+    GenesisPublicData {
+        profile: data.profile_data(),
+        admission: data.admission_data(),
+        header: data.header_data(),
+        image: data.image_data(),
+    }
 }
 
 struct ColdFounderCore {
@@ -101,7 +322,7 @@ impl HeldColdFounderAdd {
         &self,
         source: &RetainedBootstrapSourceData,
     ) -> Result<Vec<u8>, AppError> {
-        self.files.original.require_same_original(source)?;
+        self.files.origin.original.require_same_original(source)?;
         if self.core.is_none() {
             return Err(refused());
         }
@@ -144,67 +365,16 @@ impl HeldColdFounderAdd {
             .pool;
         let fee = pool.try_reserve(BYTES)?;
         let lease = store._session.retain_for_physical_work();
-        store.validate_mounted_current_layout()?;
-        source.validate_original(store)?;
-        let expected = source.saved_expectation_data(store)?;
-        let data = source.data().genesis_public_data();
-        let public = GenesisPublicData {
-            profile: data.profile_data(),
-            admission: data.admission_data(),
-            header: data.header_data(),
-            image: data.image_data(),
-        };
-        let (target, _, _) = source.original_target_data();
-        require_stages_absent(target)?;
-        let group = original_group_path(
-            store,
-            expected.layout_data(),
-            expected.context.spec_data().group,
-        )?;
-        let directory = open_archive_directory(&group)?;
-        let directory_id =
-            session_id(&directory).map_err(|error| AppError::Io(error.to_string()))?;
-        require_directory_name(&group, &directory, directory_id)?;
-        let pin = read_control(&group.join("pin.bin"), genesis::MAX_PIN_FRAME)?;
-        let actual_pin = genesis::V2GroupPinId::of(&pin.frame);
-        if actual_pin.as_bytes() != &pin_id {
-            return Err(refused());
-        }
-
-        let key = Zeroizing::new(store.keys.db_key()?);
-        let seed = read_control(&fixed_child(target, "text.seed")?, SEED_FRAME_LIMIT)?;
-        let plain = open_control_data(
-            &key,
-            TextControlKindData::Seed.id_data(&seed.frame),
-            &seed.frame,
-        )?;
+        let public = genesis_public(source);
+        let opened = OpenedColdFounderOrigin::capture(store, source, pin_id, &public)?;
+        let (retained, key, plain) = (opened.retained, opened.key, opened.plain);
         let promotion = parse_data(&plain)?;
-        let context = original_context_from_genesis(
-            &expected,
-            promotion.original_head,
-            &pin.frame,
-            &public,
-            &key,
-        )?;
-        let pin_data = genesis::open_pin_data(
-            &key,
-            expected.layout_data(),
-            expected.context.spec_data().group,
-            &pin.frame,
-        )?;
-        genesis::open_head_data(
-            &key,
-            &expected,
-            actual_pin,
-            &pin_data,
-            promotion.original_head,
-        )?
-        .require_original_public_data(&pin_data, &public)?;
+        let context = &promotion.context;
+        let (target, _, _) = source.original_target_data();
 
         let head = read_control(&fixed_child(target, "head.bin")?, selected_head::FRAME_LEN)?;
         let selected = selected_head::GovernedHeadData::open_data(&key, &head.frame)?;
-        if promotion.context != context
-            || selected.transition.context != context.id_data()?
+        if selected.transition.context != context.id_data()?
             || selected.transition.before_head != TextHeadIdData::of_data(promotion.head_frame)
             || selected.transition.before_archive.as_bytes()
                 != TextControlKindData::Archive
@@ -224,16 +394,11 @@ impl HeldColdFounderAdd {
         let mut result = Self {
             core: None,
             files: ColdFounderFiles {
-                group,
-                directory,
-                directory_id,
-                pin,
-                seed,
+                origin: retained,
                 head,
                 archive_path,
                 archive,
                 selected,
-                original: source.observe_original(),
             },
             recovered,
             _lease: lease,
@@ -386,6 +551,32 @@ impl ColdFounderFiles {
         store: &ServerStore,
         source: &RetainedBootstrapSourceData,
     ) -> Result<(OwnerHeaderId, u64), AppError> {
+        self.origin.require_current(store, source)?;
+        let (target, directory, id) = source.original_target_data();
+        require_directory_name(target, directory, id)?;
+        require_exact_held(&self.archive_path, &mut self.archive)?;
+        require_exact_held(&fixed_child(target, "head.bin")?, &mut self.head)?;
+        require_stages_absent(target)?;
+        require_directory_name(target, directory, id)?;
+        require_directory_name(
+            &self.origin.group,
+            &self.origin.directory,
+            self.origin.directory_id,
+        )?;
+        source.require_original_negative(store)?;
+        Ok((
+            self.selected.transition.header,
+            self.selected.transition.epoch,
+        ))
+    }
+}
+
+impl ColdFounderOrigin {
+    fn require_current(
+        &mut self,
+        store: &ServerStore,
+        source: &RetainedBootstrapSourceData,
+    ) -> Result<(), AppError> {
         self.original.require_same_original(source)?;
         source.validate_original(store)?;
         store.validate_mounted_current_layout()?;
@@ -394,16 +585,10 @@ impl ColdFounderFiles {
         require_directory_name(&self.group, &self.directory, self.directory_id)?;
         require_exact_held(&self.group.join("pin.bin"), &mut self.pin)?;
         require_exact_held(&fixed_child(target, "text.seed")?, &mut self.seed)?;
-        require_exact_held(&self.archive_path, &mut self.archive)?;
-        require_exact_held(&fixed_child(target, "head.bin")?, &mut self.head)?;
         require_stages_absent(target)?;
         require_directory_name(target, directory, id)?;
         require_directory_name(&self.group, &self.directory, self.directory_id)?;
-        source.require_original_negative(store)?;
-        Ok((
-            self.selected.transition.header,
-            self.selected.transition.epoch,
-        ))
+        source.require_original_negative(store)
     }
 }
 
