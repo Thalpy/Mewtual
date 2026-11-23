@@ -132,7 +132,7 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
         DirectJoinLimits, PreparedV2JoinRequest, RecoveredV2JoinedOutcome,
         RecoveredV2PendingJoinSource, V2AdmissionStepData, V2FirstAddProofData,
         V2FirstJoinDeliveryData, V2GoverningJoinDeliveryData, V2GoverningJoinPrefixData,
-        V2GoverningJoinStepData, V2JoinDeliveryData, V2JoinRequestPacketData,
+        V2GoverningJoinStepData, V2JoinDeliveryData, V2JoinRequestPacketData, V2MemberAddFrameData,
         V2PendingJoinContextData, MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES,
     };
     use catcoms_mls::persist::{
@@ -319,11 +319,18 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     assert_eq!(selected.image_data(), output.image_data());
     drop(selected);
     let member_payment = Arc::new(AtomicUsize::new(0));
+    let original_frame = V2MemberAddFrameData::encode(step(), commit).unwrap();
+    let truncated =
+        V2MemberAddFrameData::decode(&original_frame[..original_frame.len() - 1]).unwrap();
+    assert!(joined
+        .prepare_member_add_frame(joined_prefix, &truncated, super::admission(&member_payment))
+        .is_err());
+    assert_eq!(member_payment.load(SeqCst), 0);
+    let verified_frame = V2MemberAddFrameData::decode(&original_frame).unwrap();
     let warm_candidate = joined
-        .prepare_member_add_candidate(
+        .prepare_member_add_frame(
             joined_prefix,
-            step(),
-            commit,
+            &verified_frame,
             super::admission(&member_payment),
         )
         .unwrap();
@@ -614,15 +621,27 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     )
     .unwrap();
     assert!(V2GoverningJoinDeliveryData::encode(&packet, &mismatched).is_err());
+    let sibling_frame = V2MemberAddFrameData::encode(
+        V2AdmissionStepData {
+            admission,
+            header: &signed_sibling,
+            image: output.image_data(),
+        },
+        commit,
+    )
+    .unwrap();
+    let mut decoder = catcoms_wire::Decoder::new(&sibling_frame);
+    decoder.get_bytes().unwrap();
+    decoder.get_u16().unwrap();
+    decoder.get_bytes().unwrap();
+    let conflicting_header =
+        V2MemberAddFrameData::decode(&sibling_frame[..sibling_frame.len() - decoder.remaining()])
+            .unwrap();
     assert!(joined
-        .prepare_member_add_commit(
+        .prepare_member_add_frame(
             joined_prefix,
-            V2AdmissionStepData {
-                admission: &sibling_body,
-                header: &signed_sibling,
-                image: sibling.image_data(),
-            },
-            &[]
+            &conflicting_header,
+            super::admission(&member_payment)
         )
         .is_err());
     assert!(joined

@@ -14,10 +14,12 @@ use catcoms_wire::Encoder;
 mod first_add_proof;
 mod governing_prefix;
 mod pending_source;
+mod received_add;
 pub use pending_source::{
     RecoveredV2JoinedOutcome, RecoveredV2PendingJoinSource, SealedV2JoinedOutcome,
     SealedV2PendingJoinSource, V2PendingJoinContextData,
 };
+pub use received_add::{V2MemberAddFrameData, MAX_V2_MEMBER_ADD_FRAME_BYTES};
 mod warm_runtime;
 mod welcome;
 pub use first_add_proof::{

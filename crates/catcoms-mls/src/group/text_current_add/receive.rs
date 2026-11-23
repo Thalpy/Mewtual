@@ -3,7 +3,7 @@ use super::*;
 use crate::device::key_package_identity::credential_digest_with;
 use openmls_traits::OpenMlsProvider;
 
-const MAX_RECEIVED_COMMIT_BYTES: usize = 32 * 1024;
+pub const MAX_TEXT_RECEIVED_ADD_COMMIT_BYTES: usize = 32 * 1024;
 
 /// Public expectations from one signed governing Admission. The host must
 /// authenticate the Admission and original selected prefix independently.
@@ -35,7 +35,7 @@ impl PreparedTextCurrentReceivedAdd {
         mut admission: TextCurrentAddAdmission,
     ) -> Result<Self, MlsError> {
         if request.commit.is_empty()
-            || request.commit.len() > MAX_RECEIVED_COMMIT_BYTES
+            || request.commit.len() > MAX_TEXT_RECEIVED_ADD_COMMIT_BYTES
             || blake3::hash(request.commit).as_bytes() != &request.digest
         {
             return Err(bad());
@@ -72,7 +72,7 @@ impl PreparedTextCurrentReceivedAdd {
             .max_provider_backing_bytes
             .checked_mul(513)
             .and_then(|work| work.checked_add(limits.max_snapshot_bytes.checked_mul(32)?))
-            .and_then(|work| work.checked_add(64 * 4096 + MAX_RECEIVED_COMMIT_BYTES))
+            .and_then(|work| work.checked_add(64 * 4096 + MAX_TEXT_RECEIVED_ADD_COMMIT_BYTES))
             .ok_or_else(bad)?;
         if work > limits.prepare_work {
             return Err(bad());

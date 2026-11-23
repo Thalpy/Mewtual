@@ -196,11 +196,20 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
         step: V2AdmissionStepData<'_>,
         commit: &[u8],
     ) -> Result<V2GeneralCandidate, SyncError> {
-        use catcoms_replication::chat::join_bindings::MAX_JOIN_PAYLOAD_BYTES;
         self.member_prefix(prefix)?;
         // Verify and record the signed successor before inspecting the Commit.
         // A broken body cannot suppress authentic contradictory owner evidence.
         prefix.observe_member_successor_header(step.header)?;
+        self.prepare_observed_add_commit(prefix, step, commit)
+    }
+
+    fn prepare_observed_add_commit(
+        &self,
+        prefix: &mut PreparedV2JoinedPrefix,
+        step: V2AdmissionStepData<'_>,
+        commit: &[u8],
+    ) -> Result<V2GeneralCandidate, SyncError> {
+        use catcoms_replication::chat::join_bindings::MAX_JOIN_PAYLOAD_BYTES;
         let AdmissionOrigin::Add {
             commit: expected,
             before_epoch,
@@ -236,9 +245,42 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
         commit: &[u8],
         admission: TextCurrentAddAdmission,
     ) -> Result<PreparedV2JoinedAdd, SyncError> {
+        self.member_prefix(prefix)?;
+        prefix.observe_member_successor_header(step.header)?;
+        self.prepare_observed_add_candidate(prefix, step, commit, admission)
+    }
+
+    pub fn prepare_member_add_frame(
+        &self,
+        prefix: &mut PreparedV2JoinedPrefix,
+        frame: &V2MemberAddFrameData<'_>,
+        payment: TextCurrentAddAdmission,
+    ) -> Result<PreparedV2JoinedAdd, SyncError> {
+        self.member_prefix(prefix)?;
+        prefix.observe_member_successor_header(frame.header_data())?;
+        let (body, image, commit) = frame.body_data()?;
+        self.prepare_observed_add_candidate(
+            prefix,
+            V2AdmissionStepData {
+                header: frame.header_data(),
+                admission: &body,
+                image,
+            },
+            commit,
+            payment,
+        )
+    }
+
+    fn prepare_observed_add_candidate(
+        &self,
+        prefix: &mut PreparedV2JoinedPrefix,
+        step: V2AdmissionStepData<'_>,
+        commit: &[u8],
+        admission: TextCurrentAddAdmission,
+    ) -> Result<PreparedV2JoinedAdd, SyncError> {
         let body = step.admission;
         let committer = step.header.spec().issuer;
-        let core = self.prepare_member_add_commit(prefix, step, commit)?;
+        let core = self.prepare_observed_add_commit(prefix, step, commit)?;
         let AdmissionOrigin::Add {
             commit: digest,
             before_epoch,
