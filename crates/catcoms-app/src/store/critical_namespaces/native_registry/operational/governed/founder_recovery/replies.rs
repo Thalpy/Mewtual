@@ -2,54 +2,21 @@
 use super::*;
 use catcoms_net::NativeChatJoinRequests;
 use catcoms_rt::{Responder, TransportEvent};
-use tokio::sync::watch;
 
 pub(super) struct Owner {
     _lifetime: watch::Sender<()>,
-    scope: Arc<Scope>,
-}
-
-#[derive(Debug)]
-struct Scope {
-    lifetime: watch::Receiver<()>,
-    mount: RequestCancellation,
-    caller: RequestCancellation,
-}
-
-#[async_trait::async_trait]
-impl RequestAuthority for Scope {
-    fn authorized(&self) -> bool {
-        self.lifetime.has_changed().is_ok()
-            && !self.mount.is_cancelled()
-            && !self.caller.is_cancelled()
-    }
-
-    async fn revoked(&self) {
-        if !self.authorized() {
-            return;
-        }
-        let (mut lifetime, mut mount, mut caller) = (
-            self.lifetime.clone(),
-            self.mount.clone(),
-            self.caller.clone(),
-        );
-        tokio::select! {
-            _ = lifetime.changed() => {}
-            _ = mount.cancelled() => {}
-            _ = caller.cancelled() => {}
-        }
-    }
+    scope: Arc<IngressScope>,
 }
 
 pub struct NativeTextColdFounderJoinRequests {
     requests: NativeChatJoinRequests,
-    scope: Arc<Scope>,
+    scope: Arc<IngressScope>,
 }
 
 pub struct NativeTextColdFounderJoinRequest {
     bytes: bytes::Bytes,
     responder: Responder,
-    scope: Arc<Scope>,
+    scope: Arc<IngressScope>,
 }
 
 impl NativeTextColdFounderJoinRequests {
@@ -89,7 +56,7 @@ impl NativeTextColdFounderSource {
         let ingress = mesh.native_chat_join_ingress().ok_or_else(refused)?;
         let (mount, fee) = self.storage.index.joined_exchange_resources(4096)?;
         let (owner, lifetime) = watch::channel(());
-        let scope = Arc::new(Scope {
+        let scope = Arc::new(IngressScope {
             lifetime,
             mount,
             caller: caller.retain_custody(Arc::new(JoinFramePayment { _fee: fee })),

@@ -6,17 +6,53 @@ use crate::store::{NativeCreationStatusData, RetainedBootstrapSourceData};
 use catcoms_replication::chat::owner_header::OwnerHeaderId;
 use catcoms_rt::PeerId;
 use catcoms_sync::owner_v2::PreparedV2FounderRecoveredAdd;
+use tokio::sync::watch;
 
 mod history;
 mod publication;
+mod receiving;
 mod replies;
 pub use publication::{NativeTextColdFounderPublication, NativeTextColdFounderPublicationReceipt};
+pub use receiving::{NativeTextColdFounderMemberIngress, NativeTextColdFounderMemberReceiver};
 pub use replies::{NativeTextColdFounderJoinRequest, NativeTextColdFounderJoinRequests};
+
+#[derive(Debug)]
+struct IngressScope {
+    lifetime: watch::Receiver<()>,
+    mount: RequestCancellation,
+    caller: RequestCancellation,
+}
+
+#[async_trait::async_trait]
+impl RequestAuthority for IngressScope {
+    fn authorized(&self) -> bool {
+        self.lifetime.has_changed().is_ok()
+            && !self.mount.is_cancelled()
+            && !self.caller.is_cancelled()
+    }
+
+    async fn revoked(&self) {
+        if !self.authorized() {
+            return;
+        }
+        let (mut lifetime, mut mount, mut caller) = (
+            self.lifetime.clone(),
+            self.mount.clone(),
+            self.caller.clone(),
+        );
+        tokio::select! {
+            _ = lifetime.changed() => {}
+            _ = mount.cancelled() => {}
+            _ = caller.cancelled() => {}
+        }
+    }
+}
 
 /// The cold opener's original founder custody. A bound TCP actor still
 /// supplies no room runtime, authoring key admission or native UI row.
 pub struct NativeTextColdFounderSource {
     ingress: Option<replies::Owner>,
+    received: Option<receiving::Ledger>,
     actor: Option<super::super::join_tcp::Loan>,
     tcp: Option<Arc<super::super::join_tcp::Transport>>,
     sdk: Option<PreparedV2FounderRecoveredAdd>,
@@ -37,6 +73,7 @@ impl NativeTextJoinedStorage {
         match self.index.recovered_founder_input() {
             Ok(Some((selection, source, local))) => Ok(NativeTextColdFounderSource {
                 ingress: None,
+                received: None,
                 actor: None,
                 tcp: None,
                 sdk: None,

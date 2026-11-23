@@ -53,6 +53,7 @@ pub use operational::{
 };
 pub use operational::{
     NativeTextColdFounderJoinRequest, NativeTextColdFounderJoinRequests,
+    NativeTextColdFounderMemberIngress, NativeTextColdFounderMemberReceiver,
     NativeTextColdFounderPublication, NativeTextColdFounderPublicationReceipt,
     NativeTextColdFounderSource,
 };

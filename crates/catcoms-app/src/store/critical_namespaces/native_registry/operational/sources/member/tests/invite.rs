@@ -690,7 +690,6 @@ async fn mounted_join_fixture(recover_stage: bool) {
         else {
             panic!("the original joined reply must be saved");
         };
-        founder_reply = Some(reply_id);
         drop(original);
         let mut founder_receiver = founder_capture()
             .prepare_founder_member_ingress(channel, fresh.clone())
@@ -718,6 +717,12 @@ async fn mounted_join_fixture(recover_stage: bool) {
             else {
                 panic!("expected the original joined reply at the founder");
             };
+            let (topic, _, ciphertext) = frame.current_data().unwrap();
+            founder_reply = Some((
+                reply_id,
+                topic.clone(),
+                bytes::Bytes::copy_from_slice(ciphertext),
+            ));
             let received = founder_capture()
                 .receive_founder_member(&founder_receiver, &frame)
                 .unwrap()
@@ -1365,7 +1370,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
         std::fs::remove_file(&path).unwrap();
         std::fs::rename(parked, path).unwrap();
         assert_eq!(original.restore_first_add(&fresh).unwrap(), (head, epoch));
-        if let Some(reply_id) = founder_reply {
+        if let Some((reply_id, reply_topic, reply_wire)) = founder_reply {
             let channel = request().channel;
             let page = original
                 .archived_action_page(channel, None, 8, &fresh)
@@ -1406,6 +1411,13 @@ async fn mounted_join_fixture(recover_stage: bool) {
             let address = invite.direct_address_data(std::net::Ipv4Addr::LOCALHOST.into());
             let peer = invite.connected_peer_data();
             probe.subscribe(topic.clone()).await.unwrap();
+            let (stop, scope) = tokio::sync::watch::channel(false);
+            let mut cold_receiver = original
+                .prepare_member_ingress(channel, RequestCancellation::new(scope, None))
+                .unwrap()
+                .open()
+                .await
+                .unwrap();
             assert_eq!(
                 probe.dial_outcome(address.parse().unwrap()).await.unwrap(),
                 catcoms_rt::DialSubmission::Submitted,
@@ -1456,6 +1468,56 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 .prepare_member_publication(fresh.clone(), &mut founder_rng)
                 .unwrap()
                 .is_none());
+            assert_eq!(reply_topic, topic);
+            let mut damaged = reply_wire.to_vec();
+            *damaged.last_mut().unwrap() ^= 1;
+            let (damaged, original_frame) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                let mut frames = Vec::new();
+                for packet in [bytes::Bytes::from(damaged), reply_wire] {
+                    loop {
+                        match probe.publish_once(reply_topic.clone(), packet.clone()).await {
+                            Ok(catcoms_rt::PublishSubmission::Submitted) => break,
+                            Err(catcoms_rt::PublishOnceError::NoPeers) => {
+                                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                            }
+                            _ => panic!("expected the TCP probe to carry the joined ciphertext"),
+                        }
+                    }
+                    let Some(NativeChatMemberGossipEvent::Frame(frame)) = cold_receiver.next().await
+                    else {
+                        panic!("expected the recovered founder's original listener to receive the frame");
+                    };
+                    frames.push(frame);
+                }
+                (frames.remove(0), frames.remove(0))
+            }).await.expect("bounded ordinary subscriber after the founder restarted");
+            assert!(original
+                .receive_member_frame(&cold_receiver, &damaged, &mut founder_rng)
+                .is_err());
+            let received = original
+                .receive_member_frame(&cold_receiver, &original_frame, &mut founder_rng)
+                .unwrap()
+                .expect("the recovered founder loaded its original signed reply and saved parent");
+            assert_eq!(received.action, reply_id);
+            assert_eq!(received.projection_target, reply_id);
+            assert_eq!(received.archived, Some(true));
+            let live = original
+                .read_member_projection(channel, reply_id, &fresh)
+                .unwrap()
+                .unwrap();
+            assert!(live
+                .with_publication(|view| matches!(
+                    view, catcoms_replication::chat::GuardedProjection::Visible { text, .. }
+                    if text == "Joined reply to the founder's saved original"
+                ))
+                .unwrap());
+            stop.send_replace(true);
+            assert!(original
+                .receive_member_frame(&cold_receiver, &original_frame, &mut founder_rng)
+                .is_err());
+            assert!(live
+                .with_publication(|_| panic!("a cancelled recovered receiver exposed a body"))
+                .is_err());
             drop(original);
             assert!(archived
                 .with_publication(|_| panic!("the closed restored founder published a body"))

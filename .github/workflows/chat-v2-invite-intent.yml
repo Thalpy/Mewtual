@@ -33,6 +33,7 @@ on:
       - 'crates/catcoms-app/src/store/critical_namespaces/current_layout/text/query/io.rs'
       - 'scripts/check-store-raw-fs.sh'
       - 'crates/catcoms-app/src/store/persistence/v2_member_outbox/production.rs'
+      - 'crates/catcoms-app/src/store/persistence/v2_member_transport.rs'
       - 'crates/catcoms-app/src/store/persistence/v2_shared_history.rs'
       - 'crates/catcoms-app/src/store/persistence/v2_shared_history/**'
       - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/tests/text_group_guard/host/member.rs'

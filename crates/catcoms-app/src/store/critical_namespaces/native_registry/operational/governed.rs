@@ -21,6 +21,7 @@ mod runtime;
 pub(super) use contact::connect_approved_host;
 pub use founder_recovery::{
     NativeTextColdFounderJoinRequest, NativeTextColdFounderJoinRequests,
+    NativeTextColdFounderMemberIngress, NativeTextColdFounderMemberReceiver,
     NativeTextColdFounderPublication, NativeTextColdFounderPublicationReceipt,
     NativeTextColdFounderSource,
 };

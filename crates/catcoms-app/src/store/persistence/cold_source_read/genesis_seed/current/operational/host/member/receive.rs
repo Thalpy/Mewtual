@@ -1,23 +1,15 @@
 //! One paid founder receiver ledger in the original selected text host.
 use super::*;
 use crate::store::persistence::v2_member_transport::{
-    FounderReceiveOperation, FounderReceiveOutcome, FounderReceiveSession,
-    NativeTextFounderReceived,
+    project_founder_member, FounderReceiveOperation, FounderReceiveOutcome, FounderReceiveSession,
+    NativeTextFounderReceived, FOUNDER_RECEIVE_ACTIONS as ACTION_LIMIT,
+    FOUNDER_RECEIVE_BYTES as ACTION_BYTES, FOUNDER_RECEIVE_LEDGER_FEE as LEDGER_FEE,
+    FOUNDER_RECEIVE_WORK as WORK_LIMIT,
 };
 use crate::store::persistence::v2_shared_history::SharedHistoryActionQuery;
-use catcoms_replication::chat::{ActionState, V2OrdinaryReceiveStatus};
 
 mod archive;
 use archive::FounderHistory;
-
-const ACTION_LIMIT: usize = 64;
-const ACTION_BYTES: usize = 1024 * 1024;
-const WORK_LIMIT: usize = 4 * ACTION_LIMIT + MAX_PARENTS;
-const MAX_SAVED_DEPENDENCIES: usize = 4;
-const LEDGER_FEE: usize = 2 * ACTION_BYTES
-    + ACTION_LIMIT * (MAX_PARENTS + 2) * 256
-    + V2GeneralPrefixVerifier::ordinary_authorization_temporary_layout_bytes()
-    + 16 * 1024;
 
 pub(super) struct FounderReceivedLedger {
     view: ProjectionView,
@@ -147,67 +139,35 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     lane.admission,
                     outbox,
                 )?;
-                let mut status = original
-                    .project_from_ledger(verifier, &mut received.ledger, &received.view, WORK_LIMIT)
-                    .map_err(|_| Refusal::Failed)?;
-                if let V2OrdinaryReceiveStatus::WaitingForDependencies(missing) = &status {
-                    if missing.len() > MAX_SAVED_DEPENDENCIES {
-                        return Ok(FounderReceiveOutcome::Frame(None));
-                    }
-                    let mount = store
-                        .member_outbox_mount()
-                        .map_err(|_| Refusal::Unavailable)?;
-                    let key = member_outbox_key(store).map_err(|_| Refusal::Unavailable)?;
-                    let admission = verifier
-                        .admission(lane.admission)
+                let require_current = || {
+                    check_governed_member(&self.owner, governed, &lane.domain, verifier, store)
                         .map_err(|_| Refusal::Stale)?;
-                    let mut replayed = false;
-                    for &action in missing {
-                        if session.signal.is_cancelled() || frame.current_data().is_none() {
-                            return Err(Refusal::Stale);
-                        }
-                        let Some(saved) = history.saved(&mount, &key, action, rng)? else {
-                            continue;
-                        };
-                        check_governed_member(&self.owner, governed, &lane.domain, verifier, store)
-                            .map_err(|_| Refusal::Stale)?;
-                        if session.signal.is_cancelled() || frame.current_data().is_none() {
-                            return Err(Refusal::Stale);
-                        }
-                        replayed |= verifier
-                            .replay_ordinary_history_original(
-                                &mut received.ledger,
-                                &received.view,
-                                saved.action(),
-                                &admission,
-                                &[],
-                                WORK_LIMIT,
-                            )
-                            .map_err(|_| Refusal::Failed)?
-                            == V2OrdinaryReceiveStatus::Retained(ActionState::Valid);
+                    if session.signal.is_cancelled() || frame.current_data().is_none() {
+                        return Err(Refusal::Stale);
                     }
-                    if !replayed {
-                        return Ok(FounderReceiveOutcome::Frame(None));
-                    }
-                    status = original
-                        .project_from_ledger(
-                            verifier,
-                            &mut received.ledger,
-                            &received.view,
-                            WORK_LIMIT,
-                        )
-                        .map_err(|_| Refusal::Failed)?;
-                }
-                if status != V2OrdinaryReceiveStatus::Retained(ActionState::Valid) {
+                    Ok(())
+                };
+                if !project_founder_member(
+                    &original,
+                    verifier,
+                    &mut received.ledger,
+                    &received.view,
+                    |id| {
+                        let mount = store
+                            .member_outbox_mount()
+                            .map_err(|_| Refusal::Unavailable)?;
+                        let key = member_outbox_key(store).map_err(|_| Refusal::Unavailable)?;
+                        history.saved(&mount, &key, id, rng)
+                    },
+                    require_current,
+                )? {
                     return Ok(FounderReceiveOutcome::Frame(None));
                 }
                 let action = original.action_data();
-                check_governed_member(&self.owner, governed, &lane.domain, verifier, store)
-                    .map_err(|_| Refusal::Stale)?;
-                if session.signal.is_cancelled() || frame.current_data().is_none() {
-                    return Err(Refusal::Stale);
-                }
-                let archived = history.save(&original, rng).unwrap_or(Some(false));
+                let archived = history
+                    .save(&original, rng, || require_current().map_err(|_| refused()))
+                    .unwrap_or(Some(false));
+                require_current()?;
                 Ok(FounderReceiveOutcome::Frame(Some(
                     NativeTextFounderReceived {
                         action: action.id(),

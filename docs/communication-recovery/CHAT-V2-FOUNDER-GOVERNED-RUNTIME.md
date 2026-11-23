@@ -1,8 +1,8 @@
 # Whole founder node: governed Add continuation
 
-Status: library ownership increment, not a reachable native Add command. Chat
-V2 remains OFF and incomplete. Root's covering save, original Current receiver,
-lock cleanup and real production installation remain to be implemented.
+The warm native runtime supports the first governed Add, the original signed
+Welcome, and ordinary founder and joined-member messages. Chat V2 remains OFF
+pending cold desktop activation and end-to-end acceptance.
 
 ## Implemented boundary
 
@@ -30,6 +30,13 @@ The recovered graph also seals the exact outstanding founder outbox original
 for its reserved mesh. Only acceptance by that driver yields a receipt that
 can advance the same outbox. Revocation, duplicate submission, and a mesh
 with no peers leave the original pending.
+
+The same restored graph can open a bounded ordinary-member subscription on
+the original TCP actor. The live receiver uses the selected Core, validates
+each signed original, and can replay up to four exact direct dependencies from
+the founder's outbox. Live and archived receive use the same authorization and
+archive seal as the warm founder. A retired subscription revokes live body
+access, while already covered history can still be opened under a fresh scope.
 
 The stage-lifetime continuation is under validation. Native key drainage is
 being separated from retained CLOSED snapshot DATA: an actual completed Cell

@@ -1,25 +1,20 @@
 //! Rebuild one archived projection from the cold founder's selected history.
 use super::*;
 use crate::store::persistence::v2_member_outbox::{
-    member_outbox_key, MemberOutboxContextData, MemberOutboxContextSpec,
+    member_outbox_key, MemberOutboxContextData, MemberOutboxContextSpec, MemberSavedOriginal,
+};
+use crate::store::persistence::v2_member_transport::{
+    FOUNDER_RECEIVE_ACTIONS as ACTION_LIMIT, FOUNDER_RECEIVE_BYTES as ACTION_BYTES,
+    FOUNDER_RECEIVE_LEDGER_FEE as LEDGER_FEE, FOUNDER_RECEIVE_WORK as WORK_LIMIT,
 };
 use crate::store::persistence::v2_shared_history::{
     SharedHistoryActionQuery, SharedHistoryProjectionLease, SharedHistoryReplay, SharedHistoryScope,
 };
 use crate::store::{
-    NativeTextJoinedArchivedActions, NativeTextJoinedMemberProjection, V2MemberSaveRefusal,
+    NativeTextJoinedArchivedActions, NativeTextJoinedMemberProjection, ServerStore,
+    V2MemberSaveRefusal,
 };
-use catcoms_replication::chat::{
-    ActionId, ChatLedger, LedgerLimits, Realm, V2GeneralPrefixVerifier, MAX_ACTION_BYTES,
-    MAX_PARENTS,
-};
-
-const ACTION_LIMIT: usize = 64;
-const ACTION_BYTES: usize = 1024 * 1024;
-const LEDGER_FEE: usize = 2 * ACTION_BYTES
-    + ACTION_LIMIT * (MAX_PARENTS + 2) * 256
-    + V2GeneralPrefixVerifier::ordinary_authorization_temporary_layout_bytes()
-    + 16 * 1024;
+use catcoms_replication::chat::{ActionId, ChatLedger, LedgerLimits, Realm, MAX_ACTION_BYTES};
 
 impl NativeTextColdFounderSource {
     pub fn archived_action_page(
@@ -66,8 +61,7 @@ impl NativeTextColdFounderSource {
         let scope = self.history_scope(channel)?;
         let (verifier, group_view) = self.governed.as_ref().ok_or_else(refused)?.member_parts()?;
         let sdk = self.sdk.as_ref().ok_or_else(refused)?;
-        let source = self.source.data().genesis_public_data();
-        let founder = source.admission_data().admission_id();
+        let original = &self.source;
         let result = self.storage.index.with_recovered_founder_store(
             &self.selection,
             &self.source,
@@ -100,8 +94,6 @@ impl NativeTextColdFounderSource {
                 if !view.try_ready() {
                     return Err(refused());
                 }
-                let mount = store.member_outbox_mount()?;
-                let key = member_outbox_key(store)?;
                 let original = SharedHistoryReplay {
                     store,
                     scope,
@@ -109,21 +101,7 @@ impl NativeTextColdFounderSource {
                     caller: &signal,
                 }
                 .replay_message(&mut ledger, &view, create, |id| {
-                    let context = self
-                        .outbox_context()
-                        .map_err(|_| V2MemberSaveRefusal::Stale)?;
-                    let saved = mount
-                        .lookup_existing_action(store, context, &key, id, rng)
-                        .map_err(|_| V2MemberSaveRefusal::Failed)?;
-                    if saved.as_ref().is_some_and(|saved| {
-                        let realm = &saved.action().spec().realm;
-                        saved.receipt().admission != founder
-                            || realm.channel() != channel
-                            || realm.group() != scope.group.as_slice()
-                    }) {
-                        return Err(V2MemberSaveRefusal::Stale);
-                    }
-                    Ok(saved)
+                    saved_dependency(store, self.outbox_context(), original, scope, id, rng)
                 })
                 .map_err(|_| refused())?;
                 let Some(observation) = original else {
@@ -131,7 +109,7 @@ impl NativeTextColdFounderSource {
                 };
                 let projection_fee = pool.try_reserve(2 * MAX_ACTION_BYTES + 32 * 1024)?;
                 let projection = ledger
-                    .guarded_projection(create, 4 * ACTION_LIMIT + MAX_PARENTS)
+                    .guarded_projection(create, WORK_LIMIT)
                     .map_err(|_| refused())?;
                 Ok(Some(NativeTextJoinedMemberProjection::from_archive(
                     projection,
@@ -151,7 +129,7 @@ impl NativeTextColdFounderSource {
         Ok(result)
     }
 
-    fn history_scope(&self, channel: u128) -> Result<SharedHistoryScope, AppError> {
+    pub(super) fn history_scope(&self, channel: u128) -> Result<SharedHistoryScope, AppError> {
         let original = self.source.data().genesis_public_data();
         let profile = original.profile_data();
         Ok(SharedHistoryScope {
@@ -171,18 +149,57 @@ impl NativeTextColdFounderSource {
     }
 
     pub(super) fn outbox_context(&self) -> Result<MemberOutboxContextData, AppError> {
-        let profile = self.source.data().genesis_public_data();
-        let profile = profile.profile_data();
-        let original = &self.selection.binding;
-        MemberOutboxContextData::from_spec(MemberOutboxContextSpec {
-            vault: original.vault,
-            layout: original.layout,
-            pin: original.pin,
-            profile: profile.id(),
-            tenure: profile.tenure(),
-            group_nonce: profile.spec().creation,
-            device: original.signer,
-            group: &original.group,
-        })
+        outbox_context(&self.selection, &self.source)
     }
+}
+
+pub(super) fn outbox_context(
+    selection: &ColdFounderSelection,
+    source: &RetainedBootstrapSourceData,
+) -> Result<MemberOutboxContextData, AppError> {
+    let genesis = source.data().genesis_public_data();
+    let profile = genesis.profile_data();
+    let original = &selection.binding;
+    MemberOutboxContextData::from_spec(MemberOutboxContextSpec {
+        vault: original.vault,
+        layout: original.layout,
+        pin: original.pin,
+        profile: profile.id(),
+        tenure: profile.tenure(),
+        group_nonce: profile.spec().creation,
+        device: original.signer,
+        group: &original.group,
+    })
+}
+
+pub(super) fn saved_dependency(
+    store: &ServerStore,
+    context: Result<MemberOutboxContextData, AppError>,
+    original: &RetainedBootstrapSourceData,
+    scope: SharedHistoryScope,
+    id: ActionId,
+    rng: &mut impl CryptoRngCore,
+) -> Result<Option<MemberSavedOriginal>, V2MemberSaveRefusal> {
+    use V2MemberSaveRefusal as Refusal;
+    let founder = original
+        .data()
+        .genesis_public_data()
+        .admission_data()
+        .admission_id();
+    let mount = store
+        .member_outbox_mount()
+        .map_err(|_| Refusal::Unavailable)?;
+    let key = member_outbox_key(store).map_err(|_| Refusal::Unavailable)?;
+    let saved = mount
+        .lookup_existing_action(store, context.map_err(|_| Refusal::Stale)?, &key, id, rng)
+        .map_err(|_| Refusal::Failed)?;
+    if saved.as_ref().is_some_and(|saved| {
+        let realm = &saved.action().spec().realm;
+        saved.receipt().admission != founder
+            || realm.channel() != scope.channel
+            || realm.group() != scope.group.as_slice()
+    }) {
+        return Err(Refusal::Stale);
+    }
+    Ok(saved)
 }
