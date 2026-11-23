@@ -21,7 +21,8 @@ mod join;
 pub use join::{
     NativeTextJoinedArchivedActions, NativeTextJoinedDelivery, NativeTextJoinedDependencyExchange,
     NativeTextJoinedDependencyProvider, NativeTextJoinedDependencyResponse,
-    NativeTextJoinedExchange, NativeTextJoinedInstallation, NativeTextJoinedMemberFinalPreparation,
+    NativeTextJoinedExchange, NativeTextJoinedGoverningExchange, NativeTextJoinedGoverningResponse,
+    NativeTextJoinedInstallation, NativeTextJoinedMemberFinalPreparation,
     NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberLedger,
     NativeTextJoinedMemberProjection, NativeTextJoinedMemberPublication,
     NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,

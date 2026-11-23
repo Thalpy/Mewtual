@@ -74,6 +74,10 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 .upgrade()
                 .ok_or_else(refused)?
                 .capture_attached_dial()?;
+            let founder = invite.connected_peer_data();
+            if *runtime.founder_contact.get_or_init(|| founder) != founder {
+                return Err(refused());
+            }
             (transport, authentication, mount, fee)
         };
         self.original.require_current(&caller)?;

@@ -47,6 +47,7 @@ mod receive;
 pub use receive::{
     NativeTextJoinedArchivedActions, NativeTextJoinedDependencyExchange,
     NativeTextJoinedDependencyProvider, NativeTextJoinedDependencyResponse,
+    NativeTextJoinedGoverningExchange, NativeTextJoinedGoverningResponse,
     NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberLedger,
     NativeTextJoinedMemberProjection, NativeTextJoinedMemberReceiver,
     NativeTextJoinedReceivedOriginal,
@@ -450,6 +451,7 @@ pub(super) struct MountedNode<R: CryptoRngCore> {
     registration: Option<Arc<JoinedRegistrationDependency>>,
     recovered: Option<NativeTextJoinedRegistrationData>,
     selection: Option<NativeTextJoinedRowSelection>,
+    founder_contact: OnceLock<PeerId>,
     _payment: CatalogReadReservation,
 }
 
@@ -504,6 +506,7 @@ impl<R: CryptoRngCore> NativeTextSources<catcoms_net::MeshService, R> {
             registration: None,
             recovered: Some(receipt),
             selection: None,
+            founder_contact: OnceLock::new(),
             _payment: payment,
         });
         Ok(())
@@ -591,6 +594,7 @@ impl<R: CryptoRngCore> NativeTextJoinedInstallation<R> {
                     registration: None,
                     recovered: None,
                     selection: None,
+                    founder_contact: OnceLock::from(self.exchange.target),
                     _payment: payment.take().unwrap(),
                 });
                 self.exchange.tcp.attached();

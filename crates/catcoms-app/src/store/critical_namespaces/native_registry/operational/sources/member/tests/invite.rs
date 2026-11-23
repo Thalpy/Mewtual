@@ -75,14 +75,18 @@ async fn native_runtime_invite_returns_only_the_original_installed_join_response
 
 #[tokio::test]
 async fn mounted_join_request_uses_the_original_native_command_and_retains_its_pending() {
-    mounted_join_fixture(false).await;
+    mounted_join_fixture(false, false).await;
 }
 
 #[tokio::test]
 async fn mounted_join_request_cold_recovers_the_exact_registry_stage_only_with_its_welcome() {
-    mounted_join_fixture(true).await;
+    mounted_join_fixture(true, false).await;
 }
 
+#[tokio::test]
+async fn mounted_join_request_applies_the_next_governing_add_under_its_original_row() {
+    mounted_join_fixture(false, true).await;
+}
 #[tokio::test]
 async fn cold_native_founder_reuses_the_covered_source_and_listener() {
     use super::super::super::tests::selected_joined;
@@ -214,7 +218,7 @@ async fn cold_native_founder_reuses_the_covered_source_and_listener() {
     .unwrap();
 }
 
-async fn mounted_join_fixture(recover_stage: bool) {
+async fn mounted_join_fixture(recover_stage: bool, governing: bool) {
     use super::super::super::tests::{policy, selected_joined};
     use crate::store::critical_namespaces::native_registry::preparation::tests::{
         current_policy, SECRET,
@@ -1249,6 +1253,158 @@ async fn mounted_join_fixture(recover_stage: bool) {
         original_member_outbox
     );
     let mut history_rng = catcoms_rt::OsCryptoRng;
+    if governing {
+        use catcoms_rt::TransportEvent;
+        let capture = || {
+            owner.capture_member(
+                &row,
+                command(&founder, &founder_budget),
+                owner.policy.prepare_member().unwrap(),
+            )
+        };
+        let issued = capture()
+            .finish()
+            .unwrap()
+            .save_invite([0xa9; 32], 60_000, &fresh)
+            .unwrap();
+        let invite_two =
+            crate::store::NativeTextInvitePacketData::decode(issued.packet_bytes_data()).unwrap();
+        let incoming = catcoms_sync::PreparedV2JoinRequest::prepare(
+            catcoms_mls::MlsDevice::generate().unwrap(),
+            &invite_two.binding().spec_data().anchor,
+            invite_two.binding(),
+            [0xae; 32],
+            issued.expires_at_ms() - 1,
+            catcoms_sync::DirectJoinLimits::new(512 * 1024, 512 * 1024, 64 * 1024).unwrap(),
+        )
+        .unwrap();
+        let next = capture()
+            .accept_join_request(incoming.request_bytes_data(), &fresh)
+            .unwrap();
+        let delivery = next.encode_delivery_data().unwrap();
+        let (_, expected) = catcoms_sync::V2JoinDeliveryData::decode(&delivery)
+            .unwrap()
+            .proof_data()
+            .unwrap()
+            .0;
+        recovered_row()
+            .prepare_reconnect(
+                &selection,
+                &invite,
+                token,
+                std::net::Ipv4Addr::LOCALHOST.into(),
+                fresh.clone(),
+            )
+            .unwrap()
+            .connect(&scheduler)
+            .await
+            .unwrap();
+        let channel = request().channel;
+        let ingress = recovered_row()
+            .prepare_member_ingress(&selection, channel, fresh.clone())
+            .unwrap();
+        let prior_topic = ingress.topic_for_test();
+        let mut ingress = ingress.open().await.unwrap();
+        let mut lane = capture()
+            .open_connected_governing_requests(fresh.clone())
+            .unwrap();
+        let exchange = recovered_row()
+            .prepare_governing_exchange(&selection, fresh.clone())
+            .unwrap();
+        let serve = async {
+            let Some(TransportEvent::Request {
+                proto,
+                data,
+                responder,
+                ..
+            }) = lane.next().await
+            else {
+                panic!("the mounted founder must receive the exact governing request");
+            };
+            capture()
+                .serve_connected_governing_request(proto, &data, responder, fresh.clone())
+                .unwrap();
+        };
+        let (received, ()) = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            tokio::join!(exchange.receive(), serve)
+        })
+        .await
+        .unwrap();
+        let received = received.unwrap();
+        assert_eq!(
+            recovered_row().apply_governing_response(
+                &selection,
+                &received,
+                &fresh,
+                &mut history_rng
+            ),
+            Ok((expected, 2))
+        );
+        assert!(recovered_row()
+            .apply_governing_response(&selection, &received, &fresh, &mut history_rng)
+            .is_err());
+        drop(received);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(4), ingress.next())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_ne!(
+            recovered_row()
+                .prepare_member_ingress(&selection, channel, fresh.clone())
+                .unwrap()
+                .topic_for_test(),
+            prior_topic
+        );
+        assert!(selection.same_original(&recovered_row().select_registered(&fresh).unwrap()));
+        assert_eq!(
+            selection.member_outbox_context_id_data(),
+            original_member_outbox
+        );
+        assert_eq!(
+            recovered_row()
+                .lookup_saved_member(&selection, &request(), &fresh, &mut history_rng)
+                .unwrap(),
+            saved
+        );
+        drop((lane, ingress));
+        let mut retirement = mounted_sources.prepare_retirement().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            while retirement.try_retire().unwrap()
+                == crate::store::NativeTextSourceRetirementStatus::Pending
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop((retirement, mounted_sources, mounted_vault));
+        let storage = crate::store::NativeTextJoinedStorage::open_for_native_startup(
+            dir.path(),
+            SECRET,
+            &mut history_rng,
+            current_policy(),
+        )
+        .unwrap();
+        assert_eq!(
+            storage.recovered_join_registration_data().unwrap(),
+            Some(registration)
+        );
+        let mut next = storage
+            .bind_recovered_native_runtime(
+                rand_chacha::ChaCha20Rng::seed_from_u64(0xea50),
+                Box::new(catcoms_rt::SystemClock),
+                &fresh,
+            )
+            .ok()
+            .unwrap();
+        assert_eq!(
+            next.complete_recovery(&fresh).unwrap(),
+            (expected, own_add, 2)
+        );
+        return;
+    }
     let (retire_receiver, signal) = tokio::sync::watch::channel(false);
     let prepare_receiver = recovered_row()
         .prepare_member_ingress(

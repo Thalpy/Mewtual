@@ -641,6 +641,13 @@ pub(in crate::store) struct JoinedMemberSource<'a, T: MeshTransport, R: CryptoRn
 }
 
 impl JoinedMemberLane {
+    pub(in crate::store) fn require_quiescent_for_add(&self) -> Result<(), AppError> {
+        if self.requests.request.is_some() {
+            return Err(refused());
+        }
+        self.save_source.require_open_idle()
+    }
+
     pub(in crate::store) fn new(
         store: &ServerStore,
         row: NativeTextJoinedRowSelection,

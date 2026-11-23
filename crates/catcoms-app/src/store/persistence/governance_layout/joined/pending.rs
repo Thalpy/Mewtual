@@ -839,6 +839,28 @@ impl ServerStore {
 }
 
 impl JoinedPendingIo {
+    pub(in crate::store) fn cover_member_add<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
+        &mut self,
+        store: &ServerStore,
+        node: &mut catcoms_sync::ClosedV2JoinedNode<T, R>,
+        delivery: &[u8],
+        caller: &catcoms_rt::RequestCancellation,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+    ) -> Result<catcoms_sync::RetiredV2JoinedAdd, AppError> {
+        self.request_data(store)?;
+        self.welcome.as_mut().ok_or_else(denied)?.cover_member_add(
+            store,
+            self.prepared.context_data(),
+            node,
+            delivery,
+            caller,
+            rng,
+        )
+    }
+
     pub(in crate::store) fn native_transport_seed(&self) -> Result<Zeroizing<[u8; 32]>, AppError> {
         self.prepared.native_transport_seed()
     }

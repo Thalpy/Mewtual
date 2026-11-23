@@ -22,10 +22,12 @@ use catcoms_sync::owner_v2::{SelectedV2MemberEnvelope, MAX_V2_MEMBER_TRANSPORT_B
 use catcoms_sync::PreparedV2JoinedPrefix;
 
 mod dependencies;
+mod governing;
 pub use dependencies::{
     NativeTextJoinedDependencyExchange, NativeTextJoinedDependencyProvider,
     NativeTextJoinedDependencyResponse,
 };
+pub use governing::{NativeTextJoinedGoverningExchange, NativeTextJoinedGoverningResponse};
 
 const INGRESS_FEE: usize = 8 * 1024;
 // Padded plaintext, canonical signed action and its original frame may overlap.
@@ -147,6 +149,7 @@ struct ReceiverSource<'a, R: CryptoRngCore> {
     view: &'a ProjectionGroupView,
     store: &'a ServerStore,
     registration: NativeTextJoinedRegistrationData,
+    founder: Option<PeerId>,
 }
 
 pub(in crate::store::critical_namespaces::native_registry) struct NativeTextJoinedSharedHistoryRecord
@@ -766,6 +769,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                         view,
                         store,
                         registration: data,
+                        founder: runtime.founder_contact.get().copied(),
                     })
                 },
             )?

@@ -396,8 +396,11 @@ selected-history page and its MLS epoch authenticator in an encrypted record.
 Each record names the original pin and commits to the previous covered record.
 The original Welcome remains the registration receipt. Startup replays the
 contiguous chain on the original Core and MLS pair and refuses a missing
-intermediate record or a mismatched authenticator. The desktop joined
-receiver still needs to drive this path from the mounted row.
+intermediate record or a mismatched authenticator. A desktop joined row can
+fetch the next step on the original connected founder contact, then cover and
+select it once existing local save work has reconciled. The old ordinary
+subscription retires with the old epoch. On restart the original invite must
+be supplied for an approved reconnect before the worker can fetch again.
 
 An independently reopened Pending with neither Welcome file can resend the
 exact original request over the same connected protocol. It verifies the

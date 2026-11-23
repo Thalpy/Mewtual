@@ -43,14 +43,44 @@ pub(super) struct WarmWelcome {
     held_entry: Option<CreatedStage>,
     held_outcome: Option<CreatedStage>,
     selection: Option<Box<JoinedCore>>,
+    member_adds: member_add::MemberAdds,
     sdk_graph_payment: Option<TextCurrentSdkRestoreAdmission>,
     _fee: CatalogReadReservation,
 }
 
 impl WarmWelcome {
+    pub(super) fn cover_member_add<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore>(
+        &mut self,
+        store: &ServerStore,
+        context: V2PendingJoinContextData,
+        node: &mut catcoms_sync::ClosedV2JoinedNode<T, R>,
+        delivery: &[u8],
+        caller: &catcoms_rt::RequestCancellation,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+    ) -> Result<catcoms_sync::RetiredV2JoinedAdd, AppError> {
+        self.require_outcome(store)?;
+        let selected = self
+            .selection
+            .as_mut()
+            .filter(|selected| selected.initial.is_some())
+            .ok_or_else(denied)?;
+        let welcome = self.outcome.as_ref().ok_or_else(denied)?;
+        self.member_adds.cover(
+            store,
+            context,
+            welcome,
+            &mut selected.core,
+            node,
+            delivery,
+            caller,
+            rng,
+        )
+    }
+
     pub(super) fn member_prefix(
         &self,
     ) -> Result<(&PreparedV2JoinedPrefix, &ProjectionGroupView), AppError> {
+        self.member_adds.require_current()?;
         let selected = self
             .selection
             .as_ref()
@@ -86,6 +116,7 @@ impl WarmWelcome {
             held_entry: None,
             held_outcome: None,
             selection: None,
+            member_adds: member_add::MemberAdds::default(),
             sdk_graph_payment,
             _fee: fee,
         })

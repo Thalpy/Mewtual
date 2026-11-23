@@ -298,6 +298,7 @@ async fn start_dependencies<R: tauri::Runtime>(
             tokio::select! {
                 _ = serve_dependencies(app.clone(), source.clone(), provider) => {}
                 _ = drain_outbox(&app, &source) => {}
+                _ = catch_up_governing(&app, &source) => {}
                 _ = async {
                     if let Some((initial, payment)) = receive {
                         super::receiving::run(&app, &source, initial, payment).await;
@@ -312,6 +313,68 @@ async fn start_dependencies<R: tauri::Runtime>(
 
 const OUTBOX_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(250);
 const OUTBOX_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+const GOVERNING_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+const GOVERNING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+async fn catch_up_governing<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source: &Source) {
+    let mut scope = source.negative();
+    let mut waiting = None;
+    loop {
+        tokio::select! {
+            biased;
+            _ = scope.cancelled() => return,
+            _ = tokio::time::sleep(GOVERNING_RETRY) => {}
+        }
+        let state = app.state::<AppState>();
+        if waiting.is_none() {
+            let Some(local) = source.member_work.try_background() else {
+                continue;
+            };
+            let Some((prepared, row)) = source.capture_joined(&state).await else {
+                continue;
+            };
+            let caller = source.negative();
+            let Ok(Ok(exchange)) = tauri::async_runtime::spawn_blocking(move || {
+                let _local = local;
+                prepared.prepare_governing_exchange(&row, caller)
+            })
+            .await
+            else {
+                continue;
+            };
+            let Ok(Ok(response)) =
+                tokio::time::timeout(GOVERNING_TIMEOUT, exchange.receive()).await
+            else {
+                continue;
+            };
+            waiting = Some(response);
+        }
+        let Some(local) = source.member_work.try_background() else {
+            continue;
+        };
+        let Some((prepared, row)) = source.capture_joined(&state).await else {
+            continue;
+        };
+        let Some(response) = waiting.take() else {
+            continue;
+        };
+        let caller = source.negative();
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            let _local = local;
+            let result =
+                prepared.apply_governing_response(&row, &response, &caller, &mut OsCryptoRng);
+            (result, response)
+        })
+        .await;
+        match result {
+            Ok((Ok(_), _)) => source.member_work.publication_wake.notify_one(),
+            Ok((Err(catcoms_app::store::V2MemberSaveRefusal::Busy), response)) => {
+                waiting = Some(response);
+            }
+            _ => {}
+        }
+    }
+}
 
 async fn drain_outbox<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source: &Arc<Source>) {
     let local = &source.member_work;

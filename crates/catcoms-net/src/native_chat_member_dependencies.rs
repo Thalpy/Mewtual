@@ -7,6 +7,8 @@ use catcoms_rt::{
     ConnectionLease, PeerId, ProtocolId, RequestAuthority, RequestCancellation, Responder,
     SharedRequestKeepalive, TransportError, TransportEvent, CHAT_V2_DEPENDENCY_KIND,
     CHAT_V2_DEPENDENCY_REQUEST_MAX_BYTES, CHAT_V2_DEPENDENCY_RESPONSE_MAX_BYTES,
+    CHAT_V2_GOVERNING_KIND, CHAT_V2_GOVERNING_REQUEST_MAX_BYTES,
+    CHAT_V2_GOVERNING_RESPONSE_MAX_BYTES,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
@@ -184,7 +186,40 @@ impl NativeChatMemberDependencyExchange {
         sealed: &[u8],
         caller: RequestCancellation,
     ) -> Result<Bytes, TransportError> {
-        if sealed.is_empty() || sealed.len() >= CHAT_V2_DEPENDENCY_REQUEST_MAX_BYTES {
+        self.request_bounded(
+            sealed,
+            caller,
+            CHAT_V2_DEPENDENCY_KIND,
+            CHAT_V2_DEPENDENCY_REQUEST_MAX_BYTES,
+            CHAT_V2_DEPENDENCY_RESPONSE_MAX_BYTES,
+        )
+        .await
+    }
+
+    pub async fn request_governing(
+        self,
+        proof: &[u8],
+        caller: RequestCancellation,
+    ) -> Result<Bytes, TransportError> {
+        self.request_bounded(
+            proof,
+            caller,
+            CHAT_V2_GOVERNING_KIND,
+            CHAT_V2_GOVERNING_REQUEST_MAX_BYTES,
+            CHAT_V2_GOVERNING_RESPONSE_MAX_BYTES,
+        )
+        .await
+    }
+
+    async fn request_bounded(
+        self,
+        payload: &[u8],
+        caller: RequestCancellation,
+        kind: u8,
+        request_bound: usize,
+        response_bound: usize,
+    ) -> Result<Bytes, TransportError> {
+        if payload.is_empty() || payload.len() >= request_bound {
             return Err(TransportError::NoResponse);
         }
         let authority = Arc::new(OriginalRoute {
@@ -204,9 +239,9 @@ impl NativeChatMemberDependencyExchange {
         let mut cancel = caller
             .with_authority(authority)
             .retain_custody(Arc::new(OutboundSlot { _permit: slot }));
-        let mut wire = Vec::with_capacity(1 + sealed.len());
-        wire.push(CHAT_V2_DEPENDENCY_KIND);
-        wire.extend_from_slice(sealed);
+        let mut wire = Vec::with_capacity(1 + payload.len());
+        wire.push(kind);
+        wire.extend_from_slice(payload);
         let (reply, result) = oneshot::channel();
         commands
             .try_send(Command::RequestConnected {
@@ -225,7 +260,13 @@ impl NativeChatMemberDependencyExchange {
             _ = cancel.cancelled() => Err(TransportError::Cancelled),
             reply = result => {
                 let reply = reply.map_err(|_| TransportError::Closed)??;
-                if cancel.is_cancelled() { Err(TransportError::Cancelled) } else { Ok(reply) }
+                if cancel.is_cancelled() {
+                    Err(TransportError::Cancelled)
+                } else if reply.is_empty() || reply.len() > response_bound {
+                    Err(TransportError::NoResponse)
+                } else {
+                    Ok(reply)
+                }
             }
         }
     }
@@ -257,7 +298,7 @@ impl NativeChatMemberDependencyObservation {
                 .is_none_or(NativeChatMemberFrameObservation::is_current_cached)
     }
 
-    async fn revoked(&self) {
+    pub async fn revoked(&self) {
         if let Some(frame) = &self.frame {
             frame.retired().await;
         } else {
