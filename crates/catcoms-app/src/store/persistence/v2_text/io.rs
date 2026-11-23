@@ -68,6 +68,10 @@ fn require_fixed_leaf(leaf: &'static str) -> Result<(), AppError> {
             | "text.add.raw-welcome.v2"
             | "text.add.response.v2"
             | "text.add.head-stage.v2"
+            | "text.remove.sdk-entry.v1"
+            | "text.remove.outcome.v1"
+            | "text.remove.header-attempt.v1"
+            | "text.remove.head-stage.v1"
             | "text.pages"
     ) {
         Ok(())
