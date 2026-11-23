@@ -227,6 +227,15 @@ impl PreparedPinnedPending {
             .map_err(|_| refused())
     }
 
+    pub(in crate::store) fn fund_warm_sdk_graph(
+        &mut self,
+        payment: catcoms_mls::persist::TextCurrentSdkRestoreAdmission,
+    ) -> Result<(), AppError> {
+        self.source
+            .fund_warm_sdk_graph(payment)
+            .map_err(|_| refused())
+    }
+
     pub(in crate::store) fn finish_delivery(
         &mut self,
         delivery: &[u8],

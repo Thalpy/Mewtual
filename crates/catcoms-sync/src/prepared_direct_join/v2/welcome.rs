@@ -237,6 +237,19 @@ impl<'a> WelcomeAdmission<'a> {
 }
 
 impl PreparedV2JoinRequest {
+    /// Fund retention of the original warm private graph before Welcome entry.
+    /// A failed or completed entry cannot be relabelled with a different fee.
+    pub fn fund_warm_sdk_graph(
+        &mut self,
+        payment: catcoms_mls::persist::TextCurrentSdkRestoreAdmission,
+    ) -> Result<(), SyncError> {
+        if self.welcome_entered || self.warm_sdk_payment.is_some() {
+            return Err(SyncError::JoinRejected);
+        }
+        self.warm_sdk_payment = Some(payment);
+        Ok(())
+    }
+
     /// The verifier must replay the accepted genesis through this exact Add.
     /// Authenticate the response and prefix *before* restoring or entering the
     /// Welcome SDK. Failed candidates leave the original private bundle intact.
@@ -462,12 +475,21 @@ impl PreparedV2JoinRequest {
             // Only a fully authenticated response can spend the original
             // finite SDK attempt. Ambiguous or failed SDK entry stays held.
             self.welcome_entered = true;
-            let device = self.restore_exact_device(packet)?;
-            let group = ServerGroup::join_for_v2_key_package(
-                &device,
-                response.welcome,
-                &request.key_package_reference,
-            )?;
+            let mut device = self.restore_exact_device(packet)?;
+            let group = if self.warm_sdk_payment.is_some() {
+                ServerGroup::join_closed_for_v2_key_package(
+                    &mut device,
+                    response.welcome,
+                    &request.key_package_reference,
+                    &mut self.warm_sdk_payment,
+                )?
+            } else {
+                ServerGroup::join_for_v2_key_package(
+                    &device,
+                    response.welcome,
+                    &request.key_package_reference,
+                )?
+            };
             let facts = V2JoinFacts::capture(&group, &device, request.key_package_reference)?;
             if facts.group_data() != packet.invite.spec_data().anchor.group.as_slice()
                 || facts.signer_data() != &request.joiner

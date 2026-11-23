@@ -247,6 +247,20 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     assert_eq!(selected.image_data(), output.image_data());
     drop(selected);
     let member_payment = Arc::new(AtomicUsize::new(0));
+    let warm_candidate = joined
+        .prepare_member_add_candidate(
+            joined_prefix,
+            step(),
+            commit,
+            super::admission(&member_payment),
+        )
+        .unwrap();
+    assert_eq!(warm_candidate.header_data().id(), header.id());
+    assert_eq!(
+        warm_candidate.selected_epoch_data(),
+        (2, *result.after_authenticator_data())
+    );
+    drop(warm_candidate);
     let member_candidate = recovered
         .prepare_member_add_candidate(
             foreign_prefix,
@@ -777,6 +791,14 @@ async fn complete_original_welcome(native_joiner: bool) {
     assert!(prepared
         .finish_first_join_delivery_cancellable(&delivery, &canceled)
         .is_err());
+    let governed = TextCurrentAddLimits::governed_text_v2();
+    let graph_limits = TextCurrentSdkRestoreLimits {
+        max_typed_bytes: governed.restore_typed_bytes,
+        max_work: governed.restore_work,
+    };
+    let payment = || TextCurrentSdkRestoreAdmission::new(Paid(graph_limits)).unwrap();
+    prepared.fund_warm_sdk_graph(payment()).unwrap();
+    assert!(prepared.fund_warm_sdk_graph(payment()).is_err());
     let (_current, signal) = tokio::sync::watch::channel(false);
     let current = catcoms_rt::RequestCancellation::new(signal, None);
     let mut native_cut = joiner
@@ -850,11 +872,6 @@ async fn complete_original_welcome(native_joiner: bool) {
     let original = sealed.encrypted_parts().1.as_ptr();
     let (nonce, cipher) = sealed.encrypted_parts();
     let immutable_outcome = SealedV2JoinedOutcome::from_encrypted_parts(*nonce, cipher).unwrap();
-    let governed = TextCurrentAddLimits::governed_text_v2();
-    let graph_limits = TextCurrentSdkRestoreLimits {
-        max_typed_bytes: governed.restore_typed_bytes,
-        max_work: governed.restore_work,
-    };
     let restore = |outcome: &SealedV2JoinedOutcome, delivery: &[u8], fee| {
         RecoveredV2JoinedOutcome::open(
             outcome,

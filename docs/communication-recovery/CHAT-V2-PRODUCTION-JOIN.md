@@ -296,7 +296,9 @@ original joined key counter before waiting for its admitted work.
 A possible entry with no outcome stays
 historical. An owning warm join can move the actual private Welcome graph and
 its original transport into one closed joined node after selected history and
-the physical files agree. It takes the original node's join facts and sets the
+the physical files agree. Storage reserves the warm graph's own payment before
+covering Welcome entry. The successful SDK operation attaches that payment to
+the exact new group and device. It takes the original node's join facts and sets the
 joined fence against the actual own Add. The mounted runtime retains the Core
 selection and retired parent. A separate cold attachment can move the
 independently restored graph into a closed node, using its own original
@@ -356,9 +358,9 @@ KeyPackage and credential bindings, and the successor roster. It retains the
 new graph and snapshot with the corresponding Core candidate. After the host
 selects the exact signed Header, state and SDK authenticator, Sync installs
 the pair under the original joined fence. The member keeps its original
-Admission and the old transport observation retires. This handoff is exercised
-with a separately paid restored graph. The mounted durable writer and delivery
-to existing members remain open work.
+Admission and the old transport observation retires. The warm and restored
+graphs can stage the same Add with independent payment. The mounted durable
+writer and delivery to existing members remain open work.
 
 An independently reopened Pending with neither Welcome file can resend the
 exact original request over the same connected protocol. It verifies the

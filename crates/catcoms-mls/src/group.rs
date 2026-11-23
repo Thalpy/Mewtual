@@ -200,6 +200,25 @@ impl ServerGroup {
         Self::join_inner(device, welcome_bytes, Some(expected), true)
     }
 
+    /// Allocate one accounted, closed pair from the actual private Welcome.
+    /// The fee remains with the caller until the SDK operation succeeds.
+    pub fn join_closed_for_v2_key_package(
+        device: &mut MlsDevice,
+        welcome_bytes: &[u8],
+        expected: &[u8; 32],
+        payment: &mut Option<crate::persist::TextCurrentSdkRestoreAdmission>,
+    ) -> Result<Self, MlsError> {
+        if payment.is_none() {
+            return Err(MlsError::Internal("missing private Welcome graph payment"));
+        }
+        let mut group = Self::join_for_v2_key_package(device, welcome_bytes, expected)?;
+        payment
+            .take()
+            .expect("held private Welcome graph payment")
+            .retain_graph(device, &mut group);
+        Ok(group)
+    }
+
     fn join_inner(
         device: &MlsDevice,
         welcome_bytes: &[u8],

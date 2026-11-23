@@ -123,6 +123,7 @@ impl SealedV2PendingJoinSource {
             master: Zeroizing::new(master.to_vec()),
             limits,
             welcome_entered: false,
+            warm_sdk_payment: None,
             native_origin: None,
             completed: None,
             sealed_source: None,

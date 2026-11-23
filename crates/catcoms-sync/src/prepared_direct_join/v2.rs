@@ -122,6 +122,7 @@ pub struct PreparedV2JoinRequest {
     sealed_source: Option<SealedV2PendingJoinSource>,
     sealed_outcome: Option<SealedV2JoinedOutcome>,
     initial_prefix_origin: Option<std::sync::Arc<()>>,
+    warm_sdk_payment: Option<catcoms_mls::persist::TextCurrentSdkRestoreAdmission>,
 }
 
 /// Explicit owning native cut and its externally retained End batch. The
@@ -223,6 +224,7 @@ impl PreparedV2JoinRequest {
             master,
             limits,
             welcome_entered: false,
+            warm_sdk_payment: None,
             native_origin: None,
             completed: None,
             sealed_source: None,

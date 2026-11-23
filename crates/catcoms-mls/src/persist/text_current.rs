@@ -72,6 +72,11 @@ impl TextCurrentSdkRestoreAdmission {
             limits,
         })
     }
+
+    pub(crate) fn retain_graph(self, device: &mut MlsDevice, group: &mut ServerGroup) {
+        device.sdk_graph_lease = Some(self.lease.clone());
+        group.sdk_graph_lease = Some(self.lease);
+    }
 }
 /// Only CURRENT Operational graphs with <=64 real leaf slots, zero SDK past
 /// epochs/proposals/own-leaf debt, exact founder32 ring or Welcome0, and ALL-NULL

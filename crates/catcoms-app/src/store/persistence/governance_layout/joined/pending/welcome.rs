@@ -42,6 +42,7 @@ pub(super) struct WarmWelcome {
     held_entry: Option<CreatedStage>,
     held_outcome: Option<CreatedStage>,
     selection: Option<Box<JoinedCore>>,
+    sdk_graph_payment: Option<TextCurrentSdkRestoreAdmission>,
     _fee: CatalogReadReservation,
 }
 
@@ -75,6 +76,7 @@ impl WarmWelcome {
         require_absent(store)?;
         let fee = paid_frames(store)?;
         required.validate_delivery_data(delivery)?;
+        let sdk_graph_payment = Some(reserve_sdk_graph(store)?);
         let entry = codec::seal_entry(key, required.context_data(), pending_frame, delivery, rng)?;
         Ok(Self {
             delivery: Zeroizing::new(delivery.to_vec()),
@@ -83,6 +85,7 @@ impl WarmWelcome {
             held_entry: None,
             held_outcome: None,
             selection: None,
+            sdk_graph_payment,
             _fee: fee,
         })
     }
@@ -115,6 +118,9 @@ impl WarmWelcome {
         self.require_entry(store)?;
         if self.outcome.is_none() {
             let context = required.context_data();
+            if let Some(payment) = self.sdk_graph_payment.take() {
+                required.fund_warm_sdk_graph(payment)?;
+            }
             required.finish_delivery(&self.delivery, negative, keys)?;
             if negative.is_some_and(catcoms_rt::RequestCancellation::is_cancelled) {
                 return Err(denied());
@@ -516,6 +522,24 @@ impl TextCurrentSdkGraphReservation for RestorePayment {
     }
 }
 
+fn reserve_sdk_graph(store: &ServerStore) -> Result<TextCurrentSdkRestoreAdmission, AppError> {
+    let restore = TextCurrentAddLimits::governed_text_v2();
+    let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
+    let fee = policy
+        .current
+        .archive
+        .pending
+        .pool
+        .try_reserve(restore.restore_typed_bytes)?;
+    Ok(TextCurrentSdkRestoreAdmission::new(RestorePayment {
+        limits: TextCurrentSdkRestoreLimits {
+            max_typed_bytes: restore.restore_typed_bytes,
+            max_work: restore.restore_work,
+        },
+        _fee: fee,
+    })?)
+}
+
 pub(super) fn recover(
     store: &ServerStore,
     key: &[u8; 32],
@@ -536,21 +560,7 @@ pub(super) fn recover(
         .map_err(|_| denied())?;
     let outcome = if let Some(outcome) = read(&outcome_path, codec::OUTCOME_FRAME)? {
         let opened = codec::open_outcome(key, context, &entry.1, &outcome.1)?;
-        let restore = TextCurrentAddLimits::governed_text_v2();
-        let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
-        let fee = policy
-            .current
-            .archive
-            .pending
-            .pool
-            .try_reserve(restore.restore_typed_bytes)?;
-        let admission = TextCurrentSdkRestoreAdmission::new(RestorePayment {
-            limits: TextCurrentSdkRestoreLimits {
-                max_typed_bytes: restore.restore_typed_bytes,
-                max_work: restore.restore_work,
-            },
-            _fee: fee,
-        })?;
+        let admission = reserve_sdk_graph(store)?;
         let recovered =
             RecoveredV2JoinedOutcome::open(&opened.sealed, key, request, &delivery, admission)
                 .map_err(|_| denied())?;
