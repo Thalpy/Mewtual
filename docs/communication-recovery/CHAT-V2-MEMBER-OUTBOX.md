@@ -349,6 +349,11 @@ submitted items, so a failed earlier item is never skipped, and records a durabl
 and its exact entries: a stale batch (front moved) or a foreign one (other context) is
 refused. A lost checkpoint reply may cause the same signed original to be submitted again;
 local submission is not peer receipt, durability confirmation or certification.
+The native checkpoint checks both the original publication scope and the
+current row. If the original scope retires after the driver acknowledges a
+submission, the debt stays pending and a fresh attempt can settle it. The
+durable writer checks cancellation again after preparing the checkpoint and
+before entering its first file effect.
 
 The mounted joined source reads at most one item per attempt without creating an absent
 namespace. The ordinary envelope uses a read-only MLS exporter. The original native

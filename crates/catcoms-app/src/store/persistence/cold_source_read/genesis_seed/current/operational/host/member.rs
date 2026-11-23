@@ -177,7 +177,9 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     return Err(Refusal::Cancelled);
                 }
                 mount
-                    .checkpoint_publication_debt(store, context, &key, batch, rng)
+                    .checkpoint_publication_debt(store, context, &key, batch, rng, || {
+                        !caller.is_cancelled()
+                    })
                     .map(|saved| FounderDebtOutcome::Checkpointed(saved.front))
                     .map_err(|_| Refusal::Failed)
             }

@@ -454,7 +454,11 @@ impl MemberOutboxMount {
         key: &[u8; 32],
         batch: MemberDebtBatch,
         rng: &mut dyn CryptoRngCore,
+        is_current: impl Fn() -> bool,
     ) -> Result<MemberCheckpointSaved, MemberOutboxError> {
+        if !is_current() {
+            return Err(MemberOutboxRefusal::Stale.into());
+        }
         let payment = self
             .pay(MEMBER_OUTBOX_CHECKPOINT_FEE)
             .map_err(|_| MemberOutboxRefusal::Payment)?;
@@ -473,6 +477,9 @@ impl MemberOutboxMount {
                 .ok_or(MemberOutboxRefusal::Incomplete)?
                 .prepare_checkpoint(key, batch, rng, payment)
                 .map_err(|returned| returned.error)?;
+            if !is_current() {
+                return Err(MemberOutboxRefusal::Stale.into());
+            }
             let owner = state.owner.take().ok_or(MemberOutboxRefusal::Incomplete)?;
             let run = prepared.run(owner, store._session.retain_for_physical_work());
             state.owner = Some(run.owner);

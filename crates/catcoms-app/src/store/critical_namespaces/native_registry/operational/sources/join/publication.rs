@@ -44,7 +44,6 @@ pub struct NativeTextJoinedMemberPublication {
     operation: Operation,
     receipt: NativeTextJoinedMemberPublicationReceipt,
     signal: RequestCancellation,
-    _invocation: watch::Sender<bool>,
 }
 
 /// A single exact original to checkpoint. Publishable debt needs a real driver
@@ -55,6 +54,8 @@ pub struct NativeTextJoinedMemberPublicationReceipt {
     selection: NativeTextJoinedRowSelection,
     data: NativeTextJoinedRegistrationData,
     held: Option<V2MemberPublicationObservation>,
+    original: RequestCancellation,
+    _invocation: watch::Sender<bool>,
 }
 
 impl NativeTextJoinedMemberPublication {
@@ -65,7 +66,6 @@ impl NativeTextJoinedMemberPublication {
             operation,
             mut receipt,
             signal,
-            _invocation,
         } = self;
         if signal.is_cancelled() {
             return Err(PublishOnceError::Revoked.into());
@@ -84,6 +84,9 @@ impl NativeTextJoinedMemberPublication {
                     .record_submitted(0)
                     .map_err(|_| catcoms_sync::SyncError::JoinRejected)?,
             },
+        }
+        if receipt.original.is_cancelled() {
+            return Err(PublishOnceError::Revoked.into());
         }
         Ok(Some(receipt))
     }
@@ -218,14 +221,14 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             caller: caller.clone(),
             row: Some(selection.clone()),
         });
-        let signal =
-            caller
-                .with_authority(authority)
-                .retain_custody(Arc::new(PublicationCustody {
-                    _work: work,
-                    _end: end,
-                    _fee: fee,
-                }));
+        let original = caller.with_authority(authority);
+        let signal = original
+            .clone()
+            .retain_custody(Arc::new(PublicationCustody {
+                _work: work,
+                _end: end,
+                _fee: fee,
+            }));
         Ok(Some(NativeTextJoinedMemberPublication {
             operation,
             receipt: NativeTextJoinedMemberPublicationReceipt {
@@ -233,9 +236,10 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 selection: selection.clone(),
                 data,
                 held: None,
+                original,
+                _invocation: invocation,
             },
             signal,
-            _invocation: invocation,
         }))
     }
 
@@ -257,7 +261,13 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             selection,
             data,
             held,
+            original,
+            _invocation,
         } = receipt;
+        let cancelled = || caller.is_cancelled() || original.is_cancelled();
+        if cancelled() {
+            return Err(Refusal::Cancelled);
+        }
         if !selection.is_current_cached() {
             return Err(Refusal::Stale);
         }
@@ -292,6 +302,9 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 self.original
                     .require_current(caller)
                     .map_err(|_| Refusal::Cancelled)?;
+                if cancelled() {
+                    return Err(Refusal::Cancelled);
+                }
                 if !selection.is_current_cached()
                     || held
                         .as_ref()
@@ -300,7 +313,13 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                     return Err(Refusal::Stale);
                 }
                 mount
-                    .checkpoint_publication_debt(store, context, &key, batch, rng)
+                    .checkpoint_publication_debt(store, context, &key, batch, rng, || {
+                        !cancelled()
+                            && selection.is_current_cached()
+                            && held
+                                .as_ref()
+                                .is_none_or(V2MemberPublicationObservation::is_current_cached)
+                    })
                     .map(|saved| saved.front)
                     .map_err(|_| Refusal::Failed)
             },

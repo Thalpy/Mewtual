@@ -189,7 +189,14 @@ impl NativeTextColdFounderSource {
                 let mount = store.member_outbox_mount()?;
                 let key = member_outbox_key(store)?;
                 mount
-                    .checkpoint_publication_debt(store, self.outbox_context()?, &key, batch, rng)
+                    .checkpoint_publication_debt(
+                        store,
+                        self.outbox_context()?,
+                        &key,
+                        batch,
+                        rng,
+                        || !caller.is_cancelled(),
+                    )
                     .map(|checkpoint| checkpoint.front)
                     .map_err(|_| refused())
             })

@@ -1277,8 +1277,11 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 .unwrap();
             assert_eq!(front, ordinal + 1);
             assert_ne!(std::fs::read(&head_path).unwrap(), head);
+            let (retire_publication, publication_scope) = tokio::sync::watch::channel(false);
             let receipt = recovered_row()
-                .prepare_member_publication(&selection, live.clone(), &mut history_rng)
+                .prepare_member_publication(
+                    &selection, RequestCancellation::new(publication_scope, None), &mut history_rng,
+                )
                 .unwrap().expect("exact archived Delete is owed")
                 .submit().await.unwrap().unwrap();
             let deleted_wire = loop {
@@ -1311,6 +1314,17 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 view, GuardedProjection::Deleted { create, certainty: ProjectionCertainty::Provisional, .. }
                 if *create == action
             )).unwrap());
+            let original_head = std::fs::read(&head_path).unwrap();
+            retire_publication.send_replace(true);
+            assert_eq!(
+                recovered_row().checkpoint_member_publication(receipt, &live, &mut history_rng),
+                Err(V2MemberSaveRefusal::Cancelled),
+            );
+            assert_eq!(std::fs::read(&head_path).unwrap(), original_head);
+            let receipt = recovered_row()
+                .prepare_member_publication(&selection, live.clone(), &mut history_rng)
+                .unwrap().expect("the same Delete remains pending")
+                .submit().await.unwrap().unwrap();
             assert_eq!(
                 recovered_row().checkpoint_member_publication(receipt, &live, &mut history_rng).unwrap(),
                 front + 1,
