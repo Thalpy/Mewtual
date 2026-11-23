@@ -225,7 +225,11 @@ jobs:
           ] + membership
           scope = os.environ['CHAT_V2_NATIVE_SCOPE']
           if scope == 'native-membership':
-              cases = membership
+              cases = membership + [(
+                  'native-idle-reopen',
+                  'native_text::tests::native_text_connected_join_cold_idle_unlock_requires_the_existing_vault',
+                  1,
+              )]
           elif scope == 'native-join':
               cases.insert(0, ('native-join-dispatch', 'native_text_connected_join_', 5))
           elif scope == 'native-founder-restart':

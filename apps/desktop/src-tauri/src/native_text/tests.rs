@@ -2315,19 +2315,30 @@ async fn native_text_connected_join_cold_idle_unlock_requires_the_existing_vault
 
     let founded = found_request(&main, 1, "Founded after restart");
     run(&queue).await;
-    assert!(found_value(founded.await.unwrap())["server"].is_u64());
+    let founded = found_value(founded.await.unwrap());
+    assert!(founded["server"].is_u64());
     let close = register_vault_close(&state).await.unwrap();
     sources::close_server_rows(&state, &SystemClock)
         .await
         .unwrap();
     drop(close);
     let (third, main, queue) = app(path, None, true);
-    let has_row = invoke(&main, "1", SECRET);
+    unlock_current(&third, &main, &queue).await;
+    let row = resume_request(&main);
     run(&queue).await;
-    refused(has_row.await.unwrap());
-    let state = third.state::<AppState>();
-    assert_locked(&state).await;
-    assert!(state.store.lock().await.is_none());
+    let row = found_value(row.await.unwrap());
+    let [reopened] = row["servers"].as_array().unwrap().as_slice() else {
+        panic!("expected the original founder created after the first reopen");
+    };
+    assert_eq!(reopened["server"], founded["server"]);
+    assert_eq!(reopened["context"], founded["context"]);
+    assert_eq!(reopened["channel"], founded["channel"]);
+    for (file, identity) in [&vault_path, &pin_path].into_iter().zip(identities) {
+        assert!(matches!(
+            catcoms_storage::kept::session_at(file, identity),
+            catcoms_storage::kept::SessionAt::Ours
+        ));
+    }
     assert_eq!(std::fs::read(&vault_path).unwrap(), original);
     assert_eq!(std::fs::read(&pin_path).unwrap(), pin);
 }
