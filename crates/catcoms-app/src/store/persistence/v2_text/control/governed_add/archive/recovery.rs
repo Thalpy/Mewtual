@@ -24,6 +24,7 @@ pub(in crate::store) struct RecoveredGovernedAdd {
     pub(in crate::store) header: SignedOwnerHeader,
     pub(in crate::store) admission: AdmissionBody,
     pub(in crate::store) parent: TextHeadData,
+    consumed_nonce: [u8; 16],
     entry: [u8; ENTRY_BYTES],
     outcome: Zeroizing<Vec<u8>>,
 }
@@ -33,8 +34,80 @@ struct RecoveredAddJournal {
     response: Zeroizing<Vec<u8>>,
     header: SignedOwnerHeader,
     admission: AdmissionBody,
+    nonce: [u8; 16],
     entry: [u8; ENTRY_BYTES],
     outcome: Zeroizing<Vec<u8>>,
+}
+
+/// Replay of one physical archive line. Each nonce is retained only after its
+/// original signed request and complete governing journal have verified.
+struct AddReplay {
+    core: ReplayMath,
+    nonces: Vec<[u8; 16]>,
+    selected: Option<(TextHeadIdData, ArchiveHeadId)>,
+}
+
+impl AddReplay {
+    fn from_genesis(trusted: &GenesisPublicData<'_>) -> Result<Self, AppError> {
+        let core = ReplayMath::from_genesis(
+            trusted.profile,
+            trusted.admission,
+            trusted.header,
+            trusted.image,
+        )
+        .map_err(|_| refused())?;
+        Ok(Self {
+            core,
+            nonces: Vec::new(),
+            selected: None,
+        })
+    }
+
+    fn verify_add(
+        &mut self,
+        key: &[u8; 32],
+        labels: GovernedArchiveLabels,
+        frames: &GovernedArchiveFrames<'_>,
+        trusted: &GenesisPublicData<'_>,
+    ) -> Result<RecoveredAddJournal, AppError> {
+        if self.nonces.len() >= catcoms_sync::MAX_V2_GOVERNING_JOIN_STEPS {
+            return Err(refused());
+        }
+        let (journal, next) = authenticate_add_journal(key, labels, frames, trusted, &self.core)?;
+        if self.nonces.contains(&journal.nonce) {
+            return Err(refused());
+        }
+        self.nonces.push(journal.nonce);
+        self.core = next;
+        Ok(journal)
+    }
+
+    fn verify_later_add(
+        &mut self,
+        key: &[u8; 32],
+        raw_head: &[u8],
+        raw: &[u8],
+        trusted: &GenesisPublicData<'_>,
+    ) -> Result<RecoveredAddJournal, AppError> {
+        let head = selected_head::GovernedHeadData::open_governed_data(key, raw_head)?;
+        if self.selected != Some((head.transition.before_head, head.transition.before_archive)) {
+            return Err(refused());
+        }
+        let archive = open_later_data(key, &head, raw)?;
+        let (labels, frames) = decode_later_data(&archive)?;
+        let original =
+            selected_head::GovernedHeadData::open_governed_data(key, frames.parent_head)?;
+        let prior = self.core.header();
+        if original.transition.header != prior.id()
+            || original.transition.state != prior.spec().state
+            || original.transition.epoch != self.core.mls_epoch_data()
+        {
+            return Err(refused());
+        }
+        let journal = self.verify_add(key, labels, &frames, trusted)?;
+        self.selected = Some((TextHeadIdData::of_data(raw_head), head.archive));
+        Ok(journal)
+    }
 }
 
 impl RecoveredGovernedAdd {
@@ -45,38 +118,52 @@ impl RecoveredGovernedAdd {
     pub(in crate::store) fn image_data(&self) -> Result<&[u8], AppError> {
         Ok(outcome::governing_bodies(&self.entry, &self.outcome)?[2])
     }
+
+    pub(in crate::store) fn consumed_invite(&self, packet: &V2JoinRequestPacketData<'_>) -> bool {
+        packet.founder_add_data().invite.spec_data().nonce == self.consumed_nonce
+    }
 }
 
 fn authenticate_selected(
     key: &[u8; 32],
-    head: &selected_head::GovernedHeadData,
+    raw_head: &[u8],
     raw_archive: &[u8],
     context: TextContextIdData,
     trusted: &GenesisPublicData<'_>,
 ) -> Result<RecoveredGovernedAdd, AppError> {
+    authenticate_first_archive(key, raw_head, raw_archive, context, trusted).map(|(first, _)| first)
+}
+
+fn authenticate_first_archive(
+    key: &[u8; 32],
+    raw_head: &[u8],
+    raw_archive: &[u8],
+    context: TextContextIdData,
+    trusted: &GenesisPublicData<'_>,
+) -> Result<(RecoveredGovernedAdd, AddReplay), AppError> {
+    let head = selected_head::GovernedHeadData::open_data(key, raw_head)?;
     let archive = open_data(key, head.archive, raw_archive)?;
     let (labels, frames) = decode_data(&archive)?;
     if labels != head.transition || labels.context != context {
         return Err(refused());
     }
-    let parent = parent_head(key, head, &frames, trusted)?;
-    let prior = ReplayMath::from_genesis(
-        trusted.profile,
-        trusted.admission,
-        trusted.header,
-        trusted.image,
-    )
-    .map_err(|_| refused())?;
-    let journal = authenticate_add_journal(key, labels, &frames, trusted, &prior)?;
-    Ok(RecoveredGovernedAdd {
-        request: journal.request,
-        response: journal.response,
-        header: journal.header,
-        admission: journal.admission,
-        parent,
-        entry: journal.entry,
-        outcome: journal.outcome,
-    })
+    let parent = parent_head(key, &head, &frames, trusted)?;
+    let mut replay = AddReplay::from_genesis(trusted)?;
+    let journal = replay.verify_add(key, labels, &frames, trusted)?;
+    replay.selected = Some((TextHeadIdData::of_data(raw_head), head.archive));
+    Ok((
+        RecoveredGovernedAdd {
+            request: journal.request,
+            response: journal.response,
+            header: journal.header,
+            admission: journal.admission,
+            parent,
+            consumed_nonce: journal.nonce,
+            entry: journal.entry,
+            outcome: journal.outcome,
+        },
+        replay,
+    ))
 }
 
 /// Verify a complete Add journal against the replay of its authenticated
@@ -87,13 +174,14 @@ fn authenticate_add_journal(
     frames: &GovernedArchiveFrames<'_>,
     trusted: &GenesisPublicData<'_>,
     prior: &ReplayMath,
-) -> Result<RecoveredAddJournal, AppError> {
+) -> Result<(RecoveredAddJournal, ReplayMath), AppError> {
     let reservation = GovernedAddFenceData::open_data(key, frames.fence)?;
     reservation.require_parent(labels.context, labels.before_head)?;
     let request = request::open_data(key, frames.fence, frames.request)?;
     let packet = V2JoinRequestPacketData::decode(&request)?;
     reservation.require_packet(&packet)?;
     let input = packet.founder_add_data();
+    let nonce = input.invite.spec_data().nonce;
     let anchor = &input.invite.spec_data().anchor;
     let original = trusted.header.spec();
     if anchor.group != original.group
@@ -151,9 +239,10 @@ fn authenticate_add_journal(
     if header.id() != labels.header || header.spec().state != labels.state {
         return Err(refused());
     }
-    prior
+    let next = prior
         .derive_successor(&header, ReplayBody::Admission(&admission), bodies[2])
-        .map_err(|_| refused())?;
+        .map_err(|_| refused())?
+        .next;
     let spec = welcome_intent::open_data(key, frames.governing, frames.welcome_intent)?;
     let payloads = outcome::welcome_bodies(frames.entry, &outcome)?;
     welcome_intent::require_original_binding(
@@ -190,14 +279,18 @@ fn authenticate_add_journal(
         )
         .map_err(|_| refused())?;
     let entry = frames.entry.try_into().map_err(|_| refused())?;
-    Ok(RecoveredAddJournal {
-        request,
-        response,
-        header,
-        admission,
-        entry,
-        outcome,
-    })
+    Ok((
+        RecoveredAddJournal {
+            request,
+            response,
+            header,
+            admission,
+            nonce,
+            entry,
+            outcome,
+        },
+        next,
+    ))
 }
 
 fn parent_head(

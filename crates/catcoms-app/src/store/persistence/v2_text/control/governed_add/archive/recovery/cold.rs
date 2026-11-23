@@ -393,8 +393,13 @@ impl HeldColdFounderAdd {
             MAX_BYTES,
             &mut Some(Zeroizing::new(Vec::with_capacity(MAX_BYTES + 1))),
         )?;
-        let recovered =
-            authenticate_selected(&key, &selected, &archive.frame, context.id_data()?, &public)?;
+        let recovered = authenticate_selected(
+            &key,
+            &head.frame,
+            &archive.frame,
+            context.id_data()?,
+            &public,
+        )?;
         let mut result = Self {
             core: None,
             files: ColdFounderFiles {

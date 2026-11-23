@@ -369,9 +369,12 @@ A subsequent Add has a version-three archive and Head. The archive retains
 the exact encrypted predecessor Head and names its immutable archive by ID.
 The previous archive stays in its own file. The new selector checks the same
 context, consecutive generation and epoch, and exact predecessor ciphertext.
-Recovery still has to open the named archives and replay the signed journals
-before restoring an SDK graph. Physical staging and selection need their own
-writer admission.
+The replay verifier advances only after checking the complete signed journal
+and records the consumed nonce from that journal. It checks the exact
+predecessor Head and archive before advancing again. Cold recovery still has
+to walk the named files from the pinned first Add and match the complete replay
+to the restored SDK. Physical staging and selection need their own writer
+admission.
 
 The Host stages `text.add.head-stage.v2` against that exact archive. The
 selector uses the established Head envelope with a new version. Prior

@@ -172,13 +172,13 @@ impl HeldGovernedArchiveRead {
             .require_bound_original_negative(store, source)?;
         if self.recovered.is_none() {
             let head = self.head.as_ref().ok_or_else(refused)?;
-            let (selected, _) = head.archive.as_ref().ok_or_else(refused)?;
+            head.archive.as_ref().ok_or_else(refused)?;
             let archive = self.archive.as_ref().ok_or_else(refused)?;
             let key = Zeroizing::new(store.keys.db_key()?);
             let original = source.data();
             self.recovered = Some(authenticate_selected(
                 &key,
-                selected,
+                &head.raw.frame,
                 &archive.frame,
                 head.context,
                 &GenesisPublicData {

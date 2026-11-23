@@ -67,6 +67,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             let guard = store.lock_v2_text_current_group(admission, &resources)?;
             let recovered = reader.require_current(&guard)?;
             assert_eq!(recovered.request.as_slice(), packet.packet_bytes_data());
+            assert!(recovered.consumed_invite(packet));
             assert_eq!(recovered.response.as_slice(), saved.packet_bytes_data());
             assert_eq!(
                 recovered.header.spec().parent,

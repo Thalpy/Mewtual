@@ -74,6 +74,7 @@ COHORTS = {
     "governed-header": ("catcoms-sync", "raw_header_survives_late_lock_and_exact_retry_never_reenters_key", 1),
     "governed-first-head": ("catcoms-app", "governed_add_head2_preserves_the_old_head_envelope_and_refuses_legacy_selection", 1),
     "governed-later-archive": ("catcoms-app", "governed_later_add_archive_binds_the_exact_predecessor_and_refuses_downgrade", 1),
+    "governed-replay": ("catcoms-app", "native_runtime_invite_governed_add_resumes_install_after_a_lost_head_save_reply", 1),
     "interrupted-header": ("catcoms-sync", "panic_after_header_entry_does_not_repeat_key_or_lose_completed_sdk_result", 1),
     "predecessor": (
         "catcoms-app",
