@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
 /// Largest file any member-outbox helper reads or writes (a complete WAL file).
-pub(super) const MAX_FILE: usize = super::frames::WAL_FILE_CAP;
+pub(in crate::store::persistence) const MAX_FILE: usize = super::frames::WAL_FILE_CAP;
 
 pub(super) fn io(error: impl std::fmt::Display) -> AppError {
     AppError::Io(error.to_string())
@@ -40,7 +40,7 @@ fn regular(metadata: &fs::Metadata) -> bool {
 }
 
 /// A directory held by native identity. Every barrier re-proves the name still refers to it.
-pub(super) struct HeldDirectory {
+pub(in crate::store::persistence) struct HeldDirectory {
     path: PathBuf,
     id: SessionId,
 }
@@ -50,7 +50,7 @@ impl std::fmt::Debug for HeldDirectory {
     }
 }
 impl HeldDirectory {
-    pub(super) fn open(path: PathBuf) -> Result<Self, AppError> {
+    pub(in crate::store::persistence) fn open(path: PathBuf) -> Result<Self, AppError> {
         let directory = crate::store::persistence::open_archive_directory(&path)?;
         let id = session_id(&directory).map_err(io)?;
         crate::store::persistence::v2_genesis_activation::require_directory_name(
@@ -69,31 +69,31 @@ impl HeldDirectory {
     pub(super) fn path(&self) -> &Path {
         &self.path
     }
-    pub(super) fn require(&self) -> Result<(), AppError> {
+    pub(in crate::store::persistence) fn require(&self) -> Result<(), AppError> {
         let directory = crate::store::persistence::open_archive_directory(&self.path)?;
         crate::store::persistence::v2_genesis_activation::require_directory_name(
             &self.path, &directory, self.id,
         )
     }
     /// Directory durability barrier, bracketed by identity checks.
-    pub(super) fn sync(&self) -> Result<(), AppError> {
+    pub(in crate::store::persistence) fn sync(&self) -> Result<(), AppError> {
         self.require()?;
         crate::store::persistence::sync_directory(&self.path).map_err(io)?;
         self.require()
     }
-    pub(super) fn child(&self, leaf: &str) -> PathBuf {
+    pub(in crate::store::persistence) fn child(&self, leaf: &str) -> PathBuf {
         self.path.join(leaf)
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum Presence {
+pub(in crate::store::persistence) enum Presence {
     Absent,
     Present,
 }
 
 /// Observe a fixed regular-file name. Only NotFound is absence; any other error stays one.
-pub(super) fn observe(path: &Path) -> Result<Presence, AppError> {
+pub(in crate::store::persistence) fn observe(path: &Path) -> Result<Presence, AppError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if regular(&metadata) => Ok(Presence::Present),
         Ok(_) => Err(refused()),
@@ -116,11 +116,19 @@ pub(super) fn observe_directory(path: &Path) -> Result<Presence, AppError> {
 
 /// One bounded read with native identity checks before and after. `allow_empty` exists only
 /// for classifying a possibly torn fixed stage; every other caller refuses an empty file.
-pub(super) fn read_bounded(
+pub(in crate::store::persistence) fn read_bounded(
     path: &Path,
     maximum: usize,
     allow_empty: bool,
 ) -> Result<Zeroizing<Vec<u8>>, AppError> {
+    read_bounded_held(path, maximum, allow_empty).map(|(_, _, bytes)| bytes)
+}
+
+pub(in crate::store::persistence) fn read_bounded_held(
+    path: &Path,
+    maximum: usize,
+    allow_empty: bool,
+) -> Result<(File, SessionId, Zeroizing<Vec<u8>>), AppError> {
     if maximum == 0 || maximum > MAX_FILE {
         return Err(refused());
     }
@@ -153,7 +161,7 @@ pub(super) fn read_bounded(
     }
     buffer.truncate(used);
     require_same_name(path, &file, id)?;
-    Ok(buffer)
+    Ok((file, id, buffer))
 }
 
 /// Make `path` hold exactly `expected`, durably. The caller must have authenticated
@@ -165,13 +173,32 @@ pub(super) fn read_bounded(
 /// * Present with any other content or a longer length: refused, file untouched.
 ///
 /// The parent-directory barrier is the caller's, after all outputs of a step.
-pub(super) fn ensure_exact(path: &Path, expected: &[u8]) -> Result<(), AppError> {
+pub(in crate::store::persistence) fn ensure_exact(
+    path: &Path,
+    expected: &[u8],
+) -> Result<(), AppError> {
+    ensure_exact_held(path, expected).map(drop)
+}
+
+pub(in crate::store::persistence) fn ensure_exact_held(
+    path: &Path,
+    expected: &[u8],
+) -> Result<(File, SessionId), AppError> {
     if expected.is_empty() || expected.len() > MAX_FILE {
         return Err(refused());
     }
-    let mut file = match fs::symlink_metadata(path) {
+    let mut held = open_exact_write(path, false)?;
+    finish_exact_write(path, &mut held, expected)?;
+    Ok(held)
+}
+
+pub(in crate::store::persistence) fn open_exact_write(
+    path: &Path,
+    create_only: bool,
+) -> Result<(File, SessionId), AppError> {
+    let file = match fs::symlink_metadata(path) {
         Ok(metadata) => {
-            if !regular(&metadata) || metadata.len() > expected.len() as u64 {
+            if create_only || !regular(&metadata) {
                 return Err(refused());
             }
             OpenOptions::new()
@@ -190,19 +217,32 @@ pub(super) fn ensure_exact(path: &Path, expected: &[u8]) -> Result<(), AppError>
     };
     let native = session_id(&file).map_err(io)?;
     require_same_name(path, &file, native)?;
+    Ok((file, native))
+}
+
+pub(in crate::store::persistence) fn finish_exact_write(
+    path: &Path,
+    held: &mut (File, SessionId),
+    expected: &[u8],
+) -> Result<(), AppError> {
+    if expected.is_empty() || expected.len() > MAX_FILE {
+        return Err(refused());
+    }
+    let (file, native) = held;
+    require_same_name(path, file, *native)?;
     let metadata = file.metadata().map_err(io)?;
     if !regular(&metadata) || metadata.len() > expected.len() as u64 {
         return Err(refused());
     }
     let used = usize::try_from(metadata.len()).map_err(|_| refused())?;
-    require_file_bytes(&mut file, &expected[..used])?;
+    require_file_bytes(file, &expected[..used])?;
     if used < expected.len() {
         file.seek(SeekFrom::End(0)).map_err(io)?;
         file.write_all(&expected[used..]).map_err(io)?;
     }
     file.sync_all().map_err(io)?;
-    require_file_bytes(&mut file, expected)?;
-    require_same_name(path, &file, native)
+    require_file_bytes(file, expected)?;
+    require_same_name(path, file, *native)
 }
 
 /// Rename one fixed name onto another in the same held directory (the WAL MAIN promotion
@@ -212,14 +252,14 @@ pub(super) fn rename_fixed(from: &Path, to: &Path) -> Result<(), AppError> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum Removal {
+pub(in crate::store::persistence) enum Removal {
     Removed,
     AlreadyAbsent,
 }
 
 /// Remove one regular file the caller has proven deletable (a WAL-listed retiree, the
 /// retired WAL itself, or a demonstrably owned pre-commit scratch stage).
-pub(super) fn remove_listed(path: &Path) -> Result<Removal, AppError> {
+pub(in crate::store::persistence) fn remove_listed(path: &Path) -> Result<Removal, AppError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if regular(&metadata) => {}
         Ok(_) => return Err(refused()),
@@ -258,13 +298,27 @@ pub(super) fn bounded_entries(
     Ok(names)
 }
 
-fn require_same_name(path: &Path, file: &File, native: SessionId) -> Result<(), AppError> {
+pub(in crate::store::persistence) fn require_same_name(
+    path: &Path,
+    file: &File,
+    native: SessionId,
+) -> Result<(), AppError> {
     if session_id(file).map_err(io)? != native
         || !matches!(session_at(path, native), SessionAt::Ours)
     {
         return Err(refused());
     }
     Ok(())
+}
+
+pub(in crate::store::persistence) fn require_exact_held(
+    path: &Path,
+    (file, identity): &mut (File, SessionId),
+    expected: &[u8],
+) -> Result<(), AppError> {
+    require_same_name(path, file, *identity)?;
+    require_file_bytes(file, expected)?;
+    require_same_name(path, file, *identity)
 }
 
 /// Stream-compare the whole file against `expected`, including an EOF probe.

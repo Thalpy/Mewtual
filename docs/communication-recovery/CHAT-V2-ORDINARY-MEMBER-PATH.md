@@ -117,6 +117,12 @@ An exact Valid original can be prepared as encrypted action chunks and a manifes
 bound to the local vault, Profile, initial tenure and channel. The manifest preserves
 the action's original Admission and signed bytes across transport epochs. Native
 storage must select the manifest before cold replay can treat it as saved history.
+The history disk implementation verifies a complete WAL, keeps the original file
+identities through the barriers and selects the exact manifest under a keyed ActionId
+locator. Recovery completes the same bytes after a torn bundle or selector. Native
+retries retain the presealed WAL and its original file so they can write the missing
+suffix. Cold recovery preserves a partial WAL it cannot authenticate. Native catalog
+declaration, disk quotas and desktop history mounting remain open.
 The mounted joined source prepares one exact debt item for its original mesh and releases
 the metadata slot before awaiting the driver. The caller, original Core Admission and
 selected MLS fence must still authorize it at the driver's submission boundary. A real

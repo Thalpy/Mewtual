@@ -41,7 +41,7 @@
 mod data;
 mod engine;
 mod frames;
-mod fs;
+pub(super) mod fs;
 mod production;
 mod transaction;
 mod trie;
