@@ -11732,23 +11732,30 @@
   async function updateInviteFor(
     server: number,
     mintFresh = false,
+    expectedContext?: string,
   ): Promise<string | undefined> {
     const generation = (inviteRefreshGeneration.get(server) ?? 0) + 1;
     inviteRefreshGeneration.set(server, generation);
+    const session = uiStateLoadGeneration;
+    const current = () => generation === (inviteRefreshGeneration.get(server) ?? 0)
+      && (expectedContext === undefined || (!locked && !uiSessionRetired && !windowCloseInFlight
+        && session === uiStateLoadGeneration
+        && servers.some(row => row.id === server && row.backend === "text-v2" && row.context === expectedContext)));
+    if (!current()) return undefined;
     try {
       // Keep both command names as static literals. Besides making the security boundary easy to
       // audit, this lets the command-ledger test prove every frontend IPC call is registered.
       const invite = (
         mintFresh
-          ? await invoke<string | null>("mint_invite_fresh", { server })
+          ? await invoke<string | null>("mint_invite_fresh", { server, ...(expectedContext === undefined ? {} : { expectedContext }) })
           : await invoke<string | null>("get_invite", { server })
       ) ?? "";
       const latest = inviteRefreshGeneration.get(server) ?? 0;
-      if (generation !== latest) return undefined;
+      if (!current()) return undefined;
       servers = withOrderedRefreshedInvite(servers, server, invite, generation, latest);
       return invite;
     } catch (e) {
-      if (generation === (inviteRefreshGeneration.get(server) ?? 0)) error = String(e);
+      if (current()) error = String(e);
       return undefined;
     }
   }
@@ -22280,6 +22287,22 @@
   async function generateInvite() {
     const server = activeServerId;
     if (server === null || !cur) return;
+    if (cur.backend === "text-v2") {
+      const context = cur.context;
+      const view = viewGeneration;
+      if (!context || nativeConversationRemoved(server, context)) return;
+      mintingInvite = true;
+      try {
+        const invite = await updateInviteFor(server, true, context);
+        if (invite !== undefined && unlockedViewCurrent(view, server) && cur?.context === context) {
+          copied = false;
+          inviteRevealed = server;
+        }
+      } finally {
+        mintingInvite = false;
+      }
+      return;
+    }
     mintingInvite = true;
     inviteCheck = { pct: 4, label: "Checking how people can reach you…" };
     const started = Date.now();

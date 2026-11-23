@@ -593,7 +593,8 @@ Current writer. A lost reply after Head replacement can finish the same
 cached Core and MLS selection. A local refusal before SDK or header signature
 entry can retry the same covered work with a live cut on the original source.
 The desktop founder chooses the exact admission shown by the selected roster.
-Roster, removal and contact commands require the renderer's original context.
+Invitation, roster, removal and contact commands require the renderer's
+original context.
 The native row checks permission again before issuing the operation. A surviving
 joined row and a reopened founder read the roster from their authenticated
 selected history.

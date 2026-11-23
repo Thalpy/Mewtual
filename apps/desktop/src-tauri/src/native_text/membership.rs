@@ -265,7 +265,7 @@ fn parse(command: &str, body: &InvokeBody) -> Result<(u64, [u8; 32], Operation),
     Ok((server, context, operation))
 }
 
-fn decode_exact_hex<const N: usize>(text: &str) -> Result<[u8; N], &'static str> {
+pub(super) fn decode_exact_hex<const N: usize>(text: &str) -> Result<[u8; N], &'static str> {
     if text.len() != 2 * N
         || text
             .bytes()

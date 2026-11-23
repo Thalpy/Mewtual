@@ -1419,7 +1419,7 @@ async fn native_text_membership_selected_eviction_notifies_the_original_joined_r
     let invite = invite_command(
         &main,
         "mint_invite_fresh",
-        serde_json::json!({"server": found["server"]}),
+        serde_json::json!({"server": found["server"], "expectedContext": found["context"]}),
     );
     run(&founder_queue).await;
     let invite = found_value(invite.await.unwrap());
@@ -1505,17 +1505,24 @@ async fn native_text_connected_join_retries_original_welcome_after_authenticated
         .is_file());
     let found = found_request(&main, 1, "Connected founder");
     run(&queue).await;
-    let id = found_value(found.await.unwrap())["server"]
-        .as_u64()
-        .unwrap();
+    let found = found_value(found.await.unwrap());
+    let id = found["server"].as_u64().unwrap();
     let state = app.state::<AppState>();
     let mint = || {
         invite_command(
             &main,
             "mint_invite_fresh",
-            serde_json::json!({ "server": id }),
+            serde_json::json!({ "server": id, "expectedContext": found["context"] }),
         )
     };
+    for arguments in [
+        serde_json::json!({ "server": id }),
+        serde_json::json!({ "server": id, "expectedContext": "fe".repeat(32) }),
+    ] {
+        let wrong = invite_command(&main, "mint_invite_fresh", arguments);
+        refused(wrong.await.unwrap());
+    }
+    assert!(queue.lock().unwrap().is_empty());
     let first = mint();
     run(&queue).await;
     let original_code = found_value(first.await.unwrap());
@@ -1651,7 +1658,7 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     let minted = invite_command(
         &founder_window,
         "mint_invite_fresh",
-        serde_json::json!({ "server": found["server"] }),
+        serde_json::json!({ "server": found["server"], "expectedContext": found["context"] }),
     );
     run(&founder_queue).await;
     let code = found_value(minted.await.unwrap());

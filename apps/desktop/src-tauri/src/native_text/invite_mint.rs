@@ -41,12 +41,20 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
         };
         let fields = value
             .as_object()
-            .filter(|fields| fields.len() == 1)
+            .filter(|fields| fields.len() == 2)
             .ok_or(FAILED)?;
         let server = fields
             .get("server")
             .and_then(serde_json::Value::as_u64)
             .ok_or(FAILED)?;
+        let context = fields
+            .get("expectedContext")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(FAILED)
+            .and_then(|encoded| membership::decode_exact_hex::<32>(encoded).map_err(|_| FAILED))?;
+        if context == [0; 32] {
+            return Err(FAILED);
+        }
         let permit = state
             .native_text
             .inflight
@@ -64,13 +72,14 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
             _credits: credits,
             _permit: permit,
         });
-        let (source, context) = {
+        let source = {
             let table = state.servers.try_lock().map_err(|_| BUSY)?;
             let row = table.native(&server).ok_or(listing::STALE)?;
-            let source =
-                connected::Source::for_row(generation, &target, row, account, &mut source_payment)
-                    .ok_or(listing::STALE)?;
-            (source, row.data().request)
+            if row.data().request != context {
+                return Err(listing::STALE);
+            }
+            connected::Source::for_row(generation, &target, row, account, &mut source_payment)
+                .ok_or(listing::STALE)?
         };
         // The native journal scopes this stable row token to its selected
         // parent. A retry at the same parent uses the same original entry.
