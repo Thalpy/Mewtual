@@ -2,6 +2,8 @@
 use super::*;
 use catcoms_sync::{ClosedV2JoinedNode, V2MemberTransitionFrameData, MAX_V2_GOVERNING_JOIN_STEPS};
 use codec::{JoinedMembershipCandidate, RetiredJoinedMembership};
+mod header_witness;
+use header_witness::HeaderWitness;
 
 const MAX_EPOCH: u64 = MAX_V2_GOVERNING_JOIN_STEPS as u64;
 const RECORD_FEE: usize = 8 * (codec::MEMBER_ADD_FRAME + 1) + 4096;
@@ -11,6 +13,8 @@ pub(super) struct MemberAdds {
     covered: Vec<Covered>,
     pending: Option<Pending>,
     evicted: bool,
+    first: Option<HeaderWitness>,
+    fork: Option<HeaderWitness>,
 }
 
 struct Covered {
@@ -65,8 +69,11 @@ impl MemberAdds {
     }
 
     pub(super) fn require_current(&self) -> Result<(), AppError> {
-        if self.pending.is_some() || self.evicted {
+        if self.pending.is_some() || self.evicted || self.fork.is_some() {
             return Err(denied());
+        }
+        if let Some(first) = &self.first {
+            first.require_current()?;
         }
         self.require_original()
     }
@@ -99,13 +106,30 @@ impl MemberAdds {
             store.validate_mounted_governance_layout()
         };
         require_live()?;
-        if self.evicted {
+        if self.evicted || self.fork.is_some() {
             return Err(denied());
         }
         self.require_original()?;
         let (_, _, epoch) = node.selected_join_data()?;
-        let path = path(store, context, epoch.checked_add(1).ok_or_else(denied)?)?;
+        let epoch = epoch.checked_add(1).ok_or_else(denied)?;
+        let path = path(store, context, epoch)?;
         let key = Zeroizing::new(store.keys.db_key()?);
+        let frame = V2MemberTransitionFrameData::decode(delivery)?;
+        let predecessor = self
+            .covered
+            .last()
+            .map_or(welcome, |entry| entry.file.1.as_slice());
+        header_witness::observe_live(
+            store,
+            &key,
+            context,
+            (epoch, predecessor),
+            (&mut self.first, &mut self.fork),
+            (core, node),
+            frame.header_data(),
+            &require_live,
+            rng,
+        )?;
         if self.pending.is_none() {
             absent(&path)?;
             let fee = reserve(store)?;
@@ -133,8 +157,6 @@ impl MemberAdds {
             .map_or(welcome, |entry| entry.file.1.as_slice());
         let pending = self.pending.as_mut().ok_or_else(denied)?;
         if pending.path != path || !pending.candidate.matches_frame_data(delivery) {
-            let frame = V2MemberTransitionFrameData::decode(delivery)?;
-            node.observe_member_transition_header(core, &frame)?;
             return Err(denied());
         }
         require_live()?;
@@ -142,7 +164,9 @@ impl MemberAdds {
         let opened = codec::open_member_add(&key, context, predecessor, &pending.sealed)?;
         let selected = opened.require_original_candidate(&context.vault, &pending.candidate)?;
         require_live()?;
+        self.first.as_ref().ok_or_else(denied)?.require_current()?;
         let retired = install_transition(core, node, &mut pending.candidate, selected)?;
+        self.first = None;
         self.evicted = retired.terminal_data().is_some();
         let pending = self
             .pending
@@ -174,7 +198,22 @@ impl MemberAdds {
         let (_, _, epoch) = node.selected_join_data()?;
         for expected_epoch in epoch.checked_add(1).ok_or_else(denied)?..=MAX_EPOCH {
             let path = path(store, context, expected_epoch)?;
+            let predecessor = self
+                .covered
+                .last()
+                .map_or(welcome, |entry| entry.file.1.as_slice());
+            let first = header_witness::recover(
+                store,
+                &key,
+                context,
+                (expected_epoch, predecessor),
+                (core, node),
+                missing || self.evicted,
+            )?;
             if absent(&path).is_ok() {
+                if first.is_some() {
+                    self.first = first;
+                }
                 missing = true;
                 continue;
             }
@@ -191,6 +230,9 @@ impl MemberAdds {
                 return Err(denied());
             }
             exact_held(&path, &file.0, session_id(&file.0).map_err(io)?, &file.1)?;
+            if let Some(first) = &first {
+                first.require_current()?;
+            }
             store.validate_mounted_governance_layout()?;
             let retired = install_transition(core, node, &mut candidate, selected)?;
             self.evicted = retired.terminal_data().is_some();

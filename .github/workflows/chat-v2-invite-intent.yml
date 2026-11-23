@@ -310,6 +310,9 @@ jobs:
       - name: Check the Remove archive and the exact paid predecessor fetch
         if: github.event_name == 'pull_request' || inputs.scope == 'selected-history'
         run: python .github/scripts/check-chat-v2-invite-intent.py governed-remove-archive
+      - name: Check encrypted joined header witnesses against their original predecessor
+        if: github.event_name == 'pull_request' || inputs.scope == 'selected-history' || inputs.scope == 'mounted-governing'
+        run: python .github/scripts/check-chat-v2-invite-intent.py joined-header-escrow
       - name: Check legacy and later Add request records under the exact original fence
         if: inputs.scope == 'selected-history'
         run: python .github/scripts/check-chat-v2-invite-intent.py add-request-record

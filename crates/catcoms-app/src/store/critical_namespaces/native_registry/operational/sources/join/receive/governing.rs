@@ -27,6 +27,22 @@ pub struct NativeTextJoinedGoverningResponse {
     _end: retirement::PreparationEnd,
 }
 
+#[cfg(all(test, any(windows, target_os = "linux")))]
+impl NativeTextJoinedGoverningResponse {
+    pub(in crate::store::critical_namespaces::native_registry) fn with_truncated_body_for_test<
+        T,
+    >(
+        &mut self,
+        check: impl FnOnce(&Self) -> T,
+    ) -> T {
+        let original = self.frame.clone();
+        self.frame = self.frame.slice(..self.frame.len() - 1);
+        let result = check(self);
+        self.frame = original;
+        result
+    }
+}
+
 impl NativeTextJoinedGoverningExchange {
     pub async fn receive(self) -> Result<NativeTextJoinedGoverningResponse, TransportError> {
         let original = self.exchange.observe_route();

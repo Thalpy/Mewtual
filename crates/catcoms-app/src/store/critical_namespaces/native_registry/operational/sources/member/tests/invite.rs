@@ -1431,7 +1431,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
         })
         .await
         .unwrap();
-        let received = received.unwrap();
+        let mut received = received.unwrap();
         let (_retired, gone) = tokio::sync::watch::channel(true);
         assert_eq!(
             recovered_row().apply_governing_response(
@@ -1442,6 +1442,25 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
             ),
             Err(V2MemberSaveRefusal::Cancelled)
         );
+        let header_path = || {
+            std::fs::read_dir(dir.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| {
+                    let name = path.file_name().unwrap().to_string_lossy();
+                    name.starts_with("chat-critical-namespaces.joined-member-header.")
+                        && name.ends_with(".2.first.bin")
+                })
+        };
+        assert!(header_path().is_none());
+        received.with_truncated_body_for_test(|damaged| {
+            assert!(recovered_row()
+                .apply_governing_response(&selection, damaged, &fresh, &mut history_rng)
+                .is_err());
+        });
+        let covered_header =
+            header_path().expect("a valid signed header is covered before its body");
+        let original_header = std::fs::read(&covered_header).unwrap();
         assert_eq!(
             recovered_row().apply_governing_response(
                 &selection,
@@ -1451,6 +1470,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
             ),
             Ok((expected, 2))
         );
+        assert_eq!(std::fs::read(covered_header).unwrap(), original_header);
         assert!(recovered_row()
             .apply_governing_response(&selection, &received, &fresh, &mut history_rng)
             .is_err());

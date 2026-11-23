@@ -4,7 +4,7 @@ use catcoms_replication::chat::cold_selected_history::{
     SelectedHistoryNodePage, MAX_SELECTED_HISTORY_NODE_PAGE_BYTES,
 };
 use catcoms_replication::chat::{
-    owner_header::{HeaderKind, OwnerHeaderId, SignedOwnerHeader},
+    owner_header::{HeaderKind, OwnerHeaderId, SignedOwnerHeader, MAX_HEADER_BYTES},
     V2PreparedSelectedHistoryData,
 };
 use catcoms_sync::{
@@ -20,6 +20,8 @@ const OUTCOME_TAG: &[u8] = b"catcoms/private-chat-v2-welcome-outcome/v1\0";
 const OUTCOME_KEY: &str = "catcoms/private-chat-v2-welcome-outcome-key/v1";
 const MEMBER_ADD_TAG: &[u8] = b"catcoms/private-chat-v2-joined-member-add/v1\0";
 const MEMBER_ADD_KEY: &str = "catcoms/private-chat-v2-joined-member-add-key/v1";
+const MEMBER_HEADER_TAG: &[u8] = b"catcoms/private-chat-v2-joined-member-header/v1\0";
+const MEMBER_HEADER_KEY: &str = "catcoms/private-chat-v2-joined-member-header-key/v1";
 const VERSION: u16 = 1;
 const LATER_ENTRY: u16 = 2;
 const OUTCOME_WITH_HISTORY: u16 = 2;
@@ -54,6 +56,71 @@ pub(in crate::store) const MEMBER_ADD_FRAME: usize = 4
     + 4
     + MAX_SELECTED_HISTORY_NODE_PAGE_BYTES
     + SEALED_OVERHEAD;
+pub(in crate::store) const MEMBER_HEADER_FRAME: usize = 4
+    + MEMBER_HEADER_TAG.len()
+    + 2
+    + DIGESTS
+    + 4
+    + 8
+    + 4
+    + 1
+    + 4
+    + MAX_HEADER_BYTES
+    + SEALED_OVERHEAD;
+
+pub(in crate::store) fn seal_member_header(
+    key: &[u8; 32],
+    context: V2PendingJoinContextData,
+    predecessor: &[u8],
+    (epoch, conflict): (u64, bool),
+    header: &SignedOwnerHeader,
+    rng: &mut dyn CryptoRngCore,
+) -> Result<Zeroizing<Vec<u8>>, AppError> {
+    if predecessor.is_empty() || epoch < 2 {
+        return Err(refused());
+    }
+    seal_record(
+        key,
+        MEMBER_HEADER_KEY,
+        MEMBER_HEADER_TAG,
+        VERSION,
+        context_fields(context, predecessor),
+        &[
+            &epoch.to_be_bytes(),
+            &[u8::from(conflict)],
+            &header.encode(),
+        ],
+        rng,
+    )
+}
+
+pub(in crate::store) fn open_member_header(
+    key: &[u8; 32],
+    context: V2PendingJoinContextData,
+    predecessor: &[u8],
+    (epoch, conflict): (u64, bool),
+    raw: &[u8],
+) -> Result<SignedOwnerHeader, AppError> {
+    if predecessor.is_empty() || epoch < 2 {
+        return Err(refused());
+    }
+    let plain = open_record(key, MEMBER_HEADER_KEY, raw, MEMBER_HEADER_FRAME)?;
+    let (version, mut decoder) = decoder(
+        &plain,
+        MEMBER_HEADER_TAG,
+        context_fields(context, predecessor),
+    )?;
+    let bad = |_| refused();
+    if version != VERSION
+        || decoder.get_bytes().map_err(bad)? != epoch.to_be_bytes()
+        || decoder.get_bytes().map_err(bad)? != [u8::from(conflict)]
+    {
+        return Err(refused());
+    }
+    let header = SignedOwnerHeader::decode(decoder.get_bytes().map_err(bad)?).map_err(bad)?;
+    decoder.finish().map_err(bad)?;
+    Ok(header)
+}
 
 pub(in crate::store) struct OpenedMemberAdd {
     pub(in crate::store) delivery: Vec<u8>,
@@ -447,6 +514,70 @@ mod tests {
     use super::*;
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
+
+    #[test]
+    fn joined_member_header_escrow_binds_the_original_scope_and_witness_slot() {
+        use catcoms_replication::chat::{
+            owner_facts::OwnerFactId,
+            owner_header::{HeaderSpec, OwnerBodyId, OwnerStateCommitment, OwnerTenureId},
+        };
+        let mut rng = ChaCha20Rng::seed_from_u64(0x6295);
+        let signer = catcoms_crypto::DeviceKeypair::from_seed(&[6; 32]);
+        let header = SignedOwnerHeader::sign_using(
+            HeaderSpec {
+                group: vec![7; 16],
+                profile: OwnerFactId::from_bytes([2; 32]),
+                issuer: signer.verifying_key().to_bytes(),
+                tenure: OwnerTenureId::from_bytes([8; 32]),
+                parent: OwnerHeaderId::from_bytes([9; 32]),
+                sequence: 2,
+                kind: HeaderKind::Admission,
+                body: OwnerBodyId::from_bytes([10; 32]),
+                state: OwnerStateCommitment::from_bytes([11; 32]),
+            },
+            |bytes| Ok(signer.sign(bytes)),
+        )
+        .unwrap();
+        let context = V2PendingJoinContextData {
+            vault: [1; 32],
+            root: [2; 32],
+            original_pending: [3; 32],
+            pin: [4; 32],
+        };
+        let key = [5; 32];
+        let mut record = seal_member_header(
+            &key,
+            context,
+            b"covered Welcome",
+            (2, false),
+            &header,
+            &mut rng,
+        )
+        .unwrap();
+        assert_eq!(
+            open_member_header(&key, context, b"covered Welcome", (2, false), &record).unwrap(),
+            header
+        );
+        for (other, predecessor, slot) in [
+            (
+                V2PendingJoinContextData {
+                    original_pending: [12; 32],
+                    ..context
+                },
+                b"covered Welcome".as_slice(),
+                (2, false),
+            ),
+            (context, b"replacement", (2, false)),
+            (context, b"covered Welcome", (2, true)),
+            (context, b"covered Welcome", (3, false)),
+        ] {
+            assert!(open_member_header(&key, other, predecessor, slot, &record).is_err());
+        }
+        *record.last_mut().unwrap() ^= 1;
+        assert!(
+            open_member_header(&key, context, b"covered Welcome", (2, false), &record).is_err()
+        );
+    }
 
     #[test]
     fn governed_joined_pin_welcome_entry_binds_its_delivery_version_and_pending() {

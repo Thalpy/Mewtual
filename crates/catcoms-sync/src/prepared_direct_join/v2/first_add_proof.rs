@@ -360,6 +360,14 @@ impl PreparedV2JoinedPrefix {
             .map_err(|_| SyncError::JoinRejected)
     }
 
+    /// The two exact signed successors that closed this selected member view.
+    pub fn member_successor_contradiction_data(
+        &self,
+    ) -> Option<(&SignedOwnerHeader, &SignedOwnerHeader)> {
+        self.candidate.is_none().then_some(())?;
+        self.verifier.current_contradiction_data()
+    }
+
     /// Use the same selected Core verifier and original own Admission to plan
     /// an ordinary action. The Join candidate must already have been selected.
     pub fn prepare_member_plan(

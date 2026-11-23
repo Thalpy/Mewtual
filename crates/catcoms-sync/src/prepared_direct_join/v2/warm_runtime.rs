@@ -392,8 +392,29 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
         prefix: &mut PreparedV2JoinedPrefix,
         frame: &V2MemberTransitionFrameData<'_>,
     ) -> Result<(), SyncError> {
+        self.observe_member_successor_header(prefix, frame.header_data())
+    }
+
+    /// The same selected-parent check for a header recovered from host escrow.
+    pub fn observe_member_successor_header(
+        &self,
+        prefix: &mut PreparedV2JoinedPrefix,
+        header: &SignedOwnerHeader,
+    ) -> Result<(), SyncError> {
         self.member_prefix(prefix)?;
-        prefix.observe_member_successor_header(frame.header_data())
+        prefix.observe_member_successor_header(header)
+    }
+
+    /// Check a successor of this selected parent without observing or closing it.
+    pub fn verify_member_successor_header(
+        &self,
+        prefix: &PreparedV2JoinedPrefix,
+        header: &SignedOwnerHeader,
+    ) -> Result<(), SyncError> {
+        let verifier = self.member_prefix(prefix)?;
+        header
+            .verify_successor_of(verifier.replay_data().header())
+            .map_err(|_| SyncError::JoinRejected)
     }
 
     /// Authenticate the original member's own Remove without producing a
