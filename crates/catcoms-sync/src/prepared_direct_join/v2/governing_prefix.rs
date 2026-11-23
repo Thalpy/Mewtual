@@ -1,12 +1,14 @@
 //! Bounded full-prefix data for a Welcome after the first governing Add.
+use super::first_add_proof::FIRST_JOIN_DELIVERY_TAG;
 use super::*;
 use catcoms_replication::chat::{
     cold_records::{encode_header_row, HeaderRow},
     owner_bodies::{AppendBody, RemovalBody},
     owner_facts::OwnerFactId,
     owner_header::{HeaderKind, OwnerHeaderId, SignedOwnerHeader},
-    owner_profile::{AdmissionBody, AdmissionOrigin},
+    owner_profile::{AdmissionBody, AdmissionOrigin, SignedOwnerProfile},
     owner_state::transition::{ReplayBody, ReplayMath},
+    ProjectionGroupView, V2ProjectionOrigin,
 };
 
 const TAG: &[u8] = b"mewtual/chat/governing-join-prefix/v2\0";
@@ -177,8 +179,90 @@ impl<'a> V2GoverningJoinPrefixData<'a> {
         }
     }
 
+    pub(super) fn prepare_joined_prefix(
+        &self,
+        accepted: &GenesisAnchorBindingData,
+        group: &ProjectionGroupView,
+        origin: V2ProjectionOrigin,
+    ) -> Result<PreparedV2JoinedPrefix, SyncError> {
+        let mut prefix = self.first.prepare_joined_prefix(accepted, group, origin)?;
+        for (header, body) in &self.successors {
+            prefix.continue_initial_prefix(header.header(), header.image(), body.replay_data())?;
+        }
+        Ok(prefix)
+    }
+
+    pub(super) fn profile_data(&self) -> &SignedOwnerProfile {
+        self.first.profile_data()
+    }
+
     pub(super) fn frame_bytes(&self) -> usize {
         self.bytes
+    }
+}
+
+/// The two versioned Welcome frames accepted by the original pin. A known
+/// tag chooses one grammar before decoding or doing any MLS work.
+pub enum V2JoinDeliveryData<'a> {
+    First(V2FirstJoinDeliveryData<'a>),
+    Later(V2GoverningJoinDeliveryData<'a>),
+}
+
+impl<'a> V2JoinDeliveryData<'a> {
+    pub fn decode(raw: &'a [u8]) -> Result<Self, SyncError> {
+        if raw.len() > MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES {
+            return Err(SyncError::Malformed);
+        }
+        let tag = Decoder::new(raw)
+            .get_bytes()
+            .map_err(|_| SyncError::Malformed)?;
+        if tag == FIRST_JOIN_DELIVERY_TAG {
+            V2FirstJoinDeliveryData::decode(raw).map(Self::First)
+        } else if tag == DELIVERY_TAG {
+            V2GoverningJoinDeliveryData::decode(raw).map(Self::Later)
+        } else {
+            Err(SyncError::Malformed)
+        }
+    }
+
+    pub(super) fn response_data(&self) -> V2JoinResponseData<'_> {
+        match self {
+            Self::First(frame) => frame.data().0,
+            Self::Later(frame) => frame.response_data(),
+        }
+    }
+
+    pub(super) fn prepare_joined_prefix(
+        &self,
+        accepted: &GenesisAnchorBindingData,
+        group: &ProjectionGroupView,
+        origin: V2ProjectionOrigin,
+    ) -> Result<PreparedV2JoinedPrefix, SyncError> {
+        match self {
+            Self::First(frame) => frame
+                .data()
+                .1
+                .prepare_joined_prefix(accepted, group, origin),
+            Self::Later(frame) => frame
+                .governing_proof_data()
+                .0
+                .prepare_joined_prefix(accepted, group, origin),
+        }
+    }
+
+    /// The exact immediate parent and child and their retained public proof.
+    pub fn proof_data(&self) -> Result<((OwnerHeaderId, OwnerHeaderId), &'a [u8]), SyncError> {
+        match self {
+            Self::First(frame) => {
+                let (proof, bytes) = frame.governing_proof_data();
+                Ok((proof.header_ids_data(), bytes))
+            }
+            Self::Later(frame) => {
+                let (proof, bytes) = frame.governing_proof_data();
+                let (child, _) = proof.last_admission()?;
+                Ok(((child.header().spec().parent, child.header().id()), bytes))
+            }
+        }
     }
 }
 

@@ -1,14 +1,14 @@
 //! The completed private Join graph, tied to the same sealed request.
 use super::super::first_add_proof::SelectedJoinData;
-use super::super::welcome::{matches_welcome_roster, open_routing};
+use super::super::welcome::{
+    matches_welcome_roster, open_routing, ValidatedWelcome, WelcomeAdmission,
+};
 use super::*;
 use catcoms_mls::persist::{
     restore_server_text_current_bounded, snapshot_server_bounded, TextCurrentSdkRestoreAdmission,
 };
 use catcoms_replication::chat::{
     owner_header::{OwnerHeaderId, OwnerStateCommitment},
-    owner_profile::AdmissionOrigin,
-    owner_state::StateFrame,
     ProjectionGroupView, V2HostSelectionExpectation, V2ProjectionOrigin,
 };
 
@@ -65,10 +65,10 @@ impl PreparedV2JoinRequest {
         }
         let graph = self.completed.as_ref().ok_or(SyncError::JoinRejected)?;
         graph.validate_initial_state_data()?;
-        self.validate_first_join_delivery_data(delivery)?;
+        self.validate_pinned_join_delivery_data(delivery)?;
         let packet = V2JoinRequestPacketData::decode(&self.request)?;
-        let delivery = V2FirstJoinDeliveryData::decode(delivery)?;
-        let (response, proof) = delivery.data();
+        let delivery = V2JoinDeliveryData::decode(delivery)?;
+        let response = delivery.response_data();
         if response.binding.encode() != graph.response_binding {
             return Err(SyncError::JoinRejected);
         }
@@ -77,7 +77,7 @@ impl PreparedV2JoinRequest {
             graph.state,
         );
         let mut prepared =
-            proof.prepare_joined_prefix(&packet.invite.spec_data().anchor, group, origin)?;
+            delivery.prepare_joined_prefix(&packet.invite.spec_data().anchor, group, origin)?;
         let original = std::sync::Arc::new(());
         prepared.bind_source_origin(&original);
         self.initial_prefix_origin = Some(original);
@@ -202,24 +202,17 @@ impl RecoveredV2JoinedOutcome {
             return Err(SyncError::Malformed);
         }
         let packet = V2JoinRequestPacketData::decode(pending.request_bytes_data())?;
-        let delivery = V2FirstJoinDeliveryData::decode(delivery_bytes)?;
-        let (response, proof) = delivery.data();
+        let delivery = V2JoinDeliveryData::decode(delivery_bytes)?;
+        let response = delivery.response_data();
         let anchor = &packet.invite.spec_data().anchor;
-        let (profile, admission, header) = proof.verified_admission(anchor)?;
-        response
-            .binding
-            .check_links_data(&packet.invite, &packet.request, profile, admission, header)
-            .map_err(|_| SyncError::JoinRejected)?;
-        let state =
-            StateFrame::decode(proof.add_image_data()).map_err(|_| SyncError::JoinRejected)?;
-        let AdmissionOrigin::Add {
-            before_epoch: 0,
-            after_epoch: 1,
-            ..
-        } = admission.spec().origin
-        else {
-            return Err(SyncError::JoinRejected);
-        };
+        let admission = WelcomeAdmission::for_delivery(&delivery, anchor)?;
+        let ValidatedWelcome {
+            binding: expected_binding,
+            state,
+            before_epoch,
+            after_epoch,
+        } = admission.validate(&packet, response, limits.exchange)?;
+        let header = admission.header;
 
         let key = Zeroizing::new(blake3::derive_key(KEY_DOMAIN, key));
         let plain = Zeroizing::new(unseal(&key, &sealed.blob).map_err(|_| SyncError::Malformed)?);
@@ -255,8 +248,8 @@ impl RecoveredV2JoinedOutcome {
         let file = d.get_bytes().map_err(malformed)?;
         let snapshot = d.get_bytes().map_err(malformed)?;
         d.finish().map_err(malformed)?;
-        if epoch != 1
-            || binding != response.binding.encode()
+        if epoch != after_epoch
+            || binding != expected_binding
             || policy.len() > MAX_POLICY_BYTES
             || routing.len() != 32
             || file.len() != 32
@@ -285,8 +278,13 @@ impl RecoveredV2JoinedOutcome {
             unseal(&routing_key, &decode_sealed(response.sealed_routing)?)
                 .map_err(|_| SyncError::JoinRejected)?,
         );
-        let (verified_policy, routing_secret, file_key) =
-            open_routing(&transfer, &packet, 0, 1, header.spec().parent.as_bytes())?;
+        let (verified_policy, routing_secret, file_key) = open_routing(
+            &transfer,
+            &packet,
+            before_epoch,
+            after_epoch,
+            header.spec().parent.as_bytes(),
+        )?;
         verified_policy.verify_current_owner(&group)?;
         if verified_policy.encode() != policy
             || &routing_secret[..] != routing
@@ -310,7 +308,7 @@ impl RecoveredV2JoinedOutcome {
             signer: request.joiner,
             key_package: request.key_package_reference,
             credential: request.credential,
-            welcome: response.binding.encode(),
+            welcome: expected_binding,
             delivery: *blake3::hash(delivery_bytes).as_bytes(),
             prefix_origin: None,
         })
@@ -342,14 +340,13 @@ impl RecoveredV2JoinedOutcome {
         origin: V2ProjectionOrigin,
     ) -> Result<PreparedV2JoinedPrefix, SyncError> {
         if self.prefix_origin.is_some()
-            || delivery.len() > MAX_V2_FIRST_JOIN_DELIVERY_BYTES
+            || delivery.len() > MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES
             || blake3::hash(delivery).as_bytes() != &self.delivery
         {
             return Err(SyncError::JoinRejected);
         }
-        let delivery = V2FirstJoinDeliveryData::decode(delivery)?;
-        let (_, proof) = delivery.data();
-        let mut prepared = proof.prepare_joined_prefix(&self.accepted, group, origin)?;
+        let delivery = V2JoinDeliveryData::decode(delivery)?;
+        let mut prepared = delivery.prepare_joined_prefix(&self.accepted, group, origin)?;
         let original = std::sync::Arc::new(());
         prepared.bind_source_origin(&original);
         self.prefix_origin = Some(original);

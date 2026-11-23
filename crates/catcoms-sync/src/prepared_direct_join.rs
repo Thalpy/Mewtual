@@ -33,7 +33,7 @@ pub use v2::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use v2::{
     V2GoverningJoinDeliveryData, V2GoverningJoinPrefixData, V2GoverningJoinStepData,
-    MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES, MAX_V2_GOVERNING_JOIN_PREFIX_BYTES,
+    V2JoinDeliveryData, MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES, MAX_V2_GOVERNING_JOIN_PREFIX_BYTES,
     MAX_V2_GOVERNING_JOIN_STEPS,
 };
 

@@ -129,13 +129,24 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     foreign_prefix: &mut crate::PreparedV2JoinedPrefix,
 ) {
     use crate::{
-        DirectJoinLimits, PreparedV2JoinRequest, V2AdmissionStepData, V2FirstAddProofData,
+        DirectJoinLimits, PreparedV2JoinRequest, RecoveredV2JoinedOutcome,
+        RecoveredV2PendingJoinSource, V2AdmissionStepData, V2FirstAddProofData,
         V2FirstJoinDeliveryData, V2GoverningJoinDeliveryData, V2GoverningJoinPrefixData,
-        V2GoverningJoinStepData, V2JoinRequestPacketData, MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES,
+        V2GoverningJoinStepData, V2JoinDeliveryData, V2JoinRequestPacketData,
+        V2PendingJoinContextData, MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES,
     };
     use catcoms_mls::persist::{
         TextCurrentSdkGraphReservation, TextCurrentSdkRestoreAdmission, TextCurrentSdkRestoreLimits,
     };
+    use catcoms_replication::chat::{V2OriginNegative, V2ProjectionOrigin};
+    use rand_core::SeedableRng;
+    #[derive(Debug)]
+    struct Live;
+    impl V2OriginNegative for Live {
+        fn is_live(&self) -> bool {
+            true
+        }
+    }
     struct RestorePayment(TextCurrentSdkRestoreLimits);
     impl TextCurrentSdkGraphReservation for RestorePayment {
         fn limits(&self) -> TextCurrentSdkRestoreLimits {
@@ -180,15 +191,30 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     let mut fixture = Request::new(node, 96);
     fixture.change_invite(node, |spec| spec.expires_at_ms = now + 60_000);
     let anchor = &fixture.invite.spec_data().anchor;
+    let join_limits = DirectJoinLimits::new(RAW, RAW, 256 * 1024).unwrap();
     let mut joiner = PreparedV2JoinRequest::prepare(
         MlsDevice::generate().unwrap(),
         anchor,
         &fixture.invite,
         [97; 32],
         now,
-        DirectJoinLimits::new(RAW, RAW, 256 * 1024).unwrap(),
+        join_limits,
     )
     .unwrap();
+    let keys = [111; 32];
+    let context = V2PendingJoinContextData {
+        vault: [112; 32],
+        root: [113; 32],
+        original_pending: [114; 32],
+        pin: [115; 32],
+    };
+    let mut journal_rng = rand_chacha::ChaCha20Rng::seed_from_u64(303);
+    let source = joiner
+        .seal_pending_source(&keys, context, &mut journal_rng)
+        .unwrap();
+    let pending =
+        RecoveredV2PendingJoinSource::open(source, &keys, context, &fixture.invite, join_limits)
+            .unwrap();
     let wire = joiner.request_bytes_data().to_vec();
     let request = V2JoinRequestPacketData::decode(&wire).unwrap();
     let request = request.founder_add_data();
@@ -362,6 +388,13 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     .is_err());
     let delivery = V2GoverningJoinDeliveryData::decode(&wire).unwrap();
     assert_eq!(delivery.governing_proof_data().1, encoded);
+    let decoded = V2JoinDeliveryData::decode(&wire).unwrap();
+    assert_eq!(
+        decoded.proof_data().unwrap(),
+        ((header.spec().parent, header.id()), encoded.as_slice())
+    );
+    assert!(pending.validate_first_join_delivery_data(&wire).is_err());
+    pending.validate_pinned_join_delivery_data(&wire).unwrap();
     let expected = V2InstalledFounderAddData {
         epoch: result.after_epoch_data(),
         header: header.id(),
@@ -410,7 +443,9 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
         )
         .is_err()
     );
-    let candidate = joiner.finish_governing_join_delivery(&delivery).unwrap();
+    let candidate = joiner
+        .finish_pinned_join_delivery(&wire, None, None)
+        .unwrap();
     candidate.validate_initial_state_data().unwrap();
     assert_eq!(candidate.facts_data().join_epoch_data(), 2);
     assert_eq!(
@@ -425,6 +460,77 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     assert_eq!(
         joiner.finish_governing_join_delivery(&delivery).unwrap() as *const _,
         original
+    );
+    let sealed = joiner
+        .seal_joined_outcome(&keys, context, &mut journal_rng)
+        .unwrap();
+    assert!(RecoveredV2JoinedOutcome::open(
+        sealed,
+        &keys,
+        &pending,
+        &wire[..wire.len() - 1],
+        payment()
+    )
+    .is_err());
+    let mut later =
+        RecoveredV2JoinedOutcome::open(sealed, &keys, &pending, &wire, payment()).unwrap();
+    assert_eq!(later.epoch_data(), 2);
+    let mut warm_group = catcoms_replication::chat::ProjectionGroup::new(&anchor.group).unwrap();
+    let mut warm_view = warm_group.begin_view();
+    assert!(warm_view.try_ready());
+    let mut cold_group = catcoms_replication::chat::ProjectionGroup::new(&anchor.group).unwrap();
+    let mut cold_view = cold_group.begin_view();
+    assert!(cold_view.try_ready());
+    let (mut warm, selection) = joiner
+        .prepare_initial_prefix(&wire, &warm_view, V2ProjectionOrigin::new(Arc::new(Live)))
+        .unwrap();
+    let mut cold = later
+        .prepare_initial_prefix(&wire, &cold_view, V2ProjectionOrigin::new(Arc::new(Live)))
+        .unwrap();
+    assert!(warm.selected_member_verifier().is_err());
+    assert!(cold.selected_member_verifier().is_err());
+    let later_own = admission.admission_id();
+    assert_eq!(warm.own_admission_data(), later_own);
+    assert_eq!(cold.own_admission_data(), later_own);
+    drop(warm.finish_host_selected(&selection).unwrap());
+    drop(cold.finish_host_selected(&selection).unwrap());
+    let mesh = catcoms_rt::Hub::new();
+    let inputs = |n| {
+        Some((
+            mesh.join(catcoms_rt::PeerId::from_u64(n)),
+            rand_chacha::ChaCha20Rng::seed_from_u64(n),
+            Box::new(ManualClock::new(now)) as Box<dyn catcoms_rt::Clock + Send>,
+        ))
+    };
+    let mut warm_inputs = inputs(121);
+    assert!(joiner
+        .take_closed_warm_node(&cold, &mut warm_inputs)
+        .is_err());
+    let installed_warm = joiner
+        .take_closed_warm_node(&warm, &mut warm_inputs)
+        .unwrap();
+    let mut cold_inputs = inputs(122);
+    assert!(later
+        .take_closed_recovered_node(&warm, &mut cold_inputs)
+        .is_err());
+    let installed_cold = later
+        .take_closed_recovered_node(&cold, &mut cold_inputs)
+        .unwrap();
+    assert_eq!(
+        installed_warm.selected_join_data().unwrap(),
+        (header.id(), later_own, 2)
+    );
+    assert_eq!(
+        installed_cold.selected_join_data().unwrap(),
+        (header.id(), later_own, 2)
+    );
+    assert_eq!(
+        installed_warm
+            .selected_member_topic_data(&warm, 42)
+            .unwrap(),
+        installed_cold
+            .selected_member_topic_data(&cold, 42)
+            .unwrap()
     );
 
     assert!(joined.selected_member_topic_data(joined_prefix, 42).is_ok());

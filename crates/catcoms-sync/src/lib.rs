@@ -101,7 +101,7 @@ pub use prepared_direct_join::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use prepared_direct_join::{
     V2GoverningJoinDeliveryData, V2GoverningJoinPrefixData, V2GoverningJoinStepData,
-    MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES, MAX_V2_GOVERNING_JOIN_PREFIX_BYTES,
+    V2JoinDeliveryData, MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES, MAX_V2_GOVERNING_JOIN_PREFIX_BYTES,
     MAX_V2_GOVERNING_JOIN_STEPS,
 };
 pub mod local_chat_scope;

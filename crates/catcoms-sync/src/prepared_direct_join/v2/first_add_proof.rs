@@ -16,12 +16,12 @@ use catcoms_replication::chat::{
 use std::sync::{Arc, Weak};
 
 const TAG: &[u8] = b"mewtual/chat/first-add-proof/v2\0";
-const DELIVERY_TAG: &[u8] = b"mewtual/chat/first-join-delivery/v2\0";
+pub(super) const FIRST_JOIN_DELIVERY_TAG: &[u8] = b"mewtual/chat/first-join-delivery/v2\0";
 const FRAME_OVERHEAD: usize = 4 + TAG.len() + 2 + 5 * 4;
 pub const MAX_V2_FIRST_ADD_PROOF_BYTES: usize =
     FRAME_OVERHEAD + MAX_PROFILE_BYTES + 2 * (MAX_ADMISSION_BYTES + MAX_HEADER_ROW_BYTES);
 pub const MAX_V2_FIRST_JOIN_DELIVERY_BYTES: usize = 4
-    + DELIVERY_TAG.len()
+    + FIRST_JOIN_DELIVERY_TAG.len()
     + 2
     + 2 * 4
     + MAX_V2_FIRST_ADD_PROOF_BYTES
@@ -148,6 +148,10 @@ impl<'a> V2FirstAddProofData<'a> {
 
     pub(super) fn add_image_data(&self) -> &[u8] {
         self.add.image()
+    }
+
+    pub(super) fn profile_data(&self) -> &SignedOwnerProfile {
+        &self.profile
     }
 
     pub(super) fn prepare_joined_prefix(
@@ -301,6 +305,39 @@ impl PreparedV2JoinedPrefix {
             .map_err(|_| SyncError::JoinRejected)
     }
 
+    /// Replay one more historical step privately before the original Welcome
+    /// selection. Only the last candidate can be selected by the mounted host.
+    pub(super) fn continue_initial_prefix(
+        &mut self,
+        header: &SignedOwnerHeader,
+        image: &[u8],
+        body: ReplayBody<'_>,
+    ) -> Result<(), SyncError> {
+        let history = self.candidate.as_ref().ok_or(SyncError::JoinRejected)?;
+        let selected = history.header_data();
+        let expectation =
+            V2HostSelectionExpectation::from_trusted_host(selected.id(), selected.spec().state);
+        let mut retired = self.finish_host_selected(&expectation)?;
+        if retired
+            .take_close_completion()
+            .is_some_and(|mut close| !close.try_complete())
+        {
+            return Err(SyncError::JoinRejected);
+        }
+        drop(retired);
+        let own = match &body {
+            ReplayBody::Admission(admission) => admission.admission_id(),
+            _ => self.own,
+        };
+        self.candidate = Some(
+            self.verifier
+                .derive_successor(header, body, image)
+                .map_err(|_| SyncError::JoinRejected)?,
+        );
+        self.own = own;
+        Ok(())
+    }
+
     pub(super) fn observe_member_successor_header(
         &mut self,
         header: &SignedOwnerHeader,
@@ -373,9 +410,9 @@ impl<'a> V2FirstJoinDeliveryData<'a> {
         {
             return Err(SyncError::Malformed);
         }
-        let length = 4 + DELIVERY_TAG.len() + 2 + 2 * 4 + response.len() + proof.len();
+        let length = 4 + FIRST_JOIN_DELIVERY_TAG.len() + 2 + 2 * 4 + response.len() + proof.len();
         let mut e = Encoder::with_capacity(length);
-        e.put_bytes(DELIVERY_TAG)
+        e.put_bytes(FIRST_JOIN_DELIVERY_TAG)
             .map_err(|_| SyncError::Malformed)?;
         e.put_u16(VERSION);
         e.put_bytes(response).map_err(|_| SyncError::Malformed)?;
@@ -389,7 +426,7 @@ impl<'a> V2FirstJoinDeliveryData<'a> {
         }
         let malformed = |_| SyncError::Malformed;
         let mut d = Decoder::new(raw);
-        if d.get_bytes().map_err(malformed)? != DELIVERY_TAG
+        if d.get_bytes().map_err(malformed)? != FIRST_JOIN_DELIVERY_TAG
             || d.get_u16().map_err(malformed)? != VERSION
         {
             return Err(SyncError::Malformed);

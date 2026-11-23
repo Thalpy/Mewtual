@@ -163,19 +163,19 @@ impl fmt::Debug for CompletedV2JoinCandidate {
     }
 }
 
-struct WelcomeAdmission<'a> {
+pub(super) struct WelcomeAdmission<'a> {
     profile: &'a SignedOwnerProfile,
     body: &'a AdmissionBody,
-    header: &'a SignedOwnerHeader,
+    pub(super) header: &'a SignedOwnerHeader,
     state_image: &'a [u8],
     epoch: u64,
 }
 
-struct ValidatedWelcome<'a> {
-    binding: Vec<u8>,
-    state: StateFrame<'a>,
-    before_epoch: u64,
-    after_epoch: u64,
+pub(super) struct ValidatedWelcome<'a> {
+    pub(super) binding: Vec<u8>,
+    pub(super) state: StateFrame<'a>,
+    pub(super) before_epoch: u64,
+    pub(super) after_epoch: u64,
 }
 
 impl<'a> WelcomeAdmission<'a> {
@@ -193,7 +193,42 @@ impl<'a> WelcomeAdmission<'a> {
         })
     }
 
-    fn validate(
+    fn later(
+        proof: &'a V2GoverningJoinPrefixData<'_>,
+        anchor: &GenesisAnchorBindingData,
+        signed: &SignedWelcomeBindingData,
+    ) -> Result<Self, SyncError> {
+        let labels = signed.spec_data();
+        let replay = proof.verify_selected_add(
+            anchor,
+            OwnerHeaderId::from_bytes(labels.add_header),
+            OwnerFactId::from_bytes(labels.admission),
+        )?;
+        let (last, body) = proof.last_admission()?;
+        Ok(Self {
+            profile: proof.profile_data(),
+            body,
+            header: last.header(),
+            state_image: last.image(),
+            epoch: replay.mls_epoch_data(),
+        })
+    }
+
+    pub(super) fn for_delivery(
+        delivery: &'a V2JoinDeliveryData<'_>,
+        anchor: &GenesisAnchorBindingData,
+    ) -> Result<Self, SyncError> {
+        match delivery {
+            V2JoinDeliveryData::First(frame) => Self::first(frame.data().1, anchor),
+            V2JoinDeliveryData::Later(frame) => Self::later(
+                frame.governing_proof_data().0,
+                anchor,
+                frame.response_data().binding,
+            ),
+        }
+    }
+
+    pub(super) fn validate(
         &self,
         packet: &V2JoinRequestPacketData<'_>,
         response: V2JoinResponseData<'_>,
@@ -320,23 +355,12 @@ impl PreparedV2JoinRequest {
             .ok_or(SyncError::Malformed)?;
         let request_bytes = self.request.clone();
         let packet = V2JoinRequestPacketData::decode(&request_bytes)?;
-        let signed = response.binding.spec_data();
-        let replay = proof.verify_selected_add(
-            &packet.invite.spec_data().anchor,
-            OwnerHeaderId::from_bytes(signed.add_header),
-            OwnerFactId::from_bytes(signed.admission),
-        )?;
-        let (_, body) = proof.last_admission()?;
+        let admission =
+            WelcomeAdmission::later(proof, &packet.invite.spec_data().anchor, response.binding)?;
         self.finish_verified_welcome(
             &packet,
             response,
-            WelcomeAdmission {
-                profile: replay.profile(),
-                body,
-                header: replay.header(),
-                state_image: replay.image(),
-                epoch: replay.mls_epoch_data(),
-            },
+            admission,
             cap,
             WelcomeAuthority::default(),
         )
@@ -376,6 +400,37 @@ impl PreparedV2JoinRequest {
     /// exact possible-entry record after this check and before calling finish.
     pub fn validate_first_join_delivery_data(&self, bytes: &[u8]) -> Result<(), SyncError> {
         validate_delivery_data(&self.request, self.limits, bytes)
+    }
+
+    /// Authenticate a complete first or later delivery before the host covers
+    /// this exact possible Welcome entry.
+    pub fn validate_pinned_join_delivery_data(&self, bytes: &[u8]) -> Result<(), SyncError> {
+        validate_pinned_delivery_data(&self.request, self.limits, bytes)
+    }
+
+    /// Enter the exact covered Welcome on the original request using the
+    /// host's original cancellation and native key cut when present.
+    pub fn finish_pinned_join_delivery(
+        &mut self,
+        bytes: &[u8],
+        negative: Option<&catcoms_rt::RequestCancellation>,
+        native: Option<NativeV2JoinKeyEntry<'_>>,
+    ) -> Result<&CompletedV2JoinCandidate, SyncError> {
+        if bytes.len() > self.limits.exchange || (native.is_some() && negative.is_none()) {
+            return Err(SyncError::JoinRejected);
+        }
+        let delivery = V2JoinDeliveryData::decode(bytes)?;
+        let request_bytes = self.request.clone();
+        let packet = V2JoinRequestPacketData::decode(&request_bytes)?;
+        let admission =
+            WelcomeAdmission::for_delivery(&delivery, &packet.invite.spec_data().anchor)?;
+        self.finish_verified_welcome(
+            &packet,
+            delivery.response_data(),
+            admission,
+            self.limits.exchange,
+            WelcomeAuthority { negative, native },
+        )
     }
 
     /// Charge the complete wire response, including the history and framing,
@@ -567,6 +622,24 @@ pub(super) fn validate_delivery_data(
     let packet = V2JoinRequestPacketData::decode(request)?;
     let admission = WelcomeAdmission::first(proof, &packet.invite.spec_data().anchor)?;
     admission.validate(&packet, response, cap)?;
+    Ok(())
+}
+
+pub(super) fn validate_pinned_delivery_data(
+    request: &[u8],
+    limits: DirectJoinLimits,
+    bytes: &[u8],
+) -> Result<(), SyncError> {
+    if bytes.len() > limits.exchange {
+        return Err(SyncError::Malformed);
+    }
+    let delivery = V2JoinDeliveryData::decode(bytes)?;
+    let packet = V2JoinRequestPacketData::decode(request)?;
+    WelcomeAdmission::for_delivery(&delivery, &packet.invite.spec_data().anchor)?.validate(
+        &packet,
+        delivery.response_data(),
+        limits.exchange,
+    )?;
     Ok(())
 }
 

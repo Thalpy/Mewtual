@@ -215,6 +215,10 @@ impl RecoveredV2PendingJoinSource {
     pub fn validate_first_join_delivery_data(&self, bytes: &[u8]) -> Result<(), SyncError> {
         super::welcome::validate_delivery_data(&self.request, self.limits, bytes)
     }
+
+    pub fn validate_pinned_join_delivery_data(&self, bytes: &[u8]) -> Result<(), SyncError> {
+        super::welcome::validate_pinned_delivery_data(&self.request, self.limits, bytes)
+    }
 }
 
 #[cfg(test)]
