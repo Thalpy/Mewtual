@@ -9,6 +9,7 @@ use catcoms_replication::chat::join_bindings::{
     GenesisAnchorBindingData, InviteBindingSpecData, JoinPayloadKindData, SignedInviteBindingData,
     MAX_JOIN_BINDING_BYTES,
 };
+use catcoms_replication::chat::owner_header::OwnerHeaderId;
 use catcoms_rt::{
     NativeChatKeyEnds, NativeChatKeyPurpose, NativeChatKeyRefusal, NativeChatPreparedKeyCut,
     NativeChatSourceObservation,
@@ -63,6 +64,7 @@ enum Key {
 /// after source revocation and never a permission to publish or run Add.
 pub struct PreparedV2FounderInviteData {
     request: V2FounderInviteRequestData,
+    installed_parent: Option<(u64, OwnerHeaderId)>,
     original: OriginalV2GenesisSeedObservation,
     native: NativeChatSourceObservation,
     draw: Draw,
@@ -158,10 +160,21 @@ impl<T, R> UnboundV2GenesisNode<T, R> {
         &self,
         prepared: &PreparedV2FounderInviteData,
     ) -> Result<(), SyncError> {
-        prepared.original.require_same_seed_data(&self.seed)?;
+        self.require_invite_intent_parent(prepared, None)?;
         self.require_invite_source()?;
         prepared.unsigned_data()?;
         Ok(())
+    }
+
+    pub(super) fn require_invite_intent_parent(
+        &self,
+        prepared: &PreparedV2FounderInviteData,
+        expected: Option<(u64, OwnerHeaderId)>,
+    ) -> Result<(), SyncError> {
+        if prepared.installed_parent != expected {
+            return Err(unavailable());
+        }
+        prepared.original.require_same_seed_data(&self.seed)
     }
 
     /// Stable original-lifetime negatives only. The full SDK graph, roster and
@@ -200,7 +213,17 @@ impl<T, R> UnboundV2GenesisNode<T, R> {
         cut: &mut NativeChatPreparedKeyCut,
         ends: &mut NativeChatKeyEnds,
     ) -> Result<(), SyncError> {
-        prepared.original.require_same_seed_data(&self.seed)?;
+        self.sign_invite_for_parent(prepared, None, cut, ends)
+    }
+
+    pub(super) fn sign_invite_for_parent(
+        &self,
+        prepared: &mut PreparedV2FounderInviteData,
+        installed_parent: Option<(u64, OwnerHeaderId)>,
+        cut: &mut NativeChatPreparedKeyCut,
+        ends: &mut NativeChatKeyEnds,
+    ) -> Result<(), SyncError> {
+        self.require_invite_intent_parent(prepared, installed_parent)?;
         if prepared.raw.is_some() {
             return Ok(());
         }
@@ -261,9 +284,19 @@ impl<T: MeshTransport, R: CryptoRngCore> UnboundV2GenesisNode<T, R> {
         native: &NativeChatSourceObservation,
         slot: &mut Option<PreparedV2FounderInviteData>,
     ) -> Result<(), SyncError> {
+        self.prepare_invite_for_parent(request, native, slot, None)
+    }
+
+    pub(super) fn prepare_invite_for_parent(
+        &mut self,
+        request: V2FounderInviteRequestData,
+        native: &NativeChatSourceObservation,
+        slot: &mut Option<PreparedV2FounderInviteData>,
+        installed_parent: Option<(u64, OwnerHeaderId)>,
+    ) -> Result<(), SyncError> {
         request.validate()?;
         if let Some(p) = slot.as_ref() {
-            p.original.require_same_seed_data(&self.seed)?;
+            self.require_invite_intent_parent(p, installed_parent)?;
             if p.request != request || !p.native.same_original(native) {
                 return Err(unavailable());
             }
@@ -271,10 +304,15 @@ impl<T: MeshTransport, R: CryptoRngCore> UnboundV2GenesisNode<T, R> {
                 return Ok(()); // frozen historical DATA; no authority or fresh draw
             }
         }
-        self.require_invite_source()?;
+        if installed_parent.is_none() {
+            self.require_invite_source()?;
+        } else {
+            self.require_invite_stable_negative()?;
+        }
         if slot.is_none() {
             *slot = Some(PreparedV2FounderInviteData {
                 request,
+                installed_parent,
                 original: self.seed.observe_original_seed_data(),
                 native: native.clone(),
                 draw: Draw::Captured,
@@ -350,7 +388,11 @@ impl<T: MeshTransport, R: CryptoRngCore> UnboundV2GenesisNode<T, R> {
         );
         #[cfg(test)]
         test_cut(TestCut::Prepared);
-        self.require_invite_source()?;
+        if installed_parent.is_none() {
+            self.require_invite_source()?;
+        } else {
+            self.require_invite_stable_negative()?;
+        }
         Ok(())
     }
 }

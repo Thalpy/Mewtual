@@ -338,7 +338,9 @@ The original Core verifier records a valid signed successor before it checks
 the Commit bytes, so an incomplete delivery still surfaces a signed fork.
 The Sync founder can install the real later Add through its exact Core and
 MLS handoff, retaining its original Admission and closing the old transport
-observation. Its live Add owner records the consumed invitation nonce at
+observation. It can also prepare and sign the next invitation under the
+original founder at the selected epoch. The pending intent records that
+parent so a later selection cannot resume signing it. Its live Add owner records the consumed invitation nonce at
 that handoff and refuses to spend it on a different request. The host still
 owns the durable selection proof and must restore consumed nonces from the
 covered journals before enabling later cold Adds.

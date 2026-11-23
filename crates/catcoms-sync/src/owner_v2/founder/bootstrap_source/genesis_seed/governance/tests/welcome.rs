@@ -189,7 +189,52 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     assert!(node.pending.is_none());
     assert_eq!(refused_payment.load(SeqCst), 0);
     let mut fixture = Request::new(node, 96);
-    fixture.change_invite(node, |spec| spec.expires_at_ms = now + 60_000);
+    let issuer = Native::new();
+    let original = issuer.source.observe();
+    let mut invite = None;
+    let request = crate::owner_v2::V2FounderInviteRequestData {
+        token: [96; 32],
+        lifetime_ms: 60_000,
+        public_routing_plan: fixture.invite.spec_data().public_routing_plan,
+    };
+    assert!(node
+        .prepare_selected_invite_data(
+            foreign_prefix.selected_member_verifier().unwrap(),
+            request,
+            &original,
+            &mut invite
+        )
+        .is_err());
+    assert!(invite.is_none());
+    node.prepare_selected_invite_data(verifier, request, &original, &mut invite)
+        .unwrap();
+    assert!(node
+        .prepare_selected_invite_data(
+            verifier,
+            crate::owner_v2::V2FounderInviteRequestData {
+                token: [97; 32],
+                ..request
+            },
+            &original,
+            &mut invite
+        )
+        .is_err());
+    let invite = invite.as_mut().unwrap();
+    node.preflight_selected_invite_signing(verifier, invite)
+        .unwrap();
+    let mut wrong = issuer.cut(NativeChatKeyPurpose::JoinWelcome);
+    let mut ends = catcoms_rt::NativeChatKeyEnds::new();
+    assert!(node
+        .sign_selected_invite_native(verifier, invite, &mut wrong, &mut ends)
+        .is_err());
+    assert!(invite.raw_signature_data().is_err());
+    let mut cut = issuer.cut(NativeChatKeyPurpose::JoinInvite);
+    node.sign_selected_invite_native(verifier, invite, &mut cut, &mut ends)
+        .unwrap();
+    invite.materialize_data().unwrap();
+    fixture.invite = invite.signed_data().unwrap().clone();
+    assert_ne!(fixture.invite.spec_data().nonce, used);
+    assert_eq!(fixture.invite.spec_data().expires_at_ms, now + 60_000);
     let anchor = &fixture.invite.spec_data().anchor;
     let join_limits = DirectJoinLimits::new(RAW, RAW, 256 * 1024).unwrap();
     let mut joiner = PreparedV2JoinRequest::prepare(
@@ -629,6 +674,9 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
         .same_original(&original_founder));
     assert_eq!(verifier.replay_data().slots().len(), 3);
     assert!(!old_transport.is_current_cached());
+    assert!(node
+        .preflight_selected_invite_signing(verifier, invite)
+        .is_err());
     let (new_topic, _) = node.prepare_member_subscription(verifier, 42).unwrap();
     assert_eq!(
         recovered

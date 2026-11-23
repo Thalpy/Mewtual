@@ -24,6 +24,7 @@ mod request;
 use request::FrozenAddRequest;
 mod installation;
 pub use installation::{PreparedV2FounderAddInstall, RetiredV2FounderAddInstall};
+mod invite;
 mod member_transport;
 mod recover;
 pub use recover::PreparedV2FounderRecoveredAdd;
