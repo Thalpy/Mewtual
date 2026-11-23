@@ -82,6 +82,7 @@ on:
       - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/invite.rs'
       - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/member.rs'
       - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/member/receive.rs'
+      - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/member/receive/**'
       - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/member_save.rs'
       - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/invite.rs'
       - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/member.rs'

@@ -1434,6 +1434,33 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
         }
     }).await.expect("the native founder received the member's original over TCP and the joined outbox checkpointed");
 
+    let page = invite_command(
+        &founder_window,
+        "get_message_page",
+        archive_request(&found, serde_json::json!({"archiveAfter":null,"limit":8})),
+    );
+    run(&founder_queue).await;
+    assert_eq!(
+        found_value(page.await.unwrap()),
+        serde_json::json!({
+            "backend":"text-v2","scope":"received-archive-index","available":true,
+            "ids":[member_action],"more":false,
+        })
+    );
+    let archived = invite_command(
+        &founder_window,
+        "get_message_page",
+        archive_request(&found, serde_json::json!({"archivedAction":member_action})),
+    );
+    run(&founder_queue).await;
+    assert_eq!(
+        found_value(archived.await.unwrap()),
+        serde_json::json!({
+            "backend":"text-v2","scope":"received-archive",
+            "item":{"action":member_action,"text":member_text,"certainty":"provisional"},
+        })
+    );
+
     // The saved native row can be reported after the actual founder retires.
     let locked = snapshot_request(&founder_window, None);
     run(&founder_queue).await;

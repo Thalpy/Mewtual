@@ -411,10 +411,12 @@ An absent namespace stays absent. An ambiguous or damaged namespace refuses
 and preserves the original files.
 The desktop history route pages the original locally saved actions through
 the same context, including after a cold reopen. A separate desktop view
-pages the joined device's saved received messages through the held history
-namespace, replaying each exact selected action under the current Core
-guard. Joined dependency repair is bounded to the original authenticated
-carrier. General peer catch-up remains open.
+pages saved received messages on both desktop roles through the held history
+namespace. Each body replays the exact selected actions under the current
+Core guard. Joined dependency repair is bounded to the original authenticated
+carrier. The installed founder can recover its own saved direct dependencies
+and show its saved received messages after the live receiver retires. Cold
+founder startup and general peer catch-up remain open.
 
 The warm joined node can draw and sign an ordinary action through the original
 native Joiner Source. Its signing cut requires the ordinary member purpose and

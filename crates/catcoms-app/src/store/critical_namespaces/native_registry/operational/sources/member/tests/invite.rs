@@ -620,12 +620,13 @@ async fn mounted_join_fixture(recover_stage: bool) {
             else {
                 panic!("expected the original joined reply at the founder");
             };
-            assert_eq!(
-                founder_capture()
-                    .receive_founder_member(&founder_receiver, &frame)
-                    .unwrap(),
-                Some(reply_id)
-            );
+            let received = founder_capture()
+                .receive_founder_member(&founder_receiver, &frame)
+                .unwrap()
+                .unwrap();
+            assert_eq!(received.action, reply_id);
+            assert_eq!(received.projection_target, reply_id);
+            assert_eq!(received.archived, Some(true));
             receipt
         })
         .await
@@ -657,6 +658,36 @@ async fn mounted_join_fixture(recover_stage: bool) {
             1
         );
         drop((founder_receiver, projected, parent_projection));
+        assert!(founder_capture()
+            .read_founder_member_projection(channel, reply_id, &fresh)
+            .unwrap()
+            .is_none());
+        let page = founder_capture()
+            .archived_founder_action_page(channel, None, 8, &fresh)
+            .unwrap()
+            .unwrap();
+        assert_eq!(page.actions(), &[reply_id]);
+        let (end_read, signal) = tokio::sync::watch::channel(false);
+        let read_scope = RequestCancellation::new(signal, None);
+        let archived = founder_capture()
+            .archived_founder_message_projection(channel, reply_id, &read_scope)
+            .unwrap()
+            .unwrap();
+        assert!(archived
+            .with_publication(|view| matches!(
+                view, catcoms_replication::chat::GuardedProjection::Visible { text, .. }
+                if text == "Joined reply to the founder's saved original"
+            ))
+            .unwrap());
+        assert!(founder_capture()
+            .archived_founder_message_projection(channel + 1, reply_id, &fresh)
+            .unwrap()
+            .is_none());
+        end_read.send_replace(true);
+        assert!(archived
+            .with_publication(|_| panic!("retired founder archive body escaped"))
+            .is_err());
+        drop((archived, page));
         assert_eq!(
             inspect()
                 .prepare_member_save(&view, request(), &fresh, &mut rng)

@@ -56,7 +56,8 @@ pub(super) async fn run_founder<R: tauri::Runtime>(
         };
         match event {
             Some(NativeChatMemberGossipEvent::Frame(frame)) => {
-                let Some(permit) = source.member_work().foreground(scope.clone()).await else {
+                let local = source.member_work().clone();
+                let Some(permit) = local.foreground(scope.clone()).await else {
                     return;
                 };
                 let Some(preparation) = source.capture(&state).await else {
@@ -65,11 +66,22 @@ pub(super) async fn run_founder<R: tauri::Runtime>(
                 };
                 let output = tauri::async_runtime::spawn_blocking(move || {
                     let _permit = permit;
-                    let action = preparation
+                    let receipt = preparation
                         .receive_founder_member(&original, &frame)
                         .ok()
                         .flatten();
-                    (original, action)
+                    if let Some(receipt) = &receipt {
+                        if receipt.action != receipt.projection_target {
+                            if let Some(settled) = receipt.archived {
+                                local.note_archive_change(
+                                    receipt.action,
+                                    receipt.projection_target,
+                                    settled,
+                                );
+                            }
+                        }
+                    }
+                    (original, receipt.map(|receipt| receipt.projection_target))
                 })
                 .await;
                 if let Ok((original, action)) = output {

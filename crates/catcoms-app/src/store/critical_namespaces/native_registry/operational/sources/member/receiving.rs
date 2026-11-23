@@ -2,7 +2,10 @@
 use super::*;
 use crate::store::persistence::v2_member_transport::{
     FounderReceiveOperation, FounderReceiveOutcome, FounderReceiveSession,
+    NativeTextFounderReceived,
 };
+use crate::store::persistence::v2_shared_history::SharedHistoryActionQuery;
+use crate::store::NativeTextJoinedArchivedActions;
 use catcoms_net::{
     NativeChatMemberFrame, NativeChatMemberGossip, NativeChatMemberGossipError,
     NativeChatMemberGossipEvent, NativeChatMemberIngress,
@@ -116,7 +119,7 @@ impl<R: CryptoRngCore> NativeTextMemberPreparation<catcoms_net::MeshService, R> 
         self,
         receiver: &NativeTextFounderMemberReceiver<R>,
         frame: &NativeChatMemberFrame,
-    ) -> Result<Option<ActionId>, V2MemberSaveRefusal> {
+    ) -> Result<Option<NativeTextFounderReceived>, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
         if !self.row.same_original(&receiver.row) || !receiver.ingress.owns_frame(frame) {
             return Err(Refusal::Stale);
@@ -147,6 +150,63 @@ impl<R: CryptoRngCore> NativeTextMemberPreparation<catcoms_net::MeshService, R> 
                     NativeTextJoinedMemberProjection::from_live(projection, signal, fee)
                 }))
             }
+            _ => Err(V2MemberSaveRefusal::Failed),
+        }
+    }
+
+    pub fn archived_founder_action_page(
+        self,
+        channel: u128,
+        after: Option<ActionId>,
+        limit: usize,
+        caller: &RequestCancellation,
+    ) -> Result<Option<NativeTextJoinedArchivedActions>, V2MemberSaveRefusal> {
+        let query = SharedHistoryActionQuery {
+            target: None,
+            after,
+            limit,
+        };
+        match self.finish()?.run_founder_member_receive(
+            channel,
+            FounderReceiveOperation::ArchivePage(query),
+            caller,
+        )? {
+            FounderReceiveOutcome::ArchivePage(page) => {
+                Ok(page.map(NativeTextJoinedArchivedActions))
+            }
+            _ => Err(V2MemberSaveRefusal::Failed),
+        }
+    }
+
+    pub fn archived_founder_message_projection(
+        self,
+        channel: u128,
+        action: ActionId,
+        caller: &RequestCancellation,
+    ) -> Result<Option<NativeTextJoinedMemberProjection>, V2MemberSaveRefusal> {
+        let (cell, mut keys) = self.prepare_keys()?;
+        let source = keys.member_entry().1.observe_current();
+        let caller = connected::constrain_founder_transport(
+            self.scope.clone(),
+            source,
+            caller.clone(),
+            None,
+        );
+        match self
+            .finish_prepared((cell, keys))?
+            .run_founder_member_receive(
+                channel,
+                FounderReceiveOperation::ArchiveMessage(action),
+                &caller,
+            )? {
+            FounderReceiveOutcome::ArchiveMessage(result) => Ok(result.map(|original| {
+                NativeTextJoinedMemberProjection::from_archive(
+                    original.projection,
+                    original.signal,
+                    original.fee,
+                    original.lease,
+                )
+            })),
             _ => Err(V2MemberSaveRefusal::Failed),
         }
     }

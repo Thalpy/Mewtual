@@ -204,7 +204,11 @@ dependencies, the founder can look up those exact IDs in its own saved outbox.
 The current Core verifier replays each matching saved original into the
 receiver ledger for dependency validation. This gives a remote reply the
 context of the founder's original while its local outbox still owns the
-original's display. Durable founder receive and requests for missing peer
+original's display. The founder saves exact received originals in the mounted
+history namespace and can read their projection after its live receiver
+retires. Both desktop roles use the same bounded archive replay and recheck
+the archive selection and active Core view before returning a body.
+Founder startup after process restart and requests for missing peer
 dependencies remain open.
 Original audit chunks and request receipts remain retained after scheduling debt clears.
 Removal changes active view, never deletes the audit. Unproven late removed actions stay

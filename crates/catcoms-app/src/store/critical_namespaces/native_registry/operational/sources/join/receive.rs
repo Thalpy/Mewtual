@@ -3,7 +3,8 @@ use super::*;
 use crate::store::persistence::v2_member_outbox::{member_outbox_key, MemberSavedOriginal};
 use crate::store::persistence::v2_shared_history::{
     PreparedSharedHistoryRecord, SharedHistoryActionPage, SharedHistoryActionQuery,
-    SharedHistoryObservation, SharedHistoryScope, SHARED_HISTORY_RECORD_FEE,
+    SharedHistoryObservation, SharedHistoryProjectionLease, SharedHistoryReplay,
+    SharedHistoryScope, SHARED_HISTORY_RECORD_FEE,
 };
 use crate::store::ServerStore;
 use catcoms_net::{
@@ -18,7 +19,6 @@ use catcoms_replication::chat::{
 use catcoms_rt::Topic;
 use catcoms_sync::owner_v2::{SelectedV2MemberEnvelope, MAX_V2_MEMBER_TRANSPORT_BYTES};
 use catcoms_sync::PreparedV2JoinedPrefix;
-use std::collections::BTreeSet;
 
 mod dependencies;
 pub use dependencies::{
@@ -214,16 +214,11 @@ impl NativeTextJoinedMemberLedger {
 pub struct NativeTextJoinedMemberProjection {
     projection: GuardedMessageProjection,
     signal: RequestCancellation,
-    archive: Option<ArchivedProjection>,
+    archive: Option<Box<SharedHistoryProjectionLease>>,
     _fee: CatalogReadReservation,
 }
 
-struct ArchivedProjection {
-    observation: SharedHistoryObservation,
-    _ledger: Box<NativeTextJoinedMemberLedger>,
-}
-
-pub struct NativeTextJoinedArchivedActions(SharedHistoryActionPage);
+pub struct NativeTextJoinedArchivedActions(pub(in crate::store) SharedHistoryActionPage);
 
 impl NativeTextJoinedArchivedActions {
     pub fn actions(&self) -> &[ActionId] {
@@ -249,6 +244,20 @@ impl NativeTextJoinedMemberProjection {
         }
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn from_archive(
+        projection: GuardedMessageProjection,
+        signal: RequestCancellation,
+        fee: CatalogReadReservation,
+        archive: Box<SharedHistoryProjectionLease>,
+    ) -> Self {
+        Self {
+            projection,
+            signal,
+            archive: Some(archive),
+            _fee: fee,
+        }
+    }
+
     /// Resolve inside the already acquired outer native UI guard.
     pub fn with_publication<T>(
         &self,
@@ -267,7 +276,6 @@ impl NativeTextJoinedMemberProjection {
         };
         match &self.archive {
             Some(archive) => archive
-                .observation
                 .with_publication(guarded)
                 .map_err(|_| Refusal::Stale)?,
             None => guarded(),
@@ -321,10 +329,13 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             return Ok(None);
         };
         let mut projection = ledger.prepare_message_projection(create)?;
-        projection.archive = Some(ArchivedProjection {
+        projection.archive = Some(Box::new(SharedHistoryProjectionLease {
             observation,
-            _ledger: Box::new(ledger),
-        });
+            _view: ledger.view,
+            _ledger: ledger.ledger,
+            _invocation: Some(ledger._invocation),
+            _fee: ledger._fee,
+        }));
         Ok(Some(projection))
     }
 
@@ -818,99 +829,19 @@ impl<R: CryptoRngCore> ReceiverSource<'_, R> {
         caller: &RequestCancellation,
         rng: &mut impl CryptoRngCore,
     ) -> Result<Option<SharedHistoryObservation>, V2MemberSaveRefusal> {
-        use catcoms_replication::chat::ActionState;
-        use V2MemberSaveRefusal as Refusal;
         let channel = ledger.realm().channel();
-        let Some(page) = self.archived_actions(
-            channel,
-            SharedHistoryActionQuery {
-                target: Some(create),
-                after: None,
-                limit: MAX_RECEIVED_ACTIONS,
-            },
-        )?
-        else {
-            return Ok(None);
-        };
-        if page.actions.is_empty() {
-            return Ok(None);
+        SharedHistoryReplay {
+            store: self.store,
+            scope: self.history_scope(channel),
+            verifier: self
+                .prefix
+                .selected_member_verifier()
+                .map_err(|_| V2MemberSaveRefusal::Unavailable)?,
+            caller,
         }
-        if page.more || page.actions.binary_search(&create).is_err() {
-            return Err(Refusal::Failed);
-        }
-        let roots = page.actions.clone();
-        let observation = page.observation.clone();
-        drop(page);
-
-        let verifier = self
-            .prefix
-            .selected_member_verifier()
-            .map_err(|_| Refusal::Unavailable)?;
-        let mut pending: Vec<_> = roots.iter().rev().copied().collect();
-        let mut waiting = BTreeSet::new();
-        let mut work = 2 * MAX_RECEIVED_ACTIONS;
-        while let Some(action) = pending.pop() {
-            if caller.is_cancelled() {
-                return Err(Refusal::Cancelled);
-            }
-            work = work.checked_sub(1).ok_or(Refusal::Failed)?;
-            if ledger.state(action) == Some(ActionState::Valid) {
-                continue;
-            }
-            let archived = self
-                .store
-                .read_shared_history_record(self.history_scope(channel), action)
-                .map_err(|_| Refusal::Failed)?;
-            let status = if let Some(original) = archived {
-                let signed = original.original.action();
-                let target = signed.spec().body.create().unwrap_or(action);
-                if roots.binary_search(&action).is_ok() && target != create {
-                    return Err(Refusal::Failed);
-                }
-                let admission = verifier
-                    .admission(original.admission)
-                    .map_err(|_| Refusal::Stale)?;
-                verifier.project_provisional_from_ledger(
-                    ledger,
-                    view,
-                    signed,
-                    &admission,
-                    RECEIVE_WORK,
-                )
-            } else {
-                // An indexed candidate cannot be supplied by a different owner.
-                if roots.binary_search(&action).is_ok() {
-                    return Err(Refusal::Failed);
-                }
-                let original = self
-                    .read_dependency(channel, action, rng)?
-                    .ok_or(Refusal::Unavailable)?;
-                let admission = verifier
-                    .admission(original.receipt().admission)
-                    .map_err(|_| Refusal::Stale)?;
-                verifier.replay_ordinary_history_original(
-                    ledger,
-                    view,
-                    original.action(),
-                    &admission,
-                    &[],
-                    RECEIVE_WORK,
-                )
-            }
-            .map_err(|_| Refusal::Failed)?;
-            match status {
-                V2OrdinaryReceiveStatus::Retained(ActionState::Valid) => {}
-                V2OrdinaryReceiveStatus::Retained(_) => return Err(Refusal::Failed),
-                V2OrdinaryReceiveStatus::WaitingForDependencies(missing) => {
-                    if !waiting.insert(action) || pending.len() + missing.len() + 1 > work {
-                        return Err(Refusal::Failed);
-                    }
-                    pending.push(action);
-                    pending.extend(missing.into_iter().rev());
-                }
-            }
-        }
-        Ok(Some(observation))
+        .replay_message(ledger, view, create, |action| {
+            self.read_dependency(channel, action, rng)
+        })
     }
 
     fn history_scope(&self, channel: u128) -> SharedHistoryScope {

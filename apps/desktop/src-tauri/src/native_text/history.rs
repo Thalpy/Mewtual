@@ -511,24 +511,20 @@ async fn execute_archive(
     let channel = call.read.channel;
     let scope = call.scope.clone();
     let payment = call.payment.clone();
-    let original = if matches!(&call.selection, server_table::NativeSelection::Joined(_)) {
-        let local = &call.member_work;
-        let guard = local.foreground(scope.clone()).await.ok_or(STALE)?;
-        let Preparation::Joined(original, selection) = capture(state, call).await? else {
-            return Err(STALE.to_owned());
-        };
-        Some((original, selection, guard, local.clone()))
-    } else {
-        None
-    };
+    let local = call.member_work.clone();
+    let permit = local.foreground(scope.clone()).await.ok_or(STALE)?;
+    let original = capture(state, call).await?;
     tauri::async_runtime::spawn_blocking(move || match read {
         ArchiveRead::Page { after, limit } => {
             let page = match original {
-                Some((original, row, _guard, _)) => original
-                    .archived_action_page(&row, channel, after, limit, &scope)
-                    .map_err(|_| "Saved received messages could not be read. Try again.")?,
-                None => None,
-            };
+                Preparation::Founder(original) => {
+                    original.archived_founder_action_page(channel, after, limit, &scope)
+                }
+                Preparation::Joined(original, row) => {
+                    original.archived_action_page(&row, channel, after, limit, &scope)
+                }
+            }
+            .map_err(|_| "Saved received messages could not be read. Try again.")?;
             let ids = page.as_ref().map_or_else(Vec::new, |page| {
                 page.actions()
                     .iter()
@@ -549,22 +545,26 @@ async fn execute_archive(
             }))
         }
         ArchiveRead::Message(action) => {
-            let (projection, permit) = match original {
-                Some((original, row, permit, local)) => {
-                    if !local.archive_target_settled(action) {
-                        return Err("A received change is waiting to be saved.".into());
-                    }
-                    let projection = original
-                        .archived_message_projection(&row, channel, action, scope, &mut OsCryptoRng)
-                        .map_err(|_| "Saved received messages could not be read. Try again.")?;
-                    (projection, Some(permit))
+            if !local.archive_target_settled(action) {
+                return Err("A received change is waiting to be saved.".into());
+            }
+            let projection = match original {
+                Preparation::Founder(original) => {
+                    original.archived_founder_message_projection(channel, action, &scope)
                 }
-                None => (None, None),
-            };
+                Preparation::Joined(original, row) => original.archived_message_projection(
+                    &row,
+                    channel,
+                    action,
+                    scope,
+                    &mut OsCryptoRng,
+                ),
+            }
+            .map_err(|_| "Saved received messages could not be read. Try again.")?;
             Ok(Response::Received(ReceivedOutput {
                 scope: "received-archive",
                 projection,
-                _archive_permit: permit,
+                _archive_permit: Some(permit),
                 _payment: payment,
             }))
         }
