@@ -1,6 +1,7 @@
 //! Authenticate the complete original transition outside writers. The
 //! recovered snapshot still needs independent SDK restore and Head2 reproof.
 use super::*;
+use crate::store::critical_namespaces::archive_current_codec::GenesisPublicData;
 use crate::store::persistence::v2_text::{
     archive::TextArchiveData,
     head::{TextHeadData, TextPendingData},
@@ -10,9 +11,11 @@ use catcoms_replication::chat::{
     owner_profile::{AdmissionBody, AdmissionOrigin},
     owner_state::transition::{ReplayBody, ReplayMath},
 };
-use catcoms_sync::{owner_v2::V2GenesisSeedData, V2JoinResponsePacketData};
+use catcoms_sync::V2JoinResponsePacketData;
 
+mod cold;
 mod held;
+pub(in crate::store) use cold::HeldColdFounderAdd;
 pub(in crate::store) use held::HeldGovernedArchiveRead;
 
 pub(in crate::store) struct RecoveredGovernedAdd {
@@ -40,7 +43,7 @@ fn authenticate_selected(
     head: &selected_head::GovernedHeadData,
     raw_archive: &[u8],
     context: TextContextIdData,
-    trusted: &V2GenesisSeedData<'_>,
+    trusted: &GenesisPublicData<'_>,
 ) -> Result<RecoveredGovernedAdd, AppError> {
     let archive = open_data(key, head.archive, raw_archive)?;
     let (labels, frames) = decode_data(&archive)?;
@@ -111,7 +114,7 @@ fn authenticate_selected(
         trusted.profile,
         trusted.admission,
         trusted.header,
-        trusted.state,
+        trusted.image,
     )
     .and_then(|prior| prior.derive_successor(&header, ReplayBody::Admission(&admission), bodies[2]))
     .map_err(|_| refused())?;
@@ -166,7 +169,7 @@ fn parent_head(
     key: &[u8; 32],
     head: &selected_head::GovernedHeadData,
     frames: &GovernedArchiveFrames<'_>,
-    trusted: &V2GenesisSeedData<'_>,
+    trusted: &GenesisPublicData<'_>,
 ) -> Result<TextHeadData, AppError> {
     let labels = head.transition;
     let parent_kind = TextControlKindData::Head;
@@ -192,7 +195,7 @@ fn parent_head(
         || parent.archive != labels.before_archive
         || prior.context != labels.context
         || prior.header != trusted.header
-        || prior.image != trusted.state
+        || prior.image != trusted.image
     {
         return Err(refused());
     }

@@ -167,6 +167,28 @@ impl RetainedBootstrapSourceData {
         )
     }
 
+    pub(in crate::store) fn saved_expectation_data(
+        &self,
+        store: &ServerStore,
+    ) -> Result<critical_namespaces::archive_current_codec::SavedSourceExpectationData, AppError>
+    {
+        self.require_original_negative(store)?;
+        let capture = &self.capture;
+        let key = Zeroizing::new(store.keys.db_key()?);
+        let debit = founder::open_debit_data(&key, capture.invocation, &capture.debit.frame)?;
+        Ok(
+            critical_namespaces::archive_current_codec::SavedSourceExpectationData {
+                invocation: capture.invocation,
+                debit_id: founder::DebitId::of(&capture.debit.frame),
+                terminal_id: founder::IntentId::of(&capture.terminal.frame),
+                source_id: capture.source_id,
+                marker_id: founder::TargetMarkerId::of(&capture.origin.frame),
+                context: capture.context.clone(),
+                debit_display_name: debit.name,
+            },
+        )
+    }
+
     /// Reobserve the original physical capture before a later consumer. This performs only
     /// bounded small-control/object checks; it never reruns large verification under Root.
     pub fn validate_original(&self, store: &ServerStore) -> Result<(), AppError> {

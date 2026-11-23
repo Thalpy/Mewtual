@@ -11,9 +11,11 @@ source and reserve the same TCP identity and port. The original network file
 stays held through registry inspection and startup, including recovery of a
 covered activation stage. Equal-byte replacements of that file or the held
 bootstrap source refuse. The bounded actor binds the signed address without
-dialing. This preparation is separate from SDK and Core recovery. Desktop
-startup still requires the recovered founder's selected Head, original pin,
-and authenticated native runtime to agree before publishing a founder row.
+dialing. The first Add restore checks the original registry pin and promotion
+seed, authenticates the exact selected signed Add from its archive, and
+restores an independently paid closed MLS graph from the selected snapshot.
+Desktop startup still requires an owning Core and native runtime activation
+before publishing a recovered founder row.
 
 The stage-lifetime continuation is under validation. Native key drainage is
 being separated from retained CLOSED snapshot DATA: an actual completed Cell

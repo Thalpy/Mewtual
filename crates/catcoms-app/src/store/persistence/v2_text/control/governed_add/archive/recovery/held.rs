@@ -175,12 +175,18 @@ impl HeldGovernedArchiveRead {
             let (selected, _) = head.archive.as_ref().ok_or_else(refused)?;
             let archive = self.archive.as_ref().ok_or_else(refused)?;
             let key = Zeroizing::new(store.keys.db_key()?);
+            let original = source.data();
             self.recovered = Some(authenticate_selected(
                 &key,
                 selected,
                 &archive.frame,
                 head.context,
-                &source.data(),
+                &GenesisPublicData {
+                    profile: original.profile,
+                    admission: original.admission,
+                    header: original.header,
+                    image: original.state,
+                },
             )?);
         }
         self.resources
@@ -219,27 +225,7 @@ impl HeldGovernedArchiveRead {
             .ok_or_else(refused)?
             .0
             .transition;
-        let limits = TextCurrentAddLimits::governed_text_v2();
-        let max_typed_bytes = limits.restore_typed_bytes + 128 * 1024;
-        let bytes = max_typed_bytes
-            + limits.max_provider_backing_bytes
-            + limits.max_provider_payload_bytes
-            + 2 * limits.max_snapshot_bytes;
-        let pool = &store
-            .archive_bootstrap_policy
-            .as_ref()
-            .ok_or_else(refused)?
-            .pending
-            .pool;
-        let fee = pool.try_reserve(bytes)?;
-        fee.validate(pool, bytes)?;
-        let admission = TextCurrentSdkRestoreAdmission::new(RestoredSdkPayment {
-            limits: TextCurrentSdkRestoreLimits {
-                max_typed_bytes,
-                max_work: limits.restore_work,
-            },
-            _fee: fee,
-        })?;
+        let admission = restore_admission(store)?;
         let restored = PreparedV2FounderRecoveredAdd::restore(
             source.seed(),
             V2InstalledFounderAddData {
@@ -281,4 +267,30 @@ impl HeldGovernedArchiveRead {
         )?;
         guard.validate_source_only()
     }
+}
+
+pub(super) fn restore_admission(
+    store: &ServerStore,
+) -> Result<TextCurrentSdkRestoreAdmission, AppError> {
+    let limits = TextCurrentAddLimits::governed_text_v2();
+    let max_typed_bytes = limits.restore_typed_bytes + 128 * 1024;
+    let bytes = max_typed_bytes
+        + limits.max_provider_backing_bytes
+        + limits.max_provider_payload_bytes
+        + 2 * limits.max_snapshot_bytes;
+    let pool = &store
+        .archive_bootstrap_policy
+        .as_ref()
+        .ok_or_else(refused)?
+        .pending
+        .pool;
+    let fee = pool.try_reserve(bytes)?;
+    fee.validate(pool, bytes)?;
+    Ok(TextCurrentSdkRestoreAdmission::new(RestoredSdkPayment {
+        limits: TextCurrentSdkRestoreLimits {
+            max_typed_bytes,
+            max_work: limits.restore_work,
+        },
+        _fee: fee,
+    })?)
 }

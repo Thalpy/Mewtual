@@ -135,19 +135,42 @@ pub(super) fn original_context(
 ) -> Result<TextContextData, AppError> {
     let (expected, genesis_frame, nonce) = guard.original_genesis_context_data()?;
     let public = guard.source().data();
-    let source = public.context.spec_data();
     if expected.context != *public.context
         || expected.source_id != public.source
-        || nonce != source.scope_nonce
-        || expected.context.spec_data().profile != public.profile.id()
-        || expected.context.spec_data().admission != public.admission.id()
-        || expected.context.spec_data().header != public.header.id()
+        || nonce != public.context.spec_data().scope_nonce
+    {
+        return Err(refused());
+    }
+    original_context_from_genesis(
+        expected,
+        genesis_frame,
+        guard.original_pin_data().2,
+        &genesis_codec::GenesisPublicData {
+            profile: public.profile,
+            admission: public.admission,
+            header: public.header,
+            image: public.state,
+        },
+        key,
+    )
+}
+
+pub(super) fn original_context_from_genesis(
+    expected: &genesis_codec::SavedSourceExpectationData,
+    genesis_frame: &[u8],
+    pin_frame: &[u8],
+    public: &genesis_codec::GenesisPublicData<'_>,
+    key: &[u8; 32],
+) -> Result<TextContextData, AppError> {
+    let source = expected.context.spec_data();
+    if source.profile != public.profile.id()
+        || source.admission != public.admission.id()
+        || source.header != public.header.id()
         || genesis_frame.is_empty()
         || genesis_frame.len() > genesis_codec::MAX_HEAD_FRAME
     {
         return Err(refused());
     }
-    let pin_frame = guard.original_pin_data().2;
     let pin = genesis_codec::open_pin_data(key, expected.layout_data(), source.group, pin_frame)?;
     pin.require_source_data(expected)?;
     if pin.profile != *public.profile {
@@ -165,7 +188,7 @@ pub(super) fn original_context(
         profile: public.profile.id(),
         admission: public.admission.id(),
         signer: source.signer,
-        nonce,
+        nonce: source.scope_nonce,
         pin: genesis_codec::V2GroupPinId::of(pin_frame),
         tenure: public.profile.tenure(),
         genesis_parent: TextGenesisParentIdData::of_data(genesis_frame),

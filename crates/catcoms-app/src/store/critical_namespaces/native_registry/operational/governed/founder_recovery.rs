@@ -1,14 +1,19 @@
 //! The exact founder row, bootstrap source and reserved actor before SDK restore.
 use super::*;
 use crate::store::critical_namespaces::native_registry::lifecycle::network::ColdFounderSelection;
+use crate::store::persistence::v2_text::HeldColdFounderAdd;
 use crate::store::{NativeCreationStatusData, RetainedBootstrapSourceData};
+use catcoms_replication::chat::owner_header::OwnerHeaderId;
 use catcoms_rt::PeerId;
+use catcoms_sync::owner_v2::PreparedV2FounderRecoveredAdd;
 
 /// The cold opener's original founder custody. A bound TCP actor still
 /// supplies no Core selection, room runtime, key admission or native UI row.
 pub struct NativeTextColdFounderSource {
     actor: Option<super::super::join_tcp::Loan>,
     tcp: Option<Arc<super::super::join_tcp::Transport>>,
+    sdk: Option<PreparedV2FounderRecoveredAdd>,
+    governed: Option<Box<HeldColdFounderAdd>>,
     source: RetainedBootstrapSourceData,
     selection: ColdFounderSelection,
     local: (PeerId, u16),
@@ -26,6 +31,8 @@ impl NativeTextJoinedStorage {
             Ok(Some((selection, source, local))) => Ok(NativeTextColdFounderSource {
                 actor: None,
                 tcp: None,
+                sdk: None,
+                governed: None,
                 source,
                 selection,
                 local,
@@ -44,6 +51,27 @@ impl NativeTextColdFounderSource {
 
     pub fn transport_data(&self) -> (PeerId, u16) {
         self.local
+    }
+
+    /// Check the exact selected first Add and restore its closed MLS graph.
+    /// The selected Core runtime and native row still require activation.
+    pub fn restore_first_add(
+        &mut self,
+        negative: &RequestCancellation,
+    ) -> Result<(OwnerHeaderId, u64), AppError> {
+        if negative.is_cancelled() {
+            return Err(refused());
+        }
+        let selected = self.storage.index.restore_recovered_founder_add(
+            &self.selection,
+            &self.source,
+            &mut self.governed,
+            &mut self.sdk,
+        )?;
+        if negative.is_cancelled() {
+            return Err(refused());
+        }
+        Ok(selected)
     }
 
     /// Acquire the exact reserved TCP actor in the authenticated original

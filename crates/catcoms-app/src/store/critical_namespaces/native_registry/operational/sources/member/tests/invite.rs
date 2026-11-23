@@ -130,6 +130,7 @@ async fn cold_native_founder_reuses_the_covered_source_and_listener() {
     assert_eq!(peer, invite.connected_peer_data());
     let address = invite.direct_address_data(std::net::Ipv4Addr::LOCALHOST.into());
     assert!(address.contains(&format!("/tcp/{port}/")));
+    assert!(recovered.restore_first_add(&caller).is_err());
     let (_closed, signal) = tokio::sync::watch::channel(true);
     assert!(recovered
         .bind_original_tcp(&RequestCancellation::new(signal, None))
@@ -1288,6 +1289,42 @@ async fn mounted_join_fixture(recover_stage: bool) {
     selection.close_original_cached();
     assert!(!selection.is_current_cached());
     assert!(recovered_row().select_registered(&fresh).is_err());
+    if recover_stage {
+        drop(receive);
+        drop(serve);
+        drop(requests);
+        let mut retirement = owner.prepare_retirement().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            while retirement.try_retire().unwrap()
+                == crate::store::NativeTextSourceRetirementStatus::Pending
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the original founder drained before the first Add was reopened");
+        drop((retirement, row, owner, founder));
+        let cold = crate::store::NativeTextJoinedStorage::open_for_native_startup(
+            founder_dir.path(),
+            SECRET,
+            &mut rng,
+            current_policy(),
+        )
+        .unwrap();
+        let mut original = cold
+            .prepare_recovered_founder()
+            .unwrap_or_else(|(_, error)| panic!("the original founder refused: {error}"));
+        assert_eq!(original.restore_first_add(&fresh).unwrap(), (head, epoch));
+        let path =
+            only_named(founder_dir.path(), "text.add.response.v2").with_file_name("head.bin");
+        let parked = path.with_extension("held-after-restore");
+        std::fs::rename(&path, &parked).unwrap();
+        std::fs::copy(&parked, &path).unwrap();
+        assert!(original.restore_first_add(&fresh).is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::rename(parked, path).unwrap();
+        assert_eq!(original.restore_first_add(&fresh).unwrap(), (head, epoch));
+    }
 }
 
 #[derive(PartialEq, Eq)]

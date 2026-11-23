@@ -83,7 +83,7 @@ pub(in crate::store) const V2_GROUP_DIRECTORY_METADATA_BYTES: usize = std::mem::
         + 2 * 66 // original lower-hex group selector and its fixed g- prefix
         + 3 * (2 * std::mem::size_of::<usize>()); // custody, receipt and fee Arc headers
 
-fn original_group_path(
+pub(in crate::store::persistence) fn original_group_path(
     store: &ServerStore,
     layout: CurrentLayoutData,
     group: &[u8],

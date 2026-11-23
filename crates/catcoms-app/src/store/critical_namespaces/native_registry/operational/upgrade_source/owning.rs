@@ -482,6 +482,17 @@ impl Store {
             .require_recovered_founder_source(original, source)
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn restore_recovered_founder_add(
+        &self,
+        original: &ColdFounderSelection,
+        source: &crate::store::RetainedBootstrapSourceData,
+        captured: &mut Option<Box<crate::store::persistence::v2_text::HeldColdFounderAdd>>,
+        sdk: &mut Option<catcoms_sync::owner_v2::PreparedV2FounderRecoveredAdd>,
+    ) -> Result<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64), AppError> {
+        self.physical
+            .restore_recovered_founder_add(original, source, captured, sdk)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn require_empty_mounted_joined_pins(
         &self,
     ) -> Result<(), AppError> {

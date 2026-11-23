@@ -336,6 +336,36 @@ impl Physical {
         source.validate_original(self.current()?.checked_store()?)
     }
 
+    pub(super) fn restore_recovered_founder_add(
+        &self,
+        original: &network::ColdFounderSelection,
+        source: &crate::store::RetainedBootstrapSourceData,
+        captured: &mut Option<Box<crate::store::persistence::v2_text::HeldColdFounderAdd>>,
+        sdk: &mut Option<catcoms_sync::owner_v2::PreparedV2FounderRecoveredAdd>,
+    ) -> Result<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64), AppError> {
+        use crate::store::persistence::v2_text::HeldColdFounderAdd;
+        self.require_recovered_founder_source(original, source)?;
+        let store = self.current()?.checked_store()?;
+        if captured.is_none() {
+            *captured = Some(Box::new(HeldColdFounderAdd::capture(
+                store,
+                source,
+                original.binding.pin,
+            )?));
+        }
+        let captured = captured.as_deref_mut().ok_or_else(refused)?;
+        if sdk.is_none() {
+            *sdk = Some(captured.restore_sdk(store, source)?);
+        }
+        let fingerprint = sdk.as_ref().ok_or_else(refused)?.fingerprint_data();
+        let selected = captured.require_current(store, source)?;
+        if selected != (fingerprint.header, fingerprint.epoch) {
+            return Err(refused());
+        }
+        self.require_recovered_founder_source(original, source)?;
+        Ok(selected)
+    }
+
     pub(super) fn copy_selected_governing_proof(
         &self,
         pending: Option<&crate::store::persistence::governance_layout::joined::JoinedPendingIo>,
