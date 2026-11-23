@@ -1,6 +1,7 @@
 //! Bind ciphertext from the original native actor to the actual registered row.
 use super::*;
 use crate::store::persistence::v2_member_outbox::{member_outbox_key, MemberSavedOriginal};
+use crate::store::persistence::v2_member_transport::replay_local_member_dependencies;
 use crate::store::persistence::v2_shared_history::{
     PreparedSharedHistoryRecord, SharedHistoryActionPage, SharedHistoryActionQuery,
     SharedHistoryObservation, SharedHistoryProjectionLease, SharedHistoryReplay,
@@ -32,7 +33,6 @@ const OPEN_FEE: usize = 4 * MAX_V2_MEMBER_TRANSPORT_BYTES + 4096;
 const MAX_RECEIVED_ACTIONS: usize = 64;
 const MAX_RECEIVED_BYTES: usize = 1024 * 1024;
 const RECEIVE_WORK: usize = 4 * MAX_RECEIVED_ACTIONS + MAX_PARENTS;
-const LOCAL_DEPENDENCY_READS: usize = 8;
 const PROJECTION_FEE: usize = 2 * MAX_ACTION_BYTES + 32 * 1024;
 // Allow two copies of canonical originals and separately budget the ledger
 // entries, dependency edges, authority sets, tokens, and bounded work indices.
@@ -592,13 +592,24 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             return Err(Refusal::Stale);
         }
         self.with_member_receiver(&ledger.selection, caller, |source| {
-            source.replay_local_dependencies(
-                &mut ledger.ledger,
-                &ledger.view,
-                action,
-                &ledger.signal,
-                caller,
-                rng,
+            let verifier = source
+                .prefix
+                .selected_member_verifier()
+                .map_err(|_| Refusal::Unavailable)?;
+            let channel = ledger.ledger.realm().channel();
+            let subscription = &ledger.signal;
+            replay_local_member_dependencies(
+                std::slice::from_ref(&action),
+                (verifier, &mut ledger.ledger, &ledger.view),
+                RECEIVE_WORK,
+                (source.store, source.history_scope(channel)),
+                |id| source.read_dependency(channel, id, rng),
+                || {
+                    if subscription.is_cancelled() || caller.is_cancelled() {
+                        return Err(Refusal::Cancelled);
+                    }
+                    Ok(())
+                },
             )
         })
     }
@@ -756,84 +767,6 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
 }
 
 impl<R: CryptoRngCore> ReceiverSource<'_, R> {
-    fn replay_local_dependencies(
-        &self,
-        ledger: &mut ChatLedger,
-        view: &ProjectionView,
-        root: ActionId,
-        subscription: &RequestCancellation,
-        caller: &RequestCancellation,
-        rng: &mut impl CryptoRngCore,
-    ) -> Result<Option<V2OrdinaryReceiveStatus>, V2MemberSaveRefusal> {
-        use V2MemberSaveRefusal as Refusal;
-        let verifier = self
-            .prefix
-            .selected_member_verifier()
-            .map_err(|_| Refusal::Unavailable)?;
-        let channel = ledger.realm().channel();
-        let mut pending = Vec::with_capacity(LOCAL_DEPENDENCY_READS);
-        pending.push((root, false));
-        let mut remaining = LOCAL_DEPENDENCY_READS;
-        let mut result = None;
-        while let Some((id, retry)) = pending.pop() {
-            if subscription.is_cancelled() || caller.is_cancelled() {
-                return Err(Refusal::Cancelled);
-            }
-            remaining = remaining.checked_sub(1).ok_or(Refusal::Failed)?;
-            let own = self.read_dependency(channel, id, rng)?;
-            let archived = if own.is_none()
-                && self
-                    .store
-                    .has_mounted_shared_history()
-                    .map_err(|_| Refusal::Busy)?
-            {
-                self.store
-                    .read_shared_history_record(self.history_scope(channel), id)
-                    .map_err(|_| Refusal::Failed)?
-            } else {
-                None
-            };
-            let Some((signed, admission)) = own
-                .as_ref()
-                .map(|saved| (saved.action(), saved.receipt().admission))
-                .or_else(|| {
-                    archived
-                        .as_ref()
-                        .map(|saved| (saved.original.action(), saved.admission))
-                })
-            else {
-                continue;
-            };
-            if signed.id() != id || &signed.spec().realm != ledger.realm() {
-                return Err(Refusal::Stale);
-            }
-            if subscription.is_cancelled() || caller.is_cancelled() {
-                return Err(Refusal::Cancelled);
-            }
-            let admission = verifier.admission(admission).map_err(|_| Refusal::Stale)?;
-            let status = verifier
-                .replay_ordinary_history_original(
-                    ledger,
-                    view,
-                    signed,
-                    &admission,
-                    &[],
-                    RECEIVE_WORK,
-                )
-                .map_err(|_| Refusal::Failed)?;
-            if let V2OrdinaryReceiveStatus::WaitingForDependencies(missing) = &status {
-                if !retry && pending.len() + missing.len() < remaining {
-                    pending.push((id, true));
-                    pending.extend(missing.iter().rev().map(|id| (*id, false)));
-                }
-            }
-            if id == root {
-                result = Some(status);
-            }
-        }
-        Ok(result)
-    }
-
     fn archived_actions(
         &self,
         channel: u128,

@@ -204,11 +204,10 @@ that projection under the same native publication guard as a joined row.
 For an authenticated incoming action that names at most four missing direct
 dependencies, the founder can look up those exact IDs in its own saved outbox.
 An ID absent there can be read from the same channel's selected received
-archive. Both originals follow the same Core and ledger checks.
-The current Core verifier replays each matching saved original into the
-receiver ledger for dependency validation. This gives a remote reply the
-context of the founder's original while its local outbox still owns the
-original's display. The founder saves exact received originals in the mounted
+archive. It uses the same eight-lookup limit across the frame's whole local
+causal slice, including the saved parents of archived replies. The current
+Core verifier replays each matching original for dependency validation.
+The founder saves exact received originals in the mounted
 history namespace and can read their projection after its live receiver
 retires. Both desktop roles use the same bounded archive replay and recheck
 the archive selection and active Core view before returning a body.

@@ -26,9 +26,10 @@ pub(in crate::store) const FOUNDER_RECEIVE_LEDGER_FEE: usize = 2 * FOUNDER_RECEI
     + FOUNDER_RECEIVE_ACTIONS * (MAX_PARENTS + 2) * 256
     + V2GeneralPrefixVerifier::ordinary_authorization_temporary_layout_bytes()
     + 16 * 1024;
+const LOCAL_DEPENDENCY_READS: usize = 8;
 
-/// Project a live envelope, then retry once with exact saved, authenticated
-/// direct dependencies. The storage owner chooses which originals can be lent.
+/// Project a live envelope, then retry with its bounded locally saved causal
+/// slice. The storage owner chooses which originals can be lent.
 pub(in crate::store) fn project_founder_member(
     original: &SelectedV2MemberEnvelope,
     verifier: &V2GeneralPrefixVerifier,
@@ -46,57 +47,86 @@ pub(in crate::store) fn project_founder_member(
         if missing.len() > 4 {
             return Ok(false);
         }
-        let mut replayed = false;
-        for &id in missing {
-            require_current()?;
-            let own = saved_dependency(id)?;
-            let archived;
-            let (action, admission) = if let Some(saved) = &own {
-                (saved.action(), saved.receipt().admission)
-            } else {
-                if !archive
-                    .0
-                    .has_mounted_shared_history()
-                    .map_err(|_| Refusal::Busy)?
-                {
-                    continue;
-                }
-                let Some(saved) = archive
-                    .0
-                    .read_shared_history_record(archive.1, id)
-                    .map_err(|_| Refusal::Failed)?
-                else {
-                    continue;
-                };
-                archived = saved;
-                (archived.original.action(), archived.admission)
-            };
-            if action.id() != id || &action.spec().realm != ledger.realm() {
-                return Err(Refusal::Stale);
-            }
-            let admission = verifier.admission(admission).map_err(|_| Refusal::Stale)?;
-            require_current()?;
-            replayed |= verifier
-                .replay_ordinary_history_original(
-                    ledger,
-                    view,
-                    action,
-                    &admission,
-                    &[],
-                    FOUNDER_RECEIVE_WORK,
-                )
-                .map_err(|_| Refusal::Failed)?
-                == V2OrdinaryReceiveStatus::Retained(ActionState::Valid);
-        }
-        if !replayed {
-            return Ok(false);
-        }
+        replay_local_member_dependencies(
+            missing,
+            (verifier, ledger, view),
+            FOUNDER_RECEIVE_WORK,
+            archive,
+            &mut saved_dependency,
+            &mut require_current,
+        )?;
         status = original
             .project_from_ledger(verifier, ledger, view, FOUNDER_RECEIVE_WORK)
             .map_err(|_| Refusal::Failed)?;
     }
     require_current()?;
     Ok(status == V2OrdinaryReceiveStatus::Retained(ActionState::Valid))
+}
+
+/// Restore historical semantics without issuing live projection tokens. The
+/// result describes the first requested original, when locally available.
+pub(in crate::store) fn replay_local_member_dependencies(
+    roots: &[ActionId],
+    (verifier, ledger, view): (&V2GeneralPrefixVerifier, &mut ChatLedger, &ProjectionView),
+    work: usize,
+    (store, scope): (&ServerStore, SharedHistoryScope),
+    mut saved_dependency: impl FnMut(ActionId) -> Result<Option<MemberSavedOriginal>, Refusal>,
+    mut require_current: impl FnMut() -> Result<(), Refusal>,
+) -> Result<Option<V2OrdinaryReceiveStatus>, Refusal> {
+    if roots.len() > LOCAL_DEPENDENCY_READS {
+        return Err(Refusal::Failed);
+    }
+    let mut pending = Vec::with_capacity(LOCAL_DEPENDENCY_READS);
+    pending.extend(roots.iter().rev().map(|id| (*id, false)));
+    let mut remaining = LOCAL_DEPENDENCY_READS;
+    let mut first = None;
+    while let Some((id, retry)) = pending.pop() {
+        require_current()?;
+        remaining = remaining.checked_sub(1).ok_or(Refusal::Failed)?;
+        let own = saved_dependency(id)?;
+        let archived = if own.is_none()
+            && store
+                .has_mounted_shared_history()
+                .map_err(|_| Refusal::Busy)?
+        {
+            store
+                .read_shared_history_record(scope, id)
+                .map_err(|_| Refusal::Failed)?
+        } else {
+            None
+        };
+        require_current()?;
+        let Some((action, admission)) = own
+            .as_ref()
+            .map(|saved| (saved.action(), saved.receipt().admission))
+            .or_else(|| {
+                archived
+                    .as_ref()
+                    .map(|saved| (saved.original.action(), saved.admission))
+            })
+        else {
+            continue;
+        };
+        if action.id() != id || &action.spec().realm != ledger.realm() {
+            return Err(Refusal::Stale);
+        }
+        let admission = verifier.admission(admission).map_err(|_| Refusal::Stale)?;
+        let status = verifier
+            .replay_ordinary_history_original(ledger, view, action, &admission, &[], work)
+            .map_err(|_| Refusal::Failed)?;
+        if let V2OrdinaryReceiveStatus::WaitingForDependencies(missing) = &status {
+            // Keep enough reads to finish roots and retries already queued.
+            if !retry && pending.len() + missing.len() < remaining {
+                pending.push((id, true));
+                pending.extend(missing.iter().rev().map(|id| (*id, false)));
+            }
+        }
+        if roots.first() == Some(&id) {
+            first = Some(status);
+        }
+    }
+    require_current()?;
+    Ok(first)
 }
 
 pub(in crate::store) fn archive_founder_member(

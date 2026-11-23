@@ -757,12 +757,6 @@ async fn mounted_join_fixture(recover_stage: bool) {
             else {
                 panic!("expected the original joined reply at the founder");
             };
-            let (topic, _, ciphertext) = frame.current_data().unwrap();
-            founder_reply = Some((
-                reply_id,
-                topic.clone(),
-                bytes::Bytes::copy_from_slice(ciphertext),
-            ));
             let received = founder_capture()
                 .receive_founder_member(&founder_receiver, &frame)
                 .unwrap()
@@ -830,6 +824,78 @@ async fn mounted_join_fixture(recover_stage: bool) {
             .with_publication(|_| panic!("retired founder archive body escaped"))
             .is_err());
         drop((archived, page));
+
+        let nested_text = "Joined reply with an archived parent and a saved grandparent";
+        let nested = catcoms_replication::chat::Body::Create {
+            text: nested_text.into(),
+            reply_to: Some(reply_id),
+        };
+        let nested_request = || V2MemberSignRequest {
+            token: [147; 32],
+            channel,
+            body: &nested,
+            parents: std::slice::from_ref(&reply_id),
+            dependencies: &[],
+        };
+        assert_eq!(
+            inspect()
+                .prepare_member_save(&view, nested_request(), &fresh, &mut rng)
+                .unwrap(),
+            V2MemberSaveOutcome::Ready,
+        );
+        let mut final_nested = Some(
+            inspect()
+                .finish_member_admission(view.clone(), nested_request().token, &fresh)
+                .unwrap(),
+        );
+        let job = NativeTextJoinedMemberFinalPreparation::try_admit_member_save(
+            &mut final_nested,
+            &fresh,
+            MemberSaveNativeAdmission::new((), fresh.clone()),
+        )
+        .unwrap();
+        assert_eq!(job.run(), MemberSaveJobReport::SavedLocal);
+        let (nested_id, ordinal) = inspect()
+            .lookup_saved_member(&view, &nested_request(), &fresh, &mut rng)
+            .unwrap()
+            .unwrap();
+        let (receipt, topic, ciphertext) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let mut receiver = loop {
+                let prepared = founder_capture().prepare_founder_member_ingress(channel, fresh.clone()).unwrap();
+                match prepared.open().await {
+                    Ok(receiver) => break receiver,
+                    Err(catcoms_net::NativeChatMemberGossipError::Busy) => tokio::task::yield_now().await,
+                    Err(error) => panic!("the original founder listener could not reopen: {error}"),
+                }
+            };
+            let receipt = loop {
+                let prepared = inspect().prepare_member_publication(&view, fresh.clone(), &mut rng).unwrap().unwrap();
+                match prepared.submit().await {
+                    Ok(Some(receipt)) => break receipt,
+                    Err(catcoms_sync::SyncError::Publication(catcoms_rt::PublishOnceError::NoPeers)) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    }
+                    _ => panic!("expected the nested reply to reach the founder mesh"),
+                }
+            };
+            let Some(NativeChatMemberGossipEvent::Frame(frame)) = receiver.next().await else {
+                panic!("the founder did not receive the nested reply");
+            };
+            let (topic, _, ciphertext) = frame.current_data().unwrap();
+            let received = founder_capture().receive_founder_member(&receiver, &frame).unwrap()
+                .expect("the new receive ledger loaded the archived parent and the founder's saved grandparent");
+            assert_eq!(received.action, nested_id);
+            assert_eq!(received.archived, Some(true));
+            (receipt, topic.clone(), bytes::Bytes::copy_from_slice(ciphertext))
+        }).await.expect("bounded nested reply over the original TCP connection");
+        assert_eq!(
+            inspect()
+                .checkpoint_member_publication(receipt, &fresh, &mut rng)
+                .unwrap(),
+            ordinal + 1
+        );
+        founder_reply = Some((reply_id, nested_id, nested_text, topic, ciphertext));
+
         let deferred = super::body("Founder action saved before the process closed");
         let deferred_request = || V2MemberSignRequest {
             channel,
@@ -1443,13 +1509,15 @@ async fn mounted_join_fixture(recover_stage: bool) {
         std::fs::remove_file(&path).unwrap();
         std::fs::rename(parked, path).unwrap();
         assert_eq!(original.restore_first_add(&fresh).unwrap(), (head, epoch));
-        if let Some((reply_id, reply_topic, reply_wire)) = founder_reply {
+        if let Some((parent_id, reply_id, reply_text, reply_topic, reply_wire)) = founder_reply {
             let channel = request().channel;
             let page = original
                 .archived_action_page(channel, None, 8, &fresh)
                 .unwrap()
                 .unwrap();
-            assert_eq!(page.actions(), &[reply_id]);
+            let mut expected = [parent_id, reply_id];
+            expected.sort_unstable();
+            assert_eq!(page.actions(), &expected);
             let archived = original
                 .archived_message_projection(channel, reply_id, &fresh, &mut founder_rng)
                 .unwrap()
@@ -1457,7 +1525,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
             assert!(archived
                 .with_publication(|view| matches!(
                     view, catcoms_replication::chat::GuardedProjection::Visible { text, .. }
-                    if text == "Joined reply to the founder's saved original"
+                    if text == reply_text
                 ))
                 .unwrap());
             assert!(original
@@ -1620,7 +1688,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
             assert!(live
                 .with_publication(|view| matches!(
                     view, catcoms_replication::chat::GuardedProjection::Visible { text, .. }
-                    if text == "Joined reply to the founder's saved original"
+                    if text == reply_text
                 ))
                 .unwrap());
             stop.send_replace(true);
