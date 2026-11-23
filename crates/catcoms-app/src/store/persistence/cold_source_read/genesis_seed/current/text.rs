@@ -6,10 +6,88 @@
 use super::UnexposedV2GenesisCurrent;
 
 use catcoms_mls::persist::text_current_add::TextCurrentAddAdmission;
-use catcoms_rt::{NativeChatPreparedKeyCut, NativeChatSourceObservation};
-use catcoms_sync::owner_v2::{V2FounderAddOutcomeData, V2FounderAddRequestData};
+use catcoms_replication::chat::{
+    owner_header::{OwnerBodyId, SignedOwnerHeader},
+    V2GeneralCandidate, V2GeneralPrefixVerifier,
+};
+use catcoms_rt::{NativeChatKeyEnds, NativeChatPreparedKeyCut, NativeChatSourceObservation};
+use catcoms_sync::owner_v2::{
+    RetiredV2FounderRemoveInstall, V2FounderAddOutcomeData, V2FounderAddRequestData,
+    V2FounderRemoveOutcomeData,
+};
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> UnexposedV2GenesisCurrent<T, R> {
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn execute_governed_removal(
+        &mut self,
+        store: &crate::store::ServerStore,
+        verifier: &V2GeneralPrefixVerifier,
+        admission: OwnerBodyId,
+        original: &NativeChatSourceObservation,
+        payment: &mut Option<TextCurrentAddAdmission>,
+        cut: &mut NativeChatPreparedKeyCut,
+        ends: &mut NativeChatKeyEnds,
+    ) -> Result<(), crate::AppError> {
+        use crate::store::critical_namespaces::refused;
+        self.require_text_original_data(store)
+            .map_err(|_| refused())?;
+        let node = self.governed_text_node_mut().ok_or_else(refused)?;
+        node.prepare_removal_data(verifier, admission, original.clone())?;
+        node.execute_removal_native(verifier, admission, original, payment, cut, ends)?;
+        self.require_text_original_data(store)
+            .map_err(|_| refused())
+    }
+
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn governed_removal_outcome(
+        &self,
+        store: &crate::store::ServerStore,
+    ) -> Result<V2FounderRemoveOutcomeData<'_>, crate::AppError> {
+        use crate::store::critical_namespaces::refused;
+        self.require_text_original_data(store)
+            .map_err(|_| refused())?;
+        Ok(self
+            .governed_text_node()
+            .ok_or_else(refused)?
+            .removal_outcome_data()?)
+    }
+
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn materialize_governed_removal(
+        &mut self,
+        store: &crate::store::ServerStore,
+    ) -> Result<SignedOwnerHeader, crate::AppError> {
+        use crate::store::critical_namespaces::refused;
+        self.require_text_original_data(store)
+            .map_err(|_| refused())?;
+        Ok(self
+            .governed_text_node_mut()
+            .ok_or_else(refused)?
+            .materialize_signed_removal_data()?
+            .clone())
+    }
+
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn derive_governed_removal_selection(
+        &self,
+        store: &crate::store::ServerStore,
+        verifier: &mut V2GeneralPrefixVerifier,
+    ) -> Result<V2GeneralCandidate, crate::AppError> {
+        use crate::store::critical_namespaces::refused;
+        self.require_text_original_data(store)
+            .map_err(|_| refused())?;
+        Ok(self
+            .governed_text_node()
+            .ok_or_else(refused)?
+            .derive_removal_selection_data(verifier)?)
+    }
+
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn take_retired_governed_removal(
+        &mut self,
+    ) -> Result<RetiredV2FounderRemoveInstall, crate::AppError> {
+        use crate::store::critical_namespaces::refused;
+        Ok(self
+            .governed_text_node_mut()
+            .ok_or_else(refused)?
+            .take_retired_removal_data()?)
+    }
+
     pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn select_governed_dependency_access(
         &self,
         store: &crate::store::ServerStore,

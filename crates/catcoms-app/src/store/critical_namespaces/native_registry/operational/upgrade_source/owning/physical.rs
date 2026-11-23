@@ -1272,6 +1272,32 @@ impl SourceWork {
         driver.encode_selected_member_add(self.physical.current()?, request, keys, caller)
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn remove_governed_member_native<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
+        &self,
+        driver: &mut crate::store::PreparedFreshV2TextFounder<T, R>,
+        target: catcoms_replication::chat::owner_header::OwnerBodyId,
+        keys: &crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounderKeys,
+        cuts: (
+            &mut catcoms_rt::NativeChatPreparedKeyCut,
+            &mut catcoms_rt::NativeChatPreparedKeyCut,
+            &mut catcoms_rt::NativeChatKeyEnds,
+        ),
+        rng: &mut impl CryptoRngCore,
+        negative: &catcoms_rt::RequestCancellation,
+    ) -> Result<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64), AppError> {
+        driver.remove_governed_member_native(
+            self.physical.current()?,
+            target,
+            keys,
+            cuts,
+            rng,
+            negative,
+        )
+    }
+
     #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store::critical_namespaces::native_registry) fn current_for_governed_add_test(
         &self,

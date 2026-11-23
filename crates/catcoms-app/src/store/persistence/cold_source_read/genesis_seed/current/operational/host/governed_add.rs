@@ -4,7 +4,8 @@ use super::*;
 use crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounderKeys;
 use crate::store::critical_namespaces::read_pool::CatalogReadReservation;
 use crate::store::persistence::v2_text::{
-    prepare_sdk_admission, PreparedGovernedAddFence, PreparedV2TextParentCapture, TextHeadIdData,
+    prepare_sdk_admission, PreparedGovernedAddFence, PreparedGovernedRemoveFence,
+    PreparedV2TextParentCapture, TextHeadIdData,
 };
 use crate::store::ServerStore;
 use catcoms_mls::persist::text_current_add::TextCurrentAddAdmission;
@@ -17,6 +18,7 @@ use std::sync::Arc;
 pub(super) struct PendingGovernedAdd {
     // Physical write handles drain before the associated selected capture.
     pub(super) fence: PreparedGovernedAddFence,
+    pub(super) removal: Option<Box<PreparedGovernedRemoveFence>>,
     pub(super) parent: Arc<PreparedV2TextParentCapture>,
     pub(super) sdk: Option<TextCurrentAddAdmission>,
     core: Option<catcoms_replication::chat::V2GeneralCandidate>,
@@ -32,6 +34,9 @@ impl PendingGovernedAdd {
         replay: &catcoms_replication::chat::owner_state::transition::ReplayMath,
     ) -> Result<(), AppError> {
         let head = self.require_selected_replay(replay)?;
+        if let Some(removal) = &mut self.removal {
+            return removal.require_selected(guard, self.installed.ok_or_else(refused)?);
+        }
         self.fence.require_selected_head2(
             guard,
             self.parent.selected_data().ok_or_else(refused)?,
@@ -39,7 +44,7 @@ impl PendingGovernedAdd {
         )
     }
 
-    fn require_selected_replay(
+    pub(super) fn require_selected_replay(
         &self,
         replay: &catcoms_replication::chat::owner_state::transition::ReplayMath,
     ) -> Result<TextHeadIdData, AppError> {
@@ -90,6 +95,7 @@ impl PendingGovernedAdd {
         };
         Ok(Self {
             fence,
+            removal: None,
             parent,
             sdk: Some(sdk),
             core: None,
@@ -152,6 +158,14 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         let frame = store.with_v2_text_current(&owner, |admission| {
             let guard = store.lock_v2_text_current_group(admission, pending.parent.resources())?;
             require_live()?;
+            if let Some(removal) = &mut pending.removal {
+                return removal.encode_selected_member_transition(
+                    store,
+                    &guard,
+                    pending.installed.ok_or_else(refused)?,
+                    request,
+                );
+            }
             pending
                 .fence
                 .encode_selected_member_add(store, &guard, selected, head, request)
@@ -170,6 +184,16 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         rng: &mut impl catcoms_rt::CryptoRngCore,
         negative: &catcoms_rt::RequestCancellation,
     ) -> Result<crate::store::NativeTextSavedJoinResponse, AppError> {
+        if self
+            .governed_add
+            .as_ref()
+            .is_some_and(|pending| pending.removal.is_some() && pending.matches_request(packet))
+        {
+            return self.saved_governed_response(layout, packet, keys, negative);
+        }
+        if self.governed_removal.is_some() {
+            return Err(refused());
+        }
         let continuing_selection = self.governed_add.as_mut().is_some_and(|pending| {
             pending.matches_request(packet) && pending.fence.head_selection_entered()
         });
@@ -202,7 +226,12 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         store.with_v2_text_current(&owner, |admission| {
             let guard = store.lock_v2_text_current_group(admission, p.parent.resources())?;
             require_live()?;
-            let response = p.fence.saved_response_data(&guard, selected, head)?;
+            let response = if let Some(removal) = &mut p.removal {
+                removal.require_selected(&guard, p.installed.ok_or_else(refused)?)?;
+                p.fence.cached_archived_response_data()?
+            } else {
+                p.fence.saved_response_data(&guard, selected, head)?
+            };
             require_live()?;
             Ok(response)
         })

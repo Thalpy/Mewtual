@@ -20,6 +20,8 @@ use crate::store::persistence::{
 use crate::store::ServerStore;
 use crate::AppError;
 
+mod removal;
+
 /// No decoded role or caller-selected constructor can create this core. Each variant owns
 /// the SAME source/node/T/R/Clock/Scope/writer and its existing independent resource fees.
 enum OwnedCurrent<T, R> {

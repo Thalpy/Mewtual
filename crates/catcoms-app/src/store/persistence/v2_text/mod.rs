@@ -43,11 +43,13 @@ pub(in crate::store) use common::{
     TextHeadIdData, TextRetirementPlanIdData, TextTransactionIdData,
 };
 pub(in crate::store) use context::TextContextData;
-pub(in crate::store) use control::governed_add::held::PreparedGovernedAddFence;
 #[cfg(all(test, any(windows, target_os = "linux")))]
 pub(in crate::store) use control::governed_add::held::{
     GovernedAddHeaderRecoveryState, GovernedAddRecoveryState, GovernedAddWelcomeRecoveryState,
     HeldGovernedAddFence,
+};
+pub(in crate::store) use control::governed_add::held::{
+    PreparedGovernedAddFence, PreparedGovernedRemoveFence,
 };
 pub(in crate::store) use control::governed_add::{
     HeldColdFounderAdd, HeldColdFounderGenesis, HeldGovernedArchiveRead,

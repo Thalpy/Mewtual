@@ -68,13 +68,13 @@ impl PreparedGovernedAddFence {
         archive.record.require_covered(&archive.path)?;
         if parent_is_selected {
             head.record.require_covered(stage)?;
-            crate::store::persistence::v2_genesis_activation::require_directory_name(
-                target, directory, id,
+            select_governed_head(
+                guard,
+                stage,
+                parent.head_path,
+                &mut current,
+                &mut head.selection_entered,
             )?;
-            require_exact_held(parent.head_path, &mut current)?;
-            guard.validate_source_only()?;
-            head.selection_entered = true;
-            fs::rename(stage, parent.head_path).map_err(io)?;
         } else if !head.selection_entered
             || current.frame.as_slice() != head.record.covered_frame()?
         {

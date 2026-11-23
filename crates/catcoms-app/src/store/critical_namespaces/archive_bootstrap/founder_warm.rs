@@ -256,6 +256,28 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
             .encode_selected_member_add(layout, request, keys, caller)
     }
 
+    pub(in crate::store) fn remove_governed_member_native(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        target: catcoms_replication::chat::owner_header::OwnerBodyId,
+        keys: &super::founder::NativeFounderKeys,
+        cuts: (
+            &mut catcoms_rt::NativeChatPreparedKeyCut,
+            &mut catcoms_rt::NativeChatPreparedKeyCut,
+            &mut catcoms_rt::NativeChatKeyEnds,
+        ),
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+        negative: &catcoms_rt::RequestCancellation,
+    ) -> Result<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64), AppError> {
+        if !self.is_ready_data() {
+            return Err(refused());
+        }
+        self.host
+            .as_mut()
+            .ok_or_else(refused)?
+            .remove_governed_member_native(layout, target, keys, cuts, rng, negative)
+    }
+
     #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store) fn host_for_governed_add_test(
         &mut self,

@@ -3,9 +3,12 @@
 //! advancing the SDK outcome or the signing records.
 use super::super::outcome::{SealedGovernedAddOutcome, MAX_FRAME};
 use super::*;
+
+mod removal;
 use crate::store::persistence::v2_text::head::TextPendingData;
 use catcoms_storage::kept::session_id;
 use catcoms_sync::owner_v2::{V2FounderAddOutcomeData, V2InstalledFounderAddData};
+pub(in crate::store) use removal::PreparedGovernedRemoveFence;
 use std::fs::OpenOptions;
 use std::io::Write;
 
@@ -87,6 +90,28 @@ impl PreparedSmallControl {
             .map(|original| original.frame.as_slice())
             .ok_or_else(refused)
     }
+}
+
+/// Advance one held selector in the original Current directory. The caller
+/// has already covered the matching staged file and immutable archive.
+fn select_governed_head(
+    guard: &V2TextCurrentGroupGuard<'_, '_>,
+    stage: &Path,
+    head_path: &Path,
+    current: &mut OpenedTextControl,
+    entered: &mut bool,
+) -> Result<(), AppError> {
+    let (target, directory, id) = guard.target_directory_data();
+    if stage.parent() != Some(target) || head_path != fixed_child(target, "head.bin")?.as_path() {
+        return Err(refused());
+    }
+    crate::store::persistence::v2_genesis_activation::require_directory_name(
+        target, directory, id,
+    )?;
+    require_exact_held(head_path, current)?;
+    guard.validate_source_only()?;
+    *entered = true;
+    fs::rename(stage, head_path).map_err(io)
 }
 
 struct PreparedOutcome {

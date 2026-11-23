@@ -230,6 +230,14 @@ impl PreparedGovernedAddFence {
         installed: TextHeadIdData,
     ) -> Result<NativeTextSavedJoinResponse, AppError> {
         self.require_selected_head2(guard, selected, installed)?;
+        self.cached_archived_response_data()
+    }
+
+    /// Current host separately proves the selected immutable archive chain
+    /// when it uses this exact retained historical receipt after a Remove.
+    pub(in crate::store) fn cached_archived_response_data(
+        &self,
+    ) -> Result<NativeTextSavedJoinResponse, AppError> {
         let response = self
             .header
             .as_ref()

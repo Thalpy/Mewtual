@@ -217,6 +217,23 @@ impl<T, R> UnexposedV2GenesisCurrent<T, R> {
         ),
         AppError,
     > {
+        self.borrow_governed_parts(
+            catcoms_sync::owner_v2::PreparedV2FounderGovernanceNode::signing_parts_data,
+        )
+    }
+
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn borrow_governed_parts<
+        'a,
+        P,
+    >(
+        &'a mut self,
+        borrow: impl FnOnce(
+            &'a mut catcoms_sync::owner_v2::PreparedV2FounderGovernanceNode<T, R>,
+        ) -> Result<
+            (catcoms_sync::owner_v2::V2GenesisSourceFields<'a>, P),
+            catcoms_sync::SyncError,
+        >,
+    ) -> Result<(GenesisCurrentOwnerRef<'a>, P), AppError> {
         let Self {
             node,
             governed,
@@ -241,11 +258,11 @@ impl<T, R> UnexposedV2GenesisCurrent<T, R> {
             .saved_head()
             .ok_or_else(critical_namespaces::refused)?;
         activation.require_same_saved_head(head)?;
-        let (seed, signing) = governed
+        let governed = governed
             .as_mut()
             .and_then(|owner| owner.node.as_mut())
-            .ok_or_else(critical_namespaces::refused)?
-            .signing_parts_data()?;
+            .ok_or_else(critical_namespaces::refused)?;
+        let (seed, primitive) = borrow(governed)?;
         let owner = GenesisCurrentOwnerRef {
             source: GenesisSourceDataRef { seed, resources },
             task,
@@ -256,7 +273,7 @@ impl<T, R> UnexposedV2GenesisCurrent<T, R> {
             },
             wrapper_fee: fee,
         };
-        Ok((owner, signing))
+        Ok((owner, primitive))
     }
 
     /// Cached prerequisite only; new operational physical proof is separate. An ambiguous

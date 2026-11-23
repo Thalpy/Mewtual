@@ -295,6 +295,9 @@ jobs:
       - name: Check three native vaults across the later Add and the founder disconnect
         if: inputs.scope == 'mounted-governing'
         run: python .github/scripts/check-chat-v2-invite-intent.py mounted-governing
+      - name: Check a selected Remove across the mounted founder, survivor and evicted row
+        if: github.event_name == 'pull_request' || inputs.scope == 'mounted-governing'
+        run: python .github/scripts/check-chat-v2-invite-intent.py mounted-removal
       - name: Check the cold founder's original source and reserved TCP listener
         if: github.event_name == 'pull_request' || inputs.scope == 'joined-storage' || inputs.scope == 'cold-founder' || inputs.scope == 'joined-member'
         run: python .github/scripts/check-chat-v2-invite-intent.py cold-founder-source

@@ -46,6 +46,12 @@ const ADD_STAGES: [&str; 12] = [
     response::NAME,
     selected_head::NAME,
 ];
+const REMOVE_STAGES: [&str; 4] = [
+    "text.remove.sdk-entry.v1",
+    "text.remove.outcome.v1",
+    "text.remove.header-attempt.v1",
+    "text.remove.head-stage.v1",
+];
 
 fn add_stage_path(
     target: &Path,
@@ -69,6 +75,13 @@ pub(super) fn require_successor_stages_absent(
     for name in ADD_STAGES {
         require_absent(&add_stage_path(target, name, Some(selected))?)?;
     }
+    for name in REMOVE_STAGES {
+        require_absent(&governed_add_successor_child(
+            target,
+            name,
+            selected.as_bytes(),
+        )?)?;
+    }
     Ok(())
 }
 
@@ -79,6 +92,7 @@ pub(in crate::store) use header_read::{
 };
 mod writer;
 pub(in crate::store) use writer::PreparedGovernedAddFence;
+pub(in crate::store) use writer::PreparedGovernedRemoveFence;
 
 /// An actual bounded, read-only File capture, tied to the exact selected
 /// parent through its read-resource association. All file and path custody

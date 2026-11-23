@@ -29,6 +29,7 @@ mod lookup;
 use lookup::PendingTokenLookup;
 mod create;
 mod governed_add;
+mod governed_removal;
 // ORDINARY-member lane (founder-as-member vertical): general verifier + signing plan,
 // never the founder A/I/S/B certification lane. Mutually exclusive with founder Create.
 mod member;
@@ -94,6 +95,7 @@ pub struct PreparedV2TextHost<T, R> {
     invite: Option<Box<invite::PendingInvite>>,
     // Original exact warm Add reservation and its unpublished stage custody.
     governed_add: Option<Box<governed_add::PendingGovernedAdd>>,
+    governed_removal: Option<Box<governed_removal::PendingGovernedRemoval>>,
     resident: Option<PreparedV2TextResidentProjection>,
     capture: Option<PreparedV2TextPromotionCapture>,
     prepared: Option<PreparedV2TextPromotion>,
@@ -169,6 +171,7 @@ impl<T, R> PreparedV2TextHost<T, R> {
             member: None,
             invite: None,
             governed_add: None,
+            governed_removal: None,
             resident: None,
             capture: None,
             prepared: None,

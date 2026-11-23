@@ -208,6 +208,55 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
             .run_join_request(&packet, cuts, negative)
     }
 
+    /// Remove an exact selected admission on this original founder row. The
+    /// caller supplies the admitted incarnation, never a replacement signer.
+    pub fn remove_governed_admission(
+        self,
+        target: catcoms_replication::chat::owner_header::OwnerBodyId,
+        negative: &RequestCancellation,
+    ) -> Result<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64), V2MemberSaveRefusal>
+    {
+        use V2MemberSaveRefusal as Error;
+        if negative.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let (cell, (keys, mut sdk, mut header)) =
+            self.prepare_using_issuer(|source, command| {
+                use catcoms_rt::NativeChatKeyPurpose as Purpose;
+                let cut = |purpose| source.prepare_cut(command, purpose).map_err(|_| refused());
+                Ok((
+                    NativeFounderKeys::prepare(source, command)?,
+                    cut(Purpose::RemoveSdk)?,
+                    cut(Purpose::RemovalHeader)?,
+                ))
+            })?;
+        let mut job = self.finish_prepared((cell, keys))?;
+        let mut ends = catcoms_rt::NativeChatKeyEnds::new();
+        job.inner
+            .require_current()
+            .map_err(|_| Error::Unavailable)?;
+        let inner = &mut job.inner;
+        let body = inner.loan.body.as_mut().ok_or(Error::Unavailable)?;
+        let driver = body.driver.as_mut().ok_or(Error::Unavailable)?;
+        let result = body.work.remove_governed_member_native(
+            driver,
+            target,
+            &inner.keys,
+            (&mut sdk, &mut header, &mut ends),
+            body.rng.as_mut().ok_or(Error::Unavailable)?,
+            negative,
+        );
+        inner.loan.recorded = true;
+        if negative.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        inner.require_current().map_err(|_| Error::Unavailable)?;
+        result.map_err(|error| match error {
+            AppError::Io(_) => Error::Busy,
+            _ => Error::Failed,
+        })
+    }
+
     fn prepare_join_keys(&self) -> Result<JoinKeys<T, R>, V2MemberSaveRefusal> {
         use catcoms_rt::NativeChatKeyPurpose as Purpose;
         let (cell, (keys, cuts)) = self.prepare_using_issuer(|source, command| {

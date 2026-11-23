@@ -75,17 +75,28 @@ async fn native_runtime_invite_returns_only_the_original_installed_join_response
 
 #[tokio::test]
 async fn mounted_join_request_uses_the_original_native_command_and_retains_its_pending() {
-    mounted_join_fixture(false, false).await;
+    mounted_join_fixture(false, None).await;
 }
 
 #[tokio::test]
 async fn mounted_join_request_cold_recovers_the_exact_registry_stage_only_with_its_welcome() {
-    mounted_join_fixture(true, false).await;
+    mounted_join_fixture(true, None).await;
 }
 
 #[tokio::test]
 async fn mounted_join_request_applies_the_next_governing_add_under_its_original_row() {
-    mounted_join_fixture(false, true).await;
+    mounted_join_fixture(false, Some(MountedSuccessor::OfflineDelivery)).await;
+}
+
+#[tokio::test]
+async fn mounted_native_remove_retires_the_exact_joined_row_and_preserves_the_survivor() {
+    mounted_join_fixture(false, Some(MountedSuccessor::Remove)).await;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MountedSuccessor {
+    OfflineDelivery,
+    Remove,
 }
 #[tokio::test]
 async fn cold_native_founder_reuses_the_covered_source_and_listener() {
@@ -218,7 +229,7 @@ async fn cold_native_founder_reuses_the_covered_source_and_listener() {
     .unwrap();
 }
 
-async fn mounted_join_fixture(recover_stage: bool, governing: bool) {
+async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSuccessor>) {
     use super::super::super::tests::{policy, selected_joined};
     use crate::store::critical_namespaces::native_registry::preparation::tests::{
         current_policy, SECRET,
@@ -1253,7 +1264,7 @@ async fn mounted_join_fixture(recover_stage: bool, governing: bool) {
         original_member_outbox
     );
     let mut history_rng = catcoms_rt::OsCryptoRng;
-    if governing {
+    if let Some(successor) = successor {
         use catcoms_rt::TransportEvent;
         drop(receive);
         drop(serve);
@@ -1456,6 +1467,151 @@ async fn mounted_join_fixture(recover_stage: bool, governing: bool) {
             saved
         );
         drop((lane, ingress));
+        if successor == MountedSuccessor::Remove {
+            use catcoms_replication::chat::owner_header::OwnerBodyId;
+            let target = OwnerBodyId::from_bytes(*third_own.as_bytes());
+            let old_founder = OwnerBodyId::from_bytes(anchor.admission);
+            assert!(capture()
+                .remove_governed_admission(old_founder, &fresh)
+                .is_err());
+            let (removed_head, removed_epoch) =
+                capture().remove_governed_admission(target, &fresh).unwrap();
+            assert_ne!(removed_head, third_head);
+            assert_eq!(removed_epoch, 3);
+            assert_eq!(
+                capture().remove_governed_admission(target, &fresh),
+                Ok((removed_head, removed_epoch))
+            );
+            let mut lane = capture()
+                .open_connected_governing_requests(fresh.clone())
+                .unwrap();
+            for (preparation, selected) in [
+                (recovered_row(), &selection),
+                (third_row(), &third_selection),
+            ] {
+                let exchange = preparation
+                    .prepare_governing_exchange(selected, fresh.clone())
+                    .unwrap();
+                let serve = async {
+                    let Some(TransportEvent::Request {
+                        proto,
+                        data,
+                        responder,
+                        ..
+                    }) = lane.next().await
+                    else {
+                        panic!("the original mounted founder receives each Remove query");
+                    };
+                    capture()
+                        .serve_connected_governing_request(proto, &data, responder, fresh.clone())
+                        .unwrap();
+                };
+                let (receipt, ()) =
+                    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                        tokio::join!(exchange.receive(), serve)
+                    })
+                    .await
+                    .unwrap();
+                let receipt = receipt.unwrap();
+                let result = if selected.same_original(&selection) {
+                    recovered_row().apply_governing_response(
+                        selected,
+                        &receipt,
+                        &fresh,
+                        &mut history_rng,
+                    )
+                } else {
+                    third_row().apply_governing_response(selected, &receipt, &fresh, &mut third_rng)
+                };
+                assert_eq!(result, Ok((removed_head, removed_epoch)));
+            }
+            assert!(selection.is_current_cached());
+            assert!(!third_selection.is_current_cached());
+            assert!(third_row()
+                .prepare_member_ingress(&third_selection, channel, fresh.clone())
+                .is_err());
+            assert!(third_row().select_registered(&fresh).is_err());
+            let installed_topic = recovered_row()
+                .prepare_member_ingress(&selection, channel, fresh.clone())
+                .unwrap()
+                .topic_for_test();
+            assert_ne!(installed_topic, current_topic);
+            assert_eq!(
+                recovered_row()
+                    .lookup_saved_member(&selection, &request(), &fresh, &mut history_rng)
+                    .unwrap(),
+                saved
+            );
+            let original_eviction = std::fs::read_dir(third_dir.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| {
+                    let name = path.file_name().unwrap().to_string_lossy();
+                    name.starts_with("chat-critical-namespaces.joined-member-add.")
+                        && name.ends_with(".3.bin")
+                })
+                .expect("the third original's immutable terminal continuation");
+            let covered = std::fs::read(&original_eviction).unwrap();
+            drop((third_selection, lane));
+            let mut retirement = third.prepare_retirement().unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                while retirement.try_retire().unwrap()
+                    == crate::store::NativeTextSourceRetirementStatus::Pending
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the evicted original's TCP actor drained");
+            drop((retirement, third, third_vault));
+            let cold = crate::store::NativeTextJoinedStorage::open_for_native_startup(
+                third_dir.path(),
+                SECRET,
+                &mut third_rng,
+                current_policy(),
+            )
+            .unwrap();
+            assert_eq!(
+                cold.recovered_join_outcome_data().unwrap(),
+                Some((third_head, third_epoch))
+            );
+            let started = cold.bind_recovered_native_runtime(
+                third_rng,
+                Box::new(catcoms_rt::SystemClock),
+                &fresh,
+            );
+            if let Ok(mut old) = started {
+                assert!(old.complete_recovery(&fresh).is_err());
+            }
+            assert_eq!(std::fs::read(original_eviction).unwrap(), covered);
+            let mut retirement = owner.prepare_retirement().unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                while retirement.try_retire().unwrap()
+                    == crate::store::NativeTextSourceRetirementStatus::Pending
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the founder's original governing TCP actor drained");
+            drop((retirement, row, owner, founder));
+            let cold = crate::store::NativeTextJoinedStorage::open_for_native_startup(
+                founder_dir.path(),
+                SECRET,
+                &mut history_rng,
+                current_policy(),
+            )
+            .unwrap();
+            let mut cold = cold
+                .prepare_recovered_founder()
+                .map_err(|(_, error)| error)
+                .unwrap();
+            assert_eq!(
+                cold.restore_first_add(&fresh).unwrap(),
+                (removed_head, removed_epoch)
+            );
+            return;
+        }
         let mut founder_retirement = owner.prepare_retirement().unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(8), async {
             while founder_retirement.try_retire().unwrap()
