@@ -12,7 +12,7 @@ on:
       scope:
         description: Workspaces to execute; all is the normal validation run.
         type: choice
-        options: [all, root, native, native-focused, native-lock, native-join]
+        options: [all, root, native, native-focused, native-lock, native-join, native-mutations]
         default: all
       run_deferred_catchup:
         description: Include the slow case at final Chat V2 acceptance (scope all or root).
@@ -23,7 +23,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: chat-v2-complete-tests-${{ github.ref }}
+  group: chat-v2-complete-tests-${{ github.ref }}-${{ inputs.scope || 'all' }}
   cancel-in-progress: true
 
 env:
@@ -36,7 +36,7 @@ env:
 jobs:
   root:
     name: Root tests, slow case deferred (${{ matrix.os }})
-    if: github.event_name != 'workflow_dispatch' || (inputs.scope != 'native' && inputs.scope != 'native-focused' && inputs.scope != 'native-lock' && inputs.scope != 'native-join')
+    if: github.event_name != 'workflow_dispatch' || inputs.scope == 'all' || inputs.scope == 'root'
     runs-on: ${{ matrix.os }}
     # Both OSes have reached the old aggregate120-minute CI bound while
     # individual tests still reported progress (Linux run43547127334 included).
@@ -127,10 +127,10 @@ jobs:
       - name: Install frontend dependencies
         run: npm --prefix apps/desktop ci
       - name: Run the complete frontend tests
-        if: runner.os == 'Linux' && inputs.scope != 'native-lock' && inputs.scope != 'native-join'
+        if: runner.os == 'Linux' && inputs.scope != 'native-lock' && inputs.scope != 'native-join' && inputs.scope != 'native-mutations'
         run: npm --prefix apps/desktop test
       - name: Check focused Chat V2 renderer history and session retirement
-        if: runner.os == 'Linux' && github.event_name == 'workflow_dispatch' && inputs.scope == 'native-join'
+        if: runner.os == 'Linux' && github.event_name == 'workflow_dispatch' && (inputs.scope == 'native-join' || inputs.scope == 'native-mutations')
         working-directory: apps/desktop
         run: >-
           node --experimental-strip-types --import ./scripts/test-dom.mjs
@@ -144,16 +144,16 @@ jobs:
       - name: Build frontend assets
         run: npm --prefix apps/desktop run build
       - name: Check original native IPC and delayed-reply custody regressions
-        if: inputs.scope != 'native-lock' && inputs.scope != 'native-join'
+        if: inputs.scope != 'native-lock' && inputs.scope != 'native-join' && inputs.scope != 'native-mutations'
         run: >-
           cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --lib -- --exact --test-threads=1
           voice_activation_tests::admitted_ipc::admitted_commands_cross_real_tauri_json_dispatch_and_recover_locked_history
           voice_handoff::commands::tests::ready_and_closed_share_one_guard_and_delayed_closed_body_remains_paid_after_collection
       - name: Run the complete native workspace
-        if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || (inputs.scope != 'native-focused' && inputs.scope != 'native-lock' && inputs.scope != 'native-join')) }}
+        if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || inputs.scope == 'all' || inputs.scope == 'native') }}
         run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --no-fail-fast
       - uses: actions/setup-python@v5
-        if: github.event_name == 'workflow_dispatch' && (inputs.scope == 'native-focused' || inputs.scope == 'native-lock' || inputs.scope == 'native-join')
+        if: github.event_name == 'workflow_dispatch' && (inputs.scope == 'native-focused' || inputs.scope == 'native-lock' || inputs.scope == 'native-join' || inputs.scope == 'native-mutations')
         with:
           python-version: '3.12'
       - name: Run exact native gate regressions (focused, not complete acceptance)
@@ -180,25 +180,29 @@ jobs:
               raise RuntimeError('native UI retirement exceeded its deadline')
           guard['validate'](''.join(summaries), code, 4)
           PY
-      - name: Check native joined-vault reopen, desktop Join, and mode isolation
-        if: github.event_name == 'workflow_dispatch' && inputs.scope == 'native-join'
+      - name: Check native join or mutation dispatch and retry continuity
+        if: github.event_name == 'workflow_dispatch' && (inputs.scope == 'native-join' || inputs.scope == 'native-mutations')
         shell: bash
         env:
           RUST_BACKTRACE: '1'
+          CHAT_V2_NATIVE_SCOPE: ${{ inputs.scope }}
         run: |
           python - <<'PY'
+          import os
           from pathlib import Path
           import runpy
 
           guard = runpy.run_path('.github/scripts/check-chat-v2-member-save.py')
           directory = Path('logs/chat-v2-native-gates')
           directory.mkdir(parents=True, exist_ok=True)
-          for name, pattern, count in [
-              ('native-join-dispatch', 'native_text_connected_join_', 5),
+          cases = [
               ('native-send-parser', 'native_text_send_parser_', 1),
               ('native-mutation-dispatch', 'native_text_mutations_', 1),
               ('native-retry-continuity', 'native_continuity_', 3),
-          ]:
+          ]
+          if os.environ['CHAT_V2_NATIVE_SCOPE'] == 'native-join':
+              cases.insert(0, ('native-join-dispatch', 'native_text_connected_join_', 5))
+          for name, pattern, count in cases:
               command = ['cargo', 'test', '--locked', '--manifest-path',
                          'apps/desktop/src-tauri/Cargo.toml', '--lib', pattern,
                          '--', '--test-threads=1']
