@@ -74,11 +74,16 @@ fn prepare_history(
     if negative.is_cancelled() {
         return Err(V2MemberSaveRefusal::Cancelled);
     }
-    if read.maximum == 0
-        || read.maximum > MEMBER_HISTORY_MAX_ITEMS
-        || read.end.is_some_and(|end| read.start > end)
+    if let MemberHistoryRead::Originals {
+        start,
+        end,
+        maximum,
+    } = read
     {
-        return Err(V2MemberSaveRefusal::Stale);
+        if maximum == 0 || maximum > MEMBER_HISTORY_MAX_ITEMS || end.is_some_and(|end| start > end)
+        {
+            return Err(V2MemberSaveRefusal::Stale);
+        }
     }
     let store = layout
         .checked_store()
@@ -151,7 +156,15 @@ fn prepare_history(
     if negative.is_cancelled() {
         return Err(V2MemberSaveRefusal::Cancelled);
     }
-    owner
-        .history_page(&key, read.start, read.end, read.maximum, payment)
-        .map_err(|error| V2MemberSaveRefusal::from(&error))
+    match read {
+        MemberHistoryRead::Originals {
+            start,
+            end,
+            maximum,
+        } => owner.history_page(&key, start, end, maximum, payment),
+        MemberHistoryRead::OwnRevision { channel, target } => {
+            owner.own_revision_page(&key, channel, target, payment, || !negative.is_cancelled())
+        }
+    }
+    .map_err(|error| V2MemberSaveRefusal::from(&error))
 }

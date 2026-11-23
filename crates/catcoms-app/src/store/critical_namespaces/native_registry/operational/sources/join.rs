@@ -1058,6 +1058,41 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         negative: &RequestCancellation,
         rng: &mut impl CryptoRngCore,
     ) -> Result<NativeTextMemberHistoryPage, V2MemberSaveRefusal> {
+        self.prepare_history(
+            selection,
+            MemberHistoryRead::Originals {
+                start,
+                end,
+                maximum,
+            },
+            negative,
+            rng,
+        )
+    }
+
+    pub fn prepare_own_message_revision(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        channel: u128,
+        target: catcoms_replication::chat::ActionId,
+        negative: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<NativeTextMemberHistoryPage, V2MemberSaveRefusal> {
+        self.prepare_history(
+            selection,
+            MemberHistoryRead::OwnRevision { channel, target },
+            negative,
+            rng,
+        )
+    }
+
+    fn prepare_history(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        request: MemberHistoryRead,
+        negative: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<NativeTextMemberHistoryPage, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
         self.original
             .require_current(negative)
@@ -1080,19 +1115,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             data,
             runtime.registration.as_deref(),
             selection.original.row,
-            |layout, _| {
-                prepare_joined_member_history(
-                    layout,
-                    MemberHistoryRead {
-                        start,
-                        end,
-                        maximum,
-                    },
-                    negative,
-                    rng,
-                    data,
-                )
-            },
+            |layout, _| prepare_joined_member_history(layout, request, negative, rng, data),
         )?;
         self.original
             .require_current(negative)

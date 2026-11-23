@@ -6,6 +6,7 @@ use catcoms_app::store::{
     NativeTextHistoryResponseCredit, NativeTextJoinedMemberProjection,
     NativeTextJoinedRowSelection, NativeTextJoinedSelectionPreparation,
     NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus, NativeTextMemberPreparation,
+    V2MemberSaveRefusal,
 };
 use catcoms_replication::chat::{
     ActionId, Body, GuardedProjection, ProjectionCertainty, SignedAction,
@@ -47,10 +48,13 @@ enum ReadRequest {
     Archived(ArchiveRead),
 }
 #[derive(Clone, Copy)]
-struct OwnRead {
-    start: u64,
-    end: Option<u64>,
-    maximum: usize,
+enum OwnRead {
+    Originals {
+        start: u64,
+        end: Option<u64>,
+        maximum: usize,
+    },
+    Revision(ActionId),
 }
 #[derive(Clone, Copy)]
 enum ArchiveRead {
@@ -94,6 +98,7 @@ fn parse(payload: &InvokeBody) -> Result<Read, &'static str> {
                     | "start"
                     | "endExclusive"
                     | "limit"
+                    | "ownAction"
                     | "receivedAction"
                     | "archivedAction"
                     | "archiveAfter"
@@ -149,14 +154,25 @@ fn parse(payload: &InvokeBody) -> Result<Read, &'static str> {
         object.contains_key("archivedAction"),
         object.get("archiveAfter"),
         own,
+        object.contains_key("ownAction"),
     ) {
-        (true, false, None, false) if !object.contains_key("limit") => {
+        (false, false, None, false, true) if !object.contains_key("limit") => {
+            let action = string("ownAction", 64)?;
+            if action.bytes().any(|byte| byte.is_ascii_uppercase()) {
+                return Err("Invalid message.");
+            }
+            ReadRequest::Own(OwnRead::Revision(action_id(action)?))
+        }
+        (true, false, None, false, false) if !object.contains_key("limit") => {
             ReadRequest::Live(action_id(string("receivedAction", 64)?)?)
         }
-        (false, true, None, false) if !object.contains_key("limit") => ReadRequest::Archived(
-            ArchiveRead::Message(action_id(string("archivedAction", 64)?)?),
-        ),
-        (false, false, Some(after), false) => {
+        (false, true, None, false, false) if !object.contains_key("limit") => {
+            ReadRequest::Archived(ArchiveRead::Message(action_id(string(
+                "archivedAction",
+                64,
+            )?)?))
+        }
+        (false, false, Some(after), false, false) => {
             let after = match after {
                 serde_json::Value::Null => None,
                 serde_json::Value::String(value)
@@ -171,7 +187,7 @@ fn parse(payload: &InvokeBody) -> Result<Read, &'static str> {
                 limit: limit()?,
             })
         }
-        (false, false, None, true) => {
+        (false, false, None, true, false) => {
             let start = decimal(string("start", 20)?)?;
             let end = match object.get("endExclusive") {
                 None | Some(serde_json::Value::Null) => None,
@@ -183,7 +199,7 @@ fn parse(payload: &InvokeBody) -> Result<Read, &'static str> {
             if end.is_some_and(|end| start > end) {
                 return Err("Invalid history cursor.");
             }
-            ReadRequest::Own(OwnRead {
+            ReadRequest::Own(OwnRead::Originals {
                 start,
                 end,
                 maximum: limit()?,
@@ -387,14 +403,15 @@ struct Work {
     scope: RequestCancellation,
     read: OwnRead,
     channel: u128,
-    _local: OwnedMutexGuard<()>,
+    local: OwnedMutexGuard<()>,
     #[cfg(test)]
     watch: Option<Arc<DropWatch>>,
     payment: Arc<Payment>, // LAST during unrun/unwind/returned response
 }
 struct Output {
-    _page: NativeTextMemberHistoryPage,
+    _page: Option<NativeTextMemberHistoryPage>,
     body: Option<String>,
+    _local: Option<OwnedMutexGuard<()>>,
     #[cfg(test)]
     _notice: Option<DropNotice>, // actual page/body have dropped, credit is live
     _payment: Arc<Payment>,
@@ -574,27 +591,67 @@ async fn execute_archive(
 }
 impl Work {
     fn run(self) -> Result<Output, String> {
-        let read = self.read;
-        let page = match self.preparation {
-            Preparation::Founder(original) => original
+        let page = match (self.preparation, self.read) {
+            (
+                Preparation::Founder(original),
+                OwnRead::Originals {
+                    start,
+                    end,
+                    maximum,
+                },
+            ) => original
                 .finish()
                 .map_err(|_| STALE)?
-                .prepare_member_history(read.start, read.end, read.maximum, &self.scope),
-            Preparation::Joined(original, row) => original.prepare_member_history(
+                .prepare_member_history(start, end, maximum, &self.scope),
+            (
+                Preparation::Joined(original, row),
+                OwnRead::Originals {
+                    start,
+                    end,
+                    maximum,
+                },
+            ) => original.prepare_member_history(
                 &row,
-                read.start,
-                read.end,
-                read.maximum,
+                start,
+                end,
+                maximum,
                 &self.scope,
                 &mut OsCryptoRng,
             ),
-        }
-        .map_err(|_| "Chat history could not be read. Try again.")?;
+            (Preparation::Founder(original), OwnRead::Revision(target)) => original
+                .finish()
+                .map_err(|_| STALE)?
+                .prepare_own_message_revision(self.channel, target, &self.scope),
+            (Preparation::Joined(original, row), OwnRead::Revision(target)) => original
+                .prepare_own_message_revision(
+                    &row,
+                    self.channel,
+                    target,
+                    &self.scope,
+                    &mut OsCryptoRng,
+                ),
+        };
         // Consuming the Root job restores its runtime before any native await.
-        let body = serialize_page(&page, self.channel, SERIALIZED_LIMIT)?;
+        let (page, body, local) = match self.read {
+            OwnRead::Originals { .. } => {
+                let page = page.map_err(|_| "Chat history could not be read. Try again.")?;
+                let body = serialize_page(&page, self.channel, SERIALIZED_LIMIT)?;
+                (Some(page), body, None)
+            }
+            OwnRead::Revision(target) => {
+                let page = match page {
+                    Ok(page) => Some(page),
+                    Err(V2MemberSaveRefusal::Busy) => None,
+                    Err(_) => return Err("The saved message could not be read. Try again.".into()),
+                };
+                let body = serialize_revision(page.as_ref(), target)?;
+                (page, body, Some(self.local))
+            }
+        };
         Ok(Output {
             _page: page,
             body: Some(body),
+            _local: local,
             #[cfg(test)]
             _notice: self.watch.map(|watch| DropNotice {
                 watch,
@@ -615,7 +672,7 @@ async fn execute(state: &AppState, call: &Invocation, read: OwnRead) -> Result<O
         scope: call.scope.clone(),
         read,
         channel: call.read.channel,
-        _local: local,
+        local,
         #[cfg(test)]
         watch: state.native_text.history_drop_watch.lock().unwrap().clone(),
         payment: call.payment.clone(),
@@ -682,6 +739,13 @@ struct Record<'a> {
     status: &'static str,
     body: BodyData<'a>,
 }
+fn status_data(status: NativeTextMemberHistoryStatus) -> &'static str {
+    match status {
+        NativeTextMemberHistoryStatus::Pending => "pending",
+        NativeTextMemberHistoryStatus::Submitted => "submitted",
+        NativeTextMemberHistoryStatus::Held => "held",
+    }
+}
 fn record<'a>(
     action: &'a SignedAction,
     ordinal: u64,
@@ -709,13 +773,56 @@ fn record<'a>(
         signer: hex::encode(action.signer()),
         channel: action.spec().realm.channel().to_string(),
         presented_ms: action.spec().presented_ms.to_string(),
-        status: match status {
-            NativeTextMemberHistoryStatus::Pending => "pending",
-            NativeTextMemberHistoryStatus::Submitted => "submitted",
-            NativeTextMemberHistoryStatus::Held => "held",
-        },
+        status: status_data(status),
         body,
     }
+}
+
+#[derive(Serialize)]
+struct SelectedOwnMessage<'a> {
+    backend: &'static str,
+    scope: &'static str,
+    action: String,
+    scanning: bool,
+    item: Option<OwnMessageRevision<'a>>,
+}
+
+#[derive(Serialize)]
+struct OwnMessageRevision<'a> {
+    revision: String,
+    text: &'a str,
+    status: &'static str,
+}
+
+fn serialize_revision(
+    page: Option<&NativeTextMemberHistoryPage>,
+    target: ActionId,
+) -> Result<String, String> {
+    let item = if let Some(item) = page.and_then(|page| page.items().next()) {
+        let action = item.action();
+        let text = match &action.spec().body {
+            Body::Create { text, .. } if action.id() == target => text,
+            Body::Edit { create, text } if *create == target => text,
+            _ => return Err(STALE.into()),
+        };
+        Some(OwnMessageRevision {
+            revision: hex::encode(action.id().as_bytes()),
+            text,
+            status: status_data(item.status()),
+        })
+    } else {
+        None
+    };
+    encode(
+        &SelectedOwnMessage {
+            backend: "text-v2",
+            scope: "own-message-revision",
+            action: hex::encode(target.as_bytes()),
+            scanning: page.is_none(),
+            item,
+        },
+        6 * catcoms_replication::chat::MAX_TEXT_BYTES + 1024,
+    )
 }
 #[derive(Serialize)]
 struct Page<'a> {

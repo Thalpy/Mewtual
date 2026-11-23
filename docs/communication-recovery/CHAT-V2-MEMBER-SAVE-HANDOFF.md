@@ -156,3 +156,9 @@ that read as the selected append-only prefix grows. A reopened or recovered
 owner reproves the prefix from storage. The check refuses a stale revision, a
 target with a saved deletion, and an ambiguous saved edit chain. An exact retry
 checks its durable receipt first, including after a newer edit or deletion.
+
+The native history command can also select one saved Create by its ActionId.
+The result carries the exact selected revision, visible text, and local send
+state. A partial read carries no body, and a deleted message has no visible
+item. The native row permit stays with the result through the reply, so a
+locally saved mutation cannot overtake it at the publication edge.

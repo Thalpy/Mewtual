@@ -3,7 +3,7 @@ use super::*;
 use crate::store::persistence::v2_member_outbox::{
     DispositionCode, MemberEntryStatus, MemberHistoryItem, MemberHistoryPage, MemberHistoryRead,
 };
-use catcoms_replication::chat::SignedAction;
+use catcoms_replication::chat::{ActionId, SignedAction};
 
 /// Local outbox disposition only. Submitted says bytes reached local transport,
 /// never that another member received, accepted or durably saved them.
@@ -85,10 +85,34 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberJob<T, R> {
     /// are checked before/after work; the real native caller still gates reply
     /// delivery against its exact original UI generation.
     pub fn prepare_member_history(
-        mut self,
+        self,
         start: u64,
         end_exclusive: Option<u64>,
         maximum: usize,
+        negative: &RequestCancellation,
+    ) -> Result<NativeTextMemberHistoryPage, V2MemberSaveRefusal> {
+        self.prepare_history(
+            MemberHistoryRead::Originals {
+                start,
+                end: end_exclusive,
+                maximum,
+            },
+            negative,
+        )
+    }
+
+    pub fn prepare_own_message_revision(
+        self,
+        channel: u128,
+        target: ActionId,
+        negative: &RequestCancellation,
+    ) -> Result<NativeTextMemberHistoryPage, V2MemberSaveRefusal> {
+        self.prepare_history(MemberHistoryRead::OwnRevision { channel, target }, negative)
+    }
+
+    fn prepare_history(
+        mut self,
+        request: MemberHistoryRead,
         negative: &RequestCancellation,
     ) -> Result<NativeTextMemberHistoryPage, V2MemberSaveRefusal> {
         if negative.is_cancelled() {
@@ -103,11 +127,6 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberJob<T, R> {
             .body
             .as_mut()
             .ok_or(V2MemberSaveRefusal::Unavailable)?;
-        let request = MemberHistoryRead {
-            start,
-            end: end_exclusive,
-            maximum,
-        };
         let rng = body.rng.as_mut().ok_or(V2MemberSaveRefusal::Unavailable)?;
         let result = if let Some(founder) = body.recovered_founder.as_mut() {
             founder.read_own_history(request, negative, rng)

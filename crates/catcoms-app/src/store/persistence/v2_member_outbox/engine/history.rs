@@ -23,7 +23,19 @@ impl MemberOutbox {
         payment: CatalogReadReservation,
         is_current: impl Fn() -> bool,
     ) -> Result<bool, MemberOutboxError> {
-        require_payment(&payment, &self.pool, MEMBER_OUTBOX_LOOKUP_FEE)?;
+        self.read_own_revision(key, channel, target, &payment, &is_current)
+            .map(|revision| revision == Some(expected))
+    }
+
+    fn read_own_revision(
+        &mut self,
+        key: &[u8; 32],
+        channel: u128,
+        target: ActionId,
+        payment: &CatalogReadReservation,
+        is_current: &impl Fn() -> bool,
+    ) -> Result<Option<ActionId>, MemberOutboxError> {
+        require_payment(payment, &self.pool, MEMBER_OUTBOX_LOOKUP_FEE)?;
         if !is_current() {
             return Err(MemberOutboxRefusal::Stale.into());
         }
@@ -33,11 +45,11 @@ impl MemberOutbox {
             Some(scan) if scan.target == target && scan.channel == channel => scan,
             _ => {
                 let Some((receipt, _, original)) = self.read_action_original(key, target)? else {
-                    return Ok(false);
+                    return Ok(None);
                 };
                 let spec = original.action().spec();
                 if spec.realm.channel() != channel || !matches!(spec.body, Body::Create { .. }) {
-                    return Ok(false);
+                    return Ok(None);
                 }
                 OwnRevisionScan {
                     channel,
@@ -81,10 +93,54 @@ impl MemberOutbox {
         }
         self.revision = Some(scan);
         match scan.latest {
-            None => Ok(false),
+            None => Ok(None),
             Some(_) if scan.next != end => Err(MemberOutboxRefusal::Busy.into()),
-            Some(latest) => Ok(latest == expected),
+            latest => Ok(latest),
         }
+    }
+
+    pub(in crate::store) fn own_revision_page(
+        &mut self,
+        key: &[u8; 32],
+        channel: u128,
+        target: ActionId,
+        payment: CatalogReadReservation,
+        is_current: impl Fn() -> bool,
+    ) -> Result<MemberHistoryPage, MemberOutboxError> {
+        let revision = self.read_own_revision(key, channel, target, &payment, &is_current)?;
+        let head = self.clean()?;
+        let mut items = Vec::new();
+        if let Some(revision) = revision {
+            let (receipt, status, original) = self
+                .read_action_original(key, revision)?
+                .ok_or_else(refused)?;
+            let spec = original.action().spec();
+            let matches_target = match spec.body {
+                Body::Create { .. } => revision == target,
+                Body::Edit { create, .. } => create == target,
+                _ => false,
+            };
+            if spec.realm.channel() != channel || !matches_target {
+                return Err(refused().into());
+            }
+            items.push(MemberHistoryItem {
+                receipt,
+                status,
+                original,
+            });
+        }
+        super::super::transaction::require_selected(&self.ns, head)?;
+        if !is_current() {
+            return Err(MemberOutboxRefusal::Stale.into());
+        }
+        Ok(MemberHistoryPage {
+            context: self.context.id,
+            selected_head: head.id,
+            next: head.data.next_ordinal,
+            end_exclusive: head.data.next_ordinal,
+            items,
+            _payment: payment,
+        })
     }
 }
 
@@ -103,10 +159,16 @@ const _: () = assert!(
 
 /// Bounded range DATA passed between the owning runtime and its original Host.
 #[derive(Clone, Copy)]
-pub(in crate::store) struct MemberHistoryRead {
-    pub(in crate::store) start: u64,
-    pub(in crate::store) end: Option<u64>,
-    pub(in crate::store) maximum: usize,
+pub(in crate::store) enum MemberHistoryRead {
+    Originals {
+        start: u64,
+        end: Option<u64>,
+        maximum: usize,
+    },
+    OwnRevision {
+        channel: u128,
+        target: ActionId,
+    },
 }
 
 /// One immutable saved original and its currently recorded local disposition.

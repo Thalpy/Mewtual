@@ -970,6 +970,22 @@ async fn native_text_mutations_preserve_exact_originals_and_the_observed_revisio
     run(&queue).await;
     let create = found_value(create.await.unwrap());
     let target = &create["message_id"];
+    let view = |action: &serde_json::Value| {
+        invite_command(
+            &window,
+            "get_message_page",
+            serde_json::json!({
+                "server":found["server"], "channel":found["channel"], "expectedContext":found["context"],
+                "ownAction":action,
+            }),
+        )
+    };
+    let original = view(target);
+    run(&queue).await;
+    let original = found_value(original.await.unwrap());
+    assert_eq!(original["scope"], "own-message-revision");
+    assert_eq!(original["item"]["text"], "original text");
+    assert_eq!(&original["item"]["revision"], target);
     let mutate = |command: &str,
                   token: u8,
                   message: &serde_json::Value,
@@ -1011,6 +1027,24 @@ async fn native_text_mutations_preserve_exact_originals_and_the_observed_revisio
     run(&queue).await;
     let second = found_value(second.await.unwrap());
     assert_eq!(second["disposition"], "saved-local");
+    let read = view(target);
+    run(&queue).await;
+    let read = found_value(read.await.unwrap());
+    assert_eq!(&read["action"], target);
+    assert_eq!(read["item"]["revision"], second["message_id"]);
+    assert_eq!(read["item"]["text"], "second edit");
+    let indirect = view(&second["message_id"]);
+    run(&queue).await;
+    assert!(found_value(indirect.await.unwrap())["item"].is_null());
+    let crossed = invite_command(
+        &window,
+        "get_message_page",
+        serde_json::json!({
+            "server":found["server"], "channel":found["channel"], "expectedContext":found["context"],
+            "ownAction":target, "receivedAction":target,
+        }),
+    );
+    refused(crossed.await.unwrap());
     let retry = mutate(
         "edit_message",
         34,
@@ -1030,6 +1064,11 @@ async fn native_text_mutations_preserve_exact_originals_and_the_observed_revisio
     run(&queue).await;
     let removed = found_value(removed.await.unwrap());
     assert_eq!(removed["disposition"], "saved-local");
+    let read = view(target);
+    run(&queue).await;
+    let read = found_value(read.await.unwrap());
+    assert_eq!(read["scanning"], false);
+    assert!(read["item"].is_null());
     let after_delete = mutate(
         "edit_message",
         36,
