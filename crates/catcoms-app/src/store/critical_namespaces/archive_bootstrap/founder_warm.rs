@@ -495,6 +495,27 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
             .prepare_member_history_with_access(layout, read, negative, rng, access)
     }
 
+    pub(in crate::store) fn run_founder_member_debt(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        operation: crate::store::persistence::v2_member_outbox::FounderDebtOperation,
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+        access: FounderAccess<'_>,
+    ) -> Result<crate::store::persistence::v2_member_outbox::FounderDebtOutcome, V2MemberSaveRefusal>
+    {
+        access
+            .require(&self.origin)
+            .map_err(|_| V2MemberSaveRefusal::Unavailable)?;
+        if !self.is_ready_data() {
+            return Err(V2MemberSaveRefusal::Unavailable);
+        }
+        self.host
+            .as_mut()
+            .ok_or(V2MemberSaveRefusal::Unavailable)?
+            .run_founder_member_debt(layout, operation, caller, rng, access)
+    }
+
     /// No IO/wait is added at the existing finite final edge. The actual
     /// native factory must still authenticate and retain its supplied custody.
     pub fn admit_member_save(

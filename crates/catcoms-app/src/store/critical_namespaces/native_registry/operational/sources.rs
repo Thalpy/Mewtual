@@ -32,6 +32,7 @@ pub use join::{
 mod member;
 mod network;
 pub use member::{
+    NativeTextFounderMemberPublication, NativeTextFounderMemberPublicationReceipt,
     NativeTextMemberAdmissionFailure, NativeTextMemberBudget, NativeTextMemberFinalPreparation,
     NativeTextMemberHistoryItem, NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus,
     NativeTextMemberJob, NativeTextMemberPreparation, NativeTextMemberSaveJob,

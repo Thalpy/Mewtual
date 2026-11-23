@@ -10,8 +10,12 @@ pub use history::{
 use std::sync::Weak;
 mod admission;
 mod connected;
+mod publication;
 pub use admission::{
     NativeTextMemberAdmissionFailure, NativeTextMemberFinalPreparation, NativeTextMemberSaveJob,
+};
+pub use publication::{
+    NativeTextFounderMemberPublication, NativeTextFounderMemberPublicationReceipt,
 };
 type MemberKeys<T, R> = (Arc<RuntimeCell<T, R>>, NativeFounderKeys);
 type JoinKeys<T, R> = (MemberKeys<T, R>, [NativeChatPreparedKeyCut; 3]);

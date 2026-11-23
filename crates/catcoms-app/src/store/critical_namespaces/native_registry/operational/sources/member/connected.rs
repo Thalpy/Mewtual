@@ -14,6 +14,19 @@ struct JoinAuthority {
     waiting: Option<Arc<dyn RequestAuthority>>,
 }
 
+pub(super) fn constrain_founder_transport(
+    mount: Arc<Scope>,
+    source: NativeChatKeyCurrentCheck,
+    caller: RequestCancellation,
+) -> RequestCancellation {
+    caller.clone().with_authority(Arc::new(JoinAuthority {
+        mount,
+        source: Arc::new(source),
+        caller,
+        waiting: None,
+    }))
+}
+
 impl std::fmt::Debug for JoinAuthority {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NativeJoinAuthority")

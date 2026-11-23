@@ -187,7 +187,7 @@ fn refusal_of(error: &MemberOutboxError) -> V2MemberSaveRefusal {
 /// ciphertext, the Profile ID, its initial tenure, the Profile's creation nonce (never the local
 /// Scope nonce), the full device key and the group. Requires no current O generation and grants
 /// nothing: a lookup under it is a read, not an OPEN, signing or save right.
-fn member_outbox_context(
+pub(super) fn member_outbox_context(
     owner: &V2TextOwnerRef<'_>,
     layout: CurrentLayoutData,
 ) -> Result<MemberOutboxContextData, AppError> {

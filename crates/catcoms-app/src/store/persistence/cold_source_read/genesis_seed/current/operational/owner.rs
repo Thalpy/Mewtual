@@ -117,6 +117,20 @@ impl<T, R> V2TextOwnedCurrent<T, R> {
 }
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurrent<T, R> {
+    pub(super) fn prepare_governed_member_submission(
+        &mut self,
+        store: &ServerStore,
+        verifier: &catcoms_replication::chat::V2GeneralPrefixVerifier,
+        item: &crate::store::persistence::v2_member_outbox::MemberDebtItem,
+    ) -> Result<catcoms_sync::owner_v2::PreparedV2MemberSubmission, AppError> {
+        match &mut self.core {
+            OwnedCurrent::Warm(current) => {
+                current.prepare_governed_member_submission(store, verifier, item)
+            }
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
     pub(super) fn derive_governed_core_selection(
         &self,
         store: &ServerStore,

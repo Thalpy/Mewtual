@@ -363,6 +363,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
         .join("member-outbox-v1")
         .join(format!("mo-{}", hex::encode(original_member_outbox)));
     let mut saved = None;
+    let mut founder_archived = None;
     if !recover_stage {
         let mut after = rng.clone();
         let row = register(&mut rng).unwrap();
@@ -390,6 +391,102 @@ async fn mounted_join_fixture(recover_stage: bool) {
             MemberSaveJobReport, MemberSaveNativeAdmission, NativeTextJoinedMemberFinalPreparation,
             V2MemberSaveOutcome,
         };
+        use catcoms_net::NativeChatMemberGossipEvent;
+        use catcoms_replication::chat::{ActionState, V2OrdinaryReceiveStatus};
+        let founder_text = catcoms_replication::chat::Body::Create {
+            text: "Original founder message over TCP".into(),
+            reply_to: None,
+        };
+        let founder_request = || V2MemberSignRequest {
+            channel: request().channel,
+            token: [141; 32],
+            ..sign_request(&founder_text)
+        };
+        assert_eq!(
+            founder_capture()
+                .finish()
+                .unwrap()
+                .prepare_member_save(founder_request(), &fresh)
+                .unwrap(),
+            V2MemberSaveOutcome::Ready,
+        );
+        let pending = founder_capture()
+            .finish_admission(founder_request().token)
+            .unwrap();
+        let commit = Arc::new(tokio::sync::Mutex::new(()));
+        let (custody, _) = super::admission::custody(&commit, &fresh).await;
+        assert_eq!(
+            pending.try_admit(custody).unwrap().run(),
+            MemberSaveJobReport::SavedLocal
+        );
+        let (cancel, signal) = tokio::sync::watch::channel(false);
+        let cancelled = founder_capture()
+            .prepare_founder_member_publication(RequestCancellation::new(signal, None))
+            .unwrap()
+            .unwrap();
+        cancel.send_replace(true);
+        assert!(matches!(
+            cancelled.submit().await,
+            Err(catcoms_sync::SyncError::Publication(
+                catcoms_rt::PublishOnceError::Revoked
+            ))
+        ));
+        let channel = request().channel;
+        let mut receiver = inspect()
+            .prepare_member_ingress(&view, channel, fresh.clone())
+            .unwrap()
+            .open()
+            .await
+            .unwrap();
+        let mut ledger = inspect()
+            .prepare_member_ledger(&view, channel, fresh.clone())
+            .unwrap();
+        let (receipt, original) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let receipt = loop {
+                let prepared = founder_capture()
+                    .prepare_founder_member_publication(fresh.clone())
+                    .unwrap()
+                    .expect("the cancelled transmission must leave the exact debt");
+                match prepared.submit().await {
+                    Ok(Some(receipt)) => break receipt,
+                    Err(catcoms_sync::SyncError::Publication(
+                        catcoms_rt::PublishOnceError::NoPeers,
+                    )) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    }
+                    _ => panic!("expected the founder debt to reach the native mesh"),
+                }
+            };
+            let Some(NativeChatMemberGossipEvent::Frame(frame)) = receiver.next().await else {
+                panic!("expected the founder's original on the joined actor");
+            };
+            let (original, status) = inspect()
+                .receive_member_frame(&mut ledger, &frame, &fresh)
+                .unwrap();
+            assert_eq!(
+                status,
+                V2OrdinaryReceiveStatus::Retained(ActionState::Valid)
+            );
+            (receipt, original)
+        })
+        .await
+        .expect("bounded founder publication through both actual TCP actors");
+        assert_eq!(
+            founder_capture()
+                .checkpoint_founder_member_publication(receipt, &fresh)
+                .unwrap(),
+            1
+        );
+        assert!(founder_capture()
+            .prepare_founder_member_publication(fresh.clone())
+            .unwrap()
+            .is_none());
+        assert!(inspect()
+            .archive_received_member(&ledger, &original, &fresh, &mut rng)
+            .unwrap()
+            .is_some());
+        founder_archived = Some(original.action_id_data());
+        drop((receiver, ledger, original));
         assert_eq!(
             inspect()
                 .prepare_member_save(&view, request(), &fresh, &mut rng)
@@ -690,6 +787,15 @@ async fn mounted_join_fixture(recover_stage: bool) {
             let (retire, signal) = tokio::sync::watch::channel(false);
             let live = RequestCancellation::new(signal, None);
             let channel = request().channel;
+            let founder_archived = founder_archived.expect("the joined row saved a founder original before close");
+            let from_reopened_archive = recovered_row()
+                .archived_message_projection(&selection, channel, founder_archived, live.clone(), &mut history_rng)
+                .unwrap().unwrap();
+            assert!(from_reopened_archive.with_publication(|view| matches!(
+                view, GuardedProjection::Visible { text, certainty: ProjectionCertainty::Provisional, .. }
+                if text == "Original founder message over TCP"
+            )).unwrap());
+            drop(from_reopened_archive);
             let (mut receiver, topic) = loop {
                 let prepared = recovered_row()
                     .prepare_member_ingress(&selection, channel, live.clone())
@@ -769,9 +875,11 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 .archive_received_member(&ledger, &received, &live, &mut history_rng)
                 .unwrap().is_some());
             let page = recovered_row()
-                .archived_action_page(&selection, channel, None, 1, &live)
+                .archived_action_page(&selection, channel, None, 2, &live)
                 .unwrap().unwrap();
-            assert_eq!(page.actions(), &[action]);
+            let mut expected = [action, founder_archived];
+            expected.sort_unstable();
+            assert_eq!(page.actions(), &expected);
             assert!(!page.has_more());
             drop(page);
             let archived = recovered_row()

@@ -50,7 +50,8 @@ use super::projection::{BoundV2TextFounderAnchor, V2TextProjectionDomain};
 use super::*;
 use crate::store::critical_namespaces::read_pool::CatalogReadReservation;
 use crate::store::persistence::v2_member_outbox::{
-    canonical_member_parents, MemberOutboxContextId, MemberSignedOriginal,
+    canonical_member_parents, member_outbox_key, FounderDebtOperation, FounderDebtOutcome,
+    MemberDebtClass, MemberOutboxContextId, MemberSignedOriginal,
 };
 use crate::store::persistence::v2_text::{PreparedV2TextParentCapture, V2TextFounderAnchorData};
 use crate::store::{NativeTextJoinedRowSelection, ServerStore};
@@ -64,9 +65,9 @@ use catcoms_replication::chat::{
 };
 use catcoms_rt::{
     CryptoRngCore, MeshTransport, NativeChatKeyEnds, NativeChatPreparedKeyCut,
-    NativeChatSourceObservation,
+    NativeChatSourceObservation, RequestCancellation,
 };
-use catcoms_sync::owner_v2::V2MemberDraftInputs;
+use catcoms_sync::owner_v2::{V2MemberDraftInputs, MAX_V2_MEMBER_TRANSPORT_BYTES};
 use catcoms_sync::{ClosedV2JoinedNode, PreparedV2JoinedPrefix};
 use std::collections::VecDeque;
 
@@ -81,6 +82,112 @@ const MAX_FINISHED_TOKENS: usize = 64;
 /// admitted original can always be abandoned/forgotten. Normal saved traffic consumes no
 /// permanent slot; restart-safe negative retirement needs a future durable record.
 const MAX_UNSAVED_RETIREMENTS: usize = 64;
+const FOUNDER_TRANSPORT_FEE: usize = 5 * MAX_V2_MEMBER_TRANSPORT_BYTES + 4096;
+
+impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
+    pub(in crate::store) fn run_founder_member_debt(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        operation: FounderDebtOperation,
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+        access: FounderAccess<'_>,
+    ) -> Result<FounderDebtOutcome, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        access
+            .require(&self.origin)
+            .map_err(|_| Refusal::Unavailable)?;
+        if caller.is_cancelled() {
+            return Err(Refusal::Cancelled);
+        }
+        let Some(governed) = self
+            .governed_add
+            .as_deref_mut()
+            .filter(|add| add.installed.is_some())
+        else {
+            return match operation {
+                FounderDebtOperation::Prepare => Ok(FounderDebtOutcome::Idle),
+                FounderDebtOperation::Checkpoint(_) => Err(Refusal::Stale),
+            };
+        };
+        let store = layout.checked_store().map_err(|_| Refusal::Unavailable)?;
+        let lane = self.member.as_deref().ok_or(Refusal::Unavailable)?;
+        lane.validate_accounts(store)
+            .map_err(|_| Refusal::Unavailable)?;
+        let verifier = lane.verifier.as_ref().ok_or(Refusal::Unavailable)?;
+        let check_current =
+            |owner: &V2TextOwnedCurrent<T, R>,
+             governed: &mut super::governed_add::PendingGovernedAdd| {
+                let original = owner.borrow_current()?;
+                let resources = governed.parent.resources().clone();
+                store.with_v2_text_current(&original, |admission| {
+                    let guard = store.lock_v2_text_current_group(admission, &resources)?;
+                    lane.domain.require_current_source(admission)?;
+                    governed.require_selected_member_head(&guard, verifier.replay_data())
+                })
+            };
+        check_current(&self.owner, governed).map_err(|_| Refusal::Stale)?;
+        let fee = store
+            .archive_bootstrap_policy
+            .as_ref()
+            .ok_or(Refusal::Unavailable)?
+            .pending
+            .pool
+            .try_reserve(FOUNDER_TRANSPORT_FEE)
+            .map_err(|_| Refusal::Busy)?;
+        let mount = store
+            .member_outbox_mount()
+            .map_err(|_| Refusal::Unavailable)?;
+        let context = super::member_save::member_outbox_context(
+            &self
+                .owner
+                .borrow_current()
+                .map_err(|_| Refusal::Unavailable)?,
+            mount.capability().current_layout_data(),
+        )
+        .map_err(|_| Refusal::Unavailable)?;
+        if lane.outbox_context().is_some_and(|id| id != context.id()) {
+            return Err(Refusal::Stale);
+        }
+        let key = member_outbox_key(store).map_err(|_| Refusal::Unavailable)?;
+        match operation {
+            FounderDebtOperation::Prepare => {
+                let Some(batch) = mount
+                    .read_publication_debt(store, context, &key, lane.admission, rng)
+                    .map_err(|_| Refusal::Failed)?
+                else {
+                    return Ok(FounderDebtOutcome::Idle);
+                };
+                let item = &batch.items()[0];
+                if item.class() != MemberDebtClass::Publishable {
+                    return Err(Refusal::Stale);
+                }
+                let submission = self
+                    .owner
+                    .prepare_governed_member_submission(store, verifier, item)
+                    .map_err(|_| Refusal::Failed)?;
+                check_current(&self.owner, governed).map_err(|_| Refusal::Stale)?;
+                if caller.is_cancelled() || !submission.is_current_cached() {
+                    return Err(Refusal::Cancelled);
+                }
+                Ok(FounderDebtOutcome::Prepared {
+                    submission,
+                    batch,
+                    fee,
+                })
+            }
+            FounderDebtOperation::Checkpoint(batch) => {
+                if caller.is_cancelled() {
+                    return Err(Refusal::Cancelled);
+                }
+                mount
+                    .checkpoint_publication_debt(store, context, &key, batch, rng)
+                    .map(|saved| FounderDebtOutcome::Checkpointed(saved.front))
+                    .map_err(|_| Refusal::Failed)
+            }
+        }
+    }
+}
 
 const MEMBER_CHANNEL_LAYOUT_BYTES: usize = std::mem::size_of::<MemberChannel>() + 4 * 1024;
 

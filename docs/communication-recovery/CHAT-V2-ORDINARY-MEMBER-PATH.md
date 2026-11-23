@@ -189,8 +189,11 @@ The installed founder Sync node can now prepare and open ordinary encrypted fram
 the joined member's selected topic after the first Add. Its exact Core Admission is
 captured during the original Core and MLS installation. An equal replay from a
 different verifier, a changed selection, or a retired founder source refuses the
-transport operation. The mounted founder outbox worker and desktop receiver still
-need to call this path.
+transport operation. The mounted founder source now reads its exact outbox debt,
+rechecks the original held governing Head, and releases the runtime loan before
+the mesh wait. Only a submission acknowledged by the original driver can
+checkpoint that debt on a fresh capture of the same row. The desktop worker and
+founder receiver still need to call this path.
 Original audit chunks and request receipts remain retained after scheduling debt clears.
 Removal changes active view, never deletes the audit. Unproven late removed actions stay
 Held pending the separately authorized moderation path; ordinary concurrent edits resolve

@@ -26,7 +26,8 @@ mod sources;
 pub use sources::{
     NativeTextCreationBudget, NativeTextCreationInputs, NativeTextCreationJob,
     NativeTextCreationPreparation, NativeTextCreationProgress, NativeTextCreationRefusal,
-    NativeTextCreationRequest, NativeTextCreationSettings, NativeTextInvitePublication,
+    NativeTextCreationRequest, NativeTextCreationSettings, NativeTextFounderMemberPublication,
+    NativeTextFounderMemberPublicationReceipt, NativeTextInvitePublication,
     NativeTextJoinedArchivedActions, NativeTextJoinedDelivery, NativeTextJoinedDependencyExchange,
     NativeTextJoinedDependencyProvider, NativeTextJoinedDependencyResponse,
     NativeTextJoinedExchange, NativeTextJoinedInstallation, NativeTextJoinedMemberFinalPreparation,

@@ -10,6 +10,24 @@ use catcoms_rt::{NativeChatPreparedKeyCut, NativeChatSourceObservation};
 use catcoms_sync::owner_v2::{V2FounderAddOutcomeData, V2FounderAddRequestData};
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> UnexposedV2GenesisCurrent<T, R> {
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn prepare_governed_member_submission(
+        &mut self,
+        store: &crate::store::ServerStore,
+        verifier: &catcoms_replication::chat::V2GeneralPrefixVerifier,
+        item: &crate::store::persistence::v2_member_outbox::MemberDebtItem,
+    ) -> Result<catcoms_sync::owner_v2::PreparedV2MemberSubmission, crate::AppError> {
+        use crate::store::critical_namespaces::refused;
+        self.require_text_original_data(store)
+            .map_err(|_| refused())?;
+        let node = self.governed_text_node_mut().ok_or_else(refused)?;
+        Ok(node.prepare_member_submission(
+            verifier,
+            item.action().spec().realm.channel(),
+            item.admission(),
+            item.original_bytes(),
+        )?)
+    }
+
     pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn derive_governed_core_selection(
         &self,
         store: &crate::store::ServerStore,
