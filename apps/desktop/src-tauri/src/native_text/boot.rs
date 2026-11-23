@@ -254,7 +254,7 @@ impl Bootstrap {
                     }
                 }
                 Self::Joining(mut original) => {
-                    if let Err(_error) = original.retry(&mut rng) {
+                    if let Err(_error) = original.retry_with_shared_history(&mut rng) {
                         #[cfg(test)]
                         eprintln!("native startup refused during joined selection: {_error}");
                         *self = Self::Joining(original);

@@ -555,6 +555,26 @@ impl Store {
         self.physical.require_joined_pin_layout(declaration)
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn advance_shared_history_layout(
+        &mut self,
+        previous: &mut Option<
+            crate::store::persistence::governance_layout::joined::JoinedPinDeclaration,
+        >,
+        declaration: &mut Option<crate::store::persistence::governance_layout::joined::shared_history::SharedHistoryDeclaration>,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        Arc::get_mut(&mut self.physical)
+            .ok_or_else(refused)?
+            .advance_shared_history_layout(previous, declaration, rng)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn require_shared_history_layout(
+        &self,
+        declaration: &crate::store::persistence::governance_layout::joined::shared_history::SharedHistoryDeclaration,
+    ) -> Result<(), AppError> {
+        self.physical.require_shared_history_layout(declaration)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn require_governance_completion(
         &self,
         receiver: &crate::store::critical_namespaces::governance_layout::native::Startup,

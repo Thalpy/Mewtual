@@ -4,7 +4,9 @@
 use super::super::upgrade_source::{self, owning};
 use super::*;
 use crate::store::critical_namespaces::native_registry::lifecycle::preparation;
-use crate::store::persistence::governance_layout::joined::JoinedPinDeclaration;
+use crate::store::persistence::governance_layout::joined::{
+    shared_history::SharedHistoryDeclaration, JoinedPinDeclaration,
+};
 use catcoms_rt::CryptoRngCore;
 
 #[cfg(test)]
@@ -74,6 +76,7 @@ impl NativeTextGovernanceUpgrade {
         };
         Ok(NativeTextJoinedVaultUpgrade {
             joined: None,
+            history: None,
             complete: false,
             original: self,
             _metadata: metadata,
@@ -123,6 +126,7 @@ impl NativeTextGovernanceUpgrade {
 /// index and UI admission. The governed facade has never been exposed.
 pub struct NativeTextJoinedVaultUpgrade {
     joined: Option<JoinedPinDeclaration>,
+    history: Option<SharedHistoryDeclaration>,
     complete: bool,
     original: NativeTextGovernanceUpgrade,
     _metadata: CatalogReadReservation,
@@ -150,6 +154,27 @@ impl NativeTextJoinedVaultUpgrade {
         self.require_complete()
     }
 
+    /// Fresh desktop vaults select their archive before making any native
+    /// row available. Both declarations keep the same owning vault session.
+    pub fn retry_with_shared_history(
+        &mut self,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        if self.history.is_none() {
+            self.retry(rng)?;
+        }
+        let Some(Phase::Selected3(index)) = self
+            .original
+            .original
+            .as_mut()
+            .and_then(|original| original.phase.as_mut())
+        else {
+            return Err(refused());
+        };
+        index.advance_shared_history_layout(&mut self.joined, &mut self.history, rng)?;
+        self.require_complete()
+    }
+
     fn require_complete(&self) -> Result<(), AppError> {
         if !self.complete {
             return Err(refused());
@@ -164,6 +189,9 @@ impl NativeTextJoinedVaultUpgrade {
         };
         if index.native_row_count_data()? != 0 {
             return Err(refused());
+        }
+        if let Some(history) = &self.history {
+            return index.require_shared_history_layout(history);
         }
         index.require_joined_pin_layout(self.joined.as_ref().ok_or_else(refused)?)
     }

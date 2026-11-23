@@ -271,6 +271,118 @@ fn shared_history_physical_selection_reopens_the_original_promoted_files() {
 }
 
 #[test]
+fn shared_history_physical_seed_stage_keeps_an_uncovered_vault_readable() {
+    use crate::store::persistence::governance_layout::joined::shared_history::{
+        CLAIM_STAGE_NAME, DIRECTORY_NAME, MARKER_NAME,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc471);
+    let mut plan = original(dir.path(), &mut rng).prepare_governance().unwrap();
+    plan.retry(&mut rng).unwrap();
+    drop(plan.into_vault().unwrap());
+    let governed =
+        NativeTextGovernedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy())
+            .unwrap();
+    let joined = governed.into_joined(&mut rng).unwrap();
+    let store = joined.actual_store_for_test().unwrap();
+    let mut declaration = store
+        .prepare_empty_shared_history_declaration(&mut rng)
+        .unwrap();
+    declaration.stage(store).unwrap();
+    let current = dir.path().join(Slot::Current.name());
+    let stage = dir.path().join(Slot::Stage.name());
+    let claim = dir.path().join(governance::GOVERNANCE_SEED);
+    let scratch = dir.path().join(CLAIM_STAGE_NAME);
+    let base = fs::read(&current).unwrap();
+    let candidate = fs::read(&stage).unwrap();
+    let raw_claim = fs::read(&claim).unwrap();
+    drop(declaration);
+    drop(joined);
+
+    // Before the claim rename no other history outputs can exist.
+    fs::remove_file(&stage).unwrap();
+    fs::remove_file(&claim).unwrap();
+    fs::remove_file(dir.path().join(MARKER_NAME)).unwrap();
+    fs::remove_dir(dir.path().join(DIRECTORY_NAME)).unwrap();
+    let partial_claim = &raw_claim[..raw_claim.len() / 2];
+    fs::write(&scratch, partial_claim).unwrap();
+    let uncovered = NativeTextJoinedStorage::open_for_native_startup(
+        dir.path(),
+        SECRET,
+        &mut NeverRng,
+        current_policy(),
+    )
+    .unwrap();
+    assert!(!uncovered
+        .actual_store_for_test()
+        .unwrap()
+        .has_mounted_shared_history()
+        .unwrap());
+    assert_eq!(fs::read(&scratch).unwrap(), partial_claim);
+    assert_eq!(fs::read(&current).unwrap(), base);
+    assert!(!claim.exists());
+    drop(uncovered);
+
+    fs::write(&scratch, &raw_claim).unwrap();
+    let recovered = NativeTextJoinedStorage::open_for_native_startup(
+        dir.path(),
+        SECRET,
+        &mut NeverRng,
+        current_policy(),
+    )
+    .unwrap();
+    assert!(recovered
+        .actual_store_for_test()
+        .unwrap()
+        .has_mounted_shared_history()
+        .unwrap());
+    assert_eq!(fs::read(&current).unwrap(), candidate);
+    assert!(!scratch.exists());
+    assert!(!claim.exists());
+}
+
+#[test]
+fn shared_history_physical_warm_handoff_keeps_the_prepared_candidate() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc472);
+    let mut plan = original(dir.path(), &mut rng).prepare_governance().unwrap();
+    plan.retry(&mut rng).unwrap();
+    let mut upgrade = plan.prepare_joined_vault().unwrap();
+    upgrade.retry(&mut rng).unwrap();
+    let current = dir.path().join(Slot::Current.name());
+    let stage = dir.path().join(Slot::Stage.name());
+    let parked = dir.path().join("original-archive-candidate");
+    let (named, saved) = (stage.clone(), parked.clone());
+    governance::set_stage_selection_hook_for_test(Box::new(move || {
+        let raw = fs::read(&named).unwrap();
+        fs::rename(&named, saved).unwrap();
+        fs::write(named, raw).unwrap();
+    }));
+    let original = fs::read(&current).unwrap();
+    assert!(upgrade.retry_with_shared_history(&mut rng).is_err());
+    assert_eq!(fs::read(&current).unwrap(), original);
+    let candidate = fs::read(&parked).unwrap();
+    fs::remove_file(&stage).unwrap();
+    fs::rename(&parked, &stage).unwrap();
+    upgrade.retry_with_shared_history(&mut NeverRng).unwrap();
+    let vault = upgrade.into_vault().ok().unwrap();
+    assert_eq!(vault.row_count_data().unwrap(), 0);
+    assert_eq!(fs::read(&current).unwrap(), candidate);
+    drop(vault);
+    let cold = NativeTextJoinedStorage::open_for_native_startup(
+        dir.path(),
+        SECRET,
+        &mut NeverRng,
+        current_policy(),
+    )
+    .unwrap();
+    cold.actual_store_for_test()
+        .unwrap()
+        .require_mounted_shared_history()
+        .unwrap();
+}
+
+#[test]
 fn governed_joined_pin_native_factory_proves_the_selected_catalog_before_exposure() {
     let dir = tempfile::tempdir().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(0xc465);

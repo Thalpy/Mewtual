@@ -333,6 +333,44 @@ impl Physical {
         declaration.require_promoted(store)
     }
 
+    pub(super) fn advance_shared_history_layout(
+        &mut self,
+        previous: &mut Option<
+            crate::store::persistence::governance_layout::joined::JoinedPinDeclaration,
+        >,
+        declaration: &mut Option<crate::store::persistence::governance_layout::joined::shared_history::SharedHistoryDeclaration>,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        self.cell.get_mut().map_err(|_| refused())?.require_idle()?;
+        self.handler.require()?;
+        self.handler.require_idle_cached()?;
+        let handler = self.handler.clone().with_shared_history_layout(
+            crate::store::critical_namespaces::shared_history_namespace::Opening::Required,
+        );
+        self.current
+            .as_mut()
+            .ok_or_else(refused)?
+            .advance_native_shared_history(
+                previous,
+                declaration,
+                NativeRegistryHandler::GovernedLifecycle(handler.clone()),
+                rng,
+            )?;
+        self.handler = handler;
+        Ok(())
+    }
+
+    pub(super) fn require_shared_history_layout(
+        &self,
+        declaration: &crate::store::persistence::governance_layout::joined::shared_history::SharedHistoryDeclaration,
+    ) -> Result<(), AppError> {
+        self.handler.require()?;
+        self.handler.require_idle_cached()?;
+        let store = self.current()?.checked_store()?;
+        store.require_mounted_shared_history()?;
+        declaration.require_promoted(store)
+    }
+
     pub(super) fn require_governance_completion(
         &self,
         receiver: &crate::store::critical_namespaces::governance_layout::native::Startup,

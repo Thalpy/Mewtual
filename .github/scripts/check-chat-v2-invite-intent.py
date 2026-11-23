@@ -52,7 +52,7 @@ COHORTS = {
     "member-shared-history-disk": ("catcoms-app", "shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticated_wal", 1),
     "member-shared-history-declaration": ("catcoms-app", "shared_history_declaration_only_adds_eight_and_predecessor_refuses", 1),
     "member-shared-history-seed": ("catcoms-app", "shared_history_seed_retains_exact_catalogs_marker_and_pin_index", 1),
-    "member-shared-history-stage": ("catcoms-app", "shared_history_physical_", 2),
+    "member-shared-history-stage": ("catcoms-app", "shared_history_physical_", 4),
     "member-shared-history-replay": ("catcoms-replication", "ordinary_history_replay_restores_dependencies_without_publishing_removed_originals", 1),
     "member-action-history": ("catcoms-app", "member_history_keeps_settled_originals_and_a_fixed_prefix_across_appends_and_reopen", 1),
     "member-dependency-transport": ("catcoms-net", "native_member_dependency_exchange_keeps_the_original_connected_lane", 1),

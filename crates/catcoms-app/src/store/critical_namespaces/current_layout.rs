@@ -663,6 +663,49 @@ impl V2CurrentLayoutStore {
         self.store
             .install_warm_joined_pin_selection(declaration, selected)
     }
+
+    pub(in crate::store::critical_namespaces) fn advance_native_shared_history(
+        &mut self,
+        previous: &mut Option<
+            crate::store::persistence::governance_layout::joined::JoinedPinDeclaration,
+        >,
+        declaration: &mut Option<
+            crate::store::persistence::governance_layout::joined::shared_history::SharedHistoryDeclaration,
+        >,
+        handler: super::native_registry::preparation::NativeRegistryHandler,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        use super::shared_history_namespace::Opening;
+        if handler.shared_history_opening() != Opening::Required
+            || !self.store.uses_joined_pin_layout()
+            || self.governance.as_ref().is_none_or(|g| !g.is_live_cached())
+        {
+            return Err(refused());
+        }
+        if declaration.is_none() {
+            let store = self.checked_store()?;
+            let joined = previous.as_ref().ok_or_else(refused)?;
+            joined.require_promoted(store)?;
+            let prepared = store.prepare_empty_shared_history_declaration(rng)?;
+            joined.require_promoted(store)?;
+            *declaration = Some(prepared);
+            drop(previous.take());
+        }
+        let declaration = declaration.as_mut().ok_or_else(refused)?;
+        declaration.promote(&self.store)?;
+        self.store
+            .current_layout_policy
+            .as_mut()
+            .ok_or_else(refused)?
+            .native_registry = Some(handler.clone());
+        self.store
+            .governance_layout_policy
+            .as_mut()
+            .ok_or_else(refused)?
+            .current
+            .native_registry = Some(handler);
+        self.store.install_warm_shared_history(declaration)
+    }
     pub(in crate::store::critical_namespaces) fn attach_recovered_joined_node<
         T: catcoms_rt::MeshTransport,
         R: catcoms_rt::CryptoRngCore,
