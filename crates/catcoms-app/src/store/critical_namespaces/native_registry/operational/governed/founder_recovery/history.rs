@@ -29,7 +29,7 @@ impl NativeTextColdFounderSource {
             .data()
             .genesis_public_data()
             .admission_data()
-            .admission_id();
+            .id();
         let governed = self.governed.as_deref_mut().ok_or_else(refused)?;
         let roster = self.work.with_recovered_founder_layout(
             &self.selection,
