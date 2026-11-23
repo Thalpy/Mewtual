@@ -19,7 +19,7 @@ const NOW: u64 = 1_800_000_000_000;
 fn private_text_remove_stages_only_the_exact_surviving_membership() {
     let founder = MlsDevice::generate().unwrap();
     let mut group = ServerGroup::create(&founder).unwrap();
-    let mut survivor = MlsDevice::generate().unwrap();
+    let survivor = MlsDevice::generate().unwrap();
     let target = MlsDevice::generate().unwrap();
     let other = MlsDevice::generate().unwrap();
     let packages = [&survivor, &target, &other].map(|device| device.key_package().unwrap());
@@ -32,9 +32,16 @@ fn private_text_remove_stages_only_the_exact_surviving_membership() {
         .merge_pending_commit(founder.provider())
         .unwrap();
     let welcome = welcome.tls_serialize_detached().unwrap();
-    let mut joined = ServerGroup::join(&survivor, &welcome).unwrap();
+    let joined = ServerGroup::join(&survivor, &welcome).unwrap();
+    let survivor_bytes =
+        crate::persist::snapshot_server_bounded(&survivor, &joined, RAW, RAW).unwrap();
+    let (mut survivor, mut joined, old_payment) = parent(&survivor_bytes);
     let evicted = ServerGroup::join(&target, &welcome).unwrap();
+    let evicted_bytes =
+        crate::persist::snapshot_server_bounded(&target, &evicted, RAW, RAW).unwrap();
+    let (target, evicted, _) = parent(&evicted_bytes);
     let before = joined.epoch_authenticator_id();
+    let before_routing = Zeroizing::new(joined.routing_metadata_secret(&survivor).unwrap());
     let epoch = joined.epoch();
     let removed = group
         .remove_member_observed(&founder, &target.device_id())
@@ -90,11 +97,12 @@ fn private_text_remove_stages_only_the_exact_surviving_membership() {
     assert_eq!(joined.epoch(), epoch + 1);
     assert!(joined.member_device_ids().contains(&other.device_id()));
     assert!(!joined.member_device_ids().contains(&target.device_id()));
-    assert!(
-        joined.routing_metadata_secret(&survivor).unwrap()
-            == group.routing_metadata_secret(&founder).unwrap()
-    );
+    let selected_routing = Zeroizing::new(joined.routing_metadata_secret(&survivor).unwrap());
+    assert!(selected_routing.as_slice() == group.routing_metadata_secret(&founder).unwrap());
+    assert!(selected_routing.as_slice() != before_routing.as_slice());
+    assert_ne!(old_payment.load(Ordering::SeqCst), 0);
     drop((retired, joined, survivor));
+    assert_eq!(old_payment.load(Ordering::SeqCst), 0);
     assert_eq!(retained.load(Ordering::SeqCst), 0);
 }
 
