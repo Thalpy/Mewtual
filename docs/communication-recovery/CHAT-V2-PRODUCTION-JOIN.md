@@ -401,6 +401,11 @@ fetch the next step on the original connected founder contact, then cover and
 select it once existing local save work has reconciled. The old ordinary
 subscription retires with the old epoch. On restart the original invite must
 be supplied for an approved reconnect before the worker can fetch again.
+The three-vault regression covers the third native vault's later Welcome,
+the existing member's catch-up and direct TCP publication after the founder
+actor drains. It uses an explicitly supplied loopback contact from the third
+vault's authenticated registration. Production peer discovery and the
+physical-device acceptance matrix still need coverage.
 
 An independently reopened Pending with neither Welcome file can resend the
 exact original request over the same connected protocol. It verifies the

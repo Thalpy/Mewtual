@@ -1255,6 +1255,9 @@ async fn mounted_join_fixture(recover_stage: bool, governing: bool) {
     let mut history_rng = catcoms_rt::OsCryptoRng;
     if governing {
         use catcoms_rt::TransportEvent;
+        drop(receive);
+        drop(serve);
+        drop(requests);
         let capture = || {
             owner.capture_member(
                 &row,
@@ -1269,24 +1272,92 @@ async fn mounted_join_fixture(recover_stage: bool, governing: bool) {
             .unwrap();
         let invite_two =
             crate::store::NativeTextInvitePacketData::decode(issued.packet_bytes_data()).unwrap();
-        let incoming = catcoms_sync::PreparedV2JoinRequest::prepare(
-            catcoms_mls::MlsDevice::generate().unwrap(),
-            &invite_two.binding().spec_data().anchor,
-            invite_two.binding(),
-            [0xae; 32],
-            issued.expires_at_ms() - 1,
-            catcoms_sync::DirectJoinLimits::new(512 * 1024, 512 * 1024, 64 * 1024).unwrap(),
-        )
-        .unwrap();
-        let next = capture()
-            .accept_join_request(incoming.request_bytes_data(), &fresh)
+        let third_dir = tempfile::tempdir().unwrap();
+        let (third_vault, third_budget) = selected_joined(third_dir.path());
+        let third = third_vault
+            .capture_native_sources::<catcoms_net::MeshService, rand_chacha::ChaCha20Rng>(
+                policy().prepare().unwrap(),
+            )
+            .finish()
             .unwrap();
-        let delivery = next.encode_delivery_data().unwrap();
-        let (_, expected) = catcoms_sync::V2JoinDeliveryData::decode(&delivery)
+        let mut third_rng = rand_chacha::ChaCha20Rng::seed_from_u64(0xea51);
+        let third_token = [0xae; 32];
+        let capture_third = || third.capture_join_request(command(&third_vault, &third_budget));
+        capture_third()
+            .cover(
+                &invite_two,
+                &invite_two.binding().spec_data().anchor,
+                third_token,
+                issued.expires_at_ms() - 1,
+                &fresh,
+                &mut third_rng,
+            )
+            .unwrap();
+        let third_exchange = capture_third()
+            .prepare_exchange(&invite_two, fresh.clone())
+            .unwrap();
+        third_exchange
+            .connect_approved_host(
+                &invite_two,
+                std::net::Ipv4Addr::LOCALHOST.into(),
+                &scheduler,
+            )
+            .await
+            .unwrap();
+        let mut joins = capture()
+            .open_connected_join_requests(fresh.clone())
+            .unwrap();
+        let serve = async {
+            let Some(TransportEvent::Request {
+                proto,
+                data,
+                responder,
+                ..
+            }) = joins.next().await
+            else {
+                panic!("the third vault's original JoinRequest");
+            };
+            capture()
+                .serve_connected_join_request(proto, &data, responder, fresh.clone())
+                .unwrap();
+        };
+        let (delivery, ()) = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            tokio::join!(third_exchange.receive(), serve)
+        })
+        .await
+        .unwrap();
+        drop(joins);
+        let delivery = delivery.unwrap();
+        let (parent, expected) = catcoms_sync::V2JoinDeliveryData::decode(delivery.wire_for_test())
             .unwrap()
             .proof_data()
             .unwrap()
             .0;
+        assert_eq!(parent, head);
+        let mut delivery = Some(delivery);
+        let mut third_inputs = Some((
+            third_rng.clone(),
+            Box::new(catcoms_rt::SystemClock) as Box<dyn catcoms_rt::Clock + Send>,
+        ));
+        let mut third_installation = third
+            .capture_join_installation(&mut delivery, &mut third_inputs)
+            .unwrap();
+        let (third_head, third_own, third_epoch) = third_installation.install().unwrap();
+        assert_eq!((third_head, third_epoch), (expected, 2));
+        assert_ne!(third_own, own_add);
+        drop(third_installation);
+        let third_row = || third.capture_joined_selection(command(&third_vault, &third_budget));
+        third_row()
+            .register(
+                &invite_two,
+                third_token,
+                "Third Room".into(),
+                "Third Member".into(),
+                &fresh,
+                &mut third_rng,
+            )
+            .unwrap();
+        let third_selection = third_row().select_registered(&fresh).unwrap();
         recovered_row()
             .prepare_reconnect(
                 &selection,
@@ -1350,12 +1421,17 @@ async fn mounted_join_fixture(recover_stage: bool, governing: bool) {
                 .unwrap()
                 .is_none()
         );
-        assert_ne!(
-            recovered_row()
-                .prepare_member_ingress(&selection, channel, fresh.clone())
+        let current_topic = recovered_row()
+            .prepare_member_ingress(&selection, channel, fresh.clone())
+            .unwrap()
+            .topic_for_test();
+        assert_ne!(current_topic, prior_topic);
+        assert_eq!(
+            current_topic,
+            third_row()
+                .prepare_member_ingress(&third_selection, channel, fresh.clone())
                 .unwrap()
-                .topic_for_test(),
-            prior_topic
+                .topic_for_test()
         );
         assert!(selection.same_original(&recovered_row().select_registered(&fresh).unwrap()));
         assert_eq!(
@@ -1369,6 +1445,131 @@ async fn mounted_join_fixture(recover_stage: bool, governing: bool) {
             saved
         );
         drop((lane, ingress));
+        let mut founder_retirement = owner.prepare_retirement().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            while founder_retirement.try_retire().unwrap()
+                == crate::store::NativeTextSourceRetirementStatus::Pending
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the original founder and its TCP actor drained");
+        drop((founder_retirement, row, owner, founder));
+
+        let third_registration = third_row()
+            .inspect_registration(&invite_two, third_token, &fresh)
+            .unwrap()
+            .unwrap();
+        let (third_peer, third_port) = third_registration.transport_data();
+        let third_peer_name = third.joined_tcp.peer_name_for_test().unwrap();
+        recovered_row()
+            .prepare_direct_contact_for_test(
+                &selection,
+                third_peer,
+                format!("/ip4/127.0.0.1/tcp/{third_port}/p2p/{third_peer_name}"),
+                fresh.clone(),
+            )
+            .unwrap()
+            .connect(&scheduler)
+            .await
+            .unwrap();
+        use crate::store::{
+            MemberSaveJobReport, MemberSaveNativeAdmission, NativeTextJoinedMemberFinalPreparation,
+        };
+        use catcoms_net::NativeChatMemberGossipEvent;
+        let text = super::body("The existing member sent this after the founder stopped");
+        let offline = || V2MemberSignRequest {
+            token: [0xc4; 32],
+            body: &text,
+            ..request()
+        };
+        let mut third_receiver = third_row()
+            .prepare_member_ingress(&third_selection, channel, fresh.clone())
+            .unwrap()
+            .open()
+            .await
+            .unwrap();
+        let mut ledger = third_row()
+            .prepare_member_ledger(&third_selection, channel, fresh.clone())
+            .unwrap();
+        assert_eq!(
+            recovered_row().prepare_member_save(&selection, offline(), &fresh, &mut history_rng),
+            Ok(V2MemberSaveOutcome::Ready),
+        );
+        let mut final_save = Some(
+            recovered_row()
+                .finish_member_admission(selection.clone(), offline().token, &fresh)
+                .unwrap(),
+        );
+        let job = NativeTextJoinedMemberFinalPreparation::try_admit_member_save(
+            &mut final_save,
+            &fresh,
+            MemberSaveNativeAdmission::new((), fresh.clone()),
+        )
+        .unwrap();
+        assert_eq!(job.run(), MemberSaveJobReport::SavedLocal);
+        let V2MemberSaveOutcome::Saved { action, ordinal } = recovered_row()
+            .prepare_member_save(&selection, offline(), &fresh, &mut history_rng)
+            .unwrap()
+        else {
+            panic!("the original founder-offline action was saved");
+        };
+        let send = async {
+            loop {
+                let send = recovered_row()
+                    .prepare_member_publication(&selection, fresh.clone(), &mut history_rng)
+                    .unwrap()
+                    .expect("the original founder-offline original is owed");
+                match send.submit().await {
+                    Ok(Some(receipt)) => {
+                        let next = recovered_row()
+                            .checkpoint_member_publication(receipt, &fresh, &mut history_rng)
+                            .unwrap();
+                        if next == ordinal + 1 {
+                            break;
+                        }
+                    }
+                    Err(catcoms_sync::SyncError::Publication(
+                        catcoms_rt::PublishOnceError::NoPeers,
+                    )) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    }
+                    _ => panic!("expected the joined members' direct TCP publication"),
+                }
+            }
+        };
+        let receive = async {
+            while let Some(event) = third_receiver.next().await {
+                let NativeChatMemberGossipEvent::Frame(frame) = event else {
+                    continue;
+                };
+                let (original, status) = third_row()
+                    .receive_member_frame(&mut ledger, &frame, &fresh)
+                    .unwrap();
+                if original.action_id_data() == action {
+                    assert_eq!(
+                        status,
+                        catcoms_replication::chat::V2OrdinaryReceiveStatus::Retained(
+                            catcoms_replication::chat::ActionState::Valid
+                        )
+                    );
+                    return;
+                }
+            }
+            panic!("the other joined member must receive the original");
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            tokio::join!(send, receive)
+        })
+        .await
+        .expect("bounded direct publication while the founder was offline");
+        assert_eq!(
+            recovered_row()
+                .lookup_saved_member(&selection, &offline(), &fresh, &mut history_rng)
+                .unwrap(),
+            Some((action, ordinal)),
+        );
         let mut retirement = mounted_sources.prepare_retirement().unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(8), async {
             while retirement.try_retire().unwrap()

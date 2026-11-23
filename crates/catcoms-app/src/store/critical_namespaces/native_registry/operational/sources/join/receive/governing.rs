@@ -54,6 +54,66 @@ impl NativeTextJoinedGoverningExchange {
 }
 
 impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
+    #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(in crate::store::critical_namespaces::native_registry) fn prepare_direct_contact_for_test(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        peer: PeerId,
+        address: String,
+        caller: RequestCancellation,
+    ) -> Result<super::super::reconnect::NativeTextJoinedReconnect, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        let (group, observed, authentication, mount, fee) =
+            self.with_member_receiver(selection, &caller, |source| {
+                let verifier = source
+                    .prefix
+                    .selected_member_verifier()
+                    .map_err(|_| Refusal::Unavailable)?;
+                let group = verifier.replay_data().profile().spec().group.clone();
+                let observed = source
+                    .node
+                    .observe_member_publication(source.prefix)
+                    .map_err(|_| Refusal::Unavailable)?;
+                let authentication = source
+                    .metadata
+                    .authentication_negative()
+                    .map_err(|_| Refusal::Unavailable)?;
+                let (mount, fee) = source
+                    .metadata
+                    .joined_transport_resources(16 * 1024)
+                    .map_err(|_| Refusal::Busy)?;
+                Ok((group, observed, authentication, mount, fee))
+            })?;
+        let (invocation, live) = watch::channel(false);
+        let authority = Arc::new(JoinEffect {
+            scope: self.original.scope,
+            ui: self.original.command.ui.into_effect_negative(),
+            authentication,
+            invocation: live,
+            caller: caller.clone(),
+            row: Some(selection.clone()),
+        });
+        let signal = observed.constrain(caller.with_authority(authority));
+        let transport = self
+            .original
+            .tcp
+            .upgrade()
+            .ok_or(Refusal::Unavailable)?
+            .capture_attached_dial()
+            .map_err(|_| Refusal::Unavailable)?;
+        Ok(
+            super::super::reconnect::NativeTextJoinedReconnect::for_registered_peer_test(
+                invocation,
+                transport,
+                ApprovedContact::for_registered_peer_test(peer, group, address),
+                signal,
+                mount,
+                fee,
+                self.original.end.ok_or(Refusal::Unavailable)?,
+            ),
+        )
+    }
+
     pub fn prepare_governing_exchange(
         self,
         selection: &NativeTextJoinedRowSelection,

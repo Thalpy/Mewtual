@@ -16,6 +16,27 @@ pub struct NativeTextJoinedReconnect {
 }
 
 impl NativeTextJoinedReconnect {
+    #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(super) fn for_registered_peer_test(
+        invocation: watch::Sender<bool>,
+        transport: catcoms_net::MeshConnectionDial,
+        contact: ApprovedContact,
+        signal: RequestCancellation,
+        mount: RequestCancellation,
+        fee: CatalogReadReservation,
+        end: retirement::PreparationEnd,
+    ) -> Self {
+        Self {
+            _invocation: invocation,
+            transport,
+            contact,
+            signal,
+            mount,
+            payment: Arc::new(JoinFramePayment { _fee: fee }),
+            _end: end,
+        }
+    }
+
     pub async fn connect(self, scheduler: &EndpointDialScheduler) -> Result<(), AppError> {
         connect_approved_host(
             self.contact,

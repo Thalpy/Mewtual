@@ -11,6 +11,19 @@ pub(in super::super) struct ApprovedContact {
 }
 
 impl ApprovedContact {
+    #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(in super::super) fn for_registered_peer_test(
+        peer: catcoms_rt::PeerId,
+        group: Vec<u8>,
+        address: String,
+    ) -> Self {
+        Self {
+            peer,
+            group,
+            address,
+        }
+    }
+
     pub(in super::super) fn from_invite(
         invite: &crate::store::NativeTextInvitePacketData<'_>,
         approved_host: IpAddr,
