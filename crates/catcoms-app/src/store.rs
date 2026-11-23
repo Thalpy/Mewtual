@@ -60,6 +60,7 @@ pub use critical_namespaces::NativeTextJoinedRequestPreparation;
 pub use critical_namespaces::NativeTextJoinedRowSelection;
 pub use critical_namespaces::NativeTextJoinedRuntime;
 pub use critical_namespaces::NativeTextJoinedVaultUpgrade;
+pub use critical_namespaces::NativeTextColdFounderSource;
 pub use critical_namespaces::{
     ActivatedCheckpointJoin, ArchiveBootstrapCatalogPolicy, ArchiveFounderBegin,
     ArchiveFounderCreation, ArchiveFounderExisting, ArchiveFounderInputs, ArchiveFounderPlanning,

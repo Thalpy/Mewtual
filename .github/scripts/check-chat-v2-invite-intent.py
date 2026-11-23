@@ -40,6 +40,7 @@ COHORTS = {
     "joined-wire-ingress": ("catcoms-net", "native_join_transport_dispatch_preserves_original_epoch_and_ordinary_stream", 1),
     "joined-contact": ("catcoms-app", "joined_contact_refuses_a_queued_dial_after_its_invocation_retires", 1),
     "mounted-join-request": ("catcoms-app", "mounted_join_request_", 2),
+    "cold-founder-source": ("catcoms-app", "cold_native_founder_reuses_the_covered_source_and_listener", 1),
     "joined-registry-codec": ("catcoms-app", "native_birth_discriminant_preserves_all_existing_encodings_and_uses_four", 1),
     "member-outbox-admission": ("catcoms-app", "admission_must_name_the_exact_prepared_facts_and_returns_everything_when_refused", 1),
     "founder-member-save": ("catcoms-app", "native_runtime_member_prepare_uses_actual_native_signer_and_exact_retry_never_resigns", 1),

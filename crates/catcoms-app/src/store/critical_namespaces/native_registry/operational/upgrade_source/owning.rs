@@ -11,6 +11,7 @@ enum ColdOpening {
     NativeStartup,
     SelectedSharedHistory,
 }
+use super::super::super::lifecycle::network::ColdFounderSelection;
 use crate::store::critical_namespaces::{
     native_registry::preparation::NativeRegistryHandler, pending_join_codec as grammar,
     shared_history_namespace::Opening,
@@ -441,6 +442,46 @@ impl Store {
         self.physical.recovered_join_registration_data()
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn recovered_founder_input(
+        &self,
+    ) -> Result<
+        Option<(
+            ColdFounderSelection,
+            crate::store::RetainedBootstrapSourceData,
+            (catcoms_rt::PeerId, u16),
+        )>,
+        AppError,
+    > {
+        let Some(original) = self.physical.recovered_cold_founder()? else {
+            return Ok(None);
+        };
+        let source = self.physical.capture_recovered_founder_source(&original)?;
+        let reservation = self.physical.recovered_founder_reservation(&original)?;
+        Ok(Some((
+            original,
+            source,
+            (reservation.peer, reservation.port),
+        )))
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn prepare_recovered_native_founder_tcp(
+        &self,
+        original: &ColdFounderSelection,
+        source: &crate::store::RetainedBootstrapSourceData,
+    ) -> Result<(Zeroizing<[u8; 32]>, catcoms_net::NativeTcpPreparation), AppError> {
+        self.physical
+            .prepare_recovered_native_founder_tcp(original, source)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn require_recovered_founder_source(
+        &self,
+        original: &ColdFounderSelection,
+        source: &crate::store::RetainedBootstrapSourceData,
+    ) -> Result<(), AppError> {
+        self.physical
+            .require_recovered_founder_source(original, source)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn require_empty_mounted_joined_pins(
         &self,
     ) -> Result<(), AppError> {
@@ -729,7 +770,14 @@ impl Store {
         // No file read follows this same-held proof. Existing4 consumes its
         // original observation; fresh4 retains its overlapping declaration.
         // On failure the destination must close before the tail is destroyed.
-        if let Err(error) = value.physical.finish_governed_cold(&tail, joined) {
+        if let Err(error) = Arc::get_mut(&mut value.physical)
+            .ok_or_else(refused)?
+            .finish_governed_cold(
+                &tail,
+                joined,
+                matches!((opening, count), (ColdOpening::NativeStartup, 1)),
+            )
+        {
             drop(value);
             drop(tail);
             return Err(error);

@@ -69,6 +69,95 @@ async fn mounted_join_request_cold_recovers_the_exact_registry_stage_only_with_i
     mounted_join_fixture(true).await;
 }
 
+#[tokio::test]
+async fn cold_native_founder_reuses_the_covered_source_and_listener() {
+    use super::super::super::tests::selected_joined;
+    use crate::store::critical_namespaces::native_registry::preparation::tests::{
+        current_policy, SECRET,
+    };
+    use catcoms_rt::MeshTransport as _;
+    use rand_core::SeedableRng;
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, budget) = selected_joined(dir.path());
+    let (founder, row) = active(&vault, &budget, 0xe727);
+    let (_alive, signal) = tokio::sync::watch::channel(false);
+    let caller = RequestCancellation::new(signal, None);
+    let saved = prepare(&founder, &row, &vault, &budget)
+        .save_invite([63; 32], 60_000, &caller)
+        .unwrap();
+    let invite =
+        crate::store::NativeTextInvitePacketData::decode(saved.packet_bytes_data()).unwrap();
+    let id = row.id_data();
+    let mut retirement = founder.prepare_retirement().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        while retirement.try_retire().unwrap()
+            == crate::store::NativeTextSourceRetirementStatus::Pending
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the original founder actor drained before restart");
+    drop((retirement, row, founder, vault));
+
+    let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(0xe728);
+    let storage = crate::store::NativeTextJoinedStorage::open_for_native_startup(
+        dir.path(),
+        SECRET,
+        &mut rng,
+        current_policy(),
+    )
+    .unwrap();
+    let network = dir
+        .path()
+        .join("servers")
+        .join(format!("{id}.native-net-v1"));
+    let parked = network.with_extension("held-before-founder-recovery");
+    std::fs::rename(&network, &parked).unwrap();
+    std::fs::copy(&parked, &network).unwrap();
+    let storage = match storage.prepare_recovered_founder() {
+        Ok(_) => panic!("equal bytes replaced the cold-selected network file"),
+        Err((original, _)) => original,
+    };
+    std::fs::remove_file(&network).unwrap();
+    std::fs::rename(parked, &network).unwrap();
+    let mut recovered = storage
+        .prepare_recovered_founder()
+        .unwrap_or_else(|(_, error)| panic!("the original cold founder refused: {error}"));
+    assert_eq!(recovered.registration_data().0.id, id);
+    assert_eq!(recovered.registration_data().1, "Original");
+    let (peer, port) = recovered.transport_data();
+    assert_eq!(peer, invite.connected_peer_data());
+    let address = invite.direct_address_data(std::net::Ipv4Addr::LOCALHOST.into());
+    assert!(address.contains(&format!("/tcp/{port}/")));
+    let (_closed, signal) = tokio::sync::watch::channel(true);
+    assert!(recovered
+        .bind_original_tcp(&RequestCancellation::new(signal, None))
+        .is_err());
+
+    let source = only_named(dir.path(), "origin");
+    let parked = source.with_extension("held-before-founder-transport");
+    std::fs::rename(&source, &parked).unwrap();
+    std::fs::copy(&parked, &source).unwrap();
+    assert!(recovered.bind_original_tcp(&caller).is_err());
+    std::fs::remove_file(&source).unwrap();
+    std::fs::rename(parked, source).unwrap();
+    recovered.bind_original_tcp(&caller).unwrap();
+    recovered.bind_original_tcp(&caller).unwrap();
+    let (probe, _) = catcoms_net::MeshService::new_tcp(None, &[]).unwrap();
+    assert_eq!(
+        probe.dial_outcome(address.parse().unwrap()).await.unwrap(),
+        catcoms_rt::DialSubmission::Submitted
+    );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        probe.wait_for_peer_connected(peer),
+    )
+    .await
+    .expect("the recovered founder listened at its exact signed address")
+    .unwrap();
+}
+
 async fn mounted_join_fixture(recover_stage: bool) {
     use super::super::super::tests::{policy, selected_joined};
     use crate::store::critical_namespaces::native_registry::preparation::tests::{
@@ -681,8 +770,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
             .unwrap());
         assert!(founder_capture()
             .archived_founder_message_projection(channel + 1, reply_id, &fresh)
-            .unwrap()
-            .is_none());
+            .is_err());
         end_read.send_replace(true);
         assert!(archived
             .with_publication(|_| panic!("retired founder archive body escaped"))

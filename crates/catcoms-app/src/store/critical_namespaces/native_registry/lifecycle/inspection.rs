@@ -8,7 +8,9 @@ use crate::store::persistence::native_registry::lifecycle::upgrade::{
     index::{IndexCommitIo, IndexStageCleanup},
     FirstTornIo, UpgradeInventory, UpgradeIo,
 };
+use crate::store::persistence::native_registry::network::NetworkDependency;
 use crate::store::ServerStore;
+use std::sync::Arc;
 use zeroize::Zeroizing;
 
 /// Continuously held across the COMMON Current/JOIN opener, not a cached ready
@@ -16,8 +18,7 @@ use zeroize::Zeroizing;
 /// drops its Store before the evidence's last handler clone retires.
 pub(super) struct Observation {
     evidence: Evidence,
-    networks:
-        Vec<std::sync::Arc<crate::store::persistence::native_registry::network::NetworkDependency>>,
+    networks: Vec<Arc<NetworkDependency>>,
     joined: Option<std::sync::Arc<JoinedRegistrationDependency>>,
     _session: catcoms_storage::VaultPhysicalWorkLease,
 }
@@ -94,7 +95,7 @@ impl Handler {
         } else {
             None
         };
-        let networks = super::network::capture_selected(store, &selected, self)?;
+        let mut networks = super::network::capture_selected(store, &selected, self)?;
         drop(selected);
         if inventory.index_stage().is_some() {
             // Normal3 WAL is mutually exclusive with JOIN/upgrade debt. Keep
@@ -102,6 +103,7 @@ impl Handler {
             // equal-looking objects after repair or drop its required Stage.
             let proof = super::wal::classify(store, &inventory, joined)?;
             let evidence = if proof.decision().is_commit() {
+                networks.extend(proof.retained_network());
                 let frame = Zeroizing::new(inventory.index_stage().ok_or_else(refused)?.to_vec());
                 let mut io = IndexCommitIo::recover(store, inventory, proof, &frame)?;
                 io.commit(store, &frame)?;
@@ -154,15 +156,15 @@ impl Handler {
     pub(in crate::store::critical_namespaces::native_registry) fn finish_cold(
         &self,
         store: &ServerStore,
-    ) -> Result<(), AppError> {
-        let observation = {
+    ) -> Result<Vec<Arc<NetworkDependency>>, AppError> {
+        let mut observation = {
             self.cold
                 .try_lock()
                 .map_err(|_| refused())?
                 .take()
                 .ok_or_else(refused)?
         };
-        let result = (|| {
+        (|| {
             for network in &observation.networks {
                 network.require(store)?;
             }
@@ -177,9 +179,10 @@ impl Handler {
                 Evidence::IndexCommitted { io, frame } => io.require_complete(store, frame),
                 Evidence::IndexCleaned { io } => io.require_complete(store),
             }
-        })();
+        })()?;
+        let networks = std::mem::take(&mut observation.networks);
         drop(observation); // No cell/catalog/Current guard; files then session.
-        result
+        Ok(networks)
     }
 }
 

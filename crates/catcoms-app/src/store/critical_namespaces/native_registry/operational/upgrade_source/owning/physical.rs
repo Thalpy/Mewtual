@@ -3,7 +3,7 @@
 use super::*;
 mod work;
 use crate::store::critical_namespaces::native_registry::lifecycle::{
-    cell, founder, refresh, rename,
+    cell, founder, network, refresh, rename,
 };
 use std::sync::Mutex;
 pub(in crate::store::critical_namespaces::native_registry) use work::WorkDrain;
@@ -12,6 +12,9 @@ use work::{Slot, SlotAck};
 pub(super) struct Physical {
     // Actual poisoned cell and its pending files/buffers retire before Current.
     cell: Mutex<cell::Cell>,
+    // Original files kept through the common cold opener until founder
+    // recovery rechecks the authenticated selected row.
+    cold_networks: Vec<Arc<crate::store::persistence::native_registry::network::NetworkDependency>>,
     // None exists ONLY during private preallocation. Every allocation/check
     // precedes extraction of the original Current; the closer is then armed
     // before an infallible unique move fills Some. No method exposes None.
@@ -168,6 +171,65 @@ impl Physical {
             .recovered_join_registration_data()
     }
 
+    pub(super) fn recovered_cold_founder(
+        &self,
+    ) -> Result<Option<network::ColdFounderSelection>, AppError> {
+        let cell = self.cell.try_lock().map_err(|_| refused())?;
+        cell.require_idle()?;
+        self.handler.require()?;
+        self.handler.require_idle_cached()?;
+        let store = self.current()?.checked_store()?;
+        let inventory =
+            UpgradeInventory::capture(store, self.handler.debit(), self.handler.pool())?;
+        if inventory.seed().is_some() || inventory.index_stage().is_some() {
+            return Err(refused());
+        }
+        let original = network::selected_cold_founder(store, &inventory, &self.cold_networks)?;
+        if original.is_some() {
+            store.require_empty_mounted_joined_pins()?;
+        }
+        inventory.require(store)?;
+        Ok(original)
+    }
+
+    pub(super) fn capture_recovered_founder_source(
+        &self,
+        original: &network::ColdFounderSelection,
+    ) -> Result<crate::store::RetainedBootstrapSourceData, AppError> {
+        self.require_recovered_cold_founder(original)?;
+        let store = self.current()?.checked_store()?;
+        let source = store
+            .read_saved_bootstrap_source_data(&original.binding.group, original.binding.signer)?;
+        let data = source.data();
+        let context = data.view_data().context.spec_data();
+        if context.vault != original.binding.vault
+            || context.group != original.binding.group
+            || context.signer != original.binding.signer
+            || context.profile.as_bytes() != &original.binding.profile
+            || data.source_id_data().as_bytes() != &original.binding.source
+        {
+            return Err(refused());
+        }
+        self.require_recovered_cold_founder(original)?;
+        source.validate_original(store)?;
+        Ok(source)
+    }
+
+    pub(super) fn require_recovered_cold_founder(
+        &self,
+        original: &network::ColdFounderSelection,
+    ) -> Result<(), AppError> {
+        let current = self.recovered_cold_founder()?.ok_or_else(refused)?;
+        if current.status != original.status
+            || current.name != original.name
+            || current.binding != original.binding
+            || !Arc::ptr_eq(&current.network, &original.network)
+        {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
     pub(super) fn require_empty_mounted_joined_pins(&self) -> Result<(), AppError> {
         self.require_mounted_joined_without_row(false)
     }
@@ -226,6 +288,52 @@ impl Physical {
             seed,
             catcoms_net::NativeTcpPreparation::new(lease, Arc::new(JoinFramePayment { _fee: fee })),
         ))
+    }
+
+    pub(super) fn recovered_founder_reservation(
+        &self,
+        original: &network::ColdFounderSelection,
+    ) -> Result<
+        crate::store::persistence::native_registry::network::NativeFounderNetworkReservation,
+        AppError,
+    > {
+        self.require_recovered_cold_founder(original)?;
+        original
+            .network
+            .restore_reservation(self.current()?.checked_store()?)
+    }
+
+    pub(super) fn prepare_recovered_native_founder_tcp(
+        &self,
+        original: &network::ColdFounderSelection,
+        source: &crate::store::RetainedBootstrapSourceData,
+    ) -> Result<(Zeroizing<[u8; 32]>, catcoms_net::NativeTcpPreparation), AppError> {
+        use super::super::super::governed::JoinFramePayment;
+        let store = self.current()?.checked_store()?;
+        let (mount, fee) =
+            self.joined_exchange_resources(catcoms_net::NATIVE_TCP_LIFETIME_BYTES)?;
+        let reservation = self.recovered_founder_reservation(original)?;
+        source.validate_original(store)?;
+        if mount.is_cancelled() {
+            return Err(refused());
+        }
+        let lease = store._session.retain_for_physical_work();
+        Ok((
+            reservation.seed,
+            catcoms_net::NativeTcpPreparation::new(
+                (lease, original.network.clone()),
+                Arc::new(JoinFramePayment { _fee: fee }),
+            ),
+        ))
+    }
+
+    pub(super) fn require_recovered_founder_source(
+        &self,
+        original: &network::ColdFounderSelection,
+        source: &crate::store::RetainedBootstrapSourceData,
+    ) -> Result<(), AppError> {
+        self.require_recovered_cold_founder(original)?;
+        source.validate_original(self.current()?.checked_store()?)
     }
 
     pub(super) fn copy_selected_governing_proof(
@@ -407,6 +515,7 @@ impl Physical {
         Arc::new(Self {
             cell: Mutex::default(),
             current: None,
+            cold_networks: Vec::new(),
             slot: Arc::new(Slot::new()),
             ui_slot: Arc::new(Slot::new()),
             handler,
@@ -422,14 +531,21 @@ impl Physical {
         self.current.as_ref().ok_or_else(refused)
     }
     pub(super) fn finish_cold(&self) -> Result<(), AppError> {
-        self.handler.finish_cold(self.current()?.checked_store()?)
+        self.handler
+            .finish_cold(self.current()?.checked_store()?)
+            .map(drop)
     }
     pub(super) fn finish_governed_cold(
-        &self,
+        &mut self,
         tail: &crate::store::critical_namespaces::governance_layout::NativeColdTail,
         joined: JoinedPinOpening,
+        keep_native_founder: bool,
     ) -> Result<(), AppError> {
-        tail.finish(self.current()?.checked_store()?, joined)
+        let networks = tail.finish(self.current()?.checked_store()?, joined)?;
+        if keep_native_founder {
+            self.cold_networks = networks;
+        }
+        Ok(())
     }
     #[cfg(test)]
     pub(super) fn handler_for_test(&self) -> lifecycle_admission::Handler {

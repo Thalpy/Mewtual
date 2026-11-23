@@ -6,6 +6,7 @@ use critical::pending_join::CreatedStage;
 
 const MAX_FRAME: usize = 64 * 1024;
 mod dependency;
+pub(in crate::store) use dependency::NativeFounderNetworkReservation;
 pub(in crate::store) use dependency::{validate_frame, COLD_FEE};
 pub(in crate::store) use dependency::{NetworkDependency, NetworkExpected};
 

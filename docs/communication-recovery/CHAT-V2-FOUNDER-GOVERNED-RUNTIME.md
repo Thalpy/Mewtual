@@ -6,6 +6,15 @@ lock cleanup and real production installation remain to be implemented.
 
 ## Implemented boundary
 
+The native cold opener can recover the selected founder's original bootstrap
+source and reserve the same TCP identity and port. The original network file
+stays held through registry inspection and startup, including recovery of a
+covered activation stage. Equal-byte replacements of that file or the held
+bootstrap source refuse. The bounded actor binds the signed address without
+dialing. This preparation is separate from SDK and Core recovery. Desktop
+startup still requires the recovered founder's selected Head, original pin,
+and authenticated native runtime to agree before publishing a founder row.
+
 The stage-lifetime continuation is under validation. Native key drainage is
 being separated from retained CLOSED snapshot DATA: an actual completed Cell
 proof precedes monotone SDK-continuation retirement and an outside-writer move

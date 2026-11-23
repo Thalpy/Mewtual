@@ -67,6 +67,7 @@ pub use native_registry::NativeTextJoinedRegistryRowData;
 pub use native_registry::NativeTextJoinedRequestPreparation;
 pub use native_registry::NativeTextJoinedRowSelection;
 pub use native_registry::NativeTextJoinedRuntime;
+pub use native_registry::NativeTextColdFounderSource;
 pub use native_registry::NativeTextJoinedVaultUpgrade;
 pub use native_registry::{
     NativeCreationStateData, NativeCreationStatusData, NativeIndexPolicy, NativeIndexStore,

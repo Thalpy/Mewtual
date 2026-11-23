@@ -13,7 +13,10 @@ pub(super) mod data;
 mod facade;
 mod governed;
 mod join_tcp;
-pub use governed::{NativeTextGovernedStorage, NativeTextJoinedRuntime, NativeTextJoinedStorage};
+pub use governed::{
+    NativeTextColdFounderSource, NativeTextGovernedStorage, NativeTextJoinedRuntime,
+    NativeTextJoinedStorage,
+};
 mod history_response;
 pub use history_response::{NativeTextHistoryResponseBudget, NativeTextHistoryResponseCredit};
 mod interlock;

@@ -274,6 +274,9 @@ jobs:
       - name: Check mounted request restart, connected Welcome, and joined runtime ownership
         if: github.event_name == 'pull_request' || inputs.scope == 'joined-storage' || inputs.scope == 'native-contact' || inputs.scope == 'joined-member'
         run: python .github/scripts/check-chat-v2-invite-intent.py mounted-join-request
+      - name: Check the cold founder's original source and reserved TCP listener
+        if: github.event_name == 'pull_request' || inputs.scope == 'joined-storage' || inputs.scope == 'joined-member'
+        run: python .github/scripts/check-chat-v2-invite-intent.py cold-founder-source
       - name: Check joined registry labels and historical row encodings
         if: inputs.scope == 'joined-storage' || inputs.scope == 'native-contact'
         run: python .github/scripts/check-chat-v2-invite-intent.py joined-registry-codec

@@ -89,6 +89,12 @@ pub(in crate::store) struct VerifiedWal {
     joined: Option<Arc<JoinedRegistrationDependency>>,
 }
 impl VerifiedWal {
+    pub(super) fn retained_network(
+        &self,
+    ) -> Option<Arc<crate::store::persistence::native_registry::network::NetworkDependency>> {
+        self.network.clone()
+    }
+
     pub(in crate::store) fn take_network(
         &mut self,
     ) -> Option<

@@ -16,8 +16,10 @@ use catcoms_sync::{
     MAX_V2_FIRST_JOIN_DELIVERY_BYTES, MAX_V2_JOIN_REQUEST_PACKET_BYTES,
 };
 mod contact;
+mod founder_recovery;
 mod runtime;
 pub(super) use contact::connect_approved_host;
+pub use founder_recovery::NativeTextColdFounderSource;
 pub use runtime::NativeTextJoinedRuntime;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 
