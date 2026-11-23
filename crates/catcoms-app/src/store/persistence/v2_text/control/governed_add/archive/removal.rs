@@ -34,11 +34,13 @@ pub(super) struct RemovalRecord<'a> {
     authenticator: [u8; 32],
 }
 
-pub(super) fn archive_id(raw: &[u8]) -> ArchiveHeadId {
+pub(in crate::store::persistence::v2_text::control::governed_add) fn archive_id(
+    raw: &[u8],
+) -> ArchiveHeadId {
     ArchiveHeadId::from_bytes(blake3::derive_key(ID_DOMAIN, raw))
 }
 
-pub(super) fn seal_data(
+pub(in crate::store::persistence::v2_text::control::governed_add) fn seal_data(
     key: &[u8; 32],
     parent_head: &[u8],
     fetch_verifier: [u8; 32],
@@ -152,6 +154,16 @@ pub(super) fn open_data(
         return Err(refused());
     }
     Ok(plain)
+}
+
+pub(in crate::store::persistence::v2_text::control::governed_add) fn encode_selected_member_transition(
+    key: &[u8; 32],
+    head: &GovernedHeadData,
+    ciphertext: &[u8],
+    request: &V2MemberAddRequestData,
+) -> Result<Vec<u8>, AppError> {
+    let plain = open_data(key, head, ciphertext)?;
+    RemovalRecord::decode(&plain)?.encode_member_transition(request)
 }
 
 impl<'a> RemovalRecord<'a> {

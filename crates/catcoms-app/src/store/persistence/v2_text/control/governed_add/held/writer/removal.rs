@@ -278,8 +278,12 @@ impl PreparedGovernedRemoveFence {
                 &key,
                 selection.head.covered_frame()?,
             )?;
-            let plain = removal::open_data(&key, &head, selection.archive.covered_frame()?)?;
-            removal::RemovalRecord::decode(&plain)?.encode_member_transition(request)?
+            removal::encode_selected_member_transition(
+                &key,
+                &head,
+                selection.archive.covered_frame()?,
+                request,
+            )?
         } else {
             self.prior
                 .encode_retained_member_add(store, guard.source().source(), request)?
@@ -408,7 +412,7 @@ fn seal_record(
     rng: &mut dyn CryptoRngCore,
 ) -> Result<Zeroizing<Vec<u8>>, AppError> {
     let mut encoded = Encoder::with_capacity(outcome_size(fields)?);
-    let (tag, domain) = TextControlKindData::Wal.domains();
+    let (tag, domain, _) = TextControlKindData::Wal.domains();
     put(&mut encoded, tag)?;
     encoded.put_u16(3);
     for value in [ROLE, STEPS[step], parent] {
