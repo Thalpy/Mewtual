@@ -1300,8 +1300,26 @@ async fn native_text_membership_dispatch_uses_the_original_founder_row() {
     );
     run(&cold_queue).await;
     assert_eq!(found_value(restored.await.unwrap()), roster);
-    let page = native_history_request(&window, &found, "0", None, 1);
+    let resumed = resume_request(&window);
     run(&cold_queue).await;
+    let resumed = found_value(resumed.await.unwrap());
+    let [cold] = resumed["servers"].as_array().unwrap().as_slice() else {
+        panic!("the original founder is installed after cold unlock");
+    };
+    assert_eq!(cold["server"], found["server"]);
+    assert_eq!(cold["context"], found["context"]);
+    assert_eq!(cold["channel"], found["channel"]);
+    let state = reopened.state::<AppState>();
+    let local = joined_work(&state, cold["server"].as_u64().unwrap()).await;
+    let account =
+        keep_session::current(&state, state.ui_session_generation.load(Ordering::SeqCst)).unwrap();
+    let foreground = local.foreground(account).await.unwrap();
+    let page = native_history_request(&window, cold, "0", None, 1);
+    let work = cold_queue.lock().unwrap().pop();
+    drop(foreground);
+    if let Some(work) = work {
+        work.await;
+    }
     let page = found_value(page.await.unwrap());
     assert_eq!(page["items"][0]["action"], saved["message_id"]);
     assert_eq!(
