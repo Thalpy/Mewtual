@@ -10,7 +10,7 @@ use crate::store::critical_namespaces::read_pool::{
 use crate::store::persistence::v2_member_outbox::fs::{
     bounded_entries, bounded_file_length, ensure_exact_held, finish_exact_write, observe,
     open_exact_write, read_bounded_held, remove_listed, require_exact_held, require_same_name,
-    HeldDirectory, Presence, Removal, MAX_FILE,
+    HeldDirectory, Presence, Removal, WriteMode, MAX_FILE,
 };
 use crate::store::{frame, unframe};
 use catcoms_storage::kept::SessionId;
@@ -208,7 +208,7 @@ impl SharedHistoryDisk {
         let wal_path = self.directory.child(WAL_NAME);
         require_exact_held(&wal_path, original, wal)?;
         self.require_archive_capacity(key, selected, bundle.len())?;
-        let mut barrier = open_exact_write(&wal_path, false)?;
+        let mut barrier = open_exact_write(&wal_path, WriteMode::Existing)?;
         if barrier.1 != original.1 {
             return Err(refused());
         }
@@ -424,7 +424,7 @@ impl PreparedSharedHistorySave<'_> {
             }
             let (_, bundle) = decode_wal(&self.wal)?;
             disk.require_archive_capacity(key, self.expected, bundle.len())?;
-            self.attempt = Some(open_exact_write(&path, true)?);
+            self.attempt = Some(open_exact_write(&path, WriteMode::Create)?);
         } else if observe(&path)? == Presence::Absent {
             // The selection may already be durable when the final cleanup
             // barrier fails. Recheck the original before acknowledging it.

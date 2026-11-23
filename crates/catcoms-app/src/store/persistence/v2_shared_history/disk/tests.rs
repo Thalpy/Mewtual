@@ -147,7 +147,7 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
     let mut prepared = disk
         .prepare_save(&KEY, selected, &bundle, &mut rng, &session, pay())
         .unwrap();
-    let (mut held, identity) = open_exact_write(&wal_name, true).unwrap();
+    let (mut held, identity) = open_exact_write(&wal_name, WriteMode::Create).unwrap();
     use std::io::Write;
     held.write_all(&prepared.wal[..80]).unwrap();
     prepared.attempt = Some((held, identity));

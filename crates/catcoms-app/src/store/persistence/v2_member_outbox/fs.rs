@@ -203,18 +203,25 @@ pub(in crate::store::persistence) fn ensure_exact_held(
     if expected.is_empty() || expected.len() > MAX_FILE {
         return Err(refused());
     }
-    let mut held = open_exact_write(path, false)?;
+    let mut held = open_exact_write(path, WriteMode::CreateOrOpen)?;
     finish_exact_write(path, &mut held, expected)?;
     Ok(held)
 }
 
+#[derive(Clone, Copy)]
+pub(in crate::store::persistence) enum WriteMode {
+    Create,
+    Existing,
+    CreateOrOpen,
+}
+
 pub(in crate::store::persistence) fn open_exact_write(
     path: &Path,
-    create_only: bool,
+    mode: WriteMode,
 ) -> Result<(File, SessionId), AppError> {
     let file = match fs::symlink_metadata(path) {
         Ok(metadata) => {
-            if create_only || !regular(&metadata) {
+            if matches!(mode, WriteMode::Create) || !regular(&metadata) {
                 return Err(refused());
             }
             OpenOptions::new()
@@ -223,12 +230,17 @@ pub(in crate::store::persistence) fn open_exact_write(
                 .open(path)
                 .map_err(io)?
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(path)
-            .map_err(io)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if matches!(mode, WriteMode::Existing) {
+                return Err(refused());
+            }
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .map_err(io)?
+        }
         Err(error) => return Err(io(error)),
     };
     let native = session_id(&file).map_err(io)?;

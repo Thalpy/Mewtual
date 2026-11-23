@@ -69,10 +69,39 @@ fn shared_history_physical_stage_retains_the_original_catalog_claim_and_marker()
     assert_eq!(fs::read(&claim).unwrap(), claimed);
     assert_eq!(fs::read(&marker).unwrap(), covered);
 
-    // Materialize the exact authenticated candidate as a selected fixture.
-    // The cold logic must keep the marker through its normal earlier gates.
-    fs::rename(&stage, &current).unwrap();
-    fs::remove_file(&claim).unwrap();
+    // The complete original claim can recover exact torn outputs on restart.
+    fs::write(&stage, &staged[..staged.len() / 2]).unwrap();
+    fs::write(&marker, &covered[..covered.len() / 2]).unwrap();
+    let recovered = NativeTextJoinedStorage::open_for_native_startup(
+        dir.path(),
+        SECRET,
+        &mut NeverRng,
+        current_policy(),
+    )
+    .unwrap();
+    recovered
+        .actual_store_for_test()
+        .unwrap()
+        .require_mounted_shared_history()
+        .unwrap();
+    assert_eq!(fs::read(&current).unwrap(), staged);
+    assert_eq!(fs::read(&marker).unwrap(), covered);
+    assert!(!stage.exists());
+    assert!(!claim.exists());
+    drop(recovered);
+
+    // The post-rename crash has selected bytes and the same unretired claim.
+    fs::write(&claim, &claimed).unwrap();
+    let recovered = NativeTextJoinedStorage::open_for_native_startup(
+        dir.path(),
+        SECRET,
+        &mut NeverRng,
+        current_policy(),
+    )
+    .unwrap();
+    assert!(!claim.exists());
+    assert_eq!(fs::read(&current).unwrap(), staged);
+    drop(recovered);
     assert!(
         NativeTextJoinedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy()).is_err()
     );

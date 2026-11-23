@@ -142,8 +142,9 @@ Native startup reopens an existing joined layout and retains the original marker
 vault has a selected archive declaration. On that layout, the joined receiver can archive each exact
 verified original and use saved originals for semantic dependency replay. The mounted archive
 supports a single registered channel and enforces 2,048 records and 256 MiB of live file bytes
-plus one bounded WAL. Cold recovery of incomplete promotion, populated-vault migration and
-automatic declaration for new desktop vaults remain open. The disk owner checks a bounded
+plus one bounded WAL. A complete declaration seed can finish exact torn output and retire its
+claim after a power cut. Populated-vault migration and automatic declaration for new desktop
+vaults remain open. The disk owner checks a bounded
 physical inventory against separate record and byte limits before admitting a new WAL.
 The quota check charges partially written files at their final size. At capacity,
 existing originals and idempotent retries remain readable and new writes are refused.

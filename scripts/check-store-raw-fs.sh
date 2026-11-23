@@ -396,8 +396,7 @@ declare -A allowed=(
   # ensure_exact: create_new, or append ONLY the missing suffix of an existing exact prefix
   # of authenticated expected bytes (our presealed output or an authenticated WAL's frame);
   # never truncate, never adopt other content.
-  ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|open_exact_write|OpenOptions::new()']=1
-  ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|open_exact_write|Err(error) if error.kind() == std::io::ErrorKind::NotFound => OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|open_exact_write|OpenOptions::new()']=2
   ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|open_exact_write|.create_new(true)']=1
   ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|finish_exact_write|file.sync_all().map_err(io)?;']=1
   # rename_fixed: WAL stage -> WAL MAIN, and head stage -> head.bin (the selector CAS), each

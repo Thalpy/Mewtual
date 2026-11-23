@@ -198,7 +198,16 @@ impl ServerStore {
     pub(in crate::store) fn select_joined_pin_catalog(
         &self,
     ) -> Result<ColdJoinedSelection, AppError> {
-        self.select_joined_pin_catalog_with(None)
+        let recovered = if self.shared_history_opening() != Opening::Disabled {
+            shared_history::recover_declaration(self)?
+        } else {
+            None
+        };
+        let selected = self.select_joined_pin_catalog_with(None)?;
+        if let Some(recovered) = recovered {
+            recovered.require(self, &selected)?;
+        }
+        Ok(selected)
     }
 
     pub(in crate::store) fn select_warm_joined_pin_catalog(
