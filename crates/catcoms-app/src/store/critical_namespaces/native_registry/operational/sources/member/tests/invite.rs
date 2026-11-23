@@ -1646,7 +1646,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 .unwrap_or_else(|(_, error)| {
                     panic!("recovered founder save admission refused: {error:?}")
                 });
-            assert_eq!(job.run(), MemberSaveJobReport::SavedLocal);
+            assert_eq!(job.run(), crate::store::MemberSaveJobReport::SavedLocal);
             let (action, ordinal) = original
                 .lookup_saved_member(&send(), &fresh, &mut founder_rng)
                 .unwrap()

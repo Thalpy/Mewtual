@@ -399,8 +399,9 @@ impl RecoveredMemberLane {
         negative: &RequestCancellation,
         rng: &mut impl CryptoRngCore,
     ) -> Result<V2MemberSaveOutcome, V2MemberSaveRefusal> {
-        MemberSavePath::<catcoms_net::MeshService, R>::Recovered(self, source, Some(context))
-            .prepare(layout, request, negative, rng)
+        let path: MemberSavePath<'_, catcoms_net::MeshService, R> =
+            MemberSavePath::Recovered(self, source, Some(context));
+        path.prepare(layout, request, negative, rng)
     }
 
     pub(in crate::store) fn admit_member_save<R: CryptoRngCore>(
@@ -414,12 +415,13 @@ impl RecoveredMemberLane {
         if self.require_cut(cut).is_err() {
             return Err((native, V2MemberSaveRefusal::Unavailable));
         }
-        MemberSaveFinal::<catcoms_net::MeshService, R>::Recovered {
-            lane: self,
-            sdk,
-            cut,
-        }
-        .admit(layout, token, native)
+        let final_edge: MemberSaveFinal<'_, '_, catcoms_net::MeshService, R> =
+            MemberSaveFinal::Recovered {
+                lane: self,
+                sdk,
+                cut,
+            };
+        final_edge.admit(layout, token, native)
     }
 }
 
