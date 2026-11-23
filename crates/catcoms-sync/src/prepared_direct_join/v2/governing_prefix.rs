@@ -55,9 +55,8 @@ impl BodyData {
     }
 }
 
-/// Complete ordered records from the already pinned genesis to a later Add.
-/// A decoded frame supplies only data. The caller must bind the final Add to
-/// its authenticated Welcome and independently check the genuine MLS outcome.
+/// Complete ordered records from the pinned genesis to a later membership
+/// step. Welcome pairing separately requires the exact final Admission.
 pub struct V2GoverningJoinPrefixData<'a> {
     first: V2FirstAddProofData<'a>,
     successors: Vec<(HeaderRow<'a>, BodyData)>,
@@ -133,7 +132,10 @@ impl<'a> V2GoverningJoinPrefixData<'a> {
             successors.push((header, body));
         }
         input.finish().map_err(malformed)?;
-        if !matches!(successors.last(), Some((_, BodyData::Admission(_)))) {
+        if !matches!(
+            successors.last(),
+            Some((_, BodyData::Admission(_) | BodyData::Removal(_)))
+        ) {
             return Err(SyncError::JoinRejected);
         }
         Ok(Self {

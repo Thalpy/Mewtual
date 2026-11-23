@@ -873,6 +873,7 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
         ],
     )
     .unwrap();
+    assert!(V2GoverningJoinDeliveryData::encode(&packet, &mixed).is_err());
     let mixed = V2GoverningJoinPrefixData::decode(&mixed).unwrap();
     let selected_remove = V2InstalledFounderAddData {
         header: header.id(),
