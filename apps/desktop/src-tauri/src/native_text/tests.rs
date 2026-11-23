@@ -1355,7 +1355,17 @@ async fn native_text_connected_join_retries_original_welcome_after_authenticated
     refused(stale_preview.await.unwrap());
     refused(mint().await.unwrap());
     assert!(matches!(send().await, Err(TransportError::NoResponse)));
-    unlock_current(&app, &main, &queue).await;
+    let occupied = {
+        let store = state.store.lock().await;
+        let vault = store.as_ref().unwrap().as_text_v2().unwrap();
+        vault.prepare_native_authentication(state.native_text.ui_budget.prepare().unwrap())
+    };
+    assert!(!occupied.is_capture_busy_cached());
+    let release = async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(occupied);
+    };
+    tokio::join!(unlock_current(&app, &main, &queue), release);
     assert_eq!(send().await.unwrap(), original);
 
     let close = register_vault_close(&state).await.unwrap();

@@ -208,6 +208,10 @@ jobs:
                   'native-founder-restart',
                   'native_text::tests::native_text_connected_join_gated_route_publishes_one_original_joined_row',
                   1,
+              ), (
+                  'native-founder-welcome-retry',
+                  'native_text::tests::native_text_connected_join_retries_original_welcome_after_authenticated_unlock',
+                  1,
               )]
           for name, pattern, count in cases:
               command = ['cargo', 'test', '--locked', '--manifest-path',

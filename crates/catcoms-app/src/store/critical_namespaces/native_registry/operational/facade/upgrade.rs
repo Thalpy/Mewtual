@@ -638,6 +638,7 @@ pub(in crate::store::critical_namespaces::native_registry) mod tests {
         let prepared = f
             .vault
             .prepare_native_authentication(foreign.prepare().unwrap());
+        assert!(!prepared.is_capture_busy_cached());
         assert!(
             prepared.work.is_some(),
             "the original prepaid capture remains separate from later fee validation"
@@ -654,6 +655,7 @@ pub(in crate::store::critical_namespaces::native_registry) mod tests {
         let prepared = f
             .vault
             .prepare_native_authentication(f.budget.prepare().unwrap());
+        assert!(prepared.is_capture_busy_cached());
         assert_eq!(
             f.pool.charged_for_test(),
             baseline + super::super::super::native_ui::INVOCATION_BYTES,

@@ -424,23 +424,40 @@ fn router<R: tauri::Runtime>(
 async fn authenticate_mounted(
     state: &AppState,
     secret: &[u8],
+    generation: u64,
 ) -> Result<Option<NativeTextVaultAuthenticationCheck>, String> {
-    // Unique payment before capture; every early return drops it only AFTER
-    // the inner Store guard. Root returns an infallible whole capsule even Busy.
-    let credit = state
-        .native_text
-        .ui_budget
-        .prepare()
-        .map_err(|_| "Vault authentication is busy. Try again.")?;
-    let work = {
-        let guard = state.store.lock().await;
-        match guard.as_ref() {
-            None => return Ok(None),
-            Some(MountedVault::TextV2(vault)) => vault.prepare_native_authentication(credit),
-            Some(MountedVault::Legacy(_)) => {
-                return Err("This vault is using the existing chat backend.".into())
-            }
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    let work = loop {
+        if state.ui_session_generation.load(Ordering::SeqCst) != generation
+            || state.native_text.sources.is_closing_cached()
+        {
+            return Err("Unlock was superseded. Try again.".into());
         }
+        let credit = state
+            .native_text
+            .ui_budget
+            .prepare()
+            .map_err(|_| "Vault authentication is busy. Try again.")?;
+        let work = {
+            let guard = state.store.lock().await;
+            match guard.as_ref() {
+                None => return Ok(None),
+                Some(MountedVault::TextV2(vault)) => vault.prepare_native_authentication(credit),
+                Some(MountedVault::Legacy(_)) => {
+                    return Err("This vault is using the existing chat backend.".into());
+                }
+            }
+        };
+        if !work.is_capture_busy_cached() {
+            break work;
+        }
+        // A connected worker can still be returning its original metadata
+        // read after the prior UI session closed. No key check has run yet.
+        drop(work);
+        if tokio::time::Instant::now() >= deadline {
+            return Err("Vault authentication is busy. Try again.".into());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     };
     let secret = Zeroizing::new(secret.to_vec());
     tauri::async_runtime::spawn_blocking(move || work.verify(&secret))
@@ -483,7 +500,8 @@ async fn execute(
             edge.wait_once().await;
         }
     }
-    let mut authentication = authenticate_mounted(state, &captured.secret).await?;
+    let mut authentication =
+        authenticate_mounted(state, &captured.secret, captured.generation).await?;
     if authentication.is_none() {
         // Count only actual bootstrap/file custody, never the complete unlock
         // task that may later wait for close's prelude while owning vault_mount.
@@ -596,7 +614,7 @@ async fn execute(
         // Retrying retained metadata work is NOT authentication. Even if a
         // previous correct secret created the plan, THIS caller must verify
         // its own secret against the same completed mounted keystore.
-        authentication = authenticate_mounted(state, &captured.secret).await?;
+        authentication = authenticate_mounted(state, &captured.secret, captured.generation).await?;
     }
     let authentication = Arc::new(authentication.ok_or("Vault startup did not complete.")?);
     #[cfg(test)]
