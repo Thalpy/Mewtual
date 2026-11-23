@@ -1300,6 +1300,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
             let (deleted, status) = recovered_row()
                 .receive_member_frame(&mut ledger, &frame, &live)
                 .unwrap();
+            let delete_id = deleted.action_id_data();
             assert_eq!(deleted.projection_target_data(), action);
             assert_eq!(status, V2OrdinaryReceiveStatus::Retained(ActionState::Valid));
             assert!(recovered_row()
@@ -1337,8 +1338,9 @@ async fn mounted_join_fixture(recover_stage: bool) {
             drop(recovered_original);
             let mut replay = recovered_row()
                 .prepare_member_ledger(&selection, channel, live.clone()).unwrap();
+            assert!(replay.prepare_message_projection(action).is_err());
             assert_eq!(
-                recovered_row().replay_saved_member_dependency(&mut replay, action, &live, &mut history_rng).unwrap(),
+                recovered_row().replay_saved_member_dependency(&mut replay, delete_id, &live, &mut history_rng).unwrap(),
                 Some(V2OrdinaryReceiveStatus::Retained(ActionState::Valid))
             );
             assert!(replay.prepare_message_projection(action).unwrap().with_publication(|view| {

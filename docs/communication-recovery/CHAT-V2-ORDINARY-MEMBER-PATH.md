@@ -112,8 +112,10 @@ TCP carrier. Its reply remains bound to both the receive scope and that connecti
 The desktop attaches the provider to the original joined row after Join or authenticated
 reopen. Each incoming request captures that same installed row again before doing work.
 That row also attaches an exact native gossip listener. It can recover up to four direct
-dependencies per frame through the selected local outbox or the frame's original carrier,
-with one network request in flight. Unresolved originals stay outside the ledger.
+dependencies per frame through selected local storage or the frame's original carrier,
+with one network request in flight. For each requested ActionId, local replay uses up to
+eight lookups in the exact row's outbox and selected archive to recover signed parents
+and targets. Unresolved originals stay outside the ledger.
 The receiver retries its subscription while the row remains installed.
 The mounted joined row can prepare a paid channel ledger and apply frames from its own
 receiver. A final native callback checks the original receiving scope and the prepared
