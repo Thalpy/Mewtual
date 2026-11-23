@@ -13,9 +13,8 @@ use crate::owner_v2::{
 };
 use catcoms_replication::chat::{
     join_bindings::SignedWelcomeBindingData, owner_facts::OwnerFactId, owner_header::OwnerHeaderId,
-    owner_profile::AdmissionOrigin, owner_state::transition::ReplayBody, ActionDraft, ActionId,
-    V2AuthenticatedAdmission, V2GeneralCandidate, V2GeneralPrefixVerifier, V2OrdinarySigningGuard,
-    V2OrdinarySigningPlan,
+    owner_profile::AdmissionOrigin, ActionDraft, ActionId, V2AuthenticatedAdmission,
+    V2GeneralCandidate, V2GeneralPrefixVerifier, V2OrdinarySigningGuard, V2OrdinarySigningPlan,
 };
 
 /// Owns the original verified group, device, routing and runtime. Only a
@@ -143,17 +142,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
     }
 
     /// Prepare the Core successor for a later Add on this exact joined node.
-    /// The original stays at its selected epoch while the host prepares and
-    /// validates a separate MLS candidate for the same commit.
+    /// Core records fork evidence while the host prepares a separate MLS
+    /// candidate. The original MLS group stays at its selected epoch.
     pub fn prepare_member_add_commit(
         &self,
-        prefix: &PreparedV2JoinedPrefix,
+        prefix: &mut PreparedV2JoinedPrefix,
         step: V2AdmissionStepData<'_>,
         commit: &[u8],
     ) -> Result<V2GeneralCandidate, SyncError> {
         use catcoms_replication::chat::join_bindings::MAX_JOIN_PAYLOAD_BYTES;
-        let reject = |_| SyncError::JoinRejected;
-        let verifier = self.member_prefix(prefix)?;
+        self.member_prefix(prefix)?;
         let AdmissionOrigin::Add {
             commit: expected,
             before_epoch,
@@ -179,15 +177,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
             epoch,
         )
         .map_err(|_| SyncError::JoinRejected)?;
-        let candidate = verifier
-            .derive_successor(
-                step.header,
-                ReplayBody::Admission(step.admission),
-                step.image,
-            )
-            .map_err(reject)?;
-        self.member_prefix(prefix)?;
-        Ok(candidate)
+        prefix.prepare_member_successor(step)
     }
 
     pub fn selected_member_topic_data(

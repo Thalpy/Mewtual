@@ -276,6 +276,20 @@ impl PreparedV2JoinedPrefix {
             .ok_or(SyncError::JoinRejected)
     }
 
+    pub(super) fn prepare_member_successor(
+        &mut self,
+        step: V2AdmissionStepData<'_>,
+    ) -> Result<V2GeneralCandidate, SyncError> {
+        self.selected_member_verifier()?;
+        self.verifier
+            .derive_successor(
+                step.header,
+                ReplayBody::Admission(step.admission),
+                step.image,
+            )
+            .map_err(|_| SyncError::JoinRejected)
+    }
+
     /// Use the same selected Core verifier and original own Admission to plan
     /// an ordinary action. The Join candidate must already have been selected.
     pub fn prepare_member_plan(
