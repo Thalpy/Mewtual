@@ -10,7 +10,7 @@ use catcoms_replication::chat::{
     cold_selected_history::{encode_selected_history_node_page, SelectedHistoryNodePage},
     owner_state::transition::REPLAY_MATH_PRIVATE_INVOICE,
     ProjectionGroup, ProjectionGroupView, V2GeneralPrefixVerifier, V2GeneralRetiredData,
-    V2HostSelectionExpectation, V2OriginNegative, V2ProjectionOrigin,
+    V2HostSelectionExpectation, V2ProjectionOrigin,
 };
 use catcoms_sync::{
     PreparedV2JoinedPrefix, RecoveredV2JoinedOutcome, V2FirstJoinDeliveryData,
@@ -265,19 +265,6 @@ struct JoinedCore {
     _fee: CatalogReadReservation,
 }
 
-struct ProjectionMount(crate::store::chat_admission::CachedPhysicalMountNegative);
-
-impl std::fmt::Debug for ProjectionMount {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ProjectionMount").finish_non_exhaustive()
-    }
-}
-impl V2OriginNegative for ProjectionMount {
-    fn is_live(&self) -> bool {
-        self.0.is_live_cached()
-    }
-}
-
 impl JoinedCore {
     fn prepare(
         store: &ServerStore,
@@ -301,9 +288,9 @@ impl JoinedCore {
         if !view.try_ready() {
             return Err(denied());
         }
-        let origin = V2ProjectionOrigin::new(Arc::new(ProjectionMount(
+        let origin = V2ProjectionOrigin::new(Arc::new(
             store.chat_mount.capture_cached_physical_negative(),
-        )));
+        ));
         let decoded = V2FirstJoinDeliveryData::decode(delivery).map_err(|_| denied())?;
         let (proof, bytes) = decoded.governing_proof_data();
         let public_headers = proof.header_ids_data();

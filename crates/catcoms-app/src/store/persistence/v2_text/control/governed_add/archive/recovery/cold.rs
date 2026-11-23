@@ -18,10 +18,13 @@ use crate::store::persistence::{open_archive_directory, OriginalBootstrapReadObs
 use crate::store::{RetainedBootstrapSourceData, ServerStore};
 use catcoms_replication::chat::{
     owner_header::OwnerHeaderId, owner_state::transition::REPLAY_MATH_PRIVATE_INVOICE,
+    FounderGenesisAnchorData, ProjectionGroup, ProjectionGroupView, V2GeneralExpectation,
+    V2GeneralPrefixVerifier, V2GeneralRetiredData, V2HostSelectionExpectation, V2ProjectionOrigin,
 };
 use catcoms_storage::kept::{session_id, SessionId};
 use catcoms_storage::VaultPhysicalWorkLease;
 use catcoms_sync::owner_v2::{PreparedV2FounderRecoveredAdd, V2InstalledFounderAddData};
+use std::sync::Arc;
 use std::{
     fs,
     fs::File,
@@ -37,6 +40,7 @@ const ABSENT: [&str; 4] = [
 const SEED_FRAME_LIMIT: usize = 32768 + 40;
 
 pub(in crate::store) struct HeldColdFounderAdd {
+    core: Option<ColdFounderCore>,
     group: PathBuf,
     directory: File,
     directory_id: SessionId,
@@ -49,6 +53,14 @@ pub(in crate::store) struct HeldColdFounderAdd {
     recovered: RecoveredGovernedAdd,
     original: OriginalBootstrapReadObservation,
     _lease: VaultPhysicalWorkLease,
+    _fee: CatalogReadReservation,
+}
+
+struct ColdFounderCore {
+    verifier: V2GeneralPrefixVerifier,
+    _retired: V2GeneralRetiredData,
+    _view: ProjectionGroupView,
+    _group: ProjectionGroup,
     _fee: CatalogReadReservation,
 }
 
@@ -150,6 +162,7 @@ impl HeldColdFounderAdd {
         let recovered =
             authenticate_selected(&key, &selected, &archive.frame, context.id_data()?, &public)?;
         let mut result = Self {
+            core: None,
             group,
             directory,
             directory_id,
@@ -215,6 +228,110 @@ impl HeldColdFounderAdd {
         )?;
         self.require_current(store, source)?;
         Ok(restored)
+    }
+
+    pub(in crate::store) fn restore_core(
+        &mut self,
+        store: &ServerStore,
+        source: &RetainedBootstrapSourceData,
+        sdk: V2InstalledFounderAddData,
+    ) -> Result<(OwnerHeaderId, u64), AppError> {
+        let selected = self.require_current(store, source)?;
+        let head = self.selected.transition;
+        if sdk.header != head.header
+            || sdk.state != head.state
+            || sdk.epoch != head.epoch
+            || sdk.authenticator != head.authenticator
+        {
+            return Err(refused());
+        }
+        let original = source.data().genesis_public_data();
+        let founder = original.admission_data().admission_id();
+        let joined = self.recovered.admission.admission_id();
+        if self.core.is_none() {
+            const BYTES: usize = 2 * REPLAY_MATH_PRIVATE_INVOICE
+                + V2GeneralPrefixVerifier::metadata_layout_bytes()
+                + ProjectionGroup::initial_metadata_layout_bytes()
+                + 4 * std::mem::size_of::<ColdFounderCore>();
+            let pool = &store
+                .archive_bootstrap_policy
+                .as_ref()
+                .ok_or_else(refused)?
+                .pending
+                .pool;
+            let fee = pool.try_reserve(BYTES)?;
+            let profile = original.profile_data();
+            let genesis = original.header_data();
+            let context = original.context_data().spec_data();
+            let mut group = ProjectionGroup::new(context.group).map_err(|_| refused())?;
+            let mut view = group.begin_view();
+            if !view.try_ready() {
+                return Err(refused());
+            }
+            let origin = V2ProjectionOrigin::new(Arc::new(
+                store.chat_mount.capture_cached_physical_negative(),
+            ));
+            let anchor = FounderGenesisAnchorData {
+                group: context.group.to_vec(),
+                founder: context.signer,
+                profile: profile.id(),
+                admission: founder,
+                tenure: profile.tenure(),
+                header: genesis.id(),
+                state: genesis.spec().state,
+            };
+            let expectation =
+                V2GeneralExpectation::from_trusted_host(anchor).map_err(|_| refused())?;
+            let mut verifier = V2GeneralPrefixVerifier::from_genesis(
+                expectation,
+                profile,
+                original.admission_data(),
+                genesis,
+                original.image_data(),
+                &view,
+                origin,
+            )
+            .map_err(|_| refused())?;
+            let mut candidate = Some(
+                verifier
+                    .derive_successor(
+                        &self.recovered.header,
+                        ReplayBody::Admission(&self.recovered.admission),
+                        self.recovered.image_data()?,
+                    )
+                    .map_err(|_| refused())?,
+            );
+            self.require_current(store, source)?;
+            let expectation =
+                V2HostSelectionExpectation::from_trusted_host(head.header, head.state);
+            let retired = verifier
+                .advance_host_selected(&expectation, &mut candidate)
+                .map_err(|_| refused())?;
+            if retired.parent_data().header().id() != genesis.id() {
+                return Err(refused());
+            }
+            self.core = Some(ColdFounderCore {
+                verifier,
+                _retired: retired,
+                _view: view,
+                _group: group,
+                _fee: fee,
+            });
+        }
+        let core = self.core.as_ref().ok_or_else(refused)?;
+        let replay = core.verifier.replay_data();
+        if replay.header().id() != selected.0
+            || replay.mls_epoch_data() != selected.1
+            || replay.header().spec().state != head.state
+        {
+            return Err(refused());
+        }
+        for admission in [founder, joined] {
+            core.verifier
+                .observe_live_member(admission)
+                .map_err(|_| refused())?;
+        }
+        self.require_current(store, source)
     }
 }
 

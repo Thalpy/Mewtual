@@ -333,6 +333,8 @@ pub struct OpenedBootstrapSourceData {
     pub(super) genesis: VerifiedGenesisData,
 }
 
+mod genesis_public;
+
 /// Exact objects/image retained from the real authenticated record open. This is public
 /// consistency DATA only; no key, live original, Saved receipt or Current authority is kept.
 #[derive(Clone)]

@@ -358,10 +358,7 @@ impl Physical {
             *sdk = Some(captured.restore_sdk(store, source)?);
         }
         let fingerprint = sdk.as_ref().ok_or_else(refused)?.fingerprint_data();
-        let selected = captured.require_current(store, source)?;
-        if selected != (fingerprint.header, fingerprint.epoch) {
-            return Err(refused());
-        }
+        let selected = captured.restore_core(store, source, fingerprint)?;
         self.require_recovered_founder_source(original, source)?;
         Ok(selected)
     }

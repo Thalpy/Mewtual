@@ -14,8 +14,10 @@ bootstrap source refuse. The bounded actor binds the signed address without
 dialing. The first Add restore checks the original registry pin and promotion
 seed, authenticates the exact selected signed Add from its archive, and
 restores an independently paid closed MLS graph from the selected snapshot.
-Desktop startup still requires an owning Core and native runtime activation
-before publishing a recovered founder row.
+The original pin also anchors the Core replay of genesis and the first Add.
+Selection rechecks the held files and confirms that the restored MLS epoch,
+governing Header, and both active Admissions agree. Desktop startup still
+requires native runtime activation before publishing a recovered founder row.
 
 The stage-lifetime continuation is under validation. Native key drainage is
 being separated from retained CLOSED snapshot DATA: an actual completed Cell
