@@ -28,10 +28,11 @@ mod ordinary_member;
 #[cfg(not(target_arch = "wasm32"))]
 pub use governance::{
     PreparedV2FounderAddInstall, PreparedV2FounderGovernanceNode, PreparedV2FounderRecoveredAdd,
-    RetiredV2FounderAddInstall, RetiredV2FounderAddNativeCustody, V2FounderAddNativeStage,
-    V2FounderAddOutcomeData, V2FounderAddPreparationRefusal, V2FounderAddRequestData,
-    V2FounderAddSigning, V2FounderGovernanceNegative, V2InstalledFounderAddData,
-    FOUNDER_GOVERNANCE_DATA_BYTES, MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES,
+    PreparedV2FounderRemoveInstall, RetiredV2FounderAddInstall, RetiredV2FounderAddNativeCustody,
+    RetiredV2FounderRemoveInstall, V2FounderAddNativeStage, V2FounderAddOutcomeData,
+    V2FounderAddPreparationRefusal, V2FounderAddRequestData, V2FounderAddSigning,
+    V2FounderGovernanceNegative, V2FounderRemoveOutcomeData, V2FounderRemoveSigning,
+    V2InstalledFounderAddData, FOUNDER_GOVERNANCE_DATA_BYTES, MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use invite::{

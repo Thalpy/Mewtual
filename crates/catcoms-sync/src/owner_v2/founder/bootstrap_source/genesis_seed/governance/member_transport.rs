@@ -26,7 +26,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2FounderGovernanceNode<T, R> {
         )
     }
 
-    fn observe_member(
+    pub(super) fn observe_member(
         &self,
         verifier: &V2GeneralPrefixVerifier,
         channel: u128,

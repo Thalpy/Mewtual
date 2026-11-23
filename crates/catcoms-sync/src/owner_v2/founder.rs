@@ -35,11 +35,13 @@ pub use archive_candidate::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use archive_candidate::{
     PreparedV2FounderAddInstall, PreparedV2FounderGovernanceNode, PreparedV2FounderInviteData,
-    PreparedV2FounderRecoveredAdd, RetiredV2FounderAddInstall, RetiredV2FounderAddNativeCustody,
-    V2FounderAddNativeStage, V2FounderAddOutcomeData, V2FounderAddPreparationRefusal,
-    V2FounderAddRequestData, V2FounderAddSigning, V2FounderGovernanceNegative,
-    V2FounderInviteRequestData, V2InstalledFounderAddData, FOUNDER_GOVERNANCE_DATA_BYTES,
-    FOUNDER_INVITE_DATA_BYTES, MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES, MAX_FOUNDER_INVITE_LIFETIME_MS,
+    PreparedV2FounderRecoveredAdd, PreparedV2FounderRemoveInstall, RetiredV2FounderAddInstall,
+    RetiredV2FounderAddNativeCustody, RetiredV2FounderRemoveInstall, V2FounderAddNativeStage,
+    V2FounderAddOutcomeData, V2FounderAddPreparationRefusal, V2FounderAddRequestData,
+    V2FounderAddSigning, V2FounderGovernanceNegative, V2FounderInviteRequestData,
+    V2FounderRemoveOutcomeData, V2FounderRemoveSigning, V2InstalledFounderAddData,
+    FOUNDER_GOVERNANCE_DATA_BYTES, FOUNDER_INVITE_DATA_BYTES, MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES,
+    MAX_FOUNDER_INVITE_LIFETIME_MS,
 };
 
 /// Conservative logical invoice for the named private public-record/scope/watch/signature

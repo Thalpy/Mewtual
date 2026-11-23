@@ -310,9 +310,8 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     )
     .unwrap();
     let result = node.completed_add_data().unwrap();
-    let remove_parent = zeroize::Zeroizing::new(result.secret_snapshot_data().to_vec());
     let remove_admission = admission.id();
-    let remove_target = catcoms_crypto::DeviceId::from_public_key_bytes(&admission.spec().subject);
+    let removed_id = admission.admission_id();
     let step = || V2AdmissionStepData {
         admission,
         header,
@@ -729,33 +728,100 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
             .unwrap(),
         new_topic
     );
-    let (remover, mut removed_group) = catcoms_mls::restore_server(&remove_parent).unwrap();
-    let observed = removed_group
-        .remove_member_observed(&remover, &remove_target)
+    let original = native.source.observe();
+    let founder_body = node.genesis_data().admission.id();
+    assert!(node
+        .prepare_removal_data(verifier, founder_body, original.clone())
+        .is_err());
+    assert!(node
+        .prepare_removal_data(
+            foreign_prefix.selected_member_verifier().unwrap(),
+            remove_admission,
+            original.clone()
+        )
+        .is_err());
+    node.prepare_removal_data(verifier, remove_admission, original.clone())
         .unwrap();
-    let removal = verifier
-        .replay_data()
-        .prepare_removal_data(remove_admission, observed.commit_digest())
-        .unwrap();
-    let header = SignedOwnerHeader::sign_using(removal.header_spec_data().clone(), |bytes| {
-        remover
-            .sign_retained_ed25519_bounded(
-                observed.author(),
-                bytes,
-                catcoms_replication::chat::owner_header::MAX_HEADER_BYTES,
-            )
-            .map_err(|_| catcoms_replication::chat::ChatError::Dependency)
-    })
+    assert!(node
+        .prepare_removal_data(verifier, remove_admission, invite_source.clone())
+        .is_err());
+    assert!(node.ordinary_member_signer_data().is_err());
+    let mut payment = Some(super::admission(&member_payment));
+    let mut remove_ends = catcoms_rt::NativeChatKeyEnds::new();
+    let mut wrong = native.cut(NativeChatKeyPurpose::AddSdk);
+    assert!(node
+        .execute_removal_native(
+            verifier,
+            remove_admission,
+            &original,
+            &mut payment,
+            &mut wrong,
+            &mut remove_ends
+        )
+        .is_err());
+    assert!(payment.is_some());
+    let mut sdk_cut = native.cut(NativeChatKeyPurpose::RemoveSdk);
+    node.execute_removal_native(
+        verifier,
+        remove_admission,
+        &original,
+        &mut payment,
+        &mut sdk_cut,
+        &mut remove_ends,
+    )
     .unwrap();
+    let commit = node
+        .removal_outcome_data()
+        .unwrap()
+        .result
+        .commit_data()
+        .as_ptr();
+    assert!(payment.is_none());
+    node.execute_removal_native(
+        verifier,
+        remove_admission,
+        &original,
+        &mut payment,
+        &mut sdk_cut,
+        &mut remove_ends,
+    )
+    .unwrap();
+    assert_eq!(
+        node.removal_outcome_data()
+            .unwrap()
+            .result
+            .commit_data()
+            .as_ptr(),
+        commit
+    );
+    let (_, mut signing) = node.removal_signing_parts_data(verifier).unwrap();
+    let mut wrong = native.cut(NativeChatKeyPurpose::GoverningHeader);
+    assert!(signing
+        .sign_header_native(&original, &mut wrong, &mut remove_ends)
+        .is_err());
+    assert!(node.raw_removal_signature_data().is_none());
+    let (_, mut signing) = node.removal_signing_parts_data(verifier).unwrap();
+    let mut header_cut = native.cut(NativeChatKeyPurpose::RemovalHeader);
+    signing
+        .sign_header_native(&original, &mut header_cut, &mut remove_ends)
+        .unwrap();
+    let raw = *node.raw_removal_signature_data().unwrap();
+    let (_, mut signing) = node.removal_signing_parts_data(verifier).unwrap();
+    signing
+        .sign_header_native(&original, &mut header_cut, &mut remove_ends)
+        .unwrap();
+    assert_eq!(node.raw_removal_signature_data(), Some(&raw));
+    let header = node.materialize_signed_removal_data().unwrap().clone();
+    let removal = node.removal_outcome_data().unwrap();
     let old = recovered.selected_join_data().unwrap();
     let old_publication = recovered
         .observe_member_publication(foreign_prefix)
         .unwrap();
     let wire = V2MemberTransitionFrameData::encode_removal(
         &header,
-        removal.body_data(),
-        removal.image_data(),
-        observed.commit(),
+        removal.unsigned.body_data(),
+        removal.unsigned.image_data(),
+        removal.result.commit_data(),
     )
     .unwrap();
     assert!(V2MemberAddFrameData::decode(&wire).is_err());
@@ -785,10 +851,7 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
         .unwrap()
         .matches_frame_data(missing_commit_byte));
     assert_eq!(recovered.selected_join_data().unwrap(), old);
-    let epoch = (
-        removed_group.epoch(),
-        removed_group.epoch_authenticator_id(),
-    );
+    let epoch = removal.result.selected_epoch_data();
     assert_eq!(candidate.as_ref().unwrap().selected_epoch_data(), epoch);
     let selected = V2HostSelectionExpectation::from_trusted_host(header.id(), header.spec().state);
     assert!(recovered
@@ -810,6 +873,39 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
         (header.id(), old.1, epoch.0)
     );
     drop(retired);
+    let old_founder = node.prepare_member_subscription(verifier, 42).unwrap().1;
+    let old_target = verifier.observe_live_member(removed_id).unwrap();
+    let mut next = Some(node.derive_removal_selection_data(verifier).unwrap());
+    let (_, prepared) = node.prepare_removal_install_data(verifier).unwrap();
+    assert!(prepared
+        .check_host_selection_data(
+            foreign_prefix.selected_member_verifier().unwrap(),
+            next.as_ref().unwrap()
+        )
+        .is_err());
+    assert!(prepared.finish_host_selected(verifier, &mut None).is_err());
+    assert!(old_target.is_live_cached());
+    assert!(old_founder.is_current_cached());
+    assert_eq!(node.installed_add_data(), Some(installed));
+    let (_, prepared) = node.prepare_removal_install_data(verifier).unwrap();
+    let fingerprint = prepared.expected_data();
+    prepared.finish_host_selected(verifier, &mut next).unwrap();
+    assert!(next.is_none());
+    assert!(verifier.admission(removed_id).is_err());
+    assert!(!old_target.is_live_cached());
+    assert!(!old_founder.is_current_cached());
+    let mut retired = node.take_retired_removal_data().unwrap();
+    let mut close = retired.take_close_completion().unwrap();
+    assert!(close.try_complete());
+    assert!(retired.take_frozen_data().is_some());
+    drop(retired);
+    assert_eq!(node.installed_add_data(), Some(fingerprint));
+    assert_eq!(
+        node.prepare_member_subscription(verifier, 42).unwrap().0,
+        recovered
+            .selected_member_topic_data(foreign_prefix, 42)
+            .unwrap()
+    );
 }
 
 async fn complete_original_welcome(native_joiner: bool) {

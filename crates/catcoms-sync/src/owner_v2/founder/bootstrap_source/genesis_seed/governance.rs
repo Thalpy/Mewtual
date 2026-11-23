@@ -28,6 +28,12 @@ mod invite;
 mod member_transport;
 mod recover;
 pub use recover::PreparedV2FounderRecoveredAdd;
+mod removal;
+use removal::PendingRemoval;
+pub use removal::{
+    PreparedV2FounderRemoveInstall, RetiredV2FounderRemoveInstall, V2FounderRemoveOutcomeData,
+    V2FounderRemoveSigning,
+};
 mod welcome;
 pub use request::{V2FounderAddRequestData, MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES};
 use welcome::PreparedWelcome;
@@ -239,6 +245,7 @@ impl V2FounderAddSigning<'_> {
 /// its original journal, Core verifier, Current and native final admission.
 pub struct PreparedV2FounderGovernanceNode<T, R> {
     pending: Option<Box<PendingAdd>>,
+    removal: Option<Box<PendingRemoval>>,
     installed: Option<V2InstalledFounderAddData>,
     installed_invites: [Option<[u8; 16]>; crate::MAX_V2_GOVERNING_JOIN_STEPS],
     member: Option<V2AuthenticatedAdmission>,
@@ -250,6 +257,7 @@ pub struct PreparedV2FounderGovernanceNode<T, R> {
 /// host's Core replay/verifier payment. Reserve BEFORE constructing the wrapper
 /// or beginning an operation. It is neither an allocation/RSS cap nor a fee.
 pub const FOUNDER_GOVERNANCE_DATA_BYTES: usize = UNSIGNED_ADMISSION_DATA_INVOICE
+    + removal::METADATA_BYTES
     + 8 * MAX_HEADER_BYTES
     + 4 * MAX_ADMISSION_BYTES
     + 16 * MAX_GROUP_ID_BYTES
@@ -282,6 +290,7 @@ impl<T, R> UnboundV2GenesisNode<T, R> {
         }
         Ok(PreparedV2FounderGovernanceNode {
             pending: None,
+            removal: None,
             installed: None,
             installed_invites: [None; crate::MAX_V2_GOVERNING_JOIN_STEPS],
             member: None,
@@ -307,6 +316,7 @@ impl<T, R> UnboundV2GenesisNode<T, R> {
         let node = original.take().expect("validated original warm node");
         *destination = Some(PreparedV2FounderGovernanceNode {
             pending: None,
+            removal: None,
             installed: None,
             installed_invites: [None; crate::MAX_V2_GOVERNING_JOIN_STEPS],
             member: None,
@@ -345,6 +355,7 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
         self.require_sdk_current_data()?;
         let installed = self.installed.ok_or_else(unavailable)?;
         if self.pending.is_some()
+            || self.removal.is_some()
             || self
                 .available_invite_slot(request.invite.spec_data().nonce)
                 .is_none()
@@ -434,6 +445,7 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
         welcome_cut: NativeChatPreparedKeyCut,
     ) -> Result<(), V2FounderAddPreparationRefusal> {
         if self.pending.is_some()
+            || self.removal.is_some()
             || self
                 .available_invite_slot(request.invite.spec_data().nonce)
                 .is_none()
@@ -770,7 +782,7 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
     /// Add cannot race a new message, but original member results owned by Root
     /// remain untouched. Root must reconcile them BEFORE preparing the Add.
     pub fn ordinary_member_signer_data(&self) -> Result<[u8; 32], V2MemberSignRefusal> {
-        if self.pending.is_some() {
+        if self.pending.is_some() || self.removal.is_some() {
             return Err(V2MemberSignRefusal::Source);
         }
         self.require_sdk_current_data()
@@ -789,6 +801,7 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
         ends: &mut NativeChatKeyEnds,
     ) -> Result<catcoms_replication::chat::V2OrdinarySigningGuard<'a>, V2MemberSignRefusal> {
         if self.pending.is_some()
+            || self.removal.is_some()
             || self.stable_negative().require_live_data().is_err()
             || guard.signer_data() != &self.node.seed.body.context.spec_data().signer
         {

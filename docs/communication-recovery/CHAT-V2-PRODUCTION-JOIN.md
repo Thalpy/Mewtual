@@ -538,7 +538,10 @@ They observe the signed Header before reading its body or Commit, then cover
 the exact Core history page and the verified MLS epoch in an encrypted
 continuation of the original Welcome. Existing Add continuations retain their
 encoding. A Remove uses its own record version, which older readers refuse.
-The founder's native governing writer and evicted member retirement still
+The live founder binds its paid Remove and governing signature to distinct
+native key cuts, the selected Core slot and the exact MLS parent. It can
+swap the checked Core and MLS successors together after host selection.
+The founder's durable governing writer and evicted member retirement still
 need integration.
 
 ## Acceptance before enabling

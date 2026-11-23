@@ -64,6 +64,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2FounderGovernanceNode<T, R> {
         let member = self.member.as_ref().ok_or_else(unavailable)?;
         let replay = verifier.replay_data();
         if self.pending.is_some()
+            || self.removal.is_some()
             || replay.header().id() != installed.header
             || replay.header().spec().state != installed.state
             || replay.mls_epoch_data() != installed.epoch
