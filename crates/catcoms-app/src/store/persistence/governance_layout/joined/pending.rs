@@ -258,6 +258,27 @@ std::thread_local! {
 }
 
 impl ServerStore {
+    pub(in crate::store) fn encode_recovered_member_successor(
+        &self,
+        expected: NativeTextJoinedRegistrationData,
+        request: &catcoms_sync::V2MemberAddRequestData,
+    ) -> Result<Vec<u8>, AppError> {
+        if self.recovered_join_registration_data()? != Some(expected) {
+            return Err(denied());
+        }
+        let slot = self.joined_pin_index.try_lock().map_err(|_| denied())?;
+        let original = slot.as_ref().ok_or_else(denied)?;
+        original.require(self)?;
+        let welcome = original
+            .pending
+            .as_ref()
+            .and_then(|pending| pending.welcome.as_ref())
+            .ok_or_else(denied)?;
+        let frame = welcome.encode_member_successor(self, expected.context, request)?;
+        original.require(self)?;
+        Ok(frame)
+    }
+
     pub(in crate::store) fn cover_recovered_member_add<
         T: catcoms_rt::MeshTransport,
         R: catcoms_rt::CryptoRngCore,
@@ -1174,6 +1195,22 @@ impl JoinedPendingIo {
         let welcome = self.welcome.as_ref().ok_or_else(denied)?;
         welcome.require_outcome(store)?;
         welcome.member_prefix()
+    }
+
+    pub(in crate::store) fn encode_warm_member_successor(
+        &self,
+        store: &ServerStore,
+        expected: NativeTextJoinedRegistrationData,
+        request: &catcoms_sync::V2MemberAddRequestData,
+    ) -> Result<Vec<u8>, AppError> {
+        self.request_data(store)?;
+        let frame = self
+            .welcome
+            .as_ref()
+            .ok_or_else(denied)?
+            .encode_member_successor(store, expected.context, request)?;
+        self.request_data(store)?;
+        Ok(frame)
     }
 }
 

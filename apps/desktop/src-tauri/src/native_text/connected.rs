@@ -299,6 +299,7 @@ async fn start_dependencies<R: tauri::Runtime>(
                 _ = serve_dependencies(app.clone(), source.clone(), provider) => {}
                 _ = drain_outbox(&app, &source) => {}
                 _ = catch_up_governing(&app, &source) => {}
+                _ = serve_joined_governing(&app, &source) => {}
                 _ = async {
                     if let Some((initial, payment)) = receive {
                         super::receiving::run(&app, &source, initial, payment).await;
@@ -315,6 +316,47 @@ const OUTBOX_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(25
 const OUTBOX_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 const GOVERNING_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 const GOVERNING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+async fn serve_joined_governing<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source: &Source) {
+    let mut scope = source.negative();
+    loop {
+        tokio::select! {
+            biased;
+            _ = scope.cancelled() => return,
+            _ = tokio::time::sleep(GOVERNING_RETRY) => {}
+        }
+        let state = app.state::<AppState>();
+        let Some(permit) = source.member_work.try_background() else {
+            continue;
+        };
+        let Some((prepared, row)) = source.capture_joined(&state).await else {
+            continue;
+        };
+        let caller = scope.clone();
+        let Ok(Ok(mut provider)) = tauri::async_runtime::spawn_blocking(move || {
+            let _permit = permit;
+            prepared.attach_governing_provider(&row, caller)
+        })
+        .await
+        else {
+            continue;
+        };
+        while let Some(request) = provider.next().await {
+            let Some(permit) = source.member_work.try_background() else {
+                continue;
+            };
+            let Some((prepared, row)) = source.capture_joined(&state).await else {
+                continue;
+            };
+            let caller = scope.clone();
+            let _ = tauri::async_runtime::spawn_blocking(move || {
+                let _permit = permit;
+                prepared.serve_member_governing_request(&row, request, caller)
+            })
+            .await;
+        }
+    }
+}
 
 async fn catch_up_governing<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source: &Source) {
     let mut scope = source.negative();

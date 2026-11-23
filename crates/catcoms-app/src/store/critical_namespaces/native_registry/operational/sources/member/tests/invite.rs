@@ -1508,6 +1508,20 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
         if successor == MountedSuccessor::Remove {
             let (removed_head, removed_epoch, original_eviction, covered) = Box::pin(async {
                 use catcoms_replication::chat::owner_header::OwnerBodyId;
+                let contact = recovered_row()
+                    .sign_member_contact(&selection, &fresh)
+                    .unwrap();
+                third_row()
+                    .prepare_member_contact(
+                        &third_selection,
+                        &contact,
+                        std::net::Ipv4Addr::LOCALHOST.into(),
+                        fresh.clone(),
+                    )
+                    .unwrap()
+                    .connect(&scheduler)
+                    .await
+                    .unwrap();
                 let target = OwnerBodyId::from_bytes(*third_own.as_bytes());
                 let old_founder = OwnerBodyId::from_bytes(anchor.admission);
                 let roster = capture().governed_roster(&fresh).unwrap();
@@ -1556,12 +1570,9 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 let mut lane = capture()
                     .open_connected_governing_requests(fresh.clone())
                     .unwrap();
-                for (preparation, selected) in [
-                    (recovered_row(), &selection),
-                    (third_row(), &third_selection),
-                ] {
-                    let exchange = preparation
-                        .prepare_governing_exchange(selected, fresh.clone())
+                {
+                    let exchange = recovered_row()
+                        .prepare_governing_exchange(&selection, fresh.clone())
                         .unwrap();
                     let serve = async {
                         let Some(TransportEvent::Request {
@@ -1589,23 +1600,75 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         .await
                         .unwrap();
                     let receipt = receipt.unwrap();
-                    let result = if selected.same_original(&selection) {
-                        recovered_row().apply_governing_response(
-                            selected,
-                            &receipt,
-                            &fresh,
-                            &mut history_rng,
-                        )
-                    } else {
-                        third_row().apply_governing_response(
-                            selected,
-                            &receipt,
-                            &fresh,
-                            &mut third_rng,
-                        )
-                    };
+                    let result = recovered_row().apply_governing_response(
+                        &selection,
+                        &receipt,
+                        &fresh,
+                        &mut history_rng,
+                    );
                     assert_eq!(result, Ok((removed_head, removed_epoch)));
                 }
+                drop(lane);
+                let mut retirement = owner.prepare_retirement().unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                    while retirement.try_retire().unwrap()
+                        == crate::store::NativeTextSourceRetirementStatus::Pending
+                    {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("the founder's original governing TCP actor drained before the relay");
+                drop(retirement);
+                let mut relay = recovered_row()
+                    .attach_governing_provider(&selection, fresh.clone())
+                    .unwrap();
+                let wrong = third_row()
+                    .prepare_governing_exchange(&third_selection, fresh.clone())
+                    .unwrap();
+                let refuse = async {
+                    let request = relay
+                        .next()
+                        .await
+                        .expect("the survivor receives the bounded wrong proof");
+                    assert!(recovered_row()
+                        .serve_member_governing_request(&selection, request, fresh.clone())
+                        .is_err());
+                };
+                let (nonreply, ()) = tokio::time::timeout(
+                    catcoms_rt::REQUEST_TIMEOUT + std::time::Duration::from_secs(2),
+                    async { tokio::join!(wrong.send_wrong_proof_for_test(), refuse) },
+                )
+                .await
+                .unwrap();
+                assert!(nonreply.is_err());
+                let exchange = third_row()
+                    .prepare_governing_exchange(&third_selection, fresh.clone())
+                    .unwrap();
+                let serve = async {
+                    let request = relay
+                        .next()
+                        .await
+                        .expect("the survivor receives the exact old-epoch query");
+                    recovered_row()
+                        .serve_member_governing_request(&selection, request, fresh.clone())
+                        .unwrap();
+                };
+                let (relayed, ()) =
+                    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                        tokio::join!(exchange.receive(), serve)
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    third_row().apply_governing_response(
+                        &third_selection,
+                        &relayed.unwrap(),
+                        &fresh,
+                        &mut third_rng,
+                    ),
+                    Ok((removed_head, removed_epoch))
+                );
                 assert!(selection.is_current_cached());
                 assert!(!third_selection.is_current_cached());
                 let survivor_roster = recovered_row().governed_roster(&selection, &fresh).unwrap();
@@ -1643,7 +1706,6 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     })
                     .expect("the third original's immutable terminal continuation");
                 let covered = std::fs::read(&original_eviction).unwrap();
-                drop(lane);
                 (removed_head, removed_epoch, original_eviction, covered)
             })
             .await;
@@ -1680,17 +1742,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     assert!(old.complete_recovery(&fresh).is_err());
                 }
                 assert_eq!(std::fs::read(original_eviction).unwrap(), covered);
-                let mut retirement = owner.prepare_retirement().unwrap();
-                tokio::time::timeout(std::time::Duration::from_secs(8), async {
-                    while retirement.try_retire().unwrap()
-                        == crate::store::NativeTextSourceRetirementStatus::Pending
-                    {
-                        tokio::task::yield_now().await;
-                    }
-                })
-                .await
-                .expect("the founder's original governing TCP actor drained");
-                drop((retirement, row, owner, founder));
+                drop((row, owner, founder));
                 let cold = crate::store::NativeTextJoinedStorage::open_for_native_startup(
                     founder_dir.path(),
                     SECRET,

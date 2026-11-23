@@ -11,6 +11,7 @@ pub struct NativeTextJoinedReconnect {
     signal: RequestCancellation,
     mount: RequestCancellation,
     payment: Arc<JoinFramePayment>,
+    member: Option<(NativeTextJoinedRowSelection, PeerId)>,
     _end: retirement::PreparationEnd,
 }
 
@@ -23,6 +24,7 @@ impl NativeTextJoinedReconnect {
         mount: RequestCancellation,
         fee: CatalogReadReservation,
         end: retirement::PreparationEnd,
+        member: (NativeTextJoinedRowSelection, PeerId),
     ) -> Self {
         Self {
             _invocation: invocation,
@@ -31,6 +33,7 @@ impl NativeTextJoinedReconnect {
             signal,
             mount,
             payment: Arc::new(JoinFramePayment { _fee: fee }),
+            member: Some(member),
             _end: end,
         }
     }
@@ -44,7 +47,14 @@ impl NativeTextJoinedReconnect {
             self.mount.clone(),
             self.payment.clone(),
         )
-        .await
+        .await?;
+        if let Some((row, peer)) = self.member {
+            if self.signal.is_cancelled() || self.mount.is_cancelled() {
+                return Err(refused());
+            }
+            row.remember_governing_peer(peer)?;
+        }
+        Ok(())
     }
 }
 
@@ -120,6 +130,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             signal,
             mount,
             payment: Arc::new(JoinFramePayment { _fee: fee }),
+            member: None,
             _end: self.original.end.ok_or_else(refused)?,
         })
     }

@@ -411,10 +411,13 @@ actor drains. Joined members can share the contact code for their original TCP
 listener and separately approve the destination IP in the desktop roster. The
 receiver checks the signature against the exact active admission in its own
 selected Profile, head and epoch before asking the existing dial scheduler for
-one authenticated connection. The regression also exercises an old epoch, a
-changed signature, the local member's own code and a cancelled request.
-Automatic discovery, peer-to-peer governing catch-up and the physical-device
-acceptance matrix still need implementation or evidence.
+one authenticated connection. It can use that route for governing catch-up if
+the founder goes offline. A surviving peer only serves a covered transition to
+a connection that supplies the exact preceding epoch proof. Warm selection
+and cold replay derive the verifier from the original preceding MLS graph.
+The regression also exercises an old epoch, a changed signature, the local
+member's own code, a cancelled request and an invalid governing proof.
+Automatic discovery and the physical-device acceptance matrix still need work.
 
 An independently reopened Pending with neither Welcome file can resend the
 exact original request over the same connected protocol. It verifies the

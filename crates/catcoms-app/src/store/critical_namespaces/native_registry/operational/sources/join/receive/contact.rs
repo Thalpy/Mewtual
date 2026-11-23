@@ -171,6 +171,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 mount,
                 fee,
                 self.original.end.ok_or(Refusal::Unavailable)?,
+                (selection.clone(), peer),
             ),
         )
     }

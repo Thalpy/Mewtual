@@ -97,7 +97,7 @@ impl RequestAuthority for DependencyParentScope {
     }
 }
 
-struct ScopeAuthority(RequestCancellation);
+pub(super) struct ScopeAuthority(pub(super) RequestCancellation);
 impl std::fmt::Debug for ScopeAuthority {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ScopeAuthority").finish_non_exhaustive()
@@ -115,9 +115,9 @@ impl RequestAuthority for ScopeAuthority {
     }
 }
 
-struct ReplyPayment {
-    _invocation: watch::Sender<bool>,
-    _fee: CatalogReadReservation,
+pub(super) struct ReplyPayment {
+    pub(super) _invocation: watch::Sender<bool>,
+    pub(super) _fee: CatalogReadReservation,
 }
 
 impl std::fmt::Debug for ReplyPayment {
@@ -413,7 +413,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             .map_err(|_| V2MemberSaveRefusal::Unavailable)
     }
 
-    fn dependency_signal(
+    pub(super) fn dependency_signal(
         self,
         selection: &NativeTextJoinedRowSelection,
         caller: RequestCancellation,
@@ -437,7 +437,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
 }
 
 impl<R: CryptoRngCore> ReceiverSource<'_, R> {
-    fn effect_data(
+    pub(super) fn effect_data(
         &self,
     ) -> Result<(V2MemberPublicationObservation, AuthenticationNegative), V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;

@@ -28,7 +28,10 @@ pub use dependencies::{
     NativeTextJoinedDependencyExchange, NativeTextJoinedDependencyProvider,
     NativeTextJoinedDependencyResponse,
 };
-pub use governing::{NativeTextJoinedGoverningExchange, NativeTextJoinedGoverningResponse};
+pub use governing::{
+    NativeTextJoinedGoverningExchange, NativeTextJoinedGoverningIncoming,
+    NativeTextJoinedGoverningProvider, NativeTextJoinedGoverningResponse,
+};
 
 const INGRESS_FEE: usize = 8 * 1024;
 // Padded plaintext, canonical signed action and its original frame may overlap.
@@ -149,6 +152,7 @@ struct ReceiverSource<'a, R: CryptoRngCore> {
     prefix: &'a PreparedV2JoinedPrefix,
     view: &'a ProjectionGroupView,
     store: &'a ServerStore,
+    warm: Option<&'a JoinedPendingIo>,
     registration: NativeTextJoinedRegistrationData,
     founder: Option<PeerId>,
 }
@@ -796,6 +800,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                         prefix,
                         view,
                         store,
+                        warm: pending.io.as_ref().filter(|_| runtime.recovered.is_none()),
                         registration: data,
                         founder: runtime.founder_contact.get().copied(),
                     })

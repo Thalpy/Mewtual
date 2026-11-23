@@ -126,6 +126,7 @@ on:
           - joined-member
           - member-history
           - mounted-governing
+          - peer-relay
           - remove-sdk
 
 permissions:
@@ -143,7 +144,7 @@ env:
 
 jobs:
   invitation:
-    if: inputs.scope != 'joined-storage' && inputs.scope != 'joined-predecessor' && inputs.scope != 'selected-history' && inputs.scope != 'native-contact' && inputs.scope != 'cold-founder' && inputs.scope != 'joined-member' && inputs.scope != 'member-history' && inputs.scope != 'mounted-governing' && inputs.scope != 'remove-sdk'
+    if: inputs.scope != 'joined-storage' && inputs.scope != 'joined-predecessor' && inputs.scope != 'selected-history' && inputs.scope != 'native-contact' && inputs.scope != 'cold-founder' && inputs.scope != 'joined-member' && inputs.scope != 'member-history' && inputs.scope != 'mounted-governing' && inputs.scope != 'peer-relay' && inputs.scope != 'remove-sdk'
     name: Invitation intent (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
@@ -248,7 +249,7 @@ jobs:
           if-no-files-found: error
 
   joined-storage:
-    if: github.event_name == 'pull_request' || inputs.scope == 'joined-storage' || inputs.scope == 'joined-predecessor' || inputs.scope == 'selected-history' || inputs.scope == 'native-contact' || inputs.scope == 'cold-founder' || inputs.scope == 'joined-member' || inputs.scope == 'member-history' || inputs.scope == 'mounted-governing' || inputs.scope == 'remove-sdk'
+    if: github.event_name == 'pull_request' || inputs.scope == 'joined-storage' || inputs.scope == 'joined-predecessor' || inputs.scope == 'selected-history' || inputs.scope == 'native-contact' || inputs.scope == 'cold-founder' || inputs.scope == 'joined-member' || inputs.scope == 'member-history' || inputs.scope == 'mounted-governing' || inputs.scope == 'peer-relay' || inputs.scope == 'remove-sdk'
     name: Joined pin storage (${{ matrix.os }}, ${{ inputs.scope || 'joined-member' }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
@@ -295,8 +296,8 @@ jobs:
       - name: Check three native vaults across the later Add and the founder disconnect
         if: inputs.scope == 'mounted-governing'
         run: python .github/scripts/check-chat-v2-invite-intent.py mounted-governing
-      - name: Check a selected Remove across the mounted founder, survivor and evicted row
-        if: github.event_name == 'pull_request' || inputs.scope == 'mounted-governing'
+      - name: Check a selected Remove and relay it after the original founder drains
+        if: github.event_name == 'pull_request' || inputs.scope == 'mounted-governing' || inputs.scope == 'peer-relay'
         run: python .github/scripts/check-chat-v2-invite-intent.py mounted-removal
       - name: Check the cold founder's original source and reserved TCP listener
         if: github.event_name == 'pull_request' || inputs.scope == 'joined-storage' || inputs.scope == 'cold-founder' || inputs.scope == 'joined-member'
@@ -311,7 +312,7 @@ jobs:
         if: github.event_name == 'pull_request' || inputs.scope == 'selected-history'
         run: python .github/scripts/check-chat-v2-invite-intent.py governed-remove-archive
       - name: Check encrypted joined header witnesses against their original predecessor
-        if: github.event_name == 'pull_request' || inputs.scope == 'selected-history' || inputs.scope == 'mounted-governing'
+        if: github.event_name == 'pull_request' || inputs.scope == 'selected-history' || inputs.scope == 'mounted-governing' || inputs.scope == 'peer-relay'
         run: python .github/scripts/check-chat-v2-invite-intent.py joined-header-escrow
       - name: Check legacy and later Add request records under the exact original fence
         if: inputs.scope == 'selected-history'

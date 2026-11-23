@@ -33,7 +33,7 @@ use catcoms_sync::{
     ClosedV2JoinedNode, NativeV2JoinKeyEntry, V2JoinedRuntimeInputs, V2PendingJoinContextData,
 };
 use std::{
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     sync::{OnceLock, Weak},
     time::Duration,
 };
@@ -47,7 +47,8 @@ mod receive;
 pub use receive::{
     NativeTextJoinedArchivedActions, NativeTextJoinedDependencyExchange,
     NativeTextJoinedDependencyProvider, NativeTextJoinedDependencyResponse,
-    NativeTextJoinedGoverningExchange, NativeTextJoinedGoverningResponse,
+    NativeTextJoinedGoverningExchange, NativeTextJoinedGoverningIncoming,
+    NativeTextJoinedGoverningProvider, NativeTextJoinedGoverningResponse,
     NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberLedger,
     NativeTextJoinedMemberProjection, NativeTextJoinedMemberReceiver,
     NativeTextJoinedReceivedOriginal,
@@ -673,6 +674,8 @@ struct JoinedRowSelection {
     member_outbox: MemberOutboxContextId,
     scope: Arc<Scope>,
     retired: AtomicBool,
+    governing_peers: Mutex<[Option<PeerId>; 16]>,
+    next_governing_peer: AtomicUsize,
     keys: Arc<OnceLock<NativeChatSourceClose>>,
     _metadata: Arc<retirement::Control>,
 }
@@ -707,6 +710,45 @@ impl NativeTextJoinedRowSelection {
     }
     pub fn is_current_cached(&self) -> bool {
         self.original.scope.is_open() && !self.original.retired.load(Ordering::SeqCst)
+    }
+
+    fn remember_governing_peer(&self, peer: PeerId) -> Result<(), AppError> {
+        if !self.is_current_cached() {
+            return Err(refused());
+        }
+        let mut peers = self
+            .original
+            .governing_peers
+            .try_lock()
+            .map_err(|_| refused())?;
+        if !peers.contains(&Some(peer)) {
+            let next = peers
+                .iter_mut()
+                .find(|slot| slot.is_none())
+                .ok_or_else(refused)?;
+            *next = Some(peer);
+        }
+        Ok(())
+    }
+
+    fn governing_connection(
+        &self,
+        lane: &catcoms_net::NativeChatMemberDependencies,
+        founder: Option<PeerId>,
+    ) -> Option<catcoms_net::NativeChatMemberDependencyExchange> {
+        let peers = self.original.governing_peers.try_lock().ok()?;
+        let candidates = founder.into_iter().chain(peers.iter().flatten().copied());
+        let count = candidates.clone().count();
+        let start = self
+            .original
+            .next_governing_peer
+            .fetch_add(1, Ordering::Relaxed)
+            .checked_rem(count)?;
+        candidates
+            .cycle()
+            .skip(start)
+            .take(count)
+            .find_map(|peer| lane.capture_request(peer))
     }
     pub fn is_from_original_vault_cached(&self, vault: &NativeTextVault) -> bool {
         Arc::ptr_eq(&self.original.scope, &vault.sources.observe())
@@ -832,6 +874,8 @@ impl<R: CryptoRngCore> MountedNode<R> {
                     member_outbox,
                     scope: scope.clone(),
                     retired: AtomicBool::new(false),
+                    governing_peers: Mutex::new([None; 16]),
+                    next_governing_peer: AtomicUsize::new(0),
                     keys,
                     _metadata: control.clone(),
                 }),

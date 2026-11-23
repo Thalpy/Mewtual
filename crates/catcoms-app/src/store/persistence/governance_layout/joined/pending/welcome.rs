@@ -206,6 +206,21 @@ impl WarmWelcome {
         )
     }
 
+    pub(super) fn encode_member_successor(
+        &self,
+        store: &ServerStore,
+        context: V2PendingJoinContextData,
+        request: &catcoms_sync::V2MemberAddRequestData,
+    ) -> Result<Vec<u8>, AppError> {
+        self.require_outcome(store)?;
+        let original = self.outcome.as_ref().ok_or_else(denied)?;
+        let frame = self
+            .member_adds
+            .encode_selected_successor(store, context, original, request)?;
+        self.require_outcome(store)?;
+        Ok(frame)
+    }
+
     pub(super) fn finish_core(&mut self) -> Result<(), AppError> {
         self.selection.as_mut().ok_or_else(denied)?.finish()
     }
@@ -457,6 +472,24 @@ impl ClosedOutcome {
 }
 
 impl RecoveredWelcome {
+    pub(super) fn encode_member_successor(
+        &self,
+        store: &ServerStore,
+        context: V2PendingJoinContextData,
+        request: &catcoms_sync::V2MemberAddRequestData,
+    ) -> Result<Vec<u8>, AppError> {
+        self.require(store)?;
+        let outcome = self.outcome.as_ref().ok_or_else(denied)?;
+        let frame = outcome.member_adds.encode_selected_successor(
+            store,
+            context,
+            &outcome.file.1,
+            request,
+        )?;
+        self.require(store)?;
+        Ok(frame)
+    }
+
     pub(super) fn recover_member_adds<
         T: catcoms_rt::MeshTransport,
         R: catcoms_rt::CryptoRngCore,

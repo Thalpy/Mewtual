@@ -1,9 +1,13 @@
 //! Fetch and apply the exact next governing change on an existing joined row.
+use super::dependencies::{ReplyPayment, ScopeAuthority};
 use super::*;
+use crate::store::critical_namespaces::native_registry::operational::governed::JOIN_PROTOCOL;
 use catcoms_net::{NativeChatMemberDependencyExchange, NativeChatMemberDependencyObservation};
 use catcoms_rt::{
-    TransportError, CHAT_V2_GOVERNING_REQUEST_MAX_BYTES, CHAT_V2_GOVERNING_RESPONSE_MAX_BYTES,
+    Responder, TransportError, TransportEvent, CHAT_V2_GOVERNING_KIND,
+    CHAT_V2_GOVERNING_REQUEST_MAX_BYTES, CHAT_V2_GOVERNING_RESPONSE_MAX_BYTES,
 };
+use catcoms_sync::V2MemberAddRequestData;
 
 const FRAME_FEE: usize =
     4 * (CHAT_V2_GOVERNING_REQUEST_MAX_BYTES + CHAT_V2_GOVERNING_RESPONSE_MAX_BYTES) + 4096;
@@ -27,6 +31,45 @@ pub struct NativeTextJoinedGoverningResponse {
     _end: retirement::PreparationEnd,
 }
 
+pub struct NativeTextJoinedGoverningProvider {
+    requests: catcoms_net::NativeChatJoinRequests,
+    row: NativeTextJoinedRowSelection,
+    actor: Weak<join_tcp::Transport>,
+    _invocation: watch::Sender<bool>,
+}
+
+pub struct NativeTextJoinedGoverningIncoming {
+    body: bytes::Bytes,
+    responder: Responder,
+    row: NativeTextJoinedRowSelection,
+    actor: Weak<join_tcp::Transport>,
+}
+
+impl NativeTextJoinedGoverningProvider {
+    pub async fn next(&mut self) -> Option<NativeTextJoinedGoverningIncoming> {
+        while let Some(TransportEvent::Request {
+            proto,
+            data,
+            responder,
+            ..
+        }) = self.requests.next().await
+        {
+            if proto == JOIN_PROTOCOL
+                && data.first() == Some(&CHAT_V2_GOVERNING_KIND)
+                && data.len() <= CHAT_V2_GOVERNING_REQUEST_MAX_BYTES
+            {
+                return Some(NativeTextJoinedGoverningIncoming {
+                    body: data.slice(1..),
+                    responder,
+                    row: self.row.clone(),
+                    actor: self.actor.clone(),
+                });
+            }
+        }
+        None
+    }
+}
+
 #[cfg(all(test, any(windows, target_os = "linux")))]
 impl NativeTextJoinedGoverningResponse {
     pub(in crate::store::critical_namespaces::native_registry) fn with_truncated_body_for_test<
@@ -44,6 +87,20 @@ impl NativeTextJoinedGoverningResponse {
 }
 
 impl NativeTextJoinedGoverningExchange {
+    #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(in crate::store::critical_namespaces::native_registry) async fn send_wrong_proof_for_test(
+        self,
+    ) -> Result<bytes::Bytes, TransportError> {
+        let mut proof = self
+            .proof
+            .encode()
+            .map_err(|_| TransportError::NoResponse)?;
+        *proof.last_mut().ok_or(TransportError::NoResponse)? ^= 1;
+        self.exchange
+            .request_governing(&proof, self.signal.clone())
+            .await
+    }
+
     pub async fn receive(self) -> Result<NativeTextJoinedGoverningResponse, TransportError> {
         let original = self.exchange.observe_route();
         let bytes = self
@@ -70,6 +127,95 @@ impl NativeTextJoinedGoverningExchange {
 }
 
 impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
+    pub fn attach_governing_provider(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        caller: RequestCancellation,
+    ) -> Result<NativeTextJoinedGoverningProvider, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        let actor = self.original.tcp.clone();
+        let ingress = actor
+            .upgrade()
+            .ok_or(Refusal::Unavailable)?
+            .capture_attached_governing()
+            .map_err(|_| Refusal::Unavailable)?;
+        let (observed, auth, fee) = self.with_member_receiver(selection, &caller, |source| {
+            let fee = source
+                .metadata
+                .reserve_join_node(INGRESS_FEE)
+                .map_err(|_| Refusal::Busy)?;
+            let (observed, auth) = source.effect_data()?;
+            Ok((observed, auth, fee))
+        })?;
+        let (signal, invocation) = self.dependency_signal(selection, caller, auth, observed);
+        let signal = signal.retain_custody(Arc::new(JoinFramePayment { _fee: fee }));
+        let requests = ingress
+            .try_attach(Arc::new(ScopeAuthority(signal)))
+            .ok_or(Refusal::Busy)?;
+        Ok(NativeTextJoinedGoverningProvider {
+            requests,
+            row: selection.clone(),
+            actor,
+            _invocation: invocation,
+        })
+    }
+
+    pub fn serve_member_governing_request(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        incoming: NativeTextJoinedGoverningIncoming,
+        caller: RequestCancellation,
+    ) -> Result<(), V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        if !selection.same_original(&incoming.row) || !self.original.tcp.ptr_eq(&incoming.actor) {
+            return Err(Refusal::Stale);
+        }
+        let waiting = incoming.responder.cancellation_authority();
+        let request =
+            V2MemberAddRequestData::decode(&incoming.body).map_err(|_| Refusal::Failed)?;
+        let (reply, observed, auth, fee) =
+            self.with_member_receiver(selection, &caller, |source| {
+                if !waiting.authorized() {
+                    return Err(Refusal::Cancelled);
+                }
+                let fee = source
+                    .metadata
+                    .reserve_join_node(FRAME_FEE)
+                    .map_err(|_| Refusal::Busy)?;
+                let reply = match source.warm {
+                    Some(original) => original.encode_warm_member_successor(
+                        source.store,
+                        source.registration,
+                        &request,
+                    ),
+                    None => source
+                        .store
+                        .encode_recovered_member_successor(source.registration, &request),
+                }
+                .map_err(|_| Refusal::Failed)?;
+                if reply.is_empty() || reply.len() > CHAT_V2_GOVERNING_RESPONSE_MAX_BYTES {
+                    return Err(Refusal::Failed);
+                }
+                let (observed, auth) = source.effect_data()?;
+                Ok((reply, observed, auth, fee))
+            })?;
+        if !waiting.authorized() {
+            return Err(Refusal::Cancelled);
+        }
+        let (signal, invocation) = self.dependency_signal(selection, caller, auth, observed);
+        incoming
+            .responder
+            .try_respond_with_custody(
+                bytes::Bytes::from(reply),
+                Arc::new(ScopeAuthority(signal)),
+                Arc::new(ReplyPayment {
+                    _invocation: invocation,
+                    _fee: fee,
+                }),
+            )
+            .map_err(|_| Refusal::Cancelled)
+    }
+
     pub fn prepare_governing_exchange(
         self,
         selection: &NativeTextJoinedRowSelection,
@@ -82,8 +228,9 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             .map_err(|_| Refusal::Unavailable)?;
         let (exchange, proof, observed, authentication, fee) =
             self.with_member_receiver(selection, &caller, |source| {
-                let peer = source.founder.ok_or(Refusal::Unavailable)?;
-                let exchange = lane.capture_request(peer).ok_or(Refusal::Unavailable)?;
+                let exchange = selection
+                    .governing_connection(&lane, source.founder)
+                    .ok_or(Refusal::Unavailable)?;
                 let fee = source
                     .metadata
                     .reserve_join_node(FRAME_FEE)

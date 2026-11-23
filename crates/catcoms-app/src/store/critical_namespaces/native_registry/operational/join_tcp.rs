@@ -2,8 +2,8 @@
 use super::sources::NativeTextSourceRetirementRefusal;
 use super::*;
 use catcoms_net::{
-    MeshConnectionDial, MeshService, NativeChatMemberDependencies, NativeChatMemberIngress,
-    NativeTcpPreparation,
+    MeshConnectionDial, MeshService, NativeChatJoinIngress, NativeChatMemberDependencies,
+    NativeChatMemberIngress, NativeTcpPreparation,
 };
 use catcoms_rt::{MeshTransport, PeerId};
 use std::sync::Mutex;
@@ -20,6 +20,7 @@ struct Attempt {
     state: State,
     members: Option<NativeChatMemberIngress>,
     dependencies: Option<NativeChatMemberDependencies>,
+    governing: Option<NativeChatJoinIngress>,
     dial: Option<MeshConnectionDial>,
     listener: Option<([u8; 38], u16)>,
     #[cfg(test)]
@@ -86,6 +87,7 @@ impl Transport {
                 state: State::Starting,
                 members: None,
                 dependencies: None,
+                governing: None,
                 dial: None,
                 listener: None,
                 #[cfg(test)]
@@ -104,6 +106,7 @@ impl Transport {
                     }
                     attempt.members = service.native_chat_member_ingress();
                     attempt.dependencies = service.native_chat_member_dependencies();
+                    attempt.governing = service.native_chat_governing_ingress();
                     attempt.dial = Some(service.capture_connection_dial());
                     attempt.state = State::Idle(Box::new(service));
                 }
@@ -163,6 +166,16 @@ impl Transport {
             .as_ref()
             .filter(|attempt| matches!(attempt.state, State::Attached))
             .and_then(|attempt| attempt.dial.clone())
+            .ok_or_else(refused)
+    }
+
+    pub(super) fn capture_attached_governing(&self) -> Result<NativeChatJoinIngress, AppError> {
+        self.attempt
+            .try_lock()
+            .map_err(|_| refused())?
+            .as_ref()
+            .filter(|attempt| matches!(attempt.state, State::Attached))
+            .and_then(|attempt| attempt.governing.clone())
             .ok_or_else(refused)
     }
 

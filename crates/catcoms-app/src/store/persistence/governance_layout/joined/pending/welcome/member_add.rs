@@ -1,6 +1,9 @@
 //! Covered continuations of one original joined Welcome.
 use super::*;
-use catcoms_sync::{ClosedV2JoinedNode, V2MemberTransitionFrameData, MAX_V2_GOVERNING_JOIN_STEPS};
+use catcoms_sync::{
+    ClosedV2JoinedNode, V2MemberAddRequestData, V2MemberTransitionFrameData,
+    MAX_V2_GOVERNING_JOIN_STEPS,
+};
 use codec::{JoinedMembershipCandidate, RetiredJoinedMembership};
 mod header_witness;
 use header_witness::HeaderWitness;
@@ -20,6 +23,8 @@ pub(super) struct MemberAdds {
 struct Covered {
     path: PathBuf,
     file: OpenedArchiveObject,
+    parent: (OwnerHeaderId, u64),
+    fetch_verifier: [u8; 32],
     _fee: CatalogReadReservation,
 }
 
@@ -86,6 +91,32 @@ impl MemberAdds {
 
     fn reserve_output(&mut self) -> Result<(), AppError> {
         self.covered.try_reserve(1).map_err(|_| denied())
+    }
+
+    pub(super) fn encode_selected_successor(
+        &self,
+        store: &ServerStore,
+        context: V2PendingJoinContextData,
+        welcome: &[u8],
+        request: &V2MemberAddRequestData,
+    ) -> Result<Vec<u8>, AppError> {
+        self.require_current()?;
+        let index = self
+            .covered
+            .iter()
+            .position(|entry| entry.parent == request.parent_data())
+            .ok_or_else(denied)?;
+        let current = &self.covered[index];
+        if !request.matches_verifier_data(current.fetch_verifier) {
+            return Err(denied());
+        }
+        let predecessor = index
+            .checked_sub(1)
+            .map_or(welcome, |prior| self.covered[prior].file.1.as_slice());
+        let key = Zeroizing::new(store.keys.db_key()?);
+        let data = codec::open_member_add(&key, context, predecessor, &current.file.1)?;
+        self.require_current()?;
+        Ok(data.delivery)
     }
 
     pub(super) fn cover<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore>(
@@ -163,6 +194,7 @@ impl MemberAdds {
         write_held(store, &pending.path, &pending.sealed, &mut pending.original)?;
         let opened = codec::open_member_add(&key, context, predecessor, &pending.sealed)?;
         let selected = opened.require_original_candidate(&context.vault, &pending.candidate)?;
+        let fetch = node.member_add_request_data(core)?;
         require_live()?;
         self.first.as_ref().ok_or_else(denied)?.require_current()?;
         let retired = install_transition(core, node, &mut pending.candidate, selected)?;
@@ -178,6 +210,8 @@ impl MemberAdds {
                 pending.original.expect("held covered transition").file,
                 pending.sealed,
             ),
+            parent: fetch.parent_data(),
+            fetch_verifier: fetch.verifier_data(),
             _fee: pending.fee,
         });
         Ok(retired)
@@ -233,12 +267,15 @@ impl MemberAdds {
             if let Some(first) = &first {
                 first.require_current()?;
             }
+            let fetch = node.member_add_request_data(core)?;
             store.validate_mounted_governance_layout()?;
             let retired = install_transition(core, node, &mut candidate, selected)?;
             self.evicted = retired.terminal_data().is_some();
             self.covered.push(Covered {
                 path,
                 file,
+                parent: fetch.parent_data(),
+                fetch_verifier: fetch.verifier_data(),
                 _fee: fee,
             });
             drop(retired);
