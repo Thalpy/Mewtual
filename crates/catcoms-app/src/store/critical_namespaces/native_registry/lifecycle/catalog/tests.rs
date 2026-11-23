@@ -210,3 +210,64 @@ fn lifecycle3_catalog_upgrade_refuses_unknown_entries_and_every_truncated_origin
     trailing.push(0);
     assert!(upgrade_data(&trailing, &VAULT, cap).is_err());
 }
+
+#[test]
+fn shared_history_declaration_only_adds_eight_and_predecessor_refuses() {
+    use crate::store::critical_namespaces::{
+        governance_namespace_codec::{prepare_family_declaration_data, GovernanceCatalogFamily},
+        joined_pin::namespace as joined,
+        shared_history_namespace as history,
+    };
+    let (before, cap) = original(None, false);
+    let native = upgrade_data(&before, &VAULT, cap).unwrap();
+    let governed =
+        prepare_family_declaration_data(&native, &VAULT, GovernanceCatalogFamily::NativeLifecycle)
+            .unwrap();
+    let joined = joined::prepare_declaration(&governed, &VAULT).unwrap();
+    assert!(history::prepare_declaration(&governed, &VAULT).is_err());
+    let prior =
+        catalog_declaration::insert_entry_data(&joined, &VAULT, 1, 2, &join(2, true)).unwrap();
+    let declaration = history::prepare_declaration(&prior, &VAULT).unwrap();
+    history::verify_declaration(&prior, &declaration, &VAULT).unwrap();
+    let original = outer::parse(&prior, &VAULT, outer::MAX_ENVELOPE_PLAIN).unwrap();
+    let next = outer::parse(&declaration, &VAULT, outer::MAX_ENVELOPE_PLAIN).unwrap();
+    assert_eq!(next.count, original.count + 1);
+    assert_eq!(next.parent, Some(original.digest));
+    for index in 0..original.count {
+        let old = original.entry(index).unwrap();
+        let new = next.entry(index).unwrap();
+        assert_eq!(
+            (old.id, old.version, old.payload),
+            (new.id, new.version, new.payload)
+        );
+    }
+    let parsed =
+        grammar::parse_shared_history_native_registry_layout(&declaration, &VAULT).unwrap();
+    let row = &parsed.rows[0].as_ref().unwrap().metadata;
+    assert_eq!(row.scheduling, grammar::Scheduling::Paused);
+    assert_eq!(row.execution.unwrap().spent, 1);
+    assert!(grammar::parse_joined_native_registry_layout(&declaration, &VAULT, true).is_err());
+    assert!(grammar::parse_governed_native_registry_layout(&declaration, &VAULT, true).is_err());
+    assert!(grammar::parse_shared_history_native_registry_layout(&prior, &VAULT).is_err());
+    assert!(history::prepare_declaration(&declaration, &VAULT).is_err());
+    assert!(history::verify_declaration(&joined, &declaration, &VAULT).is_err());
+    assert!(history::verify_declaration(&prior, &declaration, &[0x99; 32]).is_err());
+
+    let descriptor = parsed.shared_history_payload.unwrap();
+    let wrong_version =
+        catalog_declaration::insert_entry_data(&prior, &VAULT, history::ID, 2, descriptor).unwrap();
+    let mut foreign = descriptor.to_vec();
+    *foreign.last_mut().unwrap() ^= 1;
+    let foreign = catalog_declaration::insert_entry_data(
+        &prior,
+        &VAULT,
+        history::ID,
+        history::VERSION,
+        &foreign,
+    )
+    .unwrap();
+    for malformed in [&wrong_version, &foreign] {
+        assert!(history::verify_declaration(&prior, malformed, &VAULT).is_err());
+        assert!(grammar::parse_shared_history_native_registry_layout(malformed, &VAULT).is_err());
+    }
+}

@@ -121,8 +121,10 @@ The history disk implementation verifies a complete WAL, keeps the original file
 identities through the barriers and selects the exact manifest under a keyed ActionId
 locator. Recovery completes the same bytes after a torn bundle or selector. Native
 retries retain the presealed WAL and its original file so they can write the missing
-suffix. Cold recovery preserves a partial WAL it cannot authenticate. Native catalog
-declaration and desktop history mounting remain open. The disk owner checks a bounded
+suffix. Cold recovery preserves a partial WAL it cannot authenticate. The versioned
+catalog declaration binds the exact Current, joined pin and native registry descriptors
+and leaves every earlier namespace entry byte-identical. Earlier catalog grammars
+refuse it. Physical declaration and desktop history mounting remain open. The disk owner checks a bounded
 physical inventory against separate record and byte limits before admitting a new WAL.
 The quota check charges partially written files at their final size. At capacity,
 existing originals and idempotent retries remain readable and new writes are refused.

@@ -106,6 +106,7 @@ pub(super) struct Parsed<'a> {
     // entry. JOIN must conserve its version as well as its descriptor bytes;
     // choosing the writer's historical default would relabel index2 as1.
     pub(super) native_registry_version: Option<u32>,
+    pub(super) shared_history_payload: Option<&'a [u8]>,
 }
 
 /// Fixed, inert classification retained after dropping a complete plaintext. Digest equality
@@ -131,6 +132,7 @@ pub(in crate::store) struct Summary {
     pub(super) member_outbox_payload_digest: Option<[u8; 32]>,
     pub(super) joined_pin_payload_digest: Option<[u8; 32]>,
     pub(super) native_registry_payload_digest: Option<[u8; 32]>,
+    pub(super) shared_history_payload_digest: Option<[u8; 32]>,
 }
 impl Parsed<'_> {
     pub(super) fn summary(&self, framed: [u8; 32]) -> Summary {
@@ -162,6 +164,9 @@ impl Parsed<'_> {
                 .map(|bytes| *blake3::hash(bytes).as_bytes()),
             native_registry_payload_digest: self
                 .native_registry_payload
+                .map(|bytes| *blake3::hash(bytes).as_bytes()),
+            shared_history_payload_digest: self
+                .shared_history_payload
                 .map(|bytes| *blake3::hash(bytes).as_bytes()),
         }
     }
@@ -203,6 +208,7 @@ struct SupportedLayout {
     member_outbox: bool,
     joined_pin: bool,
     native_registry: Option<u32>,
+    shared_history: bool,
 }
 impl SupportedLayout {
     const PENDING_ONLY: Self = Self {
@@ -213,6 +219,7 @@ impl SupportedLayout {
         member_outbox: false,
         joined_pin: false,
         native_registry: None,
+        shared_history: false,
     };
     const ARCHIVE_BOOTSTRAP: Self = Self {
         archive: true,
@@ -338,6 +345,30 @@ pub(super) fn parse_joined_native_registry_layout<'a>(
         },
     )?;
     if parsed.joined_pin_payload.is_none() || parsed.native_registry_payload.is_none() {
+        return Err(refused());
+    }
+    Ok(parsed)
+}
+
+/// Shared-history DATA grammar for the new declaration and its own future
+/// physical reader. The joined and governed owners keep their old refusal.
+pub(super) fn parse_shared_history_native_registry_layout<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+) -> Result<Parsed<'a>, AppError> {
+    let parsed = parse_known(
+        plain,
+        domain,
+        SupportedLayout {
+            joined_pin: true,
+            shared_history: true,
+            ..SupportedLayout::GOVERNANCE_LAYOUT
+                .executing(true)
+                .member_outbox(true)
+                .native_registry(Some(3))
+        },
+    )?;
+    if parsed.shared_history_payload.is_none() {
         return Err(refused());
     }
     Ok(parsed)
@@ -513,6 +544,7 @@ fn parse_known<'a>(
             joined_pin_payload: None,
             native_registry_payload: None,
             native_registry_version: None,
+            shared_history_payload: None,
         });
     }
     let mut rows = std::array::from_fn(|_| None);
@@ -529,6 +561,7 @@ fn parse_known<'a>(
     let mut joined_pin_payload = None;
     let mut native_registry_payload = None;
     let mut native_registry_version = None;
+    let mut shared_history_payload = None;
     for index in 0..envelope.count {
         let entry = envelope.entry(index)?;
         match entry.id {
@@ -639,6 +672,19 @@ fn parse_known<'a>(
                 native_registry_payload = Some(entry.payload);
                 native_registry_version = Some(entry.version);
             }
+            super::shared_history_namespace::ID
+                if layout.shared_history
+                    && entry.version == super::shared_history_namespace::VERSION =>
+            {
+                super::shared_history_namespace::validate_descriptor(
+                    entry.payload,
+                    current_layout.ok_or_else(refused)?,
+                    current_payload.ok_or_else(refused)?,
+                    joined_pin_payload.ok_or_else(refused)?,
+                    native_registry_payload.ok_or_else(refused)?,
+                )?;
+                shared_history_payload = Some(entry.payload);
+            }
             _ => return Err(refused()),
         }
     }
@@ -660,6 +706,7 @@ fn parse_known<'a>(
         joined_pin_payload,
         native_registry_payload,
         native_registry_version,
+        shared_history_payload,
     })
 }
 
@@ -848,6 +895,7 @@ pub(super) fn successor(current: &Summary, next: &Summary) -> Result<(), AppErro
     // JOIN cannot remove, normalize or replace it, including in a validly sealed stage.
     if current.native_registry_payload_digest != next.native_registry_payload_digest
         || current.joined_pin_payload_digest != next.joined_pin_payload_digest
+        || current.shared_history_payload_digest != next.shared_history_payload_digest
     {
         return Err(refused());
     }

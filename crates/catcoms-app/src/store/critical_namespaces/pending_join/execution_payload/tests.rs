@@ -184,6 +184,7 @@ fn summary(
         member_outbox_payload_digest: None,
         joined_pin_payload_digest: None,
         native_registry_payload_digest: None,
+        shared_history_payload_digest: None,
     }
 }
 fn original_metadata(n: u8, active: bool) -> codec::Metadata {
