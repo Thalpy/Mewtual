@@ -88,10 +88,11 @@ use catcoms_rt::{
     CryptoRngCore, DiscoveredPeer, MeshTransport, OsCryptoRng, PeerConnectionSnapshot, PeerId,
     ProtocolId, RendezvousRegistration, RequestCancellation, Responder, SharedRequestKeepalive,
     SystemClock, Topic, TransportError, TransportEvent, CHAT_V2_DEPENDENCY_KIND,
-    CHAT_V2_DEPENDENCY_REQUEST_MAX_BYTES, CHAT_V2_DEPENDENCY_RESPONSE_MAX_BYTES, CHAT_V2_JOIN_KIND,
-    CHAT_V2_JOIN_REQUEST_MAX_BYTES, CHAT_V2_JOIN_RESPONSE_MAX_BYTES, FILE_BRIDGE_KIND,
-    FILE_SERVICE_REQUEST_MAX_BYTES, FILE_SERVICE_RESPONSE_MAX_BYTES, FILE_SOURCE_KIND,
-    MAX_PEER_DIAL_BATCH,
+    CHAT_V2_DEPENDENCY_REQUEST_MAX_BYTES, CHAT_V2_DEPENDENCY_RESPONSE_MAX_BYTES,
+    CHAT_V2_GOVERNING_KIND, CHAT_V2_GOVERNING_REQUEST_MAX_BYTES,
+    CHAT_V2_GOVERNING_RESPONSE_MAX_BYTES, CHAT_V2_JOIN_KIND, CHAT_V2_JOIN_REQUEST_MAX_BYTES,
+    CHAT_V2_JOIN_RESPONSE_MAX_BYTES, FILE_BRIDGE_KIND, FILE_SERVICE_REQUEST_MAX_BYTES,
+    FILE_SERVICE_RESPONSE_MAX_BYTES, FILE_SOURCE_KIND, MAX_PEER_DIAL_BATCH,
 };
 use futures::stream::FuturesUnordered;
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, StreamExt};
@@ -457,6 +458,10 @@ impl BytesCodec {
             Some(CHAT_V2_DEPENDENCY_KIND) => (
                 CHAT_V2_DEPENDENCY_REQUEST_MAX_BYTES,
                 CHAT_V2_DEPENDENCY_RESPONSE_MAX_BYTES,
+            ),
+            Some(CHAT_V2_GOVERNING_KIND) => (
+                CHAT_V2_GOVERNING_REQUEST_MAX_BYTES,
+                CHAT_V2_GOVERNING_RESPONSE_MAX_BYTES,
             ),
             _ => (MAX_FRAME, MAX_FRAME),
         };
@@ -3654,6 +3659,7 @@ struct Actor {
     event_tx: mpsc::Sender<TransportEvent>,
     native_chat_join: Option<Arc<native_chat_join::Slot>>,
     native_chat_dependencies: Option<Arc<native_chat_join::Slot>>,
+    native_chat_governing: Option<Arc<native_chat_join::Slot>>,
     native_member_gossip: Option<native_chat_members::Registration>,
     delivery: event_dispatch::Dispatcher,
     delivery_budget: Arc<event_dispatch::Budget>,
@@ -5435,6 +5441,7 @@ impl Actor {
                         Some(CHAT_V2_DEPENDENCY_KIND) => {
                             Some(self.native_chat_dependencies.as_deref())
                         }
+                        Some(CHAT_V2_GOVERNING_KIND) => Some(self.native_chat_governing.as_deref()),
                         _ => None,
                     };
                     let (native_slot, service) = if let Some(dedicated) = dedicated {
@@ -5828,6 +5835,7 @@ pub struct MeshService {
     event_rx: Mutex<mpsc::Receiver<TransportEvent>>,
     native_chat_join: Option<NativeChatJoinIngress>,
     native_chat_dependencies: Option<NativeChatJoinIngress>,
+    native_chat_governing: Option<NativeChatJoinIngress>,
     native_chat_dependency_outbound: Option<Arc<Semaphore>>,
     native_member_gossip_slot: Option<Arc<Semaphore>>,
     #[cfg(test)]
@@ -5972,6 +5980,12 @@ impl MeshService {
         let native_chat_dependencies = dependency_slot
             .as_ref()
             .map(|slot| NativeChatJoinIngress(Arc::downgrade(slot)));
+        let governing_slot = native
+            .as_ref()
+            .map(|_| Arc::new(native_chat_join::Slot::default()));
+        let native_chat_governing = governing_slot
+            .as_ref()
+            .map(|slot| NativeChatJoinIngress(Arc::downgrade(slot)));
         let native_chat_dependency_outbound = native.as_ref().map(|_| Arc::new(Semaphore::new(1)));
         let native_member_gossip_slot = native.as_ref().map(|_| Arc::new(Semaphore::new(1)));
         #[cfg(test)]
@@ -6013,6 +6027,7 @@ impl MeshService {
             event_tx,
             native_chat_join: join_slot,
             native_chat_dependencies: dependency_slot,
+            native_chat_governing: governing_slot,
             native_member_gossip: None,
             delivery: event_dispatch::Dispatcher::default(),
             delivery_budget: delivery_budget.clone(),
@@ -6088,6 +6103,7 @@ impl MeshService {
             event_rx: Mutex::new(event_rx),
             native_chat_join,
             native_chat_dependencies,
+            native_chat_governing,
             native_chat_dependency_outbound,
             native_member_gossip_slot,
             #[cfg(test)]
@@ -6116,6 +6132,11 @@ impl MeshService {
     /// have no lane and drop this request kind before application delivery.
     pub fn native_chat_join_ingress(&self) -> Option<NativeChatJoinIngress> {
         self.native_chat_join.clone()
+    }
+
+    /// Observe the original native actor's dedicated governing request queue.
+    pub fn native_chat_governing_ingress(&self) -> Option<NativeChatJoinIngress> {
+        self.native_chat_governing.clone()
     }
 
     /// Capture one addressed dependency lane of this original native mesh.

@@ -34,6 +34,10 @@ pub const CHAT_V2_JOIN_RESPONSE_MAX_BYTES: usize = 768 * 1024;
 pub const CHAT_V2_DEPENDENCY_KIND: u8 = 32;
 pub const CHAT_V2_DEPENDENCY_REQUEST_MAX_BYTES: usize = 256;
 pub const CHAT_V2_DEPENDENCY_RESPONSE_MAX_BYTES: usize = 512 * 1024;
+/// One immediate governing transition over an existing native connection.
+pub const CHAT_V2_GOVERNING_KIND: u8 = 33;
+pub const CHAT_V2_GOVERNING_REQUEST_MAX_BYTES: usize = 256;
+pub const CHAT_V2_GOVERNING_RESPONSE_MAX_BYTES: usize = 64 * 1024;
 
 /// A stable peer identifier. In production this is derived from a libp2p public
 /// key; here it is an opaque 32-byte value so tests need no real keys.

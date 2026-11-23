@@ -15,6 +15,8 @@ pub const MAX_V2_MEMBER_ADD_FRAME_BYTES: usize = OVERHEAD
     + MAX_ADMISSION_BYTES
     + MAX_STATE_BYTES
     + MAX_TEXT_RECEIVED_ADD_COMMIT_BYTES;
+const _: () =
+    assert!(MAX_V2_MEMBER_ADD_FRAME_BYTES <= catcoms_rt::CHAT_V2_GOVERNING_RESPONSE_MAX_BYTES);
 
 pub struct V2MemberAddFrameData<'a> {
     header: SignedOwnerHeader,

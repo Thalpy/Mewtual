@@ -377,8 +377,11 @@ new graph and snapshot with the corresponding Core candidate. After the host
 selects the exact signed Header, state and SDK authenticator, Sync installs
 the pair under the original joined fence. The member keeps its original
 Admission and the old transport observation retires. The warm and restored
-graphs can stage the same Add with independent payment. The mounted durable
-writer and delivery to existing members remain open work.
+graphs can stage the same Add with independent payment. The governing frame
+keeps the signed Header readable ahead of the Admission and encrypted Commit
+so damaged bodies still allow fork detection. Native TCP assigns this
+exchange its own bounded request queue. The mounted receiver's durable
+selection and the catch-up service remain open work.
 
 An independently reopened Pending with neither Welcome file can resend the
 exact original request over the same connected protocol. It verifies the

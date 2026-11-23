@@ -39,6 +39,11 @@ async fn new_service_rejects_oversized_headers_before_body_read_or_allocation() 
             CHAT_V2_JOIN_REQUEST_MAX_BYTES,
             CHAT_V2_JOIN_RESPONSE_MAX_BYTES,
         ),
+        (
+            CHAT_V2_GOVERNING_KIND,
+            CHAT_V2_GOVERNING_REQUEST_MAX_BYTES,
+            CHAT_V2_GOVERNING_RESPONSE_MAX_BYTES,
+        ),
     ] {
         let mut codec = BytesCodec::default();
         let mut output = Cursor::new(Vec::new());

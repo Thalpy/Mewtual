@@ -135,7 +135,8 @@ mod tests {
     use crate::{keypair_from_seed, MeshService, NativeTcpPreparation, RR_PROTOCOL};
     use bytes::Bytes;
     use catcoms_rt::{
-        MeshTransport, ProtocolId, RequestCancellation, TransportError, CHAT_V2_JOIN_KIND,
+        MeshTransport, ProtocolId, RequestCancellation, TransportError, CHAT_V2_GOVERNING_KIND,
+        CHAT_V2_JOIN_KIND,
     };
     use std::future::Future;
     use std::time::Duration;
@@ -176,6 +177,7 @@ mod tests {
             .unwrap();
         let (client, _) = MeshService::new_tcp(None, &[]).unwrap();
         assert!(client.native_chat_join_ingress().is_none());
+        assert!(client.native_chat_governing_ingress().is_none());
         let address = bounded(server.next_listen_addr()).await.unwrap();
         bounded(client.dial(format!("{address}/p2p/{id}").parse().unwrap()))
             .await
@@ -239,6 +241,31 @@ mod tests {
         // Keep this exact receiver live until after the actual lower reply.
         let (response, ()) = bounded(async { tokio::join!(join(), serve) }).await;
         assert_eq!(response.unwrap().as_ref(), b"Welcome");
+        let governing = server.native_chat_governing_ingress().unwrap();
+        let mut governance = governing.try_attach(Arc::new(Current(None))).unwrap();
+        let handle_governance = async {
+            let Some(TransportEvent::Request {
+                from: source,
+                data,
+                responder,
+                ..
+            }) = governance.next().await
+            else {
+                panic!("native governing request");
+            };
+            assert_eq!(source, from);
+            assert_eq!(data.as_ref(), &[CHAT_V2_GOVERNING_KIND, 3]);
+            responder
+                .try_respond(Bytes::from_static(b"governing successor"))
+                .unwrap();
+        };
+        let request = client.request_connected(
+            peer,
+            ProtocolId(RR_PROTOCOL),
+            Bytes::from_static(&[CHAT_V2_GOVERNING_KIND, 3]),
+        );
+        let (response, ()) = bounded(async { tokio::join!(request, handle_governance) }).await;
+        assert_eq!(response.unwrap().as_ref(), b"governing successor");
         drop(current);
 
         let serve_ordinary = async {
@@ -262,6 +289,7 @@ mod tests {
         assert_eq!(response.unwrap().as_ref(), b"ordinary");
         let mut final_receiver = ingress.try_attach(Arc::new(Current(None))).unwrap();
         drop(server);
+        assert!(bounded(governance.next()).await.is_none());
         assert!(bounded(final_receiver.next()).await.is_none());
         assert!(ingress.try_attach(Arc::new(Current(None))).is_none());
     }

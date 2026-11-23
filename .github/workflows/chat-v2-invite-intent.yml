@@ -350,10 +350,10 @@ jobs:
         if: github.event_name == 'pull_request' || inputs.scope == 'joined-member' || inputs.scope == 'native-contact'
         run: python .github/scripts/check-chat-v2-invite-intent.py member-dependency-transport
       - name: Check Chat V2 request and response bounds before allocation
-        if: inputs.scope == 'joined-storage'
+        if: github.event_name == 'pull_request' || inputs.scope == 'joined-storage' || inputs.scope == 'selected-history'
         run: python .github/scripts/check-chat-v2-invite-intent.py joined-wire
-      - name: Check native JoinRequest routing and retirement over TCP
-        if: inputs.scope == 'joined-storage'
+      - name: Check native JoinRequest and governing routing and retirement over TCP
+        if: github.event_name == 'pull_request' || inputs.scope == 'joined-storage' || inputs.scope == 'selected-history'
         run: python .github/scripts/check-chat-v2-invite-intent.py joined-wire-ingress
       - name: Check the pinned governed reader against staged and selected joined pins
         if: inputs.scope == 'joined-predecessor'
