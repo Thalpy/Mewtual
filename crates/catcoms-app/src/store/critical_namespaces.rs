@@ -108,7 +108,7 @@ pub use read_pool::CriticalCatalogReadPool;
 use read_pool::{CatalogReadReservation, EMPTY_READ_FEE};
 pub(in crate::store) mod pending_join;
 pub(in crate::store) mod pending_join_codec;
-mod shared_history_namespace;
+pub(in crate::store) mod shared_history_namespace;
 pub use pending_join::{
     ActivatedCheckpointJoin, CheckpointJoinExecutionPolicy, CheckpointJoinNetwork,
     CheckpointJoinSubmissionStatus, JournalledCheckpointJoinPreparation, PendingJoinCatalogPolicy,

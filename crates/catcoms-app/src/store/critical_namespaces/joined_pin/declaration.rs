@@ -47,7 +47,7 @@ impl DeclarationLeaves {
         })
     }
 
-    fn fields(self) -> [[u8; 32]; 4] {
+    pub(in crate::store) fn fields(self) -> [[u8; 32]; 4] {
         [
             self.governance_marker,
             self.outbox_marker,

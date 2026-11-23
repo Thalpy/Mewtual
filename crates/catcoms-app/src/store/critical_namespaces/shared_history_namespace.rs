@@ -9,6 +9,8 @@ use crate::AppError;
 use catcoms_wire::{Decoder, Encoder};
 use zeroize::Zeroizing;
 
+pub(in crate::store) mod declaration;
+
 pub(super) const ID: u32 = 8;
 pub(super) const VERSION: u32 = 1;
 const TAG: &[u8] = b"catcoms/private-chat-v2-shared-history-namespace/v1\0";

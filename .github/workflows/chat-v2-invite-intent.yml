@@ -310,6 +310,9 @@ jobs:
       - name: Check exact shared history catalog declarations and older readers
         if: github.event_name == 'pull_request' || inputs.scope == 'joined-member' || inputs.scope == 'member-history'
         run: python .github/scripts/check-chat-v2-invite-intent.py member-shared-history-declaration
+      - name: Check shared history restart seed custody and layout binding
+        if: github.event_name == 'pull_request' || inputs.scope == 'joined-member' || inputs.scope == 'member-history'
+        run: python .github/scripts/check-chat-v2-invite-intent.py member-shared-history-seed
       - name: Check exact ActionId recovery after publication and restart
         if: github.event_name == 'pull_request' || inputs.scope == 'joined-member' || inputs.scope == 'member-history'
         run: python .github/scripts/check-chat-v2-invite-intent.py member-action-history
