@@ -117,6 +117,42 @@ impl<T, R> V2TextOwnedCurrent<T, R> {
 }
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurrent<T, R> {
+    pub(super) fn prepare_governed_member_subscription(
+        &self,
+        store: &ServerStore,
+        verifier: &catcoms_replication::chat::V2GeneralPrefixVerifier,
+        channel: u128,
+    ) -> Result<
+        (
+            catcoms_rt::Topic,
+            catcoms_sync::owner_v2::V2MemberPublicationObservation,
+        ),
+        AppError,
+    > {
+        match &self.core {
+            OwnedCurrent::Warm(current) => {
+                current.prepare_governed_member_subscription(store, verifier, channel)
+            }
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
+    pub(super) fn open_governed_member_frame(
+        &self,
+        store: &ServerStore,
+        verifier: &catcoms_replication::chat::V2GeneralPrefixVerifier,
+        channel: u128,
+        topic: &catcoms_rt::Topic,
+        wire: &[u8],
+    ) -> Result<catcoms_sync::owner_v2::SelectedV2MemberEnvelope, AppError> {
+        match &self.core {
+            OwnedCurrent::Warm(current) => {
+                current.open_governed_member_frame(store, verifier, channel, topic, wire)
+            }
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
     pub(super) fn prepare_governed_member_submission(
         &mut self,
         store: &ServerStore,

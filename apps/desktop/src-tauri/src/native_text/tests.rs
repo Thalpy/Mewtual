@@ -1395,6 +1395,45 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
         }).await.expect("the automatic founder worker sent exact saved text to the joined receiver");
     }
 
+    let member_text = "Joined message on the founder's installed receiver";
+    let send = native_send_request(&joiner_window, &original, 20, member_text);
+    run(&joiner_queue).await;
+    let send = found_value(send.await.unwrap());
+    let member_action = send["message_id"].as_str().unwrap();
+    assert_eq!(send["ordinal"], "0");
+    timeout(Duration::from_secs(18), async {
+        loop {
+            let received = invite_command(&founder_window, "get_message_page",
+                archive_request(&found, serde_json::json!({"receivedAction":member_action})));
+            let task = founder_queue.lock().unwrap().pop();
+            if let Some(task) = task { task.await; }
+            if let tauri::ipc::InvokeResponse::Ok(body) = received.await.unwrap() {
+                let body: serde_json::Value = body.deserialize().unwrap();
+                if !body["item"].is_null() {
+                    assert_eq!(body, serde_json::json!({
+                        "backend":"text-v2","scope":"received-live",
+                        "item":{"action":member_action,"text":member_text,"certainty":"provisional"},
+                    }));
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(35)).await;
+        }
+        loop {
+            let page = native_history_request(&joiner_window, &original, "0", None, 8);
+            let task = joiner_queue.lock().unwrap().pop();
+            if let Some(task) = task { task.await; }
+            if let tauri::ipc::InvokeResponse::Ok(body) = page.await.unwrap() {
+                let body: serde_json::Value = body.deserialize().unwrap();
+                if body["items"][0]["status"] == "submitted" {
+                    assert_eq!(body["items"][0]["action"], member_action);
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(35)).await;
+        }
+    }).await.expect("the native founder received the member's original over TCP and the joined outbox checkpointed");
+
     // The saved native row can be reported after the actual founder retires.
     let locked = snapshot_request(&founder_window, None);
     run(&founder_queue).await;
@@ -1440,8 +1479,8 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     drop(local);
     pending.await;
     let empty = found_value(empty.await.unwrap());
-    assert_eq!(empty["end_exclusive"], "0");
-    assert!(empty["items"].as_array().unwrap().is_empty());
+    assert_eq!(empty["end_exclusive"], "1");
+    assert_eq!(empty["items"][0]["action"], member_action);
     let send = native_send_request(&joiner_window, &original, 9, "Joined message");
     run(&joiner_queue).await;
     let saved = found_value(send.await.unwrap());
@@ -1453,9 +1492,9 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     run(&joiner_queue).await;
     let history = found_value(history.await.unwrap());
     assert_eq!(history["scope"], "own-saved-originals");
-    assert_eq!(history["end_exclusive"], "1");
-    assert_eq!(history["items"][0]["action"], saved["message_id"]);
-    assert_eq!(history["items"][0]["body"]["text"], "Joined message");
+    assert_eq!(history["end_exclusive"], "2");
+    assert_eq!(history["items"][1]["action"], saved["message_id"]);
+    assert_eq!(history["items"][1]["body"]["text"], "Joined message");
     let locked = snapshot_request(&joiner_window, None);
     run(&joiner_queue).await;
     assert!(snapshot_result(locked.await.unwrap())["continuity_error"].is_null());
@@ -1486,7 +1525,7 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     let retry = native_send_request(&window, &restored[0], 9, "Joined message");
     run(&queue).await;
     assert_eq!(found_value(retry.await.unwrap()), saved);
-    let page = native_history_request(&window, &restored[0], "0", Some("1"), 8);
+    let page = native_history_request(&window, &restored[0], "0", Some("2"), 8);
     run(&queue).await;
     assert_eq!(found_value(page.await.unwrap()), history);
     let changed = native_send_request(&window, &restored[0], 9, "Changed joined message");
@@ -1496,9 +1535,9 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     run(&queue).await;
     let fresh = found_value(fresh.await.unwrap());
     assert_eq!(fresh["disposition"], "saved-local");
-    assert_eq!(fresh["ordinal"], "1");
+    assert_eq!(fresh["ordinal"], "2");
     assert_ne!(fresh["message_id"], saved["message_id"]);
-    let fixed_page = native_history_request(&window, &restored[0], "0", Some("1"), 8);
+    let fixed_page = native_history_request(&window, &restored[0], "0", Some("2"), 8);
     run(&queue).await;
     assert_eq!(found_value(fixed_page.await.unwrap()), history);
     let probe = invite_command(

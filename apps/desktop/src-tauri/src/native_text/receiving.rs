@@ -2,8 +2,9 @@
 //! projection and archive selection under the same local permit.
 use super::{connected::Source, *};
 use catcoms_app::store::{
-    NativeTextJoinedMemberLedger, NativeTextJoinedMemberReceiver, NativeTextJoinedReceivedOriginal,
-    NativeTextJoinedRowSelection, NativeTextJoinedSelectionPreparation, NativeUiInvocationMetadata,
+    NativeTextFounderMemberReceiver, NativeTextJoinedMemberLedger, NativeTextJoinedMemberReceiver,
+    NativeTextJoinedReceivedOriginal, NativeTextJoinedRowSelection,
+    NativeTextJoinedSelectionPreparation, NativeUiInvocationMetadata,
 };
 use catcoms_net::{NativeChatMemberFrame, NativeChatMemberGossipEvent};
 use catcoms_replication::chat::{ActionId, ActionState, V2OrdinaryReceiveStatus};
@@ -13,6 +14,79 @@ use std::time::Duration;
 const REOPEN_DELAY: Duration = Duration::from_secs(1);
 const DEPENDENCY_TIMEOUT: Duration = Duration::from_secs(2);
 const DEPENDENCIES_PER_FRAME: usize = 4;
+
+pub(super) async fn run_founder<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    source: &Arc<Source>,
+) {
+    let mut scope = source.negative();
+    let channel = source.channel();
+    let mut receiver: Option<NativeTextFounderMemberReceiver<OsCryptoRng>> = None;
+    loop {
+        let state = app.state::<AppState>();
+        let Some(mut original) = receiver.take() else {
+            tokio::select! {
+                biased;
+                _ = scope.cancelled() => return,
+                _ = tokio::time::sleep(REOPEN_DELAY) => {},
+            }
+            let local = source.member_work();
+            let Some(permit) = local.try_background() else {
+                continue;
+            };
+            let Some(preparation) = source.capture(&state).await else {
+                continue;
+            };
+            let caller = scope.clone();
+            let Ok(Ok(prepared)) = tauri::async_runtime::spawn_blocking(move || {
+                let _permit = permit;
+                preparation.prepare_founder_member_ingress(channel, caller)
+            })
+            .await
+            else {
+                continue;
+            };
+            receiver = prepared.open().await.ok();
+            continue;
+        };
+        let event = tokio::select! {
+            biased;
+            _ = scope.cancelled() => return,
+            event = original.next() => event,
+        };
+        match event {
+            Some(NativeChatMemberGossipEvent::Frame(frame)) => {
+                let Some(permit) = source.member_work().foreground(scope.clone()).await else {
+                    return;
+                };
+                let Some(preparation) = source.capture(&state).await else {
+                    receiver = Some(original);
+                    continue;
+                };
+                let output = tauri::async_runtime::spawn_blocking(move || {
+                    let _permit = permit;
+                    let action = preparation
+                        .receive_founder_member(&original, &frame)
+                        .ok()
+                        .flatten();
+                    (original, action)
+                })
+                .await;
+                if let Ok((original, action)) = output {
+                    receiver = Some(original);
+                    if let Some(action) = action {
+                        source.notify_received(app, &state, Some(action)).await;
+                    }
+                }
+            }
+            Some(NativeChatMemberGossipEvent::RecoveryNeeded) => receiver = Some(original),
+            None => {
+                drop(original);
+                source.notify_received(app, &state, None).await;
+            }
+        }
+    }
+}
 
 pub(super) async fn open(
     state: &AppState,

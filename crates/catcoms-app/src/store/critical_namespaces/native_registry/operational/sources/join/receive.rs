@@ -226,6 +226,19 @@ impl NativeTextJoinedArchivedActions {
 }
 
 impl NativeTextJoinedMemberProjection {
+    pub(in crate::store::critical_namespaces::native_registry) fn from_live(
+        projection: GuardedMessageProjection,
+        signal: RequestCancellation,
+        fee: CatalogReadReservation,
+    ) -> Self {
+        Self {
+            projection,
+            signal,
+            archive: None,
+            _fee: fee,
+        }
+    }
+
     /// Resolve inside the already acquired outer native UI guard.
     pub fn with_publication<T>(
         &self,

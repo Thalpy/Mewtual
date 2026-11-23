@@ -6,6 +6,7 @@ use catcoms_rt::{
     NativeChatKeyCurrentCheck, ProtocolId, RequestAuthority, Responder, CHAT_V2_JOIN_KIND,
     CHAT_V2_JOIN_REQUEST_MAX_BYTES, CHAT_V2_JOIN_RESPONSE_MAX_BYTES,
 };
+use tokio::sync::watch;
 
 struct JoinAuthority {
     mount: Arc<Scope>,
@@ -18,8 +19,13 @@ pub(super) fn constrain_founder_transport(
     mount: Arc<Scope>,
     source: NativeChatKeyCurrentCheck,
     caller: RequestCancellation,
+    invocation: Option<watch::Receiver<bool>>,
 ) -> RequestCancellation {
-    caller.clone().with_authority(Arc::new(JoinAuthority {
+    let signal = invocation.map_or_else(
+        || caller.clone(),
+        |live| RequestCancellation::new(live, caller.keepalive()),
+    );
+    signal.with_authority(Arc::new(JoinAuthority {
         mount,
         source: Arc::new(source),
         caller,

@@ -83,20 +83,6 @@ pub(in crate::store) use transaction::{
     MemberOutboxTestCut,
 };
 
-pub(in crate::store) enum FounderDebtOperation {
-    Prepare,
-    Checkpoint(MemberDebtBatch),
-}
-
-pub(in crate::store) enum FounderDebtOutcome {
-    Idle,
-    Prepared {
-        submission: catcoms_sync::owner_v2::PreparedV2MemberSubmission,
-        batch: MemberDebtBatch,
-        fee: crate::store::critical_namespaces::read_pool::CatalogReadReservation,
-    },
-    Checkpointed(u64),
-}
 #[allow(unused_imports)]
 pub(in crate::store) use transaction::{
     AdmittedMemberAppend, AdmittedMemberCommit, MemberAppendAdmissionFacts, MemberAppendOutcome,

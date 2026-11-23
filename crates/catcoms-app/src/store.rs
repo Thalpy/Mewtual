@@ -73,28 +73,28 @@ pub use critical_namespaces::{
     NativeRegistryPreparationPolicy, NativeRegistryStore, NativeTextCreationBudget,
     NativeTextCreationInputs, NativeTextCreationJob, NativeTextCreationPreparation,
     NativeTextCreationProgress, NativeTextCreationRefusal, NativeTextCreationRequest,
-    NativeTextCreationSettings, NativeTextFounderMemberPublication,
-    NativeTextFounderMemberPublicationReceipt, NativeTextGovernanceUpgrade,
-    NativeTextGovernedStorage, NativeTextHistoryResponseBudget, NativeTextHistoryResponseCredit,
-    NativeTextJoinedStorage, NativeTextMemberAdmissionFailure, NativeTextMemberBudget,
-    NativeTextMemberFinalPreparation, NativeTextMemberHistoryItem, NativeTextMemberHistoryPage,
-    NativeTextMemberHistoryStatus, NativeTextMemberJob, NativeTextMemberPreparation,
-    NativeTextMemberSaveJob, NativeTextRuntimeSelection, NativeTextSourceBudget,
-    NativeTextSourceCommand, NativeTextSourcePolicy, NativeTextSourcePreparation,
-    NativeTextSourceRetirement, NativeTextSourceRetirementPreparation,
-    NativeTextSourceRetirementRefusal, NativeTextSourceRetirementStatus, NativeTextSources,
-    NativeTextUiAddRetirement, NativeTextUiCandidate, NativeTextUiGarbage, NativeTextUiObservation,
-    NativeTextUiPreparation, NativeTextUiRetirement, NativeTextUiRetirementBatch,
-    NativeTextUiRetirementDrain, NativeTextUiRetirementState, NativeTextVault,
-    NativeTextVaultAuthentication, NativeTextVaultAuthenticationCheck, NativeTextVaultUpgrade,
-    NativeTextVaultUpgradeRefusal, NativeTextWorkRetirement, NativeTextWorkRetirementPreparation,
-    NativeUiInvocationBudget, NativeUiInvocationMetadata, NativeUiStateBudget, NativeUiStateCredit,
-    NativeUiStatePreparation, NativeUiStateRead, NativeUiStateSaved, PendingJoinCatalogPolicy,
-    PreparedArchiveBootstrapStore, PreparedFreshV2TextFounder, PreparedNativeRegistryMigration,
-    PreparedV2CurrentLayoutStore, PreparedV2GovernanceLayoutStore, ReturnedArchiveFounderCreation,
-    ReturnedArchiveFounderInputs, ReturnedArchiveFounderPlanning, ReturnedCheckpointJoinActivation,
-    V2CurrentLayoutPolicy, V2CurrentLayoutStore, V2GovernanceLayoutPolicy, V2GovernanceLayoutStore,
-    V2MemberOutboxPolicy,
+    NativeTextCreationSettings, NativeTextFounderMemberIngressPreparation,
+    NativeTextFounderMemberPublication, NativeTextFounderMemberPublicationReceipt,
+    NativeTextFounderMemberReceiver, NativeTextGovernanceUpgrade, NativeTextGovernedStorage,
+    NativeTextHistoryResponseBudget, NativeTextHistoryResponseCredit, NativeTextJoinedStorage,
+    NativeTextMemberAdmissionFailure, NativeTextMemberBudget, NativeTextMemberFinalPreparation,
+    NativeTextMemberHistoryItem, NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus,
+    NativeTextMemberJob, NativeTextMemberPreparation, NativeTextMemberSaveJob,
+    NativeTextRuntimeSelection, NativeTextSourceBudget, NativeTextSourceCommand,
+    NativeTextSourcePolicy, NativeTextSourcePreparation, NativeTextSourceRetirement,
+    NativeTextSourceRetirementPreparation, NativeTextSourceRetirementRefusal,
+    NativeTextSourceRetirementStatus, NativeTextSources, NativeTextUiAddRetirement,
+    NativeTextUiCandidate, NativeTextUiGarbage, NativeTextUiObservation, NativeTextUiPreparation,
+    NativeTextUiRetirement, NativeTextUiRetirementBatch, NativeTextUiRetirementDrain,
+    NativeTextUiRetirementState, NativeTextVault, NativeTextVaultAuthentication,
+    NativeTextVaultAuthenticationCheck, NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal,
+    NativeTextWorkRetirement, NativeTextWorkRetirementPreparation, NativeUiInvocationBudget,
+    NativeUiInvocationMetadata, NativeUiStateBudget, NativeUiStateCredit, NativeUiStatePreparation,
+    NativeUiStateRead, NativeUiStateSaved, PendingJoinCatalogPolicy, PreparedArchiveBootstrapStore,
+    PreparedFreshV2TextFounder, PreparedNativeRegistryMigration, PreparedV2CurrentLayoutStore,
+    PreparedV2GovernanceLayoutStore, ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs,
+    ReturnedArchiveFounderPlanning, ReturnedCheckpointJoinActivation, V2CurrentLayoutPolicy,
+    V2CurrentLayoutStore, V2GovernanceLayoutPolicy, V2GovernanceLayoutStore, V2MemberOutboxPolicy,
 };
 pub use critical_namespaces::{
     NativeTextJoinedArchivedActions, NativeTextJoinedDependencyExchange,
@@ -640,6 +640,7 @@ mod persistence {
     mod v2_group_directory;
     /// Chat V2 ordinary-member durable outbox; independent of the founder `v2_text` journal.
     pub(in crate::store) mod v2_member_outbox;
+    pub(in crate::store) mod v2_member_transport;
     pub(in crate::store) mod v2_shared_history;
     pub(in crate::store) mod v2_text;
     pub(in crate::store) use cold_source_read::v2_genesis_activation;

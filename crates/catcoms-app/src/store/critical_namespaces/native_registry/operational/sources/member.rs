@@ -11,12 +11,14 @@ use std::sync::Weak;
 mod admission;
 mod connected;
 mod publication;
+mod receiving;
 pub use admission::{
     NativeTextMemberAdmissionFailure, NativeTextMemberFinalPreparation, NativeTextMemberSaveJob,
 };
 pub use publication::{
     NativeTextFounderMemberPublication, NativeTextFounderMemberPublicationReceipt,
 };
+pub use receiving::{NativeTextFounderMemberIngressPreparation, NativeTextFounderMemberReceiver};
 type MemberKeys<T, R> = (Arc<RuntimeCell<T, R>>, NativeFounderKeys);
 type JoinKeys<T, R> = (MemberKeys<T, R>, [NativeChatPreparedKeyCut; 3]);
 

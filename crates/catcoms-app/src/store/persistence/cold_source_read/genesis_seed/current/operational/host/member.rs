@@ -50,9 +50,10 @@ use super::projection::{BoundV2TextFounderAnchor, V2TextProjectionDomain};
 use super::*;
 use crate::store::critical_namespaces::read_pool::CatalogReadReservation;
 use crate::store::persistence::v2_member_outbox::{
-    canonical_member_parents, member_outbox_key, FounderDebtOperation, FounderDebtOutcome,
-    MemberDebtClass, MemberOutboxContextId, MemberSignedOriginal,
+    canonical_member_parents, member_outbox_key, MemberDebtClass, MemberOutboxContextId,
+    MemberSignedOriginal,
 };
+use crate::store::persistence::v2_member_transport::{FounderDebtOperation, FounderDebtOutcome};
 use crate::store::persistence::v2_text::{PreparedV2TextParentCapture, V2TextFounderAnchorData};
 use crate::store::{NativeTextJoinedRowSelection, ServerStore};
 use catcoms_replication::chat::owner_facts::OwnerFactId;
@@ -70,6 +71,8 @@ use catcoms_rt::{
 use catcoms_sync::owner_v2::{V2MemberDraftInputs, MAX_V2_MEMBER_TRANSPORT_BYTES};
 use catcoms_sync::{ClosedV2JoinedNode, PreparedV2JoinedPrefix};
 use std::collections::VecDeque;
+mod receive;
+use receive::FounderReceivedLedger;
 
 /// Bounded live channel views per lane. Refuse beyond it; a view with a live Plan is never
 /// evicted (that would revoke the Plan's channel lifetime under an in-flight request).
@@ -115,18 +118,8 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         lane.validate_accounts(store)
             .map_err(|_| Refusal::Unavailable)?;
         let verifier = lane.verifier.as_ref().ok_or(Refusal::Unavailable)?;
-        let check_current =
-            |owner: &V2TextOwnedCurrent<T, R>,
-             governed: &mut super::governed_add::PendingGovernedAdd| {
-                let original = owner.borrow_current()?;
-                let resources = governed.parent.resources().clone();
-                store.with_v2_text_current(&original, |admission| {
-                    let guard = store.lock_v2_text_current_group(admission, &resources)?;
-                    lane.domain.require_current_source(admission)?;
-                    governed.require_selected_member_head(&guard, verifier.replay_data())
-                })
-            };
-        check_current(&self.owner, governed).map_err(|_| Refusal::Stale)?;
+        check_governed_member(&self.owner, governed, &lane.domain, verifier, store)
+            .map_err(|_| Refusal::Stale)?;
         let fee = store
             .archive_bootstrap_policy
             .as_ref()
@@ -166,7 +159,8 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     .owner
                     .prepare_governed_member_submission(store, verifier, item)
                     .map_err(|_| Refusal::Failed)?;
-                check_current(&self.owner, governed).map_err(|_| Refusal::Stale)?;
+                check_governed_member(&self.owner, governed, &lane.domain, verifier, store)
+                    .map_err(|_| Refusal::Stale)?;
                 if caller.is_cancelled() || !submission.is_current_cached() {
                     return Err(Refusal::Cancelled);
                 }
@@ -187,6 +181,22 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
             }
         }
     }
+}
+
+fn check_governed_member<T: MeshTransport, R: CryptoRngCore>(
+    owner: &V2TextOwnedCurrent<T, R>,
+    governed: &mut super::governed_add::PendingGovernedAdd,
+    domain: &V2TextProjectionDomain,
+    verifier: &V2GeneralPrefixVerifier,
+    store: &ServerStore,
+) -> Result<(), AppError> {
+    let original = owner.borrow_current()?;
+    let resources = governed.parent.resources().clone();
+    store.with_v2_text_current(&original, |admission| {
+        let guard = store.lock_v2_text_current_group(admission, &resources)?;
+        domain.require_current_source(admission)?;
+        governed.require_selected_member_head(&guard, verifier.replay_data())
+    })
 }
 
 const MEMBER_CHANNEL_LAYOUT_BYTES: usize = std::mem::size_of::<MemberChannel>() + 4 * 1024;
@@ -515,6 +525,7 @@ struct MemberChannel {
 pub(super) struct V2MemberLane {
     requests: MemberRequests,
     channels: Vec<MemberChannel>,
+    received: Option<FounderReceivedLedger>,
     verifier: Option<V2GeneralPrefixVerifier>,
     bound: Option<BoundV2TextFounderAnchor>,
     anchor: Option<V2TextFounderAnchorData>,
@@ -842,6 +853,7 @@ impl V2MemberLane {
         Ok(Self {
             requests: MemberRequests::new(),
             channels: Vec::with_capacity(MAX_MEMBER_CHANNELS),
+            received: None,
             verifier: None,
             bound: None,
             anchor: None,

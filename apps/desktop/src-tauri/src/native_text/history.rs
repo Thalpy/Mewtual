@@ -281,7 +281,7 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
         // destroy the paid Root page or its invoice while those guards exist.
         let state = app.state::<AppState>();
         let mut result = match invocation.read.request {
-            ReadRequest::Live(action) => execute_received(&invocation, action)
+            ReadRequest::Live(action) => execute_received(&state, &invocation, action)
                 .await
                 .map(Response::Received),
             ReadRequest::Own(read) => execute(&state, &invocation, read)
@@ -460,19 +460,38 @@ fn received_body(scope: &'static str, projection: Option<&GuardedProjection>) ->
     serde_json::json!({"backend":"text-v2","scope":scope,"item":item}).to_string()
 }
 
-async fn execute_received(call: &Invocation, action: ActionId) -> Result<ReceivedOutput, String> {
+async fn execute_received(
+    state: &AppState,
+    call: &Invocation,
+    action: ActionId,
+) -> Result<ReceivedOutput, String> {
     let local = call.member_work.clone();
     let guard = local.foreground(call.scope.clone()).await.ok_or(STALE)?;
+    let founder = if call.selection.founder().is_some() {
+        let Preparation::Founder(original) = capture(state, call).await? else {
+            return Err(STALE.to_owned());
+        };
+        Some(original)
+    } else {
+        None
+    };
+    let channel = call.read.channel;
+    let scope = call.scope.clone();
     let payment = call.payment.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = guard;
-        let slot = local.received.lock().map_err(|_| BUSY.to_owned())?;
-        let projection = slot
-            .as_ref()
-            .map(|ledger| ledger.read_message_projection(action))
-            .transpose()
-            .map_err(|_| STALE.to_owned())?
-            .flatten();
+        let projection = if let Some(original) = founder {
+            original
+                .read_founder_member_projection(channel, action, &scope)
+                .map_err(|_| STALE.to_owned())?
+        } else {
+            let slot = local.received.lock().map_err(|_| BUSY.to_owned())?;
+            slot.as_ref()
+                .map(|ledger| ledger.read_message_projection(action))
+                .transpose()
+                .map_err(|_| STALE.to_owned())?
+                .flatten()
+        };
         Ok(ReceivedOutput {
             scope: "received-live",
             projection,

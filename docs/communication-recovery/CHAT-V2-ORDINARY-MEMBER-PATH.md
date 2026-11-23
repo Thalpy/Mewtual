@@ -195,7 +195,12 @@ the mesh wait. Only a submission acknowledged by the original driver can
 checkpoint that debt on a fresh capture of the same row. The desktop worker
 wakes after the saved receipt and the first governed Join. It shares the row's
 local work permit with saves, history, and the founder's Join handler and releases
-it before awaiting the driver. The founder's desktop receiver remains open work.
+it before awaiting the driver. The founder attaches one receiver to the original
+actor after the Add. It verifies each signed original under its current governing
+view and holds a paid live ledger for that subscription. The main window reads
+that projection under the same native publication guard as a joined row.
+The founder's received history is live. Durable founder receive and recovery of
+missing dependencies on the founder's receiver remain open.
 Original audit chunks and request receipts remain retained after scheduling debt clears.
 Removal changes active view, never deletes the audit. Unproven late removed actions stay
 Held pending the separately authorized moderation path; ordinary concurrent edits resolve

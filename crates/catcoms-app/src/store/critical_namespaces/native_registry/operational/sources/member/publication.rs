@@ -1,8 +1,7 @@
 //! Native founder publication of the original durable ordinary outbox debt.
 use super::*;
-use crate::store::persistence::v2_member_outbox::{
-    FounderDebtOperation, FounderDebtOutcome, MemberDebtBatch,
-};
+use crate::store::persistence::v2_member_outbox::MemberDebtBatch;
+use crate::store::persistence::v2_member_transport::{FounderDebtOperation, FounderDebtOutcome};
 use catcoms_rt::PublishSubmission;
 use catcoms_sync::owner_v2::PreparedV2MemberSubmission;
 
@@ -63,7 +62,8 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
         use V2MemberSaveRefusal as Refusal;
         let (cell, mut keys) = self.prepare_keys()?;
         let source = keys.member_entry().1.observe_current();
-        let signal = connected::constrain_founder_transport(self.scope.clone(), source, caller);
+        let signal =
+            connected::constrain_founder_transport(self.scope.clone(), source, caller, None);
         if signal.is_cancelled() {
             return Err(Refusal::Cancelled);
         }

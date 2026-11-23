@@ -1034,18 +1034,47 @@ impl SourceWork {
         )
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn run_founder_member_receive<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
+        &self,
+        driver: &mut crate::store::PreparedFreshV2TextFounder<T, R>,
+        channel: u128,
+        operation: crate::store::persistence::v2_member_transport::FounderReceiveOperation<'_>,
+        caller: &catcoms_rt::RequestCancellation,
+        keys: &mut crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounderKeys,
+    ) -> Result<
+        crate::store::persistence::v2_member_transport::FounderReceiveOutcome,
+        crate::store::V2MemberSaveRefusal,
+    > {
+        let current = self
+            .physical
+            .current()
+            .map_err(|_| crate::store::V2MemberSaveRefusal::Unavailable)?;
+        driver.run_founder_member_receive(
+            current,
+            channel,
+            operation,
+            caller,
+            crate::store::critical_namespaces::archive_bootstrap::founder::FounderAccess::Native(
+                keys,
+            ),
+        )
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn run_founder_member_debt<
         T: catcoms_rt::MeshTransport,
         R: catcoms_rt::CryptoRngCore,
     >(
         &self,
         driver: &mut crate::store::PreparedFreshV2TextFounder<T, R>,
-        operation: crate::store::persistence::v2_member_outbox::FounderDebtOperation,
+        operation: crate::store::persistence::v2_member_transport::FounderDebtOperation,
         caller: &catcoms_rt::RequestCancellation,
         rng: &mut impl catcoms_rt::CryptoRngCore,
         keys: &mut crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounderKeys,
     ) -> Result<
-        crate::store::persistence::v2_member_outbox::FounderDebtOutcome,
+        crate::store::persistence::v2_member_transport::FounderDebtOutcome,
         crate::store::V2MemberSaveRefusal,
     > {
         let current = self

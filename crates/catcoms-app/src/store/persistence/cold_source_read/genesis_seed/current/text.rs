@@ -10,6 +10,44 @@ use catcoms_rt::{NativeChatPreparedKeyCut, NativeChatSourceObservation};
 use catcoms_sync::owner_v2::{V2FounderAddOutcomeData, V2FounderAddRequestData};
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> UnexposedV2GenesisCurrent<T, R> {
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn prepare_governed_member_subscription(
+        &self,
+        store: &crate::store::ServerStore,
+        verifier: &catcoms_replication::chat::V2GeneralPrefixVerifier,
+        channel: u128,
+    ) -> Result<
+        (
+            catcoms_rt::Topic,
+            catcoms_sync::owner_v2::V2MemberPublicationObservation,
+        ),
+        crate::AppError,
+    > {
+        use crate::store::critical_namespaces::refused;
+        self.require_text_original_data(store)
+            .map_err(|_| refused())?;
+        Ok(self
+            .governed_text_node()
+            .ok_or_else(refused)?
+            .prepare_member_subscription(verifier, channel)?)
+    }
+
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn open_governed_member_frame(
+        &self,
+        store: &crate::store::ServerStore,
+        verifier: &catcoms_replication::chat::V2GeneralPrefixVerifier,
+        channel: u128,
+        topic: &catcoms_rt::Topic,
+        wire: &[u8],
+    ) -> Result<catcoms_sync::owner_v2::SelectedV2MemberEnvelope, crate::AppError> {
+        use crate::store::critical_namespaces::refused;
+        self.require_text_original_data(store)
+            .map_err(|_| refused())?;
+        Ok(self
+            .governed_text_node()
+            .ok_or_else(refused)?
+            .open_selected_member_envelope(verifier, channel, topic, wire)?)
+    }
+
     pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn prepare_governed_member_submission(
         &mut self,
         store: &crate::store::ServerStore,

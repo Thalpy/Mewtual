@@ -495,15 +495,40 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
             .prepare_member_history_with_access(layout, read, negative, rng, access)
     }
 
+    pub(in crate::store) fn run_founder_member_receive(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        channel: u128,
+        operation: crate::store::persistence::v2_member_transport::FounderReceiveOperation<'_>,
+        caller: &RequestCancellation,
+        access: FounderAccess<'_>,
+    ) -> Result<
+        crate::store::persistence::v2_member_transport::FounderReceiveOutcome,
+        V2MemberSaveRefusal,
+    > {
+        access
+            .require(&self.origin)
+            .map_err(|_| V2MemberSaveRefusal::Unavailable)?;
+        if !self.is_ready_data() {
+            return Err(V2MemberSaveRefusal::Unavailable);
+        }
+        self.host
+            .as_mut()
+            .ok_or(V2MemberSaveRefusal::Unavailable)?
+            .run_founder_member_receive(layout, channel, operation, caller, access)
+    }
+
     pub(in crate::store) fn run_founder_member_debt(
         &mut self,
         layout: &V2CurrentLayoutStore,
-        operation: crate::store::persistence::v2_member_outbox::FounderDebtOperation,
+        operation: crate::store::persistence::v2_member_transport::FounderDebtOperation,
         caller: &RequestCancellation,
         rng: &mut impl CryptoRngCore,
         access: FounderAccess<'_>,
-    ) -> Result<crate::store::persistence::v2_member_outbox::FounderDebtOutcome, V2MemberSaveRefusal>
-    {
+    ) -> Result<
+        crate::store::persistence::v2_member_transport::FounderDebtOutcome,
+        V2MemberSaveRefusal,
+    > {
         access
             .require(&self.origin)
             .map_err(|_| V2MemberSaveRefusal::Unavailable)?;
