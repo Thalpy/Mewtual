@@ -525,6 +525,12 @@ prevents issuance. A1 saved/uncertain originals stay historical across A2 rejoin
 they cannot become new tokens or be silently discarded. Reuse the existing
 two-phase native member save rather than adding a parallel writer.
 
+The closed surviving-member MLS path can stage a private Commit containing
+one inline Remove. It matches the exact named committer and target leaf and
+checks that the remaining roster and local signer survive the merge. The
+governing producer, durable removal handoff and evicted member retirement
+still need native integration.
+
 ## Acceptance before enabling
 
 Require deterministic tests for stripped/downgraded/cross-root bindings, exact

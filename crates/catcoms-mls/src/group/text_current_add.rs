@@ -26,7 +26,7 @@ use faults::TestCut;
 pub(crate) use receive::metadata_layout_bytes as received_add_metadata_layout_bytes;
 pub use receive::{
     PreparedTextCurrentReceivedAdd, PreparedTextReceivedAddInstallation, RetiredTextReceivedAdd,
-    TextCurrentReceivedAddData, MAX_TEXT_RECEIVED_ADD_COMMIT_BYTES,
+    TextCurrentReceivedAddData, TextCurrentReceivedRemoveData, MAX_TEXT_RECEIVED_ADD_COMMIT_BYTES,
 };
 pub(crate) use result::metadata_layout_bytes as completed_result_metadata_layout_bytes;
 pub use result::{

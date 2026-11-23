@@ -17,6 +17,34 @@ pub struct TextCurrentReceivedAddData<'a> {
     pub credential: [u8; 32],
 }
 
+/// The signer, exact serialized Commit and removed subject named by an
+/// independently verified governing Removal. This path serves survivors.
+pub struct TextCurrentReceivedRemoveData<'a> {
+    pub commit: &'a [u8],
+    pub digest: [u8; 32],
+    pub epoch: u64,
+    pub committer: [u8; 32],
+    pub subject: [u8; 32],
+}
+
+#[derive(Clone, Copy)]
+enum Change {
+    Add {
+        key_package: [u8; 32],
+        credential: [u8; 32],
+    },
+    Remove,
+}
+
+struct Expected<'a> {
+    commit: &'a [u8],
+    digest: [u8; 32],
+    epoch: u64,
+    committer: [u8; 32],
+    subject: [u8; 32],
+    change: Change,
+}
+
 /// Owns the closed candidate and original receiver identity. There is no
 /// raw extraction or live operation on the candidate before final selection.
 pub struct PreparedTextCurrentReceivedAdd {
@@ -32,6 +60,51 @@ impl PreparedTextCurrentReceivedAdd {
         device: &MlsDevice,
         group: &ServerGroup,
         request: TextCurrentReceivedAddData<'_>,
+        admission: TextCurrentAddAdmission,
+    ) -> Result<Self, MlsError> {
+        Self::prepare_change(
+            device,
+            group,
+            Expected {
+                commit: request.commit,
+                digest: request.digest,
+                epoch: request.epoch,
+                committer: request.committer,
+                subject: request.subject,
+                change: Change::Add {
+                    key_package: request.key_package,
+                    credential: request.credential,
+                },
+            },
+            admission,
+        )
+    }
+
+    pub fn prepare_remove(
+        device: &MlsDevice,
+        group: &ServerGroup,
+        request: TextCurrentReceivedRemoveData<'_>,
+        admission: TextCurrentAddAdmission,
+    ) -> Result<Self, MlsError> {
+        Self::prepare_change(
+            device,
+            group,
+            Expected {
+                commit: request.commit,
+                digest: request.digest,
+                epoch: request.epoch,
+                committer: request.committer,
+                subject: request.subject,
+                change: Change::Remove,
+            },
+            admission,
+        )
+    }
+
+    fn prepare_change(
+        device: &MlsDevice,
+        group: &ServerGroup,
+        request: Expected<'_>,
         mut admission: TextCurrentAddAdmission,
     ) -> Result<Self, MlsError> {
         if request.commit.is_empty()
@@ -47,15 +120,27 @@ impl PreparedTextCurrentReceivedAdd {
             .min_by_key(|member| member.index.u32())
             .ok_or_else(bad)?;
         let sender = committer.index;
-        let added = DeviceId::from_public_key_bytes(&request.subject);
+        let subject = DeviceId::from_public_key_bytes(&request.subject);
         let roster = group.member_device_ids();
         if committer.signature_key.as_slice() != request.committer
             || sender.u32() == original.own
             || original.epoch != request.epoch
-            || roster.contains(&added)
         {
             return Err(bad());
         }
+        let removed = match request.change {
+            Change::Add { .. } if !roster.contains(&subject) => None,
+            Change::Add { .. } => return Err(bad()),
+            Change::Remove => Some(
+                group
+                    .group
+                    .members()
+                    .find(|member| member.signature_key.as_slice() == request.subject)
+                    .map(|member| member.index)
+                    .filter(|leaf| leaf.u32() != original.own && *leaf != sender)
+                    .ok_or_else(bad)?,
+            ),
+        };
         check_commit_header(
             request.commit,
             &original.group,
@@ -101,11 +186,17 @@ impl PreparedTextCurrentReceivedAdd {
         }
         graph.policy.enter_receive().map_err(|_| bad())?;
         let provider = graph.device.provider();
-        let processed = graph
-            .group
-            .group
-            .process_private_text_add(provider, message, sender)
-            .map_err(proto)?;
+        let processed = match removed {
+            Some(leaf) => graph
+                .group
+                .group
+                .process_private_text_remove(provider, message, sender, leaf),
+            None => graph
+                .group
+                .group
+                .process_private_text_add(provider, message, sender),
+        }
+        .map_err(proto)?;
         let ProcessedMessageContent::StagedCommitMessage(staged) = processed.into_content() else {
             return Err(bad());
         };
@@ -113,6 +204,10 @@ impl PreparedTextCurrentReceivedAdd {
         if staged.self_removed() || staged.epoch().as_u64() != epoch {
             return Err(bad());
         }
+        if let Change::Add {
+            key_package,
+            credential,
+        } = request.change
         {
             let mut adds = staged.add_proposals();
             let add = adds.next().ok_or_else(bad)?;
@@ -121,14 +216,14 @@ impl PreparedTextCurrentReceivedAdd {
             let membership = membership_from_key_package(package)?;
             if adds.next().is_some()
                 || membership.group_id.as_slice() != original.group
-                || membership.device_id != added
+                || membership.device_id != subject
                 || leaf.signature_key().as_slice() != request.subject
                 || package
                     .hash_ref(provider.crypto())
                     .map_err(proto)?
                     .as_slice()
-                    != request.key_package
-                || credential_digest_with(leaf.credential(), || {})? != request.credential
+                    != key_package
+                || credential_digest_with(leaf.credential(), || {})? != credential
             {
                 return Err(bad());
             }
@@ -144,12 +239,25 @@ impl PreparedTextCurrentReceivedAdd {
             .close_merged(provider.storage())
             .map_err(|_| bad())?;
         let next = graph.group.member_device_ids();
+        let roster_matches = match request.change {
+            Change::Add { .. } => {
+                next.len() == roster.len() + 1
+                    && next.contains(&subject)
+                    && roster.iter().all(|device| next.contains(device))
+            }
+            Change::Remove => {
+                next.len() + 1 == roster.len()
+                    && !next.contains(&subject)
+                    && roster
+                        .iter()
+                        .filter(|device| **device != subject)
+                        .all(|device| next.contains(device))
+            }
+        };
         if !graph.group.is_active()
             || graph.group.epoch() != epoch
             || graph.group.group.own_leaf_index().u32() != original.own
-            || next.len() != roster.len() + 1
-            || !next.contains(&added)
-            || roster.iter().any(|device| !next.contains(device))
+            || !roster_matches
         {
             return Err(bad());
         }

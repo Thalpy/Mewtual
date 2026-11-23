@@ -15,6 +15,89 @@ const TYPED: usize = 2 * 1024 * 1024;
 const WORK: usize = 2 * 1024 * 1024 * 1024 - 1;
 const NOW: u64 = 1_800_000_000_000;
 
+#[test]
+fn private_text_remove_stages_only_the_exact_surviving_membership() {
+    let founder = MlsDevice::generate().unwrap();
+    let mut group = ServerGroup::create(&founder).unwrap();
+    let mut survivor = MlsDevice::generate().unwrap();
+    let target = MlsDevice::generate().unwrap();
+    let other = MlsDevice::generate().unwrap();
+    let packages = [&survivor, &target, &other].map(|device| device.key_package().unwrap());
+    let (_, welcome, _) = group
+        .group
+        .add_members(founder.provider(), founder.signer(), &packages)
+        .unwrap();
+    group
+        .group
+        .merge_pending_commit(founder.provider())
+        .unwrap();
+    let welcome = welcome.tls_serialize_detached().unwrap();
+    let mut joined = ServerGroup::join(&survivor, &welcome).unwrap();
+    let evicted = ServerGroup::join(&target, &welcome).unwrap();
+    let before = joined.epoch_authenticator_id();
+    let epoch = joined.epoch();
+    let removed = group
+        .remove_member_observed(&founder, &target.device_id())
+        .unwrap();
+    let packet = |subject| TextCurrentReceivedRemoveData {
+        commit: removed.commit(),
+        digest: removed.commit_digest(),
+        epoch,
+        committer: *removed.author(),
+        subject,
+    };
+    let wrong = other.public_key_bytes().try_into().unwrap();
+    let (payment, retained, _) = admission(TextCurrentAddLimits::governed_text_v2());
+    assert!(PreparedTextCurrentReceivedAdd::prepare_remove(
+        &survivor,
+        &joined,
+        packet(wrong),
+        payment,
+    )
+    .is_err());
+    assert_eq!(retained.load(Ordering::SeqCst), 0);
+    let (payment, _, _) = admission(TextCurrentAddLimits::governed_text_v2());
+    assert!(PreparedTextCurrentReceivedAdd::prepare_remove(
+        &target,
+        &evicted,
+        packet(*removed.subject()),
+        payment,
+    )
+    .is_err());
+    let (payment, retained, _) = admission(TextCurrentAddLimits::governed_text_v2());
+    let mut candidate = Some(
+        PreparedTextCurrentReceivedAdd::prepare_remove(
+            &survivor,
+            &joined,
+            packet(*removed.subject()),
+            payment,
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        (joined.epoch(), joined.epoch_authenticator_id()),
+        (epoch, before)
+    );
+    assert_eq!(
+        candidate.as_ref().unwrap().selected_epoch_data(),
+        (group.epoch(), group.epoch_authenticator_id()),
+    );
+    let retired =
+        PreparedTextCurrentReceivedAdd::prepare_install(&mut candidate, &mut survivor, &mut joined)
+            .unwrap()
+            .install();
+    assert!(candidate.is_none());
+    assert_eq!(joined.epoch(), epoch + 1);
+    assert!(joined.member_device_ids().contains(&other.device_id()));
+    assert!(!joined.member_device_ids().contains(&target.device_id()));
+    assert!(
+        joined.routing_metadata_secret(&survivor).unwrap()
+            == group.routing_metadata_secret(&founder).unwrap()
+    );
+    drop((retired, joined, survivor));
+    assert_eq!(retained.load(Ordering::SeqCst), 0);
+}
+
 struct OldFee(Arc<AtomicUsize>);
 impl TextCurrentSdkGraphReservation for OldFee {
     fn limits(&self) -> TextCurrentSdkRestoreLimits {

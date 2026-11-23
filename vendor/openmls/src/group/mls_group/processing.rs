@@ -312,12 +312,63 @@ impl MlsGroup {
         message: ProtocolMessage,
         expected_sender: LeafNodeIndex,
     ) -> Result<ProcessedMessage, ProcessMessageError<Provider::StorageError>> {
+        self.process_private_text_membership(provider, message, expected_sender, None)
+    }
+
+    /// Process one inline Remove for the exact expected nonlocal leaf.
+    /// This narrow entry runs only on a closed surviving member candidate.
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        not(any(
+            feature = "extensions-draft",
+            feature = "virtual-clients-draft",
+            feature = "targeted-messages-draft",
+            feature = "migration-import",
+            feature = "fork-resolution",
+            feature = "draft-ietf-mls-pq-ciphersuites",
+        ))
+    ))]
+    pub fn process_private_text_remove<Provider: OpenMlsProvider>(
+        &mut self,
+        provider: &Provider,
+        message: ProtocolMessage,
+        expected_sender: LeafNodeIndex,
+        expected_removed: LeafNodeIndex,
+    ) -> Result<ProcessedMessage, ProcessMessageError<Provider::StorageError>> {
+        self.process_private_text_membership(
+            provider,
+            message,
+            expected_sender,
+            Some(expected_removed),
+        )
+    }
+
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        not(any(
+            feature = "extensions-draft",
+            feature = "virtual-clients-draft",
+            feature = "targeted-messages-draft",
+            feature = "migration-import",
+            feature = "fork-resolution",
+            feature = "draft-ietf-mls-pq-ciphersuites",
+        ))
+    ))]
+    fn process_private_text_membership<Provider: OpenMlsProvider>(
+        &mut self,
+        provider: &Provider,
+        message: ProtocolMessage,
+        expected_sender: LeafNodeIndex,
+        expected_removed: Option<LeafNodeIndex>,
+    ) -> Result<ProcessedMessage, ProcessMessageError<Provider::StorageError>> {
         use crate::messages::proposals::{Proposal, ProposalOrRef};
         use tls_codec::Size as _;
-        let unsupported = || LibraryError::custom("Unsupported private text Add receive");
+        let unsupported = || LibraryError::custom("Unsupported private text membership receive");
         if !Self::private_text_add_profile_supported_data()
             || !self.is_active()
             || self.own_leaf_index() == expected_sender
+            || expected_removed
+                .is_some_and(|leaf| leaf == expected_sender || leaf == self.own_leaf_index())
             || self.pending_commit().is_some()
             || self.has_pending_proposals()
             || message.wire_format() != WireFormat::PrivateMessage
@@ -345,10 +396,12 @@ impl MlsGroup {
             return Err(unsupported().into());
         };
         let path = commit.path.as_ref().ok_or_else(unsupported)?;
-        if !matches!(proposal.as_ref(), Proposal::Add(_))
-            || path.nodes().len() > 6
-            || commit.tls_serialized_len() > 32 * 1024
-        {
+        let matches = match (expected_removed, proposal.as_ref()) {
+            (None, Proposal::Add(_)) => true,
+            (Some(expected), Proposal::Remove(actual)) => actual.removed() == expected,
+            _ => false,
+        };
+        if !matches || path.nodes().len() > 6 || commit.tls_serialized_len() > 32 * 1024 {
             return Err(unsupported().into());
         }
         let processed = self.process_verified_message(provider, verified)?;
