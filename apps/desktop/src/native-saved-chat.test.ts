@@ -14,3 +14,19 @@ test("native local history renders absence only after a complete successful empt
   await unmount(app);target.remove();
  }
 });
+
+test("native chat displays an authenticated live projection with provisional status", async () => {
+  const target = document.createElement("div");
+  document.body.append(target);
+  const app = mount(NativeSavedChat, { target, props: {
+    rows: [], received: [{ action: "9a".repeat(32), text: "A received message", certainty: "provisional" }],
+    loading: false, loaded: true, failure: null, more: false, text: "", busy: false,
+    send: () => {}, refresh: () => {}, loadMore: () => {}, change: () => {},
+  } });
+  flushSync();
+  assert.match(target.textContent ?? "", /A received message/);
+  assert.match(target.textContent ?? "", /Received · Provisional/);
+  assert.doesNotMatch(target.textContent ?? "", /Nothing saved here yet|Saved here/);
+  await unmount(app);
+  target.remove();
+});

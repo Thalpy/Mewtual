@@ -52,6 +52,43 @@ test("actual native history distinguishes a failed read and empty filtered progr
  await app.nativeRefresh();assert.equal(app.state().nativeHistoryLoaded,true);assert.equal(app.state().nativeCursor?.next,"16");assert.equal(app.state().nativeCursor?.end,"1000");assert.deepEqual(app.state().nativeOriginals,[]);app.done();
 });
 
+test("received text is fetched for the exact installed view and discarded after retirement", async () => {
+  const app = pendingManagerApp({});
+  await app.hydrate();
+  app.nativeConversation(7, "9", context);
+  const notice = { server: 7, channel: "9", context, action: row.action };
+  await app.receiveNotice({ ...notice, context: "aa".repeat(32) });
+  assert.equal(app.state().nativeHistoryCalls.length, 0);
+  const received = { action: row.action, text: "Remote original", certainty: "provisional" };
+  const reply = { backend: "text-v2", scope: "received-live", item: received };
+  app.nativeHistory(reply);
+  await app.receiveNotice(notice);
+  assert.deepEqual(app.state().nativeHistoryCalls[0], {
+    server: 7, channel: "9", expectedContext: context, receivedAction: row.action,
+  });
+  assert.deepEqual(app.received(), [received]);
+  assert.deepEqual(app.state().nativeOriginals, []);
+
+  const previousView = deferred<unknown>();
+  app.nativeHistory(previousView.promise);
+  const previous = app.receiveNotice(notice);
+  await settle();
+  await app.receiveNotice({ ...notice, action: null });
+  previousView.resolve(reply);
+  await previous;
+  assert.deepEqual(app.received(), []);
+
+  const pending = deferred<unknown>();
+  app.nativeHistory(pending.promise);
+  const read = app.receiveNotice(notice);
+  await settle();
+  app.retireFoundUiForReauth();
+  pending.resolve(reply);
+  await read;
+  assert.deepEqual(app.received(), []);
+  app.done();
+});
+
 test("a slow initial history read excludes the real automatic scheduler and manual send until it retires",async()=>{
  const app=pendingManagerApp(retained);await app.hydrate();app.nativeConversation(7,"9",context);const gate=deferred<unknown>();
  app.nativeHistory(gate.promise);const read=app.nativeRefresh();await settle();app.syncRetry();

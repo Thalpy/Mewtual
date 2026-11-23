@@ -12,7 +12,7 @@ use catcoms_net::{
 use catcoms_replication::chat::{
     ActionId, ChatLedger, GuardedMessageProjection, GuardedProjection, LedgerLimits,
     ProjectionGroupView, ProjectionView, Realm, V2GeneralPrefixVerifier, V2OrdinaryReceiveStatus,
-    MAX_PARENTS,
+    MAX_ACTION_BYTES, MAX_PARENTS,
 };
 use catcoms_rt::Topic;
 use catcoms_sync::owner_v2::{SelectedV2MemberEnvelope, MAX_V2_MEMBER_TRANSPORT_BYTES};
@@ -30,6 +30,7 @@ const OPEN_FEE: usize = 4 * MAX_V2_MEMBER_TRANSPORT_BYTES + 4096;
 const MAX_RECEIVED_ACTIONS: usize = 64;
 const MAX_RECEIVED_BYTES: usize = 1024 * 1024;
 const RECEIVE_WORK: usize = 4 * MAX_RECEIVED_ACTIONS + MAX_PARENTS;
+const PROJECTION_FEE: usize = 2 * MAX_ACTION_BYTES + 32 * 1024;
 // Allow two copies of canonical originals and separately budget the ledger
 // entries, dependency edges, authority sets, tokens, and bounded work indices.
 const LEDGER_FEE: usize = 2 * MAX_RECEIVED_BYTES
@@ -115,6 +116,11 @@ impl NativeTextJoinedReceivedOriginal {
     pub fn action_id_data(&self) -> catcoms_replication::chat::ActionId {
         self.opened.action_data().id()
     }
+
+    pub fn projection_target_data(&self) -> ActionId {
+        let action = self.opened.action_data();
+        action.spec().body.create().unwrap_or_else(|| action.id())
+    }
 }
 
 /// Paid current ledger for one channel in the original selected joined row.
@@ -153,33 +159,52 @@ impl NativeTextJoinedMemberLedger {
         !self.signal.is_cancelled() && self.selection.is_current_cached()
     }
 
+    pub fn read_message_projection(
+        &self,
+        create: ActionId,
+    ) -> Result<Option<NativeTextJoinedMemberProjection>, V2MemberSaveRefusal> {
+        if !self.is_current_cached() {
+            return Err(V2MemberSaveRefusal::Stale);
+        }
+        if self.ledger.action(create).is_none() {
+            return Ok(None);
+        }
+        self.prepare_message_projection(create).map(Some)
+    }
+
     /// Prepare the exact view and bounded body outside the final UI guard.
     /// One paid query can borrow this ledger at a time.
     pub fn prepare_message_projection(
-        &mut self,
+        &self,
         create: ActionId,
-    ) -> Result<NativeTextJoinedMemberProjection<'_>, V2MemberSaveRefusal> {
+    ) -> Result<NativeTextJoinedMemberProjection, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
         if self.signal.is_cancelled() {
             return Err(Refusal::Cancelled);
         }
+        let fee = self
+            ._fee
+            .reserve_more(PROJECTION_FEE)
+            .map_err(|_| Refusal::Busy)?;
         let projection = self
             .ledger
             .guarded_projection(create, RECEIVE_WORK)
             .map_err(|_| Refusal::Failed)?;
         Ok(NativeTextJoinedMemberProjection {
             projection,
-            signal: &self.signal,
+            signal: self.signal.clone(),
+            _fee: fee,
         })
     }
 }
 
-pub struct NativeTextJoinedMemberProjection<'a> {
+pub struct NativeTextJoinedMemberProjection {
     projection: GuardedMessageProjection,
-    signal: &'a RequestCancellation,
+    signal: RequestCancellation,
+    _fee: CatalogReadReservation,
 }
 
-impl NativeTextJoinedMemberProjection<'_> {
+impl NativeTextJoinedMemberProjection {
     /// Resolve inside the already acquired outer native UI guard.
     pub fn with_publication<T>(
         &self,

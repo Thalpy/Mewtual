@@ -56,14 +56,26 @@ pub(super) async fn run<R: tauri::Runtime>(
         };
         match next {
             Some(NativeChatMemberGossipEvent::Frame(frame)) => {
-                tokio::select! {
+                let action = tokio::select! {
                     biased;
                     _ = scope.cancelled() => break,
-                    _ = receive(&state, source, frame) => {}
+                    action = receive(&state, source, frame) => action,
+                };
+                if let Some(action) = action {
+                    source.notify_received(app, &state, Some(action)).await;
                 }
             }
             Some(NativeChatMemberGossipEvent::RecoveryNeeded) => {}
-            None => receiver = None,
+            None => {
+                receiver = None;
+                let retired = local
+                    .received
+                    .try_lock()
+                    .ok()
+                    .and_then(|mut slot| slot.take());
+                drop(retired);
+                source.notify_received(app, &state, None).await;
+            }
         }
     }
     let retired = local
@@ -74,9 +86,13 @@ pub(super) async fn run<R: tauri::Runtime>(
     drop(retired);
 }
 
-async fn receive(state: &AppState, source: &Arc<Source>, frame: NativeChatMemberFrame) {
+async fn receive(
+    state: &AppState,
+    source: &Arc<Source>,
+    frame: NativeChatMemberFrame,
+) -> Option<ActionId> {
     if !prepare_ledger(state, source).await {
-        return;
+        return None;
     }
     let Some((original, status)) = with_row(state, source, move |selected, _, local, scope| {
         let mut slot = local.received.lock().ok()?;
@@ -86,20 +102,22 @@ async fn receive(state: &AppState, source: &Arc<Source>, frame: NativeChatMember
     })
     .await
     else {
-        return;
+        return None;
     };
     let original = Arc::new(original);
     match status {
         V2OrdinaryReceiveStatus::Retained(ActionState::Valid) => {
+            let target = original.projection_target_data();
             archive_original(state, source, original).await;
+            Some(target)
         }
         V2OrdinaryReceiveStatus::WaitingForDependencies(missing) => {
             for action in missing.into_iter().take(DEPENDENCIES_PER_FRAME) {
                 recover_dependency(state, source, &original, action).await;
             }
-            apply_and_archive(state, source, original).await;
+            apply_and_archive(state, source, original).await
         }
-        V2OrdinaryReceiveStatus::Retained(_) => {}
+        V2OrdinaryReceiveStatus::Retained(_) => None,
     }
 }
 
@@ -167,14 +185,14 @@ async fn recover_dependency(
     else {
         return;
     };
-    apply_and_archive(state, source, Arc::new(original)).await;
+    let _ = apply_and_archive(state, source, Arc::new(original)).await;
 }
 
 async fn apply_and_archive(
     state: &AppState,
     source: &Arc<Source>,
     original: Arc<NativeTextJoinedReceivedOriginal>,
-) {
+) -> Option<ActionId> {
     let candidate = original.clone();
     let result = with_row(state, source, move |selected, _, local, scope| {
         let mut slot = local.received.lock().ok()?;
@@ -187,8 +205,11 @@ async fn apply_and_archive(
         result,
         Some(V2OrdinaryReceiveStatus::Retained(ActionState::Valid))
     ) {
+        let target = original.projection_target_data();
         archive_original(state, source, original).await;
+        return Some(target);
     }
+    None
 }
 
 async fn archive_original(

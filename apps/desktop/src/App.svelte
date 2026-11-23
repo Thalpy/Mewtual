@@ -215,7 +215,7 @@
   import type { NativeTextIntents } from "./native-text-intents";
   import { createNativeTextDriver } from "./native-text-driver";
   import { decodeRestoredChatSession, type NativeTextServer } from "./native-text-session";
-  import { readNativeOriginals, type NativeOriginal } from "./native-text-history";
+  import { decodeNativeReceived, decodeNativeReceivedNotice, readNativeOriginals, updateNativeReceived, type NativeOriginal, type NativeReceived } from "./native-text-history";
   import NativeSavedChat from "./NativeSavedChat.svelte";
   import {
     captureLockContinuity, closeContinuityAcknowledgement, NativeVaultLockCoordinator, type NativeVaultCloseOutcome, type NativeVaultLockOutcome,
@@ -386,6 +386,10 @@
   let servers = $state<ServerState[]>([]);
   let chatBackend = $state<"legacy" | "text-v2" | null>(null);
   let nativeOriginals = $state.raw<NativeOriginal[]>([]);
+  let nativeReceived = $state.raw<NativeReceived[]>([]);
+  let nativeReceivedScope = $state.raw<{ server: number; channel: string; context: string } | null>(null);
+  let nativeReceivedRevision = 0;
+  const nativeReceivedReads = new Map<string, { dirty: boolean }>();
   let nativeCursor = $state<{next:string;end:string}|null>(null);
   let nativeHistoryLoading = $state(false);
   let nativeHistoryLoaded = $state(false);
@@ -6945,6 +6949,10 @@
     nativeTextIntents = {};
     chatBackend = null;
     nativeOriginals = [];nativeCursor=null;nativeHistoryLoading=false;nativeHistoryRevision++;
+    nativeReceived = [];
+    nativeReceivedScope = null;
+    nativeReceivedRevision++;
+    nativeReceivedReads.clear();
     nativeHistoryLoaded=false;nativeHistoryError=null;
     nativeRetryGeneration=null;
   }
@@ -7033,6 +7041,47 @@
       nativeHistoryLoaded=true;
     }catch(failure){if(current()){nativeHistoryError="Saved messages could not be loaded. Try again.";error=errorText(failure);}}
     finally{if(revision===nativeHistoryRevision)nativeHistoryLoading=false;}
+  }
+
+  async function refreshNativeReceived(payload: unknown) {
+    let target;
+    try { target = decodeNativeReceivedNotice(payload); }
+    catch { return; }
+    const { server, channel, context, action } = target;
+    const session = uiStateLoadGeneration, view = viewGeneration, revision = nativeReceivedRevision;
+    const current = () => !locked && !uiSessionRetired && uiStateReady && !windowCloseInFlight
+      && session === uiStateLoadGeneration && view === viewGeneration && activeServerId === server
+      && revision === nativeReceivedRevision
+      && cur?.backend === "text-v2" && cur.active === channel && cur.context === context;
+    if (!current()) return;
+    if (action === null) {
+      nativeReceivedRevision++;
+      nativeReceived = [];
+      nativeReceivedScope = null;
+      nativeReceivedReads.clear();
+      return;
+    }
+    const earlier = nativeReceivedReads.get(action);
+    if (earlier) { earlier.dirty = true; return; }
+    if (nativeReceivedReads.size >= 8) return;
+    const work = { dirty: false };
+    nativeReceivedReads.set(action, work);
+    try {
+      do {
+        work.dirty = false;
+        const raw = await invoke<unknown>("get_message_page", {
+          server, channel, expectedContext: context, receivedAction: action,
+        });
+        if (!current()) return;
+        const sameScope = nativeReceivedScope?.server === server && nativeReceivedScope.channel === channel
+          && nativeReceivedScope.context === context;
+        nativeReceived = updateNativeReceived(sameScope ? nativeReceived : [], action, decodeNativeReceived(raw, action));
+        nativeReceivedScope = { server, channel, context };
+      } while (work.dirty);
+    } catch { /* The original scope may close while the read is pending. */ }
+    finally {
+      if (nativeReceivedReads.get(action) === work) nativeReceivedReads.delete(action);
+    }
   }
   async function sendNativeText(text:string,server:number,channel:string):Promise<SendOutcome> {
     const selected=cur;if(selected?.backend!=="text-v2" || !selected.context)return "refused";
@@ -7692,6 +7741,10 @@
     if(s?.backend==="text-v2") {
       dmHome=s.isDm;showNewDm=false;showAddFriend=false;notice="";
       nativeOriginals=[];nativeCursor=null;nativeHistoryLoading=false;nativeHistoryLoaded=false;nativeHistoryError=null;nativeHistoryRevision++;
+      nativeReceived = [];
+      nativeReceivedScope = null;
+      nativeReceivedRevision++;
+      nativeReceivedReads.clear();
       loadDraftFor(chanKey());committed();
       await refreshNativeHistory();
       if(viewCurrent(gen,id)){groupLoading=false;messagesLoading=false;}
@@ -22989,6 +23042,7 @@
         /* locked, or an older backend: the tracker falls back to its first sighting */
       });
     const subs: Promise<UnlistenFn>[] = [
+      tauriListen<unknown>("chat-v2-received", ({ payload }) => void refreshNativeReceived(payload)),
       appWindow.onResized(() => syncMaximized()),
       appWindow.onFocusChanged(({ payload }) => (windowFocused = payload)),
       appWindow.onCloseRequested(async (event) => {
@@ -28423,7 +28477,9 @@
           </nav>
         {/if}
         {#if cur?.backend === "text-v2"}
-          <NativeSavedChat rows={nativeOriginals} loading={nativeHistoryLoading} loaded={nativeHistoryLoaded} failure={nativeHistoryError} more={!!nativeCursor && nativeCursor.next!==nativeCursor.end}
+          <NativeSavedChat rows={nativeOriginals}
+            received={nativeReceivedScope !== null && nativeReceivedScope.server === activeServerId && nativeReceivedScope.channel === cur.active && nativeReceivedScope.context === cur.context ? nativeReceived : []}
+            loading={nativeHistoryLoading} loaded={nativeHistoryLoaded} failure={nativeHistoryError} more={!!nativeCursor && nativeCursor.next!==nativeCursor.end}
             text={draft} busy={sending || nativeHistoryLoading || nativeRetryGeneration!==null} send={()=>{void send();}} refresh={()=>{void refreshNativeHistory();}} loadMore={()=>{void refreshNativeHistory(true);}}
             change={(value)=>{draft=value;saveDraftFor(chanKey());}} />
         {:else if view === "chat"}

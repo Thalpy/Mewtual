@@ -129,6 +129,13 @@ jobs:
       - name: Run the complete frontend tests
         if: runner.os == 'Linux' && inputs.scope != 'native-lock' && inputs.scope != 'native-join'
         run: npm --prefix apps/desktop test
+      - name: Check focused Chat V2 renderer history and session retirement
+        if: runner.os == 'Linux' && github.event_name == 'workflow_dispatch' && inputs.scope == 'native-join'
+        working-directory: apps/desktop
+        run: >-
+          node --experimental-strip-types --import ./scripts/test-dom.mjs
+          --import ./scripts/test-svelte.mjs --test
+          src/native-text-history.test.ts src/native-text-app.test.ts src/native-saved-chat.test.ts
       - name: Check frontend types
         if: runner.os == 'Linux' && inputs.scope != 'native-lock'
         run: npm --prefix apps/desktop run check

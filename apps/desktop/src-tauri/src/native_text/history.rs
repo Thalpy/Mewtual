@@ -3,11 +3,13 @@
 //! native copies/serialization, then rechecks the actual installed objects.
 use super::*;
 use catcoms_app::store::{
-    NativeTextHistoryResponseCredit, NativeTextJoinedRowSelection,
-    NativeTextJoinedSelectionPreparation, NativeTextMemberHistoryPage,
-    NativeTextMemberHistoryStatus, NativeTextMemberPreparation,
+    NativeTextHistoryResponseCredit, NativeTextJoinedMemberProjection,
+    NativeTextJoinedRowSelection, NativeTextJoinedSelectionPreparation,
+    NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus, NativeTextMemberPreparation,
 };
-use catcoms_replication::chat::{Body, SignedAction};
+use catcoms_replication::chat::{
+    ActionId, Body, GuardedProjection, ProjectionCertainty, SignedAction,
+};
 use serde::Serialize;
 use std::io::Write;
 use tauri::ipc::InvokeResponseBody;
@@ -39,6 +41,7 @@ struct Read {
     start: u64,
     end: Option<u64>,
     maximum: usize,
+    received_action: Option<ActionId>,
 }
 struct Invocation {
     generation: u64,
@@ -74,6 +77,7 @@ fn parse(payload: &InvokeBody) -> Result<Read, &'static str> {
                     | "start"
                     | "endExclusive"
                     | "limit"
+                    | "receivedAction"
                     | "trace"
             )
         })
@@ -107,17 +111,31 @@ fn parse(payload: &InvokeBody) -> Result<Read, &'static str> {
     if context == [0; 32] {
         return Err("Invalid chat context.");
     }
-    let start = decimal(string("start", 20)?)?;
-    let end = match object.get("endExclusive") {
-        None | Some(serde_json::Value::Null) => None,
-        Some(serde_json::Value::String(value)) if value.len() <= 20 => Some(decimal(value)?),
-        _ => return Err("Invalid history cursor."),
+    let (start, end, maximum, received_action) = if object.contains_key("receivedAction") {
+        if ["start", "endExclusive", "limit"]
+            .iter()
+            .any(|key| object.contains_key(*key))
+        {
+            return Err("Invalid history request.");
+        }
+        let mut id = [0; 32];
+        hex::decode_to_slice(string("receivedAction", 64)?, &mut id)
+            .map_err(|_| "Invalid message.")?;
+        (0, None, 1, Some(ActionId::from_bytes(id)))
+    } else {
+        let start = decimal(string("start", 20)?)?;
+        let end = match object.get("endExclusive") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(value)) if value.len() <= 20 => Some(decimal(value)?),
+            _ => return Err("Invalid history cursor."),
+        };
+        let maximum = object
+            .get("limit")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|n| (1..=8).contains(n))
+            .ok_or("Invalid history page size.")? as usize;
+        (start, end, maximum, None)
     };
-    let maximum = object
-        .get("limit")
-        .and_then(serde_json::Value::as_u64)
-        .filter(|n| (1..=8).contains(n))
-        .ok_or("Invalid history page size.")? as usize;
     if end.is_some_and(|end| start > end)
         || object
             .get("trace")
@@ -132,6 +150,7 @@ fn parse(payload: &InvokeBody) -> Result<Read, &'static str> {
         start,
         end,
         maximum,
+        received_action,
     })
 }
 pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task)) -> bool {
@@ -209,8 +228,14 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
     spawn(Box::pin(async move {
         // Owning result is outside ALL final guards. Resolver unwind must not
         // destroy the paid Root page or its invoice while those guards exist.
-        let mut result = execute(&app.state::<AppState>(), &invocation).await;
         let state = app.state::<AppState>();
+        let mut result = if let Some(action) = invocation.read.received_action {
+            execute_received(&invocation, action)
+                .await
+                .map(Response::Received)
+        } else {
+            execute(&state, &invocation).await.map(Response::Saved)
+        };
         #[cfg(test)]
         {
             let edge = state.native_text.text_reply_edge.lock().unwrap().clone();
@@ -225,9 +250,10 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
             resolver.reject(STALE);
         } else {
             match &mut result {
-                Ok(output) => {
+                Ok(Response::Saved(output)) => {
                     resolver.resolve(InvokeResponseBody::Json(output.body.take().unwrap()))
                 }
+                Ok(Response::Received(output)) => output.resolve(resolver),
                 Err(error) => resolver.reject(&*error),
             }
         }
@@ -315,6 +341,82 @@ struct Output {
     #[cfg(test)]
     _notice: Option<DropNotice>, // actual page/body have dropped, credit is live
     _payment: Arc<Payment>,
+}
+
+enum Response {
+    Saved(Output),
+    Received(ReceivedOutput),
+}
+
+struct ReceivedOutput {
+    projection: Option<NativeTextJoinedMemberProjection>,
+    _payment: Arc<Payment>,
+}
+
+impl ReceivedOutput {
+    fn resolve<R: tauri::Runtime>(&self, resolver: tauri::ipc::InvokeResolver<R>) {
+        let Some(projection) = &self.projection else {
+            resolver.resolve(InvokeResponseBody::Json(received_body(None)));
+            return;
+        };
+        let mut resolver = Some(resolver);
+        let _ = projection.with_publication(|result| {
+            resolver
+                .take()
+                .unwrap()
+                .resolve(InvokeResponseBody::Json(received_body(Some(result))));
+        });
+        if let Some(resolver) = resolver {
+            resolver.reject(STALE);
+        }
+    }
+}
+
+fn received_body(projection: Option<&GuardedProjection>) -> String {
+    let item = match projection {
+        Some(GuardedProjection::Visible {
+            create,
+            text,
+            certainty,
+            ..
+        }) => serde_json::json!({
+            "action": hex::encode(create.as_bytes()),
+            "text": text,
+            "certainty": match certainty {
+                ProjectionCertainty::Proven => "proven",
+                ProjectionCertainty::Provisional => "provisional",
+            }
+        }),
+        _ => serde_json::Value::Null,
+    };
+    serde_json::json!({"backend":"text-v2","scope":"received-live","item":item}).to_string()
+}
+
+async fn execute_received(call: &Invocation, action: ActionId) -> Result<ReceivedOutput, String> {
+    let Some(local) = call.member_work.clone() else {
+        return Ok(ReceivedOutput {
+            projection: None,
+            _payment: call.payment.clone(),
+        });
+    };
+    let guard = local.foreground(call.scope.clone()).await.ok_or(STALE)?;
+    let payment = call.payment.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = guard;
+        let slot = local.received.lock().map_err(|_| BUSY.to_owned())?;
+        let projection = slot
+            .as_ref()
+            .map(|ledger| ledger.read_message_projection(action))
+            .transpose()
+            .map_err(|_| STALE.to_owned())?
+            .flatten();
+        Ok(ReceivedOutput {
+            projection,
+            _payment: payment,
+        })
+    })
+    .await
+    .map_err(|_| STALE.to_owned())?
 }
 impl Work {
     fn run(self) -> Result<Output, String> {

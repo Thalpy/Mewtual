@@ -163,6 +163,37 @@ impl Source {
         self.channel
     }
 
+    /// Notify the main renderer of one changed Create. Text is available only
+    /// through a fresh guarded history invocation from the installed row.
+    pub(super) async fn notify_received<R: tauri::Runtime>(
+        &self,
+        app: &tauri::AppHandle<R>,
+        state: &AppState,
+        action: Option<catcoms_replication::chat::ActionId>,
+    ) {
+        let Ok(_commit) = require_ui_session_generation(state, self.generation).await else {
+            return;
+        };
+        let store = state.store.lock().await;
+        let table = state.servers.lock().await;
+        if !self.still_installed(state, &store, &table) {
+            return;
+        }
+        let server = self.selection.id_data();
+        if let Some(row) = table.native(&server) {
+            let _ = app.emit_to(
+                "main",
+                "chat-v2-received",
+                serde_json::json!({
+                    "server": server,
+                    "channel": self.channel.to_string(),
+                    "context": hex::encode(row.data().request),
+                    "action": action.map(|action| hex::encode(action.as_bytes())),
+                }),
+            );
+        }
+    }
+
     pub(super) fn still_installed(
         &self,
         state: &AppState,

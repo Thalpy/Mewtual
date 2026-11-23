@@ -7,6 +7,8 @@ export type NativeOriginal = {
     | { kind: "delete" | "join"; create: string };
 };
 export type NativeOriginalPage = { backend: "text-v2"; scope: "own-saved-originals"; next: string; end_exclusive: string; items: NativeOriginal[] };
+export type NativeReceivedTarget = { server: number; channel: string; context: string; action: string | null };
+export type NativeReceived = { action: string; text: string; certainty: "provisional" | "proven" };
 const fail = (): never => { throw new Error("Saved messages could not be read. Try again."); };
 const object = (value: unknown): Record<string, unknown> => { if (!value || typeof value !== "object" || Array.isArray(value)) return fail(); return value as Record<string, unknown>; };
 function fields(value: Record<string, unknown>, expected: string[]) { if (Object.keys(value).length !== expected.length || expected.some(key => !Object.hasOwn(value, key))) fail(); }
@@ -18,6 +20,39 @@ function text(value: unknown): string {
   for(let i=0;i<value.length;i++){const unit=value.charCodeAt(i);if(unit>=0xd800&&unit<=0xdbff){const next=value.charCodeAt(++i);if(!(next>=0xdc00&&next<=0xdfff))return fail();}else if(unit>=0xdc00&&unit<=0xdfff)return fail();}
   if(encoder.encode(value).length>65536)return fail();
   return value;
+}
+
+export function decodeNativeReceivedNotice(value: unknown): NativeReceivedTarget {
+  const notice = object(value);
+  fields(notice, ["server", "channel", "context", "action"]);
+  if (typeof notice.server !== "number" || !Number.isSafeInteger(notice.server) || notice.server < 1) return fail();
+  return {
+    server: notice.server,
+    channel: decimal(notice.channel, 128),
+    context: hex(notice.context),
+    action: notice.action === null ? null : hex(notice.action),
+  };
+}
+
+export function decodeNativeReceived(value: unknown, expectedAction: string): NativeReceived | null {
+  const root = object(value);
+  fields(root, ["backend", "scope", "item"]);
+  if (root.backend !== "text-v2" || root.scope !== "received-live") return fail();
+  if (root.item === null) return null;
+  const row = object(root.item);
+  fields(row, ["action", "text", "certainty"]);
+  const action = hex(row.action);
+  if (action !== expectedAction || (row.certainty !== "provisional" && row.certainty !== "proven")) return fail();
+  const body = text(row.text);
+  if (!body) return fail();
+  return { action, text: body, certainty: row.certainty };
+}
+
+export function updateNativeReceived(rows: NativeReceived[], action: string, item: NativeReceived | null): NativeReceived[] {
+  const index = rows.findIndex(row => row.action === action);
+  if (index < 0) return item ? [...rows, item].slice(-64) : rows;
+  if (!item) return rows.filter(row => row.action !== action);
+  return rows.map((row, at) => at === index ? item : row);
 }
 export function decodeNativeOriginalPage(value: unknown, start: string, end: string | null, channel: string): NativeOriginalPage {
   const root = object(value); fields(root, ["backend", "scope", "next", "end_exclusive", "items"]);

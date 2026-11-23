@@ -604,6 +604,29 @@ fn native_history_request(
 ) -> Reply {
     native_history_request_with_reply(window, found, start, end, limit, false)
 }
+
+fn native_received_request(
+    window: &tauri::WebviewWindow<MockRuntime>,
+    found: &serde_json::Value,
+) -> Reply {
+    let mut request = request(window, "1", SECRET);
+    request.cmd = "get_message_page".into();
+    request.body = InvokeBody::Json(serde_json::json!({
+        "server": found["server"],
+        "channel": found["channel"],
+        "expectedContext": found["context"],
+        "receivedAction": hex::encode([249; 32]),
+    }));
+    let (tx, rx) = oneshot::channel();
+    let view: &tauri::Webview<MockRuntime> = window.as_ref();
+    view.clone().on_message(
+        request,
+        Box::new(move |_, _, result, _, _| {
+            let _ = tx.send(result);
+        }),
+    );
+    rx
+}
 fn native_history_request_with_reply(
     window: &tauri::WebviewWindow<MockRuntime>,
     found: &serde_json::Value,
@@ -1262,6 +1285,12 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
         .data()
         .instance;
     let original_publication = assert_joined_connected_workers(&state, id).await;
+    let probe = native_received_request(&joiner_window, &original);
+    run(&joiner_queue).await;
+    assert_eq!(
+        found_value(probe.await.unwrap()),
+        serde_json::json!({"backend":"text-v2","scope":"received-live","item":null})
+    );
 
     // The saved native row can be reported after the actual founder retires.
     let locked = snapshot_request(&founder_window, None);

@@ -157,8 +157,10 @@ then wakes the single worker for that installed row. The worker retries unchange
 interruption, polls for debt after an authenticated reopen and stops when the row retires.
 Foreground reads and saves share the row's local work permit with publication preparation
 and checkpointing. Transport submission runs after that permit is released.
-Shared history mounting, renderer access and recovery beyond the live worker's bounded
-direct dependency window remain open.
+The main renderer receives an action ID notification and reads the exact live projection
+through a fresh authenticated invocation. Provisional bodies are labelled separately from
+local receipts. Browsing shared history across restart and recovery beyond the live worker's
+bounded direct dependency window remain open.
 Original audit chunks and request receipts remain retained after scheduling debt clears.
 Removal changes active view, never deletes the audit. Unproven late removed actions stay
 Held pending the separately authorized moderation path; ordinary concurrent edits resolve
