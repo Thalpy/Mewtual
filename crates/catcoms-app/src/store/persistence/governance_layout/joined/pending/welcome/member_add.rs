@@ -1,9 +1,7 @@
 //! Covered continuations of one original joined Welcome.
 use super::*;
-use catcoms_sync::{
-    ClosedV2JoinedNode, PreparedV2JoinedMembership, RetiredV2JoinedAdd,
-    V2MemberTransitionFrameData, MAX_V2_GOVERNING_JOIN_STEPS,
-};
+use catcoms_sync::{ClosedV2JoinedNode, V2MemberTransitionFrameData, MAX_V2_GOVERNING_JOIN_STEPS};
+use codec::{JoinedMembershipCandidate, RetiredJoinedMembership};
 
 const MAX_EPOCH: u64 = MAX_V2_GOVERNING_JOIN_STEPS as u64;
 const RECORD_FEE: usize = 8 * (codec::MEMBER_ADD_FRAME + 1) + 4096;
@@ -12,6 +10,7 @@ const RECORD_FEE: usize = 8 * (codec::MEMBER_ADD_FRAME + 1) + 4096;
 pub(super) struct MemberAdds {
     covered: Vec<Covered>,
     pending: Option<Pending>,
+    evicted: bool,
 }
 
 struct Covered {
@@ -24,7 +23,7 @@ struct Pending {
     path: PathBuf,
     sealed: Zeroizing<Vec<u8>>,
     original: Option<CreatedStage>,
-    candidate: Option<PreparedV2JoinedMembership>,
+    candidate: JoinedMembershipCandidate,
     fee: CatalogReadReservation,
 }
 
@@ -66,7 +65,7 @@ impl MemberAdds {
     }
 
     pub(super) fn require_current(&self) -> Result<(), AppError> {
-        if self.pending.is_some() {
+        if self.pending.is_some() || self.evicted {
             return Err(denied());
         }
         self.require_original()
@@ -92,7 +91,7 @@ impl MemberAdds {
         delivery: &[u8],
         caller: &catcoms_rt::RequestCancellation,
         rng: &mut impl catcoms_rt::CryptoRngCore,
-    ) -> Result<RetiredV2JoinedAdd, AppError> {
+    ) -> Result<RetiredJoinedMembership, AppError> {
         let require_live = || {
             if caller.is_cancelled() {
                 return Err(denied());
@@ -100,6 +99,9 @@ impl MemberAdds {
             store.validate_mounted_governance_layout()
         };
         require_live()?;
+        if self.evicted {
+            return Err(denied());
+        }
         self.require_original()?;
         let (_, _, epoch) = node.selected_join_data()?;
         let path = path(store, context, epoch.checked_add(1).ok_or_else(denied)?)?;
@@ -108,9 +110,7 @@ impl MemberAdds {
             absent(&path)?;
             let fee = reserve(store)?;
             self.reserve_output()?;
-            let payment = crate::store::persistence::v2_text::prepare_sdk_admission(store)?;
-            let frame = V2MemberTransitionFrameData::decode(delivery)?;
-            let candidate = node.prepare_member_transition_frame(core, &frame, payment)?;
+            let candidate = prepare_transition(store, core, node, delivery)?;
             let sealed = codec::seal_member_add(
                 &key,
                 context,
@@ -123,7 +123,7 @@ impl MemberAdds {
                 path: path.clone(),
                 sealed,
                 original: None,
-                candidate: Some(candidate),
+                candidate,
                 fee,
             });
         }
@@ -132,33 +132,18 @@ impl MemberAdds {
             .last()
             .map_or(welcome, |entry| entry.file.1.as_slice());
         let pending = self.pending.as_mut().ok_or_else(denied)?;
-        if pending.path != path
-            || !pending
-                .candidate
-                .as_ref()
-                .ok_or_else(denied)?
-                .matches_frame_data(delivery)
-        {
+        if pending.path != path || !pending.candidate.matches_frame_data(delivery) {
             let frame = V2MemberTransitionFrameData::decode(delivery)?;
             node.observe_member_transition_header(core, &frame)?;
             return Err(denied());
         }
         require_live()?;
         write_held(store, &pending.path, &pending.sealed, &mut pending.original)?;
-        let candidate = pending.candidate.as_ref().ok_or_else(denied)?;
         let opened = codec::open_member_add(&key, context, predecessor, &pending.sealed)?;
-        let selected = opened.require_original_candidate(&context.vault, candidate)?;
+        let selected = opened.require_original_candidate(&context.vault, &pending.candidate)?;
         require_live()?;
-        let expected = V2HostSelectionExpectation::from_trusted_host(
-            candidate.header_data().id(),
-            candidate.header_data().spec().state,
-        );
-        let retired = node.install_host_selected_membership(
-            core,
-            &mut pending.candidate,
-            &expected,
-            selected,
-        )?;
+        let retired = install_transition(core, node, &mut pending.candidate, selected)?;
+        self.evicted = retired.terminal_data().is_some();
         let pending = self
             .pending
             .take()
@@ -193,29 +178,22 @@ impl MemberAdds {
                 missing = true;
                 continue;
             }
-            if missing {
+            if missing || self.evicted {
                 return Err(denied());
             }
             let fee = reserve(store)?;
             let file = read(&path, codec::MEMBER_ADD_FRAME)?.ok_or_else(denied)?;
             let opened = codec::open_member_add(&key, context, self.predecessor(welcome), &file.1)?;
-            let frame = V2MemberTransitionFrameData::decode(&opened.delivery)?;
             self.reserve_output()?;
-            let payment = crate::store::persistence::v2_text::prepare_sdk_admission(store)?;
-            let mut candidate = Some(node.prepare_member_transition_frame(core, &frame, payment)?);
-            let facts = candidate.as_ref().ok_or_else(denied)?;
-            let selected = opened.require_original_candidate(&context.vault, facts)?;
+            let mut candidate = prepare_transition(store, core, node, &opened.delivery)?;
+            let selected = opened.require_original_candidate(&context.vault, &candidate)?;
             if selected.0 != expected_epoch {
                 return Err(denied());
             }
-            let expected = V2HostSelectionExpectation::from_trusted_host(
-                facts.header_data().id(),
-                facts.header_data().spec().state,
-            );
             exact_held(&path, &file.0, session_id(&file.0).map_err(io)?, &file.1)?;
             store.validate_mounted_governance_layout()?;
-            let retired =
-                node.install_host_selected_membership(core, &mut candidate, &expected, selected)?;
+            let retired = install_transition(core, node, &mut candidate, selected)?;
+            self.evicted = retired.terminal_data().is_some();
             self.covered.push(Covered {
                 path,
                 file,
@@ -224,5 +202,49 @@ impl MemberAdds {
             drop(retired);
         }
         self.require_current()
+    }
+}
+
+fn prepare_transition<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore>(
+    store: &ServerStore,
+    core: &mut PreparedV2JoinedPrefix,
+    node: &ClosedV2JoinedNode<T, R>,
+    delivery: &[u8],
+) -> Result<JoinedMembershipCandidate, AppError> {
+    let frame = V2MemberTransitionFrameData::decode(delivery)?;
+    node.observe_member_transition_header(core, &frame)?;
+    let payment = crate::store::persistence::v2_text::prepare_sdk_admission(store)?;
+    if frame.removal_admission_data()? == Some(core.own_admission_data()) {
+        let candidate = node.prepare_member_eviction_frame(core, &frame, payment)?;
+        Ok(JoinedMembershipCandidate::Eviction(Some(candidate)))
+    } else {
+        let candidate = node.prepare_member_transition_frame(core, &frame, payment)?;
+        Ok(JoinedMembershipCandidate::Continuing(Some(candidate)))
+    }
+}
+
+fn install_transition<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore>(
+    core: &mut PreparedV2JoinedPrefix,
+    node: &mut ClosedV2JoinedNode<T, R>,
+    candidate: &mut JoinedMembershipCandidate,
+    selected: (u64, [u8; 32]),
+) -> Result<RetiredJoinedMembership, AppError> {
+    let header = candidate.header_data();
+    let head = header.id();
+    let expected = V2HostSelectionExpectation::from_trusted_host(head, header.spec().state);
+    match candidate {
+        JoinedMembershipCandidate::Continuing(candidate) => {
+            let retired =
+                node.install_host_selected_membership(core, candidate, &expected, selected)?;
+            Ok(RetiredJoinedMembership::Continuing(retired))
+        }
+        JoinedMembershipCandidate::Eviction(candidate) => {
+            let retired =
+                node.install_host_selected_eviction(core, candidate, &expected, selected)?;
+            Ok(RetiredJoinedMembership::Evicted {
+                terminal: (head, selected.0),
+                retired,
+            })
+        }
     }
 }

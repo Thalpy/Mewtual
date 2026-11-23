@@ -3,9 +3,13 @@ use super::*;
 use catcoms_replication::chat::cold_selected_history::{
     SelectedHistoryNodePage, MAX_SELECTED_HISTORY_NODE_PAGE_BYTES,
 };
-use catcoms_replication::chat::owner_header::HeaderKind;
+use catcoms_replication::chat::{
+    owner_header::{HeaderKind, OwnerHeaderId, SignedOwnerHeader},
+    V2PreparedSelectedHistoryData,
+};
 use catcoms_sync::{
-    PreparedV2JoinedMembership, SealedV2JoinedOutcome, V2JoinDeliveryData,
+    PreparedV2JoinedEviction, PreparedV2JoinedMembership, RetiredV2JoinedAdd,
+    RetiredV2JoinedEviction, SealedV2JoinedOutcome, V2JoinDeliveryData,
     V2MemberTransitionFrameData, V2PendingJoinContextData, MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES,
     MAX_V2_MEMBER_TRANSITION_FRAME_BYTES,
 };
@@ -20,6 +24,7 @@ const VERSION: u16 = 1;
 const LATER_ENTRY: u16 = 2;
 const OUTCOME_WITH_HISTORY: u16 = 2;
 const MEMBER_REMOVAL: u16 = 2;
+const MEMBER_EVICTION: u16 = 3;
 const SEALED_OVERHEAD: usize = 40;
 const DIGESTS: usize = 5 * 36;
 const MAX_OUTCOME_CIPHERTEXT: usize = 512 * 1024 + 4096;
@@ -53,26 +58,134 @@ pub(in crate::store) const MEMBER_ADD_FRAME: usize = 4
 pub(in crate::store) struct OpenedMemberAdd {
     pub(in crate::store) delivery: Vec<u8>,
     history: Zeroizing<Vec<u8>>,
-    sdk: (u64, [u8; 32]),
+    binding: (u64, [u8; 32]),
+    version: u16,
+}
+
+pub(in crate::store) enum JoinedMembershipCandidate {
+    Continuing(Option<PreparedV2JoinedMembership>),
+    Eviction(Option<PreparedV2JoinedEviction>),
+}
+
+impl JoinedMembershipCandidate {
+    pub(in crate::store) fn header_data(&self) -> &SignedOwnerHeader {
+        match self {
+            Self::Continuing(candidate) => candidate
+                .as_ref()
+                .expect("held membership candidate")
+                .header_data(),
+            Self::Eviction(candidate) => candidate
+                .as_ref()
+                .expect("held eviction candidate")
+                .header_data(),
+        }
+    }
+
+    pub(in crate::store) fn matches_frame_data(&self, delivery: &[u8]) -> bool {
+        match self {
+            Self::Continuing(candidate) => candidate
+                .as_ref()
+                .is_some_and(|candidate| candidate.matches_frame_data(delivery)),
+            Self::Eviction(candidate) => candidate
+                .as_ref()
+                .is_some_and(|candidate| candidate.matches_frame_data(delivery)),
+        }
+    }
+
+    fn record_version(&self) -> Result<u16, AppError> {
+        match self {
+            Self::Continuing(_) => member_transition_version(self.header_data().spec().kind),
+            Self::Eviction(_) => Ok(MEMBER_EVICTION),
+        }
+    }
+
+    fn history_data(&self) -> &V2PreparedSelectedHistoryData {
+        match self {
+            Self::Continuing(candidate) => candidate
+                .as_ref()
+                .expect("held membership candidate")
+                .selected_history_data(),
+            Self::Eviction(candidate) => candidate
+                .as_ref()
+                .expect("held eviction candidate")
+                .selected_history_data(),
+        }
+    }
+
+    /// A continuing row retains the selected MLS authenticator. An eviction
+    /// retains the exact Commit digest and grants no successor SDK state.
+    fn binding_data(&self) -> (u64, [u8; 32]) {
+        match self {
+            Self::Continuing(candidate) => candidate
+                .as_ref()
+                .expect("held membership candidate")
+                .selected_epoch_data(),
+            Self::Eviction(candidate) => candidate
+                .as_ref()
+                .expect("held eviction candidate")
+                .removed_data(),
+        }
+    }
+}
+
+#[must_use = "retire the displaced joined continuation outside the host writers"]
+pub(in crate::store) enum RetiredJoinedMembership {
+    Continuing(RetiredV2JoinedAdd),
+    Evicted {
+        terminal: (OwnerHeaderId, u64),
+        retired: RetiredV2JoinedEviction,
+    },
+}
+
+impl RetiredJoinedMembership {
+    pub(in crate::store) fn terminal_data(&self) -> Option<(OwnerHeaderId, u64)> {
+        match self {
+            Self::Continuing(_) => None,
+            Self::Evicted { terminal, .. } => Some(*terminal),
+        }
+    }
 }
 
 impl OpenedMemberAdd {
     pub(in crate::store) fn require_original_candidate(
         &self,
         vault: &[u8; 32],
-        candidate: &PreparedV2JoinedMembership,
+        candidate: &JoinedMembershipCandidate,
     ) -> Result<(u64, [u8; 32]), AppError> {
         if !candidate.matches_frame_data(&self.delivery)
-            || self.sdk != candidate.selected_epoch_data()
+            || self.version != candidate.record_version()?
+            || self.binding != candidate.binding_data()
         {
             return Err(refused());
         }
         SelectedHistoryNodePage::decode(&self.history)
-            .and_then(|page| {
-                page.verify_exact_append_data(vault, candidate.selected_history_data())
-            })
+            .and_then(|page| page.verify_exact_append_data(vault, candidate.history_data()))
             .map_err(|_| refused())?;
-        Ok(self.sdk)
+        Ok(self.binding)
+    }
+
+    #[cfg(test)]
+    pub(in crate::store) fn relabel_as_eviction_for_test(
+        &self,
+        key: &[u8; 32],
+        context: V2PendingJoinContextData,
+        predecessor: &[u8],
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<Zeroizing<Vec<u8>>, AppError> {
+        seal_record(
+            key,
+            MEMBER_ADD_KEY,
+            MEMBER_ADD_TAG,
+            MEMBER_EVICTION,
+            context_fields(context, predecessor),
+            &[
+                &self.binding.0.to_be_bytes(),
+                &self.binding.1,
+                &self.delivery,
+                &self.history,
+            ],
+            rng,
+        )
     }
 }
 
@@ -81,18 +194,18 @@ pub(in crate::store) fn seal_member_add(
     context: V2PendingJoinContextData,
     predecessor: &[u8],
     delivery: &[u8],
-    candidate: &PreparedV2JoinedMembership,
+    candidate: &JoinedMembershipCandidate,
     rng: &mut dyn CryptoRngCore,
 ) -> Result<Zeroizing<Vec<u8>>, AppError> {
     if predecessor.is_empty() || !candidate.matches_frame_data(delivery) {
         return Err(refused());
     }
-    let (epoch, authenticator) = candidate.selected_epoch_data();
-    let version = member_transition_version(candidate.header_data().spec().kind)?;
+    let (epoch, binding) = candidate.binding_data();
+    let version = candidate.record_version()?;
     let history =
         catcoms_replication::chat::cold_selected_history::encode_selected_history_node_page(
             &context.vault,
-            candidate.selected_history_data(),
+            candidate.history_data(),
         )
         .map_err(|_| refused())?;
     seal_record(
@@ -101,7 +214,7 @@ pub(in crate::store) fn seal_member_add(
         MEMBER_ADD_TAG,
         version,
         context_fields(context, predecessor),
-        &[&epoch.to_be_bytes(), &authenticator, delivery, &history],
+        &[&epoch.to_be_bytes(), &binding, delivery, &history],
         rng,
     )
 }
@@ -124,7 +237,7 @@ pub(in crate::store) fn open_member_add(
             .try_into()
             .map_err(|_| refused())?,
     );
-    let authenticator = d
+    let binding = d
         .get_bytes()
         .map_err(bad)?
         .try_into()
@@ -133,17 +246,17 @@ pub(in crate::store) fn open_member_add(
     let history = d.get_bytes().map_err(bad)?;
     d.finish().map_err(bad)?;
     let frame = V2MemberTransitionFrameData::decode(delivery)?;
-    if version != member_transition_version(frame.kind_data())?
-        || frame.kind_data() != frame.header_data().spec().kind
-        || epoch < 2
-    {
+    let version_matches = version == member_transition_version(frame.kind_data())?
+        || (version == MEMBER_EVICTION && frame.kind_data() == HeaderKind::Removal);
+    if !version_matches || frame.kind_data() != frame.header_data().spec().kind || epoch < 2 {
         return Err(refused());
     }
     SelectedHistoryNodePage::decode(history).map_err(|_| refused())?;
     Ok(OpenedMemberAdd {
         delivery: delivery.to_vec(),
         history: Zeroizing::new(history.to_vec()),
-        sdk: (epoch, authenticator),
+        binding: (epoch, binding),
+        version,
     })
 }
 

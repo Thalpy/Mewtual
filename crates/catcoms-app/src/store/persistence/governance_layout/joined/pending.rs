@@ -267,7 +267,7 @@ impl ServerStore {
         delivery: &[u8],
         caller: &catcoms_rt::RequestCancellation,
         rng: &mut impl catcoms_rt::CryptoRngCore,
-    ) -> Result<catcoms_sync::RetiredV2JoinedAdd, AppError> {
+    ) -> Result<critical_namespaces::joined_pin::welcome::RetiredJoinedMembership, AppError> {
         let (_, context) = self.selected_pending_join_data()?.ok_or_else(denied)?;
         let (retired, verified) = {
             let mut slot = self.joined_pin_index.try_lock().map_err(|_| denied())?;
@@ -309,30 +309,34 @@ impl ServerStore {
                 .ok_or_else(denied)?;
             let prefix = welcome.member_prefix_mut_for_test()?;
             let pending = node.prepare_member_add_frame(prefix, &frame, allowance)?;
+            let epoch = pending.selected_epoch_data();
             let (_, (_, predecessor)) = welcome.registration_files()?;
             use critical_namespaces::joined_pin::welcome as record;
+            let pending = record::JoinedMembershipCandidate::Continuing(Some(pending));
             let raw = record::seal_member_add(&key, context, predecessor, wire, &pending, rng)?;
             let opened = record::open_member_add(&key, context, predecessor, &raw)?;
             if opened.delivery != wire
-                || opened.require_original_candidate(&context.vault, &pending)?
-                    != pending.selected_epoch_data()
+                || opened.require_original_candidate(&context.vault, &pending)? != epoch
             {
                 return Err(denied());
             }
             assert!(record::open_member_add(&key, context, &predecessor[1..], &raw).is_err());
+            let relabelled =
+                opened.relabel_as_eviction_for_test(&key, context, predecessor, rng)?;
+            assert!(record::open_member_add(&key, context, predecessor, &relabelled).is_err());
             let mut foreign = context;
             foreign.pin[0] ^= 1;
             assert!(record::open_member_add(&key, foreign, predecessor, &raw).is_err());
             assert!(
                 record::open_member_add(&key, context, predecessor, &raw[..raw.len() - 1]).is_err()
             );
-            pending
+            (pending.header_data().id(), epoch.0)
         };
         let (head, _, epoch) = node.selected_join_data()?;
         if (head, epoch) != original || self.recovered_join_outcome_data()? != Some(original) {
             return Err(denied());
         }
-        Ok((pending.header_data().id(), pending.selected_epoch_data().0))
+        Ok(pending)
     }
 
     #[cfg(all(test, any(windows, target_os = "linux")))]
@@ -849,7 +853,7 @@ impl JoinedPendingIo {
         delivery: &[u8],
         caller: &catcoms_rt::RequestCancellation,
         rng: &mut impl catcoms_rt::CryptoRngCore,
-    ) -> Result<catcoms_sync::RetiredV2JoinedAdd, AppError> {
+    ) -> Result<critical_namespaces::joined_pin::welcome::RetiredJoinedMembership, AppError> {
         self.request_data(store)?;
         self.welcome.as_mut().ok_or_else(denied)?.cover_member_add(
             store,

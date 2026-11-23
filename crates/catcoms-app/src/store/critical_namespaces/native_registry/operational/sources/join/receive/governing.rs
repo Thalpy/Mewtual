@@ -1,4 +1,4 @@
-//! Fetch and apply the exact next governing Add on an existing joined row.
+//! Fetch and apply the exact next governing change on an existing joined row.
 use super::*;
 use catcoms_net::{NativeChatMemberDependencyExchange, NativeChatMemberDependencyObservation};
 use catcoms_rt::{
@@ -193,6 +193,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         };
         require_live()?;
         let mut retired = None;
+        let mut retired_row = None;
         let selected = {
             let pending = self
                 .original
@@ -216,7 +217,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 return Err(Refusal::Stale);
             }
             let metadata = self.original.work.as_ref().ok_or(Refusal::Unavailable)?;
-            metadata.with_registered_joined_member(
+            let result = metadata.with_registered_joined_member(
                 data,
                 runtime.registration.as_deref(),
                 selection.original.row,
@@ -253,23 +254,41 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                             .ok_or(Refusal::Unavailable)?
                             .cover_member_add(store, node, &response.frame, &signal, rng)
                     };
-                    retired = Some(result.map_err(|error| match error {
+                    let transition = result.map_err(|error| match error {
                         AppError::Io(_) => Refusal::Busy,
                         _ => Refusal::Failed,
-                    })?);
+                    })?;
+                    let terminal = transition.terminal_data();
+                    retired = Some(transition);
                     mount.require_live(store).map_err(|_| Refusal::Cancelled)?;
+                    if let Some(terminal) = terminal {
+                        return Ok(terminal);
+                    }
                     let (head, _, epoch) = node
                         .selected_join_data()
                         .map_err(|_| Refusal::Unavailable)?;
                     Ok((head, epoch))
                 },
-            )?
+            );
+            if retired
+                .as_ref()
+                .is_some_and(|receipt| receipt.terminal_data().is_some())
+            {
+                selection.close_original_cached();
+                retired_row = Some((runtime.member.take(), runtime.node.take()));
+            }
+            result
         };
+        let evicted = retired_row.is_some();
+        drop(retired_row);
         drop(retired);
+        if evicted {
+            return selected;
+        }
         self.original
             .require_current(caller)
             .map_err(|_| Refusal::Cancelled)?;
-        Ok(selected)
+        selected
     }
 }
 
@@ -280,7 +299,7 @@ struct ApplyScope {
 
 impl std::fmt::Debug for ApplyScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("NativeTextJoinedAddApplyScope")
+        f.write_str("NativeTextJoinedGoverningApplyScope")
     }
 }
 

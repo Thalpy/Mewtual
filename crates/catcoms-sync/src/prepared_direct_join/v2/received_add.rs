@@ -264,6 +264,20 @@ impl<'a> V2MemberTransitionFrameData<'a> {
         self.kind
     }
 
+    /// Read the quoted admission from a Remove body after the caller observes
+    /// its signed Header. Core and MLS still authenticate the original cut.
+    pub fn removal_admission_data(
+        &self,
+    ) -> Result<Option<catcoms_replication::chat::owner_facts::OwnerFactId>, SyncError> {
+        if self.kind != HeaderKind::Removal {
+            return Ok(None);
+        }
+        let (TransitionBody::Removal(body), _, _) = self.body_data()? else {
+            return Err(SyncError::JoinRejected);
+        };
+        Ok(Some(body.spec().frozen_tip.context.admission))
+    }
+
     pub(super) fn digest_data(&self) -> blake3::Hash {
         self.digest
     }

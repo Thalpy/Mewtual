@@ -549,8 +549,12 @@ reply and each Remove archive can serve its exact Commit to holders of the
 preceding epoch's proof. The evicted member can authenticate its own Remove
 without merging or deriving successor keys. Sync can select the original
 frozen Core admission and close the same fence that admits final saves.
-The founder's durable governing writer and the native terminal record for
-an evicted member still need integration.
+The joined vault covers that terminal cut on its original Welcome file
+chain. The record retains the original Commit digest and frozen history
+page. Recovery authenticates that cut before refusing to activate that same
+old registration, and live application retires the original row and SDK.
+The founder's durable governing writer and the physical end-to-end removal
+regression still need integration.
 
 ## Acceptance before enabling
 

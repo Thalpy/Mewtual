@@ -57,7 +57,7 @@ impl WarmWelcome {
         delivery: &[u8],
         caller: &catcoms_rt::RequestCancellation,
         rng: &mut impl catcoms_rt::CryptoRngCore,
-    ) -> Result<catcoms_sync::RetiredV2JoinedAdd, AppError> {
+    ) -> Result<codec::RetiredJoinedMembership, AppError> {
         self.require_outcome(store)?;
         let selected = self
             .selection
@@ -484,7 +484,7 @@ impl RecoveredWelcome {
         delivery: &[u8],
         caller: &catcoms_rt::RequestCancellation,
         rng: &mut impl catcoms_rt::CryptoRngCore,
-    ) -> Result<catcoms_sync::RetiredV2JoinedAdd, AppError> {
+    ) -> Result<codec::RetiredJoinedMembership, AppError> {
         self.require(store)?;
         let outcome = self.outcome.as_mut().ok_or_else(denied)?;
         let selected = Arc::get_mut(&mut outcome.selection).ok_or_else(denied)?;
