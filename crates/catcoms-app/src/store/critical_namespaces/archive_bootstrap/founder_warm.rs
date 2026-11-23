@@ -188,7 +188,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
     }
 
     pub(in crate::store) fn inspect_native_invite_data(
-        &self,
+        &mut self,
         layout: &V2CurrentLayoutStore,
         request: catcoms_sync::owner_v2::V2FounderInviteRequestData,
         routing_plan: &[u8],
@@ -199,13 +199,13 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
             return Err(refused());
         }
         self.host
-            .as_ref()
+            .as_mut()
             .ok_or_else(refused)?
             .inspect_native_invite_data(layout, request, routing_plan, keys, negative)
     }
 
     pub(in crate::store) fn require_received_join_request(
-        &self,
+        &mut self,
         layout: &V2CurrentLayoutStore,
         incoming: &catcoms_sync::V2JoinRequestPacketData<'_>,
         routing_plan: &[u8],
@@ -216,7 +216,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
             return Err(refused());
         }
         self.host
-            .as_ref()
+            .as_mut()
             .ok_or_else(refused)?
             .require_received_join_request(layout, incoming, routing_plan, keys, negative)
     }

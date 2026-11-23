@@ -176,8 +176,8 @@ impl<T: MeshTransport, R: CryptoRngCore> member::NativeTextMemberJob<T, R> {
             .map_err(|_| Error::Unavailable)?;
         let packet = V2JoinRequestPacketData::decode(bytes).map_err(|_| Error::Failed)?;
         let inner = &mut self.inner;
-        let body = inner.loan.body.as_ref().ok_or(Error::Unavailable)?;
-        let driver = body.driver.as_ref().ok_or(Error::Unavailable)?;
+        let body = inner.loan.body.as_mut().ok_or(Error::Unavailable)?;
+        let driver = body.driver.as_mut().ok_or(Error::Unavailable)?;
         let route = body
             .network
             .as_ref()

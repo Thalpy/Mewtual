@@ -244,18 +244,26 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> UnexposedV2Gene
             .map_err(|_| refused())
     }
 
-    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn preflight_first_add_package_data(
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn preflight_add_package_data(
         &self,
         store: &crate::store::ServerStore,
         request: catcoms_sync::owner_v2::V2FounderAddRequestData<'_>,
         limits: catcoms_mls::persist::text_current_add::TextCurrentAddLimits,
+        selected: Option<&catcoms_replication::chat::owner_state::transition::ReplayMath>,
     ) -> Result<(), crate::AppError> {
         use crate::store::critical_namespaces::refused;
         self.require_text_original_data(store)
             .map_err(|_| refused())?;
-        match (self.genesis_text_node(), self.governed_text_node()) {
-            (Some(node), None) => node.preflight_first_add_package_data(request, limits)?,
-            (None, Some(node)) => node.preflight_first_add_package_data(request, limits)?,
+        match (
+            self.genesis_text_node(),
+            self.governed_text_node(),
+            selected,
+        ) {
+            (Some(node), None, None) => node.preflight_first_add_package_data(request, limits)?,
+            (None, Some(node), None) => node.preflight_first_add_package_data(request, limits)?,
+            (None, Some(node), Some(replay)) => {
+                node.preflight_subsequent_add_package_data(replay, request, limits)?
+            }
             _ => return Err(refused()),
         }
         self.require_text_original_data(store)
@@ -334,14 +342,20 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> UnexposedV2Gene
         request: catcoms_sync::owner_v2::V2FounderInviteRequestData,
         native: &catcoms_rt::NativeChatSourceObservation,
         slot: &mut Option<catcoms_sync::owner_v2::PreparedV2FounderInviteData>,
+        selected: Option<&catcoms_replication::chat::V2GeneralPrefixVerifier>,
     ) -> Result<(), crate::AppError> {
         self.require_text_original_data(store)
             .map_err(|_| crate::store::critical_namespaces::refused())?;
-        let result = self
-            .genesis_text_node_mut()
-            .ok_or_else(crate::store::critical_namespaces::refused)?
-            .prepare_invite_data(request, native, slot)
-            .map_err(crate::AppError::from);
+        let result = if let Some(verifier) = selected {
+            self.governed_text_node_mut()
+                .ok_or_else(crate::store::critical_namespaces::refused)?
+                .prepare_selected_invite_data(verifier, request, native, slot)
+        } else {
+            self.genesis_text_node_mut()
+                .ok_or_else(crate::store::critical_namespaces::refused)?
+                .prepare_invite_data(request, native, slot)
+        }
+        .map_err(crate::AppError::from);
         self.require_text_original_data(store)
             .map_err(|_| crate::store::critical_namespaces::refused())?;
         result
@@ -351,13 +365,20 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> UnexposedV2Gene
         &self,
         store: &crate::store::ServerStore,
         original: &catcoms_sync::owner_v2::PreparedV2FounderInviteData,
+        selected: Option<&catcoms_replication::chat::V2GeneralPrefixVerifier>,
     ) -> Result<(), crate::AppError> {
         self.require_text_original_data(store)
             .map_err(|_| crate::store::critical_namespaces::refused())?;
-        self.genesis_text_node()
-            .ok_or_else(crate::store::critical_namespaces::refused)?
-            .preflight_invite_signing_data(original)
-            .map_err(crate::AppError::from)
+        if let Some(verifier) = selected {
+            self.governed_text_node()
+                .ok_or_else(crate::store::critical_namespaces::refused)?
+                .preflight_selected_invite_signing(verifier, original)
+        } else {
+            self.genesis_text_node()
+                .ok_or_else(crate::store::critical_namespaces::refused)?
+                .preflight_invite_signing_data(original)
+        }
+        .map_err(crate::AppError::from)
     }
 
     pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn sign_text_invite(
@@ -366,13 +387,20 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> UnexposedV2Gene
         original: &mut catcoms_sync::owner_v2::PreparedV2FounderInviteData,
         cut: &mut catcoms_rt::NativeChatPreparedKeyCut,
         ends: &mut catcoms_rt::NativeChatKeyEnds,
+        selected: Option<&catcoms_replication::chat::V2GeneralPrefixVerifier>,
     ) -> Result<(), crate::AppError> {
         self.require_text_original_data(store)
             .map_err(|_| crate::store::critical_namespaces::refused())?;
-        self.genesis_text_node()
-            .ok_or_else(crate::store::critical_namespaces::refused)?
-            .sign_invite_native_data(original, cut, ends)
-            .map_err(crate::AppError::from)
+        if let Some(verifier) = selected {
+            self.governed_text_node()
+                .ok_or_else(crate::store::critical_namespaces::refused)?
+                .sign_selected_invite_native(verifier, original, cut, ends)
+        } else {
+            self.genesis_text_node()
+                .ok_or_else(crate::store::critical_namespaces::refused)?
+                .sign_invite_native_data(original, cut, ends)
+        }
+        .map_err(crate::AppError::from)
     }
 }
 

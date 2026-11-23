@@ -1,16 +1,18 @@
 //! One immutable, covered unsigned intent inside the original text.pages.
 //!
-//! This initial closed profile has ONE persistent object/8KiB quota. It never
-//! replaces, retires or deletes it. A torn/unknown object blocks further work;
+//! One persistent intent is retained per selected parent. A torn or unknown
+//! object blocks further work on that parent;
 //! only the same warm owner may finish its own exact partially written frame.
 //! The signing stages use separate immutable files under the same held directory.
 use super::*;
 use crate::store::critical_namespaces::current_layout::V2TextCurrentGroupGuard;
+use crate::store::persistence::v2_text::TextHeadIdData;
 use catcoms_crypto::{seal, unseal};
 use catcoms_replication::chat::join_bindings::InviteBindingSpecData;
 use catcoms_storage::kept::{session_at, session_id, SessionAt, SessionId};
 use catcoms_storage::VaultPhysicalWorkLease;
 use catcoms_wire::{Decoder, Encoder};
+use std::borrow::Cow;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -20,6 +22,8 @@ const NAME: &str = "invite.intent.v1";
 const TAG: &[u8] = b"mewtual/private-chat/invite-intent/v1\0";
 const KEY_DOMAIN: &str = "mewtual/private-chat/invite-intent-key/v1";
 const CONTEXT_DOMAIN: &[u8] = b"mewtual/private-chat/invite-context/v1\0";
+const SELECTED_CONTEXT_DOMAIN: &str = "mewtual/private-chat/invite-context-selected/v2";
+const MAX_NAME: usize = "invite.attempt.v2.".len() + 64;
 const OBJECTS: u32 = 1;
 const BYTES: u32 = 8192;
 const MAX_PLAIN: usize = 4096;
@@ -31,6 +35,37 @@ pub(super) use recovery::InviteRecoveryRead;
 pub(super) use signing::{InviteSigningJournal, SIGNING_JOURNAL_BYTES};
 
 type Pages = (PathBuf, File, SessionId);
+
+struct InviteJournalNames {
+    intent: Cow<'static, str>,
+    attempt: Cow<'static, str>,
+    raw: Cow<'static, str>,
+}
+
+impl InviteJournalNames {
+    fn for_parent(parent: Option<TextHeadIdData>) -> Self {
+        if let Some(parent) = parent {
+            let suffix = hex::encode(parent.as_bytes());
+            Self {
+                intent: format!("invite.intent.v2.{suffix}").into(),
+                attempt: format!("invite.attempt.v2.{suffix}").into(),
+                raw: format!("invite.raw.v2.{suffix}").into(),
+            }
+        } else {
+            Self {
+                intent: NAME.into(),
+                attempt: signing::ATTEMPT.into(),
+                raw: signing::RAW.into(),
+            }
+        }
+    }
+}
+
+impl Default for InviteJournalNames {
+    fn default() -> Self {
+        Self::for_parent(None)
+    }
+}
 
 #[cfg(test)]
 std::thread_local! {
@@ -72,6 +107,8 @@ pub(super) struct InviteIntentJournal {
     pages: Option<Pages>,
     context: Option<[u8; 32]>,
     object: JournalFile,
+    parent: Option<TextHeadIdData>,
+    names: InviteJournalNames,
     intent: Option<Intent>,
     observed_absent: bool,
     observed_present: bool,
@@ -107,9 +144,24 @@ fn original_context(guard: &V2TextCurrentGroupGuard<'_, '_>) -> Result<[u8; 32],
     Ok(*h.finalize().as_bytes())
 }
 
+fn bound_context(
+    guard: &V2TextCurrentGroupGuard<'_, '_>,
+    parent: Option<TextHeadIdData>,
+) -> Result<[u8; 32], AppError> {
+    let genesis = original_context(guard)?;
+    if let Some(parent) = parent {
+        let mut hash = blake3::Hasher::new_derive_key(SELECTED_CONTEXT_DOMAIN);
+        hash.update(&genesis);
+        hash.update(parent.as_bytes());
+        Ok(*hash.finalize().as_bytes())
+    } else {
+        Ok(genesis)
+    }
+}
+
 fn open_pages(guard: &V2TextCurrentGroupGuard<'_, '_>) -> Result<Pages, AppError> {
     let (target, _, _) = guard.target_directory_data();
-    if target.as_os_str().len() + 1 + "text.pages".len() + 1 + signing::MAX_NAME > MAX_PATH {
+    if target.as_os_str().len() + 1 + "text.pages".len() + 1 + MAX_NAME > MAX_PATH {
         return Err(refused());
     }
     let pages = target.join("text.pages");
@@ -197,11 +249,23 @@ fn decode(plain: &[u8], context: [u8; 32]) -> Result<Intent, AppError> {
 }
 
 impl InviteIntentJournal {
+    pub(super) fn for_parent(parent: Option<TextHeadIdData>) -> Self {
+        Self {
+            parent,
+            names: InviteJournalNames::for_parent(parent),
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn parent_data(&self) -> Option<TextHeadIdData> {
+        self.parent
+    }
+
     fn bind(
         &mut self,
         guard: &crate::store::critical_namespaces::current_layout::V2TextCurrentGroupGuard<'_, '_>,
     ) -> Result<(), AppError> {
-        let context = original_context(guard)?;
+        let context = bound_context(guard, self.parent)?;
         if self.context.is_some_and(|original| original != context) {
             return Err(refused());
         }
@@ -237,7 +301,7 @@ impl InviteIntentJournal {
                 return Ok(None);
             }
             self.object
-                .sync(self.pages.as_ref().ok_or_else(refused)?, NAME)?;
+                .sync(self.pages.as_ref().ok_or_else(refused)?, &self.names.intent)?;
             self.covered = true;
             return self
                 .intent
@@ -249,7 +313,7 @@ impl InviteIntentJournal {
         if self.observed_absent {
             return Ok(None);
         }
-        let path = self.pages()?.0.join(NAME);
+        let path = self.pages()?.0.join(&*self.names.intent);
         match fs::symlink_metadata(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound && !self.observed_present => {
                 self.observed_absent = true;
@@ -287,7 +351,7 @@ impl InviteIntentJournal {
         self.intent = Some(intent);
         self.loaded = true;
         self.object
-            .sync(self.pages.as_ref().ok_or_else(refused)?, NAME)?;
+            .sync(self.pages.as_ref().ok_or_else(refused)?, &self.names.intent)?;
         self.covered = true;
         Ok(Some(self.intent.as_ref().unwrap().result(request, route)?))
     }
@@ -347,7 +411,7 @@ impl InviteIntentJournal {
             return Err(refused());
         }
         self.object
-            .cover(self.pages.as_ref().ok_or_else(refused)?, NAME)?;
+            .cover(self.pages.as_ref().ok_or_else(refused)?, &self.names.intent)?;
         self.covered = true;
         Ok(result)
     }
@@ -357,7 +421,7 @@ impl InviteIntentJournal {
             return Err(refused());
         }
         self.object
-            .require_exact(self.pages.as_ref().ok_or_else(refused)?, NAME)
+            .require_exact(self.pages.as_ref().ok_or_else(refused)?, &self.names.intent)
     }
 }
 

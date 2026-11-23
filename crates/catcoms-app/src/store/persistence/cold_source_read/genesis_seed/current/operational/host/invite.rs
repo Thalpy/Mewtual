@@ -78,10 +78,6 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             || request.public_routing_plan == [0; 32]
             || request.lifetime_ms == 0
             || request.lifetime_ms > MAX_FOUNDER_INVITE_LIFETIME_MS
-            || self
-                .invite
-                .as_ref()
-                .is_some_and(|p| p.request != request || p.routing_plan != routing_plan)
         {
             return Err(refused());
         }
@@ -98,14 +94,31 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             return Err(refused());
         }
         self.ensure_member_lane(layout)?;
+        let parent = self
+            .governed_add
+            .as_ref()
+            .and_then(|add| add.installed)
+            .map(|(head, _)| head);
+        if self.invite.as_ref().is_some_and(|p| {
+            p.journal.parent_data() == parent
+                && (p.request != request || p.routing_plan != routing_plan)
+        }) {
+            return Err(refused());
+        }
+        let mut governed = self
+            .governed_add
+            .as_deref_mut()
+            .filter(|add| add.installed.is_some());
+        let member = self.member.as_mut().ok_or_else(refused)?;
         {
             let owner = self.owner.borrow_current()?;
-            self.member
-                .as_mut()
-                .ok_or_else(refused)?
-                .require_invite_parent(store, &owner)?;
+            member.require_invite_parent(store, &owner, governed.as_deref_mut())?;
         }
-        if self.invite.is_none() {
+        if self
+            .invite
+            .as_ref()
+            .is_none_or(|p| p.journal.parent_data() != parent)
+        {
             let pool = &store
                 .archive_bootstrap_policy
                 .as_ref()
@@ -119,7 +132,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
                 routing_plan: routing_plan.to_vec(),
                 original: None,
                 signing: InviteSigningJournal::default(),
-                journal: InviteIntentJournal::default(),
+                journal: InviteIntentJournal::for_parent(parent),
                 fee,
             }));
         }
@@ -135,13 +148,10 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         // A saved unsigned intent is DATA only: it never adopts a cold signer.
         let hit = {
             let owner = self.owner.borrow_current()?;
-            self.member
-                .as_mut()
-                .ok_or_else(refused)?
-                .with_invite_parent(store, &owner, |guard| {
-                    keys.preflight(&self.origin)?;
-                    p.journal.lookup(guard, request, routing_plan)
-                })?
+            member.with_invite_parent(store, &owner, governed.as_deref_mut(), |guard, _| {
+                keys.preflight(&self.origin)?;
+                p.journal.lookup(guard, request, routing_plan)
+            })?
         };
         if let Some(result) = hit {
             keys.preflight(&self.origin)?;
@@ -149,8 +159,16 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         }
         // This is outside every Current/Core writer. A late refusal leaves the
         // SAME original in this host before the RuntimeLoan is restored.
-        self.owner
-            .prepare_invite_data(store, request, &keys.original, &mut p.original)?;
+        let selected = parent
+            .map(|_| member.selected_invite_verifier())
+            .transpose()?;
+        self.owner.prepare_invite_data(
+            store,
+            request,
+            &keys.original,
+            &mut p.original,
+            selected,
+        )?;
         let PendingInvite {
             original, journal, ..
         } = p.as_mut();
@@ -161,14 +179,10 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             .map_err(AppError::from)?;
         journal.prepare_data(store, request, routing_plan, bytes, rng)?;
         let owner = self.owner.borrow_current()?;
-        let result = self
-            .member
-            .as_mut()
-            .ok_or_else(refused)?
-            .with_invite_parent(store, &owner, |guard| {
-                keys.preflight(&self.origin)?;
-                journal.cover(guard, request, routing_plan, bytes)
-            })?;
+        let result = member.with_invite_parent(store, &owner, governed, |guard, _| {
+            keys.preflight(&self.origin)?;
+            journal.cover(guard, request, routing_plan, bytes)
+        })?;
         keys.preflight(&self.origin)?;
         Ok(result)
     }
@@ -190,7 +204,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
     /// Independently inspect the files using the real current owner. This
     /// does not initialize the Host's member lane, intent or signing state.
     pub(in crate::store) fn inspect_native_invite_data(
-        &self,
+        &mut self,
         layout: &V2CurrentLayoutStore,
         request: V2FounderInviteRequestData,
         routing_plan: &[u8],
@@ -205,7 +219,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
     /// Match the exact received invitation to the actual persisted signed
     /// original. This is a negative gate before a separate Add transaction.
     pub(in crate::store) fn require_received_join_request(
-        &self,
+        &mut self,
         layout: &V2CurrentLayoutStore,
         packet: &catcoms_sync::V2JoinRequestPacketData<'_>,
         routing_plan: &[u8],
@@ -235,8 +249,19 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             return Err(refused());
         }
         keys.preflight(&self.origin)?;
+        let selected = self
+            .governed_add
+            .as_ref()
+            .filter(|add| add.installed.is_some())
+            .map(|_| {
+                self.member
+                    .as_ref()
+                    .ok_or_else(refused)?
+                    .governed_add_replay()
+            })
+            .transpose()?;
         self.owner
-            .preflight_first_add_package_data(store, request, limits)?;
+            .preflight_add_package_data(store, request, limits, selected)?;
         if negative.is_cancelled() {
             return Err(refused());
         }
@@ -289,7 +314,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             .as_ref()
             .ok_or_else(refused)?
             .require_request(store, packet)?;
-        let mut read = InviteRecoveryRead::prepare(store)?;
+        let mut read = InviteRecoveryRead::prepare(store, None)?;
         let p = self.governed_add.as_ref().ok_or_else(refused)?;
         let resources = p.parent.resources().clone();
         let selected = p.parent.selected_data().ok_or_else(refused)?;
@@ -321,7 +346,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
     }
 
     fn read_native_invite<U>(
-        &self,
+        &mut self,
         layout: &V2CurrentLayoutStore,
         keys: &NativeFounderKeys,
         negative: &RequestCancellation,
@@ -336,7 +361,31 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         require_live()?;
         let store = layout.checked_store()?;
         let owner = self.owner.borrow_current()?;
-        let mut read = InviteRecoveryRead::prepare(store)?;
+        if let Some(governed) = self
+            .governed_add
+            .as_deref_mut()
+            .filter(|add| add.installed.is_some())
+        {
+            let parent = governed.installed.ok_or_else(refused)?.0;
+            let mut read = InviteRecoveryRead::prepare(store, Some(parent))?;
+            let member = self.member.as_mut().ok_or_else(refused)?;
+            member.with_invite_parent(store, &owner, Some(&mut *governed), |guard, _| {
+                require_live()?;
+                read.capture(guard)
+            })?;
+            let status = inspect(&read, owner.source().data())?;
+            #[cfg(test)]
+            if let Some(hook) = AFTER_INVITE_READ.with(|slot| slot.borrow_mut().take()) {
+                hook();
+            }
+            member.with_invite_parent(store, &owner, Some(governed), |guard, _| {
+                read.require_current(guard)?;
+                require_live()
+            })?;
+            require_live()?;
+            return Ok(status);
+        }
+        let mut read = InviteRecoveryRead::prepare(store, None)?;
         let mut capture = PreparedV2TextParentCapture::prepare(store, owner.source())?;
         let resources = capture.resources().clone();
         store.with_v2_text_current(&owner, |admission| {
@@ -394,10 +443,24 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         let original = p.original.as_mut().ok_or_else(refused)?;
         let owner = owned.borrow_current()?;
         let member = self.member.as_mut().ok_or_else(refused)?;
+        let mut governed = self
+            .governed_add
+            .as_deref_mut()
+            .filter(|add| add.installed.is_some());
+        let parent = governed
+            .as_ref()
+            .and_then(|add| add.installed)
+            .map(|(head, _)| head);
+        if p.journal.parent_data() != parent {
+            return Err(refused());
+        }
         if original.raw_signature_data().is_err() {
-            owned.preflight_invite_signing(store, original)?;
+            let selected = parent
+                .map(|_| member.selected_invite_verifier())
+                .transpose()?;
+            owned.preflight_invite_signing(store, original, selected)?;
             p.signing.prepare_attempt(&p.journal, store, rng)?;
-            member.with_invite_parent(store, &owner, |guard| {
+            member.with_invite_parent(store, &owner, governed.as_deref_mut(), |guard, _| {
                 require_live(keys)?;
                 p.signing.cover_attempt(&mut p.journal, guard)
             })?;
@@ -405,11 +468,16 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             // complete before the key cut. Drain a partial End outside the
             // writers and before another RuntimeLoan can retry this original.
             let mut ends = NativeChatKeyEnds::new();
-            member.with_invite_parent(store, &owner, |guard| {
-                p.signing.require_attempt(&mut p.journal, guard)?;
-                require_live(keys)?;
-                owned.sign_invite(store, original, keys.invite_cut(), &mut ends)
-            })?;
+            member.with_invite_parent(
+                store,
+                &owner,
+                governed.as_deref_mut(),
+                |guard, selected| {
+                    p.signing.require_attempt(&mut p.journal, guard)?;
+                    require_live(keys)?;
+                    owned.sign_invite(store, original, keys.invite_cut(), &mut ends, selected)
+                },
+            )?;
             drop(ends);
             #[cfg(test)]
             if let Some(hook) = AFTER_INVITE_KEY.with(|slot| slot.borrow_mut().take()) {
@@ -432,7 +500,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             .and_then(|policy| {
                 PreparedNativeTextInvitePacket::prepare(pool, signed, policy, &p.routing_plan)
             });
-        member.with_invite_parent(store, &owner, |guard| {
+        member.with_invite_parent(store, &owner, governed, |guard, _| {
             require_live(keys)?;
             p.signing.cover_raw(&mut p.journal, guard)
         })?;

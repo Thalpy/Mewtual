@@ -4,12 +4,14 @@ use super::*;
 use crate::store::{NativeTextInviteRecovery, ServerStore};
 use catcoms_replication::chat::{join_bindings::SignedInviteBindingData, ChatError};
 use catcoms_sync::owner_v2::V2GenesisSeedData;
-use signing::{open_stage, ATTEMPT, FRAME_BYTES, RAW};
+use signing::{open_stage, FRAME_BYTES};
 
 const READ_BYTES: usize = 6 * MAX_PATH + 6 * MAX_FRAME + 8 * FRAME_BYTES + 16 * 1024;
 
 pub(in super::super) struct InviteRecoveryRead<'a> {
     store: &'a ServerStore,
+    parent: Option<TextHeadIdData>,
+    names: InviteJournalNames,
     context: Option<[u8; 32]>,
     pages: Option<Pages>,
     intent: Option<ReadObject>,
@@ -21,7 +23,10 @@ pub(in super::super) struct InviteRecoveryRead<'a> {
 }
 
 impl<'a> InviteRecoveryRead<'a> {
-    pub(in super::super) fn prepare(store: &'a ServerStore) -> Result<Self, AppError> {
+    pub(in super::super) fn prepare(
+        store: &'a ServerStore,
+        parent: Option<TextHeadIdData>,
+    ) -> Result<Self, AppError> {
         let pool = &store
             .archive_bootstrap_policy
             .as_ref()
@@ -32,6 +37,8 @@ impl<'a> InviteRecoveryRead<'a> {
         fee.validate(pool, READ_BYTES)?;
         Ok(Self {
             store,
+            parent,
+            names: InviteJournalNames::for_parent(parent),
             context: None,
             pages: None,
             intent: None,
@@ -49,12 +56,14 @@ impl<'a> InviteRecoveryRead<'a> {
         if !std::ptr::eq(self.store, guard.store()) || self.pages.is_some() {
             return Err(refused());
         }
-        self.context = Some(original_context(guard)?);
+        self.context = Some(bound_context(guard, self.parent)?);
         self.pages = Some(open_pages(guard)?);
         let pages = self.pages.as_ref().ok_or_else(refused)?;
-        self.intent = Some(ReadObject::open(&pages.0.join(NAME), MAX_FRAME)?.ok_or_else(refused)?);
-        self.attempt = ReadObject::open(&pages.0.join(ATTEMPT), FRAME_BYTES)?;
-        self.raw = ReadObject::open(&pages.0.join(RAW), FRAME_BYTES)?;
+        self.intent = Some(
+            ReadObject::open(&pages.0.join(&*self.names.intent), MAX_FRAME)?.ok_or_else(refused)?,
+        );
+        self.attempt = ReadObject::open(&pages.0.join(&*self.names.attempt), FRAME_BYTES)?;
+        self.raw = ReadObject::open(&pages.0.join(&*self.names.raw), FRAME_BYTES)?;
         Ok(())
     }
 
@@ -65,7 +74,7 @@ impl<'a> InviteRecoveryRead<'a> {
         guard: &V2TextCurrentGroupGuard<'_, '_>,
     ) -> Result<(), AppError> {
         if !std::ptr::eq(self.store, guard.store())
-            || self.context != Some(original_context(guard)?)
+            || self.context != Some(bound_context(guard, self.parent)?)
         {
             return Err(refused());
         }
@@ -74,9 +83,9 @@ impl<'a> InviteRecoveryRead<'a> {
         self.intent
             .as_mut()
             .ok_or_else(refused)?
-            .require_exact(&pages.0.join(NAME))?;
-        require_slot(&pages.0.join(ATTEMPT), self.attempt.as_mut())?;
-        require_slot(&pages.0.join(RAW), self.raw.as_mut())?;
+            .require_exact(&pages.0.join(&*self.names.intent))?;
+        require_slot(&pages.0.join(&*self.names.attempt), self.attempt.as_mut())?;
+        require_slot(&pages.0.join(&*self.names.raw), self.raw.as_mut())?;
         require_pages(pages)
     }
 

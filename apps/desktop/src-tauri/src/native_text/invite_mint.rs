@@ -1,4 +1,4 @@
-//! Publish the first covered V2 invitation of the original founder row.
+//! Publish the covered V2 invitation of the original founder row.
 use super::*;
 use catcoms_app::store::NativeUiInvocationMetadata;
 use tauri::ipc::InvokeResponseBody;
@@ -72,8 +72,8 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
                     .ok_or(listing::STALE)?;
             (source, row.data().request)
         };
-        // One immutable invitation per founder context. A lost observer
-        // retries that same journal entry on this original row.
+        // The native journal scopes this stable row token to its selected
+        // parent. A retry at the same parent uses the same original entry.
         let token = blake3::derive_key("mewtual/native-chat-first-invite/v2", &context);
         Ok((source, token, payment))
     })();

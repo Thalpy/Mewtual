@@ -326,15 +326,16 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurr
         }
     }
 
-    pub(super) fn preflight_first_add_package_data(
+    pub(super) fn preflight_add_package_data(
         &self,
         store: &ServerStore,
         request: catcoms_sync::owner_v2::V2FounderAddRequestData<'_>,
         limits: catcoms_mls::persist::text_current_add::TextCurrentAddLimits,
+        selected: Option<&catcoms_replication::chat::owner_state::transition::ReplayMath>,
     ) -> Result<(), AppError> {
         match &self.core {
             OwnedCurrent::Warm(current) => {
-                current.preflight_first_add_package_data(store, request, limits)
+                current.preflight_add_package_data(store, request, limits, selected)
             }
             OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
         }
@@ -385,10 +386,11 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurr
         request: catcoms_sync::owner_v2::V2FounderInviteRequestData,
         native: &catcoms_rt::NativeChatSourceObservation,
         slot: &mut Option<catcoms_sync::owner_v2::PreparedV2FounderInviteData>,
+        selected: Option<&catcoms_replication::chat::V2GeneralPrefixVerifier>,
     ) -> Result<(), AppError> {
         match &mut self.core {
             OwnedCurrent::Warm(current) => {
-                current.prepare_text_invite_data(store, request, native, slot)
+                current.prepare_text_invite_data(store, request, native, slot, selected)
             }
             OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
         }
@@ -398,9 +400,12 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurr
         &self,
         store: &ServerStore,
         original: &catcoms_sync::owner_v2::PreparedV2FounderInviteData,
+        selected: Option<&catcoms_replication::chat::V2GeneralPrefixVerifier>,
     ) -> Result<(), AppError> {
         match &self.core {
-            OwnedCurrent::Warm(current) => current.preflight_text_invite_signing(store, original),
+            OwnedCurrent::Warm(current) => {
+                current.preflight_text_invite_signing(store, original, selected)
+            }
             OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
         }
     }
@@ -411,9 +416,12 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurr
         original: &mut catcoms_sync::owner_v2::PreparedV2FounderInviteData,
         cut: &mut catcoms_rt::NativeChatPreparedKeyCut,
         ends: &mut catcoms_rt::NativeChatKeyEnds,
+        selected: Option<&catcoms_replication::chat::V2GeneralPrefixVerifier>,
     ) -> Result<(), AppError> {
         match &self.core {
-            OwnedCurrent::Warm(current) => current.sign_text_invite(store, original, cut, ends),
+            OwnedCurrent::Warm(current) => {
+                current.sign_text_invite(store, original, cut, ends, selected)
+            }
             OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
         }
     }

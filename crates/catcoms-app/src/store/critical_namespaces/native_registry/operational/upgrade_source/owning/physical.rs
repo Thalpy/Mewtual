@@ -1177,7 +1177,7 @@ impl SourceWork {
         R: catcoms_rt::CryptoRngCore,
     >(
         &self,
-        driver: &crate::store::PreparedFreshV2TextFounder<T, R>,
+        driver: &mut crate::store::PreparedFreshV2TextFounder<T, R>,
         request: catcoms_sync::owner_v2::V2FounderInviteRequestData,
         routing_plan: &[u8],
         keys: &crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounderKeys,
@@ -1197,7 +1197,7 @@ impl SourceWork {
         R: catcoms_rt::CryptoRngCore,
     >(
         &self,
-        driver: &crate::store::PreparedFreshV2TextFounder<T, R>,
+        driver: &mut crate::store::PreparedFreshV2TextFounder<T, R>,
         incoming: &catcoms_sync::V2JoinRequestPacketData<'_>,
         routing_plan: &[u8],
         keys: &crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounderKeys,

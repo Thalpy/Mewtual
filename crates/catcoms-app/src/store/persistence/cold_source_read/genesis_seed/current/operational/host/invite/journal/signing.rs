@@ -5,7 +5,6 @@ use crate::store::critical_namespaces::current_layout::V2TextCurrentGroupGuard;
 
 pub(super) const ATTEMPT: &str = "invite.attempt.v1";
 pub(super) const RAW: &str = "invite.raw.v1";
-pub(super) const MAX_NAME: usize = ATTEMPT.len();
 const SIGNING_TAG: &[u8] = b"mewtual/private-chat/invite-signing/v1\0";
 const SIGNING_KEY: &str = "mewtual/private-chat/invite-signing-key/v1";
 const OBJECTS: u32 = 2;
@@ -115,11 +114,11 @@ impl InviteSigningJournal {
         Ok(())
     }
 
-    fn require_raw_absent(&mut self, pages: &Pages) -> Result<(), AppError> {
+    fn require_raw_absent(&mut self, pages: &Pages, name: &str) -> Result<(), AppError> {
         if self.unexpected_raw || self.raw.create_entered {
             return Err(refused());
         }
-        let error = match fs::symlink_metadata(pages.0.join(RAW)) {
+        let error = match fs::symlink_metadata(pages.0.join(name)) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => io(e),
             Ok(_) => refused(),
@@ -139,14 +138,14 @@ impl InviteSigningJournal {
         intent.bind(guard)?;
         intent.require_original()?;
         let pages = intent.pages()?;
-        self.require_raw_absent(pages)?;
+        self.require_raw_absent(pages, &intent.names.raw)?;
         if self.attempt_covered {
-            self.attempt.require_exact(pages, ATTEMPT)?;
+            self.attempt.require_exact(pages, &intent.names.attempt)?;
         } else {
-            self.attempt.cover(pages, ATTEMPT)?;
+            self.attempt.cover(pages, &intent.names.attempt)?;
             self.attempt_covered = true;
         }
-        self.require_raw_absent(pages)?;
+        self.require_raw_absent(pages, &intent.names.raw)?;
         require_pages(pages)
     }
 
@@ -161,8 +160,8 @@ impl InviteSigningJournal {
         intent.bind(guard)?;
         intent.require_original()?;
         let pages = intent.pages()?;
-        self.attempt.require_exact(pages, ATTEMPT)?;
-        self.require_raw_absent(pages)?;
+        self.attempt.require_exact(pages, &intent.names.attempt)?;
+        self.require_raw_absent(pages, &intent.names.raw)?;
         require_pages(pages)
     }
 
@@ -199,14 +198,14 @@ impl InviteSigningJournal {
         intent.bind(guard)?;
         intent.require_original()?;
         let pages = intent.pages()?;
-        self.attempt.require_exact(pages, ATTEMPT)?;
+        self.attempt.require_exact(pages, &intent.names.attempt)?;
         if self.raw_covered {
-            self.raw.require_exact(pages, RAW)?;
+            self.raw.require_exact(pages, &intent.names.raw)?;
         } else {
-            self.raw.cover(pages, RAW)?;
+            self.raw.cover(pages, &intent.names.raw)?;
             self.raw_covered = true;
         }
-        self.attempt.require_exact(pages, ATTEMPT)?;
+        self.attempt.require_exact(pages, &intent.names.attempt)?;
         intent.require_original()?;
         Ok(())
     }

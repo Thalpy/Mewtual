@@ -800,8 +800,9 @@ impl V2MemberLane {
         &mut self,
         store: &ServerStore,
         owner: &V2TextOwnerRef<'_>,
+        governed: Option<&mut super::governed_add::PendingGovernedAdd>,
     ) -> Result<(), AppError> {
-        self.with_invite_parent(store, owner, |_| Ok(()))
+        self.with_invite_parent(store, owner, governed, |_, _| Ok(()))
     }
     /// The isolated invitation journal stays under the same actual Current4
     /// and selected G1 proof. It mutates no Head/O/H/WAL/index object and never
@@ -810,8 +811,10 @@ impl V2MemberLane {
         &mut self,
         store: &ServerStore,
         owner: &V2TextOwnerRef<'_>,
+        governed: Option<&mut super::governed_add::PendingGovernedAdd>,
         work: impl FnOnce(
             &crate::store::critical_namespaces::current_layout::V2TextCurrentGroupGuard<'_, '_>,
+            Option<&V2GeneralPrefixVerifier>,
         ) -> Result<U, AppError>,
     ) -> Result<U, AppError> {
         self.validate_accounts(store)?;
@@ -821,7 +824,23 @@ impl V2MemberLane {
         let original = owner.source().data();
         if !admission.is_open_data()
             || admission.admission_data().spec().subject != original.context.spec_data().signer
-            || verifier.replay_data().mls_epoch_data() != 0
+        {
+            return Err(refused());
+        }
+        if let Some(governed) = governed {
+            self.require_quiescent_for_add()?;
+            let resources = governed.parent.resources().clone();
+            return store.with_v2_text_current(owner, |current| {
+                let guard = store.lock_v2_text_current_group(current, &resources)?;
+                self.domain.require_current_source(current)?;
+                governed.require_selected_member_head(&guard, verifier.replay_data())?;
+                let result = work(&guard, Some(verifier))?;
+                governed.require_selected_member_head(&guard, verifier.replay_data())?;
+                self.domain.require_current_source(current)?;
+                Ok(result)
+            });
+        }
+        if verifier.replay_data().mls_epoch_data() != 0
             || verifier.replay_data().header().id() != original.header.id()
         {
             return Err(refused());
@@ -833,12 +852,16 @@ impl V2MemberLane {
             self.domain.require_current_source(current)?;
             guard.require_governed_native_invite_parent()?;
             selected.validate_idle_genesis_member_under_current_guard(&guard)?;
-            let result = work(&guard)?;
+            let result = work(&guard, None)?;
             guard.require_governed_native_invite_parent()?;
             selected.validate_idle_genesis_member_under_current_guard(&guard)?;
             self.domain.require_current_source(current)?;
             Ok(result)
         })
+    }
+
+    pub(super) fn selected_invite_verifier(&self) -> Result<&V2GeneralPrefixVerifier, AppError> {
+        self.verifier.as_ref().ok_or_else(refused)
     }
     fn prepare(
         store: &ServerStore,

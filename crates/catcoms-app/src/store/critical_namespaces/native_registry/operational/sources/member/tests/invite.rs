@@ -2744,9 +2744,44 @@ async fn native_governed_add_fixture(case: JoinCase) {
             ..sign_request(&message)
         };
         let head = only_named(directory.path(), "text.add.response.v2").with_file_name("head.bin");
+        let next =
+            || prepare(&owner, &row, &vault, &budget).save_invite([58; 32], 60_000, &negative);
+        let next_saved = next().unwrap();
+        let next_invite =
+            crate::store::NativeTextInvitePacketData::decode(next_saved.packet_bytes_data())
+                .unwrap();
+        assert_ne!(
+            next_invite.binding().spec_data().nonce,
+            invite.binding().spec_data().nonce
+        );
+        assert_eq!(
+            next_invite.binding().spec_data().anchor.header,
+            invite.binding().spec_data().anchor.header
+        );
+        assert_eq!(
+            next().unwrap().packet_bytes_data(),
+            next_saved.packet_bytes_data()
+        );
+        assert_eq!(std::fs::read(&raw).unwrap(), original);
+        let next_request = PreparedV2JoinRequest::prepare(
+            catcoms_mls::MlsDevice::generate().unwrap(),
+            &next_invite.binding().spec_data().anchor,
+            next_invite.binding(),
+            [60; 32],
+            next_saved.expires_at_ms() - 1,
+            DirectJoinLimits::new(512 * 1024, 512 * 1024, 64 * 1024).unwrap(),
+        )
+        .unwrap();
+        assert!(prepare(&owner, &row, &vault, &budget)
+            .check_received_join_request(next_request.request_bytes_data(), &negative)
+            .is_ok());
+        assert!(prepare(&owner, &row, &vault, &budget)
+            .check_received_join_request(&original_request, &negative)
+            .is_err());
         let parked_head = head.with_extension("test-parked");
         std::fs::rename(&head, &parked_head).unwrap();
         std::fs::copy(&parked_head, &head).unwrap();
+        assert!(next().is_err());
         assert!(prepare(&owner, &row, &vault, &budget)
             .prepare_member_save(request(), &negative)
             .is_err());
