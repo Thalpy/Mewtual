@@ -380,8 +380,13 @@ Admission and the old transport observation retires. The warm and restored
 graphs can stage the same Add with independent payment. The governing frame
 keeps the signed Header readable ahead of the Admission and encrypted Commit
 so damaged bodies still allow fork detection. Native TCP assigns this
-exchange its own bounded request queue. The mounted receiver's durable
-selection and the catch-up service remain open work.
+exchange its own bounded request queue. Existing members derive the request
+proof from their selected MLS epoch. The later Add journal stores a one-way
+verifier bound to the signed parent and epoch. A recovered founder can use
+that verifier to serve only the immediate successor from its authenticated
+archive over the same native connection. Earlier request records remain
+readable for exact Welcome retries. The mounted receiver's durable selection
+and desktop dispatch still need wiring.
 
 An independently reopened Pending with neither Welcome file can resend the
 exact original request over the same connected protocol. It verifies the

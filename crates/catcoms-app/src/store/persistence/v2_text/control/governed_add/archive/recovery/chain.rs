@@ -20,6 +20,11 @@ struct Predecessor {
     file: OpenedTextControl,
 }
 
+struct PriorRequest {
+    digest: [u8; 32],
+    fetch_verifier: Option<[u8; 32]>,
+}
+
 pub(super) struct PublicStep {
     pub(super) header: SignedOwnerHeader,
     pub(super) admission: AdmissionBody,
@@ -31,7 +36,7 @@ pub(super) struct RecoveredArchiveChain {
     pub(super) journal: RecoveredAddJournal,
     first: PublicStep,
     successors: Vec<PublicStep>,
-    prior_requests: Vec<[u8; 32]>,
+    prior_requests: Vec<PriorRequest>,
     pub(super) prefix: Vec<u8>,
 }
 
@@ -45,7 +50,7 @@ impl RecoveredArchiveChain {
             + MAX_V2_GOVERNING_JOIN_STEPS
                 * (4 * std::mem::size_of::<Predecessor>()
                     + 4 * std::mem::size_of::<PublicStep>()
-                    + 4 * std::mem::size_of::<[u8; 32]>()
+                    + 4 * std::mem::size_of::<PriorRequest>()
                     + 128)
     }
 
@@ -98,7 +103,10 @@ impl RecoveredArchiveChain {
         };
         let first_proof = first.first_proof(trusted)?;
         let mut prior_requests = Vec::with_capacity(count - 1);
-        prior_requests.push(*blake3::hash(&first_add.request).as_bytes());
+        prior_requests.push(PriorRequest {
+            digest: *blake3::hash(&first_add.request).as_bytes(),
+            fetch_verifier: None,
+        });
         drop(first_add);
         let mut successors = Vec::with_capacity(count - 1);
         let mut public_bytes = first_proof.len();
@@ -106,7 +114,10 @@ impl RecoveredArchiveChain {
             require_original()?;
             let mut archive = original.reread(directory, &mut buffer)?;
             let journal = replay.verify_later_add(key, &original.head, &archive.frame, trusted)?;
-            prior_requests.push(*blake3::hash(&journal.request).as_bytes());
+            prior_requests.push(PriorRequest {
+                digest: *blake3::hash(&journal.request).as_bytes(),
+                fetch_verifier: journal.fetch_verifier,
+            });
             buffer = Some(std::mem::take(&mut archive.frame));
             successors.push(journal.public_step(&mut public_bytes)?);
         }
@@ -184,14 +195,15 @@ impl RecoveredArchiveChain {
         let index = self
             .prior_requests
             .iter()
-            .position(|digest| digest == requested.as_bytes())
+            .position(|prior| &prior.digest == requested.as_bytes())
             .ok_or_else(refused)?;
-        let original = self.predecessors.get(index).ok_or_else(refused)?;
-        let selected = selected_head::GovernedHeadData::open_governed_data(key, &original.head)?;
-        let mut buffer = Some(Zeroizing::new(Vec::with_capacity(MAX_BYTES + 1)));
-        let archive = original.reread(directory, &mut buffer)?;
         let first_proof = self.first.first_proof(trusted)?;
         if index == 0 {
+            let original = self.predecessors.first().ok_or_else(refused)?;
+            let selected =
+                selected_head::GovernedHeadData::open_governed_data(key, &original.head)?;
+            let mut buffer = Some(Zeroizing::new(Vec::with_capacity(MAX_BYTES + 1)));
+            let archive = original.reread(directory, &mut buffer)?;
             let (first, _) = authenticate_first_archive(
                 key,
                 &original.head,
@@ -207,20 +219,7 @@ impl RecoveredArchiveChain {
                 &first_proof,
             )?);
         }
-        let mut replay = AddReplay::from_genesis(trusted)?.core;
-        for step in self.public_steps().take(index) {
-            replay = replay
-                .derive_successor(
-                    &step.header,
-                    ReplayBody::Admission(&step.admission),
-                    &step.image,
-                )
-                .map_err(|_| refused())?
-                .next;
-        }
-        let plain = open_later_data(key, &selected, &archive.frame)?;
-        let (labels, frames) = decode_later_data(&plain)?;
-        let (journal, _) = authenticate_add_journal(key, labels, &frames, trusted, &replay)?;
+        let journal = self.read_later_journal(key, directory, trusted, index)?;
         if journal.request.as_slice() != request {
             return Err(refused());
         }
@@ -235,6 +234,66 @@ impl RecoveredArchiveChain {
             &journal.response,
             &proof,
         )?)
+    }
+
+    pub(super) fn encode_member_add(
+        &self,
+        key: &[u8; 32],
+        directory: &Path,
+        trusted: &GenesisPublicData<'_>,
+        request: &V2MemberAddRequestData,
+    ) -> Result<Vec<u8>, AppError> {
+        let (parent, epoch) = request.parent_data();
+        let index = usize::try_from(epoch).map_err(|_| refused())?;
+        if index == self.predecessors.len() {
+            return self.journal.encode_member_add(request);
+        }
+        let prior = self.prior_requests.get(index).ok_or_else(refused)?;
+        let step = index
+            .checked_sub(1)
+            .and_then(|i| self.successors.get(i))
+            .ok_or_else(refused)?;
+        if parent != step.header.spec().parent
+            || !prior
+                .fetch_verifier
+                .is_some_and(|expected| request.matches_verifier_data(expected))
+        {
+            return Err(refused());
+        }
+        self.read_later_journal(key, directory, trusted, index)?
+            .encode_member_add(request)
+    }
+
+    fn read_later_journal(
+        &self,
+        key: &[u8; 32],
+        directory: &Path,
+        trusted: &GenesisPublicData<'_>,
+        index: usize,
+    ) -> Result<RecoveredAddJournal, AppError> {
+        let original = self
+            .predecessors
+            .get(index)
+            .filter(|record| !record.first)
+            .ok_or_else(refused)?;
+        let selected = selected_head::GovernedHeadData::open_governed_data(key, &original.head)?;
+        let mut buffer = Some(Zeroizing::new(Vec::with_capacity(MAX_BYTES + 1)));
+        let archive = original.reread(directory, &mut buffer)?;
+        let mut replay = AddReplay::from_genesis(trusted)?.core;
+        for step in self.public_steps().take(index) {
+            replay = replay
+                .derive_successor(
+                    &step.header,
+                    ReplayBody::Admission(&step.admission),
+                    &step.image,
+                )
+                .map_err(|_| refused())?
+                .next;
+        }
+        let plain = open_later_data(key, &selected, &archive.frame)?;
+        let (labels, frames) = decode_later_data(&plain)?;
+        let (journal, _) = authenticate_add_journal(key, labels, &frames, trusted, &replay)?;
+        Ok(journal)
     }
 }
 

@@ -98,6 +98,7 @@ pub use critical_namespaces::{
     V2CurrentLayoutStore, V2GovernanceLayoutPolicy, V2GovernanceLayoutStore, V2MemberOutboxPolicy,
 };
 pub use critical_namespaces::{
+    NativeTextColdFounderGoverningRequest, NativeTextColdFounderGoverningRequests,
     NativeTextColdFounderJoinRequest, NativeTextColdFounderJoinRequests,
     NativeTextColdFounderMemberIngress, NativeTextColdFounderMemberReceiver,
     NativeTextColdFounderPublication, NativeTextColdFounderPublicationReceipt,

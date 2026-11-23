@@ -104,6 +104,26 @@ fn governed_add_request_record_preserves_only_the_original_packet() {
     let resealed = data.seal_data(&KEY, &mut rng).unwrap();
     assert!(super::request::open_data(&KEY, &resealed, &raw).is_err());
     assert!(super::request::open_data(&KEY, &fence, &raw[..raw.len() - 1]).is_err());
+    assert!(super::request::open_record(&KEY, &fence, &raw)
+        .unwrap()
+        .fetch_verifier
+        .is_none());
+    let verifier = [43; 32];
+    let later =
+        super::request::seal_with_fetch_verifier(&KEY, &fence, &packet, Some(verifier), &mut rng)
+            .unwrap();
+    let reopened = super::request::open_record(&KEY, &fence, &later).unwrap();
+    assert_eq!(reopened.packet.as_slice(), original.request_bytes_data());
+    assert_eq!(reopened.fetch_verifier, Some(verifier));
+    assert!(super::request::open_record(&KEY, &resealed, &later).is_err());
+    assert!(super::request::seal_with_fetch_verifier(
+        &KEY,
+        &fence,
+        &packet,
+        Some([0; 32]),
+        &mut rng,
+    )
+    .is_err());
     let replacement = request(38);
     let replacement = V2JoinRequestPacketData::decode(replacement.request_bytes_data()).unwrap();
     assert!(super::request::seal_data(&KEY, &fence, &replacement, &mut rng).is_err());

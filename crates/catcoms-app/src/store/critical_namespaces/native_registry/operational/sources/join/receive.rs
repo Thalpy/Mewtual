@@ -691,6 +691,21 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             .map_err(|_| V2MemberSaveRefusal::Unavailable)
     }
 
+    /// Borrow the original selected local epoch to construct one request for
+    /// its immediate successor. The caller retains its connected route.
+    pub fn member_add_request_data(
+        &self,
+        selection: &NativeTextJoinedRowSelection,
+        caller: &RequestCancellation,
+    ) -> Result<catcoms_sync::V2MemberAddRequestData, V2MemberSaveRefusal> {
+        self.with_member_receiver(selection, caller, |source| {
+            source
+                .node
+                .member_add_request_data(source.prefix)
+                .map_err(|_| V2MemberSaveRefusal::Unavailable)
+        })
+    }
+
     fn with_member_receiver<T>(
         &self,
         selection: &NativeTextJoinedRowSelection,

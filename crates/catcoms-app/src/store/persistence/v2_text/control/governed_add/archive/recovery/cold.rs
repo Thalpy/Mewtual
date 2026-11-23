@@ -480,6 +480,34 @@ impl HeldColdFounderAdd {
         Ok(V2FirstJoinDeliveryData::encode(&first.response, &proof)?)
     }
 
+    pub(in crate::store) fn encode_member_add(
+        &self,
+        store: &ServerStore,
+        source: &RetainedBootstrapSourceData,
+        request: &V2MemberAddRequestData,
+    ) -> Result<Vec<u8>, AppError> {
+        self.files.origin.original.require_same_original(source)?;
+        let ColdRecoveredArchive::Later(chain) = &self.recovered else {
+            return Err(refused());
+        };
+        if self.core.is_none() {
+            return Err(refused());
+        }
+        let genesis = source.data().genesis_public_data();
+        let key = Zeroizing::new(store.keys.db_key()?);
+        chain.encode_member_add(
+            &key,
+            source.original_target_data().0,
+            &GenesisPublicData {
+                profile: genesis.profile_data(),
+                admission: genesis.admission_data(),
+                header: genesis.header_data(),
+                image: genesis.image_data(),
+            },
+            request,
+        )
+    }
+
     pub(in crate::store) fn capture(
         store: &ServerStore,
         source: &RetainedBootstrapSourceData,

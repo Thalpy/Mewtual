@@ -11,7 +11,9 @@ use catcoms_replication::chat::{
     owner_profile::{AdmissionBody, AdmissionOrigin},
     owner_state::transition::{ReplayBody, ReplayMath},
 };
-use catcoms_sync::V2JoinResponsePacketData;
+use catcoms_sync::{
+    V2AdmissionStepData, V2JoinResponsePacketData, V2MemberAddFrameData, V2MemberAddRequestData,
+};
 
 mod chain;
 mod cold;
@@ -38,6 +40,32 @@ struct RecoveredAddJournal {
     nonce: [u8; 16],
     entry: [u8; ENTRY_BYTES],
     outcome: Zeroizing<Vec<u8>>,
+    fetch_verifier: Option<[u8; 32]>,
+}
+
+impl RecoveredAddJournal {
+    fn encode_member_add(&self, request: &V2MemberAddRequestData) -> Result<Vec<u8>, AppError> {
+        let AdmissionOrigin::Add { before_epoch, .. } = self.admission.spec().origin else {
+            return Err(refused());
+        };
+        if request.parent_data() != (self.header.spec().parent, before_epoch)
+            || !self
+                .fetch_verifier
+                .is_some_and(|expected| request.matches_verifier_data(expected))
+        {
+            return Err(refused());
+        }
+        let image = outcome::governing_bodies(&self.entry, &self.outcome)?[2];
+        let commit = outcome::archive_commit(&self.entry, &self.outcome)?;
+        Ok(V2MemberAddFrameData::encode(
+            V2AdmissionStepData {
+                header: &self.header,
+                admission: &self.admission,
+                image,
+            },
+            commit,
+        )?)
+    }
 }
 
 /// Replay of one physical archive line. Each nonce is retained only after its
@@ -178,7 +206,10 @@ fn authenticate_add_journal(
 ) -> Result<(RecoveredAddJournal, ReplayMath), AppError> {
     let reservation = GovernedAddFenceData::open_data(key, frames.fence)?;
     reservation.require_parent(labels.context, labels.before_head)?;
-    let request = request::open_data(key, frames.fence, frames.request)?;
+    let request::OpenedRequest {
+        packet: request,
+        fetch_verifier,
+    } = request::open_record(key, frames.fence, frames.request)?;
     let packet = V2JoinRequestPacketData::decode(&request)?;
     reservation.require_packet(&packet)?;
     let input = packet.founder_add_data();
@@ -204,6 +235,7 @@ fn authenticate_add_journal(
     let AdmissionOrigin::Add {
         before_epoch,
         after_epoch,
+        commit,
         ..
     } = admission.spec().origin
     else {
@@ -212,6 +244,8 @@ fn authenticate_add_journal(
     if before_epoch != prior.mls_epoch_data()
         || before_epoch.checked_add(1) != Some(after_epoch)
         || after_epoch != labels.epoch
+        || (before_epoch == 0 && fetch_verifier.is_some())
+        || blake3::hash(outcome::archive_commit(frames.entry, &outcome)?).as_bytes() != &commit
     {
         return Err(refused());
     }
@@ -289,6 +323,7 @@ fn authenticate_add_journal(
             nonce,
             entry,
             outcome,
+            fetch_verifier,
         },
         next,
     ))

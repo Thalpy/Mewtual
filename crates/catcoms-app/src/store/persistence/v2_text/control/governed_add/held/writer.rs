@@ -138,32 +138,24 @@ impl PreparedGovernedAddFence {
         source: &GenesisSourceDataRef<'_>,
         seed: &SelectedV2TextHead,
         packet: &V2JoinRequestPacketData<'_>,
-        installed: (TextHeadIdData, V2InstalledFounderAddData),
+        (installed, fetch_verifier): ((TextHeadIdData, V2InstalledFounderAddData), [u8; 32]),
         rng: &mut dyn CryptoRngCore,
     ) -> Result<Self, AppError> {
         source.require_original_negative(store)?;
-        let captured = HeldColdFounderAdd::capture(
+        let original = Box::new(HeldColdFounderAdd::capture(
             store,
             source.source(),
             *seed.head_data().context.spec_data().pin.as_bytes(),
-        );
-        #[cfg(test)]
-        if let Err(error) = &captured {
-            eprintln!("later writer archive capture: {error:?}");
-        }
-        let original = Box::new(captured?);
-        let verified = original.require_installed_parent(source.source(), installed.0, installed.1);
-        #[cfg(test)]
-        if let Err(error) = &verified {
-            eprintln!("later writer captured different receipt: {error:?}");
-        }
-        verified?;
-        let prepared = Self::prepare_bound(store, source, seed, packet, rng, Some(original));
-        #[cfg(test)]
-        if let Err(error) = &prepared {
-            eprintln!("later writer bind: {error:?}");
-        }
-        prepared
+        )?);
+        original.require_installed_parent(source.source(), installed.0, installed.1)?;
+        Self::prepare_bound(
+            store,
+            source,
+            seed,
+            packet,
+            rng,
+            Some((original, fetch_verifier)),
+        )
     }
 
     fn prepare_bound(
@@ -172,7 +164,7 @@ impl PreparedGovernedAddFence {
         selected: &SelectedV2TextHead,
         packet: &V2JoinRequestPacketData<'_>,
         rng: &mut dyn CryptoRngCore,
-        later: Option<Box<HeldColdFounderAdd>>,
+        later: Option<(Box<HeldColdFounderAdd>, [u8; 32])>,
     ) -> Result<Self, AppError> {
         if selected.head_data().generation != 1
             || selected.head_data().pending != TextPendingData::None
@@ -187,17 +179,26 @@ impl PreparedGovernedAddFence {
             .pool;
         let fee = pool.try_reserve(WRITER_BYTES)?;
         fee.validate(pool, WRITER_BYTES)?;
-        let head = later.as_deref().map_or_else(
+        let head = later.as_ref().map_or_else(
             || selected.head_id_data(),
-            |prior| prior.writer_parent_data().1,
+            |(prior, _)| prior.writer_parent_data().1,
         );
         let data = GovernedAddFenceData::for_request(
             selected.head_data().context.id_data()?,
             head,
             packet,
         );
-        let held =
-            HeldGovernedAddFence::prepare_with_parent(store, source, selected, Some(data), later)?;
+        let (later_parent, fetch_verifier) = match later {
+            Some((parent, verifier)) => (Some(parent), Some(verifier)),
+            None => (None, None),
+        };
+        let held = HeldGovernedAddFence::prepare_with_parent(
+            store,
+            source,
+            selected,
+            Some(data),
+            later_parent,
+        )?;
         let target = selected.physical_query_data().target;
         let other_paths = [
             fixed_child(target, "text.wal")?,
@@ -206,7 +207,12 @@ impl PreparedGovernedAddFence {
         ];
         let key = Zeroizing::new(store.keys.db_key()?);
         let frozen = data.seal_data(&key, rng)?;
-        let request = PreparedSmallControl::new(request::seal_data(&key, &frozen, packet, rng)?);
+        let request_frame = if let Some(verifier) = fetch_verifier {
+            request::seal_with_fetch_verifier(&key, &frozen, packet, Some(verifier), rng)?
+        } else {
+            request::seal_data(&key, &frozen, packet, rng)?
+        };
+        let request = PreparedSmallControl::new(request_frame);
         held.resources
             .require_bound_original_negative(store, source)?;
         Ok(Self {

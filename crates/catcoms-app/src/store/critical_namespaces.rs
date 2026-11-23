@@ -96,6 +96,7 @@ pub use native_registry::{
     NativeUiStateRead, NativeUiStateSaved, PreparedNativeRegistryMigration,
 };
 pub use native_registry::{
+    NativeTextColdFounderGoverningRequest, NativeTextColdFounderGoverningRequests,
     NativeTextColdFounderJoinRequest, NativeTextColdFounderJoinRequests,
     NativeTextColdFounderMemberIngress, NativeTextColdFounderMemberReceiver,
     NativeTextColdFounderPublication, NativeTextColdFounderPublicationReceipt,

@@ -271,6 +271,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
         )
     }
 
+    /// Request only the successor to this original selected joined epoch.
+    pub fn member_add_request_data(
+        &self,
+        prefix: &PreparedV2JoinedPrefix,
+    ) -> Result<V2MemberAddRequestData, SyncError> {
+        let verifier = self.member_prefix(prefix)?;
+        V2MemberAddRequestData::for_selected_group(
+            &self.node.group,
+            &self.node.device,
+            verifier.replay_data(),
+        )
+    }
+
     fn prepare_observed_add_candidate(
         &self,
         prefix: &mut PreparedV2JoinedPrefix,

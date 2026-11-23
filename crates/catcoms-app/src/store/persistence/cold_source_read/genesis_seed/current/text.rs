@@ -270,6 +270,21 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> UnexposedV2Gene
             .map_err(|_| refused())
     }
 
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn governed_fetch_verifier(
+        &self,
+        store: &crate::store::ServerStore,
+        verifier: &catcoms_replication::chat::V2GeneralPrefixVerifier,
+    ) -> Result<[u8; 32], crate::AppError> {
+        use crate::store::critical_namespaces::refused;
+        self.require_text_original_data(store)
+            .map_err(|_| refused())?;
+        let request = self
+            .governed_text_node()
+            .ok_or_else(refused)?
+            .member_add_request_data(verifier)?;
+        Ok(request.verifier_data())
+    }
+
     pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn retire_add_for_closed_ui(
         &mut self,
         closed: &[Option<&catcoms_rt::NativeChatKeyDrain>],

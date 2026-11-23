@@ -286,6 +286,9 @@ jobs:
       - name: Check the later Add selector and its exact predecessor archive binding
         if: github.event_name == 'pull_request' || inputs.scope == 'selected-history'
         run: python .github/scripts/check-chat-v2-invite-intent.py governed-later-archive
+      - name: Check legacy and later Add request records under the exact original fence
+        if: inputs.scope == 'selected-history'
+        run: python .github/scripts/check-chat-v2-invite-intent.py add-request-record
       - name: Check authenticated Add replay and the saved invitation nonce
         if: github.event_name == 'pull_request' || inputs.scope == 'cold-founder'
         run: python .github/scripts/check-chat-v2-invite-intent.py governed-replay

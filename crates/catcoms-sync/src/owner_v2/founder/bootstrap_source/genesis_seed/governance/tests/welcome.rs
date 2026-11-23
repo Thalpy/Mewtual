@@ -133,7 +133,7 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
         RecoveredV2PendingJoinSource, V2AdmissionStepData, V2FirstAddProofData,
         V2FirstJoinDeliveryData, V2GoverningJoinDeliveryData, V2GoverningJoinPrefixData,
         V2GoverningJoinStepData, V2JoinDeliveryData, V2JoinRequestPacketData, V2MemberAddFrameData,
-        V2PendingJoinContextData, MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES,
+        V2MemberAddRequestData, V2PendingJoinContextData, MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES,
     };
     use catcoms_mls::persist::{
         TextCurrentSdkGraphReservation, TextCurrentSdkRestoreAdmission, TextCurrentSdkRestoreLimits,
@@ -154,6 +154,16 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
         }
     }
     let replay = verifier.replay_data();
+    let old_route = node.member_add_request_data(verifier).unwrap();
+    let member_route = joined.member_add_request_data(joined_prefix).unwrap();
+    let request_bytes = member_route.encode().unwrap();
+    let request = V2MemberAddRequestData::decode(&request_bytes).unwrap();
+    assert_eq!(request.parent_data(), (replay.header().id(), 1));
+    assert!(request.matches_verifier_data(old_route.verifier_data()));
+    let mut wrong = request_bytes;
+    *wrong.last_mut().unwrap() ^= 1;
+    let wrong = V2MemberAddRequestData::decode(&wrong).unwrap();
+    assert!(!wrong.matches_verifier_data(old_route.verifier_data()));
     let used = node.installed_invites[0].unwrap();
     let mut reused = Request::new(node, used[0]);
     assert_eq!(reused.invite.spec_data().nonce, used);
@@ -694,6 +704,12 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
         .same_original(&original_founder));
     assert_eq!(verifier.replay_data().slots().len(), 3);
     assert!(!old_transport.is_current_cached());
+    let new_route = node.member_add_request_data(verifier).unwrap();
+    assert!(recovered
+        .member_add_request_data(foreign_prefix)
+        .unwrap()
+        .matches_verifier_data(new_route.verifier_data()));
+    assert!(!new_route.matches_verifier_data(old_route.verifier_data()));
     assert!(node
         .preflight_selected_invite_signing(verifier, invite)
         .is_err());

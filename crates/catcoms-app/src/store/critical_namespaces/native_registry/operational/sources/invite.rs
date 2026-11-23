@@ -84,10 +84,6 @@ impl<T: MeshTransport, R: CryptoRngCore> member::NativeTextMemberJob<T, R> {
             body.rng.as_mut().ok_or(Error::Unavailable)?,
             negative,
         );
-        #[cfg(test)]
-        if let Err(error) = &result {
-            eprintln!("native Add refused: {error:?}");
-        }
         inner.loan.recorded = true;
         if negative.is_cancelled() {
             return Err(Error::Cancelled);

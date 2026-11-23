@@ -235,6 +235,10 @@ pub(super) fn archive_snapshot<'a>(entry: &[u8], plain: &'a [u8]) -> Result<&'a 
     Ok(decode_outcome_fields(plain, entry_digest(entry)?)?.bodies[7])
 }
 
+pub(super) fn archive_commit<'a>(entry: &[u8], plain: &'a [u8]) -> Result<&'a [u8], AppError> {
+    Ok(decode_outcome_fields(plain, entry_digest(entry)?)?.bodies[0])
+}
+
 fn decode_outcome_fields(plain: &[u8], parent: [u8; 32]) -> Result<OutcomeFields<'_>, AppError> {
     let mut d = Decoder::new(plain);
     if field(&mut d, TAG.len())? != TAG

@@ -18,6 +18,7 @@ mod replies;
 mod tests;
 pub use publication::{NativeTextColdFounderPublication, NativeTextColdFounderPublicationReceipt};
 pub use receiving::{NativeTextColdFounderMemberIngress, NativeTextColdFounderMemberReceiver};
+pub use replies::{NativeTextColdFounderGoverningRequest, NativeTextColdFounderGoverningRequests};
 pub use replies::{NativeTextColdFounderJoinRequest, NativeTextColdFounderJoinRequests};
 
 #[derive(Debug)]
@@ -56,6 +57,7 @@ impl RequestAuthority for IngressScope {
 /// supplies no room runtime, authoring key admission or native UI row.
 pub struct NativeTextColdFounderSource {
     ingress: Option<replies::Owner>,
+    governing_ingress: Option<replies::Owner>,
     received: Option<receiving::Ledger>,
     member: Option<Box<crate::store::persistence::RecoveredMemberLane>>,
     actor: Option<super::super::join_tcp::Loan>,
@@ -87,6 +89,7 @@ impl NativeTextJoinedStorage {
                 };
                 Ok(NativeTextColdFounderSource {
                     ingress: None,
+                    governing_ingress: None,
                     received: None,
                     member: None,
                     actor: None,
@@ -283,6 +286,7 @@ impl NativeTextColdFounderSource {
             return Ok(false);
         }
         drop(self.ingress.take());
+        drop(self.governing_ingress.take());
         drop(self.received.take());
         drop(self.actor.take());
         match self.tcp.as_ref() {

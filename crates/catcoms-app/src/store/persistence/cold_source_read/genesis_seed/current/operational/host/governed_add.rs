@@ -54,7 +54,7 @@ impl PendingGovernedAdd {
         parent: Arc<PreparedV2TextParentCapture>,
         packet: &V2JoinRequestPacketData<'_>,
         rng: &mut dyn catcoms_rt::CryptoRngCore,
-        installed: Option<(TextHeadIdData, V2InstalledFounderAddData)>,
+        installed: Option<((TextHeadIdData, V2InstalledFounderAddData), [u8; 32])>,
     ) -> Result<Self, AppError> {
         let frame = packet.packet_bytes_data();
         let selected = parent.selected_data().ok_or_else(refused)?;
@@ -71,13 +71,13 @@ impl PendingGovernedAdd {
         let fee = pool.try_reserve(bytes)?;
         fee.validate(pool, bytes)?;
         let sdk = prepare_sdk_admission(store)?;
-        let fence = if let Some(installed) = installed {
+        let fence = if let Some((installed, fetch_verifier)) = installed {
             PreparedGovernedAddFence::prepare_later(
                 store,
                 owner.source(),
                 selected,
                 packet,
-                installed,
+                (installed, fetch_verifier),
                 rng,
             )?
         } else {

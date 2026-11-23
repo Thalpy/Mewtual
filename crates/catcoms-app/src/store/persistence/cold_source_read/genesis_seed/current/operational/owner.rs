@@ -341,6 +341,17 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurr
         }
     }
 
+    pub(super) fn governed_fetch_verifier(
+        &self,
+        store: &ServerStore,
+        verifier: &catcoms_replication::chat::V2GeneralPrefixVerifier,
+    ) -> Result<[u8; 32], AppError> {
+        match &self.core {
+            OwnedCurrent::Warm(current) => current.governed_fetch_verifier(store, verifier),
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
     pub(super) fn retire_add_for_closed_ui(
         &mut self,
         closed: &[Option<&catcoms_rt::NativeChatKeyDrain>],

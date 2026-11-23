@@ -54,6 +54,7 @@ pub use operational::{
     NativeUiStatePreparation, NativeUiStateRead, NativeUiStateSaved,
 };
 pub use operational::{
+    NativeTextColdFounderGoverningRequest, NativeTextColdFounderGoverningRequests,
     NativeTextColdFounderJoinRequest, NativeTextColdFounderJoinRequests,
     NativeTextColdFounderMemberIngress, NativeTextColdFounderMemberReceiver,
     NativeTextColdFounderPublication, NativeTextColdFounderPublicationReceipt,

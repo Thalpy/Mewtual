@@ -6,10 +6,26 @@ use crate::owner_v2::{
     V2FounderMemberDependencyAccess, V2MemberEnvelopeScopeData, V2MemberPublicationObservation,
     MAX_V2_MEMBER_TRANSPORT_BYTES,
 };
+use crate::V2MemberAddRequestData;
 use catcoms_replication::chat::{owner_facts::OwnerFactId, V2GeneralPrefixVerifier};
 use catcoms_rt::{PublishOnceError, Topic};
 
 impl<T: MeshTransport, R: CryptoRngCore> PreparedV2FounderGovernanceNode<T, R> {
+    /// Capture the request verifier while the original predecessor SDK pair
+    /// is still selected. A later epoch uses an independent exporter secret.
+    pub fn member_add_request_data(
+        &self,
+        verifier: &V2GeneralPrefixVerifier,
+    ) -> Result<V2MemberAddRequestData, SyncError> {
+        self.observe_member(verifier, 0)?;
+        let seed = &self.node.seed.body;
+        V2MemberAddRequestData::for_selected_group(
+            &seed.group,
+            &seed.device,
+            verifier.replay_data(),
+        )
+    }
+
     fn observe_member(
         &self,
         verifier: &V2GeneralPrefixVerifier,
