@@ -56,6 +56,7 @@ COHORTS = {
     "member-shared-history-stage": ("catcoms-app", "shared_history_physical_", 4),
     "member-shared-history-replay": ("catcoms-replication", "ordinary_history_replay_restores_dependencies_without_publishing_removed_originals", 1),
     "member-action-history": ("catcoms-app", "member_history_keeps_settled_originals_and_a_fixed_prefix_across_appends_and_reopen", 1),
+    "member-own-revision": ("catcoms-app", "member_own_revision_resumes_over_saved_ordinals_and_reproves_a_reopened_tombstone", 1),
     "member-dependency-transport": ("catcoms-net", "native_member_dependency_exchange_keeps_the_original_connected_lane", 1),
     "selected-history": ("catcoms-replication", "selected_history_archive_page_", 2),
     "add-source-close": ("catcoms-sync", "governed_add_whole_source_retirement_", 1),

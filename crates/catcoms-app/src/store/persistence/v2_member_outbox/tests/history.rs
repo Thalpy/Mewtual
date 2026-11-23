@@ -4,6 +4,86 @@ use super::super::engine::history::{MEMBER_HISTORY_MAX_ITEMS, MEMBER_OUTBOX_HIST
 use super::*;
 
 #[test]
+fn member_own_revision_resumes_over_saved_ordinals_and_reproves_a_reopened_tombstone() {
+    let mut fx = Fixture::new(185);
+    let create = fx.sign("original", 1);
+    let target = create.id();
+    let member = admission(0xa1);
+    let mut owner = fx.open();
+    (owner, _) = fx.save(owner, token(1), create.clone(), member);
+    for n in 2..=10 {
+        let other = fx.sign("unrelated original", n);
+        (owner, _) = fx.save(owner, token(n), other, member);
+    }
+    let make_change = |fx: &Fixture, nonce: u8, parent, body| {
+        SignedAction::sign(
+            &fx.device,
+            ActionSpec {
+                nonce: [nonce; 16],
+                parents: vec![parent],
+                body,
+                ..create.spec().clone()
+            },
+        )
+        .unwrap()
+    };
+    let edit = make_change(
+        &fx,
+        11,
+        target,
+        Body::Edit {
+            create: target,
+            text: "edited".into(),
+        },
+    );
+    let edited = edit.id();
+    (owner, _) = fx.save(owner, token(11), edit, member);
+    let read = |owner: &mut MemberOutbox, expected, authorized| {
+        owner.require_own_revision(
+            &KEY,
+            CHANNEL,
+            target,
+            expected,
+            fx.pay(MEMBER_OUTBOX_LOOKUP_FEE),
+            || authorized,
+        )
+    };
+    let before = namespace_files(&owner);
+    assert!(matches!(
+        read(&mut owner, target, true).unwrap_err().refusal(),
+        Some(MemberOutboxRefusal::Busy)
+    ));
+    assert!(read(&mut owner, edited, false).is_err());
+    assert!(!read(&mut owner, target, true).unwrap());
+    assert!(read(&mut owner, edited, true).unwrap());
+    assert_eq!(namespace_files(&owner), before);
+
+    let delete = make_change(&fx, 12, edited, Body::Delete { create: target });
+    let deleted = delete.id();
+    (owner, _) = fx.save(owner, token(12), delete, member);
+    drop(owner);
+    let mut owner = fx.open();
+    let before = namespace_files(&owner);
+    let read = |owner: &mut MemberOutbox, expected| {
+        owner.require_own_revision(
+            &KEY,
+            CHANNEL,
+            target,
+            expected,
+            fx.pay(MEMBER_OUTBOX_LOOKUP_FEE),
+            || true,
+        )
+    };
+    assert!(matches!(
+        read(&mut owner, edited).unwrap_err().refusal(),
+        Some(MemberOutboxRefusal::Busy)
+    ));
+    assert!(!read(&mut owner, edited).unwrap());
+    assert!(!read(&mut owner, deleted).unwrap());
+    assert_eq!(namespace_files(&owner), before);
+}
+
+#[test]
 fn member_history_keeps_settled_originals_and_a_fixed_prefix_across_appends_and_reopen() {
     let mut fx = Fixture::new(181);
     let (a1, a2) = (admission(0xa1), admission(0xa2));

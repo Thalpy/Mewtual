@@ -462,6 +462,7 @@ pub(in crate::store) struct MemberOutbox {
     pub(super) limits: TrieLimits,
     pub(super) pool: CriticalCatalogReadPool,
     pub(super) state: OwnerState,
+    revision: Option<history::OwnRevisionScan>,
     // Drop order is declaration order: the metadata payment, then (LAST) the claim.
     _metadata: CatalogReadReservation,
     _claim: MemberOutboxClaim,
@@ -597,6 +598,7 @@ impl MemberOutbox {
             limits,
             pool: pool.clone(),
             state: OwnerState::Clean(head),
+            revision: None,
             _metadata: metadata,
             _claim: claim,
         };
@@ -637,6 +639,7 @@ impl MemberOutbox {
         work: CatalogReadReservation,
     ) -> Result<(), MemberOutboxError> {
         require_payment(&work, &self.pool, MEMBER_OUTBOX_RECOVERY_FEE)?;
+        self.revision = None;
         self.state = OwnerState::NeedsRecovery;
         let head = recover(&self.ns, &self.context, key, self.limits, rng)?;
         self.state = OwnerState::Clean(head);
@@ -683,6 +686,29 @@ impl MemberOutbox {
         payment: CatalogReadReservation,
     ) -> Result<Option<MemberSavedOriginal>, MemberOutboxError> {
         require_payment(&payment, &self.pool, MEMBER_OUTBOX_LOOKUP_FEE)?;
+        let Some((receipt, status, original)) = self.read_action_original(key, action)? else {
+            return Ok(None);
+        };
+        Ok(Some(MemberSavedOriginal {
+            receipt,
+            status,
+            original,
+            _payment: payment,
+        }))
+    }
+
+    fn read_action_original(
+        &self,
+        key: &[u8; 32],
+        action: ActionId,
+    ) -> Result<
+        Option<(
+            MemberReceiptData,
+            MemberEntryStatus,
+            AssembledActionOriginal,
+        )>,
+        MemberOutboxError,
+    > {
         let head = self.clean()?;
         let mut nodes = DiskNodes { ns: &self.ns, key };
         let action_row = match lookup(
@@ -708,12 +734,7 @@ impl MemberOutbox {
         let receipt = receipt_of(&self.context, entry.token, &token_row, &entry);
         let status = self.status_of(key, head, entry.ordinal)?;
         let original = read_original(&self.ns, key, &self.context, &entry)?;
-        Ok(Some(MemberSavedOriginal {
-            receipt,
-            status,
-            original,
-            _payment: payment,
-        }))
+        Ok(Some((receipt, status, original)))
     }
 
     /// The token's row and its entry, cross-checked against each other.

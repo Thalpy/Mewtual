@@ -178,7 +178,7 @@ pub(super) enum CleanupProof<'a> {
     WalkNewRoot(&'a [u8; 32]),
 }
 
-fn require_selected(ns: &Namespace, current: &SelectedHead) -> Result<(), AppError> {
+pub(super) fn require_selected(ns: &Namespace, current: &SelectedHead) -> Result<(), AppError> {
     let now = read_bounded(&ns.head(), HEAD_FILE_CAP, false)?;
     if now.as_slice() != current.file.as_slice() {
         return Err(refused());

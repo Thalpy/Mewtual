@@ -146,3 +146,13 @@ source and its agreed narrow lane/save changes. See the
 [coordinator decisions](CHAT-V2-JOINED-SOURCE-COORDINATION.md) for pin, transport,
 final-admission and removed-original boundaries. Governance4's own first-torn
 recovery and physical two-device acceptance also remain open.
+
+## Saved mutation revisions
+
+Before signing a new native Edit or Delete, the original outbox owner checks the
+expected revision against its authenticated saved ordinals. Each read advances
+at most eight originals after the target Create. The original owner can resume
+that read as the selected append-only prefix grows. A reopened or recovered
+owner reproves the prefix from storage. The check refuses a stale revision, a
+target with a saved deletion, and an ambiguous saved edit chain. An exact retry
+checks its durable receipt first, including after a newer edit or deletion.

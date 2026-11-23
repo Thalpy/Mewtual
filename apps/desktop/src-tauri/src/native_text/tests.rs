@@ -1023,10 +1023,25 @@ async fn native_text_mutations_preserve_exact_originals_and_the_observed_revisio
     let stale = mutate("edit_message", 34, target, target, Some("second edit"));
     run(&queue).await;
     refused(stale.await.unwrap());
+    let stale = mutate("delete_message", 35, target, &first["message_id"], None);
+    run(&queue).await;
+    refused(stale.await.unwrap());
     let removed = mutate("delete_message", 35, target, &second["message_id"], None);
     run(&queue).await;
     let removed = found_value(removed.await.unwrap());
     assert_eq!(removed["disposition"], "saved-local");
+    let after_delete = mutate(
+        "edit_message",
+        36,
+        target,
+        &removed["message_id"],
+        Some("resurrected text"),
+    );
+    run(&queue).await;
+    refused(after_delete.await.unwrap());
+    let retry = mutate("delete_message", 35, target, &second["message_id"], None);
+    run(&queue).await;
+    assert_eq!(found_value(retry.await.unwrap()), removed);
     let audit = native_history_request(&window, &found, "0", None, 8);
     run(&queue).await;
     let audit = found_value(audit.await.unwrap());

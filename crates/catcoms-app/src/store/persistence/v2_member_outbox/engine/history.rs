@@ -1,6 +1,92 @@
 //! Bounded reads of every saved original, including the settled prefix.
 //! Publication debt is a different view: empty debt never means empty history.
 use super::*;
+use catcoms_replication::chat::Body;
+
+/// A small, resumable scan of one target's original saved revisions. A
+/// successful append can only extend the authenticated ordinal prefix.
+#[derive(Clone, Copy)]
+pub(super) struct OwnRevisionScan {
+    target: ActionId,
+    channel: u128,
+    next: u64,
+    latest: Option<ActionId>,
+}
+
+impl MemberOutbox {
+    pub(in crate::store) fn require_own_revision(
+        &mut self,
+        key: &[u8; 32],
+        channel: u128,
+        target: ActionId,
+        expected: ActionId,
+        payment: CatalogReadReservation,
+        is_current: impl Fn() -> bool,
+    ) -> Result<bool, MemberOutboxError> {
+        require_payment(&payment, &self.pool, MEMBER_OUTBOX_LOOKUP_FEE)?;
+        if !is_current() {
+            return Err(MemberOutboxRefusal::Stale.into());
+        }
+        let head = self.clean()?;
+        super::super::transaction::require_selected(&self.ns, head)?;
+        let mut scan = match self.revision {
+            Some(scan) if scan.target == target && scan.channel == channel => scan,
+            _ => {
+                let Some((receipt, _, original)) = self.read_action_original(key, target)? else {
+                    return Ok(false);
+                };
+                let spec = original.action().spec();
+                if spec.realm.channel() != channel || !matches!(spec.body, Body::Create { .. }) {
+                    return Ok(false);
+                }
+                OwnRevisionScan {
+                    channel,
+                    target,
+                    next: receipt.ordinal.checked_add(1).ok_or_else(refused)?,
+                    latest: Some(target),
+                }
+            }
+        };
+        let end = head.data.next_ordinal;
+        if scan.next > end {
+            return Err(MemberOutboxRefusal::Stale.into());
+        }
+        for ordinal in scan.next..end.min(scan.next.saturating_add(MEMBER_HISTORY_MAX_ITEMS as u64))
+        {
+            if !is_current() {
+                return Err(MemberOutboxRefusal::Stale.into());
+            }
+            let Some(latest) = scan.latest else { break };
+            let (entry_id, entry) = self.debt_entry(key, head, ordinal)?;
+            let (token, _) = self
+                .token_row(key, head, entry.token)?
+                .ok_or_else(refused)?;
+            if token.entry != entry_id {
+                return Err(refused().into());
+            }
+            let original = read_original(&self.ns, key, &self.context, &entry)?;
+            let action = original.action();
+            let spec = action.spec();
+            if spec.realm.channel() == channel && spec.body.create() == Some(target) {
+                scan.latest = match &spec.body {
+                    Body::Edit { .. } if spec.parents.as_slice() == [latest] => Some(action.id()),
+                    _ => None,
+                };
+            }
+            scan.next = ordinal + 1;
+        }
+        super::super::transaction::require_selected(&self.ns, head)?;
+        if !is_current() {
+            return Err(MemberOutboxRefusal::Stale.into());
+        }
+        self.revision = Some(scan);
+        match scan.latest {
+            None => Ok(false),
+            Some(_) if scan.next != end => Err(MemberOutboxRefusal::Busy.into()),
+            Some(latest) => Ok(latest == expected),
+        }
+    }
+}
 
 /// Independent history-page limit. Changing publication checkpoint batching
 /// must not silently increase retained plaintext or the read invoice here.

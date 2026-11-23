@@ -706,6 +706,18 @@ impl<T: MeshTransport, R: CryptoRngCore> MemberSavePath<'_, T, R> {
                 _,
             ) => (*target, *target, archive),
             (Body::Edit { create, .. } | Body::Delete { create }, [parent]) => {
+                let fee = env.lookup_payment()?;
+                let current = state
+                    .owner
+                    .as_mut()
+                    .ok_or(Refusal::Stale)?
+                    .require_own_revision(env.key, request.channel, *create, *parent, fee, || {
+                        !negative.is_cancelled()
+                    })
+                    .map_err(|error| Refusal::from(&error))?;
+                if !current {
+                    return Err(Refusal::Conflict);
+                }
                 (*create, *parent, None)
             }
             _ => return self.sign_and_lend(env, request),
