@@ -1558,7 +1558,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 .with_publication(|_| panic!("a cancelled recovered receiver exposed a body"))
                 .is_err());
             let vault = original
-                .take_native_vault_for_test(
+                .take_native_vault(
                     (
                         Arc::new(std::sync::atomic::AtomicU64::new(7)),
                         Arc::new(std::sync::atomic::AtomicU64::new(7)),
@@ -1708,6 +1708,78 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 }
             }
         }).await.expect("the recovered founder served only the original exact delivery");
+        drop(requests);
+        let expected = original.registration_data().0;
+        let authorized = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (vault, sources, recovered_row) = original
+            .into_recovered_native_sources(
+                (
+                    Arc::new(std::sync::atomic::AtomicU64::new(7)),
+                    authorized.clone(),
+                    Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                ),
+                founder_budget.clone(),
+                &policy(),
+                SECRET,
+                inputs(),
+                &fresh,
+            )
+            .unwrap();
+        assert_eq!(recovered_row.id_data(), expected.id);
+        authorized.store(7, std::sync::atomic::Ordering::SeqCst);
+        let capture = || {
+            sources.capture_member(
+                &recovered_row,
+                command(&vault, &founder_budget),
+                sources.policy.prepare_member().unwrap(),
+            )
+        };
+        let body = super::body("Saved through the reopened native Source");
+        let request = || V2MemberSignRequest {
+            channel: 42,
+            token: [161; 32],
+            body: &body,
+            parents: &[],
+            dependencies: &[],
+        };
+        assert_eq!(
+            capture()
+                .finish()
+                .unwrap()
+                .prepare_member_save(request(), &fresh)
+                .unwrap(),
+            V2MemberSaveOutcome::Ready
+        );
+        let admission = capture().finish_admission(request().token).unwrap();
+        let commit = Arc::new(tokio::sync::Mutex::new(()));
+        let (custody, _) = super::admission::custody(&commit, &fresh).await;
+        assert_eq!(
+            admission
+                .try_admit(custody)
+                .unwrap_or_else(|error| panic!("native cold founder save: {:?}", error.refusal()))
+                .run(),
+            crate::store::MemberSaveJobReport::SavedLocal,
+        );
+        assert!(matches!(
+            capture()
+                .finish()
+                .unwrap()
+                .prepare_member_save(request(), &fresh)
+                .unwrap(),
+            V2MemberSaveOutcome::Saved { .. },
+        ));
+        recovered_row.close_original_cached();
+        assert!(capture().finish().is_err());
+        let mut retirement = sources.prepare_retirement().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            while retirement.try_retire().unwrap()
+                == crate::store::NativeTextSourceRetirementStatus::Pending
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the genuine recovered Source and TCP actor drained");
     }
 }
 

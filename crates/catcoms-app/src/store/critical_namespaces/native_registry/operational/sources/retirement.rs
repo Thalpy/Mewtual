@@ -84,11 +84,12 @@ enum TcpDisposition {
     // or missing retirement metadata is UNKNOWN, never this negative proof.
     NotPrepared,
     Tracked(catcoms_net::NativeTcpDrain),
+    RecoveredDrained,
 }
 impl TcpDisposition {
     fn drained(&self) -> bool {
         match self {
-            Self::NotPrepared => true,
+            Self::NotPrepared | Self::RecoveredDrained => true,
             Self::Tracked(original) => original.is_drained(),
         }
     }
@@ -371,13 +372,28 @@ impl<T: MeshTransport, R: CryptoRngCore> Row<T, R> {
                 return Ok(false); // exact mutated driver restored by Loan Drop
             }
         }
+        let recovered = loan
+            .body
+            .as_mut()
+            .and_then(|body| body.recovered_founder.as_mut());
+        let recovered_drained = if let Some(founder) = recovered {
+            if !founder.try_retire()? {
+                return Ok(false);
+            }
+            true
+        } else {
+            false
+        };
         let body = loan.body.take().expect("original retirement loan");
-        let tcp = body
-            .network
-            .as_ref()
-            .and_then(|network| network.observe_tcp())
-            .map(TcpDisposition::Tracked)
-            .unwrap_or(TcpDisposition::NotPrepared);
+        let tcp = if recovered_drained {
+            TcpDisposition::RecoveredDrained
+        } else {
+            body.network
+                .as_ref()
+                .and_then(|network| network.observe_tcp())
+                .map(TcpDisposition::Tracked)
+                .unwrap_or(TcpDisposition::NotPrepared)
+        };
         // Arm the destruction envelope BEFORE acquiring its metadata writer.
         // Field order proves every actual Runtime field Drop has completed
         // before acknowledgment, including a destructor unwinding that Drop.

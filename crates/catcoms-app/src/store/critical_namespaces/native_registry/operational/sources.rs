@@ -31,6 +31,7 @@ pub use join::{
 };
 mod member;
 mod network;
+mod recovered_founder;
 pub use member::{
     NativeTextFounderMemberIngressPreparation, NativeTextFounderMemberPublication,
     NativeTextFounderMemberPublicationReceipt, NativeTextFounderMemberReceiver,
@@ -187,6 +188,7 @@ struct Runtime<T: MeshTransport, R: CryptoRngCore> {
     request: Option<NativeTextCreationRequest>,
     device_started: bool,
     driver: Option<crate::store::PreparedFreshV2TextFounder<T, R>>,
+    recovered_founder: Option<Box<crate::store::NativeTextColdFounderSource>>,
     device: Option<catcoms_mls::MlsDevice>,
     transport: Option<T>,
     rng: Option<R>,

@@ -184,6 +184,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextCreationPreparation<T, R> {
                             request: Some(request),
                             device_started: false,
                             driver: None,
+                            recovered_founder: None,
                             device: None,
                             transport: None,
                             rng: Some(inputs.rng),

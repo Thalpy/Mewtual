@@ -12,6 +12,8 @@ pub(in crate::store::critical_namespaces::native_registry) struct ColdFounderSel
     pub(in crate::store::critical_namespaces::native_registry) status:
         crate::store::NativeCreationStatusData,
     pub(in crate::store::critical_namespaces::native_registry) name: String,
+    pub(in crate::store::critical_namespaces::native_registry) invocation: [u8; 32],
+    pub(in crate::store::critical_namespaces::native_registry) request: [u8; 32],
     pub(in crate::store::critical_namespaces::native_registry) binding:
         super::super::data::FounderBindingData,
     pub(in crate::store::critical_namespaces::native_registry) network: Arc<NetworkDependency>,
@@ -50,6 +52,8 @@ pub(in crate::store::critical_namespaces::native_registry) fn selected_cold_foun
     Ok(Some(ColdFounderSelection {
         status: founder::status(row)?,
         name: row.name.clone(),
+        invocation: birth.invocation,
+        request: birth.request,
         binding: binding.clone(),
         network: network.clone(),
     }))

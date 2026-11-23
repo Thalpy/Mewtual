@@ -57,6 +57,11 @@ impl RecoveredMemberLane {
         self.context
     }
 
+    pub(in crate::store) fn close_and_drained(&self) -> bool {
+        self.save_source.close();
+        self.save_source.drained()
+    }
+
     pub(in crate::store) fn require_cut(
         &self,
         cut: &NativeChatPreparedKeyCut,

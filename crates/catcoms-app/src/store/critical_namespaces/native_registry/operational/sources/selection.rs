@@ -19,10 +19,11 @@ pub(super) struct Selection<T: MeshTransport, R: CryptoRngCore> {
     pub(super) request: [u8; 32],
     pub(super) join_ingress: Option<catcoms_net::NativeChatJoinIngress>,
     pub(super) member_ingress: Option<catcoms_net::NativeChatMemberIngress>,
-    source_close: catcoms_rt::NativeChatSourceClose,
+    pub(super) source_close: catcoms_rt::NativeChatSourceClose,
+    pub(super) recovered_founder: bool,
     // LAST: actual weak RuntimeCell allocation and all copied metadata must
     // remain paid even after the whole canonical Sources/SDK has been dropped.
-    _metadata: Arc<RuntimeMetadata>,
+    pub(super) _metadata: Arc<RuntimeMetadata>,
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> Clone for NativeTextRuntimeSelection<T, R> {
@@ -62,6 +63,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextRuntimeSelection<T, R> {
                     .as_ref()
                     .and_then(|network| network.member_ingress.clone()),
                 source_close: body.source_close.clone(),
+                recovered_founder: false,
                 _metadata: body._metadata.clone(),
             }),
         }
@@ -70,6 +72,10 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextRuntimeSelection<T, R> {
     /// Local index DATA only, not an authenticated native server credential.
     pub fn id_data(&self) -> u64 {
         self.original.status.id
+    }
+
+    pub fn request_data(&self) -> [u8; 32] {
+        self.original.request
     }
 
     /// Fence this exact original Source at native row retirement. SC-only and

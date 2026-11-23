@@ -113,8 +113,7 @@ impl NativeTextColdFounderSource {
         self.local
     }
 
-    #[cfg(test)]
-    pub(in crate::store::critical_namespaces::native_registry) fn take_native_vault_for_test(
+    pub(in crate::store::critical_namespaces::native_registry) fn take_native_vault(
         &mut self,
         atoms: (Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicBool>),
         budget: crate::store::NativeUiInvocationBudget,
@@ -126,6 +125,84 @@ impl NativeTextColdFounderSource {
             atoms,
             budget,
         )
+    }
+
+    /// Authenticate the original vault and install the recovered founder in
+    /// its native Source book before handing out a row association.
+    pub fn into_recovered_native_sources<R: CryptoRngCore>(
+        mut self,
+        atoms: (Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicBool>),
+        ui_budget: crate::store::NativeUiInvocationBudget,
+        policy: &crate::store::NativeTextSourcePolicy,
+        secret: &[u8],
+        inputs: crate::store::NativeTextCreationInputs<R>,
+        caller: &RequestCancellation,
+    ) -> Result<
+        (
+            crate::store::NativeTextVault,
+            crate::store::NativeTextSources<catcoms_net::MeshService, R>,
+            crate::store::NativeTextRuntimeSelection<catcoms_net::MeshService, R>,
+        ),
+        AppError,
+    > {
+        let vault = self.take_native_vault(atoms, ui_budget.clone(), caller)?;
+        let authentication = vault
+            .prepare_native_authentication(ui_budget.prepare()?)
+            .verify(secret)?;
+        self.bind_original_tcp(caller)?;
+        self.restore_first_add(caller)?;
+        let mut sources = vault
+            .capture_native_sources(policy.prepare()?)
+            .finish()
+            .map_err(|_| refused())?;
+        let row =
+            sources.install_recovered_founder(&vault, &authentication, self, inputs, caller)?;
+        Ok((vault, sources, row))
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn runtime_labels(
+        &self,
+    ) -> (NativeCreationStatusData, [u8; 32], [u8; 32]) {
+        (
+            self.selection.status,
+            self.selection.invocation,
+            self.selection.request,
+        )
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn runtime_ingress(
+        &self,
+    ) -> Result<
+        (
+            catcoms_net::NativeChatJoinIngress,
+            catcoms_net::NativeChatMemberIngress,
+        ),
+        AppError,
+    > {
+        let mesh = self.actor.as_ref().ok_or_else(refused)?.borrow()?;
+        Ok((
+            mesh.native_chat_join_ingress().ok_or_else(refused)?,
+            mesh.native_chat_member_ingress().ok_or_else(refused)?,
+        ))
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn try_retire(
+        &mut self,
+    ) -> Result<bool, crate::store::NativeTextSourceRetirementRefusal> {
+        if self
+            .member
+            .as_ref()
+            .is_some_and(|member| !member.close_and_drained())
+        {
+            return Ok(false);
+        }
+        drop(self.ingress.take());
+        drop(self.received.take());
+        drop(self.actor.take());
+        match self.tcp.as_ref() {
+            Some(original) => original.try_retire(),
+            None => Ok(true),
+        }
     }
 
     /// Check the exact selected first Add, restore its closed MLS graph and

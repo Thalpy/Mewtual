@@ -53,6 +53,11 @@ before entering the native key. Cancelling final admission leaves the original
 presealed action ready for the next authorized attempt. The saved receipt is
 resolved from the same outbox used by the founder before restart.
 
+The recovered founder can enter the original native Source book after vault
+authentication. Its row is paired with the selected physical vault and its
+reserved mesh. Preparing a key still requires a current admitted UI command
+from that vault. Source retirement drains the original save work and TCP actor.
+
 The stage-lifetime continuation is under validation. Native key drainage is
 being separated from retained CLOSED snapshot DATA: an actual completed Cell
 proof precedes monotone SDK-continuation retirement and an outside-writer move

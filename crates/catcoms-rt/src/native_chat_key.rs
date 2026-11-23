@@ -417,12 +417,40 @@ impl NativeChatSourceOwner {
         if !ui.current() {
             return Err(NativeChatKeyRefusal::Unavailable);
         }
-        Ok(Self {
+        let owner = Self::for_trusted_authenticated_mount(
+            &NativeChatUiMountObservation {
+                original: ui.host.clone(),
+            },
+            custody,
+        )?;
+        if !ui.current() {
+            owner.close();
+            return Err(NativeChatKeyRefusal::Unavailable);
+        }
+        Ok(owner)
+    }
+
+    /// Trusted Root may retain a Source for an authenticated recovered mount
+    /// before the renderer starts a new UI generation. Preparing or entering
+    /// a cut still requires a separately admitted command from that Host.
+    pub fn for_trusted_authenticated_mount(
+        mount: &NativeChatUiMountObservation,
+        custody: Arc<dyn Send + Sync>,
+    ) -> Result<Self, NativeChatKeyRefusal> {
+        if !mount.is_open() {
+            return Err(NativeChatKeyRefusal::Unavailable);
+        }
+        let owner = Self {
             original: Arc::new(Source {
-                host: ui.host.clone(),
+                host: mount.original.clone(),
                 counter: Arc::new(Counter::new(Some(custody))),
             }),
-        })
+        };
+        if !mount.is_open() {
+            owner.close();
+            return Err(NativeChatKeyRefusal::Unavailable);
+        }
+        Ok(owner)
     }
     /// Weak observation to bind the actual retained creator/cache/Host.
     pub fn observe(&self) -> NativeChatSourceObservation {

@@ -221,7 +221,8 @@ impl Physical {
     ) -> Result<(), AppError> {
         let current = self.recovered_cold_founder()?.ok_or_else(refused)?;
         if current.status != original.status
-            || current.name != original.name
+            || current.invocation != original.invocation
+            || current.request != original.request
             || current.binding != original.binding
             || !Arc::ptr_eq(&current.network, &original.network)
         {

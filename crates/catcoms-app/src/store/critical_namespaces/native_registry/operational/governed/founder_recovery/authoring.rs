@@ -7,9 +7,13 @@ use crate::store::{
 };
 use catcoms_rt::{
     Clock, NativeChatKeyEnds, NativeChatKeyPurpose, NativeChatPreparedKeyCut,
-    NativeChatSourceOwner, NativeChatUiCommand,
+    NativeChatSourceObservation,
 };
 
+#[cfg(test)]
+use catcoms_rt::{NativeChatSourceOwner, NativeChatUiCommand};
+
+#[cfg(test)]
 pub(in crate::store::critical_namespaces::native_registry) struct FounderSavePreparation {
     original: Arc<crate::store::persistence::native_registry::network::NetworkDependency>,
     token: [u8; 32],
@@ -18,6 +22,7 @@ pub(in crate::store::critical_namespaces::native_registry) struct FounderSavePre
 }
 
 impl NativeTextColdFounderSource {
+    #[cfg(test)]
     pub(in crate::store::critical_namespaces::native_registry) fn prepare_member_save<
         R: CryptoRngCore,
     >(
@@ -29,14 +34,41 @@ impl NativeTextColdFounderSource {
         runtime: (&dyn Clock, &mut R),
         outbox_rng: &mut impl CryptoRngCore,
     ) -> Result<V2MemberSaveOutcome, Refusal> {
+        let mut cut = owner
+            .prepare_cut(command, NativeChatKeyPurpose::MemberAction)
+            .map_err(|_| Refusal::Unavailable)?;
+        let mut ends = NativeChatKeyEnds::new();
+        self.prepare_member_save_with_keys(
+            request,
+            (&owner.observe(), &mut cut, &mut ends),
+            caller,
+            runtime,
+            outbox_rng,
+        )
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn prepare_member_save_with_keys<
+        R: CryptoRngCore,
+    >(
+        &mut self,
+        request: V2MemberSignRequest<'_>,
+        keys: (
+            &NativeChatSourceObservation,
+            &mut NativeChatPreparedKeyCut,
+            &mut NativeChatKeyEnds,
+        ),
+        caller: &RequestCancellation,
+        runtime: (&dyn Clock, &mut R),
+        outbox_rng: &mut impl CryptoRngCore,
+    ) -> Result<V2MemberSaveOutcome, Refusal> {
         if self.index.is_some() {
             return Err(Refusal::Unavailable);
         }
         if caller.is_cancelled() {
             return Err(Refusal::Cancelled);
         }
-        let mut cut = owner
-            .prepare_cut(command, NativeChatKeyPurpose::MemberAction)
+        let (native, cut, ends) = keys;
+        cut.preflight(native, NativeChatKeyPurpose::MemberAction)
             .map_err(|_| Refusal::Unavailable)?;
         if self.member.is_none() {
             if let Some((action, ordinal)) =
@@ -45,10 +77,8 @@ impl NativeTextColdFounderSource {
                 return Ok(V2MemberSaveOutcome::Saved { action, ordinal });
             }
         }
-        let mut ends = NativeChatKeyEnds::new();
         self.restore_first_add(caller).map_err(|_| Refusal::Stale)?;
         let context = self.outbox_context().map_err(|_| Refusal::Stale)?;
-        let native = owner.observe();
         let governed = self.governed.as_deref_mut().ok_or(Refusal::Unavailable)?;
         let sdk = self.sdk.as_mut().ok_or(Refusal::Unavailable)?;
         let member = &mut self.member;
@@ -59,7 +89,7 @@ impl NativeTextColdFounderSource {
                     store,
                     &self.source,
                     |verifier, view, require_files| {
-                        sdk.bind_native_member_source(verifier, &native, &cut)
+                        sdk.bind_native_member_source(verifier, native, cut)
                             .map_err(|_| refused())?;
                         if member.is_none() {
                             let (_, selected) = sdk.prepare_member_topic(
@@ -70,7 +100,7 @@ impl NativeTextColdFounderSource {
                             *member = Some(Box::new(RecoveredMemberLane::new(
                                 store,
                                 context.id(),
-                                native,
+                                native.clone(),
                                 selected,
                             )?));
                         }
@@ -86,8 +116,8 @@ impl NativeTextColdFounderSource {
                             sdk,
                             verifier,
                             view,
-                            cut: &mut cut,
-                            ends: &mut ends,
+                            cut: &mut *cut,
+                            ends: &mut *ends,
                             clock: runtime.0,
                             rng: runtime.1,
                             require_files: &mut require_current,
@@ -106,6 +136,7 @@ impl NativeTextColdFounderSource {
         guarded
     }
 
+    #[cfg(test)]
     pub(in crate::store::critical_namespaces::native_registry) fn finish_member_save(
         &mut self,
         token: [u8; 32],
@@ -128,6 +159,20 @@ impl NativeTextColdFounderSource {
         })
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn require_member_save_admission(
+        &mut self,
+        cut: &NativeChatPreparedKeyCut,
+        caller: &RequestCancellation,
+    ) -> Result<(), Refusal> {
+        self.restore_first_add(caller).map_err(|_| Refusal::Stale)?;
+        self.member
+            .as_ref()
+            .ok_or(Refusal::Stale)?
+            .require_cut(cut)
+            .map_err(|_| Refusal::Unavailable)
+    }
+
+    #[cfg(test)]
     pub(in crate::store::critical_namespaces::native_registry) fn admit_member_save<
         R: CryptoRngCore,
     >(
@@ -141,6 +186,17 @@ impl NativeTextColdFounderSource {
         if preparation.signal.is_cancelled() {
             return Err((native, Refusal::Cancelled));
         }
+        self.admit_restored_member_save::<R>(preparation.token, &preparation.cut, native)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn admit_restored_member_save<
+        R: CryptoRngCore,
+    >(
+        &self,
+        token: [u8; 32],
+        cut: &NativeChatPreparedKeyCut,
+        native: MemberSaveNativeAdmission,
+    ) -> Result<MemberSaveJob, (MemberSaveNativeAdmission, Refusal)> {
         let (Some(lane), Some(sdk), Ok(layout)) = (
             self.member.as_ref(),
             self.sdk.as_ref(),
@@ -148,6 +204,6 @@ impl NativeTextColdFounderSource {
         ) else {
             return Err((native, Refusal::Unavailable));
         };
-        lane.admit_member_save::<R>(layout, preparation.token, sdk, &preparation.cut, native)
+        lane.admit_member_save::<R>(layout, token, sdk, cut, native)
     }
 }

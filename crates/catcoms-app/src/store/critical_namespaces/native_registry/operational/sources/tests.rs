@@ -356,6 +356,7 @@ fn native_sources_runtime_loan_restores_exact_body_and_retains_original_files_af
         request: Some(request(1, "Original retained request")),
         device_started: false,
         driver: None,
+        recovered_founder: None,
         device: None,
         transport: None,
         rng: Some(ChaCha20Rng::seed_from_u64(0xcd09)),

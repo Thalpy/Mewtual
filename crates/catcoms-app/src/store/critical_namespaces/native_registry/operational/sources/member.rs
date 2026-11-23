@@ -289,15 +289,34 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberJob<T, R> {
             .body
             .as_mut()
             .ok_or(V2MemberSaveRefusal::Unavailable)?;
-        let result = body.work.prepare_native_member(
-            body.driver
+        let rng = body.rng.as_mut().ok_or(V2MemberSaveRefusal::Unavailable)?;
+        let result = if let Some(founder) = body.recovered_founder.as_mut() {
+            let clock = body
+                .clock
+                .as_deref()
+                .ok_or(V2MemberSaveRefusal::Unavailable)?;
+            let draws = body
+                .group_rng
                 .as_mut()
-                .ok_or(V2MemberSaveRefusal::Unavailable)?,
-            request,
-            negative,
-            body.rng.as_mut().ok_or(V2MemberSaveRefusal::Unavailable)?,
-            &mut inner.keys,
-        );
+                .ok_or(V2MemberSaveRefusal::Unavailable)?;
+            founder.prepare_member_save_with_keys(
+                request,
+                inner.keys.member_entry(),
+                negative,
+                (clock, draws),
+                rng,
+            )
+        } else {
+            body.work.prepare_native_member(
+                body.driver
+                    .as_mut()
+                    .ok_or(V2MemberSaveRefusal::Unavailable)?,
+                request,
+                negative,
+                rng,
+                &mut inner.keys,
+            )
+        };
         #[cfg(all(test, any(windows, target_os = "linux")))]
         tests::after_prepare();
         // The actual driver retains all known outcomes before this late check.
