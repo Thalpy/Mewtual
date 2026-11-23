@@ -531,8 +531,10 @@ checks that the remaining roster and local signer survive the merge. Core
 derives the unsigned frozen cut from the selected admission slot. Sync pairs
 the signed Core step and the closed SDK candidate under the existing joined
 save fence and returns the original frozen admission with retirement custody.
-The governing producer, durable removal handoff and evicted member retirement
-still need native integration.
+The MLS committer can also build the exact private Remove once on a paid
+closed candidate while the original graph stays selected. The native
+governing writer, durable removal handoff and evicted member retirement
+still need integration.
 
 ## Acceptance before enabling
 

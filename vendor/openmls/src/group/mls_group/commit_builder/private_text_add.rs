@@ -16,7 +16,7 @@ fn unsupported() -> CreateCommitError {
 /// malformed unmerged metadata BEFORE resolution() can assert on a blank leaf
 /// or repeat references across unrelated subtrees. Local/remote authority is a
 /// separate caller obligation; these facts merely close the supported bound.
-fn require_tree(group: &MlsGroup) -> Result<(), CreateCommitError> {
+fn require_tree(group: &MlsGroup, removal: Option<LeafNodeIndex>) -> Result<(), CreateCommitError> {
     group.is_operational().map_err(|_| unsupported())?;
     if group.ciphersuite() != Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519
         || group.pending_proposals().next().is_some()
@@ -53,7 +53,15 @@ fn require_tree(group: &MlsGroup) -> Result<(), CreateCommitError> {
     }
     let slots = occupied.checked_add(blanks).ok_or_else(unsupported)?;
     let own = group.own_leaf_index().u32() as usize;
-    if slots != leaf_slots || own >= slots || !present[own] || (slots == 64 && blanks == 0) {
+    if slots != leaf_slots || own >= slots || !present[own] {
+        return Err(unsupported());
+    }
+    if let Some(removed) = removal {
+        let removed = removed.u32() as usize;
+        if removed == own || removed >= slots || !present[removed] {
+            return Err(unsupported());
+        }
+    } else if slots == 64 && blanks == 0 {
         return Err(unsupported());
     }
     let mut parents = 0usize;
@@ -144,13 +152,44 @@ impl<'a, G: BorrowMut<MlsGroup>> CommitBuilder<'a, LoadedPsks, G> {
         {
             return Err(unsupported());
         }
-        require_tree(self.group.borrow())?;
+        require_tree(self.group.borrow(), None)?;
         self.build_internal(
             rand,
             crypto,
             signer,
             None::<NewSignerBundle<'_, S>>,
             AddedKeyPackageValidationTime::Explicit(now),
+            TextAddExecution::Serial,
+            |_| true,
+        )
+    }
+
+    /// Build one forced-path, inline Remove of the exact original leaf.
+    pub fn build_private_text_remove<S: Signer>(
+        self,
+        rand: &impl OpenMlsRand,
+        crypto: &impl OpenMlsCrypto,
+        signer: &S,
+        target: LeafNodeIndex,
+    ) -> Result<CommitBuilder<'a, Complete, G>, CreateCommitError> {
+        if !MlsGroup::private_text_add_profile_supported_data()
+            || !matches!(self.stage.own_proposals.as_slice(),
+                [Proposal::Remove(removed)] if removed.removed() == target)
+            || !self.stage.force_self_update
+            || !self.stage.consume_proposal_store
+            || self.stage.external_commit_info.is_some()
+            || !self.stage.leaf_node_parameters.is_empty()
+            || !self.stage.psks.is_empty()
+        {
+            return Err(unsupported());
+        }
+        require_tree(self.group.borrow(), Some(target))?;
+        self.build_internal(
+            rand,
+            crypto,
+            signer,
+            None::<NewSignerBundle<'_, S>>,
+            AddedKeyPackageValidationTime::Legacy,
             TextAddExecution::Serial,
             |_| true,
         )

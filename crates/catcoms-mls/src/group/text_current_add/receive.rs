@@ -113,7 +113,11 @@ impl PreparedTextCurrentReceivedAdd {
         {
             return Err(bad());
         }
-        let original = OriginalParent::observe(device, group)?;
+        let original = OriginalParent::observe_membership(
+            device,
+            group,
+            matches!(request.change, Change::Add { .. }),
+        )?;
         let committer = group
             .group
             .members()

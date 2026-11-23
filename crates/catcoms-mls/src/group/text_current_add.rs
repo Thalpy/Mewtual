@@ -19,6 +19,7 @@ mod work;
 pub(crate) use installation::metadata_layout_bytes as installation_metadata_layout_bytes;
 pub use installation::{PreparedTextCurrentAddInstallation, RetiredTextCurrentAdd};
 mod receive;
+mod remove;
 mod result;
 mod routing;
 #[cfg(test)]
@@ -28,6 +29,8 @@ pub use receive::{
     PreparedTextCurrentReceivedAdd, PreparedTextReceivedAddInstallation, RetiredTextReceivedAdd,
     TextCurrentReceivedAddData, TextCurrentReceivedRemoveData, MAX_TEXT_RECEIVED_ADD_COMMIT_BYTES,
 };
+pub(crate) use remove::metadata_layout_bytes as remove_metadata_layout_bytes;
+pub use remove::{CompletedTextCurrentRemoveData, PreparedTextCurrentRemove};
 pub(crate) use result::metadata_layout_bytes as completed_result_metadata_layout_bytes;
 pub use result::{
     CompletedTextCurrentAddData, TextCurrentAddParentView, TextCurrentAddRequestView,
@@ -146,6 +149,14 @@ struct OriginalParent {
 }
 impl OriginalParent {
     fn observe(device: &MlsDevice, group: &ServerGroup) -> Result<Self, MlsError> {
+        Self::observe_membership(device, group, true)
+    }
+
+    fn observe_membership(
+        device: &MlsDevice,
+        group: &ServerGroup,
+        adding: bool,
+    ) -> Result<Self, MlsError> {
         let d = device.sdk_graph_lease.as_ref().ok_or_else(bad)?;
         let g = group.sdk_graph_lease.as_ref().ok_or_else(bad)?;
         if !Arc::ptr_eq(d, g) {
@@ -171,7 +182,7 @@ impl OriginalParent {
             .checked_add(group.group.treesync().blank_leaves().count())
             .ok_or_else(bad)?;
         let first_blank = group.group.treesync().blank_leaves().next();
-        if !(1..=64).contains(&slots) || (slots == 64 && first_blank.is_none()) {
+        if !(1..=64).contains(&slots) || (adding && slots == 64 && first_blank.is_none()) {
             return Err(bad());
         }
         Ok(Self {

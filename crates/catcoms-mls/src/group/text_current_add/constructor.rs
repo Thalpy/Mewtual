@@ -43,14 +43,26 @@ fn private_text_remove_stages_only_the_exact_surviving_membership() {
     let before = joined.epoch_authenticator_id();
     let before_routing = Zeroizing::new(joined.routing_metadata_secret(&survivor).unwrap());
     let epoch = joined.epoch();
-    let removed = group
-        .remove_member_observed(&founder, &target.device_id())
-        .unwrap();
+    let founder_bytes =
+        crate::persist::snapshot_server_bounded(&founder, &group, RAW, RAW).unwrap();
+    let (founder, group, _) = parent(&founder_bytes);
+    let target_key = target.public_key_bytes().try_into().unwrap();
+    let (payment, _, _) = admission(TextCurrentAddLimits::governed_text_v2());
+    let mut removal =
+        PreparedTextCurrentRemove::prepare(&founder, &group, target_key, payment).unwrap();
+    assert!(removal.completed_data().is_none());
+    assert!(removal.execute_private(&survivor, &joined).is_err());
+    removal.execute_private(&founder, &group).unwrap();
+    let previous = removal.completed_data().unwrap().commit_data().as_ptr();
+    removal.execute_private(&founder, &group).unwrap();
+    let removed = removal.completed_data().unwrap();
+    assert_eq!(removed.commit_data().as_ptr(), previous);
+    assert_eq!(group.epoch(), epoch);
     let packet = |subject| TextCurrentReceivedRemoveData {
-        commit: removed.commit(),
-        digest: removed.commit_digest(),
+        commit: removed.commit_data(),
+        digest: *blake3::hash(removed.commit_data()).as_bytes(),
         epoch,
-        committer: *removed.author(),
+        committer: founder.public_key_bytes().try_into().unwrap(),
         subject,
     };
     let wrong = other.public_key_bytes().try_into().unwrap();
@@ -67,7 +79,7 @@ fn private_text_remove_stages_only_the_exact_surviving_membership() {
     assert!(PreparedTextCurrentReceivedAdd::prepare_remove(
         &target,
         &evicted,
-        packet(*removed.subject()),
+        packet(*removed.target_data()),
         payment,
     )
     .is_err());
@@ -76,7 +88,7 @@ fn private_text_remove_stages_only_the_exact_surviving_membership() {
         PreparedTextCurrentReceivedAdd::prepare_remove(
             &survivor,
             &joined,
-            packet(*removed.subject()),
+            packet(*removed.target_data()),
             payment,
         )
         .unwrap(),
@@ -87,7 +99,7 @@ fn private_text_remove_stages_only_the_exact_surviving_membership() {
     );
     assert_eq!(
         candidate.as_ref().unwrap().selected_epoch_data(),
-        (group.epoch(), group.epoch_authenticator_id()),
+        removed.selected_epoch_data(),
     );
     let retired =
         PreparedTextCurrentReceivedAdd::prepare_install(&mut candidate, &mut survivor, &mut joined)
@@ -97,8 +109,14 @@ fn private_text_remove_stages_only_the_exact_surviving_membership() {
     assert_eq!(joined.epoch(), epoch + 1);
     assert!(joined.member_device_ids().contains(&other.device_id()));
     assert!(!joined.member_device_ids().contains(&target.device_id()));
+    let (selected_founder, selected_group, _) = parent(removed.secret_snapshot_data());
     let selected_routing = Zeroizing::new(joined.routing_metadata_secret(&survivor).unwrap());
-    assert!(selected_routing.as_slice() == group.routing_metadata_secret(&founder).unwrap());
+    assert!(
+        selected_routing.as_slice()
+            == selected_group
+                .routing_metadata_secret(&selected_founder)
+                .unwrap()
+    );
     assert!(selected_routing.as_slice() != before_routing.as_slice());
     assert_ne!(old_payment.load(Ordering::SeqCst), 0);
     drop((retired, joined, survivor));

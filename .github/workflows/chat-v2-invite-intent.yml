@@ -43,6 +43,7 @@ on:
       - 'crates/catcoms-net/src/native_chat_members.rs'
       - 'crates/catcoms-mls/src/group/text_current_add/**'
       - 'vendor/openmls/src/group/mls_group/processing.rs'
+      - 'vendor/openmls/src/group/mls_group/commit_builder/private_text_add.rs'
       - 'crates/catcoms-net/src/native_chat_member_dependencies.rs'
       - 'crates/catcoms-net/src/publication/**'
       - 'crates/catcoms-sync/src/owner_v2/member.rs'
