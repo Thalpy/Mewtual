@@ -798,7 +798,8 @@ fn serialize_revision(
     page: Option<&NativeTextMemberHistoryPage>,
     target: ActionId,
 ) -> Result<String, String> {
-    let item = if let Some(item) = page.and_then(|page| page.items().next()) {
+    let selected = page.and_then(|page| page.items().next());
+    let item = if let Some(item) = &selected {
         let action = item.action();
         let text = match &action.spec().body {
             Body::Create { text, .. } if action.id() == target => text,
