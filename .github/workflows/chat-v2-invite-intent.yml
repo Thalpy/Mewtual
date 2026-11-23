@@ -106,6 +106,7 @@ on:
       - 'crates/catcoms-replication/src/chat/join_bindings.rs'
       - 'crates/catcoms-replication/src/chat/cold_selected_history.rs'
       - 'crates/catcoms-replication/src/chat/projection_admission/v2_general/tests/selected_history.rs'
+      - 'crates/catcoms-replication/src/chat/owner_state/transition/removal_prepare.rs'
       - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/tests/text_group_guard/query/workspace/retain_admission/intent_admission/raw_admission/accepted_admission/retirement/worker.rs'
   workflow_dispatch:
     inputs:

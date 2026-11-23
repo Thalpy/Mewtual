@@ -305,6 +305,18 @@ impl PreparedV2JoinedPrefix {
             .map_err(|_| SyncError::JoinRejected)
     }
 
+    pub(super) fn prepare_member_removal(
+        &mut self,
+        header: &SignedOwnerHeader,
+        body: &catcoms_replication::chat::owner_bodies::RemovalBody,
+        image: &[u8],
+    ) -> Result<V2GeneralCandidate, SyncError> {
+        self.selected_member_verifier()?;
+        self.verifier
+            .derive_successor(header, ReplayBody::Removal(body), image)
+            .map_err(|_| SyncError::JoinRejected)
+    }
+
     /// Replay one more historical step privately before the original Welcome
     /// selection. Only the last candidate can be selected by the mounted host.
     pub(super) fn continue_initial_prefix(

@@ -34,7 +34,8 @@ pub use governing_prefix::{
     MAX_V2_GOVERNING_JOIN_STEPS,
 };
 pub use warm_runtime::{
-    ClosedV2JoinedNode, PreparedV2JoinedAdd, RetiredV2JoinedAdd, V2JoinedRuntimeInputs,
+    ClosedV2JoinedNode, PreparedV2JoinedAdd, PreparedV2JoinedRemoval, RetiredV2JoinedAdd,
+    V2JoinedRuntimeInputs,
 };
 pub use welcome::{
     CompletedV2JoinCandidate, V2JoinResponseData, V2JoinResponsePacketData,

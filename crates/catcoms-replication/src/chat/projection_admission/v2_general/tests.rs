@@ -8,7 +8,7 @@ mod read_accessors;
 mod review_regressions;
 mod selected_history;
 mod signing;
-use crate::chat::owner_bodies::{AcceptanceSpec, AppendBody, AppendSpec, RemovalBody, RemovalSpec};
+use crate::chat::owner_bodies::{AcceptanceSpec, AppendBody, AppendSpec};
 use crate::chat::owner_header::{HeaderKind, HeaderSpec, OwnerBodyId};
 use crate::chat::owner_profile::{AdmissionOrigin, AdmissionSpec, ProfileSpec, SignedOwnerProfile};
 use crate::chat::owner_state::{
@@ -235,24 +235,15 @@ impl Fixture {
     fn remove(&mut self, admission: &V2AuthenticatedAdmission) -> V2GeneralRetiredData {
         let base = self.verifier.replay_data();
         let slot = base.slot(admission.core.body.id()).unwrap();
-        let body = RemovalBody::new(RemovalSpec {
-            group: GROUP.to_vec(),
-            subject: admission.core.body.spec().subject,
-            commit: [199; 32],
-            before_epoch: self.epoch(),
-            after_epoch: self.epoch() + 1,
-            tip_header: slot.tip_header,
-            frozen_tip: slot.frontier.tip(),
-        })
-        .unwrap();
-        let slots = base
-            .slots()
-            .filter(|s| s.image.admission != admission.core.body.id())
-            .map(|s| s.image)
-            .collect();
-        let image = self.image(HeaderKind::Removal, body.id(), self.epoch() + 1, slots);
-        let header = self.owner.header(&image);
-        self.advance(&header, ReplayBody::Removal(&body), &image)
+        let step = base
+            .prepare_removal_data(admission.core.body.id(), [199; 32])
+            .unwrap();
+        assert_eq!(step.body_data().spec().tip_header, slot.tip_header);
+        assert_eq!(step.body_data().spec().frozen_tip, slot.frontier.tip());
+        let image = step.image_data();
+        let header = self.owner.header(image);
+        assert_eq!(header.spec(), step.header_spec_data());
+        self.advance(&header, ReplayBody::Removal(step.body_data()), image)
     }
     fn append_one(
         &mut self,

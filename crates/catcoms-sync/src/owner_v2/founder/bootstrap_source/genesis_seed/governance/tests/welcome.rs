@@ -309,6 +309,9 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     )
     .unwrap();
     let result = node.completed_add_data().unwrap();
+    let remove_parent = zeroize::Zeroizing::new(result.secret_snapshot_data().to_vec());
+    let remove_admission = admission.id();
+    let remove_target = catcoms_crypto::DeviceId::from_public_key_bytes(&admission.spec().subject);
     let step = || V2AdmissionStepData {
         admission,
         header,
@@ -725,6 +728,71 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
             .unwrap(),
         new_topic
     );
+    let (remover, mut removed_group) = catcoms_mls::restore_server(&remove_parent).unwrap();
+    let observed = removed_group
+        .remove_member_observed(&remover, &remove_target)
+        .unwrap();
+    let removal = verifier
+        .replay_data()
+        .prepare_removal_data(remove_admission, observed.commit_digest())
+        .unwrap();
+    let header = SignedOwnerHeader::sign_using(removal.header_spec_data().clone(), |bytes| {
+        remover
+            .sign_retained_ed25519_bounded(
+                observed.author(),
+                bytes,
+                catcoms_replication::chat::owner_header::MAX_HEADER_BYTES,
+            )
+            .map_err(|_| catcoms_replication::chat::ChatError::Dependency)
+    })
+    .unwrap();
+    let old = recovered.selected_join_data().unwrap();
+    let old_publication = recovered
+        .observe_member_publication(foreign_prefix)
+        .unwrap();
+    assert!(recovered
+        .prepare_member_removal_commit(
+            foreign_prefix,
+            &removal,
+            &header,
+            &observed.commit()[..observed.commit().len() - 1],
+            super::admission(&payment),
+        )
+        .is_err());
+    let mut candidate = Some(
+        recovered
+            .prepare_member_removal_commit(
+                foreign_prefix,
+                &removal,
+                &header,
+                observed.commit(),
+                super::admission(&payment),
+            )
+            .unwrap(),
+    );
+    assert_eq!(recovered.selected_join_data().unwrap(), old);
+    let epoch = (
+        removed_group.epoch(),
+        removed_group.epoch_authenticator_id(),
+    );
+    assert_eq!(candidate.as_ref().unwrap().selected_epoch_data(), epoch);
+    let selected = V2HostSelectionExpectation::from_trusted_host(header.id(), header.spec().state);
+    let failed_epoch = (epoch.0 - 1, epoch.1);
+    assert!(recovered
+        .install_host_selected_removal(foreign_prefix, &mut candidate, &selected, failed_epoch,)
+        .is_err());
+    assert!(old_publication.is_current_cached());
+    let retired = recovered
+        .install_host_selected_removal(foreign_prefix, &mut candidate, &selected, epoch)
+        .unwrap();
+    assert!(retired.frozen_admission_data().is_some());
+    assert!(candidate.is_none());
+    assert!(!old_publication.is_current_cached());
+    assert_eq!(
+        recovered.selected_join_data().unwrap(),
+        (header.id(), old.1, epoch.0)
+    );
+    drop(retired);
 }
 
 async fn complete_original_welcome(native_joiner: bool) {

@@ -527,8 +527,11 @@ two-phase native member save rather than adding a parallel writer.
 
 The closed surviving-member MLS path can stage a private Commit containing
 one inline Remove. It matches the exact named committer and target leaf and
-checks that the remaining roster and local signer survive the merge. The
-governing producer, durable removal handoff and evicted member retirement
+checks that the remaining roster and local signer survive the merge. Core
+derives the unsigned frozen cut from the selected admission slot. Sync pairs
+the signed Core step and the closed SDK candidate under the existing joined
+save fence and returns the original frozen admission with retirement custody.
+The governing producer, durable removal handoff and evicted member retirement
 still need native integration.
 
 ## Acceptance before enabling

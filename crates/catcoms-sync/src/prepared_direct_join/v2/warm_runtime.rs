@@ -4,6 +4,7 @@ use super::*;
 use catcoms_mls::{
     group::text_current_add::{
         PreparedTextCurrentReceivedAdd, RetiredTextReceivedAdd, TextCurrentReceivedAddData,
+        TextCurrentReceivedRemoveData,
     },
     persist::text_current_add::TextCurrentAddAdmission,
 };
@@ -47,12 +48,34 @@ pub struct PreparedV2JoinedAdd {
     frame: Option<blake3::Hash>,
 }
 
+pub struct PreparedV2JoinedRemoval(PreparedV2JoinedAdd);
+
+impl PreparedV2JoinedRemoval {
+    pub fn header_data(&self) -> &catcoms_replication::chat::owner_header::SignedOwnerHeader {
+        self.0.header_data()
+    }
+
+    pub fn selected_epoch_data(&self) -> (u64, [u8; 32]) {
+        self.0.selected_epoch_data()
+    }
+
+    pub fn selected_history_data(&self) -> &V2PreparedSelectedHistoryData {
+        self.0.selected_history_data()
+    }
+}
+
 /// The displaced Core state and SDK graph. The host drops this after leaving
 /// the final native and Current writers.
 #[must_use = "retire the displaced joined state after leaving the final writers"]
 pub struct RetiredV2JoinedAdd {
     _core: V2GeneralRetiredData,
     _sdk: RetiredTextReceivedAdd,
+}
+
+impl RetiredV2JoinedAdd {
+    pub fn frozen_admission_data(&self) -> Option<&catcoms_replication::chat::V2FrozenAdmission> {
+        self._core.frozen_data()
+    }
 }
 
 impl PreparedV2JoinedAdd {
@@ -294,6 +317,43 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
         prefix.observe_member_successor_header(frame.header_data())
     }
 
+    /// Pair the exact signed surviving-member Remove with its independently
+    /// paid closed MLS graph. The actual host owns the subsequent selection.
+    pub fn prepare_member_removal_commit(
+        &self,
+        prefix: &mut PreparedV2JoinedPrefix,
+        step: &catcoms_replication::chat::owner_state::transition::UnsignedRemovalStepData,
+        header: &catcoms_replication::chat::owner_header::SignedOwnerHeader,
+        commit: &[u8],
+        payment: TextCurrentAddAdmission,
+    ) -> Result<PreparedV2JoinedRemoval, SyncError> {
+        self.member_prefix(prefix)?;
+        prefix.observe_member_successor_header(header)?;
+        let body = step.body_data();
+        let spec = body.spec();
+        if header.spec() != step.header_spec_data() || spec.before_epoch != self.epoch {
+            return Err(SyncError::JoinRejected);
+        }
+        let core = prefix.prepare_member_removal(header, body, step.image_data())?;
+        let sdk = PreparedTextCurrentReceivedAdd::prepare_remove(
+            &self.node.device,
+            &self.node.group,
+            TextCurrentReceivedRemoveData {
+                commit,
+                digest: spec.commit,
+                epoch: spec.before_epoch,
+                committer: header.spec().issuer,
+                subject: spec.subject,
+            },
+            payment,
+        )?;
+        Ok(PreparedV2JoinedRemoval(PreparedV2JoinedAdd {
+            core: Some(core),
+            sdk: Some(sdk),
+            frame: None,
+        }))
+    }
+
     /// Request only the successor to this original selected joined epoch.
     pub fn member_add_request_data(
         &self,
@@ -358,8 +418,34 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
         selection: &V2HostSelectionExpectation,
         selected_sdk: (u64, [u8; 32]),
     ) -> Result<RetiredV2JoinedAdd, SyncError> {
-        let verifier = self.member_prefix(prefix)?;
         let candidate = pending.as_mut().ok_or(SyncError::JoinRejected)?;
+        let retired = self.install_member_transition(prefix, candidate, selection, selected_sdk)?;
+        *pending = None;
+        Ok(retired)
+    }
+
+    pub fn install_host_selected_removal(
+        &mut self,
+        prefix: &mut PreparedV2JoinedPrefix,
+        pending: &mut Option<PreparedV2JoinedRemoval>,
+        selection: &V2HostSelectionExpectation,
+        selected_sdk: (u64, [u8; 32]),
+    ) -> Result<RetiredV2JoinedAdd, SyncError> {
+        let candidate = pending.as_mut().ok_or(SyncError::JoinRejected)?;
+        let retired =
+            self.install_member_transition(prefix, &mut candidate.0, selection, selected_sdk)?;
+        *pending = None;
+        Ok(retired)
+    }
+
+    fn install_member_transition(
+        &mut self,
+        prefix: &mut PreparedV2JoinedPrefix,
+        candidate: &mut PreparedV2JoinedAdd,
+        selection: &V2HostSelectionExpectation,
+        selected_sdk: (u64, [u8; 32]),
+    ) -> Result<RetiredV2JoinedAdd, SyncError> {
+        let verifier = self.member_prefix(prefix)?;
         let core = candidate.core.as_ref().ok_or(SyncError::JoinRejected)?;
         verifier
             .check_host_selection_data(selection, core)
@@ -376,14 +462,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
         )?;
         let fence = self
             .fence
-            .prepare_selected_add(*self.admission_id.as_bytes(), before, selected_sdk)
+            .prepare_selected_membership(*self.admission_id.as_bytes(), before, selected_sdk)
             .map_err(|_| SyncError::JoinRejected)?;
         let core = prefix.select_member_successor(selection, &mut candidate.core)?;
         let sdk = sdk.install();
         self.head = header;
         self.epoch = selected_sdk.0;
         fence.finish();
-        *pending = None;
         Ok(RetiredV2JoinedAdd {
             _core: core,
             _sdk: sdk,
