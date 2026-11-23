@@ -6972,7 +6972,7 @@
       token:()=>Array.from(crypto.getRandomValues(new Uint8Array(32)),byte=>byte.toString(16).padStart(2,"0")).join(""),
       invoke:async(command,args)=>{
         if(command==="found_server")return(await invokeDebugged<unknown>("found_server",args)).value;
-        if(command==="send_message")return(await invokeDebugged<unknown>("send_message",args)).value;
+        if(command==="send_message" || command==="edit_message" || command==="delete_message")return(await invokeDebugged<unknown>(command,args)).value;
         throw new Error("Unsupported native chat request.");
       },
       sealed:()=>sealed?.(),
@@ -7014,9 +7014,13 @@
             const result=await nativeTextDriver(session).found(intent);
             if(result){installNativeServer(result.server);if(route?.current()&&activeServerId===null&&!showAdd){await switchServer(result.server.server,()=>{},route);}}
           }
-          else {const row=servers.find(row=>row.id===intent.server);if(row?.backend!=="text-v2" || row.context!==intent.expectedContext)continue;
-            const replyTo=intent.replyTo??null;
-            await nativeTextDriver(session,nativeDraftRetirement(intent.server,intent.channel,intent.expectedContext,intent.text,replyTo)).send(intent.server,intent.channel,intent.expectedContext,intent.text,replyTo);}
+          else {
+            const row=servers.find(row=>row.id===intent.server);if(row?.backend!=="text-v2" || row.context!==intent.expectedContext)continue;
+            const retireDraft=intent.kind==="create"
+              ? nativeDraftRetirement(intent.server,intent.channel,intent.expectedContext,intent.text,intent.replyTo??null)
+              : undefined;
+            await nativeTextDriver(session,retireDraft).retry(intent);
+          }
         }catch { /* Keep exact custody; a later scheduled retry reuses it. */ }
       }
     }finally{

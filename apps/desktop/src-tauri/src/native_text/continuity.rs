@@ -68,22 +68,7 @@ pub(crate) fn validate(object: &Map<String, Value>, version: u64) -> Result<(), 
                 }
                 item.get("isDm").and_then(Value::as_bool).ok_or(REFUSED)?;
             }
-            Some("create") => {
-                let fields = [
-                    "kind",
-                    "token",
-                    "server",
-                    "channel",
-                    "expectedContext",
-                    "text",
-                    "replyTo",
-                ];
-                if let Some(reply) = item.get("replyTo") {
-                    exact(item, &fields)?;
-                    id(Some(reply))?;
-                } else {
-                    exact(item, &fields[..fields.len() - 1])?;
-                }
+            Some(kind @ ("create" | "edit" | "delete")) => {
                 item.get("server")
                     .and_then(Value::as_u64)
                     .filter(|n| *n <= SAFE_INTEGER)
@@ -101,7 +86,31 @@ pub(crate) fn validate(object: &Map<String, Value>, version: u64) -> Result<(), 
                     return Err(REFUSED);
                 }
                 id(item.get("expectedContext"))?;
-                text(item.get("text"), 8192, true)?;
+                let common = ["kind", "token", "server", "channel", "expectedContext"];
+                let suffix: &[&str] = match kind {
+                    "create" if item.contains_key("replyTo") => {
+                        id(item.get("replyTo"))?;
+                        &["text", "replyTo"]
+                    }
+                    "create" => &["text"],
+                    "edit" => &["messageId", "expectedRevision", "text"],
+                    _ => &["messageId", "expectedRevision"],
+                };
+                if common.len() + suffix.len() != item.len()
+                    || common
+                        .iter()
+                        .chain(suffix)
+                        .any(|field| !item.contains_key(*field))
+                {
+                    return Err(REFUSED);
+                }
+                if kind != "create" {
+                    id(item.get("messageId"))?;
+                    id(item.get("expectedRevision"))?;
+                }
+                if kind != "delete" {
+                    text(item.get("text"), 8192, true)?;
+                }
             }
             _ => return Err(REFUSED),
         }
@@ -126,6 +135,17 @@ mod tests {
         let mut reply = create();
         reply["replyTo"] = "03".repeat(32).into();
         assert!(crate::validate_ui_state_json(&envelope(reply).to_string()).is_ok());
+        let mut edit = create();
+        edit["kind"] = "edit".into();
+        edit["messageId"] = "03".repeat(32).into();
+        edit["expectedRevision"] = "04".repeat(32).into();
+        assert!(crate::validate_ui_state_json(&envelope(edit.clone()).to_string()).is_ok());
+        edit["kind"] = "delete".into();
+        assert!(crate::validate_ui_state_json(&envelope(edit.clone()).to_string()).is_err());
+        edit.as_object_mut().unwrap().remove("text");
+        assert!(crate::validate_ui_state_json(&envelope(edit.clone()).to_string()).is_ok());
+        edit.as_object_mut().unwrap().remove("expectedRevision");
+        assert!(crate::validate_ui_state_json(&envelope(edit).to_string()).is_err());
         for version in [1, 2, 3, 5] {
             let mut old = root.clone();
             old["version"] = version.into();

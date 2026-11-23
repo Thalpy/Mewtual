@@ -53,6 +53,24 @@ test("native reply custody persists the target and never aliases another target 
   assert.deepEqual(f.calls[3].args, original.args);
   assert.equal(f.state().draws, 3);
 });
+test("native mutations seal the exact revision and retry without generating another token", async () => {
+  const f = fixture();
+  const target = { server: 1, channel: "9", expectedContext: "02".repeat(32), messageId: "03".repeat(32), expectedRevision: "04".repeat(32) };
+  f.answer(async (_cmd, args) => ({ backend: "text-v2", disposition: "uncertain", retry_token: args.retryToken }));
+  await f.driver.change({ kind: "edit", ...target, text: "Edited" });
+  await f.driver.change({ kind: "delete", ...target });
+  assert.deepEqual(f.calls.map(call => call.command), ["edit_message", "delete_message"]);
+  const edit = f.calls[0];
+  const original = edit.sealed[String(edit.args.retryToken)];
+  assert.equal(original.kind === "edit" && original.expectedRevision, target.expectedRevision);
+  assert.equal(Object.hasOwn(f.calls[1].args, "text"), false);
+  assert.equal(original.kind, "edit");
+  if (original.kind !== "edit") throw new Error("expected an edit");
+  assert.equal(await f.driver.retry({ ...original, expectedRevision: target.messageId }), null);
+  await f.driver.retry(original);
+  assert.deepEqual(f.calls[2].args, edit.args);
+  assert.equal(f.state().draws, 2);
+});
 test("foreign receipts and cleanup failures preserve native custody",async()=>{
   const f=fixture();f.answer(async()=>({backend:"text-v2",disposition:"saved-local",retry_token:"ff".repeat(32),message_id:"a".repeat(64),ordinal:"0"}));
   await assert.rejects(f.driver.send(1,"9","02".repeat(32),"original"),/could not be confirmed/);assert.equal(Object.keys(f.state().intents).length,1);

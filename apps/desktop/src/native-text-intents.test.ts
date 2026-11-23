@@ -31,6 +31,17 @@ test("saved replies hold one exact target while existing plain records retain th
     assert.throws(() => decodeNativeTextIntents({ [token]: { ...create, replyTo } }, 4));
   }
 });
+test("native mutation records distinguish original identity, causal revision, and body kind", () => {
+  const identity = { token, server: 2, channel: "9", expectedContext: "02".repeat(32), messageId: "03".repeat(32), expectedRevision: "04".repeat(32) };
+  const edit = { kind: "edit", ...identity, text: "Edited text" } as const;
+  const remove = { kind: "delete", ...identity } as const;
+  const queue = retainNativeTextIntent({}, edit);
+  assert.deepEqual(decodeNativeTextIntents({ [token]: remove }, 4)[token], remove);
+  assert.throws(() => retainNativeTextIntent(queue, { ...edit, expectedRevision: identity.messageId }));
+  assert.throws(() => retainNativeTextIntent(queue, remove));
+  assert.throws(() => decodeNativeTextIntents({ [token]: { ...remove, text: "" } }, 4));
+  assert.throws(() => decodeNativeTextIntents({ [token]: { ...edit, expectedRevision: null } }, 4));
+});
 test("native future/malformed records refuse the whole queue without mutating it", () => {
   const original = { [token]: create };
   for (const patch of [{ kind: "future" }, { token: "a".repeat(32) }, { token: "00".repeat(32) }, { channel: "01" },

@@ -9,7 +9,14 @@ export type NativeTextCreateIntent = Readonly<{
   kind: "create"; token: string; server: number; channel: string;
   expectedContext: string; text: string; replyTo?: string;
 }>;
-export type NativeTextIntent = NativeTextFoundIntent | NativeTextCreateIntent;
+type NativeTextMutationTarget = Readonly<{
+  token: string; server: number; channel: string; expectedContext: string;
+  messageId: string; expectedRevision: string;
+}>;
+export type NativeTextEditIntent = NativeTextMutationTarget & Readonly<{ kind: "edit"; text: string }>;
+export type NativeTextDeleteIntent = NativeTextMutationTarget & Readonly<{ kind: "delete" }>;
+export type NativeTextMutationIntent = NativeTextEditIntent | NativeTextDeleteIntent;
+export type NativeTextIntent = NativeTextFoundIntent | NativeTextCreateIntent | NativeTextMutationIntent;
 export type NativeTextIntents = Record<string, NativeTextIntent>;
 export const MAX_NATIVE_TEXT_INTENTS = 16;
 const encoder = new TextEncoder();
@@ -60,13 +67,25 @@ export function decodeNativeTextIntents(value: unknown, version: number): Native
       result[key] = Object.freeze({ kind: "found", token, displayName: text(item.displayName, 256, true),
         serverName: text(item.serverName, 256, true), advertise: text(item.advertise, 4096),
         relay: text(item.relay, 4096), rendezvous: text(item.rendezvous, 4096), isDm: item.isDm });
-    } else if (item.kind === "create") {
-      const fields = ["kind", "token", "server", "channel", "expectedContext", "text"];
-      const reply = Object.hasOwn(item, "replyTo") ? { replyTo: id(item.replyTo) } : {};
-      exact(item, [...fields, ...Object.keys(reply)]);
+    } else if (item.kind === "create" || item.kind === "edit" || item.kind === "delete") {
       if (typeof item.server !== "number" || !Number.isSafeInteger(item.server) || item.server < 0) return fail();
-      result[key] = Object.freeze({ kind: "create", token, server: item.server, channel: channel(item.channel),
-        expectedContext: id(item.expectedContext), text: text(item.text, 8192, true), ...reply });
+      const target = { token, server: item.server, channel: channel(item.channel), expectedContext: id(item.expectedContext) };
+      const fields = ["kind", "token", "server", "channel", "expectedContext", "text"];
+      if (item.kind === "create") {
+        const reply = Object.hasOwn(item, "replyTo") ? { replyTo: id(item.replyTo) } : {};
+        exact(item, [...fields, ...Object.keys(reply)]);
+        result[key] = Object.freeze({ kind: "create", ...target, text: text(item.text, 8192, true), ...reply });
+      } else {
+        const mutation = { ...target, messageId: id(item.messageId), expectedRevision: id(item.expectedRevision) };
+        const identity = ["messageId", "expectedRevision"];
+        if (item.kind === "edit") {
+          exact(item, [...fields, ...identity]);
+          result[key] = Object.freeze({ kind: "edit", ...mutation, text: text(item.text, 8192, true) });
+        } else {
+          exact(item, [...fields.slice(0, -1), ...identity]);
+          result[key] = Object.freeze({ kind: "delete", ...mutation });
+        }
+      }
     } else return fail();
   }
   return result;

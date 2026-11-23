@@ -1,7 +1,8 @@
 /** Native-only frontend request custody. Persistence always precedes dispatch;
  * uncertainty never redraws a token or edits its original payload. Native still
  * independently checks actual authorization and commits the signed original. */
-import { retainNativeTextIntent, type NativeTextIntents, type NativeTextFoundIntent, type NativeTextCreateIntent, type NativeTextIntent } from "./native-text-intents.ts";
+import { retainNativeTextIntent, type NativeTextIntents, type NativeTextFoundIntent, type NativeTextCreateIntent,
+  type NativeTextEditIntent, type NativeTextDeleteIntent, type NativeTextMutationIntent, type NativeTextIntent } from "./native-text-intents.ts";
 import { decodeRestoredChatSession, type NativeTextServer } from "./native-text-session.ts";
 export type NativeTextDriverDependencies = {
   read(): NativeTextIntents;
@@ -10,10 +11,12 @@ export type NativeTextDriverDependencies = {
   current(): boolean;
   sealed?(intent: NativeTextIntent): void;
   token(): string;
-  invoke: (command: "found_server" | "send_message", args: Record<string, unknown>) => Promise<unknown>;
+  invoke: (command: "found_server" | "send_message" | "edit_message" | "delete_message", args: Record<string, unknown>) => Promise<unknown>;
 };
 export type NativeFoundSettings = Omit<NativeTextFoundIntent, "kind" | "token">;
+export type NativeMutationSettings = Omit<NativeTextEditIntent, "token"> | Omit<NativeTextDeleteIntent, "token">;
 export type NativeSavedMessage = { disposition: "saved-local"; action: string; ordinal: string; cleanupPending: boolean };
+type ActionIntent = NativeTextCreateIntent | NativeTextMutationIntent;
 const same = (a: NativeTextIntent, b: NativeTextIntent) => JSON.stringify(retainNativeTextIntent({}, a)[a.token]) === JSON.stringify(retainNativeTextIntent({}, b)[b.token]);
 const object = (value: unknown): Record<string, unknown> => {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("The chat reply could not be confirmed. Retry the same request.");
@@ -40,6 +43,25 @@ export function createNativeTextDriver(deps: NativeTextDriverDependencies) {
       return true;
     }
   }
+  async function dispatch(intent: ActionIntent): Promise<NativeSavedMessage | { disposition: "uncertain" } | null> {
+    if (!await prepare(intent)) return null;
+    const common = { server: intent.server, channel: intent.channel, expectedContext: intent.expectedContext, retryToken: intent.token };
+    const result = intent.kind === "create"
+      ? await deps.invoke("send_message", { ...common, text: intent.text, replyTo: intent.replyTo ?? null })
+      : await deps.invoke(intent.kind === "edit" ? "edit_message" : "delete_message", {
+        ...common, messageId: intent.messageId, expectedRevision: intent.expectedRevision,
+        ...(intent.kind === "edit" ? { text: intent.text } : {}),
+      });
+    if (!deps.current()) return null;
+    const response = object(result);
+    if (response.backend !== "text-v2" || response.retry_token !== intent.token) throw new Error("The message reply could not be confirmed. Retry the same message.");
+    if (response.disposition === "uncertain") return { disposition: "uncertain" };
+    if (response.disposition !== "saved-local" || typeof response.message_id !== "string" || !/^[0-9a-f]{64}$/.test(response.message_id) || !decimal(response.ordinal)) {
+      throw new Error("The message reply could not be confirmed. Retry the same message.");
+    }
+    const cleanupPending = await complete(intent);
+    return deps.current() ? { disposition: "saved-local", action: response.message_id, ordinal: response.ordinal, cleanupPending } : null;
+  }
   return {
     async found(settings: NativeFoundSettings): Promise<{ server: NativeTextServer; cleanupPending: boolean } | null> {
       if (!deps.current()) return null;
@@ -62,22 +84,24 @@ export function createNativeTextDriver(deps: NativeTextDriverDependencies) {
       const cleanupPending = await complete(intent);
       return deps.current() ? { server: session.servers[0], cleanupPending } : null;
     },
-    async send(server: number, channel: string, expectedContext: string, text: string, replyTo: string | null = null): Promise<NativeSavedMessage | { disposition: "uncertain" } | null> {
+    async send(server: number, channel: string, expectedContext: string, text: string, replyTo: string | null = null) {
       if (!deps.current()) return null;
       const existing = Object.values(deps.read()).find((item): item is NativeTextCreateIntent => item.kind === "create" && item.server === server
         && item.channel === channel && item.expectedContext === expectedContext && item.text === text && (item.replyTo ?? null) === replyTo);
       const intent: NativeTextCreateIntent = existing ?? { kind: "create", token: deps.token(), server, channel, expectedContext, text,
         ...(replyTo === null ? {} : { replyTo }) };
-      if (!await prepare(intent)) return null;
-      const response = object(await deps.invoke("send_message", { server, channel, expectedContext, text: intent.text, retryToken: intent.token, replyTo: intent.replyTo ?? null }));
+      return dispatch(intent);
+    },
+    async change(settings: NativeMutationSettings) {
       if (!deps.current()) return null;
-      if (response.backend !== "text-v2" || response.retry_token !== intent.token) throw new Error("The message reply could not be confirmed. Retry the same message.");
-      if (response.disposition === "uncertain") return { disposition: "uncertain" };
-      if (response.disposition !== "saved-local" || typeof response.message_id !== "string" || !/^[0-9a-f]{64}$/.test(response.message_id) || !decimal(response.ordinal)) {
-        throw new Error("The message reply could not be confirmed. Retry the same message.");
-      }
-      const cleanupPending = await complete(intent);
-      return deps.current() ? { disposition: "saved-local", action: response.message_id, ordinal: response.ordinal, cleanupPending } : null;
+      const existing = Object.values(deps.read()).find((item): item is NativeTextMutationIntent =>
+        item.kind === settings.kind && same(item, { ...settings, token: item.token }));
+      return dispatch(existing ?? { ...settings, token: deps.token() });
+    },
+    async retry(intent: ActionIntent) {
+      const original = deps.read()[intent.token];
+      if (!deps.current() || !original || !same(original, intent)) return null;
+      return dispatch(intent);
     },
   };
 }
