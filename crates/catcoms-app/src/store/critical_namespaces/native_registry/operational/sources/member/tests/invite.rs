@@ -785,7 +785,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
             .with_publication(|_| panic!("retired founder archive body escaped"))
             .is_err());
         drop((archived, page));
-        let deferred = body("Founder action saved before the process closed");
+        let deferred = super::body("Founder action saved before the process closed");
         let deferred_request = || V2MemberSignRequest {
             channel,
             token: [146; 32],
