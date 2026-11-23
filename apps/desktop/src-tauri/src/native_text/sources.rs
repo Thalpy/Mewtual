@@ -42,7 +42,7 @@ impl ReadyBundle {
         {
             return Err(FAILED.into());
         }
-        let request = selection.request_data();
+        let request = selection.context_data();
         let row = server_table::PreparedNativeRow::new(
             server_table::NativeRowSpec {
                 selection: server_table::NativeSelection::Founder(selection),

@@ -212,7 +212,7 @@
     type ModerationEvent, type ModerationState, type TimelineMessage,
   } from "./moderation";
   import { MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity } from "./ui-continuity";
-  import type { NativeTextIntents } from "./native-text-intents";
+  import type { NativeTextIntent, NativeTextIntents } from "./native-text-intents";
   import { createNativeTextDriver } from "./native-text-driver";
   import { decodeNativeMembershipNotice, decodeRestoredChatSession, type NativeTextServer } from "./native-text-session";
   import { decodeNativeReceived, decodeNativeReceivedNotice, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, updateNativeReceived, type NativeOriginal, type NativeOwnMessage, type NativeReceived } from "./native-text-history";
@@ -3626,7 +3626,7 @@
   $effect(() => {
     pendingSendRetry.update(
       !locked && uiStateReady && !windowCloseInFlight ? uiStateLoadGeneration : null,
-      chatBackend==="text-v2" ? Object.keys(nativeTextIntents).length>0 : Object.values(pendingSends).some(intent => !quarantinedPendingIntent(intent) && (intent.resolution || !intent.retryBlock)),
+      chatBackend==="text-v2" ? Object.values(nativeTextIntents).some(nativeIntentCanRetry) : Object.values(pendingSends).some(intent => !quarantinedPendingIntent(intent) && (intent.resolution || !intent.retryBlock)),
       sending || (chatBackend==="text-v2" ? nativeHistoryLoading || nativeOwnLoading || busy || nativeRetryGeneration===uiStateLoadGeneration : retryingPendingSends || pendingManagerOpen || pendingSendResolution !== null),
     );
   });
@@ -4604,13 +4604,13 @@
   }
   function receiveNativeMembership(payload: unknown) {
     const notice = decodeNativeMembershipNotice(payload);
-    if (!notice || locked || !uiStateReady || uiSessionRetired || windowCloseInFlight
+    if (!notice || locked || uiSessionRetired || windowCloseInFlight
       || !servers.some(row => row.id === notice.server && row.backend === "text-v2" && row.context === notice.context)) return;
     if (notice.removed) {
       nativeRemovedContexts[notice.server] = notice.context;
       return;
     }
-    if (membersOpen && activeServerId === notice.server && !nativeSelectedRemoved) {
+    if (uiStateReady && membersOpen && activeServerId === notice.server && !nativeConversationRemoved(notice.server, notice.context)) {
       void refreshNativeMembers(notice.server, viewGeneration);
     }
   }
@@ -4627,7 +4627,6 @@
     } else {
       nativeRosterRequest++;
       nativeRoster = null;
-      if (locked) nativeRemovedContexts = {};
     }
   });
   type StorageHealth = {
@@ -5716,7 +5715,7 @@
   let styleWarnings = $derived(nameStyleWarnings());
 
   let cur = $derived(servers.find((s) => s.id === activeServerId) ?? null);
-  let nativeSelectedRemoved = $derived(activeServerId !== null && cur?.backend === "text-v2" && nativeRemovedContexts[activeServerId] === cur.context);
+  let nativeSelectedRemoved = $derived(activeServerId !== null && cur?.backend === "text-v2" && nativeConversationRemoved(activeServerId, cur.context));
   let myFp = $derived(roster.find((r) => r.you)?.fingerprint ?? "");
   // The full device identity, as the studio's native views name authors. A fingerprint is
   // display only and never compared against an author field.
@@ -7054,6 +7053,7 @@
     // Found after this synchronous redaction has retired the original owner.
     if(chatBackend==="text-v2")busy=false;
     nativeTextIntents = {};
+    nativeRemovedContexts = {};
     chatBackend = null;
     nativeOriginals = [];nativeCursor=null;nativeHistoryLoading=false;nativeHistoryRevision++;
     nativeOwnMessages = {};nativeOwnLoading = false;
@@ -7065,6 +7065,13 @@
     nativeHistoryLoaded=false;nativeHistoryError=null;
     nativeRetryGeneration=null;
   }
+  function nativeConversationRemoved(server: number, context: string | undefined): boolean {
+    return context !== undefined && nativeRemovedContexts[server] === context;
+  }
+  function nativeIntentCanRetry(intent: NativeTextIntent): boolean {
+    return intent.kind === "found" || (!nativeConversationRemoved(intent.server, intent.expectedContext)
+      && servers.some(row => row.id === intent.server && row.backend === "text-v2" && row.context === intent.expectedContext));
+  }
   function nativeTextDriver(session:number, sealed:()=>void=()=>{}) {
     const current=()=>!uiSessionRetired && chatBackend==="text-v2" && !locked && uiStateReady && !windowCloseInFlight && session===uiStateLoadGeneration;
     return createNativeTextDriver({
@@ -7072,6 +7079,7 @@
       replace:next=>{if(!current())throw new Error("The chat session changed.");nativeTextIntents=next;uiContinuityVersion=4;},
       seal:()=>queueUiStateSave(()=>{if(!current())throw new Error("The chat session changed.");return continuityJson();}),
       current,
+      mayDispatch: nativeIntentCanRetry,
       token:()=>Array.from(crypto.getRandomValues(new Uint8Array(32)),byte=>byte.toString(16).padStart(2,"0")).join(""),
       invoke:async(command,args)=>{
         if(command==="found_server")return(await invokeDebugged<unknown>("found_server",args)).value;
@@ -7107,7 +7115,7 @@
     try {
       for(const intent of Object.values(nativeTextIntents)) {
         if(locked || session!==uiStateLoadGeneration || windowCloseInFlight || chatBackend!=="text-v2")return;
-        if(!nativeTextIntents[intent.token])continue;
+        if(!nativeTextIntents[intent.token] || !nativeIntentCanRetry(intent))continue;
         try {
           if(intent.kind==="found") {
             // Only open a recovered first group while this original empty-view
@@ -7118,7 +7126,6 @@
             if(result){installNativeServer(result.server);if(route?.current()&&activeServerId===null&&!showAdd){await switchServer(result.server.server,()=>{},route);}}
           }
           else {
-            const row=servers.find(row=>row.id===intent.server);if(row?.backend!=="text-v2" || row.context!==intent.expectedContext)continue;
             const retireDraft=intent.kind==="create"
               ? nativeDraftRetirement(intent.server,intent.channel,intent.expectedContext,intent.text,intent.replyTo??null)
               : undefined;
@@ -7137,14 +7144,14 @@
   }
   async function refreshNativeHistory(append=false) {
     const selected=cur,server=activeServerId;
-    if(selected?.backend!=="text-v2" || !selected.context || server===null || locked || !uiStateReady)return;
+    if(selected?.backend!=="text-v2" || !selected.context || server===null || locked || !uiStateReady || nativeConversationRemoved(server, selected.context))return;
     // Reads and writes share native admission. The write owner always refreshes
     // the latest selected view after retiring, so a switch need not compete for
     // that permit or lose its history when the write's original view changed.
     if(sending || busy || nativeRetryGeneration!==null)return;
     if(nativeHistoryLoading || nativeOwnLoading)return;
     const session=uiStateLoadGeneration,viewToken=viewGeneration,revision=++nativeHistoryRevision,channel=selected.active,context=selected.context;
-    const current=()=>!locked && !uiSessionRetired && uiStateReady && !windowCloseInFlight && session===uiStateLoadGeneration && viewToken===viewGeneration && revision===nativeHistoryRevision && activeServerId===server && cur?.active===channel && cur?.context===context;
+    const current=()=>!locked && !uiSessionRetired && uiStateReady && !windowCloseInFlight && session===uiStateLoadGeneration && viewToken===viewGeneration && revision===nativeHistoryRevision && activeServerId===server && cur?.active===channel && cur?.context===context && !nativeConversationRemoved(server, context);
     nativeHistoryLoading=true;nativeHistoryError=null;
     try {
       const result=await readNativeOriginals((_command,args)=>invoke<unknown>("get_message_page",args),{server,channel,context},current,append?nativeCursor:null);
@@ -7200,7 +7207,7 @@
     const selected = cur, server = activeServerId;
     if (server === null || selected?.backend !== "text-v2" || !selected.context || locked || !uiStateReady
       || uiSessionRetired || windowCloseInFlight || busy || sending || nativeHistoryLoading || nativeOwnLoading
-      || nativeSelectedRemoved || nativeRetryGeneration !== null || nativeOwnMessages[action]?.item?.revision !== revision) return;
+      || nativeConversationRemoved(server, selected.context) || nativeRetryGeneration !== null || nativeOwnMessages[action]?.item?.revision !== revision) return;
     const session = uiStateLoadGeneration, view = viewGeneration, operation = ++pendingSendNonce;
     const target = { server, channel: selected.active, expectedContext: selected.context, messageId: action, expectedRevision: revision };
     const data = text === null ? { ...target, kind: "delete" as const } : { ...target, kind: "edit" as const, text };
@@ -7313,7 +7320,7 @@
     }
   }
   async function sendNativeText(text:string,server:number,channel:string):Promise<SendOutcome> {
-    const selected=cur;if(selected?.backend!=="text-v2" || !selected.context || nativeSelectedRemoved)return "refused";
+    const selected=cur;if(selected?.backend!=="text-v2" || !selected.context || nativeConversationRemoved(server, selected.context))return "refused";
     const session=uiStateLoadGeneration,context=selected.context,operation=++pendingSendNonce;
     const replyTo=replyingTo || null;
     const retireDraft=nativeDraftRetirement(server,channel,context,text,replyTo);

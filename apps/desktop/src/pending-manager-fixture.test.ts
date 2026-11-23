@@ -9,7 +9,7 @@ import { VideoReviewQueue } from "./video-review.ts";
 import { createNativeTextDriver } from "./native-text-driver.ts";
 import { decodeNativeReceived, decodeNativeReceivedNotice, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, updateNativeReceived } from "./native-text-history.ts";
 import { PendingSendRetry } from "./pending-send-retry.ts";
-import { decodeRestoredChatSession } from "./native-text-session.ts";
+import { decodeNativeMembershipNotice, decodeRestoredChatSession } from "./native-text-session.ts";
 import { sessionContinuationCurrent } from "./viewscope.ts";
 
 export function deferred<T = void>() {
@@ -44,7 +44,7 @@ export function pendingManagerBackend(initial:unknown){return{sealed:JSON.string
 /** Shared test fixture for real App save queue, hydration, decisions and submit/retry. */
 export function pendingManagerApp(initial: unknown, backend=pendingManagerBackend(initial)) {
   const dependencies = { initial, backend, addPendingSend, durableStopOriginal, durableStopTerminal, retiredStopWarning, matchingPendingMutation, matchingPendingSend, samePendingIntent, pendingSendRetryBlock, resolvePendingSend, recoverQuarantinedIntent, quarantinedPendingIntent, validateMutationPayload, validateSendPayload, pendingContinuityVersion, sendRefusedUnaccepted,
-    MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity, persistenceWarning, sendAndRefresh, sendOutcome, NativeVaultLockCoordinator, closeContinuityAcknowledgement, VideoReviewQueue, createNativeTextDriver, decodeNativeReceived, decodeNativeReceivedNotice, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, updateNativeReceived, PendingSendRetry, decodeRestoredChatSession, sessionContinuationCurrent };
+    MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity, persistenceWarning, sendAndRefresh, sendOutcome, NativeVaultLockCoordinator, closeContinuityAcknowledgement, VideoReviewQueue, createNativeTextDriver, decodeNativeReceived, decodeNativeReceivedNotice, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, updateNativeReceived, PendingSendRetry, decodeNativeMembershipNotice, decodeRestoredChatSession, sessionContinuationCurrent };
   return new Function(...Object.keys(dependencies), `
     let locked = false, uiStateReady = false, uiStateLoadGeneration = 1, uiStateHydrationAttempt = 0, uiStateSaveTimer,uiSessionRetired=false;
     let uiStateSaveChain = Promise.resolve(), uiStateSaveFailed = false, uiStateFailureToast = 0;
@@ -56,6 +56,7 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
     let nativeReceived = [], nativeReceivedScope = null, nativeReceivedRevision = 0;
     const nativeReceivedReads = new Map();
     let nativeArchive = null, nativeArchiveRevision = 0;
+    let nativeRemovedContexts = {}, membersOpen = false;
     let busy=false,showAdd=false,startTab="join";
     let displayName="Catte",newServerName="Group",advertise="",relay="",rendezvous="";
     const studioExit={begin(){const generation=viewGeneration;return{current:()=>generation===viewGeneration};}};
@@ -144,6 +145,7 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
     };
     ${production("  function queueUiStateSave(", "  function chanKey(")}
     ${production("  function resetNativeTextForLock(", "  function nativeTextDriver(")}
+    ${production("  function receiveNativeMembership(", "  $effect(")}
     ${production("  function nativeTextDriver(", "  async function found(")}
     ${production("  async function found(", "  async function join(")}
     ${production("  function restoreReloaded(", "  async function unlock(")}
@@ -188,6 +190,8 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
       nativeArchiveRefresh: refreshNativeArchive,
       archive() { return structuredClone(nativeArchive); },
       receiveNotice: refreshNativeReceived,
+      receiveMembership: receiveNativeMembership,
+      nativeRemoved: nativeConversationRemoved,
       received() { return structuredClone(nativeReceived); },
       nativeRetry: retryNativeTextRequests,
       nativeFound: found,

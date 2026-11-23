@@ -88,6 +88,11 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextRuntimeSelection<T, R> {
         self.original.request
     }
 
+    /// The original creation invocation identifies the same desktop context after restart.
+    pub fn context_data(&self) -> [u8; 32] {
+        self.original.invocation
+    }
+
     pub fn is_recovered_from_original_vault_cached(&self, vault: &NativeTextVault) -> bool {
         self.original.recovered_founder
             && self.original.scope.is_open()

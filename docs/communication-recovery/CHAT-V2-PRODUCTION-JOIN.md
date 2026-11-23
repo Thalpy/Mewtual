@@ -517,7 +517,10 @@ The approved joined row can look up a saved request through that context.
 An absent namespace stays absent. An ambiguous or damaged namespace refuses
 and preserves the original files.
 The desktop history route pages the original locally saved actions through
-the same context, including after a cold reopen. A separate desktop view
+the same context, including after a cold reopen. For a founder the desktop
+context comes from the original creation invocation in the covered row. The
+vault also retains the request digest for verifying the original settings.
+A separate desktop view
 pages saved received messages on both desktop roles through the held history
 namespace. Each body replays the exact selected actions under the current
 Core guard. Joined dependency repair is bounded to the original authenticated
@@ -573,6 +576,9 @@ chain. The record retains the original Commit digest and frozen history
 page. Recovery authenticates that cut before refusing to activate that same
 old registration, and live application retires the original row and SDK.
 The desktop reports removal on that original row and retires its composer.
+An exact draft or saved retry survives eviction. The renderer stops dispatching
+new requests for that exact context, even when removal arrives during the local
+retry journal write.
 The warm founder covers the exact Remove intent and SDK entry before SDK
 work, then covers the original SDK outcome and Header attempt before signing.
 Add and Remove share the exact-file Head replacement under the original
@@ -588,6 +594,11 @@ A cold restart during an incomplete governing transaction still needs recovery
 work.
 
 ## Acceptance before enabling
+
+The Chat V2 integration workflow runs focused desktop membership checks on
+Windows and Ubuntu and a separate renderer job on relevant pull requests.
+Select `all` and `run_deferred_catchup=true` when dispatching it for full
+acceptance. This includes the deferred long-running catch-up regression.
 
 Require deterministic tests for stripped/downgraded/cross-root bindings, exact
 lost-Welcome/KP retries, every Add/pin/archive crash cut, both removal/admission

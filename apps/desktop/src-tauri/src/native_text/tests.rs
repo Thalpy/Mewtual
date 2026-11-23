@@ -1322,7 +1322,19 @@ async fn native_text_membership_dispatch_uses_the_original_founder_row() {
     assert_eq!(cold["context"], found["context"]);
     assert_eq!(cold["channel"], found["channel"]);
     let state = reopened.state::<AppState>();
-    let local = joined_work(&state, cold["server"].as_u64().unwrap()).await;
+    let server = cold["server"].as_u64().unwrap();
+    let request_digest = {
+        let table = state.servers.lock().await;
+        let row = table.native(&server).unwrap();
+        row.data().selection.founder().unwrap().request_data()
+    };
+    let mut wrong = cold.clone();
+    wrong["context"] = serde_json::json!(hex::encode(request_digest));
+    assert_ne!(wrong["context"], cold["context"]);
+    let refused_history = native_history_request(&window, &wrong, "0", None, 1);
+    refused(refused_history.await.unwrap());
+    assert!(cold_queue.lock().unwrap().is_empty());
+    let local = joined_work(&state, server).await;
     let account =
         keep_session::current(&state, state.ui_session_generation.load(Ordering::SeqCst)).unwrap();
     let foreground = local.foreground(account).await.unwrap();

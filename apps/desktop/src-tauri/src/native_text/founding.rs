@@ -346,12 +346,16 @@ async fn execute(state: &AppState, invocation: &Invocation) -> Result<Output, St
         })?;
     }
     let preparation = capture(state, invocation).await?;
-    let selection = server_table::NativeSelection::Founder(
+    let founder =
         tauri::async_runtime::spawn_blocking(move || preparation.finish()?.select_stored_runtime())
             .await
             .map_err(|_| SUPERSEDED)?
-            .map_err(|_| SUPERSEDED)?,
-    );
+            .map_err(|_| SUPERSEDED)?;
+    let context = founder.context_data();
+    if context != invocation.intent.request {
+        return Err(SUPERSEDED.into());
+    }
+    let selection = server_table::NativeSelection::Founder(founder);
     let row_policy = { state.servers.lock().await.native_budget() };
     let credit = row_policy.prepare().map_err(|_| BUSY)?;
     let instance = state.next_server_instance.fetch_add(1, Ordering::Relaxed);
@@ -361,7 +365,7 @@ async fn execute(state: &AppState, invocation: &Invocation) -> Result<Output, St
             selection: selection.clone(),
             instance,
             target: invocation.target.clone(),
-            request: invocation.intent.request,
+            request: context,
             name: &invocation.intent.name,
             display_name: &invocation.intent.display_name,
             is_dm: invocation.intent.is_dm,
@@ -372,7 +376,7 @@ async fn execute(state: &AppState, invocation: &Invocation) -> Result<Output, St
     let id = selection.id_data();
     // Freeze and serialize bounded DATA outside final publication guards.
     let response = serde_json::json!({"backend":"text-v2", "server":id,
-        "context":hex::encode(invocation.intent.request),
+        "context":hex::encode(context),
         "channel":channel_id("general").to_string(), "channels":[{"id":channel_id("general").to_string(),"name":"general"}],
         "is_dm":invocation.intent.is_dm, "storage_warning":null}).to_string();
     #[cfg(test)]
@@ -405,7 +409,7 @@ async fn execute(state: &AppState, invocation: &Invocation) -> Result<Output, St
             }
             if let Some(existing) = table.native(&id) {
                 let previous = existing.data();
-                if previous.request != invocation.intent.request
+                if previous.request != context
                     || !previous.selection.same_original(&selection)
                     || previous.name != invocation.intent.name
                     || previous.display_name != invocation.intent.display_name

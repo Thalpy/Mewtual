@@ -9,6 +9,7 @@ export type NativeTextDriverDependencies = {
   replace(intents: NativeTextIntents): void;
   seal(): Promise<void>;
   current(): boolean;
+  mayDispatch?(intent: NativeTextIntent): boolean;
   sealed?(intent: NativeTextIntent): void;
   token(): string;
   invoke: (command: "found_server" | "send_message" | "edit_message" | "delete_message", args: Record<string, unknown>) => Promise<unknown>;
@@ -24,13 +25,17 @@ const object = (value: unknown): Record<string, unknown> => {
 };
 const decimal = (value: unknown): value is string => typeof value === "string" && /^(0|[1-9][0-9]{0,19})$/.test(value) && BigInt(value) <= (1n << 64n) - 1n;
 export function createNativeTextDriver(deps: NativeTextDriverDependencies) {
+  const permitted = (intent: NativeTextIntent) => deps.current() && (deps.mayDispatch?.(intent) ?? true);
   async function prepare(intent: NativeTextIntent): Promise<boolean> {
-    if (!deps.current()) return false;
+    if (!permitted(intent)) return false;
     deps.replace(retainNativeTextIntent(deps.read(), intent));
     await deps.seal(); // failed seal means ZERO native invocation
-    if (!deps.current() || !deps.read()[intent.token] || !same(deps.read()[intent.token], intent)) return false;
+    return true;
+  }
+  function ready(intent: NativeTextIntent): boolean {
+    if (!permitted(intent) || !deps.read()[intent.token] || !same(deps.read()[intent.token], intent)) return false;
     deps.sealed?.(intent);
-    return deps.current() && !!deps.read()[intent.token] && same(deps.read()[intent.token], intent);
+    return permitted(intent) && !!deps.read()[intent.token] && same(deps.read()[intent.token], intent);
   }
   async function complete(intent: NativeTextIntent): Promise<boolean> {
     if (!deps.current() || !deps.read()[intent.token] || !same(deps.read()[intent.token], intent)) return true;
@@ -44,7 +49,7 @@ export function createNativeTextDriver(deps: NativeTextDriverDependencies) {
     }
   }
   async function dispatch(intent: ActionIntent): Promise<NativeSavedMessage | { disposition: "uncertain" } | null> {
-    if (!await prepare(intent)) return null;
+    if (!await prepare(intent) || !ready(intent)) return null;
     const common = { server: intent.server, channel: intent.channel, expectedContext: intent.expectedContext, retryToken: intent.token };
     const result = intent.kind === "create"
       ? await deps.invoke("send_message", { ...common, text: intent.text, replyTo: intent.replyTo ?? null })
@@ -73,7 +78,7 @@ export function createNativeTextDriver(deps: NativeTextDriverDependencies) {
       const existing = Object.values(deps.read()).find((item): item is NativeTextFoundIntent => item.kind === "found");
       const intent: NativeTextFoundIntent = existing ?? { kind: "found", token: deps.token(), ...resolved };
       if (existing && !same(existing, { kind: "found", token: existing.token, ...resolved })) throw new Error("Finish creating the previous group before changing its settings.");
-      if (!await prepare(intent)) return null;
+      if (!await prepare(intent) || !ready(intent)) return null;
       const response = object(await deps.invoke("found_server", { requestId: intent.token, displayName: intent.displayName, serverName: intent.serverName,
         advertise: intent.advertise, relay: intent.relay, rendezvous: intent.rendezvous, isDm: intent.isDm }));
       if (!deps.current()) return null;

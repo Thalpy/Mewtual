@@ -20,6 +20,41 @@ test("actual App native seal failure keeps composer and exact intent without any
 const token="04".repeat(32);
 const retained={version:4,drafts:{"7:9":"original"},readMarks:{},nativeTextIntents:{[token]:{kind:"create",token,server:7,channel:"9",expectedContext:context,text:"original"}}};
 const saved=(args:Record<string,unknown>)=>({backend:"text-v2",disposition:"saved-local",retry_token:args.retryToken,message_id:row.action,ordinal:"0"});
+test("confirmed removal retires only the original conversation before native dispatch", async () => {
+  const app = pendingManagerApp({});
+  await app.hydrate();
+  app.nativeConversation(7, "9", context);
+  app.type("keep this draft");
+  const gate = deferred();
+  app.holdSave(gate.promise);
+  const send = app.send();
+  await settle();
+  assert.equal(app.state().writes.length, 1);
+  const otherContext = "05".repeat(32);
+  app.receiveMembership({ server: 7, context: otherContext, removed: true });
+  assert.equal(app.nativeRemoved(7, context), false);
+
+  app.receiveMembership({ server: 7, context, removed: true });
+  app.receiveMembership({ server: 7, context, removed: false });
+  gate.resolve();
+  assert.equal(await send, "uncertain");
+  assert.equal(app.state().draft, "keep this draft");
+  await app.nativeRetry();
+  app.syncRetry();
+  assert.deepEqual(app.retryTimers(), []);
+  assert.equal(await app.send(), "refused");
+  assert.equal(app.state().submissions.length, 0);
+  const [retainedToken] = Object.keys(app.state().sealed.nativeTextIntents);
+  assert.equal(app.state().sealed.nativeTextIntents[retainedToken].expectedContext, context);
+
+  app.nativeConversation(7, "9", otherContext);
+  app.type("different conversation");
+  app.answer(async args => saved(args));
+  assert.equal(await app.send(), "sent");
+  assert.equal(app.state().submissions[0].args.expectedContext, otherContext);
+  assert.deepEqual(Object.keys(app.state().sealed.nativeTextIntents), [retainedToken]);
+  app.done();
+});
 test("native App seals only a mutation for its displayed revision and discards retired reads", async () => {
   const app = pendingManagerApp({});
   await app.hydrate();
