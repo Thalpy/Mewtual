@@ -152,6 +152,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     verifier,
                     &mut received.ledger,
                     &received.view,
+                    (store, history.scope),
                     |id| {
                         let mount = store
                             .member_outbox_mount()

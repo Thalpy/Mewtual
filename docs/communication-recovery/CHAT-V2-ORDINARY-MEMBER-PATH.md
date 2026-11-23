@@ -201,6 +201,8 @@ view and holds a paid live ledger for that subscription. The main window reads
 that projection under the same native publication guard as a joined row.
 For an authenticated incoming action that names at most four missing direct
 dependencies, the founder can look up those exact IDs in its own saved outbox.
+An ID absent there can be read from the same channel's selected received
+archive. Both originals follow the same Core and ledger checks.
 The current Core verifier replays each matching saved original into the
 receiver ledger for dependency validation. This gives a remote reply the
 context of the founder's original while its local outbox still owns the

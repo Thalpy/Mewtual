@@ -242,6 +242,7 @@ impl NativeTextColdFounderSource {
                 verifier,
                 &mut ledger.ledger,
                 &ledger.view,
+                (store, scope),
                 |id| {
                     let context = history::outbox_context(selection, source);
                     history::saved_dependency(store, context, source, scope, id, rng)

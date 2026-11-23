@@ -1566,7 +1566,17 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     let changed = native_send_request(&window, &restored[0], 9, "Changed joined message");
     run(&queue).await;
     refused(changed.await.unwrap());
-    let fresh = native_send_request(&window, &restored[0], 10, "Message after restart");
+    let fresh = invite_command(
+        &window,
+        "send_message",
+        archive_request(
+            &restored[0],
+            serde_json::json!({
+                "retryToken":hex::encode([10;32]),
+                "text":"Message after restart", "replyTo":member_action,
+            }),
+        ),
+    );
     run(&queue).await;
     let fresh = found_value(fresh.await.unwrap());
     assert_eq!(fresh["disposition"], "saved-local");

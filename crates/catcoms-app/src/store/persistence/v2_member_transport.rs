@@ -34,6 +34,7 @@ pub(in crate::store) fn project_founder_member(
     verifier: &V2GeneralPrefixVerifier,
     ledger: &mut ChatLedger,
     view: &ProjectionView,
+    archive: (&ServerStore, SharedHistoryScope),
     mut saved_dependency: impl FnMut(ActionId) -> Result<Option<MemberSavedOriginal>, Refusal>,
     mut require_current: impl FnMut() -> Result<(), Refusal>,
 ) -> Result<bool, Refusal> {
@@ -48,18 +49,38 @@ pub(in crate::store) fn project_founder_member(
         let mut replayed = false;
         for &id in missing {
             require_current()?;
-            let Some(saved) = saved_dependency(id)? else {
-                continue;
+            let own = saved_dependency(id)?;
+            let archived;
+            let (action, admission) = if let Some(saved) = &own {
+                (saved.action(), saved.receipt().admission)
+            } else {
+                if !archive
+                    .0
+                    .has_mounted_shared_history()
+                    .map_err(|_| Refusal::Busy)?
+                {
+                    continue;
+                }
+                let Some(saved) = archive
+                    .0
+                    .read_shared_history_record(archive.1, id)
+                    .map_err(|_| Refusal::Failed)?
+                else {
+                    continue;
+                };
+                archived = saved;
+                (archived.original.action(), archived.admission)
             };
-            let admission = verifier
-                .admission(saved.receipt().admission)
-                .map_err(|_| Refusal::Stale)?;
+            if action.id() != id || &action.spec().realm != ledger.realm() {
+                return Err(Refusal::Stale);
+            }
+            let admission = verifier.admission(admission).map_err(|_| Refusal::Stale)?;
             require_current()?;
             replayed |= verifier
                 .replay_ordinary_history_original(
                     ledger,
                     view,
-                    saved.action(),
+                    action,
                     &admission,
                     &[],
                     FOUNDER_RECEIVE_WORK,

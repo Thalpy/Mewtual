@@ -14,7 +14,7 @@ pub(super) struct FounderHistory<'a> {
     store: &'a ServerStore,
     verifier: &'a V2GeneralPrefixVerifier,
     owner: V2TextOwnerRef<'a>,
-    scope: SharedHistoryScope,
+    pub(super) scope: SharedHistoryScope,
     admission: OwnerFactId,
     outbox: Option<MemberOutboxContextId>,
 }
