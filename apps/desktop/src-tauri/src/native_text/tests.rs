@@ -1969,12 +1969,16 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     let founder_saved = action;
     let joined_generation = joined_state.ui_session_generation.load(Ordering::SeqCst);
     let joined_work = joined_work(&joined_state, id).await;
+    let joined_session = keep_session::current(&joined_state, joined_generation).unwrap();
     let mut last_refusal = String::new();
     let recovered_parent = tokio::time::timeout(Duration::from_secs(28), async {
         loop {
+            let guard = joined_work
+                .foreground(joined_session.clone())
+                .await
+                .unwrap();
             let (prepare, selection, channel, scope) =
                 capture_joined_worker(&joined_state, id, joined_generation).await;
-            let guard = joined_work.foreground(scope.clone()).await.unwrap();
             let exchange = prepare.prepare_dependency_exchange(
                 &selection,
                 channel,
@@ -1988,9 +1992,12 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
                 Ok(exchange) => {
                     match tokio::time::timeout(Duration::from_secs(8), exchange.receive()).await {
                         Ok(Ok(reply)) => {
+                            let _guard = joined_work
+                                .foreground(joined_session.clone())
+                                .await
+                                .unwrap();
                             let (prepare, selection, _, scope) =
                                 capture_joined_worker(&joined_state, id, joined_generation).await;
-                            let _guard = joined_work.foreground(scope.clone()).await.unwrap();
                             let original = prepare
                                 .open_dependency_response(&selection, reply, &scope)
                                 .unwrap()
