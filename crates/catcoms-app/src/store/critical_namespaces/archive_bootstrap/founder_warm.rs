@@ -278,6 +278,21 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
             .remove_governed_member_native(layout, target, keys, cuts, rng, negative)
     }
 
+    pub(in crate::store) fn governed_roster_native(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        keys: &super::founder::NativeFounderKeys,
+        negative: &catcoms_rt::RequestCancellation,
+    ) -> Result<crate::store::NativeTextRoster, AppError> {
+        if !self.is_ready_data() {
+            return Err(refused());
+        }
+        self.host
+            .as_mut()
+            .ok_or_else(refused)?
+            .governed_roster_native(layout, keys, negative)
+    }
+
     #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store) fn host_for_governed_add_test(
         &mut self,

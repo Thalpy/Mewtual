@@ -553,8 +553,14 @@ The joined vault covers that terminal cut on its original Welcome file
 chain. The record retains the original Commit digest and frozen history
 page. Recovery authenticates that cut before refusing to activate that same
 old registration, and live application retires the original row and SDK.
-The founder's durable governing writer and the physical end-to-end removal
-regression still need integration.
+The warm founder covers the exact Remove intent and SDK entry before SDK
+work, then covers the original SDK outcome and Header attempt before signing.
+Add and Remove share the exact-file Head replacement under the original
+Current writer. A lost reply after Head replacement can finish the same
+cached Core and MLS selection. The desktop founder chooses the exact
+admission shown by the selected roster, and the original native row checks
+permission again before issuing the operation. A cold restart during an
+incomplete governing transaction still needs recovery work.
 
 ## Acceptance before enabling
 

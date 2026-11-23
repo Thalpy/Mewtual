@@ -1298,6 +1298,18 @@ impl SourceWork {
         )
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn governed_roster_native<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
+        &self,
+        driver: &mut crate::store::PreparedFreshV2TextFounder<T, R>,
+        keys: &crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounderKeys,
+        negative: &catcoms_rt::RequestCancellation,
+    ) -> Result<crate::store::NativeTextRoster, AppError> {
+        driver.governed_roster_native(self.physical.current()?, keys, negative)
+    }
+
     #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store::critical_namespaces::native_registry) fn current_for_governed_add_test(
         &self,

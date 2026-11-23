@@ -199,6 +199,7 @@ jobs:
               ('native-send-parser', 'native_text_send_parser_', 1),
               ('native-mutation-dispatch', 'native_text_mutations_', 1),
               ('native-retry-continuity', 'native_text::continuity::tests::', 3),
+              ('native-membership-parser', 'native_text::membership::tests::native_membership_requires_the_exact_admission', 1),
           ]
           scope = os.environ['CHAT_V2_NATIVE_SCOPE']
           if scope == 'native-join':
@@ -211,6 +212,10 @@ jobs:
               ), (
                   'native-founder-welcome-retry',
                   'native_text::tests::native_text_connected_join_retries_original_welcome_after_authenticated_unlock',
+                  1,
+              ), (
+                  'native-membership-parser',
+                  'native_text::membership::tests::native_membership_requires_the_exact_admission',
                   1,
               )]
           failures = []

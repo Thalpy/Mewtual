@@ -279,6 +279,24 @@ impl NativeTextJoinedMemberProjection {
 }
 
 impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
+    pub fn governed_roster(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        caller: &RequestCancellation,
+    ) -> Result<crate::store::NativeTextRoster, V2MemberSaveRefusal> {
+        self.with_member_receiver(selection, caller, |source| {
+            let verifier = source
+                .prefix
+                .selected_member_verifier()
+                .map_err(|_| V2MemberSaveRefusal::Unavailable)?;
+            let own = catcoms_replication::chat::owner_header::OwnerBodyId::from_bytes(
+                *source.prefix.own_admission_data().as_bytes(),
+            );
+            crate::store::NativeTextRoster::from_selected(source.store, verifier.replay_data(), own)
+                .map_err(|_| V2MemberSaveRefusal::Failed)
+        })
+    }
+
     pub fn archived_action_page(
         self,
         selection: &NativeTextJoinedRowSelection,

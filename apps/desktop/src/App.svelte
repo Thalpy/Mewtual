@@ -4531,6 +4531,45 @@
       /* storage unavailable */
     }
   }
+  type NativeRosterMember = Member & { admission: string; founder: boolean };
+  type NativeRosterSnapshot = { server: number; generation: number; entries: NativeRosterMember[]; failure: string; loading: boolean };
+  let nativeRoster = $state<NativeRosterSnapshot | null>(null);
+  let removingNativeAdmission = $state("");
+  let confirmNativeRemoval = $state("");
+  async function refreshNativeMembers(server: number, generation: number) {
+    nativeRoster = { server, generation, entries: [], failure: "", loading: true };
+    try {
+      const entries = await invoke<NativeRosterMember[]>("get_members", { server });
+      if (viewCurrent(generation, server) && cur?.backend === "text-v2") {
+        nativeRoster = { server, generation, entries, failure: "", loading: false };
+      }
+    } catch (error) {
+      if (viewCurrent(generation, server) && cur?.backend === "text-v2") {
+        nativeRoster = { server, generation, entries: [], failure: String(error), loading: false };
+      }
+    }
+  }
+  async function removeNativeMember(member: NativeRosterMember) {
+    const server = activeServerId;
+    const generation = viewGeneration;
+    if (server === null || cur?.backend !== "text-v2" || member.founder || removingNativeAdmission) return;
+    confirmNativeRemoval = "";
+    removingNativeAdmission = member.admission;
+    try {
+      await invoke("remove_member", { server, expectedAdmission: member.admission });
+      if (viewCurrent(generation, server) && cur?.backend === "text-v2") await refreshNativeMembers(server, generation);
+    } catch (cause) {
+      if (viewCurrent(generation, server) && cur?.backend === "text-v2") error = String(cause);
+    } finally {
+      removingNativeAdmission = "";
+    }
+  }
+  $effect(() => {
+    if (membersOpen && !locked && uiStateReady && cur?.backend === "text-v2" && activeServerId !== null) {
+      confirmNativeRemoval = "";
+      void refreshNativeMembers(activeServerId, viewGeneration);
+    }
+  });
   type StorageHealth = {
     listed_files: number; referenced_chunks: number; verified_chunks: number;
     // `missing` = absent chunks of this device's own uploads (damage); `not_cached` = absent
@@ -28614,6 +28653,9 @@
         {/if}
         {#if cur?.backend === "text-v2"}
           {@const archive = nativeArchive !== null && nativeArchive.server === activeServerId && nativeArchive.channel === cur.active && nativeArchive.context === cur.context ? nativeArchive : null}
+          <button type="button" class="ghost small sb-members" aria-expanded={membersOpen} aria-controls="native-member-list" onclick={toggleMembers}>
+            {membersOpen ? "Hide members" : "Show members"}
+          </button>
           {#key `${activeServerId}:${cur.active}:${cur.context}`}
             <NativeSavedChat rows={nativeOriginals} own={nativeOwnMessages}
               readOwn={(action) => {void refreshNativeOwnMessage(action);}}
@@ -30474,7 +30516,35 @@
 
       <!-- Studio reserves this width for the drawing and its controls. The member-list
            preference is preserved for chat; call frame claims remain in Studio's Art tab. -->
-      {#if !dmHome && cur && cur.backend !== "text-v2" && !cur.isDm && membersOpen && view !== "studio"}
+      {#if !dmHome && cur?.backend === "text-v2" && !cur.isDm && membersOpen}
+        {@const snapshot = nativeRoster?.server === activeServerId && nativeRoster.generation === viewGeneration ? nativeRoster : null}
+        {@const canRemove = snapshot?.entries.some((member) => member.you && member.founder)}
+        <aside id="native-member-list" class="members-col" aria-label="Members">
+          <h3><span>Members{snapshot && !snapshot.loading && !snapshot.failure ? ` (${snapshot.entries.length})` : ""}</span></h3>
+          {#if !snapshot || snapshot.loading}
+            <p class="muted small" role="status">Loading members…</p>
+          {:else if snapshot.failure}
+            <p class="muted small" role="status">{snapshot.failure}</p>
+          {:else}
+            <ul>
+              {#each snapshot.entries as member (member.admission)}
+                <li>
+                  <span title={member.identity}>{member.fingerprint}{member.you ? " (you)" : ""}{member.founder ? " · Founder" : ""}</span>
+                  {#if canRemove && !member.founder}
+                    {#if confirmNativeRemoval === member.admission}
+                      <button type="button" class="danger-btn small" disabled={!!removingNativeAdmission} onclick={() => void removeNativeMember(member)}>Confirm removal</button>
+                      <button type="button" class="ghost small" onclick={() => (confirmNativeRemoval = "")}>Cancel</button>
+                    {:else}
+                      <button type="button" class="ghost small" disabled={!!removingNativeAdmission} onclick={() => (confirmNativeRemoval = member.admission)}>Remove</button>
+                    {/if}
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+          {/if}
+          <button type="button" class="ghost small" disabled={snapshot?.loading || !!removingNativeAdmission} onclick={() => { if (activeServerId !== null) void refreshNativeMembers(activeServerId, viewGeneration); }}>Refresh members</button>
+        </aside>
+      {:else if !dmHome && cur && !cur.isDm && membersOpen && view !== "studio" && cur.backend !== "text-v2"}
         <aside class="members-col" aria-label="Members">
           <h3><span>Members · {onlineCount}/{members} claimed here</span></h3>
           {#if roster.length > 6}

@@ -1472,6 +1472,17 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 use catcoms_replication::chat::owner_header::OwnerBodyId;
                 let target = OwnerBodyId::from_bytes(*third_own.as_bytes());
                 let old_founder = OwnerBodyId::from_bytes(anchor.admission);
+                let roster = capture().governed_roster(&fresh).unwrap();
+                assert_eq!(roster.members().len(), 3);
+                assert!(roster
+                    .members()
+                    .iter()
+                    .any(|member| member.admission == old_founder && member.founder && member.you));
+                assert!(roster
+                    .members()
+                    .iter()
+                    .any(|member| member.admission == target && !member.founder && !member.you));
+                drop(roster);
                 assert!(capture()
                     .remove_governed_admission(old_founder, &fresh)
                     .is_err());
@@ -1492,6 +1503,13 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     capture().remove_governed_admission(target, &fresh).unwrap();
                 assert_ne!(removed_head, third_head);
                 assert_eq!(removed_epoch, 3);
+                let roster = capture().governed_roster(&fresh).unwrap();
+                assert_eq!(roster.members().len(), 2);
+                assert!(roster
+                    .members()
+                    .iter()
+                    .all(|member| member.admission != target));
+                drop(roster);
                 assert_eq!(
                     capture().remove_governed_admission(target, &fresh),
                     Ok((removed_head, removed_epoch))

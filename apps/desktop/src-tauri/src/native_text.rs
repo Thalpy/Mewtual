@@ -19,6 +19,7 @@ mod invite_mint;
 mod invite_preview;
 mod joining;
 mod listing;
+mod membership;
 mod receiving;
 pub(super) mod retirement;
 mod sending;
@@ -259,6 +260,9 @@ fn router<R: tauri::Runtime>(
         }
         if enabled && invoke.message.command() == "mint_invite_fresh" {
             return invite_mint::route(invoke, &spawn);
+        }
+        if enabled && matches!(invoke.message.command(), "get_members" | "remove_member") {
+            return membership::route(invoke, &spawn);
         }
         if enabled
             && matches!(

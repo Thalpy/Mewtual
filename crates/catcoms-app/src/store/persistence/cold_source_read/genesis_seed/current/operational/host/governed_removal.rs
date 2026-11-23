@@ -16,6 +16,62 @@ pub(super) struct PendingGovernedRemoval {
 }
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextHost<T, R> {
+    pub(in crate::store) fn governed_roster_native(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        keys: &NativeFounderKeys,
+        negative: &RequestCancellation,
+    ) -> Result<crate::store::NativeTextRoster, AppError> {
+        use crate::store::persistence::v2_text::PreparedV2TextParentCapture;
+        use crate::store::{NativeTextRoster, NativeTextRosterMember};
+        let store = layout.checked_store()?;
+        let require = || {
+            if negative.is_cancelled() {
+                return Err(refused());
+            }
+            keys.preflight(&self.origin)
+        };
+        require()?;
+        let owner = self.owner.borrow_current()?;
+        let genesis = owner.source().data();
+        let own = genesis.admission.id();
+        if let Some(current) = self.governed_add.as_mut() {
+            let verifier = self
+                .member
+                .as_ref()
+                .ok_or_else(refused)?
+                .selected_invite_verifier()?;
+            let replay = verifier.replay_data();
+            let resources = current.parent.resources().clone();
+            return store.with_v2_text_current(&owner, |admission| {
+                let guard = store.lock_v2_text_current_group(admission, &resources)?;
+                current.require_selected_member_head(&guard, replay)?;
+                require()?;
+                let roster = NativeTextRoster::from_selected(store, replay, own)?;
+                require()?;
+                Ok(roster)
+            });
+        }
+        let mut capture = PreparedV2TextParentCapture::prepare(store, owner.source())?;
+        let resources = capture.resources().clone();
+        store.with_v2_text_current(&owner, |admission| {
+            let guard = store.lock_v2_text_current_group(admission, &resources)?;
+            capture
+                .capture(&guard)?
+                .validate_idle_genesis_member_under_current_guard(&guard)?;
+            require()?;
+            NativeTextRoster::prepare(
+                store,
+                std::iter::once(NativeTextRosterMember {
+                    admission: own,
+                    signer: genesis.admission.spec().subject,
+                    founder: true,
+                    you: true,
+                }),
+            )
+        })
+    }
+
     #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store) fn after_governed_remove_selection_for_test(hook: Box<dyn FnOnce()>) {
         super::governed_add::AFTER_GOVERNED_HEAD_SAVE.with(|slot| {

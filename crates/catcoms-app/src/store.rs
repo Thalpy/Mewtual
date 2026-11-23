@@ -53,6 +53,7 @@ mod critical_namespaces;
 mod governance_open;
 mod mounted;
 mod native_text_invite;
+mod native_text_roster;
 pub use critical_namespaces::NativeTextFounderDependencyProvider;
 pub use critical_namespaces::NativeTextInvitePublication;
 pub use critical_namespaces::NativeTextJoinedRegistrationData;
@@ -126,6 +127,7 @@ pub use native_text_invite::{
     NativeTextInvitePacketData, NativeTextInviteRecovery, NativeTextSavedInvite,
     NativeTextSavedJoinResponse, MAX_NATIVE_TEXT_INVITE_PACKET_BYTES,
 };
+pub use native_text_roster::{NativeTextRoster, NativeTextRosterMember};
 pub use persistence::v2_member_transport::{
     NativeTextFounderDependencyExchange, NativeTextFounderDependencyResponse,
     NativeTextFounderFrameOutcome, NativeTextFounderReceived,

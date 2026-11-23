@@ -257,6 +257,32 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
         })
     }
 
+    pub fn governed_roster(
+        self,
+        negative: &RequestCancellation,
+    ) -> Result<crate::store::NativeTextRoster, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Error;
+        if negative.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let mut job = self.finish()?;
+        job.inner
+            .require_current()
+            .map_err(|_| Error::Unavailable)?;
+        let inner = &mut job.inner;
+        let body = inner.loan.body.as_mut().ok_or(Error::Unavailable)?;
+        let driver = body.driver.as_mut().ok_or(Error::Unavailable)?;
+        let result = body
+            .work
+            .governed_roster_native(driver, &inner.keys, negative);
+        inner.loan.recorded = true;
+        if negative.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        inner.require_current().map_err(|_| Error::Unavailable)?;
+        result.map_err(|_| Error::Failed)
+    }
+
     fn prepare_join_keys(&self) -> Result<JoinKeys<T, R>, V2MemberSaveRefusal> {
         use catcoms_rt::NativeChatKeyPurpose as Purpose;
         let (cell, (keys, cuts)) = self.prepare_using_issuer(|source, command| {

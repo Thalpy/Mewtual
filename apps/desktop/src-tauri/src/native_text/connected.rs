@@ -118,7 +118,7 @@ impl Source {
         Self::for_installed(generation, target, row, account, payment)
     }
 
-    fn for_installed(
+    pub(super) fn for_installed(
         generation: u64,
         target: &Arc<NativeTextVaultAuthenticationCheck>,
         row: &server_table::NativeRow,
