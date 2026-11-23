@@ -36,7 +36,8 @@ pub use governing_prefix::{
 };
 pub use warm_runtime::{
     ClosedV2JoinedNode, PreparedV2JoinedAdd, PreparedV2JoinedEviction, PreparedV2JoinedMembership,
-    RetiredV2JoinedAdd, RetiredV2JoinedEviction, V2JoinedRuntimeInputs,
+    RetiredV2JoinedAdd, RetiredV2JoinedEviction, V2JoinedRuntimeInputs, V2MemberContactData,
+    V2_MEMBER_CONTACT_BYTES,
 };
 pub use welcome::{
     CompletedV2JoinCandidate, V2JoinResponseData, V2JoinResponsePacketData,

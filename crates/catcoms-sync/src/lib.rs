@@ -96,10 +96,10 @@ pub use prepared_direct_join::{
     RetiredV2JoinedAdd, RetiredV2JoinedEviction, SealedV2JoinedOutcome, SealedV2PendingJoinSource,
     V2AdmissionStepData, V2FirstAddProofData, V2FirstJoinDeliveryData, V2JoinRequestPacketData,
     V2JoinResponseData, V2JoinResponsePacketData, V2JoinedRuntimeInputs, V2MemberAddFrameData,
-    V2MemberAddRequestData, V2MemberTransitionFrameData, V2PendingJoinContextData,
-    MAX_V2_FIRST_ADD_PROOF_BYTES, MAX_V2_FIRST_JOIN_DELIVERY_BYTES,
+    V2MemberAddRequestData, V2MemberContactData, V2MemberTransitionFrameData,
+    V2PendingJoinContextData, MAX_V2_FIRST_ADD_PROOF_BYTES, MAX_V2_FIRST_JOIN_DELIVERY_BYTES,
     MAX_V2_JOIN_REQUEST_PACKET_BYTES, MAX_V2_JOIN_RESPONSE_PACKET_BYTES,
-    MAX_V2_MEMBER_ADD_FRAME_BYTES, MAX_V2_MEMBER_TRANSITION_FRAME_BYTES,
+    MAX_V2_MEMBER_ADD_FRAME_BYTES, MAX_V2_MEMBER_TRANSITION_FRAME_BYTES, V2_MEMBER_CONTACT_BYTES,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use prepared_direct_join::{

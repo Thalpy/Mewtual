@@ -4538,6 +4538,11 @@
   let nativeRosterRequest = 0;
   let removingNativeAdmission = $state("");
   let confirmNativeRemoval = $state("");
+  let nativeContactCode = $state("");
+  let nativeContactInput = $state("");
+  let nativeContactHost = $state("");
+  let nativeContactStatus = $state("");
+  let nativeContactBusy = $state(false);
   async function refreshNativeMembers(server: number, generation: number, mount = chatLedgerMount) {
     const request = ++nativeRosterRequest;
     nativeRoster = { server, mount, members: [], canRemove: false, failure: "", loading: true };
@@ -4567,9 +4572,39 @@
       removingNativeAdmission = "";
     }
   }
+  async function useNativeContact(action: "share" | "connect") {
+    const server = activeServerId;
+    const generation = viewGeneration;
+    if (server === null || locked || nativeContactBusy || cur?.backend !== "text-v2") return;
+    nativeContactStatus = "";
+    nativeContactBusy = true;
+    try {
+      if (action === "share") {
+        const code = await invoke<string>("share_native_chat_contact", { server });
+        if (membersOpen && unlockedViewCurrent(generation, server)) nativeContactCode = code;
+      } else {
+        await invoke("connect_native_chat_contact", {
+          server, contact: nativeContactInput.trim(), approvedHost: nativeContactHost.trim(),
+        });
+        if (membersOpen && unlockedViewCurrent(generation, server)) {
+          nativeContactInput = "";
+          nativeContactHost = "";
+          nativeContactStatus = "Connected to member.";
+        }
+      }
+    } catch (cause) {
+      if (membersOpen && unlockedViewCurrent(generation, server)) nativeContactStatus = String(cause);
+    } finally {
+      nativeContactBusy = false;
+    }
+  }
   $effect(() => {
     const server = activeServerId;
     const mount = chatLedgerMount;
+    nativeContactCode = "";
+    nativeContactInput = "";
+    nativeContactHost = "";
+    nativeContactStatus = "";
     if (membersOpen && !locked && uiStateReady && cur?.backend === "text-v2" && server !== null) {
       confirmNativeRemoval = "";
       untrack(() => { void refreshNativeMembers(server, viewGeneration, mount); });
@@ -30548,6 +30583,18 @@
                 </li>
               {/each}
             </ul>
+            {#if snapshot.members.some((member) => member.you && !member.founder)}
+              <button type="button" class="ghost small" disabled={nativeContactBusy} onclick={() => void useNativeContact("share")}>Create my contact code</button>
+              {#if nativeContactCode}
+                <label>My contact code <input type="text" value={nativeContactCode} readonly onfocus={(event) => event.currentTarget.select()} /></label>
+              {/if}
+              <form onsubmit={(event) => { event.preventDefault(); void useNativeContact("connect"); }}>
+                <label>Member contact code <input type="text" bind:value={nativeContactInput} maxlength="512" spellcheck="false" /></label>
+                <label>Approved IP address <input type="text" bind:value={nativeContactHost} maxlength="45" spellcheck="false" /></label>
+                <button type="submit" class="ghost small" disabled={nativeContactBusy || !nativeContactInput.trim() || !nativeContactHost.trim()}>Connect to member</button>
+              </form>
+              {#if nativeContactStatus}<p class="small" role="status">{nativeContactStatus}</p>{/if}
+            {/if}
           {/if}
           <button type="button" class="ghost small" disabled={snapshot?.loading || !!removingNativeAdmission} onclick={() => { if (activeServerId !== null) void refreshNativeMembers(activeServerId, viewGeneration); }}>Refresh members</button>
         </aside>

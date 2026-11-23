@@ -839,6 +839,23 @@ pub fn phase0_peer_id(p: &libp2p::PeerId) -> PeerId {
     to_peer(p)
 }
 
+/// A candidate direct TCP route for one canonical inline Ed25519 peer.
+/// The caller must authorize the destination before passing it to transport.
+pub fn native_chat_direct_tcp_route(
+    peer: &[u8; 38],
+    host: std::net::IpAddr,
+    port: u16,
+) -> Option<(PeerId, String)> {
+    let public = libp2p::identity::PublicKey::try_decode_protobuf(peer.get(2..)?).ok()?;
+    let id = public.to_peer_id();
+    if port == 0 || id.to_bytes().as_slice() != peer || public.try_into_ed25519().is_err() {
+        return None;
+    }
+    let family = if host.is_ipv4() { "ip4" } else { "ip6" };
+    let address = format!("/{family}/{host}/tcp/{port}/p2p/{id}");
+    Some((phase0_peer_id(&id), address))
+}
+
 /// The **target** peer of a multiaddr: the last `/p2p/<id>` component. For a relay
 /// circuit address `…/p2p/<relay>/p2p-circuit/p2p/<target>` this is the target (not
 /// the relay); for a direct `…/p2p/<peer>` it is that peer.

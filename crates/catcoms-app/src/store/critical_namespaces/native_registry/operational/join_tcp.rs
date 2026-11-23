@@ -21,6 +21,7 @@ struct Attempt {
     members: Option<NativeChatMemberIngress>,
     dependencies: Option<NativeChatMemberDependencies>,
     dial: Option<MeshConnectionDial>,
+    listener: Option<([u8; 38], u16)>,
     #[cfg(test)]
     peer_name: Option<String>,
 }
@@ -86,15 +87,20 @@ impl Transport {
                 members: None,
                 dependencies: None,
                 dial: None,
+                listener: None,
                 #[cfg(test)]
                 peer_name: None,
             });
             let attempt = slot.as_mut().expect("original TCP attempt");
             match attempt.original.build(key, &listen, &[]) {
-                Ok((service, _public_peer, _)) if service.local_peer() == peer => {
+                Ok((service, public_peer, _)) if service.local_peer() == peer => {
+                    attempt.listener = Some((
+                        public_peer.to_bytes().try_into().map_err(|_| refused())?,
+                        port,
+                    ));
                     #[cfg(test)]
                     {
-                        attempt.peer_name = Some(_public_peer.to_string());
+                        attempt.peer_name = Some(public_peer.to_string());
                     }
                     attempt.members = service.native_chat_member_ingress();
                     attempt.dependencies = service.native_chat_member_dependencies();
@@ -157,6 +163,16 @@ impl Transport {
             .as_ref()
             .filter(|attempt| matches!(attempt.state, State::Attached))
             .and_then(|attempt| attempt.dial.clone())
+            .ok_or_else(refused)
+    }
+
+    pub(super) fn attached_listener_data(&self) -> Result<([u8; 38], u16), AppError> {
+        self.attempt
+            .try_lock()
+            .map_err(|_| refused())?
+            .as_ref()
+            .filter(|attempt| matches!(attempt.state, State::Attached))
+            .and_then(|attempt| attempt.listener)
             .ok_or_else(refused)
     }
 

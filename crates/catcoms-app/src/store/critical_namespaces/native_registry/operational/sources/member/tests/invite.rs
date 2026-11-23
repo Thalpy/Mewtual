@@ -88,9 +88,22 @@ async fn mounted_join_request_applies_the_next_governing_add_under_its_original_
     mounted_join_fixture(false, Some(MountedSuccessor::OfflineDelivery)).await;
 }
 
-#[tokio::test]
-async fn mounted_native_remove_retires_the_exact_joined_row_and_preserves_the_survivor() {
-    mounted_join_fixture(false, Some(MountedSuccessor::Remove)).await;
+#[test]
+fn mounted_native_remove_retires_the_exact_joined_row_and_preserves_the_survivor() {
+    // This combined debug fixture keeps three paid vaults and the cold restore
+    // on one caller thread. Give that fixture its own stack on both CI hosts.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(mounted_join_fixture(false, Some(MountedSuccessor::Remove)));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1266,6 +1279,11 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
     let mut history_rng = catcoms_rt::OsCryptoRng;
     if let Some(successor) = successor {
         use catcoms_rt::TransportEvent;
+        let stale_contact = (successor == MountedSuccessor::OfflineDelivery).then(|| {
+            recovered_row()
+                .sign_member_contact(&selection, &fresh)
+                .unwrap()
+        });
         drop(receive);
         drop(serve);
         drop(requests);
@@ -1694,19 +1712,29 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
         .expect("the original founder and its TCP actor drained");
         drop((founder_retirement, row, owner, founder));
 
-        let third_registration = third_row()
-            .inspect_registration(&invite_two, third_token, &fresh)
-            .unwrap()
+        let contact = third_row()
+            .sign_member_contact(&third_selection, &fresh)
             .unwrap();
-        let (third_peer, third_port) = third_registration.transport_data();
-        let third_peer_name = third.joined_tcp.peer_name_for_test().unwrap();
+        let host = std::net::Ipv4Addr::LOCALHOST.into();
+        let old = stale_contact.unwrap();
+        assert!(third_row()
+            .prepare_member_contact(&third_selection, &old, host, fresh.clone())
+            .is_err());
+        assert!(third_row()
+            .prepare_member_contact(&third_selection, &contact, host, fresh.clone())
+            .is_err());
+        let mut damaged = contact;
+        *damaged.last_mut().unwrap() ^= 1;
+        assert!(recovered_row()
+            .prepare_member_contact(&selection, &damaged, host, fresh.clone())
+            .is_err());
+        let (_cancel, reason) = tokio::sync::watch::channel(true);
+        let cancelled = RequestCancellation::new(reason, None);
+        assert!(recovered_row()
+            .prepare_member_contact(&selection, &contact, host, cancelled)
+            .is_err());
         recovered_row()
-            .prepare_direct_contact_for_test(
-                &selection,
-                third_peer,
-                format!("/ip4/127.0.0.1/tcp/{third_port}/p2p/{third_peer_name}"),
-                fresh.clone(),
-            )
+            .prepare_member_contact(&selection, &contact, host, fresh.clone())
             .unwrap()
             .connect(&scheduler)
             .await

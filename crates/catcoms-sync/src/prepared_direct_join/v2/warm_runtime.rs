@@ -2,6 +2,7 @@
 use super::first_add_proof::SelectedJoinData;
 use super::received_add::TransitionBody;
 use super::*;
+mod contact;
 use catcoms_mls::{
     group::text_current_add::{
         PreparedTextCurrentReceivedAdd, RetiredTextReceivedAdd, TextCurrentReceivedAddData,
@@ -9,6 +10,7 @@ use catcoms_mls::{
     },
     persist::text_current_add::TextCurrentAddAdmission,
 };
+pub use contact::{V2MemberContactData, V2_MEMBER_CONTACT_BYTES};
 
 pub type V2JoinedRuntimeInputs<T, R> = (T, R, Box<dyn Clock + Send>);
 use crate::owner_v2::{
@@ -230,11 +232,21 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
         original: &NativeChatSourceObservation,
         cut: &NativeChatPreparedKeyCut,
     ) -> Result<(), SyncError> {
+        self.bind_recovered_native_source(prefix, original, cut, NativeChatKeyPurpose::MemberAction)
+    }
+
+    fn bind_recovered_native_source(
+        &mut self,
+        prefix: &PreparedV2JoinedPrefix,
+        original: &NativeChatSourceObservation,
+        cut: &NativeChatPreparedKeyCut,
+        purpose: NativeChatKeyPurpose,
+    ) -> Result<(), SyncError> {
         if !self.was_recovered_data() {
             return Err(SyncError::JoinRejected);
         }
         self.member_prefix(prefix)?;
-        cut.preflight(original, NativeChatKeyPurpose::MemberAction)
+        cut.preflight(original, purpose)
             .map_err(|_| SyncError::JoinRejected)?;
         if let Some(bound) = self.native_origin.as_ref() {
             return bound

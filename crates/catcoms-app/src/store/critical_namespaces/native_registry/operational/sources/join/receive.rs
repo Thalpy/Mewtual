@@ -21,6 +21,7 @@ use catcoms_rt::Topic;
 use catcoms_sync::owner_v2::{SelectedV2MemberEnvelope, MAX_V2_MEMBER_TRANSPORT_BYTES};
 use catcoms_sync::PreparedV2JoinedPrefix;
 
+mod contact;
 mod dependencies;
 mod governing;
 pub use dependencies::{

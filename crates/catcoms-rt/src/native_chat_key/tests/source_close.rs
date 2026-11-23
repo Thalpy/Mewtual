@@ -19,6 +19,7 @@ fn source_close_handle_refuses_every_prepared_purpose_and_unlock_cannot_revive_i
         NativeChatKeyPurpose::JoinInvite,
         NativeChatKeyPurpose::RemoveSdk,
         NativeChatKeyPurpose::RemovalHeader,
+        NativeChatKeyPurpose::MemberContact,
     ];
     let mut cuts: Vec<_> = purposes
         .iter()

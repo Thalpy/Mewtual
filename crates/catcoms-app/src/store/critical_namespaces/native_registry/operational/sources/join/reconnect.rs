@@ -1,10 +1,9 @@
-//! One explicitly approved reconnect on an existing joined actor.
+//! One explicitly approved connection on an existing joined actor.
 use super::*;
 use catcoms_discovery::EndpointDialScheduler;
 use std::net::IpAddr;
 
-/// Contact the founder named by the exact original invitation. This only
-/// establishes the authenticated transport connection for an existing row.
+/// Establish one authenticated transport connection for an existing row.
 pub struct NativeTextJoinedReconnect {
     _invocation: watch::Sender<bool>,
     transport: catcoms_net::MeshConnectionDial,
@@ -16,8 +15,7 @@ pub struct NativeTextJoinedReconnect {
 }
 
 impl NativeTextJoinedReconnect {
-    #[cfg(all(test, any(windows, target_os = "linux")))]
-    pub(super) fn for_registered_peer_test(
+    pub(super) fn from_selected_member(
         invocation: watch::Sender<bool>,
         transport: catcoms_net::MeshConnectionDial,
         contact: ApprovedContact,

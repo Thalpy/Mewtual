@@ -1,20 +1,26 @@
 //! Inspect and remove exact published admissions through the native row.
 use super::*;
 use catcoms_replication::chat::owner_header::OwnerBodyId;
+use catcoms_sync::V2_MEMBER_CONTACT_BYTES;
+use std::net::IpAddr;
 use tauri::ipc::InvokeResponseBody;
 
 const BUSY: &str = "Chat membership is busy. Retry the request.";
 const FAILED: &str = "Chat membership is unavailable for this conversation.";
 const LIST: &str = "get_native_chat_members";
 const REMOVE: &str = "remove_native_chat_member";
+const SHARE: &str = "share_native_chat_contact";
+const CONNECT: &str = "connect_native_chat_contact";
 
 enum Operation {
     List,
     Remove(OwnerBodyId),
+    Share,
+    Connect([u8; V2_MEMBER_CONTACT_BYTES], IpAddr),
 }
 
 pub(super) fn handles(command: &str) -> bool {
-    matches!(command, LIST | REMOVE)
+    matches!(command, LIST | REMOVE | SHARE | CONNECT)
 }
 
 pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task)) -> bool {
@@ -52,7 +58,9 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
             &row.data().selection,
             server_table::NativeSelection::Founder(_)
         );
-        if !founder && matches!(operation, Operation::Remove(_)) {
+        if (!founder && matches!(operation, Operation::Remove(_)))
+            || (founder && matches!(operation, Operation::Share | Operation::Connect(..)))
+        {
             return Err(FAILED);
         }
         let source = connected::Source::for_installed(
@@ -121,19 +129,47 @@ async fn perform(
                         .map_err(refusal)?;
                     Ok(("null".into(), None))
                 }
+                _ => Err(FAILED),
             }
         })
         .await
         .map_err(|_| FAILED)?;
     }
     let (prepared, selection) = source.capture_joined(state).await.ok_or(listing::STALE)?;
+    if let Operation::Connect(raw, host) = operation {
+        let attempt = tauri::async_runtime::spawn_blocking(move || {
+            let _local = local;
+            prepared
+                .prepare_member_contact(&selection, &raw, host, negative)
+                .map_err(refusal)
+        })
+        .await
+        .map_err(|_| FAILED)??;
+        attempt
+            .connect(&state.endpoint_dials)
+            .await
+            .map_err(|_| FAILED)?;
+        return Ok(("null".into(), None));
+    }
     tauri::async_runtime::spawn_blocking(move || {
         let _local = local;
-        encode(
-            prepared
-                .governed_roster(&selection, &negative)
-                .map_err(refusal)?,
-        )
+        match operation {
+            Operation::List => encode(
+                prepared
+                    .governed_roster(&selection, &negative)
+                    .map_err(refusal)?,
+            ),
+            Operation::Share => {
+                let raw = prepared
+                    .sign_member_contact(&selection, &negative)
+                    .map_err(refusal)?;
+                Ok((
+                    serde_json::to_string(&hex::encode(raw)).map_err(|_| FAILED)?,
+                    None,
+                ))
+            }
+            _ => Err(FAILED),
+        }
     })
     .await
     .map_err(|_| FAILED)?
@@ -183,20 +219,29 @@ fn parse(command: &str, body: &InvokeBody) -> Result<(u64, Operation), &'static 
         .ok_or(FAILED)?;
     let operation = match command {
         LIST if fields.len() == 1 => Operation::List,
+        SHARE if fields.len() == 1 => Operation::Share,
+        CONNECT if fields.len() == 3 => {
+            let contact = fields
+                .get("contact")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(FAILED)?;
+            let host: IpAddr = fields
+                .get("approvedHost")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(FAILED)?
+                .parse()
+                .map_err(|_| FAILED)?;
+            if host.is_unspecified() || host.is_multicast() {
+                return Err(FAILED);
+            }
+            Operation::Connect(decode_exact_hex(contact)?, host)
+        }
         REMOVE if fields.len() == 2 => {
             let label = fields
                 .get("expectedAdmission")
                 .and_then(serde_json::Value::as_str)
                 .ok_or(FAILED)?;
-            if label.len() != 64
-                || label
-                    .bytes()
-                    .any(|b| !b.is_ascii_digit() && !(b'a'..=b'f').contains(&b))
-            {
-                return Err(FAILED);
-            }
-            let mut id = [0; 32];
-            hex::decode_to_slice(label, &mut id).map_err(|_| FAILED)?;
+            let id = decode_exact_hex(label)?;
             if id == [0; 32] {
                 return Err(FAILED);
             }
@@ -205,6 +250,19 @@ fn parse(command: &str, body: &InvokeBody) -> Result<(u64, Operation), &'static 
         _ => return Err(FAILED),
     };
     Ok((server, operation))
+}
+
+fn decode_exact_hex<const N: usize>(text: &str) -> Result<[u8; N], &'static str> {
+    if text.len() != 2 * N
+        || text
+            .bytes()
+            .any(|b| !b.is_ascii_digit() && !(b'a'..=b'f').contains(&b))
+    {
+        return Err(FAILED);
+    }
+    let mut bytes = [0; N];
+    hex::decode_to_slice(text, &mut bytes).map_err(|_| FAILED)?;
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -235,5 +293,31 @@ mod tests {
         ] {
             assert!(parse(REMOVE, &body(value)).is_err());
         }
+        let contact = "ab".repeat(V2_MEMBER_CONTACT_BYTES);
+        assert!(matches!(
+            parse(
+                CONNECT,
+                &body(serde_json::json!({
+                    "server": 1, "contact": &contact, "approvedHost": "127.0.0.1",
+                }))
+            ),
+            Ok((1, Operation::Connect(_, _)))
+        ));
+        for host in ["0.0.0.0", "localhost", "ff01::1", "::"] {
+            assert!(parse(
+                CONNECT,
+                &body(serde_json::json!({
+                    "server": 1, "contact": &contact, "approvedHost": host,
+                }))
+            )
+            .is_err());
+        }
+        assert!(parse(
+            CONNECT,
+            &body(serde_json::json!({
+                "server": 1, "contact": &contact,
+            }))
+        )
+        .is_err());
     }
 }

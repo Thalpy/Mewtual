@@ -1,4 +1,4 @@
-//! One explicitly approved direct host for a covered native join request.
+//! One explicitly approved direct host for native Chat V2.
 use super::*;
 use catcoms_discovery::{parse_peer_dial_route, EndpointDialPermit, EndpointDialScheduler};
 use catcoms_rt::{DialPermit, DialSubmission};
@@ -11,8 +11,7 @@ pub(in super::super) struct ApprovedContact {
 }
 
 impl ApprovedContact {
-    #[cfg(all(test, any(windows, target_os = "linux")))]
-    pub(in super::super) fn for_registered_peer_test(
+    pub(in super::super) fn from_selected_member(
         peer: catcoms_rt::PeerId,
         group: Vec<u8>,
         address: String,

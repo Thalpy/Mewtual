@@ -403,9 +403,14 @@ subscription retires with the old epoch. On restart the original invite must
 be supplied for an approved reconnect before the worker can fetch again.
 The three-vault regression covers the third native vault's later Welcome,
 the existing member's catch-up and direct TCP publication after the founder
-actor drains. It uses an explicitly supplied loopback contact from the third
-vault's authenticated registration. Production peer discovery and the
-physical-device acceptance matrix still need coverage.
+actor drains. Joined members can share the contact code for their original TCP
+listener and separately approve the destination IP in the desktop roster. The
+receiver checks the signature against the exact active admission in its own
+selected Profile, head and epoch before asking the existing dial scheduler for
+one authenticated connection. The regression also exercises an old epoch, a
+changed signature, the local member's own code and a cancelled request.
+Automatic discovery, peer-to-peer governing catch-up and the physical-device
+acceptance matrix still need implementation or evidence.
 
 An independently reopened Pending with neither Welcome file can resend the
 exact original request over the same connected protocol. It verifies the
@@ -508,7 +513,7 @@ carrier. The installed founder can recover its own saved direct dependencies
 and show its saved received messages after the live receiver retires. Cold
 founder startup restores ordinary member history and its original listener
 from a covered Add. New cold-founder invitations, later governing writes and
-general peer discovery still need implementation.
+automatic peer discovery still need implementation.
 
 The warm joined node can draw and sign an ordinary action through the original
 native Joiner Source. Its signing cut requires the ordinary member purpose and
