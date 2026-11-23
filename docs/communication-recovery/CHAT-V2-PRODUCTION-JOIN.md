@@ -402,7 +402,10 @@ select it once existing local save work has reconciled. The joined vault first
 covers the signed header under the exact encrypted predecessor, even when the
 body is unavailable. A second authenticated sibling closes the live Core view,
 and the covered pair refuses cold activation before either branch can advance.
-The old ordinary
+Each new selected membership archive also has a separate encrypted selection
+record that identifies its exact ciphertext and predecessor. A cold vault
+refuses to activate an older epoch when that selection record remains and its
+covered membership archive is missing or replaced. The old ordinary
 subscription retires with the old epoch. On restart the original invite must
 be supplied for an approved reconnect before the worker can fetch again.
 The three-vault regression covers the third native vault's later Welcome,

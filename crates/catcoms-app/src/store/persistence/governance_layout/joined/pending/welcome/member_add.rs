@@ -9,7 +9,7 @@ mod header_witness;
 use header_witness::HeaderWitness;
 
 const MAX_EPOCH: u64 = MAX_V2_GOVERNING_JOIN_STEPS as u64;
-const RECORD_FEE: usize = 8 * (codec::MEMBER_ADD_FRAME + 1) + 4096;
+const RECORD_FEE: usize = 8 * (codec::MEMBER_ADD_FRAME + codec::MEMBER_SELECTION_FRAME + 1) + 4096;
 
 #[derive(Default)]
 pub(super) struct MemberAdds {
@@ -25,6 +25,7 @@ struct Covered {
     file: OpenedArchiveObject,
     parent: (OwnerHeaderId, u64),
     fetch_verifier: [u8; 32],
+    selection: Option<SelectionRecord>,
     _fee: CatalogReadReservation,
 }
 
@@ -33,7 +34,39 @@ struct Pending {
     sealed: Zeroizing<Vec<u8>>,
     original: Option<CreatedStage>,
     candidate: JoinedMembershipCandidate,
+    selection: SelectionRecord,
     fee: CatalogReadReservation,
+}
+
+struct SelectionRecord {
+    path: PathBuf,
+    frame: Zeroizing<Vec<u8>>,
+    original: Option<CreatedStage>,
+}
+
+impl SelectionRecord {
+    fn require_current(&self) -> Result<(), AppError> {
+        exact_retained(
+            &self.path,
+            self.original.as_ref().ok_or_else(denied)?,
+            &self.frame,
+        )
+    }
+}
+
+fn selection_path(
+    store: &ServerStore,
+    context: V2PendingJoinContextData,
+    epoch: u64,
+) -> Result<PathBuf, AppError> {
+    fixed(
+        store,
+        false,
+        &format!(
+            "chat-critical-namespaces.joined-member-selected.{}.{epoch}.bin",
+            hex::encode(context.original_pending)
+        ),
+    )
 }
 
 fn path(
@@ -69,6 +102,9 @@ impl MemberAdds {
         for covered in &self.covered {
             let (file, raw) = &covered.file;
             exact_held(&covered.path, file, session_id(file).map_err(io)?, raw)?;
+            if let Some(selection) = &covered.selection {
+                selection.require_current()?;
+            }
         }
         Ok(())
     }
@@ -144,6 +180,7 @@ impl MemberAdds {
         let (_, _, epoch) = node.selected_join_data()?;
         let epoch = epoch.checked_add(1).ok_or_else(denied)?;
         let path = path(store, context, epoch)?;
+        let selection_path = selection_path(store, context, epoch)?;
         let key = Zeroizing::new(store.keys.db_key()?);
         let frame = V2MemberTransitionFrameData::decode(delivery)?;
         let predecessor = self
@@ -163,6 +200,7 @@ impl MemberAdds {
         )?;
         if self.pending.is_none() {
             absent(&path)?;
+            absent(&selection_path)?;
             let fee = reserve(store)?;
             self.reserve_output()?;
             let candidate = prepare_transition(store, core, node, delivery)?;
@@ -174,11 +212,24 @@ impl MemberAdds {
                 &candidate,
                 rng,
             )?;
+            let selection = SelectionRecord {
+                path: selection_path.clone(),
+                frame: codec::seal_member_selection(
+                    &key,
+                    context,
+                    epoch,
+                    self.predecessor(welcome),
+                    &sealed,
+                    rng,
+                )?,
+                original: None,
+            };
             self.pending = Some(Pending {
                 path: path.clone(),
                 sealed,
                 original: None,
                 candidate,
+                selection,
                 fee,
             });
         }
@@ -187,7 +238,10 @@ impl MemberAdds {
             .last()
             .map_or(welcome, |entry| entry.file.1.as_slice());
         let pending = self.pending.as_mut().ok_or_else(denied)?;
-        if pending.path != path || !pending.candidate.matches_frame_data(delivery) {
+        if pending.path != path
+            || pending.selection.path != selection_path
+            || !pending.candidate.matches_frame_data(delivery)
+        {
             return Err(denied());
         }
         require_live()?;
@@ -197,6 +251,27 @@ impl MemberAdds {
         let fetch = node.member_add_request_data(core)?;
         require_live()?;
         self.first.as_ref().ok_or_else(denied)?.require_current()?;
+        write_held(
+            store,
+            &pending.selection.path,
+            &pending.selection.frame,
+            &mut pending.selection.original,
+        )?;
+        codec::require_member_selection(
+            &key,
+            context,
+            epoch,
+            predecessor,
+            &pending.sealed,
+            &pending.selection.frame,
+        )?;
+        exact_retained(
+            &pending.path,
+            pending.original.as_ref().ok_or_else(denied)?,
+            &pending.sealed,
+        )?;
+        pending.selection.require_current()?;
+        require_live()?;
         let retired = install_transition(core, node, &mut pending.candidate, selected)?;
         self.first = None;
         self.evicted = retired.terminal_data().is_some();
@@ -212,6 +287,7 @@ impl MemberAdds {
             ),
             parent: fetch.parent_data(),
             fetch_verifier: fetch.verifier_data(),
+            selection: Some(pending.selection),
             _fee: pending.fee,
         });
         Ok(retired)
@@ -232,6 +308,7 @@ impl MemberAdds {
         let (_, _, epoch) = node.selected_join_data()?;
         for expected_epoch in epoch.checked_add(1).ok_or_else(denied)?..=MAX_EPOCH {
             let path = path(store, context, expected_epoch)?;
+            let selection_path = selection_path(store, context, expected_epoch)?;
             let predecessor = self
                 .covered
                 .last()
@@ -245,6 +322,7 @@ impl MemberAdds {
                 missing || self.evicted,
             )?;
             if absent(&path).is_ok() {
+                absent(&selection_path)?;
                 if first.is_some() {
                     self.first = first;
                 }
@@ -256,6 +334,29 @@ impl MemberAdds {
             }
             let fee = reserve(store)?;
             let file = read(&path, codec::MEMBER_ADD_FRAME)?.ok_or_else(denied)?;
+            let selection = if let Some((original, frame)) =
+                read(&selection_path, codec::MEMBER_SELECTION_FRAME)?
+            {
+                codec::require_member_selection(
+                    &key,
+                    context,
+                    expected_epoch,
+                    predecessor,
+                    &file.1,
+                    &frame,
+                )?;
+                let identity = session_id(&original).map_err(io)?;
+                Some(SelectionRecord {
+                    path: selection_path,
+                    frame,
+                    original: Some(CreatedStage {
+                        file: original,
+                        identity: Some(identity),
+                    }),
+                })
+            } else {
+                None
+            };
             let opened = codec::open_member_add(&key, context, self.predecessor(welcome), &file.1)?;
             self.reserve_output()?;
             let mut candidate = prepare_transition(store, core, node, &opened.delivery)?;
@@ -267,6 +368,9 @@ impl MemberAdds {
             if let Some(first) = &first {
                 first.require_current()?;
             }
+            if let Some(selection) = &selection {
+                selection.require_current()?;
+            }
             let fetch = node.member_add_request_data(core)?;
             store.validate_mounted_governance_layout()?;
             let retired = install_transition(core, node, &mut candidate, selected)?;
@@ -276,6 +380,7 @@ impl MemberAdds {
                 file,
                 parent: fetch.parent_data(),
                 fetch_verifier: fetch.verifier_data(),
+                selection,
                 _fee: fee,
             });
             drop(retired);

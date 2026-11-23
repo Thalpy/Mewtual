@@ -3695,23 +3695,26 @@ async fn native_governed_add_fixture(case: JoinCase) {
         let name = covered_path.file_name().unwrap().to_str().unwrap();
         let absent_middle =
             covered_path.with_file_name(format!("{}.3.bin", name.strip_suffix(".2.bin").unwrap()));
-        std::fs::rename(&covered_path, &absent_middle).unwrap();
-        let storage =
-            NativeTextJoinedStorage::open(join_dir, SECRET, &mut join_rng, current_policy())
+        let absent_tail = covered_path.with_extension("parked-selection");
+        for parked in [absent_middle, absent_tail] {
+            std::fs::rename(&covered_path, &parked).unwrap();
+            let storage =
+                NativeTextJoinedStorage::open(join_dir, SECRET, &mut join_rng, current_policy())
+                    .unwrap();
+            let (mesh, _) = catcoms_net::MeshService::new_tcp(None, &[]).unwrap();
+            let mut blocked = storage
+                .bind_recovered_join_runtime(
+                    mesh,
+                    rand_chacha::ChaCha20Rng::seed_from_u64(0xe725),
+                    Box::new(catcoms_rt::SystemClock),
+                )
+                .ok()
                 .unwrap();
-        let (mesh, _) = catcoms_net::MeshService::new_tcp(None, &[]).unwrap();
-        let mut blocked = storage
-            .bind_recovered_join_runtime(
-                mesh,
-                rand_chacha::ChaCha20Rng::seed_from_u64(0xe725),
-                Box::new(catcoms_rt::SystemClock),
-            )
-            .ok()
-            .unwrap();
-        assert!(blocked.complete_recovery(&negative).is_err());
-        assert!(absent_middle.is_file() && !covered_path.exists());
-        drop(blocked);
-        std::fs::rename(absent_middle, &covered_path).unwrap();
+            assert!(blocked.complete_recovery(&negative).is_err());
+            assert!(parked.is_file() && !covered_path.exists());
+            drop(blocked);
+            std::fs::rename(parked, &covered_path).unwrap();
+        }
         drop(governing);
         drop(client);
         let mut close = owner.prepare_retirement().unwrap();

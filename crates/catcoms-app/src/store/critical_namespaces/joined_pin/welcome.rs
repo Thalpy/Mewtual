@@ -22,6 +22,8 @@ const MEMBER_ADD_TAG: &[u8] = b"catcoms/private-chat-v2-joined-member-add/v1\0";
 const MEMBER_ADD_KEY: &str = "catcoms/private-chat-v2-joined-member-add-key/v1";
 const MEMBER_HEADER_TAG: &[u8] = b"catcoms/private-chat-v2-joined-member-header/v1\0";
 const MEMBER_HEADER_KEY: &str = "catcoms/private-chat-v2-joined-member-header-key/v1";
+const MEMBER_SELECTION_TAG: &[u8] = b"catcoms/private-chat-v2-joined-member-selected/v1\0";
+const MEMBER_SELECTION_KEY: &str = "catcoms/private-chat-v2-joined-member-selected-key/v1";
 const VERSION: u16 = 1;
 const LATER_ENTRY: u16 = 2;
 const OUTCOME_WITH_HISTORY: u16 = 2;
@@ -67,6 +69,66 @@ pub(in crate::store) const MEMBER_HEADER_FRAME: usize = 4
     + 4
     + MAX_HEADER_BYTES
     + SEALED_OVERHEAD;
+
+pub(in crate::store) const MEMBER_SELECTION_FRAME: usize =
+    4 + MEMBER_SELECTION_TAG.len() + 2 + DIGESTS + 4 + 8 + 4 + 32 + SEALED_OVERHEAD;
+
+pub(in crate::store) fn seal_member_selection(
+    key: &[u8; 32],
+    context: V2PendingJoinContextData,
+    epoch: u64,
+    predecessor: &[u8],
+    selected: &[u8],
+    rng: &mut dyn CryptoRngCore,
+) -> Result<Zeroizing<Vec<u8>>, AppError> {
+    if epoch < 2
+        || predecessor.is_empty()
+        || selected.is_empty()
+        || selected.len() > MEMBER_ADD_FRAME
+    {
+        return Err(refused());
+    }
+    seal_record(
+        key,
+        MEMBER_SELECTION_KEY,
+        MEMBER_SELECTION_TAG,
+        VERSION,
+        context_fields(context, predecessor),
+        &[&epoch.to_be_bytes(), blake3::hash(selected).as_bytes()],
+        rng,
+    )
+}
+
+pub(in crate::store) fn require_member_selection(
+    key: &[u8; 32],
+    context: V2PendingJoinContextData,
+    epoch: u64,
+    predecessor: &[u8],
+    selected: &[u8],
+    raw: &[u8],
+) -> Result<(), AppError> {
+    if epoch < 2
+        || predecessor.is_empty()
+        || selected.is_empty()
+        || selected.len() > MEMBER_ADD_FRAME
+    {
+        return Err(refused());
+    }
+    let plain = open_record(key, MEMBER_SELECTION_KEY, raw, MEMBER_SELECTION_FRAME)?;
+    let (version, mut reader) = decoder(
+        &plain,
+        MEMBER_SELECTION_TAG,
+        context_fields(context, predecessor),
+    )?;
+    let bad = |_| refused();
+    if version != VERSION
+        || reader.get_bytes().map_err(bad)? != epoch.to_be_bytes()
+        || reader.get_bytes().map_err(bad)? != blake3::hash(selected).as_bytes()
+    {
+        return Err(refused());
+    }
+    reader.finish().map_err(bad)
+}
 
 pub(in crate::store) fn seal_member_header(
     key: &[u8; 32],
@@ -117,7 +179,8 @@ pub(in crate::store) fn open_member_header(
     {
         return Err(refused());
     }
-    let header = SignedOwnerHeader::decode(decoder.get_bytes().map_err(bad)?).map_err(bad)?;
+    let header =
+        SignedOwnerHeader::decode(decoder.get_bytes().map_err(bad)?).map_err(|_| refused())?;
     decoder.finish().map_err(bad)?;
     Ok(header)
 }
