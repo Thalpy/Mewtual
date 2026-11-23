@@ -168,7 +168,7 @@ fn selected_governed_or_joined(
     governance.retry(&mut rng).unwrap();
     let vault = if joined {
         let mut joined = governance.prepare_joined_vault().unwrap();
-        joined.retry(&mut rng).unwrap();
+        joined.retry_with_shared_history(&mut rng).unwrap();
         joined.into_vault().ok().unwrap()
     } else {
         governance.into_vault().unwrap()

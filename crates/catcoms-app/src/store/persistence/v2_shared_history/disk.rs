@@ -16,7 +16,7 @@ use crate::store::{frame, unframe};
 use catcoms_storage::kept::SessionId;
 use catcoms_storage::VaultSessionGuard;
 use std::fs::File;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, Weak};
 
 const SELECTOR_TAG: &[u8] = b"catcoms/private-chat-v2-shared-history-selector/v1\0";
 const SELECTOR_KEY: &[u8] = b"chat-v2/shared-history/selector";
@@ -90,7 +90,7 @@ pub(in crate::store::persistence) struct SharedHistoryDisk {
     directory: HeldDirectory,
     scope: SharedHistoryScope,
     quota: SharedHistoryDiskQuota,
-    gate: Mutex<()>,
+    gate: Arc<Mutex<u64>>,
     pool: CriticalCatalogReadPool,
     key_binding: [u8; 32],
 }
@@ -111,7 +111,7 @@ impl SharedHistoryDisk {
             directory,
             scope,
             quota,
-            gate: Mutex::new(()),
+            gate: Arc::new(Mutex::new(0)),
             pool,
             key_binding,
         })
@@ -160,8 +160,9 @@ impl SharedHistoryDisk {
         payment.validate(&self.pool, DISK_FEE)?;
         self.require_key(key)?;
         let _lease = session.retain_for_physical_work();
-        let _gate = self.gate.try_lock().map_err(|_| refused())?;
+        let mut gate = self.gate.try_lock().map_err(|_| refused())?;
         self.directory.require()?;
+        advance_revision(&mut gate)?;
         self.recover_locked(key)
     }
 
@@ -218,7 +219,7 @@ impl SharedHistoryDisk {
             return Err(refused());
         }
         let _lease = session.retain_for_physical_work();
-        let _gate = self.gate.try_lock().map_err(|_| refused())?;
+        let gate = self.gate.try_lock().map_err(|_| refused())?;
         let maximum = 2 * self.quota.records;
         let names = bounded_entries(&self.directory, maximum)?;
         if names.len() > maximum {
@@ -277,6 +278,10 @@ impl SharedHistoryDisk {
         Ok(SharedHistoryActionPage {
             actions: remaining.iter().take(query.limit).copied().collect(),
             more: remaining.len() > query.limit,
+            observation: SharedHistoryObservation {
+                gate: Arc::downgrade(&self.gate),
+                revision: *gate,
+            },
             _payment: payment,
         })
     }
@@ -551,7 +556,33 @@ fn history_leaf(value: &std::ffi::OsStr) -> Result<(&str, HistoryLeaf), AppError
 pub(in crate::store) struct SharedHistoryActionPage {
     pub(in crate::store) actions: Vec<ActionId>,
     pub(in crate::store) more: bool,
+    pub(in crate::store) observation: SharedHistoryObservation,
     _payment: CatalogReadReservation,
+}
+
+#[derive(Clone)]
+pub(in crate::store) struct SharedHistoryObservation {
+    gate: Weak<Mutex<u64>>,
+    revision: u64,
+}
+
+impl SharedHistoryObservation {
+    pub(in crate::store) fn with_publication<T>(
+        &self,
+        publish: impl FnOnce() -> T,
+    ) -> Result<T, AppError> {
+        let owner = self.gate.upgrade().ok_or_else(refused)?;
+        let revision = owner.try_lock().map_err(|_| refused())?;
+        if *revision != self.revision {
+            return Err(refused());
+        }
+        Ok(publish())
+    }
+}
+
+fn advance_revision(revision: &mut u64) -> Result<(), AppError> {
+    *revision = revision.checked_add(1).ok_or_else(refused)?;
+    Ok(())
 }
 
 pub(in crate::store) struct SharedHistoryActionQuery {
@@ -580,8 +611,9 @@ impl PreparedSharedHistorySave<'_> {
         let disk = self.disk;
         disk.require_key(key)?;
         let _lease = self.session.retain_for_physical_work();
-        let _gate = disk.gate.try_lock().map_err(|_| refused())?;
+        let mut gate = disk.gate.try_lock().map_err(|_| refused())?;
         disk.directory.require()?;
+        advance_revision(&mut gate)?;
         let path = disk.directory.child(WAL_NAME);
         if self.attempt.is_none() {
             disk.recover_locked(key)?;

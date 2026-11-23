@@ -469,20 +469,26 @@ async fn mounted_join_fixture(recover_stage: bool) {
     drop(vault);
     if recover_stage {
         std::fs::rename(&outcome_path, &registration_parked).unwrap();
-        assert!(crate::store::NativeTextJoinedStorage::open(
-            dir.path(),
-            SECRET,
-            &mut rng,
-            current_policy()
-        )
-        .is_err());
+        assert!(
+            crate::store::NativeTextJoinedStorage::open_for_native_startup(
+                dir.path(),
+                SECRET,
+                &mut rng,
+                current_policy()
+            )
+            .is_err()
+        );
         assert_eq!(std::fs::read(&index).unwrap(), prior_index);
         assert_eq!(std::fs::read(&stage).unwrap(), saved_stage);
         std::fs::rename(&registration_parked, &outcome_path).unwrap();
     }
-    let cold =
-        crate::store::NativeTextJoinedStorage::open(dir.path(), SECRET, &mut rng, current_policy())
-            .unwrap();
+    let cold = crate::store::NativeTextJoinedStorage::open_for_native_startup(
+        dir.path(),
+        SECRET,
+        &mut rng,
+        current_policy(),
+    )
+    .unwrap();
     assert_eq!(cold.row_count_data().unwrap(), 1);
     assert_eq!(std::fs::read(&index).unwrap(), saved_stage);
     assert!(!stage.exists());
@@ -583,8 +589,27 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 .unwrap(),
             crate::store::V2MemberSaveOutcome::Saved { action, ordinal }
         );
-        let mut next = request();
-        next.token = [143; 32];
+        let dependency = recovered_row()
+            .read_member_dependency(
+                &selection,
+                request().channel,
+                action,
+                &fresh,
+                &mut history_rng,
+            )
+            .unwrap()
+            .unwrap();
+        let delete_body = catcoms_replication::chat::Body::Delete { create: action };
+        let next = crate::store::V2MemberSignRequest {
+            token: [143; 32],
+            channel: request().channel,
+            body: &delete_body,
+            parents: &[action],
+            dependencies: &[crate::store::V2MemberDependency {
+                action: dependency.action(),
+                admission: dependency.receipt().admission,
+            }],
+        };
         let next_token = next.token;
         assert_eq!(
             recovered_row()
@@ -592,6 +617,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 .unwrap(),
             crate::store::V2MemberSaveOutcome::Ready
         );
+        drop(dependency);
         let mut final_work = Some(
             recovered_row()
                 .finish_member_admission(selection.clone(), next_token, &fresh)
@@ -711,7 +737,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 }
             };
             assert_eq!(
-                relay.publish_once(topic, encrypted).await.unwrap(),
+                relay.publish_once(topic.clone(), encrypted).await.unwrap(),
                 PublishSubmission::Submitted
             );
             let Some(NativeChatMemberGossipEvent::Frame(frame)) = receiver.next().await else {
@@ -738,6 +764,26 @@ async fn mounted_join_fixture(recover_stage: bool) {
             assert_eq!(prepared_history.action, action);
             assert_ne!(*prepared_history.manifest.as_bytes(), [0; 32]);
             assert!(!prepared_history.bundle.is_empty());
+            drop(prepared_history);
+            assert!(recovered_row()
+                .archive_received_member(&ledger, &received, &live, &mut history_rng)
+                .unwrap().is_some());
+            let page = recovered_row()
+                .archived_action_page(&selection, channel, None, 1, &live)
+                .unwrap().unwrap();
+            assert_eq!(page.actions(), &[action]);
+            assert!(!page.has_more());
+            drop(page);
+            let archived = recovered_row()
+                .archived_message_projection(&selection, channel, action, live.clone(), &mut history_rng)
+                .unwrap().expect("independent paid replay over the actual archive");
+            assert!(archived.with_publication(|view| matches!(
+                view, GuardedProjection::Visible { text, certainty: ProjectionCertainty::Provisional, .. }
+                if text == "Original joined message"
+            )).unwrap());
+            assert!(recovered_row()
+                .archived_message_projection(&selection, channel + 1, action, live.clone(), &mut history_rng)
+                .is_err());
             let result = ledger.prepare_message_projection(action).unwrap();
             assert!(result.with_publication(|view| matches!(
                 view, GuardedProjection::Visible { text, certainty: ProjectionCertainty::Provisional, .. }
@@ -748,6 +794,45 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 .unwrap();
             assert_eq!(front, ordinal + 1);
             assert_ne!(std::fs::read(&head_path).unwrap(), head);
+            let receipt = recovered_row()
+                .prepare_member_publication(&selection, live.clone(), &mut history_rng)
+                .unwrap().expect("exact archived Delete is owed")
+                .submit().await.unwrap().unwrap();
+            let deleted_wire = loop {
+                if let TransportEvent::Gossip { topic: arrived, from, data } =
+                    relay.next_event().await.expect("the relay remains connected")
+                {
+                    assert_eq!(arrived, topic);
+                    assert_eq!(from, local_transport.0);
+                    break data;
+                }
+            };
+            assert_eq!(relay.publish_once(topic, deleted_wire).await.unwrap(), PublishSubmission::Submitted);
+            let Some(NativeChatMemberGossipEvent::Frame(frame)) = receiver.next().await else {
+                panic!("expected the relayed Delete");
+            };
+            let (deleted, status) = recovered_row()
+                .receive_member_frame(&mut ledger, &frame, &live)
+                .unwrap();
+            assert_eq!(deleted.projection_target_data(), action);
+            assert_eq!(status, V2OrdinaryReceiveStatus::Retained(ActionState::Valid));
+            assert!(recovered_row()
+                .archive_received_member(&ledger, &deleted, &live, &mut history_rng)
+                .unwrap().is_some());
+            assert!(archived.with_publication(|_| panic!("pre-delete archive projection escaped")).is_err());
+            drop(archived);
+            let archived = recovered_row()
+                .archived_message_projection(&selection, channel, action, live.clone(), &mut history_rng)
+                .unwrap().unwrap();
+            assert!(archived.with_publication(|view| matches!(
+                view, GuardedProjection::Deleted { create, certainty: ProjectionCertainty::Provisional, .. }
+                if *create == action
+            )).unwrap());
+            assert_eq!(
+                recovered_row().checkpoint_member_publication(receipt, &live, &mut history_rng).unwrap(),
+                front + 1,
+            );
+            drop(deleted);
             let recovered_original = recovered_row()
                 .read_member_dependency(&selection, channel, action, &live, &mut history_rng)
                 .unwrap().expect("settled parents remain readable by exact ActionId");
@@ -780,6 +865,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
             assert!(matches!(reply, Err(catcoms_rt::TransportError::NoResponse)));
             retire.send_replace(true);
             assert!(provider.next().await.is_none());
+            assert!(archived.with_publication(|_| panic!("retired archived original escaped")).is_err());
             assert!(result.with_publication(|_| panic!("retired original view escaped")).is_err());
             assert!(!received.is_for_original_row_cached(&selection));
         }).await.expect("bounded joined message and exact acknowledgement over native TCP");

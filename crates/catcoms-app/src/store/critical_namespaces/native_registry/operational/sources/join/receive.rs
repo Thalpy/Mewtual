@@ -3,7 +3,7 @@ use super::*;
 use crate::store::persistence::v2_member_outbox::{member_outbox_key, MemberSavedOriginal};
 use crate::store::persistence::v2_shared_history::{
     PreparedSharedHistoryRecord, SharedHistoryActionPage, SharedHistoryActionQuery,
-    SharedHistoryScope, SHARED_HISTORY_RECORD_FEE,
+    SharedHistoryObservation, SharedHistoryScope, SHARED_HISTORY_RECORD_FEE,
 };
 use crate::store::ServerStore;
 use catcoms_net::{
@@ -18,6 +18,7 @@ use catcoms_replication::chat::{
 use catcoms_rt::Topic;
 use catcoms_sync::owner_v2::{SelectedV2MemberEnvelope, MAX_V2_MEMBER_TRANSPORT_BYTES};
 use catcoms_sync::PreparedV2JoinedPrefix;
+use std::collections::BTreeSet;
 
 mod dependencies;
 pub use dependencies::{
@@ -194,6 +195,7 @@ impl NativeTextJoinedMemberLedger {
         Ok(NativeTextJoinedMemberProjection {
             projection,
             signal: self.signal.clone(),
+            archive: None,
             _fee: fee,
         })
     }
@@ -202,7 +204,13 @@ impl NativeTextJoinedMemberLedger {
 pub struct NativeTextJoinedMemberProjection {
     projection: GuardedMessageProjection,
     signal: RequestCancellation,
+    archive: Option<ArchivedProjection>,
     _fee: CatalogReadReservation,
+}
+
+struct ArchivedProjection {
+    observation: SharedHistoryObservation,
+    _ledger: Box<NativeTextJoinedMemberLedger>,
 }
 
 pub struct NativeTextJoinedArchivedActions(SharedHistoryActionPage);
@@ -224,14 +232,23 @@ impl NativeTextJoinedMemberProjection {
         publish: impl FnOnce(&GuardedProjection) -> T,
     ) -> Result<T, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
-        self.projection
-            .with_publication(|result| {
-                if self.signal.is_cancelled() {
-                    return Err(Refusal::Cancelled);
-                }
-                Ok(publish(result))
-            })
-            .map_err(|_| Refusal::Stale)?
+        let guarded = || {
+            self.projection
+                .with_publication(|result| {
+                    if self.signal.is_cancelled() {
+                        return Err(Refusal::Cancelled);
+                    }
+                    Ok(publish(result))
+                })
+                .map_err(|_| Refusal::Stale)?
+        };
+        match &self.archive {
+            Some(archive) => archive
+                .observation
+                .with_publication(guarded)
+                .map_err(|_| Refusal::Stale)?,
+            None => guarded(),
+        }
     }
 }
 
@@ -244,28 +261,48 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         limit: usize,
         caller: &RequestCancellation,
     ) -> Result<Option<NativeTextJoinedArchivedActions>, V2MemberSaveRefusal> {
-        use V2MemberSaveRefusal as Refusal;
         self.with_member_receiver(selection, caller, |source| {
-            if !source
-                .store
-                .has_mounted_shared_history()
-                .map_err(|_| Refusal::Busy)?
-            {
-                return Ok(None);
-            }
             source
-                .store
-                .shared_history_action_page(
-                    source.history_scope(channel),
+                .archived_actions(
+                    channel,
                     SharedHistoryActionQuery {
                         target: None,
                         after,
                         limit,
                     },
                 )
-                .map(|page| Some(NativeTextJoinedArchivedActions(page)))
-                .map_err(|_| Refusal::Failed)
+                .map(|page| page.map(NativeTextJoinedArchivedActions))
         })
+    }
+
+    /// Rebuild a bounded projection for one exact archived Create under the
+    /// current joined SDK and governing view. The view outlives the response
+    /// so the renderer must still enter the normal publication guard.
+    pub fn archived_message_projection(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        channel: u128,
+        create: ActionId,
+        caller: RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Option<NativeTextJoinedMemberProjection>, V2MemberSaveRefusal> {
+        let (ledger, observation) = self.prepare_member_ledger_with(
+            selection,
+            channel,
+            caller.clone(),
+            |source, ledger, view| {
+                source.replay_archived_message(ledger, view, create, &caller, rng)
+            },
+        )?;
+        let Some(observation) = observation else {
+            return Ok(None);
+        };
+        let mut projection = ledger.prepare_message_projection(create)?;
+        projection.archive = Some(ArchivedProjection {
+            observation,
+            _ledger: Box::new(ledger),
+        });
+        Ok(Some(projection))
     }
 
     #[cfg(test)]
@@ -380,8 +417,23 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         channel: u128,
         caller: RequestCancellation,
     ) -> Result<NativeTextJoinedMemberLedger, V2MemberSaveRefusal> {
+        self.prepare_member_ledger_with(selection, channel, caller, |_, _, _| Ok(()))
+            .map(|(ledger, ())| ledger)
+    }
+
+    fn prepare_member_ledger_with<T>(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        channel: u128,
+        caller: RequestCancellation,
+        populate: impl FnOnce(
+            &ReceiverSource<'_, R>,
+            &mut ChatLedger,
+            &ProjectionView,
+        ) -> Result<T, V2MemberSaveRefusal>,
+    ) -> Result<(NativeTextJoinedMemberLedger, T), V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
-        let (view, ledger, observed, authentication, fee) =
+        let (view, ledger, observed, authentication, result, fee) =
             self.with_member_receiver(selection, &caller, |source| {
                 let ReceiverSource {
                     metadata,
@@ -418,7 +470,8 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 let authentication = metadata
                     .authentication_negative()
                     .map_err(|_| Refusal::Unavailable)?;
-                Ok((view, ledger, observed, authentication, fee))
+                let result = populate(&source, &mut ledger, &view)?;
+                Ok((view, ledger, observed, authentication, result, fee))
             })?;
         let (invocation, live) = watch::channel(false);
         let authority = Arc::new(JoinEffect {
@@ -430,14 +483,17 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             row: Some(selection.clone()),
         });
         let signal = observed.constrain(caller.with_authority(authority));
-        Ok(NativeTextJoinedMemberLedger {
-            _invocation: invocation,
-            view,
-            ledger,
-            selection: selection.clone(),
-            signal,
-            _fee: fee,
-        })
+        Ok((
+            NativeTextJoinedMemberLedger {
+                _invocation: invocation,
+                view,
+                ledger,
+                selection: selection.clone(),
+                signal,
+                _fee: fee,
+            },
+            result,
+        ))
     }
 
     /// Admit a live network original into this exact channel ledger. A missing
@@ -712,6 +768,128 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
 }
 
 impl<R: CryptoRngCore> ReceiverSource<'_, R> {
+    fn archived_actions(
+        &self,
+        channel: u128,
+        query: SharedHistoryActionQuery,
+    ) -> Result<Option<SharedHistoryActionPage>, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        if !self
+            .store
+            .has_mounted_shared_history()
+            .map_err(|_| Refusal::Busy)?
+        {
+            return Ok(None);
+        }
+        self.store
+            .shared_history_action_page(self.history_scope(channel), query)
+            .map(Some)
+            .map_err(|_| Refusal::Failed)
+    }
+
+    fn replay_archived_message(
+        &self,
+        ledger: &mut ChatLedger,
+        view: &ProjectionView,
+        create: ActionId,
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Option<SharedHistoryObservation>, V2MemberSaveRefusal> {
+        use catcoms_replication::chat::ActionState;
+        use V2MemberSaveRefusal as Refusal;
+        let channel = ledger.realm().channel();
+        let Some(page) = self.archived_actions(
+            channel,
+            SharedHistoryActionQuery {
+                target: Some(create),
+                after: None,
+                limit: MAX_RECEIVED_ACTIONS,
+            },
+        )?
+        else {
+            return Ok(None);
+        };
+        if page.actions.is_empty() {
+            return Ok(None);
+        }
+        if page.more || page.actions.binary_search(&create).is_err() {
+            return Err(Refusal::Failed);
+        }
+        let roots = page.actions.clone();
+        let observation = page.observation.clone();
+        drop(page);
+
+        let verifier = self
+            .prefix
+            .selected_member_verifier()
+            .map_err(|_| Refusal::Unavailable)?;
+        let mut pending: Vec<_> = roots.iter().rev().copied().collect();
+        let mut waiting = BTreeSet::new();
+        let mut work = 2 * MAX_RECEIVED_ACTIONS;
+        while let Some(action) = pending.pop() {
+            if caller.is_cancelled() {
+                return Err(Refusal::Cancelled);
+            }
+            work = work.checked_sub(1).ok_or(Refusal::Failed)?;
+            if ledger.state(action) == Some(ActionState::Valid) {
+                continue;
+            }
+            let archived = self
+                .store
+                .read_shared_history_record(self.history_scope(channel), action)
+                .map_err(|_| Refusal::Failed)?;
+            let status = if let Some(original) = archived {
+                let signed = original.original.action();
+                let target = signed.spec().body.create().unwrap_or(action);
+                if roots.binary_search(&action).is_ok() && target != create {
+                    return Err(Refusal::Failed);
+                }
+                let admission = verifier
+                    .admission(original.admission)
+                    .map_err(|_| Refusal::Stale)?;
+                verifier.project_provisional_from_ledger(
+                    ledger,
+                    view,
+                    signed,
+                    &admission,
+                    RECEIVE_WORK,
+                )
+            } else {
+                // An indexed candidate cannot be supplied by a different owner.
+                if roots.binary_search(&action).is_ok() {
+                    return Err(Refusal::Failed);
+                }
+                let original = self
+                    .read_dependency(channel, action, rng)?
+                    .ok_or(Refusal::Unavailable)?;
+                let admission = verifier
+                    .admission(original.receipt().admission)
+                    .map_err(|_| Refusal::Stale)?;
+                verifier.replay_ordinary_history_original(
+                    ledger,
+                    view,
+                    original.action(),
+                    &admission,
+                    &[],
+                    RECEIVE_WORK,
+                )
+            }
+            .map_err(|_| Refusal::Failed)?;
+            match status {
+                V2OrdinaryReceiveStatus::Retained(ActionState::Valid) => {}
+                V2OrdinaryReceiveStatus::Retained(_) => return Err(Refusal::Failed),
+                V2OrdinaryReceiveStatus::WaitingForDependencies(missing) => {
+                    if !waiting.insert(action) || pending.len() + missing.len() + 1 > work {
+                        return Err(Refusal::Failed);
+                    }
+                    pending.push(action);
+                    pending.extend(missing.into_iter().rev());
+                }
+            }
+        }
+        Ok(Some(observation))
+    }
+
     fn history_scope(&self, channel: u128) -> SharedHistoryScope {
         let data = self.registration;
         SharedHistoryScope {

@@ -156,6 +156,12 @@ target found in the signed original. The reader opens the full bundle to derive
 the target from an older selector. Both versions require the same physical bundle
 inventory, and an unsettled WAL refuses the page. Each candidate still needs its
 full selected bundle and governing replay before a message body can be shown.
+For one archived Create, the joined source opens its exact selected actions
+and resolves their required originals within a paid 64-action, 1 MiB ledger.
+The source checks current governing Admission and real signatures again. The
+projection remains provisional and is invalidated by an intervening archive
+write or retirement of the governing or native view. An incomplete target or
+dependency set refuses projection.
 The mounted joined source prepares one exact debt item for its original mesh and releases
 the metadata slot before awaiting the driver. The caller, original Core Admission and
 selected MLS fence must still authorize it at the driver's submission boundary. A real
