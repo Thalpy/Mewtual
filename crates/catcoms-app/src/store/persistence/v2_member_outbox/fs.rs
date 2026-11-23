@@ -280,9 +280,9 @@ pub(super) fn create_namespace(path: &Path) -> Result<(), AppError> {
     fs::create_dir(path).map_err(io)
 }
 
-/// At most `maximum + 1` names in a held directory. Used ONLY when `head.bin` is missing, to
-/// prove a namespace holds nothing but an interrupted creation before completing it.
-pub(super) fn bounded_entries(
+/// At most `maximum + 1` names in a held directory. The caller pays for the
+/// full result and must refuse the extra entry before authorizing mutation.
+pub(in crate::store::persistence) fn bounded_entries(
     directory: &HeldDirectory,
     maximum: usize,
 ) -> Result<Vec<OsString>, AppError> {
@@ -296,6 +296,18 @@ pub(super) fn bounded_entries(
     }
     directory.require()?;
     Ok(names)
+}
+
+/// Charge only known regular leaves against the caller's bounded inventory.
+pub(in crate::store::persistence) fn bounded_file_length(
+    path: &Path,
+    maximum: usize,
+) -> Result<usize, AppError> {
+    let metadata = fs::symlink_metadata(path).map_err(io)?;
+    if !regular(&metadata) || metadata.len() > maximum as u64 {
+        return Err(refused());
+    }
+    Ok(metadata.len() as usize)
 }
 
 pub(in crate::store::persistence) fn require_same_name(

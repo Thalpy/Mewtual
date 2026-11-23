@@ -122,7 +122,10 @@ identities through the barriers and selects the exact manifest under a keyed Act
 locator. Recovery completes the same bytes after a torn bundle or selector. Native
 retries retain the presealed WAL and its original file so they can write the missing
 suffix. Cold recovery preserves a partial WAL it cannot authenticate. Native catalog
-declaration, disk quotas and desktop history mounting remain open.
+declaration and desktop history mounting remain open. The disk owner checks a bounded
+physical inventory against separate record and byte limits before admitting a new WAL.
+The quota check charges partially written files at their final size. At capacity,
+existing originals and idempotent retries remain readable and new writes are refused.
 The mounted joined source prepares one exact debt item for its original mesh and releases
 the metadata slot before awaiting the driver. The caller, original Core Admission and
 selected MLS fence must still authorize it at the driver's submission boundary. A real

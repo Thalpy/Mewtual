@@ -65,6 +65,8 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
         SharedHistoryDisk::from_held(
             HeldDirectory::open(path.clone()).unwrap(),
             scope,
+            SharedHistoryDiskQuota::new(3, 3 * (SELECTOR_BYTES + MAX_SHARED_HISTORY_BUNDLE))
+                .unwrap(),
             pool.clone(),
             &KEY,
         )
@@ -75,26 +77,26 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
     let (expected, bytes) = encode(&scope, &first, admission, &mut rng);
     let disk = owner();
     assert_eq!(
-        disk.prepare_save(&KEY, expected, &bytes, &mut rng, pay())
+        disk.prepare_save(&KEY, expected, &bytes, &mut rng, &session, pay())
             .unwrap()
-            .commit(&KEY, &session)
+            .commit(&KEY)
             .unwrap(),
         expected
     );
     let (retry, resealed) = encode(&scope, &first, admission, &mut rng);
     assert_ne!(retry, expected);
     assert_eq!(
-        disk.prepare_save(&KEY, retry, &resealed, &mut rng, pay())
+        disk.prepare_save(&KEY, retry, &resealed, &mut rng, &session, pay())
             .unwrap()
-            .commit(&KEY, &session)
+            .commit(&KEY)
             .unwrap(),
         expected
     );
     let (conflict, altered) = encode(&scope, &first, OwnerFactId::from_bytes([19; 32]), &mut rng);
     assert!(disk
-        .prepare_save(&KEY, conflict, &altered, &mut rng, pay())
+        .prepare_save(&KEY, conflict, &altered, &mut rng, &session, pay())
         .unwrap()
-        .commit(&KEY, &session)
+        .commit(&KEY)
         .is_err());
     assert!(disk
         .read(&[255; 32], expected.action, &session, pay())
@@ -143,25 +145,74 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
     let third = original(&scope, 21);
     let (selected, bundle) = encode(&scope, &third, admission, &mut rng);
     let mut prepared = disk
-        .prepare_save(&KEY, selected, &bundle, &mut rng, pay())
+        .prepare_save(&KEY, selected, &bundle, &mut rng, &session, pay())
         .unwrap();
     let (mut held, identity) = open_exact_write(&wal_name, true).unwrap();
     use std::io::Write;
     held.write_all(&prepared.wal[..80]).unwrap();
     prepared.attempt = Some((held, identity));
     let mut reencoded = disk
-        .prepare_save(&KEY, selected, &bundle, &mut rng, pay())
+        .prepare_save(&KEY, selected, &bundle, &mut rng, &session, pay())
         .unwrap();
-    assert!(reencoded.commit(&KEY, &session).is_err());
+    assert!(reencoded.commit(&KEY).is_err());
     assert_eq!(std::fs::read(&wal_name).unwrap(), &prepared.wal[..80]);
     drop(reencoded);
     assert!(disk.recover(&KEY, &session, pay()).is_err());
     std::fs::rename(&wal_name, &parked).unwrap();
     std::fs::write(&wal_name, &prepared.wal[..80]).unwrap();
-    assert!(prepared.commit(&KEY, &session).is_err());
+    assert!(prepared.commit(&KEY).is_err());
     assert!(!disk.selector_path(&KEY, selected.action).exists());
     std::fs::remove_file(&wal_name).unwrap();
     std::fs::rename(&parked, &wal_name).unwrap();
-    assert_eq!(prepared.commit(&KEY, &session).unwrap(), selected);
+    assert_eq!(prepared.commit(&KEY).unwrap(), selected);
     assert!(!wal_name.exists());
+    drop(prepared);
+    drop(disk);
+
+    let disk = owner();
+    let (fourth, bundle) = encode(&scope, &original(&scope, 22), admission, &mut rng);
+    assert!(disk
+        .prepare_save(&KEY, fourth, &bundle, &mut rng, &session, pay())
+        .unwrap()
+        .commit(&KEY)
+        .is_err());
+    assert!(!wal_name.exists());
+    assert!(!disk.bundle_path(fourth.manifest).exists());
+    assert!(!disk.selector_path(&KEY, fourth.action).exists());
+    assert!(disk
+        .read(&KEY, selected.action, &session, pay())
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        disk.prepare_save(&KEY, retry, &resealed, &mut rng, &session, pay())
+            .unwrap()
+            .commit(&KEY)
+            .unwrap(),
+        expected
+    );
+    drop(disk);
+
+    // A separate byte limit refuses the same append even with record slots left.
+    let disk = SharedHistoryDisk::from_held(
+        HeldDirectory::open(path.clone()).unwrap(),
+        scope,
+        SharedHistoryDiskQuota::new(5, bundle.len() + SELECTOR_BYTES).unwrap(),
+        pool.clone(),
+        &KEY,
+    )
+    .unwrap();
+    assert!(disk
+        .prepare_save(&KEY, fourth, &bundle, &mut rng, &session, pay())
+        .unwrap()
+        .commit(&KEY)
+        .is_err());
+    assert!(!wal_name.exists());
+    assert_eq!(
+        disk.read(&KEY, expected.action, &session, pay())
+            .unwrap()
+            .unwrap()
+            .original
+            .original_bytes(),
+        first.encode()
+    );
 }

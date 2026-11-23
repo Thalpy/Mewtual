@@ -8,9 +8,9 @@ use crate::store::critical_namespaces::read_pool::{
     CatalogReadReservation, CriticalCatalogReadPool,
 };
 use crate::store::persistence::v2_member_outbox::fs::{
-    ensure_exact_held, finish_exact_write, observe, open_exact_write, read_bounded_held,
-    remove_listed, require_exact_held, require_same_name, HeldDirectory, Presence, Removal,
-    MAX_FILE,
+    bounded_entries, bounded_file_length, ensure_exact_held, finish_exact_write, observe,
+    open_exact_write, read_bounded_held, remove_listed, require_exact_held, require_same_name,
+    HeldDirectory, Presence, Removal, MAX_FILE,
 };
 use crate::store::{frame, unframe};
 use catcoms_storage::kept::SessionId;
@@ -26,9 +26,30 @@ const WAL_TAG: &[u8] = b"catcoms/private-chat-v2-shared-history-wal/v1\0";
 const WAL_NAME: &str = "history.wal";
 const WAL_BYTES: usize = 4 + WAL_TAG.len() + 2 + 4 + SELECTOR_BYTES + 4 + MAX_SHARED_HISTORY_BUNDLE;
 const _: () = assert!(WAL_BYTES <= MAX_FILE);
+const MAX_RECORDS_PER_DIRECTORY: usize = 2048;
+// Account for the full bounded native inventory, including the offending entry.
+const INVENTORY_FEE: usize = (2 * MAX_RECORDS_PER_DIRECTORY + 2) * 1024;
 
-pub(super) const DISK_FEE: usize =
-    SHARED_HISTORY_RECORD_FEE + 3 * WAL_BYTES + MAX_SHARED_HISTORY_BUNDLE + 16 * 1024;
+pub(super) const DISK_FEE: usize = SHARED_HISTORY_RECORD_FEE
+    + 3 * WAL_BYTES
+    + MAX_SHARED_HISTORY_BUNDLE
+    + INVENTORY_FEE
+    + 16 * 1024;
+
+#[derive(Clone, Copy)]
+pub(super) struct SharedHistoryDiskQuota {
+    records: usize,
+    bytes: usize,
+}
+
+impl SharedHistoryDiskQuota {
+    pub(super) fn new(records: usize, bytes: usize) -> Result<Self, AppError> {
+        if !(1..=MAX_RECORDS_PER_DIRECTORY).contains(&records) || bytes <= SELECTOR_BYTES {
+            return Err(refused());
+        }
+        Ok(Self { records, bytes })
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) struct SelectedHistoryRecord {
@@ -39,6 +60,7 @@ pub(super) struct SelectedHistoryRecord {
 pub(super) struct SharedHistoryDisk {
     directory: HeldDirectory,
     scope: SharedHistoryScope,
+    quota: SharedHistoryDiskQuota,
     gate: Mutex<()>,
     pool: CriticalCatalogReadPool,
     key_binding: [u8; 32],
@@ -50,6 +72,7 @@ impl SharedHistoryDisk {
     pub(super) fn from_held(
         directory: HeldDirectory,
         scope: SharedHistoryScope,
+        quota: SharedHistoryDiskQuota,
         pool: CriticalCatalogReadPool,
         key: &[u8; 32],
     ) -> Result<Self, AppError> {
@@ -58,6 +81,7 @@ impl SharedHistoryDisk {
         Ok(Self {
             directory,
             scope,
+            quota,
             gate: Mutex::new(()),
             pool,
             key_binding,
@@ -65,14 +89,15 @@ impl SharedHistoryDisk {
     }
 
     /// Seal the WAL once so a short write can resume on the same held file.
-    pub(super) fn prepare_save(
-        &self,
+    pub(super) fn prepare_save<'a>(
+        &'a self,
         key: &[u8; 32],
         expected: SelectedHistoryRecord,
         bundle: &[u8],
         rng: &mut impl CryptoRngCore,
+        session: &'a VaultSessionGuard,
         payment: CatalogReadReservation,
-    ) -> Result<PreparedSharedHistorySave<'_>, AppError> {
+    ) -> Result<PreparedSharedHistorySave<'a>, AppError> {
         payment.validate(&self.pool, DISK_FEE)?;
         self.require_key(key)?;
         let (admission, original) = open_shared_history_bundle(
@@ -87,6 +112,7 @@ impl SharedHistoryDisk {
             expected,
             admission,
             original,
+            session,
             wal: encode_wal(&selector, bundle)?,
             attempt: None,
             _payment: payment,
@@ -164,6 +190,7 @@ impl SharedHistoryDisk {
         self.directory.require()?;
         let wal_path = self.directory.child(WAL_NAME);
         require_exact_held(&wal_path, original, wal)?;
+        self.require_archive_capacity(key, selected, bundle.len())?;
         let mut barrier = open_exact_write(&wal_path, false)?;
         if barrier.1 != original.1 {
             return Err(refused());
@@ -201,6 +228,73 @@ impl SharedHistoryDisk {
             return Err(refused());
         }
         Ok(())
+    }
+
+    /// Size the candidate from what is physically present under this owner.
+    /// The two outputs of a partially installed WAL each count once at their
+    /// full candidate size. One bounded WAL has its own allowance.
+    fn require_archive_capacity(
+        &self,
+        key: &[u8; 32],
+        selected: SelectedHistoryRecord,
+        bundle_bytes: usize,
+    ) -> Result<(), AppError> {
+        let limit = 2 * self.quota.records + 1;
+        let names = bounded_entries(&self.directory, limit)?;
+        if names.len() > limit {
+            return Err(refused());
+        }
+        let target_selector = self.selector_path(key, selected.action);
+        let target_bundle = self.bundle_path(selected.manifest);
+        let mut selectors = 1;
+        let mut bundles = 1;
+        let mut used = SELECTOR_BYTES + bundle_bytes;
+        for name in names {
+            let leaf = name.to_str().ok_or_else(refused)?;
+            let path = self.directory.child(leaf);
+            if leaf == WAL_NAME {
+                bounded_file_length(&path, WAL_BYTES)?;
+                continue;
+            }
+            let (prefix, digest) = leaf.split_once('-').ok_or_else(refused)?;
+            let digits = digest.strip_suffix(".bin").ok_or_else(refused)?;
+            if digits.len() != 64
+                || !digits
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(refused());
+            }
+            let (maximum, candidate_bytes, target, count) = match prefix {
+                "s" => (
+                    SELECTOR_BYTES,
+                    SELECTOR_BYTES,
+                    &target_selector,
+                    &mut selectors,
+                ),
+                "b" => (
+                    MAX_SHARED_HISTORY_BUNDLE,
+                    bundle_bytes,
+                    &target_bundle,
+                    &mut bundles,
+                ),
+                _ => return Err(refused()),
+            };
+            let length = bounded_file_length(&path, maximum)?;
+            if &path == target {
+                if length > candidate_bytes {
+                    return Err(refused());
+                }
+            } else {
+                *count += 1;
+                used = used.checked_add(length).ok_or_else(refused)?;
+            }
+        }
+        if selectors > self.quota.records || bundles > self.quota.records || used > self.quota.bytes
+        {
+            return Err(refused());
+        }
+        self.directory.require()
     }
 
     fn read_selected(
@@ -291,18 +385,15 @@ pub(super) struct PreparedSharedHistorySave<'disk> {
     original: AssembledActionOriginal,
     wal: Zeroizing<Vec<u8>>,
     attempt: Option<(File, SessionId)>,
+    session: &'disk VaultSessionGuard,
     _payment: CatalogReadReservation,
 }
 
 impl PreparedSharedHistorySave<'_> {
-    pub(super) fn commit(
-        &mut self,
-        key: &[u8; 32],
-        session: &VaultSessionGuard,
-    ) -> Result<SelectedHistoryRecord, AppError> {
+    pub(super) fn commit(&mut self, key: &[u8; 32]) -> Result<SelectedHistoryRecord, AppError> {
         let disk = self.disk;
         disk.require_key(key)?;
-        let _lease = session.retain_for_physical_work();
+        let _lease = self.session.retain_for_physical_work();
         let _gate = disk.gate.try_lock().map_err(|_| refused())?;
         disk.directory.require()?;
         let path = disk.directory.child(WAL_NAME);
@@ -311,6 +402,8 @@ impl PreparedSharedHistorySave<'_> {
             if let Some(selected) = self.prior_selection(key)? {
                 return Ok(selected);
             }
+            let (_, bundle) = decode_wal(&self.wal)?;
+            disk.require_archive_capacity(key, self.expected, bundle.len())?;
             self.attempt = Some(open_exact_write(&path, true)?);
         } else if observe(&path)? == Presence::Absent {
             // The selection may already be durable when the final cleanup
