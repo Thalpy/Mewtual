@@ -5,7 +5,7 @@ use super::*;
 pub type V2JoinedRuntimeInputs<T, R> = (T, R, Box<dyn Clock + Send>);
 use crate::owner_v2::{
     open_v2_member_envelope_data, seal_v2_member_envelope_data, v2_member_envelope_topic_data,
-    JoinFactsSlot, JoinedFenceNode, OpenedV2MemberDependencyRequest,
+    JoinFactsSlot, JoinedFenceNode, MemberTransportFence, OpenedV2MemberDependencyRequest,
     PreparedV2MemberDependencyRequest, PreparedV2MemberSubmission, SelectedV2MemberEnvelope,
     V2JoinFacts, V2JoinedFenceAdmission, V2JoinedSourceFence, V2MemberDependencyRoute,
     V2MemberDraftInputs, V2MemberEnvelopeScopeData, V2MemberPublicationObservation,
@@ -336,7 +336,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
             .fence
             .observe_publication(self.admission_id.as_bytes())
             .map_err(|_| SyncError::JoinRejected)?;
-        Ok(V2MemberPublicationObservation { member, fence })
+        Ok(V2MemberPublicationObservation {
+            member,
+            fence: MemberTransportFence::Joined(fence),
+        })
     }
 
     /// Sign using this warm native joiner's original device and Source. The

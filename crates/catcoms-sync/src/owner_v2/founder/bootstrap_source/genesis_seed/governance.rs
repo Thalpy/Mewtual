@@ -15,6 +15,7 @@ use catcoms_replication::chat::owner_profile::{AdmissionOrigin, AdmissionSpec};
 use catcoms_replication::chat::owner_state::transition::{
     ReplayMath, UnsignedAdmissionStepData, UNSIGNED_ADMISSION_DATA_INVOICE,
 };
+use catcoms_replication::chat::V2AuthenticatedAdmission;
 use catcoms_rt::{
     NativeChatKeyEnds, NativeChatKeyPurpose, NativeChatPreparedKeyCut, NativeChatSourceObservation,
 };
@@ -23,6 +24,7 @@ mod request;
 use request::FrozenAddRequest;
 mod installation;
 pub use installation::{PreparedV2FounderAddInstall, RetiredV2FounderAddInstall};
+mod member_transport;
 mod recover;
 pub use recover::PreparedV2FounderRecoveredAdd;
 mod welcome;
@@ -229,6 +231,7 @@ impl V2FounderAddSigning<'_> {
 pub struct PreparedV2FounderGovernanceNode<T, R> {
     pending: Option<Box<PendingAdd>>,
     installed: Option<V2InstalledFounderAddData>,
+    member: Option<V2AuthenticatedAdmission>,
     node: UnboundV2GenesisNode<T, R>,
 }
 
@@ -270,6 +273,7 @@ impl<T, R> UnboundV2GenesisNode<T, R> {
         Ok(PreparedV2FounderGovernanceNode {
             pending: None,
             installed: None,
+            member: None,
             node: self,
         })
     }
@@ -293,6 +297,7 @@ impl<T, R> UnboundV2GenesisNode<T, R> {
         *destination = Some(PreparedV2FounderGovernanceNode {
             pending: None,
             installed: None,
+            member: None,
             node,
         });
         Ok(())

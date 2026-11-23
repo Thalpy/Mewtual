@@ -124,6 +124,7 @@ async fn complete_original_welcome(native_joiner: bool) {
     let count = Arc::new(AtomicUsize::new(0));
     let d = node.genesis_data();
     let mut g = governance(d.profile, d.admission, d.header, d.state);
+    assert!(node.prepare_member_subscription(&g.verifier, 42).is_err());
     begin(&mut node, &native, &count, request);
     node.execute_add_data_native(request).unwrap();
     assert!(node.outcome_data().is_err());
@@ -541,6 +542,7 @@ async fn complete_original_welcome(native_joiner: bool) {
     drop(original);
     drop(cold_node.admit_member_save(&cold_plan).unwrap());
     let mut revoked_submission = None;
+    let mut founder_after_drop = None;
     if let Some(joiner) = &joiner {
         let mut inputs = crate::owner_v2::V2MemberDraftInputs::new();
         let drawn = joined_node.draw_member_draft_inputs(&mut inputs).unwrap();
@@ -706,6 +708,98 @@ async fn complete_original_welcome(native_joiner: bool) {
         );
         assert_eq!(cold_ledger.action_ids().count(), 1);
         assert_eq!(cold_ledger.action(action.id()).unwrap().encode(), raw);
+
+        // The installed founder and the joined device use the same selected
+        // topic. Only the founder's original Core verifier may authorize its
+        // own SDK transport, even if the joined verifier replayed equal bytes.
+        let (founder_topic, founder_fence) =
+            node.prepare_member_subscription(&g.verifier, 42).unwrap();
+        assert_eq!(founder_topic, observed);
+        assert!(founder_fence.is_current_cached());
+        assert!(node.prepare_member_subscription(verifier, 42).is_err());
+        assert!(node
+            .open_selected_member_envelope(&g.verifier, 43, &observed, &data)
+            .is_err());
+        let founder_opened = node
+            .open_selected_member_envelope(&g.verifier, 42, &observed, &data)
+            .unwrap();
+        assert!(founder_opened
+            .provisional_authority(verifier, &[], &cold_channel)
+            .is_err());
+        assert_eq!(
+            founder_opened
+                .project_provisional(&g.verifier, &mut g._ledger, &g.view, &[], 8)
+                .unwrap(),
+            ActionState::Valid,
+        );
+        let founder_keys = Native::new();
+        let mut founder_inputs = crate::owner_v2::V2MemberDraftInputs::new();
+        let (presented_ms, nonce) = node
+            .draw_ordinary_draft_inputs(&mut founder_inputs)
+            .unwrap();
+        let labels = g
+            .founder
+            .admission_data()
+            .ordinary_labels(&joined_realm)
+            .unwrap();
+        let draft = ActionDraft::new(
+            ActionSpec {
+                realm: joined_realm.clone(),
+                basis: labels.basis,
+                grant: labels.grant,
+                nonce,
+                presented_ms,
+                parents: vec![],
+                body: Body::Create {
+                    text: "Original founder transport".into(),
+                    reply_to: None,
+                },
+            },
+            node.ordinary_member_signer_data().unwrap(),
+        )
+        .unwrap();
+        let mut plan = g
+            .verifier
+            .prepare_ordinary_signing_plan(&draft, &g.founder, &[], &g.view)
+            .unwrap();
+        let signer = node.ordinary_member_signer_data().unwrap();
+        let guard = plan.admit_signing(&draft, &signer).unwrap();
+        let mut cut = founder_keys.cut(NativeChatKeyPurpose::MemberAction);
+        let mut ends = NativeChatKeyEnds::new();
+        drop(
+            node.sign_ordinary_admitted_native(
+                &founder_inputs,
+                guard,
+                &founder_keys.source.observe(),
+                &mut cut,
+                &mut ends,
+            )
+            .unwrap(),
+        );
+        let founder = plan
+            .complete_cached_raw64_data(&plan.observe_original(), &draft)
+            .unwrap();
+        let founder_admission = g.founder.admission_data().admission_id();
+        let founder_raw = founder.encode();
+        assert!(node
+            .prepare_member_submission(&g.verifier, 42, admission, &founder_raw)
+            .is_err());
+        let submission = node
+            .prepare_member_submission(&g.verifier, 42, founder_admission, &founder_raw)
+            .unwrap();
+        assert_eq!(submission.topic, observed);
+        let opened = cold_node
+            .open_selected_member_envelope(&prefix, 42, &submission.topic, &submission.wire)
+            .unwrap();
+        assert_eq!(opened.original_data(), founder_raw);
+        assert_eq!(
+            opened
+                .project_provisional(verifier, &mut cold_ledger, &cold_channel, &[], 8)
+                .unwrap(),
+            ActionState::Valid
+        );
+        founder_after_drop = Some(submission);
+
         let route = crate::owner_v2::V2MemberDependencyRoute {
             requester: cold_node.local_peer_data(),
             provider: joined_node.local_peer_data(),
@@ -810,6 +904,17 @@ async fn complete_original_welcome(native_joiner: bool) {
     }
     assert!(joined_node.admit_member_save(&warm_plan).is_err());
     drop(cold_node.admit_member_save(&cold_plan).unwrap());
+    drop(node);
+    if let Some(submission) = founder_after_drop {
+        assert!(!submission.is_current_cached());
+        let (_cancel, signal) = tokio::sync::watch::channel(false);
+        assert!(matches!(
+            submission
+                .submit(RequestCancellation::new(signal, None))
+                .await,
+            Err(crate::SyncError::Publication(PublishOnceError::Revoked)),
+        ));
+    }
 }
 
 #[test]

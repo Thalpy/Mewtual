@@ -18,7 +18,7 @@ use catcoms_wire::{Decoder, DocType, Encoder};
 use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Weak,
     },
     time::Duration,
 };
@@ -46,16 +46,30 @@ pub struct PreparedV2MemberSubmission {
     pub(crate) observation: V2MemberPublicationObservation,
 }
 
-/// The exact current Core lifetime and finalized MLS selection for one joined
-/// Source. This is a negative observation and carries no driver or SDK graph.
+/// The exact current Core lifetime and finalized MLS selection. This negative
+/// observation carries neither the driver nor the original SDK graph.
 pub struct V2MemberPublicationObservation {
     pub(crate) member: V2LiveMemberObservation,
-    pub(crate) fence: V2JoinedPublicationFence,
+    pub(crate) fence: MemberTransportFence,
+}
+
+pub(crate) enum MemberTransportFence {
+    Joined(V2JoinedPublicationFence),
+    Founder {
+        seed: Weak<()>,
+        scope: RequestCancellation,
+    },
 }
 
 impl V2MemberPublicationObservation {
     pub fn is_current_cached(&self) -> bool {
-        self.member.is_live_cached() && self.fence.is_current_cached()
+        self.member.is_live_cached()
+            && match &self.fence {
+                MemberTransportFence::Joined(fence) => fence.is_current_cached(),
+                MemberTransportFence::Founder { seed, scope } => {
+                    seed.strong_count() != 0 && !scope.is_cancelled()
+                }
+            }
     }
 
     /// Retire the exact mesh operation with the native caller, Core group or

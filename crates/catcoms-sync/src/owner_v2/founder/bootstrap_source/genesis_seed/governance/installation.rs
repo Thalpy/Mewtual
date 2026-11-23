@@ -4,7 +4,8 @@ use catcoms_mls::group::text_current_add::{
     PreparedTextCurrentAddInstallation, RetiredTextCurrentAdd,
 };
 use catcoms_replication::chat::{
-    V2GeneralCandidate, V2GeneralPrefixVerifier, V2GeneralRetiredData, V2HostSelectionExpectation,
+    owner_facts::OwnerFactId, V2GeneralCandidate, V2GeneralPrefixVerifier, V2GeneralRetiredData,
+    V2HostSelectionExpectation,
 };
 
 /// Original SDK pair and its candidate remain exclusively borrowed. The Host
@@ -14,6 +15,8 @@ pub struct PreparedV2FounderAddInstall<'a> {
     negative: V2FounderGovernanceNegative<'a>,
     after: V2InstalledFounderAddData,
     installed: &'a mut Option<V2InstalledFounderAddData>,
+    founder: OwnerFactId,
+    member: &'a mut Option<V2AuthenticatedAdmission>,
     core_retired: &'a mut Option<V2GeneralRetiredData>,
     sdk_retired: &'a mut Option<RetiredTextCurrentAdd>,
 }
@@ -34,7 +37,11 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2FounderGovernanceNode<T, R> {
         self.require_sdk_current_data()?;
         self.signed_welcome_data()?;
         let p = self.pending.as_deref_mut().ok_or_else(unavailable)?;
-        if p.phase != Phase::Materialized || p.retired_sdk.is_some() || p.retired_core.is_some() {
+        if p.phase != Phase::Materialized
+            || p.retired_sdk.is_some()
+            || p.retired_core.is_some()
+            || self.member.is_some()
+        {
             return Err(unavailable());
         }
         let result = p
@@ -59,6 +66,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2FounderGovernanceNode<T, R> {
             group,
             identity,
         } = &mut *self.node.seed.body;
+        let founder = genesis.admission.admission_id();
         let fields = V2GenesisSourceFields {
             source: *source,
             context,
@@ -85,6 +93,8 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2FounderGovernanceNode<T, R> {
                 negative,
                 after,
                 installed: &mut self.installed,
+                founder,
+                member: &mut self.member,
                 core_retired: &mut p.retired_core,
                 sdk_retired: &mut p.retired_sdk,
             },
@@ -128,6 +138,9 @@ impl PreparedV2FounderAddInstall<'_> {
         candidate: &mut Option<V2GeneralCandidate>,
     ) -> Result<(), SyncError> {
         self.negative.require_live_data()?;
+        let founder = verifier
+            .admission(self.founder)
+            .map_err(|_| unavailable())?;
         let selected =
             V2HostSelectionExpectation::from_trusted_host(self.after.header, self.after.state);
         let retired = verifier
@@ -138,6 +151,7 @@ impl PreparedV2FounderAddInstall<'_> {
         *self.core_retired = Some(retired);
         *self.sdk_retired = Some(self.mls.install());
         *self.installed = Some(self.after);
+        *self.member = Some(founder);
         Ok(())
     }
 }

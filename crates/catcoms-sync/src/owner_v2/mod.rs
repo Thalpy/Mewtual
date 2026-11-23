@@ -55,6 +55,7 @@ pub use member_dependencies::{
     OpenedV2MemberDependencyRequest, PreparedV2MemberDependencyRequest, V2MemberDependencyRoute,
     MAX_V2_DEPENDENCY_REPLY_BYTES, MAX_V2_DEPENDENCY_REQUEST_BYTES,
 };
+pub(crate) use member_envelope::MemberTransportFence;
 pub use member_envelope::{
     open_v2_member_envelope_data, seal_v2_member_envelope_data, v2_member_envelope_topic_data,
     OpenedV2MemberEnvelopeData, PreparedV2MemberSubmission, SelectedV2MemberEnvelope,

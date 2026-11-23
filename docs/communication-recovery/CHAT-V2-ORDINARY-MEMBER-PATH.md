@@ -184,6 +184,13 @@ A failed archive write for a live mutation holds that target out of archive repl
 for the installed row. An exact selected retry clears its entry. This bounded in-session
 state stays with the row through receiver reattachment. Durable protection after
 unsettled mutations and a process or vault restart still needs a selected negative record.
+
+The installed founder Sync node can now prepare and open ordinary encrypted frames on
+the joined member's selected topic after the first Add. Its exact Core Admission is
+captured during the original Core and MLS installation. An equal replay from a
+different verifier, a changed selection, or a retired founder source refuses the
+transport operation. The mounted founder outbox worker and desktop receiver still
+need to call this path.
 Original audit chunks and request receipts remain retained after scheduling debt clears.
 Removal changes active view, never deletes the audit. Unproven late removed actions stay
 Held pending the separately authorized moderation path; ordinary concurrent edits resolve
