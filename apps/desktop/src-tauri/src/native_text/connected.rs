@@ -15,7 +15,7 @@ pub(super) struct Source {
     instance: u64,
     channel: u128,
     scope: RequestCancellation,
-    publication_wake: Option<Arc<tokio::sync::Notify>>,
+    member_work: Option<Arc<server_table::JoinedMemberWork>>,
     _payment: NativeUiInvocationMetadata,
 }
 
@@ -107,7 +107,7 @@ impl Source {
             instance: data.instance,
             channel: data.channel,
             scope,
-            publication_wake: data.publication_wake.clone(),
+            member_work: data.member_work.clone(),
             _payment: payment.take()?,
         })
     }
@@ -230,7 +230,7 @@ const OUTBOX_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(25
 const OUTBOX_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 
 async fn drain_joined_outbox<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source: &Arc<Source>) {
-    let Some(wake) = &source.publication_wake else {
+    let Some(local) = &source.member_work else {
         return;
     };
     let mut scope = source.scope.clone();
@@ -240,7 +240,7 @@ async fn drain_joined_outbox<R: tauri::Runtime>(app: &tauri::AppHandle<R>, sourc
             tokio::select! {
                 biased;
                 _ = scope.cancelled() => return,
-                _ = wake.notified() => {},
+                _ = local.publication_wake.notified() => {},
                 _ = tokio::time::sleep(OUTBOX_RETRY - OUTBOX_COOLDOWN) => {},
             }
         }
@@ -248,7 +248,7 @@ async fn drain_joined_outbox<R: tauri::Runtime>(app: &tauri::AppHandle<R>, sourc
         ready = tokio::select! {
             biased;
             _ = scope.cancelled() => return,
-            advanced = publish_joined_debt(&state, source) => advanced,
+            advanced = publish_joined_debt(&state, source, local) => advanced,
         };
         tokio::select! {
             biased;
@@ -258,12 +258,20 @@ async fn drain_joined_outbox<R: tauri::Runtime>(app: &tauri::AppHandle<R>, sourc
     }
 }
 
-async fn publish_joined_debt(state: &AppState, source: &Arc<Source>) -> bool {
+async fn publish_joined_debt(
+    state: &AppState,
+    source: &Arc<Source>,
+    local: &server_table::JoinedMemberWork,
+) -> bool {
+    let Some(preparation_guard) = local.try_background() else {
+        return false;
+    };
     let Some((original, row)) = source.capture_joined(state).await else {
         return false;
     };
     let work = source.clone();
     let prepared = tauri::async_runtime::spawn_blocking(move || {
+        let _local = preparation_guard;
         original.prepare_member_publication(&row, work.scope.clone(), &mut OsCryptoRng)
     })
     .await;
@@ -273,12 +281,18 @@ async fn publish_joined_debt(state: &AppState, source: &Arc<Source>) -> bool {
     let Ok(Some(receipt)) = prepared.submit().await else {
         return false;
     };
+    // A confirmed send already owns an exact receipt. Wait for the user
+    // operation to release local work so this receipt can be checkpointed.
+    let Some(checkpoint_guard) = local.foreground(source.scope.clone()).await else {
+        return false;
+    };
     let Some((original, _)) = source.capture_joined(state).await else {
         return false;
     };
     let work = source.clone();
     matches!(
         tauri::async_runtime::spawn_blocking(move || {
+            let _local = checkpoint_guard;
             original.checkpoint_member_publication(receipt, &work.scope, &mut OsCryptoRng)
         })
         .await,
@@ -293,11 +307,19 @@ async fn serve_dependencies<R: tauri::Runtime>(
 ) {
     while let Some(request) = provider.next().await {
         let state = app.state::<AppState>();
+        let Some(local) = source
+            .member_work
+            .as_ref()
+            .and_then(|work| work.try_background())
+        else {
+            continue;
+        };
         let Some((original, row)) = source.capture_joined(&state).await else {
             continue;
         };
         let source = source.clone();
         let _ = tauri::async_runtime::spawn_blocking(move || {
+            let _local = local;
             original.serve_dependency_request(
                 &row,
                 source.channel,

@@ -11,6 +11,7 @@ use catcoms_replication::chat::{Body, SignedAction};
 use serde::Serialize;
 use std::io::Write;
 use tauri::ipc::InvokeResponseBody;
+use tokio::sync::OwnedMutexGuard;
 
 enum Preparation {
     Founder(NativeTextMemberPreparation<catcoms_net::MeshService, OsCryptoRng>),
@@ -45,6 +46,7 @@ struct Invocation {
     selection: server_table::NativeSelection,
     instance: u64,
     scope: RequestCancellation,
+    member_work: Option<Arc<server_table::JoinedMemberWork>>,
     read: Read,
     payment: Arc<Payment>, // LAST, including unpolled/cancelled reply futures
 }
@@ -168,7 +170,7 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
         });
         let read = parse(invoke.message.payload())?;
         let account = keep_session::current(&state, generation).ok_or(STALE)?;
-        let (selection, instance, scope) = {
+        let (selection, instance, scope, member_work) = {
             let table = state.servers.try_lock().map_err(|_| BUSY)?;
             let row = table.native(&read.server).ok_or(STALE)?;
             if row.data().request != read.context
@@ -181,6 +183,7 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
                 row.data().selection.clone(),
                 row.data().instance,
                 row.scope(account).ok_or(STALE)?,
+                row.data().member_work.clone(),
             )
         };
         Ok(Invocation {
@@ -189,6 +192,7 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
             selection,
             instance,
             scope,
+            member_work,
             read,
             payment,
         })
@@ -300,6 +304,7 @@ struct Work {
     preparation: Preparation,
     scope: RequestCancellation,
     read: Read,
+    _local: Option<OwnedMutexGuard<()>>,
     #[cfg(test)]
     watch: Option<Arc<DropWatch>>,
     payment: Arc<Payment>, // LAST during unrun/unwind/returned response
@@ -344,10 +349,15 @@ impl Work {
     }
 }
 async fn execute(state: &AppState, call: &Invocation) -> Result<Output, String> {
+    let local = match &call.member_work {
+        Some(work) => Some(work.foreground(call.scope.clone()).await.ok_or(STALE)?),
+        None => None,
+    };
     let work = Work {
         preparation: capture(state, call).await?,
         scope: call.scope.clone(),
         read: call.read,
+        _local: local,
         #[cfg(test)]
         watch: state.native_text.history_drop_watch.lock().unwrap().clone(),
         payment: call.payment.clone(),

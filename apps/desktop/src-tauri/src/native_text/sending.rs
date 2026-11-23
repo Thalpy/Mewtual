@@ -64,6 +64,7 @@ struct Invocation {
     instance: u64,
     scope: RequestCancellation,
     persist: Arc<Mutex<()>>,
+    member_work: Option<Arc<server_table::JoinedMemberWork>>,
     intent: Intent,
     payment: Arc<Payment>, // LAST through every blocking worker/result
 }
@@ -175,7 +176,7 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
         });
         let intent = parse(invoke.message.payload())?;
         let account = keep_session::current(&state, generation).ok_or(STALE)?;
-        let (selection, instance, scope) = {
+        let (selection, instance, scope, member_work) = {
             // BEFORE scheduling: delayed work cannot select a replacement row.
             let table = state.servers.try_lock().map_err(|_| BUSY)?;
             let row = table.native(&intent.server).ok_or(STALE)?;
@@ -190,6 +191,7 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
                 data.selection.clone(),
                 data.instance,
                 row.scope(account).ok_or(STALE)?,
+                data.member_work.clone(),
             )
         };
         // This helper takes a mutex and may allocate. Never call it after final
@@ -202,6 +204,7 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
             instance,
             scope,
             persist,
+            member_work,
             intent,
             payment,
         })
@@ -256,7 +259,7 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
                         resolver.resolve(InvokeResponseBody::Json(reply.body));
                         original_row
                             .filter(|_| reply.saved_local)
-                            .and_then(|row| row.data().publication_wake.clone())
+                            .and_then(|row| row.data().member_work.clone())
                     }
                     Err(error) => {
                         resolver.reject(error);
@@ -265,8 +268,8 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
                 }
             }
         };
-        if let Some(wake) = wake {
-            wake.notify_one();
+        if let Some(work) = wake {
+            work.publication_wake.notify_one();
         }
     }));
     true
@@ -391,7 +394,11 @@ impl PrepareWork<Preparation> {
     }
 }
 
-async fn prepare(state: &AppState, invocation: &Invocation) -> Result<V2MemberSaveOutcome, String> {
+async fn prepare(
+    state: &AppState,
+    invocation: &Invocation,
+    local: Option<Arc<OwnedMutexGuard<()>>>,
+) -> Result<V2MemberSaveOutcome, String> {
     let preparation = capture(state, invocation).await?;
     let work = PrepareWork {
         preparation,
@@ -405,10 +412,13 @@ async fn prepare(state: &AppState, invocation: &Invocation) -> Result<V2MemberSa
         channel: invocation.intent.channel,
         _payment: invocation.payment.clone(),
     };
-    tauri::async_runtime::spawn_blocking(move || work.run())
-        .await
-        .map_err(|_| STALE)?
-        .map_err(refusal)
+    tauri::async_runtime::spawn_blocking(move || {
+        let _local = local;
+        work.run()
+    })
+    .await
+    .map_err(|_| STALE)?
+    .map_err(refusal)
 }
 fn refusal(reason: V2MemberSaveRefusal) -> String {
     match reason {
@@ -559,7 +569,15 @@ struct Reply {
 }
 
 async fn execute(state: &AppState, invocation: &Invocation) -> Result<Reply, String> {
-    let mut outcome = prepare(state, invocation).await?;
+    let local = match &invocation.member_work {
+        Some(work) => Some(Arc::new(
+            work.foreground(invocation.scope.clone())
+                .await
+                .ok_or(STALE)?,
+        )),
+        None => None,
+    };
+    let mut outcome = prepare(state, invocation, local.clone()).await?;
     if outcome == V2MemberSaveOutcome::Ready {
         let preparation = capture(state, invocation).await?;
         let token = invocation.intent.token;
@@ -568,7 +586,9 @@ async fn execute(state: &AppState, invocation: &Invocation) -> Result<Reply, Str
             value: preparation,
             _payment: invocation.payment.clone(),
         };
+        let local_during_preparation = local.clone();
         let prepared = tauri::async_runtime::spawn_blocking(move || {
+            let _local = local_during_preparation;
             worker.map(|value| match value {
                 Preparation::Founder(original) => original
                     .finish_admission(token)
@@ -593,7 +613,9 @@ async fn execute(state: &AppState, invocation: &Invocation) -> Result<Reply, Str
         let job = admit(state, invocation, preparation)?;
         #[cfg(test)]
         let io_edge = state.native_text.send_io_edge.lock().unwrap().clone();
+        let local_during_save = local.clone();
         let report = tauri::async_runtime::spawn_blocking(move || {
+            let _local = local_during_save;
             #[cfg(test)]
             if let Some(edge) = io_edge {
                 edge.wait_once();
@@ -608,7 +630,7 @@ async fn execute(state: &AppState, invocation: &Invocation) -> Result<Reply, Str
                 saved_local: false,
             });
         }
-        outcome = prepare(state, invocation).await?; // recover exact receipt without re-signing
+        outcome = prepare(state, invocation, local).await?; // exact saved receipt
     }
     match outcome {
         V2MemberSaveOutcome::Saved{action,ordinal}=>Ok(Reply {

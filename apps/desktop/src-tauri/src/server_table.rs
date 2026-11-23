@@ -7,6 +7,7 @@ use catcoms_app::store::{
     CriticalCatalogReadPool, NativeTextJoinedRowSelection, NativeTextRuntimeSelection,
     NativeTextVaultAuthenticationCheck, NativeUiInvocationBudget, NativeUiInvocationMetadata,
 };
+use tokio::sync::OwnedMutexGuard;
 
 pub(super) const NATIVE_ROWS: usize = 2;
 type FounderSelection = NativeTextRuntimeSelection<catcoms_net::MeshService, OsCryptoRng>;
@@ -83,11 +84,43 @@ pub(super) struct NativeRowData {
     pub(super) display_name: String,
     pub(super) is_dm: bool,
     pub(super) channel: u128,
-    pub(super) publication_wake: Option<Arc<tokio::sync::Notify>>,
+    pub(super) member_work: Option<Arc<JoinedMemberWork>>,
     retiring: bool,
     // LAST: actual dedicated native row payment follows all retained DATA.
     _credit: NativeUiInvocationMetadata,
 }
+
+/// Serialize the original joined row's local reads and writes. A waiter holds
+/// no UI guard or Core loan, and network effects never retain this permit.
+pub(super) struct JoinedMemberWork {
+    pub(super) publication_wake: tokio::sync::Notify,
+    local: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl JoinedMemberWork {
+    fn new() -> Self {
+        Self {
+            publication_wake: tokio::sync::Notify::new(),
+            local: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
+    pub(super) async fn foreground(
+        &self,
+        mut scope: RequestCancellation,
+    ) -> Option<OwnedMutexGuard<()>> {
+        tokio::select! {
+            biased;
+            _ = scope.cancelled() => None,
+            guard = self.local.clone().lock_owned() => Some(guard),
+        }
+    }
+
+    pub(super) fn try_background(&self) -> Option<OwnedMutexGuard<()>> {
+        self.local.clone().try_lock_owned().ok()
+    }
+}
+
 impl PreparedNativeRow {
     pub(super) fn is_for_recovered_vault(
         &self,
@@ -109,8 +142,8 @@ impl PreparedNativeRow {
             return Err("Invalid native server details.".into());
         }
         let (name, display_name) = bounded_native_names(spec.name, spec.display_name)?;
-        let publication_wake = matches!(&spec.selection, NativeSelection::Joined(_))
-            .then(|| Arc::new(tokio::sync::Notify::new()));
+        let member_work = matches!(&spec.selection, NativeSelection::Joined(_))
+            .then(|| Arc::new(JoinedMemberWork::new()));
         let data = NativeRowData {
             selection: spec.selection,
             files: keep_session::EntryOwner::new(),
@@ -121,7 +154,7 @@ impl PreparedNativeRow {
             display_name,
             is_dm: spec.is_dm,
             channel: spec.channel,
-            publication_wake,
+            member_work,
             retiring: false,
             _credit: credit,
         };
@@ -402,7 +435,9 @@ const _: () = assert!(
         + 2 * std::mem::size_of::<Row>()
         + 4 * 256
         + 1024
-        + 2 * (std::mem::size_of::<tokio::sync::Notify>() + 32)
+        + 2 * (std::mem::size_of::<JoinedMemberWork>()
+            + std::mem::size_of::<tokio::sync::Mutex<()>>()
+            + 64)
         <= 4096
 );
 

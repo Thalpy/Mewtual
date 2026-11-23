@@ -1291,8 +1291,22 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
         listed["servers"].as_array().unwrap(),
         std::slice::from_ref(&original)
     );
+    let local = joined_work(&state, id)
+        .await
+        .foreground(
+            keep_session::current(&state, state.ui_session_generation.load(Ordering::SeqCst))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     let empty = native_history_request(&joiner_window, &original, "0", None, 8);
-    run(&joiner_queue).await;
+    let pending = run(&joiner_queue);
+    tokio::pin!(pending);
+    assert!(timeout(Duration::from_millis(15), &mut pending)
+        .await
+        .is_err());
+    drop(local);
+    pending.await;
     let empty = found_value(empty.await.unwrap());
     assert_eq!(empty["end_exclusive"], "0");
     assert!(empty["items"].as_array().unwrap().is_empty());
@@ -1370,8 +1384,13 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
 async fn assert_joined_connected_workers(
     state: &AppState,
     id: u64,
-) -> std::sync::Weak<tokio::sync::Notify> {
+) -> std::sync::Weak<server_table::JoinedMemberWork> {
     let generation = state.ui_session_generation.load(Ordering::SeqCst);
+    let work = joined_work(state, id).await;
+    let _local = work
+        .foreground(keep_session::current(state, generation).unwrap())
+        .await
+        .unwrap();
     let target = state.native_text.ui_state.original_target().unwrap();
     let mut ui = Some(
         founding::ui_capture(state, generation, &target)
@@ -1389,8 +1408,8 @@ async fn assert_joined_connected_workers(
         let server_table::NativeSelection::Joined(selection) = &original.data().selection else {
             panic!("the registered row must still be the original joined source");
         };
-        let wake = original.data().publication_wake.as_ref().unwrap();
-        assert!(Arc::strong_count(wake) >= 2);
+        let wake = original.data().member_work.as_ref().unwrap();
+        assert!(Arc::strong_count(wake) >= 3);
         let scope = original
             .scope(keep_session::current(state, generation).unwrap())
             .unwrap();
@@ -1415,7 +1434,22 @@ async fn assert_joined_connected_workers(
     publication
 }
 
-async fn assert_joined_publication_stopped(original: std::sync::Weak<tokio::sync::Notify>) {
+async fn joined_work(state: &AppState, id: u64) -> Arc<server_table::JoinedMemberWork> {
+    state
+        .servers
+        .lock()
+        .await
+        .native(&id)
+        .unwrap()
+        .data()
+        .member_work
+        .clone()
+        .unwrap()
+}
+
+async fn assert_joined_publication_stopped(
+    original: std::sync::Weak<server_table::JoinedMemberWork>,
+) {
     tokio::time::timeout(Duration::from_secs(3), async {
         while original.strong_count() != 0 {
             tokio::time::sleep(Duration::from_millis(10)).await;
