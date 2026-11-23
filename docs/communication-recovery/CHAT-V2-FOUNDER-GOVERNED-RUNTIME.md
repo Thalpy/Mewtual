@@ -60,6 +60,8 @@ from that vault. Source retirement drains the original save work and TCP actor.
 The desktop uses the same ordinary IPC and workers for the reopened founder.
 Its display name comes from the original sealed bootstrap debit. The recovered
 request responder returns only the exact covered Welcome.
+An outbox driver receipt retains its original cancellation scope. A new
+caller cannot checkpoint debt using an acknowledgement from a retired scope.
 
 Before the first Add, cold recovery can prove the original promoted genesis
 through the held pin, promotion seed, operational head, archive and directory

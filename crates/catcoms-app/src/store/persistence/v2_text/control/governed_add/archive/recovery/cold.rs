@@ -7,7 +7,7 @@ use crate::store::persistence::v2_genesis_activation::require_directory_name;
 use crate::store::persistence::v2_group_directory::original_group_path;
 use crate::store::persistence::v2_text::{
     capture::original_context_from_genesis,
-    control::governed_add::held::require_exact_held,
+    control::governed_add::held::{require_exact_held, STAGE as GOVERNED_ADD_FENCE},
     head::TextRootData,
     io::{
         archive_child, fixed_child, read_control, read_control_into, OpenedTextControl,
@@ -34,11 +34,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const ABSENT: [&str; 5] = [
+const ABSENT: [&str; 4] = [
     "head.stage",
     "text.seed.stage.v1",
     "text.wal",
-    "text.wal.stage.v1",
     selected_head::NAME,
 ];
 const SEED_FRAME_LIMIT: usize = 32768 + 40;
@@ -183,7 +182,10 @@ impl HeldColdFounderGenesis {
 }
 
 fn require_add_not_entered(target: &Path) -> Result<(), AppError> {
+    // A completed Add retains its fence as evidence. Its presence rules out
+    // epoch-zero recovery even when the Add has not written another stage.
     for name in [
+        GOVERNED_ADD_FENCE,
         "text.add.request.v2",
         "text.add.sdk-entry.v2",
         "text.add.outcome.v2",

@@ -27,7 +27,7 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-const STAGE: &str = "text.wal.stage.v1";
+pub(super) const STAGE: &str = "text.wal.stage.v1";
 const FILE_COMPARE_BYTES: usize = 8192;
 
 mod header_read;

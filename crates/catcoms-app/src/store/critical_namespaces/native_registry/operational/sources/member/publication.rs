@@ -2,7 +2,7 @@
 use super::*;
 use crate::store::persistence::v2_member_outbox::MemberDebtBatch;
 use crate::store::persistence::v2_member_transport::{FounderDebtOperation, FounderDebtOutcome};
-use catcoms_rt::PublishSubmission;
+use catcoms_rt::{PublishOnceError, PublishSubmission, RequestAuthority};
 use catcoms_sync::owner_v2::PreparedV2MemberSubmission;
 
 struct Custody {
@@ -29,6 +29,28 @@ pub struct NativeTextFounderMemberPublication<T: MeshTransport, R: CryptoRngCore
 pub struct NativeTextFounderMemberPublicationReceipt<T: MeshTransport, R: CryptoRngCore> {
     batch: MemberDebtBatch,
     row: NativeTextRuntimeSelection<T, R>,
+    original: RequestCancellation,
+}
+
+#[derive(Debug)]
+struct CheckpointScope {
+    original: RequestCancellation,
+    caller: RequestCancellation,
+}
+
+#[async_trait::async_trait]
+impl RequestAuthority for CheckpointScope {
+    fn authorized(&self) -> bool {
+        !self.original.is_cancelled() && !self.caller.is_cancelled()
+    }
+
+    async fn revoked(&self) {
+        let (mut original, mut caller) = (self.original.clone(), self.caller.clone());
+        tokio::select! {
+            _ = original.cancelled() => {},
+            _ = caller.cancelled() => {},
+        }
+    }
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> NativeTextFounderMemberPublication<T, R> {
@@ -41,7 +63,11 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextFounderMemberPublication<T, R
             mut receipt,
             signal,
         } = self;
-        match submission.submit(signal).await? {
+        let submitted = submission.submit(signal).await?;
+        if receipt.original.is_cancelled() {
+            return Err(PublishOnceError::Revoked.into());
+        }
+        match submitted {
             PublishSubmission::Duplicate => Ok(None),
             PublishSubmission::Submitted => {
                 receipt
@@ -79,6 +105,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
                 batch,
                 fee,
             } => {
+                let original = signal.clone();
                 let signal = signal.retain_custody(Arc::new(Custody {
                     _work: work,
                     _end: end,
@@ -86,7 +113,11 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
                 }));
                 Ok(Some(NativeTextFounderMemberPublication {
                     submission,
-                    receipt: NativeTextFounderMemberPublicationReceipt { batch, row },
+                    receipt: NativeTextFounderMemberPublicationReceipt {
+                        batch,
+                        row,
+                        original,
+                    },
                     signal,
                 }))
             }
@@ -103,9 +134,16 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
         if !self.row.same_original(&receipt.row) {
             return Err(V2MemberSaveRefusal::Stale);
         }
+        let scope = caller.clone().with_authority(Arc::new(CheckpointScope {
+            original: receipt.original,
+            caller: caller.clone(),
+        }));
+        if scope.is_cancelled() {
+            return Err(V2MemberSaveRefusal::Cancelled);
+        }
         match self
             .finish()?
-            .run_founder_member_debt(FounderDebtOperation::Checkpoint(receipt.batch), caller)?
+            .run_founder_member_debt(FounderDebtOperation::Checkpoint(receipt.batch), &scope)?
         {
             FounderDebtOutcome::Checkpointed(front) => Ok(front),
             _ => Err(V2MemberSaveRefusal::Failed),

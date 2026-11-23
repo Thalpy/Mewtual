@@ -150,6 +150,12 @@ async fn cold_native_founder_reuses_the_covered_source_and_listener() {
         genesis
     );
     let head = only_named(dir.path(), "text.seed").with_file_name("head.bin");
+    let fence = head.with_file_name("text.wal.stage.v1");
+    std::fs::write(&fence, b"interrupted Add fence").unwrap();
+    assert!(recovered.prove_promoted_genesis(&caller).is_err());
+    assert_eq!(std::fs::read(&fence).unwrap(), b"interrupted Add fence");
+    std::fs::remove_file(&fence).unwrap();
+    assert_eq!(recovered.prove_promoted_genesis(&caller).unwrap(), genesis);
     let original_head = head.with_extension("held-before-original-genesis-check");
     std::fs::rename(&head, &original_head).unwrap();
     std::fs::copy(&original_head, &head).unwrap();
@@ -1751,6 +1757,9 @@ async fn mounted_join_fixture(recover_stage: bool) {
             }
         }).await.expect("the recovered founder served only the original exact delivery");
         drop(requests);
+        let (member_topic, _, _topic_payment) =
+            original.prepare_member_subscription(42, &fresh).unwrap();
+        probe.subscribe(member_topic).await.unwrap();
         let expected = original.registration_data().0;
         let authorized = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let (vault, sources, recovered_row, authentication) = original
@@ -1812,6 +1821,48 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 .unwrap(),
             V2MemberSaveOutcome::Saved { .. },
         ));
+        let (stop_publication, publication_signal) = tokio::sync::watch::channel(false);
+        let publication_scope = RequestCancellation::new(publication_signal, None);
+        let receipt = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let original = capture()
+                    .prepare_founder_member_publication(publication_scope.clone())
+                    .unwrap()
+                    .expect("the new founder message remains in its original outbox");
+                match original.submit().await {
+                    Ok(Some(receipt)) => break receipt,
+                    Err(catcoms_sync::SyncError::Publication(
+                        catcoms_rt::PublishOnceError::NoPeers,
+                    )) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    }
+                    _ => panic!("expected the recovered founder's original driver acknowledgement"),
+                }
+            }
+        })
+        .await
+        .expect("the original recovered actor submitted to its subscribed peer");
+        stop_publication.send_replace(true);
+        assert_eq!(
+            capture().checkpoint_founder_member_publication(receipt, &fresh),
+            Err(V2MemberSaveRefusal::Cancelled),
+        );
+        let retry = capture()
+            .prepare_founder_member_publication(fresh.clone())
+            .unwrap()
+            .expect("a cancelled acknowledgement leaves the same debt pending");
+        let receipt = tokio::time::timeout(std::time::Duration::from_secs(10), retry.submit())
+            .await
+            .unwrap()
+            .unwrap()
+            .expect("the original actor acknowledged a fresh publication");
+        assert!(capture()
+            .checkpoint_founder_member_publication(receipt, &fresh)
+            .is_ok());
+        assert!(capture()
+            .prepare_founder_member_publication(fresh.clone())
+            .unwrap()
+            .is_none());
         recovered_row.close_original_cached();
         assert!(capture().finish().is_err());
         let mut retirement = sources.prepare_retirement().unwrap();
