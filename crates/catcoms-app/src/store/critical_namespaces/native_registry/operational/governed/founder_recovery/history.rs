@@ -43,8 +43,7 @@ impl NativeTextColdFounderSource {
             .admission_data()
             .admission_id();
         let receipt = self
-            .storage
-            .index
+            .work
             .with_recovered_founder_store(&self.selection, original, |store| {
                 let mount = store.member_outbox_mount()?;
                 let key = member_outbox_key(store)?;
@@ -83,26 +82,24 @@ impl NativeTextColdFounderSource {
     ) -> Result<Option<NativeTextJoinedArchivedActions>, AppError> {
         self.restore_first_add(caller)?;
         let scope = self.history_scope(channel)?;
-        let result = self.storage.index.with_recovered_founder_store(
-            &self.selection,
-            &self.source,
-            |store| {
-                if !store.has_mounted_shared_history()? {
-                    return Ok(None);
-                }
-                store
-                    .shared_history_action_page(
-                        scope,
-                        SharedHistoryActionQuery {
-                            target: None,
-                            after,
-                            limit,
-                        },
-                    )
-                    .map(NativeTextJoinedArchivedActions)
-                    .map(Some)
-            },
-        )?;
+        let result =
+            self.work
+                .with_recovered_founder_store(&self.selection, &self.source, |store| {
+                    if !store.has_mounted_shared_history()? {
+                        return Ok(None);
+                    }
+                    store
+                        .shared_history_action_page(
+                            scope,
+                            SharedHistoryActionQuery {
+                                target: None,
+                                after,
+                                limit,
+                            },
+                        )
+                        .map(NativeTextJoinedArchivedActions)
+                        .map(Some)
+                })?;
         self.restore_first_add(caller)?;
         Ok(result)
     }
@@ -119,69 +116,67 @@ impl NativeTextColdFounderSource {
         let (verifier, group_view) = self.governed.as_ref().ok_or_else(refused)?.member_parts()?;
         let sdk = self.sdk.as_ref().ok_or_else(refused)?;
         let original = &self.source;
-        let result = self.storage.index.with_recovered_founder_store(
-            &self.selection,
-            &self.source,
-            |store| {
-                if !store.has_mounted_shared_history()? {
-                    return Ok(None);
-                }
-                let pool = &store
-                    .archive_bootstrap_policy
-                    .as_ref()
-                    .ok_or_else(refused)?
-                    .pending
-                    .pool;
-                let fee = pool.try_reserve(LEDGER_FEE)?;
-                let (_, observation) =
-                    sdk.prepare_member_topic(verifier, channel, store.chat_mount.observer())?;
-                let signal = observation.constrain(caller.clone());
-                let realm = Realm::new(&scope.group, channel).map_err(|_| refused())?;
-                let mut ledger = ChatLedger::new(
-                    realm,
-                    LedgerLimits {
-                        max_actions: ACTION_LIMIT,
-                        max_action_bytes: ACTION_BYTES,
-                    },
-                )
-                .map_err(|_| refused())?;
-                let mut view = ledger
-                    .begin_projection_view_in(group_view)
+        let result =
+            self.work
+                .with_recovered_founder_store(&self.selection, &self.source, |store| {
+                    if !store.has_mounted_shared_history()? {
+                        return Ok(None);
+                    }
+                    let pool = &store
+                        .archive_bootstrap_policy
+                        .as_ref()
+                        .ok_or_else(refused)?
+                        .pending
+                        .pool;
+                    let fee = pool.try_reserve(LEDGER_FEE)?;
+                    let (_, observation) =
+                        sdk.prepare_member_topic(verifier, channel, store.chat_mount.observer())?;
+                    let signal = observation.constrain(caller.clone());
+                    let realm = Realm::new(&scope.group, channel).map_err(|_| refused())?;
+                    let mut ledger = ChatLedger::new(
+                        realm,
+                        LedgerLimits {
+                            max_actions: ACTION_LIMIT,
+                            max_action_bytes: ACTION_BYTES,
+                        },
+                    )
                     .map_err(|_| refused())?;
-                if !view.try_ready() {
-                    return Err(refused());
-                }
-                let original = SharedHistoryReplay {
-                    store,
-                    scope,
-                    verifier,
-                    caller: &signal,
-                }
-                .replay_message(&mut ledger, &view, create, |id| {
-                    saved_dependency(store, self.outbox_context(), original, scope, id, rng)
-                })
-                .map_err(|_| refused())?;
-                let Some(observation) = original else {
-                    return Ok(None);
-                };
-                let projection_fee = pool.try_reserve(2 * MAX_ACTION_BYTES + 32 * 1024)?;
-                let projection = ledger
-                    .guarded_projection(create, WORK_LIMIT)
+                    let mut view = ledger
+                        .begin_projection_view_in(group_view)
+                        .map_err(|_| refused())?;
+                    if !view.try_ready() {
+                        return Err(refused());
+                    }
+                    let original = SharedHistoryReplay {
+                        store,
+                        scope,
+                        verifier,
+                        caller: &signal,
+                    }
+                    .replay_message(&mut ledger, &view, create, |id| {
+                        saved_dependency(store, self.outbox_context(), original, scope, id, rng)
+                    })
                     .map_err(|_| refused())?;
-                Ok(Some(NativeTextJoinedMemberProjection::from_archive(
-                    projection,
-                    signal,
-                    projection_fee,
-                    Box::new(SharedHistoryProjectionLease {
-                        observation,
-                        _view: view,
-                        _ledger: ledger,
-                        _invocation: None,
-                        _fee: fee,
-                    }),
-                )))
-            },
-        )?;
+                    let Some(observation) = original else {
+                        return Ok(None);
+                    };
+                    let projection_fee = pool.try_reserve(2 * MAX_ACTION_BYTES + 32 * 1024)?;
+                    let projection = ledger
+                        .guarded_projection(create, WORK_LIMIT)
+                        .map_err(|_| refused())?;
+                    Ok(Some(NativeTextJoinedMemberProjection::from_archive(
+                        projection,
+                        signal,
+                        projection_fee,
+                        Box::new(SharedHistoryProjectionLease {
+                            observation,
+                            _view: view,
+                            _ledger: ledger,
+                            _invocation: None,
+                            _fee: fee,
+                        }),
+                    )))
+                })?;
         self.restore_first_add(caller)?;
         Ok(result)
     }

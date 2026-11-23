@@ -1,4 +1,5 @@
 //! The exact founder row, bootstrap source and reserved actor before SDK restore.
+use super::super::upgrade_source::owning::{SourceWork, Store};
 use super::*;
 use crate::store::critical_namespaces::native_registry::lifecycle::network::ColdFounderSelection;
 use crate::store::persistence::v2_text::HeldColdFounderAdd;
@@ -60,7 +61,10 @@ pub struct NativeTextColdFounderSource {
     source: RetainedBootstrapSourceData,
     selection: ColdFounderSelection,
     local: (PeerId, u16),
-    storage: NativeTextJoinedStorage,
+    // All recovered operations recheck the same original physical mount.
+    // The affine index stays here to close admission when this owner retires.
+    work: SourceWork,
+    _index: Store,
 }
 
 impl NativeTextJoinedStorage {
@@ -71,18 +75,24 @@ impl NativeTextJoinedStorage {
             return Err((self, refused()));
         }
         match self.index.recovered_founder_input() {
-            Ok(Some((selection, source, local))) => Ok(NativeTextColdFounderSource {
-                ingress: None,
-                received: None,
-                actor: None,
-                tcp: None,
-                sdk: None,
-                governed: None,
-                source,
-                selection,
-                local,
-                storage: self,
-            }),
+            Ok(Some((selection, source, local))) => {
+                let Some(work) = self.index.capture_source_work() else {
+                    return Err((self, refused()));
+                };
+                Ok(NativeTextColdFounderSource {
+                    ingress: None,
+                    received: None,
+                    actor: None,
+                    tcp: None,
+                    sdk: None,
+                    governed: None,
+                    source,
+                    selection,
+                    local,
+                    work,
+                    _index: self.index,
+                })
+            }
             Ok(None) => Err((self, refused())),
             Err(error) => Err((self, error)),
         }
@@ -107,7 +117,7 @@ impl NativeTextColdFounderSource {
         if negative.is_cancelled() {
             return Err(refused());
         }
-        let selected = self.storage.index.restore_recovered_founder_add(
+        let selected = self.work.restore_recovered_founder_add(
             &self.selection,
             &self.source,
             &mut self.governed,
@@ -122,22 +132,22 @@ impl NativeTextColdFounderSource {
     /// Acquire the exact reserved TCP actor in the authenticated original
     /// vault. Binding never contacts a remote endpoint or admits the MLS SDK.
     pub fn bind_original_tcp(&mut self, negative: &RequestCancellation) -> Result<(), AppError> {
-        let index = &self.storage.index;
+        let work = &self.work;
         let require_original = || {
             if negative.is_cancelled() {
                 return Err(refused());
             }
-            index.require_recovered_founder_source(&self.selection, &self.source)
+            work.require_recovered_founder_source(&self.selection, &self.source)
         };
         require_original()?;
         if self.actor.is_none() {
             if self.tcp.is_none() {
-                let (_, fee) = index.joined_exchange_resources(32 * 1024)?;
+                let (_, fee) = work.recovered_founder_resources(32 * 1024)?;
                 self.tcp = Some(Arc::new(super::super::join_tcp::Transport::paid(fee)));
             }
             self.actor = Some(self.tcp.as_ref().ok_or_else(refused)?.checkout(
                 self.local,
-                || index.prepare_recovered_native_founder_tcp(&self.selection, &self.source),
+                || work.prepare_recovered_native_founder_tcp(&self.selection, &self.source),
                 require_original,
             )?);
         }

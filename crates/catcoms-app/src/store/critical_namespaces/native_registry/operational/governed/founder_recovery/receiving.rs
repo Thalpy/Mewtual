@@ -88,7 +88,7 @@ impl NativeTextColdFounderSource {
         self.restore_first_add(&caller)?;
         let mesh = self.actor.as_ref().ok_or_else(refused)?.borrow()?;
         let ingress = mesh.native_chat_member_ingress().ok_or_else(refused)?;
-        let (mount, fee) = self.storage.index.joined_exchange_resources(INGRESS_FEE)?;
+        let (mount, fee) = self.work.recovered_founder_resources(INGRESS_FEE)?;
         let (verifier, _) = self.governed.as_ref().ok_or_else(refused)?.member_parts()?;
         let sdk = self.sdk.as_ref().ok_or_else(refused)?;
         let (topic, observation) = sdk.prepare_member_topic(verifier, channel, mount.clone())?;
@@ -131,7 +131,7 @@ impl NativeTextColdFounderSource {
         let scope = self.history_scope(receiver.channel)?;
         let (verifier, group) = self.governed.as_ref().ok_or_else(refused)?.member_parts()?;
         let sdk = self.sdk.as_ref().ok_or_else(refused)?;
-        let (mount, _payment) = self.storage.index.joined_exchange_resources(FRAME_FEE)?;
+        let (mount, _payment) = self.work.recovered_founder_resources(FRAME_FEE)?;
         let (topic, _, wire) = frame.current_data().ok_or_else(refused)?;
         let original = sdk.open_member_envelope(verifier, receiver.channel, topic, wire, mount)?;
         if self
@@ -143,9 +143,8 @@ impl NativeTextColdFounderSource {
         }
         if self.received.is_none() {
             let (_, fee) = self
-                .storage
-                .index
-                .joined_exchange_resources(FOUNDER_RECEIVE_LEDGER_FEE)?;
+                .work
+                .recovered_founder_resources(FOUNDER_RECEIVE_LEDGER_FEE)?;
             let realm = Realm::new(&scope.group, receiver.channel).map_err(|_| refused())?;
             let mut ledger = ChatLedger::new(
                 realm,
@@ -170,7 +169,7 @@ impl NativeTextColdFounderSource {
         }
         let selection = &self.selection;
         let source = &self.source;
-        let index = &self.storage.index;
+        let work = &self.work;
         let ledger = self
             .received
             .as_mut()
@@ -180,9 +179,9 @@ impl NativeTextColdFounderSource {
             if receiver.signal.is_cancelled() || frame.current_data().is_none() {
                 return Err(refused());
             }
-            index.require_recovered_founder_source(selection, source)
+            work.require_recovered_founder_source(selection, source)
         };
-        let retained = index.with_recovered_founder_store(selection, source, |store| {
+        let retained = work.with_recovered_founder_store(selection, source, |store| {
             project_founder_member(
                 &original,
                 verifier,
@@ -202,8 +201,7 @@ impl NativeTextColdFounderSource {
         self.restore_first_add(&receiver.signal)?;
         let governed = self.governed.as_mut().ok_or_else(refused)?;
         let archived = self
-            .storage
-            .index
+            .work
             .with_recovered_founder_store(&self.selection, &self.source, |store| {
                 archive_founder_member(store, scope, &original, rng, || {
                     if receiver.signal.is_cancelled() || frame.current_data().is_none() {
@@ -241,9 +239,8 @@ impl NativeTextColdFounderSource {
             return Ok(None);
         };
         let (_, fee) = self
-            .storage
-            .index
-            .joined_exchange_resources(2 * MAX_ACTION_BYTES + 32 * 1024)?;
+            .work
+            .recovered_founder_resources(2 * MAX_ACTION_BYTES + 32 * 1024)?;
         let projection = received
             .ledger
             .guarded_projection(create, FOUNDER_RECEIVE_WORK)

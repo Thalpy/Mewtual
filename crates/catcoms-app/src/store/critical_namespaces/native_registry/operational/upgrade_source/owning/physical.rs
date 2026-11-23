@@ -794,6 +794,54 @@ impl Physical {
 }
 
 impl SourceWork {
+    pub(in crate::store::critical_namespaces::native_registry) fn recovered_founder_resources(
+        &self,
+        bytes: usize,
+    ) -> Result<(catcoms_rt::RequestCancellation, CatalogReadReservation), AppError> {
+        self.physical.joined_exchange_resources(bytes)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn prepare_recovered_native_founder_tcp(
+        &self,
+        original: &ColdFounderSelection,
+        source: &crate::store::RetainedBootstrapSourceData,
+    ) -> Result<(Zeroizing<[u8; 32]>, catcoms_net::NativeTcpPreparation), AppError> {
+        self.physical
+            .prepare_recovered_native_founder_tcp(original, source)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn require_recovered_founder_source(
+        &self,
+        original: &ColdFounderSelection,
+        source: &crate::store::RetainedBootstrapSourceData,
+    ) -> Result<(), AppError> {
+        self.physical
+            .require_recovered_founder_source(original, source)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn restore_recovered_founder_add(
+        &self,
+        original: &ColdFounderSelection,
+        source: &crate::store::RetainedBootstrapSourceData,
+        captured: &mut Option<Box<crate::store::persistence::v2_text::HeldColdFounderAdd>>,
+        sdk: &mut Option<catcoms_sync::owner_v2::PreparedV2FounderRecoveredAdd>,
+    ) -> Result<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64), AppError> {
+        self.physical
+            .restore_recovered_founder_add(original, source, captured, sdk)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn with_recovered_founder_store<
+        T,
+    >(
+        &self,
+        original: &ColdFounderSelection,
+        source: &crate::store::RetainedBootstrapSourceData,
+        read: impl FnOnce(&ServerStore) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        self.physical
+            .with_recovered_founder_store(original, source, read)
+    }
+
     /// Configuration is negative only, but an incompatible DATA-only mount
     /// must refuse BEFORE retaining an authoring entry or generating any key.
     pub(in crate::store::critical_namespaces::native_registry) fn require_native_founder_configuration(

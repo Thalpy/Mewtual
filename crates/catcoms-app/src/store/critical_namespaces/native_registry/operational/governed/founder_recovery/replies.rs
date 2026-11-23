@@ -54,7 +54,7 @@ impl NativeTextColdFounderSource {
         self.restore_first_add(&caller)?;
         let mesh = self.actor.as_ref().ok_or_else(refused)?.borrow()?;
         let ingress = mesh.native_chat_join_ingress().ok_or_else(refused)?;
-        let (mount, fee) = self.storage.index.joined_exchange_resources(4096)?;
+        let (mount, fee) = self.work.recovered_founder_resources(4096)?;
         let (owner, lifetime) = watch::channel(());
         let scope = Arc::new(IngressScope {
             lifetime,
@@ -95,9 +95,8 @@ impl NativeTextColdFounderSource {
             .with_authority(request.responder.cancellation_authority());
         self.restore_first_add(&caller)?;
         let (_, fee) = self
-            .storage
-            .index
-            .joined_exchange_resources(4 * CHAT_V2_JOIN_RESPONSE_MAX_BYTES + 4096)?;
+            .work
+            .recovered_founder_resources(4 * CHAT_V2_JOIN_RESPONSE_MAX_BYTES + 4096)?;
         let original = self.governed.as_ref().ok_or_else(refused)?;
         let delivery = original.encode_join_delivery(&self.source)?;
         if delivery.len() > CHAT_V2_JOIN_RESPONSE_MAX_BYTES || caller.is_cancelled() {

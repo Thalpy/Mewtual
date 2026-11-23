@@ -55,7 +55,7 @@ impl NativeTextColdFounderSource {
         bytes: &[u8],
     ) -> Result<catcoms_replication::chat::ActionId, AppError> {
         let (verifier, _) = self.governed.as_ref().ok_or_else(refused)?.member_parts()?;
-        let (mount, _fee) = self.storage.index.joined_exchange_resources(SEND_FEE)?;
+        let (mount, _fee) = self.work.recovered_founder_resources(SEND_FEE)?;
         let opened = self
             .sdk
             .as_ref()
@@ -80,46 +80,45 @@ impl NativeTextColdFounderSource {
             .genesis_public_data()
             .admission_data()
             .admission_id();
-        let (mount_scope, payment) = self.storage.index.joined_exchange_resources(SEND_FEE)?;
-        let result =
-            self.storage
-                .index
-                .with_recovered_founder_store(original, &self.source, |store| {
-                    let mount = store.member_outbox_mount()?;
-                    let key = member_outbox_key(store)?;
-                    let Some(batch) = mount
-                        .read_publication_debt(store, self.outbox_context()?, &key, founder, rng)
-                        .map_err(|_| refused())?
-                    else {
-                        return Ok(None);
-                    };
-                    let item = &batch.items()[0];
-                    if item.class() != MemberDebtClass::Publishable
-                        || item.admission() != founder
-                        || caller.is_cancelled()
-                    {
-                        return Err(refused());
-                    }
-                    let submission = sdk.prepare_member_submission(
-                        verifier,
-                        mesh,
-                        item.action().spec().realm.channel(),
-                        item.original_bytes(),
-                        mount_scope,
-                        rng,
-                    )?;
-                    if !submission.is_current_cached() {
-                        return Err(refused());
-                    }
-                    Ok(Some(NativeTextColdFounderPublication {
-                        submission,
-                        batch,
-                        original: original.network.clone(),
-                        signal: caller
-                            .clone()
-                            .retain_custody(Arc::new(JoinFramePayment { _fee: payment })),
-                    }))
-                })?;
+        let (mount_scope, payment) = self.work.recovered_founder_resources(SEND_FEE)?;
+        let result = self
+            .work
+            .with_recovered_founder_store(original, &self.source, |store| {
+                let mount = store.member_outbox_mount()?;
+                let key = member_outbox_key(store)?;
+                let Some(batch) = mount
+                    .read_publication_debt(store, self.outbox_context()?, &key, founder, rng)
+                    .map_err(|_| refused())?
+                else {
+                    return Ok(None);
+                };
+                let item = &batch.items()[0];
+                if item.class() != MemberDebtClass::Publishable
+                    || item.admission() != founder
+                    || caller.is_cancelled()
+                {
+                    return Err(refused());
+                }
+                let submission = sdk.prepare_member_submission(
+                    verifier,
+                    mesh,
+                    item.action().spec().realm.channel(),
+                    item.original_bytes(),
+                    mount_scope,
+                    rng,
+                )?;
+                if !submission.is_current_cached() {
+                    return Err(refused());
+                }
+                Ok(Some(NativeTextColdFounderPublication {
+                    submission,
+                    batch,
+                    original: original.network.clone(),
+                    signal: caller
+                        .clone()
+                        .retain_custody(Arc::new(JoinFramePayment { _fee: payment })),
+                }))
+            })?;
         self.restore_first_add(&caller)?;
         Ok(result)
     }
@@ -135,8 +134,7 @@ impl NativeTextColdFounderSource {
             return Err(refused());
         }
         self.restore_first_add(caller)?;
-        self.storage
-            .index
+        self.work
             .with_recovered_founder_store(&self.selection, &self.source, |store| {
                 if caller.is_cancelled() || receipt.signal.is_cancelled() {
                     return Err(refused());
