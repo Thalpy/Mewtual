@@ -11732,7 +11732,7 @@
   async function updateInviteFor(
     server: number,
     mintFresh = false,
-    expectedContext?: string,
+    expectedContext: string | undefined = undefined,
   ): Promise<string | undefined> {
     const generation = (inviteRefreshGeneration.get(server) ?? 0) + 1;
     inviteRefreshGeneration.set(server, generation);

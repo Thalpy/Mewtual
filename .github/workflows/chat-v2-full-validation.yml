@@ -161,7 +161,16 @@ jobs:
         run: npm --prefix apps/desktop run check
       # Native builds consume real frontend assets; build them on both operating systems.
       - name: Build frontend assets
-        run: npm --prefix apps/desktop run build
+        id: frontend_build
+        shell: bash
+        run: |
+          mkdir -p logs/chat-v2-frontend
+          npm --prefix apps/desktop run build 2>&1 | tee logs/chat-v2-frontend/build.log
+      - uses: actions/upload-artifact@v4
+        if: failure() && steps.frontend_build.conclusion == 'failure'
+        with:
+          name: chat-v2-frontend-build-${{ matrix.os }}
+          path: logs/chat-v2-frontend/build.log
       - name: Check original native IPC and delayed-reply custody regressions
         if: inputs.scope == 'all' || inputs.scope == 'native' || inputs.scope == 'native-focused'
         run: >-
