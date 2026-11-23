@@ -174,7 +174,7 @@ impl TextCurrentAddAdmission {
                 >(),
             )?
             .checked_add(crate::group::text_current_add::installation_metadata_layout_bytes()?)?
-            .checked_add(crate::group::text_current_add::completed_result_metadata_layout_bytes()?)
+            .checked_add(crate::group::text_current_add::completed_result_metadata_layout_bytes()?)?
             .checked_add(crate::group::text_current_add::received_add_metadata_layout_bytes())?
             .checked_add(crate::group::text_current_add::remove_metadata_layout_bytes())
     }
