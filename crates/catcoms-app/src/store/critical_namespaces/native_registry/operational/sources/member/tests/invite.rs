@@ -9,6 +9,20 @@ use crate::store::critical_namespaces::{
 };
 use crate::store::NativeTextInviteRecovery;
 
+#[derive(Debug)]
+struct DependencyTestScope(RequestCancellation);
+
+#[async_trait::async_trait]
+impl catcoms_rt::RequestAuthority for DependencyTestScope {
+    fn authorized(&self) -> bool {
+        !self.0.is_cancelled()
+    }
+
+    async fn revoked(&self) {
+        self.0.clone().cancelled().await;
+    }
+}
+
 fn find_named(root: &std::path::Path, name: &str) -> Vec<std::path::PathBuf> {
     fn visit(root: &std::path::Path, name: &str, depth: u8, result: &mut Vec<std::path::PathBuf>) {
         assert!(depth < 12, "bounded isolated fixture tree");
@@ -1563,9 +1577,11 @@ async fn mounted_join_fixture(recover_stage: bool) {
         .unwrap();
     cancel_contact.send_replace(true);
     assert!(reconnect.connect(&scheduler).await.is_err());
-    selection.close_original_cached();
-    assert!(!selection.is_current_cached());
-    assert!(recovered_row().select_registered(&fresh).is_err());
+    let close_joined = || {
+        selection.close_original_cached();
+        assert!(!selection.is_current_cached());
+        assert!(recovered_row().select_registered(&fresh).is_err());
+    };
     {
         drop(receive);
         drop(serve);
@@ -1659,6 +1675,58 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 None
             );
             original.bind_original_tcp(&fresh).unwrap();
+            recovered_row()
+                .prepare_reconnect(&selection, &invite, token, host, fresh.clone())
+                .unwrap()
+                .connect(&scheduler)
+                .await
+                .unwrap();
+            let lane = original.runtime_dependency_lane().unwrap();
+            let mut requests = lane
+                .try_attach(Arc::new(DependencyTestScope(fresh.clone())))
+                .unwrap();
+            let exchange = recovered_row()
+                .prepare_dependency_exchange(
+                    &selection,
+                    channel,
+                    invite.connected_peer_data(),
+                    action,
+                    fresh.clone(),
+                    &mut history_rng,
+                )
+                .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                let serve = async {
+                    let incoming = requests
+                        .next()
+                        .await
+                        .expect("the reopened founder has the original connected request");
+                    let reply = original
+                        .prepare_dependency_reply(channel, &incoming, &fresh, &mut founder_rng)
+                        .unwrap();
+                    incoming
+                        .respond(
+                            reply.wire,
+                            Arc::new(DependencyTestScope(
+                                reply.observation.constrain(fresh.clone()),
+                            )),
+                            Arc::new(()),
+                        )
+                        .unwrap();
+                    reply.fee
+                };
+                let (response, payment) = tokio::join!(exchange.receive(), serve);
+                let exact = recovered_row()
+                    .open_dependency_response(&selection, response.unwrap(), &fresh)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(exact.action_id_data(), action);
+                drop(payment);
+            })
+            .await
+            .expect("the authentic recovered founder can answer the reopened joined member");
+            drop(requests);
+            close_joined();
             let (cancelled, signal) = tokio::sync::watch::channel(false);
             let pending = original
                 .prepare_member_publication(
@@ -1912,6 +1980,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 .is_err());
             return;
         }
+        close_joined();
         original.bind_original_tcp(&fresh).unwrap();
         let mut requests = original
             .open_recovered_join_requests(fresh.clone())
