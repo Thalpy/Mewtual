@@ -221,6 +221,47 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
         joiner.finish_governing_welcome(response, &prefix).unwrap() as *const _,
         original
     );
+
+    assert!(joined.selected_member_topic_data(joined_prefix, 42).is_ok());
+    let mut sibling_body = admission.spec().clone();
+    let AdmissionOrigin::Add {
+        commit: different, ..
+    } = &mut sibling_body.origin
+    else {
+        panic!("the founder prepared an Add");
+    };
+    different[0] ^= 1;
+    let sibling_body = AdmissionBody::new(sibling_body).unwrap();
+    let sibling = replay.prepare_admission_data(&sibling_body).unwrap();
+    let signed_sibling =
+        SignedOwnerHeader::sign_using(sibling.header_spec_data().clone(), |bytes| {
+            node.node
+                .seed
+                .body
+                .device
+                .sign_retained_ed25519_bounded(
+                    &anchor.founder,
+                    bytes,
+                    catcoms_replication::chat::owner_header::MAX_HEADER_BYTES,
+                )
+                .map_err(|_| catcoms_replication::chat::ChatError::Dependency)
+        })
+        .unwrap();
+    assert!(joined
+        .prepare_member_add_commit(
+            joined_prefix,
+            V2AdmissionStepData {
+                admission: &sibling_body,
+                header: &signed_sibling,
+                image: sibling.image_data(),
+            },
+            &[]
+        )
+        .is_err());
+    assert!(joined
+        .selected_member_topic_data(joined_prefix, 42)
+        .is_err());
+    assert_eq!(joined.selected_join_data().unwrap(), previously_selected);
 }
 
 async fn complete_original_welcome(native_joiner: bool) {

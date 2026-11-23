@@ -152,6 +152,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
     ) -> Result<V2GeneralCandidate, SyncError> {
         use catcoms_replication::chat::join_bindings::MAX_JOIN_PAYLOAD_BYTES;
         self.member_prefix(prefix)?;
+        // Verify and record the signed successor before inspecting the Commit.
+        // A broken body cannot suppress authentic contradictory owner evidence.
+        prefix.observe_member_successor_header(step.header)?;
         let AdmissionOrigin::Add {
             commit: expected,
             before_epoch,

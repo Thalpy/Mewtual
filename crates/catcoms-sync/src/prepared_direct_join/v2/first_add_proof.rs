@@ -290,6 +290,16 @@ impl PreparedV2JoinedPrefix {
             .map_err(|_| SyncError::JoinRejected)
     }
 
+    pub(super) fn observe_member_successor_header(
+        &mut self,
+        header: &SignedOwnerHeader,
+    ) -> Result<(), SyncError> {
+        self.selected_member_verifier()?;
+        self.verifier
+            .observe_current_header(header)
+            .map_err(|_| SyncError::JoinRejected)
+    }
+
     /// Use the same selected Core verifier and original own Admission to plan
     /// an ordinary action. The Join candidate must already have been selected.
     pub fn prepare_member_plan(

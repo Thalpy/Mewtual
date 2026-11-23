@@ -330,6 +330,8 @@ state. A gap, reorder, or different final Admission refuses before MLS entry.
 The existing joined node can check a later Add against its own selected
 Core prefix, the signed commit digest and the exact MLS group and epoch. Its
 prepared successor leaves the installed member at the original epoch.
+The original Core verifier records a valid signed successor before it checks
+the Commit bytes, so an incomplete delivery still surfaces a signed fork.
 Native storage and transport still need to produce and cover the later Add
 and advance the existing members to the new epoch.
 
