@@ -2845,8 +2845,17 @@ async fn native_governed_add_fixture(case: JoinCase) {
             exact.governing_proof_bytes_data().as_ptr(),
             next_join.governing_proof_bytes_data().as_ptr()
         );
+        drop(client);
         let mut close = owner.prepare_retirement().unwrap();
-        close.try_retire().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            while close.try_retire().unwrap()
+                == crate::store::NativeTextSourceRetirementStatus::Pending
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the original founder drained before reopening the later Add");
         assert_eq!(saved.packet_bytes_data(), retry.packet_bytes_data());
         drop((close, owner, row, vault));
         let mut cold = NativeTextJoinedStorage::open_for_native_startup(
