@@ -2793,6 +2793,32 @@ async fn native_governed_add_fixture(case: JoinCase) {
         std::fs::remove_file(&head).unwrap();
         std::fs::rename(&parked_head, &head).unwrap();
         let next_wire = next_request.request_bytes_data().to_vec();
+        assert_eq!(
+            prepare(&owner, &row, &vault, &budget).prepare_member_save(request(), &negative),
+            Ok(V2MemberSaveOutcome::Ready),
+        );
+        let pending = owner
+            .capture_member(
+                &row,
+                command(&vault, &budget),
+                owner.policy.prepare_member().unwrap(),
+            )
+            .finish_admission([0xe8; 32])
+            .unwrap();
+        let commit = Arc::new(tokio::sync::Mutex::new(()));
+        let (custody, _) = super::admission::custody(&commit, &negative).await;
+        assert_eq!(
+            pending.try_admit(custody).unwrap().run(),
+            crate::store::MemberSaveJobReport::SavedLocal
+        );
+        assert!(
+            accept(&next_wire).is_err(),
+            "the earlier member save still owes reconciliation"
+        );
+        assert!(matches!(
+            prepare(&owner, &row, &vault, &budget).prepare_member_save(request(), &negative),
+            Ok(V2MemberSaveOutcome::Saved { .. })
+        ));
         let next_join = accept(&next_wire).unwrap_or_else(|error| {
             let stages: Vec<_> = std::fs::read_dir(head.parent().unwrap())
                 .unwrap()
@@ -2818,24 +2844,6 @@ async fn native_governed_add_fixture(case: JoinCase) {
         assert_eq!(
             exact.governing_proof_bytes_data().as_ptr(),
             next_join.governing_proof_bytes_data().as_ptr()
-        );
-        assert_eq!(
-            prepare(&owner, &row, &vault, &budget).prepare_member_save(request(), &negative),
-            Ok(V2MemberSaveOutcome::Ready),
-        );
-        let pending = owner
-            .capture_member(
-                &row,
-                command(&vault, &budget),
-                owner.policy.prepare_member().unwrap(),
-            )
-            .finish_admission([0xe8; 32])
-            .unwrap();
-        let commit = Arc::new(tokio::sync::Mutex::new(()));
-        let (custody, _) = super::admission::custody(&commit, &negative).await;
-        assert_eq!(
-            pending.try_admit(custody).unwrap().run(),
-            crate::store::MemberSaveJobReport::SavedLocal
         );
         let mut close = owner.prepare_retirement().unwrap();
         close.try_retire().unwrap();
