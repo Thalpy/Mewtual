@@ -41,6 +41,18 @@ pub struct PreparedTextCurrentRemove {
     admission: TextCurrentAddAdmission,
 }
 
+#[must_use = "retain the exclusive Remove preflight until the final host admission"]
+pub struct PreparedTextCurrentRemoveInstallation<'a> {
+    slot: &'a mut Option<PreparedTextCurrentRemove>,
+    device: &'a mut MlsDevice,
+    group: &'a mut ServerGroup,
+}
+
+#[must_use = "drop the displaced Remove custody outside host writers"]
+pub struct RetiredTextCurrentRemove {
+    _original: PreparedTextCurrentRemove,
+}
+
 impl std::fmt::Debug for PreparedTextCurrentRemove {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PreparedTextCurrentRemove")
@@ -230,10 +242,64 @@ impl PreparedTextCurrentRemove {
             target: &self.target,
         })
     }
+
+    /// Exclusively borrow the still-selected original pair and closed result.
+    /// The host separately proves its selected Core step and covering save.
+    pub fn prepare_install_into<'a>(
+        slot: &'a mut Option<Self>,
+        device: &'a mut MlsDevice,
+        group: &'a mut ServerGroup,
+    ) -> Result<PreparedTextCurrentRemoveInstallation<'a>, MlsError> {
+        let candidate = slot.as_ref().ok_or_else(bad)?;
+        candidate.original.require_same(device, group)?;
+        let complete = candidate.complete.as_ref().ok_or_else(bad)?;
+        let graph = &candidate.graph;
+        let paid = candidate.admission.lease();
+        if !graph
+            .device
+            .sdk_graph_lease
+            .as_ref()
+            .is_some_and(|p| Arc::ptr_eq(p, &paid))
+            || !graph
+                .group
+                .sdk_graph_lease
+                .as_ref()
+                .is_some_and(|p| Arc::ptr_eq(p, &paid))
+            || graph.group.group_id_ref() != candidate.original.group
+            || !graph.group.is_active()
+            || graph.device.public_key_ref() != candidate.original.author
+            || graph.group.group.own_leaf_index().u32() != candidate.original.own
+            || !graph.group.has_local_signer(&candidate.original.author)
+            || (graph.group.epoch(), graph.group.epoch_authenticator_id()) != complete.fingerprint
+        {
+            return Err(bad());
+        }
+        Ok(PreparedTextCurrentRemoveInstallation {
+            slot,
+            device,
+            group,
+        })
+    }
+}
+
+impl PreparedTextCurrentRemoveInstallation<'_> {
+    pub fn cancel(self) {}
+
+    pub fn install(self) -> RetiredTextCurrentRemove {
+        let mut original = self.slot.take().expect("exclusive completed Remove");
+        std::mem::swap(self.device, &mut original.graph.device);
+        std::mem::swap(self.group, &mut original.graph.group);
+        RetiredTextCurrentRemove {
+            _original: original,
+        }
+    }
 }
 
 pub(crate) const fn metadata_layout_bytes() -> usize {
     4 * (std::mem::size_of::<PreparedTextCurrentRemove>()
         + std::mem::size_of::<Result<PreparedTextCurrentRemove, MlsError>>()
-        + std::mem::size_of::<CompletedTextCurrentRemoveData<'static>>())
+        + std::mem::size_of::<CompletedTextCurrentRemoveData<'static>>()
+        + std::mem::size_of::<PreparedTextCurrentRemoveInstallation<'static>>()
+        + std::mem::size_of::<Result<PreparedTextCurrentRemoveInstallation<'static>, MlsError>>()
+        + std::mem::size_of::<RetiredTextCurrentRemove>())
 }

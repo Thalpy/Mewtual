@@ -30,7 +30,10 @@ pub use receive::{
     TextCurrentReceivedAddData, TextCurrentReceivedRemoveData, MAX_TEXT_RECEIVED_ADD_COMMIT_BYTES,
 };
 pub(crate) use remove::metadata_layout_bytes as remove_metadata_layout_bytes;
-pub use remove::{CompletedTextCurrentRemoveData, PreparedTextCurrentRemove};
+pub use remove::{
+    CompletedTextCurrentRemoveData, PreparedTextCurrentRemove,
+    PreparedTextCurrentRemoveInstallation, RetiredTextCurrentRemove,
+};
 pub(crate) use result::metadata_layout_bytes as completed_result_metadata_layout_bytes;
 pub use result::{
     CompletedTextCurrentAddData, TextCurrentAddParentView, TextCurrentAddRequestView,

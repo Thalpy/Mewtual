@@ -274,6 +274,9 @@ jobs:
       - name: Check a genuine one-member Remove on a closed surviving MLS graph
         if: github.event_name == 'pull_request' || inputs.scope == 'remove-sdk'
         run: python .github/scripts/check-chat-v2-invite-intent.py remove-sdk
+      - name: Check distinct governing key cuts and source drain
+        if: github.event_name == 'pull_request' || inputs.scope == 'remove-sdk'
+        run: python .github/scripts/check-chat-v2-invite-intent.py governing-key-cuts
       - name: Check joined pin, declaration seed, and original file custody
         if: inputs.scope == 'joined-storage'
         run: python .github/scripts/check-chat-v2-invite-intent.py joined-pin

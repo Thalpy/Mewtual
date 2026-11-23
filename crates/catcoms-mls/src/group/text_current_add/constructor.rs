@@ -1,5 +1,5 @@
-//! Constructor/fork tests only. No private Add SDK dispatch, Current, Source,
-//! governance or publication role is supplied by these resource-only fixtures.
+//! Closed candidate constructor, dispatch and ownership tests. These fixtures
+//! establish SDK behavior independently of Root and native source authority.
 use super::*;
 use crate::config::CIPHERSUITE;
 use crate::persist::text_current_add::{TextCurrentAddLimits, TextCurrentAddReservation};
@@ -45,9 +45,9 @@ fn private_text_remove_stages_only_the_exact_surviving_membership() {
     let epoch = joined.epoch();
     let founder_bytes =
         crate::persist::snapshot_server_bounded(&founder, &group, RAW, RAW).unwrap();
-    let (founder, group, _) = parent(&founder_bytes);
+    let (mut founder, mut group, founder_payment) = parent(&founder_bytes);
     let target_key = target.public_key_bytes().try_into().unwrap();
-    let (payment, _, _) = admission(TextCurrentAddLimits::governed_text_v2());
+    let (payment, removal_payment, _) = admission(TextCurrentAddLimits::governed_text_v2());
     let mut removal =
         PreparedTextCurrentRemove::prepare(&founder, &group, target_key, payment).unwrap();
     assert!(removal.completed_data().is_none());
@@ -109,19 +109,38 @@ fn private_text_remove_stages_only_the_exact_surviving_membership() {
     assert_eq!(joined.epoch(), epoch + 1);
     assert!(joined.member_device_ids().contains(&other.device_id()));
     assert!(!joined.member_device_ids().contains(&target.device_id()));
-    let (selected_founder, selected_group, _) = parent(removed.secret_snapshot_data());
     let selected_routing = Zeroizing::new(joined.routing_metadata_secret(&survivor).unwrap());
-    assert!(
-        selected_routing.as_slice()
-            == selected_group
-                .routing_metadata_secret(&selected_founder)
-                .unwrap()
-    );
+    let expected = removed.selected_epoch_data();
+    let mut removal = Some(removal);
+    assert!(PreparedTextCurrentRemove::prepare_install_into(
+        &mut removal,
+        &mut survivor,
+        &mut joined
+    )
+    .is_err());
+    PreparedTextCurrentRemove::prepare_install_into(&mut removal, &mut founder, &mut group)
+        .unwrap()
+        .cancel();
+    assert_eq!(group.epoch(), epoch);
+    assert!(removal.is_some());
+    let retired_founder =
+        PreparedTextCurrentRemove::prepare_install_into(&mut removal, &mut founder, &mut group)
+            .unwrap()
+            .install();
+    assert!(removal.is_none());
+    assert_eq!((group.epoch(), group.epoch_authenticator_id()), expected);
+    assert!(selected_routing.as_slice() == group.routing_metadata_secret(&founder).unwrap());
     assert!(selected_routing.as_slice() != before_routing.as_slice());
     assert_ne!(old_payment.load(Ordering::SeqCst), 0);
     drop((retired, joined, survivor));
     assert_eq!(old_payment.load(Ordering::SeqCst), 0);
     assert_eq!(retained.load(Ordering::SeqCst), 0);
+    assert_ne!(founder_payment.load(Ordering::SeqCst), 0);
+    drop(retired_founder);
+    assert_eq!(founder_payment.load(Ordering::SeqCst), 0);
+    assert_ne!(removal_payment.load(Ordering::SeqCst), 0);
+    drop((founder, group));
+    assert_eq!(removal_payment.load(Ordering::SeqCst), 0);
 }
 
 struct OldFee(Arc<AtomicUsize>);
