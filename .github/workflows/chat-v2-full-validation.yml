@@ -228,6 +228,7 @@ jobs:
               cases = membership + [
                   ('native-idle-reopen', 'native_text::tests::native_text_connected_join_cold_idle_unlock_requires_the_existing_vault', 1),
                   ('native-eviction-notice', 'native_text::tests::native_text_membership_selected_eviction_notifies_the_original_joined_row', 1),
+                  ('native-frame-capture', 'native_text::tests::native_text_founder_frame_capture_survives_transient_row_contention', 1),
               ]
           elif scope == 'native-join':
               cases.insert(0, ('native-join-dispatch', 'native_text_connected_join_', 5))

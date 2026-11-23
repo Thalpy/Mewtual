@@ -5,7 +5,7 @@ use catcoms_app::store::{
     NativeTextFounderDependencyExchange, NativeTextFounderFrameOutcome,
     NativeTextFounderMemberReceiver, NativeTextFounderReceived, NativeTextJoinedMemberLedger,
     NativeTextJoinedMemberReceiver, NativeTextJoinedReceivedOriginal, NativeTextJoinedRowSelection,
-    NativeTextJoinedSelectionPreparation, NativeUiInvocationMetadata,
+    NativeTextJoinedSelectionPreparation, NativeTextMemberPreparation, NativeUiInvocationMetadata,
 };
 use catcoms_net::{NativeChatMemberFrame, NativeChatMemberGossipEvent};
 use catcoms_replication::chat::{ActionId, ActionState, V2OrdinaryReceiveStatus};
@@ -15,6 +15,34 @@ use std::time::Duration;
 const REOPEN_DELAY: Duration = Duration::from_secs(1);
 const DEPENDENCY_TIMEOUT: Duration = Duration::from_secs(2);
 const DEPENDENCIES_PER_FRAME: usize = 4;
+const FOUNDER_CAPTURE_RETRY_DELAY: Duration = Duration::from_millis(25);
+const FOUNDER_CAPTURE_ATTEMPTS: usize = 8;
+
+pub(super) async fn capture_founder_frame(
+    state: &AppState,
+    source: &Source,
+) -> Option<(
+    tokio::sync::OwnedMutexGuard<()>,
+    NativeTextMemberPreparation<catcoms_net::MeshService, OsCryptoRng>,
+)> {
+    let mut scope = source.negative();
+    for attempt in 0..FOUNDER_CAPTURE_ATTEMPTS {
+        let permit = source.member_work().foreground(scope.clone()).await?;
+        if let Some(prepared) = source.capture(state).await {
+            return Some((permit, prepared));
+        }
+        drop(permit);
+        if attempt + 1 == FOUNDER_CAPTURE_ATTEMPTS {
+            break;
+        }
+        tokio::select! {
+            biased;
+            _ = scope.cancelled() => return None,
+            _ = tokio::time::sleep(FOUNDER_CAPTURE_RETRY_DELAY) => {}
+        }
+    }
+    None
+}
 
 pub(super) async fn run_founder<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
@@ -85,11 +113,11 @@ async fn receive_founder_frame(
     Option<ActionId>,
 )> {
     let local = source.member_work();
-    let scope = source.negative();
     let mut remaining = DEPENDENCIES_PER_FRAME;
     loop {
-        let permit = local.foreground(scope.clone()).await?;
-        let Some(preparation) = source.capture(state).await else {
+        // The caller still holds the exact frame and its receiver. A failed
+        // capture admits no App/SDK work and can retry after short contention.
+        let Some((permit, preparation)) = capture_founder_frame(state, source).await else {
             return Some((receiver, None));
         };
         let local = local.clone();
@@ -142,7 +170,6 @@ async fn recover_founder_chain(
     remaining: &mut usize,
 ) -> Option<(NativeTextFounderMemberReceiver<OsCryptoRng>, bool)> {
     let local = source.member_work();
-    let scope = source.negative();
     let mut next = Some(first);
     let mut waiting = Vec::with_capacity(*remaining);
     loop {
@@ -161,8 +188,7 @@ async fn recover_founder_chain(
         let Some(response) = waiting.pop() else {
             return Some((receiver, true));
         };
-        let permit = local.foreground(scope.clone()).await?;
-        let Some(preparation) = source.capture(state).await else {
+        let Some((permit, preparation)) = capture_founder_frame(state, source).await else {
             break;
         };
         let may_follow = *remaining > 0;

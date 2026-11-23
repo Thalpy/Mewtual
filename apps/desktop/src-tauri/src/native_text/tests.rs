@@ -1366,6 +1366,45 @@ async fn native_text_membership_dispatch_uses_the_original_founder_row() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_founder_frame_capture_survives_transient_row_contention() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, window, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &window, &queue).await;
+    let found = found_request(&window, 1, "Original receiver");
+    run(&queue).await;
+    let found = found_value(found.await.unwrap());
+    let state = app.state::<AppState>();
+    let generation = state.ui_session_generation.load(Ordering::SeqCst);
+    let table = state.servers.lock().await;
+    let row = table.native(&found["server"].as_u64().unwrap()).unwrap();
+    let source = connected::Source::for_row(
+        generation,
+        &state.native_text.ui_state.original_target().unwrap(),
+        row,
+        keep_session::current(&state, generation).unwrap(),
+        &mut Some(state.native_text.ui_budget.prepare().unwrap()),
+    )
+    .unwrap();
+
+    let mut capture = Box::pin(receiving::capture_founder_frame(&state, &source));
+    pending_once(capture.as_mut()).await;
+    drop(table);
+    let (permit, prepared) = timeout(Duration::from_secs(5), capture)
+        .await
+        .expect("capture retained the original receiver while the table was busy")
+        .unwrap();
+    let caller = source.negative();
+    let roster = tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        prepared.governed_roster(&caller)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(roster.members().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_text_membership_selected_eviction_notifies_the_original_joined_row() {
     use tauri::Listener;
 

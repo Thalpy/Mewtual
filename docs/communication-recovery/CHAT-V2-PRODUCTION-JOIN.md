@@ -523,12 +523,13 @@ vault also retains the request digest for verifying the original settings.
 After a cold reopen, a lost founding reply can be recovered through the
 original invocation and settings on that authenticated row. A conflicting
 retry cannot create a new group or start the original network again.
-A separate desktop view
-pages saved received messages on both desktop roles through the held history
+A separate desktop view pages saved received messages through the held history
 namespace. Each body replays the exact selected actions under the current
 Core guard. Joined dependency repair is bounded to the original authenticated
 carrier. The installed founder can recover its own saved direct dependencies
-and show its saved received messages after the live receiver retires. Cold
+and show its saved received messages after the live receiver retires. The
+desktop briefly retains an incoming founder frame or dependency reply while
+local capture is busy. Each retry rechecks the same mounted row. Cold
 founder startup restores ordinary member history and its original listener
 from a covered Add. If no governing Add has entered, startup authenticates the
 original promoted genesis and exposes its singleton roster and saved local
