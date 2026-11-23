@@ -2,7 +2,8 @@
 use super::sources::NativeTextSourceRetirementRefusal;
 use super::*;
 use catcoms_net::{
-    MeshService, NativeChatMemberDependencies, NativeChatMemberIngress, NativeTcpPreparation,
+    MeshConnectionDial, MeshService, NativeChatMemberDependencies, NativeChatMemberIngress,
+    NativeTcpPreparation,
 };
 use catcoms_rt::{MeshTransport, PeerId};
 use std::sync::Mutex;
@@ -19,6 +20,7 @@ struct Attempt {
     state: State,
     members: Option<NativeChatMemberIngress>,
     dependencies: Option<NativeChatMemberDependencies>,
+    dial: Option<MeshConnectionDial>,
     #[cfg(test)]
     peer_name: Option<String>,
 }
@@ -83,6 +85,7 @@ impl Transport {
                 state: State::Starting,
                 members: None,
                 dependencies: None,
+                dial: None,
                 #[cfg(test)]
                 peer_name: None,
             });
@@ -95,6 +98,7 @@ impl Transport {
                     }
                     attempt.members = service.native_chat_member_ingress();
                     attempt.dependencies = service.native_chat_member_dependencies();
+                    attempt.dial = Some(service.capture_connection_dial());
                     attempt.state = State::Idle(Box::new(service));
                 }
                 Ok(_) => return Err(refused()),
@@ -143,6 +147,16 @@ impl Transport {
             .as_ref()
             .filter(|attempt| matches!(attempt.state, State::Attached | State::Loaned))
             .and_then(|attempt| attempt.dependencies.clone())
+            .ok_or_else(refused)
+    }
+
+    pub(super) fn capture_attached_dial(&self) -> Result<MeshConnectionDial, AppError> {
+        self.attempt
+            .try_lock()
+            .map_err(|_| refused())?
+            .as_ref()
+            .filter(|attempt| matches!(attempt.state, State::Attached))
+            .and_then(|attempt| attempt.dial.clone())
             .ok_or_else(refused)
     }
 

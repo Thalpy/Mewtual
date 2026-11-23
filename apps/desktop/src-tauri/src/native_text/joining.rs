@@ -66,8 +66,8 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
         let state = app.state::<AppState>();
         let result = complete(&state, &invocation).await;
         match result {
-            Ok(selection) => {
-                if publish(&state, &invocation, selection, resolver).await {
+            Ok((selection, parked)) => {
+                if publish(&state, &invocation, selection.clone(), resolver).await {
                     connected::start_current(
                         &app,
                         &state,
@@ -75,6 +75,12 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
                         &invocation.target,
                     )
                     .await;
+                    if parked && selection.name_data() == invocation.name {
+                        let desktop = app.clone();
+                        drop(tauri::async_runtime::spawn(async move {
+                            reconnect(&desktop.state::<AppState>(), invocation, selection).await;
+                        }));
+                    }
                 }
             }
             Err(error) => resolver.reject(error),
@@ -198,7 +204,7 @@ async fn capture_active<T>(
 async fn complete(
     state: &AppState,
     invocation: &Arc<Invocation>,
-) -> Result<NativeTextJoinedRowSelection, String> {
+) -> Result<(NativeTextJoinedRowSelection, bool), String> {
     let prepared: SelectionPreparation = capture_active(state, invocation, |sources, command| {
         sources.capture_joined_selection(command)
     })
@@ -308,10 +314,57 @@ async fn complete(
     tauri::async_runtime::spawn_blocking(move || {
         prepared
             .select_registered(&original.account)
+            .map(|selection| (selection, parked))
             .map_err(|_| FAILED.to_owned())
     })
     .await
     .map_err(|_| FAILED)?
+}
+
+async fn reconnect(
+    state: &AppState,
+    invocation: Arc<Invocation>,
+    selection: NativeTextJoinedRowSelection,
+) -> Option<()> {
+    let (work, scope) = {
+        let table = state.servers.lock().await;
+        let row = table.native(&selection.id_data())?;
+        let data = row.data();
+        let original = server_table::NativeSelection::Joined(selection.clone());
+        if !row.matches(&original, data.instance, &invocation.target) {
+            return None;
+        }
+        (
+            data.member_work.clone(),
+            row.scope(invocation.account.clone())?,
+        )
+    };
+    let foreground = work.foreground(scope.clone()).await?;
+    let prepared = capture_active(state, &invocation, |sources, command| {
+        sources.capture_joined_selection(command)
+    })
+    .await
+    .ok()?;
+    let original = invocation.clone();
+    let attempt = tauri::async_runtime::spawn_blocking(move || {
+        let invite = original.invite().ok()?;
+        prepared
+            .prepare_reconnect(
+                &selection,
+                &invite,
+                Invocation::token(&invite),
+                original.host,
+                scope,
+            )
+            .ok()
+    })
+    .await
+    .ok()??;
+    drop(foreground);
+    attempt
+        .connect(&invocation.invite().ok()?, &state.endpoint_dials)
+        .await
+        .ok()
 }
 
 async fn publish<R: tauri::Runtime>(

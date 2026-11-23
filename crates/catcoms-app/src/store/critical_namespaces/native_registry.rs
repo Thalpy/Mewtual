@@ -24,6 +24,7 @@ pub(in crate::store) mod preparation;
 
 pub use lifecycle::joined::NativeTextJoinedRegistryRowData;
 pub use operational::NativeTextInvitePublication;
+pub use operational::NativeTextJoinedReconnect;
 pub use operational::NativeTextJoinedRequestPreparation;
 pub use operational::NativeTextJoinedRowSelection;
 pub use operational::NativeTextJoinedRuntime;

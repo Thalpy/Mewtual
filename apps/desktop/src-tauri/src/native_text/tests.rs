@@ -1610,13 +1610,6 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
         std::fs::read(joiner_path.join("chat-critical-namespaces.joined-pin.index")).unwrap(),
         saved_pins
     );
-    let close = register_vault_close(&state).await.unwrap();
-    sources::close_server_rows(&state, &SystemClock)
-        .await
-        .unwrap();
-    assert_joined_publication_stopped(recovered_publication).await;
-    drop(close);
-
     let founder_state = founder.state::<AppState>();
     let close = register_vault_close(&founder_state).await.unwrap();
     sources::close_server_rows(&founder_state, &SystemClock)
@@ -1679,6 +1672,68 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     let saved = found_value(send.await.unwrap());
     assert_eq!(saved["disposition"], "saved-local");
     assert_ne!(saved["message_id"], founder_action);
+
+    let reconnect = invite_command(
+        &window,
+        "join_server",
+        serde_json::json!({
+            "inviteHex":code, "approvedHost":"127.0.0.1", "displayName":"Member",
+            "serverName":"My joined group", "isDm":false, "allowSwitchboards":false,
+        }),
+    );
+    run(&queue).await;
+    assert_eq!(found_value(reconnect.await.unwrap()), original);
+    for (window, queue, row, action, expected) in [
+        (
+            &window,
+            &queue,
+            &original,
+            &saved["message_id"],
+            "Founder message after restart",
+        ),
+        (
+            &founder_window,
+            &founder_queue,
+            founder_row,
+            &fresh["message_id"],
+            "Message after restart",
+        ),
+    ] {
+        let received = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let probe = invite_command(
+                    window,
+                    "get_message_page",
+                    archive_request(row, serde_json::json!({"archivedAction":action})),
+                );
+                run(queue).await;
+                if let tauri::ipc::InvokeResponse::Ok(body) = probe.await.unwrap() {
+                    let value = body.deserialize::<serde_json::Value>().unwrap();
+                    if &value["item"]["action"] == action {
+                        break value;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!("the offline original was not received after reconnect: {expected}")
+        });
+        assert_eq!(received["item"]["text"], expected);
+    }
+    assert_eq!(
+        std::fs::read(joiner_path.join("chat-critical-namespaces.joined-pin.index")).unwrap(),
+        saved_pins,
+    );
+
+    let joined_state = reopened.state::<AppState>();
+    let close = register_vault_close(&joined_state).await.unwrap();
+    sources::close_server_rows(&joined_state, &SystemClock)
+        .await
+        .unwrap();
+    assert_joined_publication_stopped(recovered_publication).await;
+    drop(close);
     let close = register_vault_close(&state).await.unwrap();
     sources::close_server_rows(&state, &SystemClock)
         .await

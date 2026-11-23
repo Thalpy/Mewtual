@@ -51,6 +51,8 @@ pub use receive::{
     NativeTextJoinedMemberProjection, NativeTextJoinedMemberReceiver,
     NativeTextJoinedReceivedOriginal,
 };
+mod reconnect;
+pub use reconnect::NativeTextJoinedReconnect;
 
 #[derive(Default)]
 pub(super) struct PendingJoin {
@@ -360,7 +362,7 @@ impl NativeTextJoinedExchange {
         connect_approved_host(
             invite,
             approved_host,
-            self.tcp.borrow()?,
+            &self.tcp.borrow()?.capture_connection_dial(),
             scheduler,
             self.signal.clone(),
             self.mount.clone(),

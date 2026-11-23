@@ -25,7 +25,7 @@ pub use join::{
     NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberLedger,
     NativeTextJoinedMemberProjection, NativeTextJoinedMemberPublication,
     NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
-    NativeTextJoinedMemberSaveJob, NativeTextJoinedReceivedOriginal,
+    NativeTextJoinedMemberSaveJob, NativeTextJoinedReceivedOriginal, NativeTextJoinedReconnect,
     NativeTextJoinedRequestPreparation, NativeTextJoinedRowSelection,
     NativeTextJoinedSelectionPreparation,
 };

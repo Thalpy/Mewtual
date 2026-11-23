@@ -83,7 +83,7 @@ impl NativeTextJoinedStorage {
         connect_approved_host(
             invite,
             approved_host,
-            transport,
+            &transport.capture_connection_dial(),
             scheduler,
             caller.clone(),
             mount.clone(),
@@ -101,7 +101,7 @@ impl NativeTextJoinedStorage {
 pub(in super::super) async fn connect_approved_host(
     invite: &crate::store::NativeTextInvitePacketData<'_>,
     approved_host: IpAddr,
-    transport: &catcoms_net::MeshService,
+    transport: &catcoms_net::MeshConnectionDial,
     scheduler: &EndpointDialScheduler,
     mut caller: RequestCancellation,
     mut mount: RequestCancellation,

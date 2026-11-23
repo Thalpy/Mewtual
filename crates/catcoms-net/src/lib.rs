@@ -5856,6 +5856,78 @@ pub struct MeshService {
     registered_rx: Mutex<mpsc::UnboundedReceiver<Registered>>,
 }
 
+/// Bounded dial access to the original actor with no ownership of its
+/// transport or event receiver. The caller still supplies a revocable permit.
+#[derive(Clone, Debug)]
+pub struct MeshConnectionDial {
+    commands: mpsc::WeakSender<Command>,
+    snapshots: watch::Receiver<Vec<PeerConnectionSnapshot>>,
+    leases: std::sync::Weak<std::sync::Mutex<HashMap<PeerId, catcoms_rt::ConnectionLease>>>,
+}
+
+impl MeshConnectionDial {
+    pub fn connection_lease(&self, peer: PeerId) -> Option<catcoms_rt::ConnectionLease> {
+        let leases = self.leases.upgrade()?;
+        connection_leases::current(&leases, peer)
+    }
+
+    pub async fn dial_permit(
+        &self,
+        permit: catcoms_rt::BoxedDialPermit,
+    ) -> Result<catcoms_rt::DialSubmission, TransportError> {
+        let commands = self.commands.upgrade().ok_or(TransportError::Closed)?;
+        let response = queue_dial_permit(&commands, permit).await?;
+        drop(commands);
+        response.await.map_err(|_| TransportError::Closed)
+    }
+
+    pub async fn wait_for_peer_connected(
+        &self,
+        peer: PeerId,
+    ) -> Result<PeerConnectionSnapshot, TransportError> {
+        wait_for_connected(self.snapshots.clone(), std::slice::from_ref(&peer)).await
+    }
+}
+
+async fn queue_dial_permit(
+    commands: &mpsc::Sender<Command>,
+    permit: catcoms_rt::BoxedDialPermit,
+) -> Result<oneshot::Receiver<catcoms_rt::DialSubmission>, TransportError> {
+    let addr = permit
+        .address()
+        .parse::<Multiaddr>()
+        .map_err(|_| TransportError::InvalidDialBatch)?;
+    let (reply, response) = oneshot::channel();
+    commands
+        .send(Command::Dial {
+            addr,
+            permit: Some(permit),
+            reply: Some(reply),
+        })
+        .await
+        .map_err(|_| TransportError::Closed)?;
+    Ok(response)
+}
+
+async fn wait_for_connected(
+    mut snapshots: watch::Receiver<Vec<PeerConnectionSnapshot>>,
+    wanted: &[PeerId],
+) -> Result<PeerConnectionSnapshot, TransportError> {
+    loop {
+        let current = current_connection_snapshot(&mut snapshots)?;
+        if let Some(connected) = current
+            .into_iter()
+            .find(|entry| wanted.contains(&entry.peer))
+        {
+            return Ok(connected);
+        }
+        snapshots
+            .changed()
+            .await
+            .map_err(|_| TransportError::Closed)?;
+    }
+}
+
 // `Command` holds a oneshot sender; keep it out of `Debug`.
 impl std::fmt::Debug for Command {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -6082,20 +6154,7 @@ impl MeshService {
         &self,
         wanted: &[PeerId],
     ) -> Result<PeerConnectionSnapshot, TransportError> {
-        let mut snapshots = self.connection_snapshot_rx.clone();
-        loop {
-            let current = current_connection_snapshot(&mut snapshots)?;
-            let connected = current
-                .into_iter()
-                .find(|entry| wanted.contains(&entry.peer));
-            if let Some(connected) = connected {
-                return Ok(connected);
-            }
-            snapshots
-                .changed()
-                .await
-                .map_err(|_| TransportError::Closed)?;
-        }
+        wait_for_connected(self.connection_snapshot_rx.clone(), wanted).await
     }
 
     /// Convenience form of [`MeshService::wait_for_any_connected`] for one peer.
@@ -6264,20 +6323,18 @@ impl MeshService {
         &self,
         permit: catcoms_rt::BoxedDialPermit,
     ) -> Result<catcoms_rt::DialSubmission, TransportError> {
-        let addr = permit
-            .address()
-            .parse::<Multiaddr>()
-            .map_err(|_| TransportError::InvalidDialBatch)?;
-        let (reply, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(Command::Dial {
-                addr,
-                permit: Some(permit),
-                reply: Some(reply),
-            })
+        queue_dial_permit(&self.cmd_tx, permit)
+            .await?
             .await
-            .map_err(|_| TransportError::Closed)?;
-        rx.await.map_err(|_| TransportError::Closed)
+            .map_err(|_| TransportError::Closed)
+    }
+
+    pub fn capture_connection_dial(&self) -> MeshConnectionDial {
+        MeshConnectionDial {
+            commands: self.cmd_tx.downgrade(),
+            snapshots: self.connection_snapshot_rx.clone(),
+            leases: Arc::downgrade(&self.connection_leases),
+        }
     }
 
     /// Submit one bounded direct-route batch whose terminal identity must match `peer`.

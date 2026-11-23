@@ -1810,9 +1810,14 @@ impl MetadataWork {
         &self,
         bytes: usize,
     ) -> Result<CatalogReadReservation, AppError> {
-        self.physical
-            .joined_exchange_resources(bytes)
-            .map(|(_, fee)| fee)
+        self.joined_transport_resources(bytes).map(|(_, fee)| fee)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn joined_transport_resources(
+        &self,
+        bytes: usize,
+    ) -> Result<(catcoms_rt::RequestCancellation, CatalogReadReservation), AppError> {
+        self.physical.joined_exchange_resources(bytes)
     }
 
     /// Outside every guard, after original-pool validation. Capture the SAME

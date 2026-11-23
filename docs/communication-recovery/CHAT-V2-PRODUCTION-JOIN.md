@@ -317,6 +317,11 @@ using the signed TCP port and complete peer identity from the covered invite.
 One scheduler permit follows the exact dial into the transport, where stale
 caller, vault or invocation ownership refuses submission. The caller waits for
 the expected peer's authenticated handshake before exchanging the request.
+Pasting the exact original invitation again with an approved IP can also
+reconnect an already registered desktop row after restart. The selected row
+and stored invitation are checked again before using the existing joined TCP
+actor. The local row reply is independent of the dial outcome, and reconnect
+only establishes the transport handshake for the existing membership.
 An independently reopened Pending with neither Welcome file can resend the
 exact original request over the same connected protocol. It verifies the
 reply against that request and the original held files before covering Entry

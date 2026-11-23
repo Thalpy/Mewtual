@@ -108,7 +108,8 @@ pub use critical_namespaces::{
     NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberLedger,
     NativeTextJoinedMemberProjection, NativeTextJoinedMemberPublication,
     NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
-    NativeTextJoinedReceivedOriginal, NativeTextJoinedSelectionPreparation,
+    NativeTextJoinedReceivedOriginal, NativeTextJoinedReconnect,
+    NativeTextJoinedSelectionPreparation,
 };
 pub use critical_namespaces::{
     NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,

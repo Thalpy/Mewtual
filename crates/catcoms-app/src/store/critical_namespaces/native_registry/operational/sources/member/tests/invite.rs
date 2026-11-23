@@ -1372,6 +1372,22 @@ async fn mounted_join_fixture(recover_stage: bool) {
     }
     assert!(selection.is_from_original_vault_cached(&mounted_vault));
     assert!(selection.same_original(&recovered_row().select_registered(&fresh).unwrap()));
+    let host = std::net::Ipv4Addr::LOCALHOST.into();
+    assert!(recovered_row()
+        .prepare_reconnect(&selection, &invite, [62; 32], host, fresh.clone())
+        .is_err());
+    let (cancel_contact, contact_scope) = tokio::sync::watch::channel(false);
+    let reconnect = recovered_row()
+        .prepare_reconnect(
+            &selection,
+            &invite,
+            token,
+            host,
+            RequestCancellation::new(contact_scope, None),
+        )
+        .unwrap();
+    cancel_contact.send_replace(true);
+    assert!(reconnect.connect(&invite, &scheduler).await.is_err());
     selection.close_original_cached();
     assert!(!selection.is_current_cached());
     assert!(recovered_row().select_registered(&fresh).is_err());
