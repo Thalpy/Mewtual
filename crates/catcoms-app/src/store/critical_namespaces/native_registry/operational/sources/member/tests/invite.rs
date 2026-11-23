@@ -2918,6 +2918,14 @@ async fn native_governed_add_fixture(case: JoinCase) {
                 .id(),
             later_head
         );
+        assert_eq!(
+            recovered_member
+                .check_recovered_member_add_frame_for_test(
+                    &catcoms_sync::V2MemberAddFrameData::decode(&warm_frame).unwrap(),
+                )
+                .unwrap(),
+            (later_head, 2)
+        );
         drop(governing);
         drop(client);
         let mut close = owner.prepare_retirement().unwrap();

@@ -141,6 +141,20 @@ fn runtime_invoice<T: MeshTransport, R: CryptoRngCore>() -> usize {
 
 impl<T: MeshTransport, R: CryptoRngCore> NativeTextJoinedRuntime<T, R> {
     #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(in crate::store::critical_namespaces::native_registry) fn check_recovered_member_add_frame_for_test(
+        &self,
+        frame: &catcoms_sync::V2MemberAddFrameData<'_>,
+    ) -> Result<(OwnerHeaderId, u64), AppError> {
+        self.storage
+            .index
+            .actual_store_for_test()?
+            .check_recovered_member_add_frame_for_test(
+                self.node.as_ref().ok_or_else(refused)?,
+                frame,
+            )
+    }
+
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store::critical_namespaces::native_registry) fn recovered_member_add_request_for_test(
         &self,
     ) -> Result<catcoms_sync::V2MemberAddRequestData, AppError> {

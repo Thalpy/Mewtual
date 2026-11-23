@@ -23,6 +23,7 @@ mod request;
 mod resources;
 mod retain;
 mod retirement;
+mod sdk_admission;
 mod transaction;
 mod wal;
 mod workspace;
@@ -78,6 +79,7 @@ pub(in crate::store) use request::TextRequestDigestData;
 #[cfg(all(test, windows))]
 pub(in crate::store) use request::TextTokenKeyData;
 pub(in crate::store) use resources::V2TextReadResources;
+pub(in crate::store) use sdk_admission::prepare_sdk_admission;
 #[cfg(all(test, windows))]
 pub(in crate::store) use transaction::V2TextRetainTestCut;
 pub(in crate::store) use transaction::V2_TEXT_RETAIN_ROOT_PHASE_BYTES;

@@ -388,8 +388,10 @@ archive over the same native connection. Cold Core replay releases each
 predecessor's retired model before staging the next authenticated step.
 Earlier request records remain readable for exact Welcome retries. The
 desktop founder dispatcher serves the governing lane with bounded background
-work for both warm and recovered native rows. The mounted receiver still
-needs durable selection and a catch-up worker.
+work for both warm and recovered native rows. Joined Welcome recovery keeps
+the original signed proof and registration while releasing its retired Core
+model, so the existing member can stage the successor on that same verifier.
+The mounted receiver still needs durable selection and a catch-up worker.
 
 An independently reopened Pending with neither Welcome file can resend the
 exact original request over the same connected protocol. It verifies the

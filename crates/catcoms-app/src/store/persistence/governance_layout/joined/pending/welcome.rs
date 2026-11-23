@@ -9,8 +9,8 @@ use catcoms_replication::chat::owner_header::OwnerHeaderId;
 use catcoms_replication::chat::{
     cold_selected_history::{encode_selected_history_node_page, SelectedHistoryNodePage},
     owner_state::transition::REPLAY_MATH_PRIVATE_INVOICE,
-    ProjectionGroup, ProjectionGroupView, V2GeneralPrefixVerifier, V2GeneralRetiredData,
-    V2HostSelectionExpectation, V2ProjectionOrigin,
+    ProjectionGroup, ProjectionGroupView, V2GeneralPrefixVerifier, V2HostSelectionExpectation,
+    V2ProjectionOrigin,
 };
 use catcoms_sync::{
     PreparedV2JoinedPrefix, RecoveredV2JoinedOutcome, V2JoinDeliveryData, V2PendingJoinContextData,
@@ -52,7 +52,7 @@ impl WarmWelcome {
         let selected = self
             .selection
             .as_ref()
-            .filter(|selected| selected.retired.is_some())
+            .filter(|selected| selected.initial.is_some())
             .ok_or_else(denied)?;
         Ok((&selected.core, &selected._view))
     }
@@ -208,7 +208,7 @@ impl WarmWelcome {
         let selection = self
             .selection
             .as_ref()
-            .filter(|selected| selected.retired.is_some())
+            .filter(|selected| selected.initial.is_some())
             .ok_or_else(denied)?;
         pending.take_closed_warm_node(&selection.core, inputs)
     }
@@ -262,7 +262,7 @@ impl RecoveredMemberPrefix {
 struct JoinedCore {
     core: PreparedV2JoinedPrefix,
     expected: V2HostSelectionExpectation,
-    retired: Option<V2GeneralRetiredData>,
+    initial: Option<SelectedJoinData>,
     public_headers: (OwnerHeaderId, OwnerHeaderId),
     public_proof: Zeroizing<Vec<u8>>,
     _view: ProjectionGroupView,
@@ -306,7 +306,7 @@ impl JoinedCore {
         Ok(Self {
             core,
             expected,
-            retired: None,
+            initial: None,
             public_headers,
             public_proof,
             _view: view,
@@ -316,12 +316,25 @@ impl JoinedCore {
     }
 
     fn finish(&mut self) -> Result<(), AppError> {
-        if self.retired.is_none() {
-            self.retired = Some(
-                self.core
-                    .finish_host_selected(&self.expected)
-                    .map_err(|_| denied())?,
+        if self.initial.is_none() {
+            let retired = self
+                .core
+                .finish_host_selected(&self.expected)
+                .map_err(|_| denied())?;
+            let selected = self.core.selected_replay_data().ok_or_else(denied)?;
+            if self.public_headers != (retired.parent_data().header().id(), selected.header().id())
+            {
+                return Err(denied());
+            }
+            let initial = self.selection_data(
+                selected.header().id(),
+                *selected.header().spec().state.as_bytes(),
+                selected.mls_epoch_data(),
             );
+            // The durable Welcome already holds the original proof. The old
+            // model owns the candidate slot needed by the next governing step.
+            drop(retired);
+            self.initial = Some(initial);
         }
         Ok(())
     }
@@ -334,12 +347,7 @@ impl JoinedCore {
     }
 
     fn selected_data(&self) -> Option<SelectedJoinData> {
-        let replay = self.core.selected_replay_data()?;
-        Some(self.selection_data(
-            replay.header().id(),
-            *replay.header().spec().state.as_bytes(),
-            replay.mls_epoch_data(),
-        ))
+        self.initial
     }
 
     fn selection_data(
@@ -365,11 +373,9 @@ impl JoinedCore {
         headers: (OwnerHeaderId, OwnerHeaderId),
         output: &mut Vec<u8>,
     ) -> Result<(), AppError> {
-        let original = self.retired.as_ref().ok_or_else(denied)?;
-        let selected = self.core.selected_replay_data().ok_or_else(denied)?;
+        let original = self.initial.ok_or_else(denied)?;
         if self.public_headers != headers
-            || original.parent_data().header().id() != headers.0
-            || selected.header().id() != headers.1
+            || original.governing_add != headers.1
             || !output.is_empty()
             || output.capacity() < self.public_proof.len()
         {
@@ -453,7 +459,7 @@ impl RecoveredWelcome {
         let outcome = self
             .outcome
             .as_mut()
-            .filter(|outcome| outcome.selection.retired.is_some())
+            .filter(|outcome| outcome.selection.initial.is_some())
             .ok_or_else(denied)?;
         outcome
             .graph
@@ -491,9 +497,19 @@ impl RecoveredWelcome {
         let outcome = self
             .outcome
             .as_ref()
-            .filter(|outcome| outcome.selection.retired.is_some())
+            .filter(|outcome| outcome.selection.initial.is_some())
             .ok_or_else(denied)?;
         Ok(RecoveredMemberPrefix(outcome.selection.clone()))
+    }
+
+    #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(super) fn member_prefix_mut_for_test(
+        &mut self,
+    ) -> Result<&mut PreparedV2JoinedPrefix, AppError> {
+        let outcome = self.outcome.as_mut().ok_or_else(denied)?;
+        let selection = Arc::get_mut(&mut outcome.selection).ok_or_else(denied)?;
+        selection.initial.ok_or_else(denied)?;
+        Ok(&mut selection.core)
     }
 
     pub(super) fn outcome_data(

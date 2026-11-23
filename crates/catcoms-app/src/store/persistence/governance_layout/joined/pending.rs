@@ -259,6 +259,34 @@ std::thread_local! {
 
 impl ServerStore {
     #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(in crate::store) fn check_recovered_member_add_frame_for_test<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
+        &self,
+        node: &catcoms_sync::ClosedV2JoinedNode<T, R>,
+        frame: &catcoms_sync::V2MemberAddFrameData<'_>,
+    ) -> Result<(OwnerHeaderId, u64), AppError> {
+        let original = self.recovered_join_outcome_data()?.ok_or_else(denied)?;
+        let allowance = super::super::v2_text::prepare_sdk_admission(self)?;
+        let pending = {
+            let mut slot = self.joined_pin_index.try_lock().map_err(|_| denied())?;
+            let prefix = slot
+                .as_mut()
+                .and_then(|index| index.pending.as_mut())
+                .and_then(|pending| pending.welcome.as_mut())
+                .ok_or_else(denied)?
+                .member_prefix_mut_for_test()?;
+            node.prepare_member_add_frame(prefix, frame, allowance)?
+        };
+        let (head, _, epoch) = node.selected_join_data()?;
+        if (head, epoch) != original || self.recovered_join_outcome_data()? != Some(original) {
+            return Err(denied());
+        }
+        Ok((pending.header_data().id(), pending.selected_epoch_data().0))
+    }
+
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store) fn recovered_member_add_request_for_test<
         T: catcoms_rt::MeshTransport,
         R: catcoms_rt::CryptoRngCore,
