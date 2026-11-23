@@ -136,9 +136,11 @@ impl Source {
                 .await
                 .ok()?;
             let store = state.store.lock().await;
-            let table = state.servers.lock().await;
-            if !self.still_installed(state, &store, &table) {
-                return None;
+            {
+                let table = state.servers.try_lock().ok()?;
+                if !self.still_installed(state, &store, &table) {
+                    return None;
+                }
             }
             state
                 .native_text
@@ -261,6 +263,13 @@ async fn drain_joined_outbox<R: tauri::Runtime>(app: &tauri::AppHandle<R>, sourc
                 _ = scope.cancelled() => return,
                 _ = local.publication_wake.notified() => {},
                 _ = tokio::time::sleep(OUTBOX_RETRY - OUTBOX_COOLDOWN) => {},
+            }
+            // Give the renderer a chance to enqueue the history read it
+            // commonly follows a newly saved receipt with.
+            tokio::select! {
+                biased;
+                _ = scope.cancelled() => return,
+                _ = tokio::time::sleep(OUTBOX_COOLDOWN) => {},
             }
         }
         let state = app.state::<AppState>();

@@ -98,13 +98,13 @@ fn invoke(window: &tauri::WebviewWindow<MockRuntime>, generation: &str, secret: 
     );
     rx
 }
-async fn run(queue: &Queue) {
-    let task = queue
+#[track_caller]
+fn run(queue: &Queue) -> Task {
+    queue
         .lock()
         .unwrap()
         .pop()
-        .expect("actual router scheduled one task");
-    task.await;
+        .expect("actual router scheduled one task")
 }
 fn success(reply: tauri::ipc::InvokeResponse) {
     let body = match reply {

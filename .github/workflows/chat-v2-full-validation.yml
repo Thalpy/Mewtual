@@ -175,6 +175,8 @@ jobs:
       - name: Check native joined-vault reopen, desktop Join, and mode isolation
         if: github.event_name == 'workflow_dispatch' && inputs.scope == 'native-join'
         shell: bash
+        env:
+          RUST_BACKTRACE: '1'
         run: |
           python - <<'PY'
           from pathlib import Path
