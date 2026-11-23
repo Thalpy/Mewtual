@@ -214,7 +214,7 @@
   import { MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity } from "./ui-continuity";
   import type { NativeTextIntents } from "./native-text-intents";
   import { createNativeTextDriver } from "./native-text-driver";
-  import { decodeRestoredChatSession, type NativeTextServer } from "./native-text-session";
+  import { decodeNativeMembershipNotice, decodeRestoredChatSession, type NativeTextServer } from "./native-text-session";
   import { decodeNativeReceived, decodeNativeReceivedNotice, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, updateNativeReceived, type NativeOriginal, type NativeOwnMessage, type NativeReceived } from "./native-text-history";
   import NativeSavedChat from "./NativeSavedChat.svelte";
   import {
@@ -4543,6 +4543,7 @@
   let nativeContactHost = $state("");
   let nativeContactStatus = $state("");
   let nativeContactBusy = $state(false);
+  let nativeRemovedContexts = $state<Record<number, string>>({});
   async function refreshNativeMembers(server: number, generation: number, mount = chatLedgerMount) {
     if (cur?.backend !== "text-v2") return;
     const expectedContext = cur.context;
@@ -4601,6 +4602,18 @@
       nativeContactBusy = false;
     }
   }
+  function receiveNativeMembership(payload: unknown) {
+    const notice = decodeNativeMembershipNotice(payload);
+    if (!notice || locked || !uiStateReady || uiSessionRetired || windowCloseInFlight
+      || !servers.some(row => row.id === notice.server && row.backend === "text-v2" && row.context === notice.context)) return;
+    if (notice.removed) {
+      nativeRemovedContexts[notice.server] = notice.context;
+      return;
+    }
+    if (membersOpen && activeServerId === notice.server && !nativeSelectedRemoved) {
+      void refreshNativeMembers(notice.server, viewGeneration);
+    }
+  }
   $effect(() => {
     const server = activeServerId;
     const mount = chatLedgerMount;
@@ -4608,12 +4621,13 @@
     nativeContactInput = "";
     nativeContactHost = "";
     nativeContactStatus = "";
-    if (membersOpen && !locked && uiStateReady && cur?.backend === "text-v2" && server !== null) {
+    if (membersOpen && !locked && uiStateReady && cur?.backend === "text-v2" && server !== null && !nativeSelectedRemoved) {
       confirmNativeRemoval = "";
       untrack(() => { void refreshNativeMembers(server, viewGeneration, mount); });
     } else {
       nativeRosterRequest++;
       nativeRoster = null;
+      if (locked) nativeRemovedContexts = {};
     }
   });
   type StorageHealth = {
@@ -5702,6 +5716,7 @@
   let styleWarnings = $derived(nameStyleWarnings());
 
   let cur = $derived(servers.find((s) => s.id === activeServerId) ?? null);
+  let nativeSelectedRemoved = $derived(activeServerId !== null && cur?.backend === "text-v2" && nativeRemovedContexts[activeServerId] === cur.context);
   let myFp = $derived(roster.find((r) => r.you)?.fingerprint ?? "");
   // The full device identity, as the studio's native views name authors. A fingerprint is
   // display only and never compared against an author field.
@@ -7185,7 +7200,7 @@
     const selected = cur, server = activeServerId;
     if (server === null || selected?.backend !== "text-v2" || !selected.context || locked || !uiStateReady
       || uiSessionRetired || windowCloseInFlight || busy || sending || nativeHistoryLoading || nativeOwnLoading
-      || nativeRetryGeneration !== null || nativeOwnMessages[action]?.item?.revision !== revision) return;
+      || nativeSelectedRemoved || nativeRetryGeneration !== null || nativeOwnMessages[action]?.item?.revision !== revision) return;
     const session = uiStateLoadGeneration, view = viewGeneration, operation = ++pendingSendNonce;
     const target = { server, channel: selected.active, expectedContext: selected.context, messageId: action, expectedRevision: revision };
     const data = text === null ? { ...target, kind: "delete" as const } : { ...target, kind: "edit" as const, text };
@@ -7298,7 +7313,7 @@
     }
   }
   async function sendNativeText(text:string,server:number,channel:string):Promise<SendOutcome> {
-    const selected=cur;if(selected?.backend!=="text-v2" || !selected.context)return "refused";
+    const selected=cur;if(selected?.backend!=="text-v2" || !selected.context || nativeSelectedRemoved)return "refused";
     const session=uiStateLoadGeneration,context=selected.context,operation=++pendingSendNonce;
     const replyTo=replyingTo || null;
     const retireDraft=nativeDraftRetirement(server,channel,context,text,replyTo);
@@ -23262,6 +23277,7 @@
       });
     const subs: Promise<UnlistenFn>[] = [
       tauriListen<unknown>("chat-v2-received", ({ payload }) => void refreshNativeReceived(payload)),
+      tauriListen<unknown>("chat-v2-membership", ({ payload }) => receiveNativeMembership(payload)),
       appWindow.onResized(() => syncMaximized()),
       appWindow.onFocusChanged(({ payload }) => (windowFocused = payload)),
       appWindow.onCloseRequested(async (event) => {
@@ -28697,7 +28713,9 @@
             {/if}
           </nav>
         {/if}
-        {#if cur?.backend === "text-v2"}
+        {#if cur?.backend === "text-v2" && nativeSelectedRemoved}
+          <p class="muted" role="status">You were removed from this conversation.</p>
+        {:else if cur?.backend === "text-v2"}
           {@const archive = nativeArchive !== null && nativeArchive.server === activeServerId && nativeArchive.channel === cur.active && nativeArchive.context === cur.context ? nativeArchive : null}
           <button type="button" class="ghost small sb-members" aria-expanded={membersOpen} aria-controls="native-member-list" onclick={toggleMembers}>
             {membersOpen ? "Hide members" : "Show members"}
@@ -30562,7 +30580,7 @@
 
       <!-- Studio reserves this width for the drawing and its controls. The member-list
            preference is preserved for chat; call frame claims remain in Studio's Art tab. -->
-      {#if !dmHome && cur?.backend === "text-v2" && !cur.isDm && membersOpen}
+      {#if !dmHome && cur?.backend === "text-v2" && !cur.isDm && membersOpen && !nativeSelectedRemoved}
         {@const snapshot = nativeRoster?.server === activeServerId && nativeRoster.mount === chatLedgerMount ? nativeRoster : null}
         <aside id="native-member-list" class="members-col" aria-label="Members">
           <h3><span>Members{snapshot && !snapshot.loading && !snapshot.failure ? ` (${snapshot.members.length})` : ""}</span></h3>

@@ -243,6 +243,34 @@ impl Source {
                 .is_some_and(|row| row.matches(&self.selection, self.instance, &self.target))
     }
 
+    async fn notify_membership<R: tauri::Runtime>(
+        &self,
+        app: &tauri::AppHandle<R>,
+        state: &AppState,
+        removed: bool,
+    ) {
+        let Ok(_commit) = require_ui_session_generation(state, self.generation).await else {
+            return;
+        };
+        let store = state.store.lock().await;
+        let table = state.servers.lock().await;
+        if !self.still_installed(state, &store, &table) {
+            return;
+        }
+        let server = self.selection.id_data();
+        if let Some(row) = table.native(&server) {
+            let _ = app.emit_to(
+                "main",
+                "chat-v2-membership",
+                serde_json::json!({
+                    "server": server,
+                    "context": hex::encode(row.data().request),
+                    "removed": removed,
+                }),
+            );
+        }
+    }
+
     pub(super) async fn capture(&self, state: &AppState) -> Option<Preparation> {
         if self.scope.is_cancelled() {
             return None;
@@ -405,12 +433,18 @@ async fn catch_up_governing<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
             let _local = local;
             let result =
                 prepared.apply_governing_response(&row, &response, &caller, &mut OsCryptoRng);
-            (result, response)
+            (result, response, !row.is_current_cached())
         })
         .await;
         match result {
-            Ok((Ok(_), _)) => source.member_work.publication_wake.notify_one(),
-            Ok((Err(catcoms_app::store::V2MemberSaveRefusal::Busy), response)) => {
+            Ok((Ok(_), _, removed)) => {
+                source.notify_membership(app, &state, removed).await;
+                if removed {
+                    return;
+                }
+                source.member_work.publication_wake.notify_one();
+            }
+            Ok((Err(catcoms_app::store::V2MemberSaveRefusal::Busy), response, _)) => {
                 waiting = Some(response);
             }
             _ => {}

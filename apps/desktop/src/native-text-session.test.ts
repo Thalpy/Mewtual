@@ -1,7 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { decodeRestoredChatSession } from "./native-text-session.ts";
+import { decodeNativeMembershipNotice, decodeRestoredChatSession } from "./native-text-session.ts";
 const row = { backend: "text-v2", server: 1, context: "01".repeat(32), channel: "340282366920938463463374607431768211455", name: "Group", display_name: "Catte", is_dm: false };
+test("a native membership notice must name the original context and explicit outcome", () => {
+  const notice = { server: row.server, context: row.context, removed: true };
+  assert.deepEqual(decodeNativeMembershipNotice(notice), notice);
+  assert.deepEqual(decodeNativeMembershipNotice({ ...notice, removed: false }), { ...notice, removed: false });
+  for (const invalid of [null, { server: row.server, removed: true },
+    { ...notice, server: "1" }, { ...notice, server: 0 }, { ...notice, removed: "true" },
+    { ...notice, context: "00".repeat(32) }, { ...notice, context: "ab".repeat(16) },
+    { ...notice, channel: row.channel }]) {
+    assert.equal(decodeNativeMembershipNotice(invalid), null);
+  }
+});
 test("session backend survives zero rows and stays distinct from locked resume", () => {
   assert.deepEqual(decodeRestoredChatSession([]), { backend: "legacy", servers: [] });
   assert.deepEqual(decodeRestoredChatSession({ backend: "text-v2", servers: [] }), { backend: "text-v2", servers: [] });

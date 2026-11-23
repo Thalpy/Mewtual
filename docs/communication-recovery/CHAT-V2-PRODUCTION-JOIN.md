@@ -572,6 +572,7 @@ The joined vault covers that terminal cut on its original Welcome file
 chain. The record retains the original Commit digest and frozen history
 page. Recovery authenticates that cut before refusing to activate that same
 old registration, and live application retires the original row and SDK.
+The desktop reports removal on that original row and retires its composer.
 The warm founder covers the exact Remove intent and SDK entry before SDK
 work, then covers the original SDK outcome and Header attempt before signing.
 Add and Remove share the exact-file Head replacement under the original

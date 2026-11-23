@@ -136,7 +136,7 @@ jobs:
           node --experimental-strip-types --import ./scripts/test-dom.mjs
           --import ./scripts/test-svelte.mjs --test
           src/native-text-history.test.ts src/native-text-app.test.ts src/native-saved-chat.test.ts
-          src/native-text-driver.test.ts src/native-text-intents.test.ts
+          src/native-text-driver.test.ts src/native-text-intents.test.ts src/native-text-session.test.ts
       - name: Check frontend types
         if: runner.os == 'Linux' && inputs.scope != 'native-lock'
         run: npm --prefix apps/desktop run check

@@ -8,6 +8,7 @@ export type NativeTextServer = Readonly<{
 export type RestoredChatSession<Legacy> =
   | { backend: "legacy"; servers: Legacy[] }
   | { backend: "text-v2"; servers: NativeTextServer[] };
+export type NativeMembershipNotice = Readonly<{ server: number; context: string; removed: boolean }>;
 const fail = (): never => { throw new Error("The chat session could not be restored. Unlock again."); };
 const encoder = new TextEncoder();
 function object(value: unknown): Record<string, unknown> {
@@ -16,6 +17,16 @@ function object(value: unknown): Record<string, unknown> {
 }
 function fields(value: Record<string, unknown>, expected: string[]) {
   if (Object.keys(value).length !== expected.length || expected.some(key => !Object.hasOwn(value, key))) fail();
+}
+
+export function decodeNativeMembershipNotice(value: unknown): NativeMembershipNotice | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const notice = value as Record<string, unknown>;
+  if (Object.keys(notice).length !== 3 || typeof notice.server !== "number"
+    || !Number.isSafeInteger(notice.server) || notice.server <= 0
+    || typeof notice.context !== "string" || !/^[0-9a-f]{64}$/.test(notice.context)
+    || /^0+$/.test(notice.context) || typeof notice.removed !== "boolean") return null;
+  return { server: notice.server, context: notice.context, removed: notice.removed };
 }
 function label(value: unknown): string {
   if (typeof value !== "string" || !value.length || value.length > 256) return fail();
