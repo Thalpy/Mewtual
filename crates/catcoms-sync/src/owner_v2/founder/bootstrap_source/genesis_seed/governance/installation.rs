@@ -40,7 +40,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2FounderGovernanceNode<T, R> {
         if p.phase != Phase::Materialized
             || p.retired_sdk.is_some()
             || p.retired_core.is_some()
-            || self.member.is_some()
+            || self.member.is_some() != self.installed.is_some()
         {
             return Err(unavailable());
         }
@@ -123,6 +123,7 @@ impl PreparedV2FounderAddInstall<'_> {
         candidate: &V2GeneralCandidate,
     ) -> Result<(), SyncError> {
         self.negative.require_live_data()?;
+        self.original_founder(verifier)?;
         let selected =
             V2HostSelectionExpectation::from_trusted_host(self.after.header, self.after.state);
         verifier
@@ -138,9 +139,8 @@ impl PreparedV2FounderAddInstall<'_> {
         candidate: &mut Option<V2GeneralCandidate>,
     ) -> Result<(), SyncError> {
         self.negative.require_live_data()?;
-        let founder = verifier
-            .admission(self.founder)
-            .map_err(|_| unavailable())?;
+        let founder = self.original_founder(verifier)?;
+        let first_member = self.member.is_none().then_some(founder);
         let selected =
             V2HostSelectionExpectation::from_trusted_host(self.after.header, self.after.state);
         let retired = verifier
@@ -151,7 +151,26 @@ impl PreparedV2FounderAddInstall<'_> {
         *self.core_retired = Some(retired);
         *self.sdk_retired = Some(self.mls.install());
         *self.installed = Some(self.after);
-        *self.member = Some(founder);
+        if let Some(founder) = first_member {
+            *self.member = Some(founder);
+        }
         Ok(())
+    }
+
+    fn original_founder(
+        &self,
+        verifier: &V2GeneralPrefixVerifier,
+    ) -> Result<V2AuthenticatedAdmission, SyncError> {
+        let founder = verifier
+            .admission(self.founder)
+            .map_err(|_| unavailable())?;
+        if self
+            .member
+            .as_ref()
+            .is_some_and(|original| !original.same_original(&founder))
+        {
+            return Err(unavailable());
+        }
+        Ok(founder)
     }
 }

@@ -120,7 +120,7 @@ fn verify_later_governing_join_prefix(
 fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore>(
     node: &mut Node,
     first: &[u8],
-    replay: &catcoms_replication::chat::owner_state::transition::ReplayMath,
+    verifier: &mut catcoms_replication::chat::V2GeneralPrefixVerifier,
     now: u64,
     joined: &crate::ClosedV2JoinedNode<T, R>,
     joined_prefix: &mut crate::PreparedV2JoinedPrefix,
@@ -131,6 +131,7 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
         V2FirstJoinDeliveryData, V2GoverningJoinDeliveryData, V2GoverningJoinPrefixData,
         V2GoverningJoinStepData, V2JoinRequestPacketData, MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES,
     };
+    let replay = verifier.replay_data();
     let mut fixture = Request::new(node, 96);
     fixture.change_invite(node, |spec| spec.expires_at_ms = now + 60_000);
     let anchor = &fixture.invite.spec_data().anchor;
@@ -283,6 +284,49 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
         .selected_member_topic_data(joined_prefix, 42)
         .is_err());
     assert_eq!(joined.selected_join_data().unwrap(), previously_selected);
+
+    let previous = node.installed_add_data().unwrap();
+    let original_founder = node.member.as_ref().unwrap().clone();
+    let (_, old_transport) = node.prepare_member_subscription(verifier, 42).unwrap();
+    let expected_header = header.id();
+    let expected_authenticator = *result.after_authenticator_data();
+    let mut next = Some(
+        verifier
+            .derive_successor(
+                header,
+                ReplayBody::Admission(admission),
+                output.image_data(),
+            )
+            .unwrap(),
+    );
+    let (_, prepared) = node.prepare_install_data().unwrap();
+    assert!(prepared
+        .check_host_selection_data(
+            foreign_prefix.selected_member_verifier().unwrap(),
+            next.as_ref().unwrap()
+        )
+        .is_err());
+    assert!(prepared.finish_host_selected(verifier, &mut None).is_err());
+    assert_eq!(node.installed_add_data().unwrap(), previous);
+    let (_, prepared) = node.prepare_install_data().unwrap();
+    prepared
+        .check_host_selection_data(verifier, next.as_ref().unwrap())
+        .unwrap();
+    prepared.finish_host_selected(verifier, &mut next).unwrap();
+    assert!(next.is_none());
+    drop(node.take_retired_install_data().unwrap());
+    let installed = node.installed_add_data().unwrap();
+    assert_eq!(installed.epoch, 2);
+    assert_eq!(installed.header, expected_header);
+    assert_eq!(installed.authenticator, expected_authenticator);
+    assert!(node
+        .member
+        .as_ref()
+        .unwrap()
+        .same_original(&original_founder));
+    assert_eq!(verifier.replay_data().slots().len(), 3);
+    assert!(!old_transport.is_current_cached());
+    assert!(node.prepare_member_subscription(verifier, 42).is_ok());
 }
 
 async fn complete_original_welcome(native_joiner: bool) {
@@ -1176,7 +1220,7 @@ async fn complete_original_welcome(native_joiner: bool) {
         complete_second_governing_welcome(
             &mut node,
             &proof,
-            g.verifier.replay_data(),
+            &mut g.verifier,
             now,
             &joined_node,
             &mut warm_prefix,

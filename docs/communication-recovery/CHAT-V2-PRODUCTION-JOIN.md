@@ -334,6 +334,9 @@ Core prefix, the signed commit digest and the exact MLS group and epoch. Its
 prepared successor leaves the installed member at the original epoch.
 The original Core verifier records a valid signed successor before it checks
 the Commit bytes, so an incomplete delivery still surfaces a signed fork.
+The Sync founder can install the real later Add through its exact Core and
+MLS handoff, retaining its original Admission and closing the old transport
+observation. The host still owns the durable selection proof.
 Native storage and transport still need to produce and cover the later Add
 and advance the existing members to the new epoch.
 
