@@ -107,7 +107,13 @@ impl HeldColdFounderGenesis {
             .pool;
         let fee = pool.try_reserve(FEE)?;
         let lease = store._session.retain_for_physical_work();
-        let public = genesis_public(source);
+        let data = source.data().genesis_public_data();
+        let public = GenesisPublicData {
+            profile: data.profile_data(),
+            admission: data.admission_data(),
+            header: data.header_data(),
+            image: data.image_data(),
+        };
         let opened = OpenedColdFounderOrigin::capture(store, source, pin_id, &public)?;
         let (target, _, _) = source.original_target_data();
         require_add_not_entered(target)?;
@@ -272,16 +278,6 @@ impl OpenedColdFounderOrigin {
     }
 }
 
-fn genesis_public(source: &RetainedBootstrapSourceData) -> GenesisPublicData<'_> {
-    let data = source.data().genesis_public_data();
-    GenesisPublicData {
-        profile: data.profile_data(),
-        admission: data.admission_data(),
-        header: data.header_data(),
-        image: data.image_data(),
-    }
-}
-
 struct ColdFounderCore {
     verifier: V2GeneralPrefixVerifier,
     _retired: V2GeneralRetiredData,
@@ -365,7 +361,13 @@ impl HeldColdFounderAdd {
             .pool;
         let fee = pool.try_reserve(BYTES)?;
         let lease = store._session.retain_for_physical_work();
-        let public = genesis_public(source);
+        let data = source.data().genesis_public_data();
+        let public = GenesisPublicData {
+            profile: data.profile_data(),
+            admission: data.admission_data(),
+            header: data.header_data(),
+            image: data.image_data(),
+        };
         let opened = OpenedColdFounderOrigin::capture(store, source, pin_id, &public)?;
         let (retained, key, plain) = (opened.retained, opened.key, opened.plain);
         let promotion = parse_data(&plain)?;
