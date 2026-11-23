@@ -519,6 +519,7 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
         )
         .is_err()
     );
+    joiner.fund_warm_sdk_graph(payment()).unwrap();
     let candidate = joiner
         .finish_pinned_join_delivery(&wire, None, None)
         .unwrap();
