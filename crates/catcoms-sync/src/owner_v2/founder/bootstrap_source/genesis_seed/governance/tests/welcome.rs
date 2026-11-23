@@ -190,7 +190,7 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     assert_eq!(refused_payment.load(SeqCst), 0);
     let mut fixture = Request::new(node, 96);
     let issuer = Native::new();
-    let original = issuer.source.observe();
+    let invite_source = issuer.source.observe();
     let mut invite = None;
     let request = crate::owner_v2::V2FounderInviteRequestData {
         token: [96; 32],
@@ -201,12 +201,12 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
         .prepare_selected_invite_data(
             foreign_prefix.selected_member_verifier().unwrap(),
             request,
-            &original,
+            &invite_source,
             &mut invite
         )
         .is_err());
     assert!(invite.is_none());
-    node.prepare_selected_invite_data(verifier, request, &original, &mut invite)
+    node.prepare_selected_invite_data(verifier, request, &invite_source, &mut invite)
         .unwrap();
     assert!(node
         .prepare_selected_invite_data(
@@ -215,7 +215,7 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
                 token: [97; 32],
                 ..request
             },
-            &original,
+            &invite_source,
             &mut invite
         )
         .is_err());
@@ -232,7 +232,8 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     node.sign_selected_invite_native(verifier, invite, &mut cut, &mut ends)
         .unwrap();
     invite.materialize_data().unwrap();
-    fixture.invite = invite.signed_data().unwrap().clone();
+    fixture.invite =
+        SignedInviteBindingData::decode(&invite.signed_data().unwrap().encode()).unwrap();
     assert_ne!(fixture.invite.spec_data().nonce, used);
     assert_eq!(fixture.invite.spec_data().expires_at_ms, now + 60_000);
     let anchor = &fixture.invite.spec_data().anchor;
