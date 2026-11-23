@@ -1,4 +1,4 @@
-//! Native Create and reply: retain the exact original from signing through actual
+//! Native ordinary actions retain the exact original from signing through actual
 //! encrypted local IO. The local receipt precedes any joined outbox attempt.
 use super::*;
 use catcoms_app::store::{
@@ -55,8 +55,8 @@ struct Intent {
     channel: u128,
     token: [u8; 32],
     context: [u8; 32],
-    text: String,
-    reply_to: Option<ActionId>,
+    body: Body,
+    parent: Option<ActionId>,
 }
 struct Invocation {
     generation: u64,
@@ -69,23 +69,29 @@ struct Invocation {
     intent: Intent,
     payment: Arc<Payment>, // LAST through every blocking worker/result
 }
-fn parse(payload: &InvokeBody) -> Result<Intent, &'static str> {
+#[derive(Clone, Copy)]
+enum Kind {
+    Create,
+    Edit,
+    Delete,
+}
+
+fn parse(payload: &InvokeBody, kind: Kind) -> Result<Intent, &'static str> {
     let InvokeBody::Json(value) = payload else {
         return Err("Invalid message request.");
     };
     let object = value.as_object().ok_or("Invalid message request.")?;
-    if object.len() > 7
+    let specific: &[&str] = match kind {
+        Kind::Create => &["text", "replyTo"],
+        Kind::Edit => &["text", "messageId", "expectedRevision"],
+        Kind::Delete => &["messageId", "expectedRevision"],
+    };
+    if object.len() > 8
         || object.keys().any(|key| {
             !matches!(
                 key.as_str(),
-                "server"
-                    | "channel"
-                    | "text"
-                    | "replyTo"
-                    | "retryToken"
-                    | "expectedContext"
-                    | "trace"
-            )
+                "server" | "channel" | "retryToken" | "expectedContext" | "trace"
+            ) && !specific.contains(&key.as_str())
         })
     {
         return Err("Invalid message request.");
@@ -104,10 +110,13 @@ fn parse(payload: &InvokeBody) -> Result<Intent, &'static str> {
     let channel = field("channel", 39)?
         .parse()
         .map_err(|_| "Invalid channel.")?;
-    let text = field("text", TEXT_LIMIT)?;
-    if text.is_empty() {
-        return Err("Enter a message.");
-    }
+    let text = || {
+        let text = field("text", TEXT_LIMIT)?;
+        if text.is_empty() {
+            return Err("Enter a message.");
+        }
+        Ok(text.to_owned())
+    };
     let decode = |value: &str| {
         if value.len() != 64 {
             return Err("Keep the original message token and chat context.");
@@ -122,13 +131,10 @@ fn parse(payload: &InvokeBody) -> Result<Intent, &'static str> {
     };
     let token = decode(field("retryToken", 64)?)?;
     let context = decode(field("expectedContext", 64)?)?;
-    let reply_to = match object.get("replyTo") {
-        None | Some(serde_json::Value::Null) => None,
-        Some(serde_json::Value::String(value)) if value.is_empty() => None,
-        Some(serde_json::Value::String(value)) => Some(ActionId::from_bytes(
-            decode(value).map_err(|_| "Invalid reply target.")?,
-        )),
-        _ => return Err("Invalid reply target."),
+    let decode_action = |value: &str| {
+        decode(value)
+            .map(ActionId::from_bytes)
+            .map_err(|_| "Invalid message action.")
     };
     if object
         .get("trace")
@@ -136,17 +142,52 @@ fn parse(payload: &InvokeBody) -> Result<Intent, &'static str> {
     {
         return Err("Invalid message request.");
     }
+    let (body, parent) = match kind {
+        Kind::Create => {
+            let reply_to = match object.get("replyTo") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(value)) if value.is_empty() => None,
+                Some(serde_json::Value::String(value)) => Some(decode_action(value)?),
+                _ => return Err("Invalid reply target."),
+            };
+            (
+                Body::Create {
+                    text: text()?,
+                    reply_to,
+                },
+                reply_to,
+            )
+        }
+        Kind::Edit | Kind::Delete => {
+            let create = decode_action(field("messageId", 64)?)?;
+            let revision = decode_action(field("expectedRevision", 64)?)?;
+            let body = match kind {
+                Kind::Edit => Body::Edit {
+                    create,
+                    text: text()?,
+                },
+                _ => Body::Delete { create },
+            };
+            (body, Some(revision))
+        }
+    };
     Ok(Intent {
         server,
         channel,
         token,
         context,
-        text: text.to_owned(),
-        reply_to,
+        body,
+        parent,
     })
 }
 
 pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task)) -> bool {
+    let kind = match invoke.message.command() {
+        "send_message" => Kind::Create,
+        "edit_message" => Kind::Edit,
+        "delete_message" => Kind::Delete,
+        _ => return false,
+    };
     if invoke.acl.is_none()
         || invoke.message.webview_ref().label() != "main"
         || invoke.message.webview_ref().window().label() != "main"
@@ -180,7 +221,7 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
             _permit: permit,
             _credits: credits,
         });
-        let intent = parse(invoke.message.payload())?;
+        let intent = parse(invoke.message.payload(), kind)?;
         let account = keep_session::current(&state, generation).ok_or(STALE)?;
         let (selection, instance, scope, member_work) = {
             // BEFORE scheduling: delayed work cannot select a replacement row.
@@ -365,29 +406,25 @@ impl<T> Worker<T> {
 // Field order covers both an unrun queue item and unwind during real signing.
 struct PrepareWork<P> {
     preparation: P,
-    text: InputText,
+    input: ActionInput,
     scope: RequestCancellation,
     token: [u8; 32],
     channel: u128,
     _payment: Arc<Payment>,
 }
-struct InputText {
-    value: String,
-    reply_to: Option<ActionId>,
+struct ActionInput {
+    body: Body,
+    parent: Option<ActionId>,
     #[cfg(test)]
     _notice: Option<tests::PaymentNotice>,
 }
 impl PrepareWork<Preparation> {
     fn run(self) -> Result<V2MemberSaveOutcome, V2MemberSaveRefusal> {
-        let body = Body::Create {
-            text: self.text.value,
-            reply_to: self.text.reply_to,
-        };
         let request = V2MemberSignRequest {
             token: self.token,
             channel: self.channel,
-            body: &body,
-            parents: self.text.reply_to.as_slice(),
+            body: &self.input.body,
+            parents: self.input.parent.as_slice(),
             dependencies: &[],
         };
         match self.preparation {
@@ -409,9 +446,9 @@ async fn prepare(
     let preparation = capture(state, invocation).await?;
     let work = PrepareWork {
         preparation,
-        text: InputText {
-            value: invocation.intent.text.clone(),
-            reply_to: invocation.intent.reply_to,
+        input: ActionInput {
+            body: invocation.intent.body.clone(),
+            parent: invocation.intent.parent,
             #[cfg(test)]
             _notice: None,
         },
@@ -702,9 +739,12 @@ mod tests {
             let (_sender, signal) = watch::channel(false);
             let work = PrepareWork {
                 preparation: notice(),
-                text: InputText {
-                    value: "paid plaintext".into(),
-                    reply_to: None,
+                input: ActionInput {
+                    body: Body::Create {
+                        text: "paid plaintext".into(),
+                        reply_to: None,
+                    },
+                    parent: None,
                     _notice: Some(notice()),
                 },
                 scope: RequestCancellation::new(signal, None),
@@ -762,14 +802,16 @@ mod tests {
     fn native_text_send_parser_requires_exact_token_context_and_bounded_reply() {
         let base = serde_json::json!({"server":1,"channel":"7","text":"hello","replyTo":null,
             "retryToken":"01".repeat(32),"expectedContext":"02".repeat(32)});
-        let accepted = parse(&InvokeBody::Json(base.clone())).unwrap();
+        let accepted = parse(&InvokeBody::Json(base.clone()), Kind::Create).unwrap();
         assert_eq!(accepted.token, [1; 32]);
         assert_eq!(accepted.context, [2; 32]);
-        assert!(accepted.reply_to.is_none());
+        assert!(accepted.parent.is_none());
         let mut reply = base.clone();
         reply["replyTo"] = serde_json::json!("03".repeat(32));
         assert_eq!(
-            parse(&InvokeBody::Json(reply)).unwrap().reply_to,
+            parse(&InvokeBody::Json(reply), Kind::Create)
+                .unwrap()
+                .parent,
             Some(ActionId::from_bytes([3; 32])),
         );
         for (key, value) in [
@@ -786,7 +828,29 @@ mod tests {
         ] {
             let mut changed = base.clone();
             changed[key] = value;
-            assert!(parse(&InvokeBody::Json(changed)).is_err(), "{key}");
+            assert!(
+                parse(&InvokeBody::Json(changed), Kind::Create).is_err(),
+                "{key}"
+            );
         }
+        let mut edit = base;
+        edit.as_object_mut().unwrap().remove("replyTo");
+        edit["messageId"] = serde_json::json!("04".repeat(32));
+        edit["expectedRevision"] = serde_json::json!("05".repeat(32));
+        let parsed = parse(&InvokeBody::Json(edit.clone()), Kind::Edit).unwrap();
+        assert!(
+            matches!(parsed.body, Body::Edit { create, .. } if create == ActionId::from_bytes([4; 32]))
+        );
+        assert_eq!(parsed.parent, Some(ActionId::from_bytes([5; 32])));
+        assert!(parse(&InvokeBody::Json(edit.clone()), Kind::Delete).is_err());
+        edit.as_object_mut().unwrap().remove("text");
+        assert!(matches!(
+            parse(&InvokeBody::Json(edit.clone()), Kind::Delete)
+                .unwrap()
+                .body,
+            Body::Delete { .. }
+        ));
+        edit.as_object_mut().unwrap().remove("expectedRevision");
+        assert!(parse(&InvokeBody::Json(edit), Kind::Delete).is_err());
     }
 }

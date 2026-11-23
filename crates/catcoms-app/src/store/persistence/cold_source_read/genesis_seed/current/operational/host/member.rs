@@ -251,8 +251,9 @@ pub struct V2MemberSignRequest<'a> {
     /// The exact required dependency set (parents plus Edit/Delete/Join target), in any
     /// order. Caller-owned DATA loans: Core verifies every signature, delegation and that each
     /// names a CURRENT Admission of this verifier. Unused extras or a missing one refuse.
-    /// Native reply preparation can supply an empty slice to check its exact Create parent
-    /// in the original local outbox or the selected received archive.
+    /// Native replies can load their exact Create from the original outbox or selected
+    /// received archive. Native Edit and Delete can load their Create and one explicit
+    /// original revision from the original local outbox when this slice is empty.
     pub dependencies: &'a [V2MemberDependency<'a>],
 }
 

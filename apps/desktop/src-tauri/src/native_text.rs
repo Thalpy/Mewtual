@@ -274,7 +274,12 @@ fn router<R: tauri::Runtime>(
         if enabled && invoke.message.command() == "found_server" {
             return founding::route(invoke, &spawn);
         }
-        if enabled && invoke.message.command() == "send_message" {
+        if enabled
+            && matches!(
+                invoke.message.command(),
+                "send_message" | "edit_message" | "delete_message"
+            )
+        {
             return sending::route(invoke, &spawn);
         }
         if enabled && invoke.message.command() == "get_message_page" {

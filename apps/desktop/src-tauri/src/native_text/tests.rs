@@ -959,6 +959,88 @@ fn native_send_request(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_mutations_preserve_exact_originals_and_the_observed_revision() {
+    let directory = tempfile::tempdir().unwrap();
+    let (app, window, queue) = app(directory.path().join("vault"), None, true);
+    unlock_current(&app, &window, &queue).await;
+    let found = found_request(&window, 1, "Native revisions");
+    run(&queue).await;
+    let found = found_value(found.await.unwrap());
+    let create = native_send_request(&window, &found, 31, "original text");
+    run(&queue).await;
+    let create = found_value(create.await.unwrap());
+    let target = &create["message_id"];
+    let mutate = |command: &str,
+                  token: u8,
+                  message: &serde_json::Value,
+                  revision: &serde_json::Value,
+                  text: Option<&str>| {
+        let mut body = serde_json::json!({
+            "server":found["server"], "channel":found["channel"], "expectedContext":found["context"],
+            "retryToken":hex::encode([token;32]), "messageId":message, "expectedRevision":revision,
+        });
+        if let Some(text) = text {
+            body["text"] = text.into();
+        }
+        invite_command(&window, command, body)
+    };
+    let first = mutate("edit_message", 32, target, target, Some("first edit"));
+    run(&queue).await;
+    let first = found_value(first.await.unwrap());
+    assert_eq!(first["disposition"], "saved-local");
+    assert_ne!(first["message_id"], *target);
+    let unrelated = native_send_request(&window, &found, 33, "unrelated message");
+    run(&queue).await;
+    let unrelated = found_value(unrelated.await.unwrap());
+    let invalid = mutate(
+        "edit_message",
+        34,
+        target,
+        &unrelated["message_id"],
+        Some("second edit"),
+    );
+    run(&queue).await;
+    refused(invalid.await.unwrap());
+    let second = mutate(
+        "edit_message",
+        34,
+        target,
+        &first["message_id"],
+        Some("second edit"),
+    );
+    run(&queue).await;
+    let second = found_value(second.await.unwrap());
+    assert_eq!(second["disposition"], "saved-local");
+    let retry = mutate(
+        "edit_message",
+        34,
+        target,
+        &first["message_id"],
+        Some("second edit"),
+    );
+    run(&queue).await;
+    assert_eq!(found_value(retry.await.unwrap()), second);
+    let stale = mutate("edit_message", 34, target, target, Some("second edit"));
+    run(&queue).await;
+    refused(stale.await.unwrap());
+    let removed = mutate("delete_message", 35, target, &second["message_id"], None);
+    run(&queue).await;
+    let removed = found_value(removed.await.unwrap());
+    assert_eq!(removed["disposition"], "saved-local");
+    let audit = native_history_request(&window, &found, "0", None, 8);
+    run(&queue).await;
+    let audit = found_value(audit.await.unwrap());
+    assert_eq!(audit["end_exclusive"], "5");
+    assert_eq!(audit["items"][0]["body"]["text"], "original text");
+    assert_eq!(audit["items"][3]["body"]["text"], "second edit");
+    assert_eq!(audit["items"][4]["action"], removed["message_id"]);
+    assert_eq!(
+        audit["items"][4]["body"],
+        serde_json::json!({"kind":"delete","create":target})
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_text_found_router_installs_two_original_rows_retries_and_releases_real_files() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("vault");

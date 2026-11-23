@@ -196,6 +196,7 @@ jobs:
           for name, pattern, count in [
               ('native-join-dispatch', 'native_text_connected_join_', 5),
               ('native-send-parser', 'native_text_send_parser_', 1),
+              ('native-mutation-dispatch', 'native_text_mutations_', 1),
               ('native-retry-continuity', 'native_continuity_', 3),
           ]:
               command = ['cargo', 'test', '--locked', '--manifest-path',

@@ -221,6 +221,10 @@ new reply resolves its Create parent from the selected local outbox or
 received archive in the same channel and checks the exact signature and
 Admission through Core. A changed target conflicts with an already saved
 token. A missing parent leaves the request unsigned.
+The native Edit and Delete commands author only against an exact Create and
+explicit revision in the member's own outbox. These commands retain signed
+originals and exact retry receipts. Display of the current own-message
+projection and its editor controls still need to use that revision evidence.
 Original audit chunks and request receipts remain retained after scheduling debt clears.
 Removal changes active view, never deletes the audit. Unproven late removed actions stay
 Held pending the separately authorized moderation path; ordinary concurrent edits resolve

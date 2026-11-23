@@ -56,10 +56,11 @@ use crate::store::persistence::v2_member_outbox::{
     MemberCommitRun, MemberContextCell, MemberContextState, MemberLookup, MemberOriginalCustody,
     MemberOutbox, MemberOutboxContextData, MemberOutboxContextId, MemberOutboxContextSpec,
     MemberOutboxError, MemberOutboxMount, MemberOutboxRefusal, MemberOutboxSaveAdmission,
-    MemberReceiptData, MemberRequestData, MemberRequestToken, MemberSignedOriginal,
-    ReturnedMemberOriginal, MEMBER_OUTBOX_APPEND_FEE, MEMBER_OUTBOX_LOOKUP_FEE,
+    MemberReceiptData, MemberRequestData, MemberRequestToken, MemberSavedOriginal,
+    MemberSignedOriginal, ReturnedMemberOriginal, MEMBER_OUTBOX_APPEND_FEE,
+    MEMBER_OUTBOX_LOOKUP_FEE,
 };
-use crate::store::persistence::v2_shared_history::SharedHistoryScope;
+use crate::store::persistence::v2_shared_history::{disk::SavedSharedOriginal, SharedHistoryScope};
 use crate::store::persistence::V2TextOwnerRef;
 use crate::store::ServerStore;
 use crate::store::{NativeTextJoinedRegistrationData, NativeTextJoinedRowSelection};
@@ -290,6 +291,26 @@ enum MemberSavePath<'a, T: MeshTransport, R: CryptoRngCore> {
         RecoveredMemberSource<'a, R>,
         Option<MemberOutboxContextData>,
     ),
+}
+
+enum SavedDependency {
+    Own(MemberSavedOriginal),
+    Received(SavedSharedOriginal),
+}
+
+impl SavedDependency {
+    fn loan(&self) -> V2MemberDependency<'_> {
+        match self {
+            Self::Own(saved) => V2MemberDependency {
+                action: saved.action(),
+                admission: saved.receipt().admission,
+            },
+            Self::Received(saved) => V2MemberDependency {
+                action: saved.original.action(),
+                admission: saved.admission,
+            },
+        }
+    }
 }
 
 enum MemberSaveFinal<'a, 'key, T: MeshTransport, R: CryptoRngCore> {
@@ -576,23 +597,12 @@ impl<T: MeshTransport, R: CryptoRngCore> MemberSavePath<'_, T, R> {
         // 3. Bind an existing lane BEFORE signing, so a binding refusal can never strand a
         // fresh signature; a lane this call creates has no binding and is bound right after.
         // Then author and sign (a retry reuses the cached original) and take it.
-        let original = match request.body {
-            Body::Create {
-                reply_to: Some(parent),
-                ..
-            } if request.dependencies.is_empty()
-                && !matches!(&self, Self::Founder(_, FounderAccess::Library)) =>
-            {
-                self.sign_reply(
-                    &mut env,
-                    state,
-                    request,
-                    *parent,
-                    archived_replies,
-                    negative,
-                )?
-            }
-            _ => self.sign_and_lend(&env, request)?,
+        let original = if request.dependencies.is_empty()
+            && !matches!(&self, Self::Founder(_, FounderAccess::Library))
+        {
+            self.sign_selected_dependencies(&mut env, state, request, archived_replies, negative)?
+        } else {
+            self.sign_and_lend(&env, request)?
         };
 
         // 4. The Store's independently paid slot owns the known original BEFORE any
@@ -676,52 +686,102 @@ impl<T: MeshTransport, R: CryptoRngCore> MemberSavePath<'_, T, R> {
         }
     }
 
-    // Resolve only the exact native reply target after the saved-token lookup.
-    // Core still checks the signed Create and its Admission before key entry.
-    fn sign_reply(
+    // Resolve only the original dependencies named in this native request.
+    // Core still checks the signed originals and their Admissions before key entry.
+    fn sign_selected_dependencies(
         &mut self,
         env: &mut SaveEnvironment<'_>,
         state: &mut MemberContextState,
         request: V2MemberSignRequest<'_>,
-        parent: ActionId,
         archive: Option<SharedHistoryScope>,
         negative: &RequestCancellation,
     ) -> Result<MemberSignedOriginal, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        let (target, parent, archive) = match (request.body, request.parents) {
+            (
+                Body::Create {
+                    reply_to: Some(target),
+                    ..
+                },
+                _,
+            ) => (*target, *target, archive),
+            (Body::Edit { create, .. } | Body::Delete { create }, [parent]) => {
+                (*create, *parent, None)
+            }
+            _ => return self.sign_and_lend(env, request),
+        };
+        let original =
+            Self::read_selected_dependency(env, state, target, request.channel, archive)?;
+        let target = original.loan();
+        if !matches!(&target.action.spec().body, Body::Create { .. }) {
+            return Err(Refusal::Signing);
+        }
+        let revision = if parent == target.action.id() {
+            None
+        } else {
+            Some(Self::read_selected_dependency(
+                env,
+                state,
+                parent,
+                request.channel,
+                None,
+            )?)
+        };
+        if negative.is_cancelled() {
+            return Err(Refusal::Cancelled);
+        }
+        if let Some(revision) = &revision {
+            let revision = revision.loan();
+            if revision.action.spec().body.create() != Some(target.action.id()) {
+                return Err(Refusal::Signing);
+            }
+            self.sign_and_lend(
+                env,
+                V2MemberSignRequest {
+                    dependencies: &[target, revision],
+                    ..request
+                },
+            )
+        } else {
+            self.sign_and_lend(
+                env,
+                V2MemberSignRequest {
+                    dependencies: &[target],
+                    ..request
+                },
+            )
+        }
+    }
+
+    fn read_selected_dependency(
+        env: &mut SaveEnvironment<'_>,
+        state: &MemberContextState,
+        id: ActionId,
+        channel: u128,
+        archive: Option<SharedHistoryScope>,
+    ) -> Result<SavedDependency, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
         let fee = env.lookup_payment()?;
         let own = state
             .owner
             .as_ref()
             .ok_or(Refusal::Stale)?
-            .lookup_action_original(env.key, parent, fee)
+            .lookup_action_original(env.key, id, fee)
             .map_err(|error| Refusal::from(&error))?;
-        let archived;
-        let (action, admission) = if let Some(saved) = &own {
-            (saved.action(), saved.receipt().admission)
-        } else {
-            archived = env
-                .store
-                .read_shared_history_record(archive.ok_or(Refusal::Signing)?, parent)
-                .map_err(|_| Refusal::Failed)?
-                .ok_or(Refusal::Signing)?;
-            (archived.original.action(), archived.admission)
+        let saved = match own {
+            Some(original) => SavedDependency::Own(original),
+            None => SavedDependency::Received(
+                env.store
+                    .read_shared_history_record(archive.ok_or(Refusal::Signing)?, id)
+                    .map_err(|_| Refusal::Failed)?
+                    .ok_or(Refusal::Signing)?,
+            ),
         };
-        if action.id() != parent
-            || action.spec().realm.channel() != request.channel
-            || !matches!(&action.spec().body, Body::Create { .. })
-        {
+        let action = saved.loan().action;
+        if action.id() != id || action.spec().realm.channel() != channel {
             return Err(Refusal::Signing);
         }
-        if negative.is_cancelled() {
-            return Err(Refusal::Cancelled);
-        }
-        self.sign_and_lend(
-            env,
-            V2MemberSignRequest {
-                dependencies: &[V2MemberDependency { action, admission }],
-                ..request
-            },
-        )
+        Ok(saved)
     }
 
     fn sign_and_lend(
