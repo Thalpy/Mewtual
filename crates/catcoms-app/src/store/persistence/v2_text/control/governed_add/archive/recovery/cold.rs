@@ -70,6 +70,13 @@ impl HeldColdFounderAdd {
         self.recovered.request.as_slice() == request
     }
 
+    pub(in crate::store) fn member_parts(
+        &self,
+    ) -> Result<(&V2GeneralPrefixVerifier, &ProjectionGroupView), AppError> {
+        let core = self.core.as_ref().ok_or_else(refused)?;
+        Ok((&core.verifier, &core._view))
+    }
+
     pub(in crate::store) fn encode_join_delivery(
         &self,
         source: &RetainedBootstrapSourceData,

@@ -357,10 +357,23 @@ impl Physical {
         if sdk.is_none() {
             *sdk = Some(captured.restore_sdk(store, source)?);
         }
-        let fingerprint = sdk.as_ref().ok_or_else(refused)?.fingerprint_data();
-        let selected = captured.restore_core(store, source, fingerprint)?;
+        let sdk = sdk.as_mut().ok_or_else(refused)?;
+        let selected = captured.restore_core(store, source, sdk.fingerprint_data())?;
+        sdk.bind_selected_member(captured.member_parts()?.0)?;
         self.require_recovered_founder_source(original, source)?;
         Ok(selected)
+    }
+
+    pub(super) fn with_recovered_founder_store<T>(
+        &self,
+        original: &network::ColdFounderSelection,
+        source: &crate::store::RetainedBootstrapSourceData,
+        read: impl FnOnce(&ServerStore) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        self.require_recovered_founder_source(original, source)?;
+        let result = read(self.current()?.checked_store()?)?;
+        self.require_recovered_founder_source(original, source)?;
+        Ok(result)
     }
 
     pub(super) fn copy_selected_governing_proof(

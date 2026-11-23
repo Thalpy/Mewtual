@@ -526,6 +526,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
         .join(format!("mo-{}", hex::encode(original_member_outbox)));
     let mut saved = None;
     let mut founder_archived = None;
+    let mut founder_reply = None;
     if !recover_stage {
         let mut after = rng.clone();
         let row = register(&mut rng).unwrap();
@@ -686,6 +687,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
         else {
             panic!("the original joined reply must be saved");
         };
+        founder_reply = Some(reply_id);
         drop(original);
         let mut founder_receiver = founder_capture()
             .prepare_founder_member_ingress(channel, fresh.clone())
@@ -1292,7 +1294,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
     selection.close_original_cached();
     assert!(!selection.is_current_cached());
     assert!(recovered_row().select_registered(&fresh).is_err());
-    if recover_stage {
+    {
         drop(receive);
         drop(serve);
         drop(requests);
@@ -1328,6 +1330,32 @@ async fn mounted_join_fixture(recover_stage: bool) {
         std::fs::remove_file(&path).unwrap();
         std::fs::rename(parked, path).unwrap();
         assert_eq!(original.restore_first_add(&fresh).unwrap(), (head, epoch));
+        if let Some(reply_id) = founder_reply {
+            let channel = request().channel;
+            let page = original
+                .archived_action_page(channel, None, 8, &fresh)
+                .unwrap()
+                .unwrap();
+            assert_eq!(page.actions(), &[reply_id]);
+            let archived = original
+                .archived_message_projection(channel, reply_id, &fresh, &mut founder_rng)
+                .unwrap()
+                .unwrap();
+            assert!(archived
+                .with_publication(|view| matches!(
+                    view, catcoms_replication::chat::GuardedProjection::Visible { text, .. }
+                    if text == "Joined reply to the founder's saved original"
+                ))
+                .unwrap());
+            assert!(original
+                .archived_message_projection(channel + 1, reply_id, &fresh, &mut founder_rng)
+                .is_err());
+            drop(original);
+            assert!(archived
+                .with_publication(|_| panic!("the closed restored founder published a body"))
+                .is_err());
+            return;
+        }
         original.bind_original_tcp(&fresh).unwrap();
         let mut requests = original
             .open_recovered_join_requests(fresh.clone())

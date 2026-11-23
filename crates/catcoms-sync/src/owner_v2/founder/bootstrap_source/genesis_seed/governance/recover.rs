@@ -6,12 +6,18 @@ use catcoms_replication::chat::{
     owner_facts::OwnerFactId, owner_header::HeaderKind, owner_state::StateFrame,
 };
 
+mod member_transport;
+
 /// Paid private graph. Source installation, Core replay and publication have
 /// their own Host proofs and cannot be authorized by these recovered labels.
 pub struct PreparedV2FounderRecoveredAdd {
-    _device: MlsDevice,
-    _group: ServerGroup,
+    device: MlsDevice,
+    group: ServerGroup,
     expected: V2InstalledFounderAddData,
+    founder: OwnerFactId,
+    signer: [u8; 32],
+    member: Option<V2AuthenticatedAdmission>,
+    lifetime: Arc<()>,
 }
 
 struct GenesisRestoreScope<'a> {
@@ -19,6 +25,7 @@ struct GenesisRestoreScope<'a> {
     signer: [u8; 32],
     profile: OwnerFactId,
     header: OwnerHeaderId,
+    founder: OwnerFactId,
 }
 
 impl PreparedV2FounderRecoveredAdd {
@@ -38,6 +45,7 @@ impl PreparedV2FounderRecoveredAdd {
                 signer: context.signer,
                 profile: original.profile.id(),
                 header: original.header.id(),
+                founder: original.admission.admission_id(),
             },
             expected,
             header,
@@ -66,6 +74,7 @@ impl PreparedV2FounderRecoveredAdd {
                 signer: context.signer,
                 profile: original.profile_data().id(),
                 header: original.header_data().id(),
+                founder: original.admission_data().admission_id(),
             },
             expected,
             header,
@@ -127,9 +136,13 @@ impl PreparedV2FounderRecoveredAdd {
             return Err(unavailable());
         }
         Ok(Self {
-            _device: device,
-            _group: group,
+            device,
+            group,
             expected,
+            founder: context.founder,
+            signer: context.signer,
+            member: None,
+            lifetime: Arc::new(()),
         })
     }
 

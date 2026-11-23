@@ -7,6 +7,7 @@ use catcoms_replication::chat::owner_header::OwnerHeaderId;
 use catcoms_rt::PeerId;
 use catcoms_sync::owner_v2::PreparedV2FounderRecoveredAdd;
 
+mod history;
 mod replies;
 pub use replies::{NativeTextColdFounderJoinRequest, NativeTextColdFounderJoinRequests};
 

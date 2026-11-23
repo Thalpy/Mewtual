@@ -493,6 +493,18 @@ impl Store {
             .restore_recovered_founder_add(original, source, captured, sdk)
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn with_recovered_founder_store<
+        T,
+    >(
+        &self,
+        original: &ColdFounderSelection,
+        source: &crate::store::RetainedBootstrapSourceData,
+        read: impl FnOnce(&ServerStore) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        self.physical
+            .with_recovered_founder_store(original, source, read)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn require_empty_mounted_joined_pins(
         &self,
     ) -> Result<(), AppError> {

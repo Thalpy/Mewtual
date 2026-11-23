@@ -23,6 +23,9 @@ join ingress. It accepts the exact stored signed JoinRequest and rebuilds
 the public proof from the checked genesis and Add. The transport response
 uses the existing signed Welcome and enrolled KeyPackage and remains tied to
 the original request waiter until the lower queue sends it.
+The same reopened owner can read its saved received archive from the
+original vault. Archive replay uses the selected Core Admission and the
+founder's exact own outbox dependencies under a separately paid view.
 
 The stage-lifetime continuation is under validation. Native key drainage is
 being separated from retained CLOSED snapshot DATA: an actual completed Cell
