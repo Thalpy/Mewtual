@@ -722,6 +722,12 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 .open_member_frame(&selection, channel, &frame, &live)
                 .unwrap();
             assert_eq!(received.action_id_data(), action);
+            assert!(matches!(
+                recovered_row().prepare_received_dependency_exchange(
+                    &received, action, live.clone(), &mut history_rng,
+                ),
+                Err(crate::store::V2MemberSaveRefusal::Failed)
+            ));
             assert_eq!(
                 recovered_row().project_received_member(&mut ledger, &received, &live).unwrap(),
                 V2OrdinaryReceiveStatus::Retained(ActionState::Valid)

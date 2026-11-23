@@ -167,13 +167,33 @@ impl NativeChatMemberFrame {
 /// The exact receive epoch and carrier negative, with no ciphertext lease.
 #[derive(Clone)]
 pub struct NativeChatMemberFrameObservation {
+    peer: PeerId,
     carrier: ConnectionLease,
     original: Arc<Original>,
+}
+
+impl std::fmt::Debug for NativeChatMemberFrameObservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeChatMemberFrameObservation")
+            .finish_non_exhaustive()
+    }
 }
 
 impl NativeChatMemberFrameObservation {
     pub fn is_current_cached(&self) -> bool {
         self.original.is_current_cached() && self.carrier.is_live()
+    }
+
+    pub(super) fn carrier_data(&self) -> Option<(PeerId, &ConnectionLease)> {
+        self.is_current_cached()
+            .then_some((self.peer, &self.carrier))
+    }
+
+    pub(super) async fn retired(&self) {
+        tokio::select! {
+            _ = self.original.retired() => {}
+            _ = self.carrier.revoked() => {}
+        }
     }
 }
 
@@ -191,14 +211,14 @@ impl Registration {
         &self,
         from: PeerId,
         data: Vec<u8>,
-        carrier: Option<ConnectionLease>,
+        carrier: Option<(PeerId, ConnectionLease)>,
         budget: &Arc<event_dispatch::Budget>,
     ) {
         if !self.original.is_current_cached() || data.len() > self.maximum {
             return;
         }
         let delivered = (|| {
-            let carrier = carrier.filter(ConnectionLease::is_live)?;
+            let (peer, carrier) = carrier.filter(|(_, connection)| connection.is_live())?;
             let queued = self.sender.try_reserve().ok()?;
             let credit = budget.charge(data.len(), None)?;
             queued.send(NativeChatMemberFrame {
@@ -206,6 +226,7 @@ impl Registration {
                 from,
                 data: event_dispatch::charged_bytes(Bytes::from(data), credit),
                 observation: NativeChatMemberFrameObservation {
+                    peer,
                     carrier,
                     original: self.original.clone(),
                 },
@@ -289,9 +310,31 @@ mod tests {
                 original_frame.current_data(),
                 Some((&topic, sender.local_peer(), sent.as_slice()))
             );
+            let dependencies = receiver.native_chat_member_dependencies().unwrap();
+            let recovery = dependencies
+                .capture_frame_request(&original_frame.observe())
+                .expect("the original native connection can carry dependency requests");
+            assert_eq!(
+                recovery.route_data(),
+                (receiver.local_peer(), sender.local_peer())
+            );
+            let route = recovery.observe_route();
+            assert!(route.is_current_cached());
             retire.send_replace(true);
             assert!(original.next().await.is_none());
             assert!(original_frame.current_data().is_none());
+            assert!(!route.is_current_cached());
+            assert!(dependencies
+                .capture_frame_request(&original_frame.observe())
+                .is_none());
+            let (_unrelated, signal) = watch::channel(false);
+            assert!(matches!(
+                recovery
+                    .request(b"request", RequestCancellation::new(signal, None))
+                    .await,
+                Err(catcoms_rt::TransportError::Cancelled)
+            ));
+            assert!(dependencies.capture_request(sender.local_peer()).is_some());
 
             let (_owner, signal) = watch::channel(false);
             let scope = RequestCancellation::new(signal, None);

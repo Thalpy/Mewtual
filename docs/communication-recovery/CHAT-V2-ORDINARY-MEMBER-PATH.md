@@ -107,6 +107,8 @@ existing authenticated TCP connection. The request binds both peers, the selecte
 channel and its one ActionId. The exact encrypted request binds the reply. An unavailable
 reply describes only that provider's selected source. It cannot clear another member's
 history or justify importing a child with missing parents.
+Frame-triggered recovery can request a signed direct dependency on the exact original
+TCP carrier. Its reply remains bound to both the receive scope and that connection.
 The desktop attaches the provider to the original joined row after Join or authenticated
 reopen. Each incoming request captures that same installed row again before doing work.
 The mounted joined row can prepare a paid channel ledger and apply frames from its own

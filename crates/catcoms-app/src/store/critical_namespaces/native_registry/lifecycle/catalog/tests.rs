@@ -244,7 +244,7 @@ fn shared_history_declaration_only_adds_eight_and_predecessor_refuses() {
     let parsed =
         grammar::parse_shared_history_native_registry_layout(&declaration, &VAULT).unwrap();
     let row = &parsed.rows[0].as_ref().unwrap().metadata;
-    assert_eq!(row.scheduling, grammar::Scheduling::Paused);
+    assert!(row.scheduling == grammar::Scheduling::Paused);
     assert_eq!(row.execution.unwrap().spent, 1);
     assert!(grammar::parse_joined_native_registry_layout(&declaration, &VAULT, true).is_err());
     assert!(grammar::parse_governed_native_registry_layout(&declaration, &VAULT, true).is_err());

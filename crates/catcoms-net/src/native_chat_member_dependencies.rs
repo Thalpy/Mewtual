@@ -1,5 +1,6 @@
 //! Bounded connected dependency requests under the original native mesh and lease.
 use super::native_chat_join::{NativeChatJoinIngress, NativeChatJoinRequests};
+use super::native_chat_members::NativeChatMemberFrameObservation;
 use super::{connection_leases, Command, RR_PROTOCOL};
 use bytes::Bytes;
 use catcoms_rt::{
@@ -43,13 +44,35 @@ impl NativeChatMemberDependencies {
     /// Capture the exact existing peer connection before preparing the wire.
     pub fn capture_request(&self, peer: PeerId) -> Option<NativeChatMemberDependencyExchange> {
         let connection = connection_leases::current(&self.connections.upgrade()?, peer)?;
-        Some(NativeChatMemberDependencyExchange {
+        Some(self.exchange(peer, connection, None))
+    }
+
+    /// Use only the original connected carrier of this received frame. An
+    /// author ID or a new connection for the same peer cannot supply its route.
+    pub fn capture_frame_request(
+        &self,
+        observation: &NativeChatMemberFrameObservation,
+    ) -> Option<NativeChatMemberDependencyExchange> {
+        let (peer, original) = observation.carrier_data()?;
+        let current = connection_leases::current(&self.connections.upgrade()?, peer)?;
+        current
+            .is_same(original)
+            .then(|| self.exchange(peer, current, Some(observation.clone())))
+    }
+
+    fn exchange(
+        &self,
+        peer: PeerId,
+        connection: ConnectionLease,
+        frame: Option<NativeChatMemberFrameObservation>,
+    ) -> NativeChatMemberDependencyExchange {
+        NativeChatMemberDependencyExchange {
             commands: self.commands.clone(),
             local: self.local,
             peer,
-            connection,
+            observation: NativeChatMemberDependencyObservation { connection, frame },
             outbound: self.outbound.clone(),
-        })
+        }
     }
 }
 
@@ -122,7 +145,7 @@ pub struct NativeChatMemberDependencyExchange {
     commands: mpsc::WeakSender<Command>,
     local: PeerId,
     peer: PeerId,
-    connection: ConnectionLease,
+    observation: NativeChatMemberDependencyObservation,
     outbound: Weak<Semaphore>,
 }
 
@@ -131,8 +154,12 @@ impl NativeChatMemberDependencyExchange {
         (self.local, self.peer)
     }
 
+    pub fn observe_route(&self) -> NativeChatMemberDependencyObservation {
+        self.observation.clone()
+    }
+
     pub fn observe_connection(&self) -> ConnectionLease {
-        self.connection.clone()
+        self.observation.connection.clone()
     }
 
     pub async fn request(
@@ -144,7 +171,7 @@ impl NativeChatMemberDependencyExchange {
             return Err(TransportError::NoResponse);
         }
         let authority = Arc::new(OriginalRoute {
-            connection: self.connection,
+            observation: self.observation,
             caller: caller.clone(),
         });
         if !authority.authorized() {
@@ -194,20 +221,44 @@ struct OutboundSlot {
 
 #[derive(Debug)]
 struct OriginalRoute {
-    connection: ConnectionLease,
+    observation: NativeChatMemberDependencyObservation,
     caller: RequestCancellation,
+}
+
+#[derive(Clone, Debug)]
+pub struct NativeChatMemberDependencyObservation {
+    connection: ConnectionLease,
+    frame: Option<NativeChatMemberFrameObservation>,
+}
+
+impl NativeChatMemberDependencyObservation {
+    pub fn is_current_cached(&self) -> bool {
+        self.connection.is_live()
+            && self
+                .frame
+                .as_ref()
+                .is_none_or(NativeChatMemberFrameObservation::is_current_cached)
+    }
+
+    async fn revoked(&self) {
+        if let Some(frame) = &self.frame {
+            frame.retired().await;
+        } else {
+            self.connection.revoked().await;
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl RequestAuthority for OriginalRoute {
     fn authorized(&self) -> bool {
-        self.connection.is_live() && !self.caller.is_cancelled()
+        self.observation.is_current_cached() && !self.caller.is_cancelled()
     }
 
     async fn revoked(&self) {
         let mut caller = self.caller.clone();
         tokio::select! {
-            _ = self.connection.revoked() => {}
+            _ = self.observation.revoked() => {}
             _ = caller.cancelled() => {}
         }
     }
@@ -258,11 +309,11 @@ mod tests {
                     .await,
                 Err(TransportError::NoResponse)
             ));
-            let carrier = source.capture_request(target).unwrap().observe_connection();
+            let observation = source.capture_request(target).unwrap().observe_route();
             let (retire, signal) = watch::channel(false);
             let candidate = RequestCancellation::new(signal, None);
             let authority = Arc::new(OriginalRoute {
-                connection: carrier.clone(),
+                observation: observation.clone(),
                 caller: candidate.clone(),
             });
             let mut requests = provider_lane.try_attach(authority.clone()).unwrap();
@@ -301,8 +352,8 @@ mod tests {
                 Err(TransportError::Cancelled)
             ));
             drop(provider);
-            carrier.revoked().await;
-            assert!(!carrier.is_live());
+            observation.revoked().await;
+            assert!(!observation.is_current_cached());
             assert!(source.capture_request(target).is_none());
         })
         .await

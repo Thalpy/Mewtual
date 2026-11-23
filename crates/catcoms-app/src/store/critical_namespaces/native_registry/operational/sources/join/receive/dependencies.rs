@@ -2,9 +2,10 @@
 use super::*;
 use catcoms_net::{
     NativeChatMemberDependencies, NativeChatMemberDependencyExchange,
-    NativeChatMemberDependencyIncoming, NativeChatMemberDependencyRequests,
+    NativeChatMemberDependencyIncoming, NativeChatMemberDependencyObservation,
+    NativeChatMemberDependencyRequests,
 };
-use catcoms_rt::{ConnectionLease, TransportError};
+use catcoms_rt::TransportError;
 use catcoms_sync::owner_v2::{
     PreparedV2MemberDependencyRequest, V2MemberDependencyRoute, V2MemberPublicationObservation,
     MAX_V2_DEPENDENCY_REPLY_BYTES,
@@ -32,7 +33,7 @@ pub struct NativeTextJoinedDependencyResponse {
     channel: u128,
     route: V2MemberDependencyRoute,
     request: PreparedV2MemberDependencyRequest,
-    connection: ConnectionLease,
+    observation: NativeChatMemberDependencyObservation,
     signal: RequestCancellation,
     invocation: watch::Sender<bool>,
 }
@@ -50,12 +51,12 @@ impl NativeTextJoinedDependencyProvider {
 
 impl NativeTextJoinedDependencyExchange {
     pub async fn receive(self) -> Result<NativeTextJoinedDependencyResponse, TransportError> {
-        let connection = self.exchange.observe_connection();
+        let observation = self.exchange.observe_route();
         let wire = self
             .exchange
             .request(self.request.wire_data(), self.signal.clone())
             .await?;
-        if self.signal.is_cancelled() || !connection.is_live() {
+        if self.signal.is_cancelled() || !observation.is_current_cached() {
             return Err(TransportError::Cancelled);
         }
         Ok(NativeTextJoinedDependencyResponse {
@@ -64,7 +65,7 @@ impl NativeTextJoinedDependencyExchange {
             channel: self.channel,
             route: self.route,
             request: self.request,
-            connection,
+            observation,
             signal: self.signal,
             invocation: self.invocation,
         })
@@ -115,13 +116,65 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             .dependency_lane()?
             .capture_request(provider)
             .ok_or(Refusal::Unavailable)?;
+        self.prepare_dependency_on(exchange, selection, channel, action, caller, rng)
+    }
+
+    /// Recover one signed direct dependency on the frame's original carrier.
+    /// This capture cannot infer a route from the action author or reconnect.
+    pub fn prepare_received_dependency_exchange(
+        self,
+        original: &NativeTextJoinedReceivedOriginal,
+        action: ActionId,
+        caller: RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<NativeTextJoinedDependencyExchange, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        let selection = &original.selection;
+        if !original.is_for_original_row_cached(selection) {
+            return Err(Refusal::Stale);
+        }
+        let spec = original.opened.action_data().spec();
+        if spec.parents.binary_search(&action).is_err() && spec.body.create() != Some(action) {
+            return Err(Refusal::Failed);
+        }
+        let ReceiveOrigin::Gossip(frame) = &original.origin else {
+            return Err(Refusal::Unavailable);
+        };
+        let exchange = self
+            .dependency_lane()?
+            .capture_frame_request(frame)
+            .ok_or(Refusal::Unavailable)?;
+        self.prepare_dependency_on(
+            exchange,
+            selection,
+            spec.realm.channel(),
+            action,
+            caller,
+            rng,
+        )
+    }
+
+    fn prepare_dependency_on(
+        self,
+        exchange: NativeChatMemberDependencyExchange,
+        selection: &NativeTextJoinedRowSelection,
+        channel: u128,
+        action: ActionId,
+        caller: RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<NativeTextJoinedDependencyExchange, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
         let (requester, provider) = exchange.route_data();
         let route = V2MemberDependencyRoute {
             requester,
             provider,
         };
+        let observation = exchange.observe_route();
         let (request, observed, auth, fee) =
             self.with_member_receiver(selection, &caller, |source| {
+                if !observation.is_current_cached() {
+                    return Err(Refusal::Stale);
+                }
                 let fee = source
                     .metadata
                     .reserve_join_node(REPLY_FEE)
@@ -133,6 +186,9 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 let (observed, auth) = source.effect_data()?;
                 Ok((request, observed, auth, fee))
             })?;
+        if !observation.is_current_cached() {
+            return Err(Refusal::Stale);
+        }
         let (signal, invocation) = self.dependency_signal(selection, caller, auth, observed);
         let signal = signal.retain_custody(Arc::new(JoinFramePayment { _fee: fee }));
         Ok(NativeTextJoinedDependencyExchange {
@@ -155,7 +211,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         use V2MemberSaveRefusal as Refusal;
         if !selection.same_original(&response.selected)
             || response.signal.is_cancelled()
-            || !response.connection.is_live()
+            || !response.observation.is_current_cached()
         {
             return Err(Refusal::Stale);
         }
@@ -177,14 +233,14 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 .map_err(|_| Refusal::Failed)?;
             let NativeTextJoinedDependencyResponse {
                 wire,
-                connection,
+                observation,
                 signal,
                 invocation,
                 ..
             } = response;
             drop(wire);
             let origin = ReceiveOrigin::Dependency {
-                connection,
+                route: observation,
                 signal,
                 _invocation: invocation,
             };

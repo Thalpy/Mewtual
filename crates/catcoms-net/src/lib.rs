@@ -130,7 +130,8 @@ pub use native_chat_members::{
 mod native_chat_member_dependencies;
 pub use native_chat_member_dependencies::{
     NativeChatMemberDependencies, NativeChatMemberDependencyExchange,
-    NativeChatMemberDependencyIncoming, NativeChatMemberDependencyRequests,
+    NativeChatMemberDependencyIncoming, NativeChatMemberDependencyObservation,
+    NativeChatMemberDependencyRequests,
 };
 mod publication;
 
@@ -5384,7 +5385,8 @@ impl Actor {
                     .filter(|r| r.topic == topic)
                 {
                     let connection =
-                        connection_leases::current(&self.connection_leases.table, carrier);
+                        connection_leases::current(&self.connection_leases.table, carrier)
+                            .map(|connection| (carrier, connection));
                     registered.deliver(from, message.data, connection, &self.delivery_budget);
                     return;
                 }

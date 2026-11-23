@@ -86,7 +86,7 @@ pub struct NativeTextJoinedReceivedOriginal {
 enum ReceiveOrigin {
     Gossip(NativeChatMemberFrameObservation),
     Dependency {
-        connection: catcoms_rt::ConnectionLease,
+        route: catcoms_net::NativeChatMemberDependencyObservation,
         signal: RequestCancellation,
         _invocation: watch::Sender<bool>,
     },
@@ -96,9 +96,9 @@ impl ReceiveOrigin {
     fn is_current_cached(&self) -> bool {
         match self {
             Self::Gossip(frame) => frame.is_current_cached(),
-            Self::Dependency {
-                connection, signal, ..
-            } => connection.is_live() && !signal.is_cancelled(),
+            Self::Dependency { route, signal, .. } => {
+                route.is_current_cached() && !signal.is_cancelled()
+            }
         }
     }
 }
