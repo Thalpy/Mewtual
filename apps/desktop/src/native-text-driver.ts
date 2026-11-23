@@ -62,13 +62,14 @@ export function createNativeTextDriver(deps: NativeTextDriverDependencies) {
       const cleanupPending = await complete(intent);
       return deps.current() ? { server: session.servers[0], cleanupPending } : null;
     },
-    async send(server: number, channel: string, expectedContext: string, text: string): Promise<NativeSavedMessage | { disposition: "uncertain" } | null> {
+    async send(server: number, channel: string, expectedContext: string, text: string, replyTo: string | null = null): Promise<NativeSavedMessage | { disposition: "uncertain" } | null> {
       if (!deps.current()) return null;
       const existing = Object.values(deps.read()).find((item): item is NativeTextCreateIntent => item.kind === "create" && item.server === server
-        && item.channel === channel && item.expectedContext === expectedContext && item.text === text);
-      const intent: NativeTextCreateIntent = existing ?? { kind: "create", token: deps.token(), server, channel, expectedContext, text };
+        && item.channel === channel && item.expectedContext === expectedContext && item.text === text && (item.replyTo ?? null) === replyTo);
+      const intent: NativeTextCreateIntent = existing ?? { kind: "create", token: deps.token(), server, channel, expectedContext, text,
+        ...(replyTo === null ? {} : { replyTo }) };
       if (!await prepare(intent)) return null;
-      const response = object(await deps.invoke("send_message", { server, channel, expectedContext, text: intent.text, retryToken: intent.token, replyTo: null }));
+      const response = object(await deps.invoke("send_message", { server, channel, expectedContext, text: intent.text, retryToken: intent.token, replyTo: intent.replyTo ?? null }));
       if (!deps.current()) return null;
       if (response.backend !== "text-v2" || response.retry_token !== intent.token) throw new Error("The message reply could not be confirmed. Retry the same message.");
       if (response.disposition === "uncertain") return { disposition: "uncertain" };

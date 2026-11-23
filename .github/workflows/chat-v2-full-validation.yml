@@ -136,6 +136,7 @@ jobs:
           node --experimental-strip-types --import ./scripts/test-dom.mjs
           --import ./scripts/test-svelte.mjs --test
           src/native-text-history.test.ts src/native-text-app.test.ts src/native-saved-chat.test.ts
+          src/native-text-driver.test.ts src/native-text-intents.test.ts
       - name: Check frontend types
         if: runner.os == 'Linux' && inputs.scope != 'native-lock'
         run: npm --prefix apps/desktop run check
@@ -192,16 +193,20 @@ jobs:
           guard = runpy.run_path('.github/scripts/check-chat-v2-member-save.py')
           directory = Path('logs/chat-v2-native-gates')
           directory.mkdir(parents=True, exist_ok=True)
-          command = ['cargo', 'test', '--locked', '--manifest-path',
-                     'apps/desktop/src-tauri/Cargo.toml', '--lib',
-                     'native_text_connected_join_',
-                     '--', '--test-threads=1']
-          code, summaries, timed_out, _ = guard['run_logged'](
-              'native-join-dispatch', command, directory, limit=45 * 60,
-          )
-          if timed_out:
-              raise RuntimeError('native join dispatch exceeded its deadline')
-          guard['validate'](''.join(summaries), code, 5)
+          for name, pattern, count in [
+              ('native-join-dispatch', 'native_text_connected_join_', 5),
+              ('native-send-parser', 'native_text_send_parser_', 1),
+              ('native-retry-continuity', 'native_continuity_', 3),
+          ]:
+              command = ['cargo', 'test', '--locked', '--manifest-path',
+                         'apps/desktop/src-tauri/Cargo.toml', '--lib', pattern,
+                         '--', '--test-threads=1']
+              code, summaries, timed_out, _ = guard['run_logged'](
+                  name, command, directory, limit=45 * 60,
+              )
+              if timed_out:
+                  raise RuntimeError(f'{name} exceeded its deadline')
+              guard['validate'](''.join(summaries), code, count)
           PY
       - uses: actions/upload-artifact@v4
         if: always()

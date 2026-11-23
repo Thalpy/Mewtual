@@ -6985,16 +6985,17 @@
       channels:[{id:row.channel,name:"general"}],active:row.channel,unread:[],invite:"",isDm:row.is_dm};
     servers=previous?servers.map(server=>server.id===row.server?entry:server):[...servers,entry];
   }
-  function nativeDraftRetirement(server:number,channel:string,context:string,text:string) {
+  function nativeDraftRetirement(server:number,channel:string,context:string,text:string,replyTo:string|null=null) {
     const key=chatScopeKey(server,channel),revision=draftRevisions[key]??0;
     const original=activeServerId===server && cur?.active===channel ? draft : drafts[key]??"";
     return ()=>{
       if(original.trim()!==text || (draftRevisions[key]??0)!==revision || servers.find(row=>row.id===server)?.context!==context)return;
       const active=activeServerId===server && cur?.active===channel && cur?.context===context;
-      if(active && draft!==original)return;
+      if(active && (draft!==original || (replyingTo || null)!==replyTo))return;
+      if(!active && replyTo!==null)return;
       if(!active && drafts[key]!==original)return;
       drafts={...drafts,[key]:""};draftRevisions[key]=revision+1;
-      if(active)draft="";
+      if(active){draft="";replyingTo="";}
     };
   }
   async function retryNativeTextRequests() {
@@ -7014,7 +7015,8 @@
             if(result){installNativeServer(result.server);if(route?.current()&&activeServerId===null&&!showAdd){await switchServer(result.server.server,()=>{},route);}}
           }
           else {const row=servers.find(row=>row.id===intent.server);if(row?.backend!=="text-v2" || row.context!==intent.expectedContext)continue;
-            await nativeTextDriver(session,nativeDraftRetirement(intent.server,intent.channel,intent.expectedContext,intent.text)).send(intent.server,intent.channel,intent.expectedContext,intent.text);}
+            const replyTo=intent.replyTo??null;
+            await nativeTextDriver(session,nativeDraftRetirement(intent.server,intent.channel,intent.expectedContext,intent.text,replyTo)).send(intent.server,intent.channel,intent.expectedContext,intent.text,replyTo);}
         }catch { /* Keep exact custody; a later scheduled retry reuses it. */ }
       }
     }finally{
@@ -7143,10 +7145,11 @@
   async function sendNativeText(text:string,server:number,channel:string):Promise<SendOutcome> {
     const selected=cur;if(selected?.backend!=="text-v2" || !selected.context)return "refused";
     const session=uiStateLoadGeneration,context=selected.context,operation=++pendingSendNonce;
-    const retireDraft=nativeDraftRetirement(server,channel,context,text);
+    const replyTo=replyingTo || null;
+    const retireDraft=nativeDraftRetirement(server,channel,context,text,replyTo);
     sending=true;
     try {
-      const result=await nativeTextDriver(session,retireDraft).send(server,channel,context,text);
+      const result=await nativeTextDriver(session,retireDraft).send(server,channel,context,text,replyTo);
       if(!result)return "uncertain";
       if(result.disposition==="uncertain")return "uncertain";
       return "sent"; // press outcome only; UI status remains Saved here
@@ -28541,6 +28544,7 @@
             loading={nativeHistoryLoading} loaded={nativeHistoryLoaded} failure={nativeHistoryError} more={!!nativeCursor && nativeCursor.next!==nativeCursor.end}
             {archive} readArchive={(append)=>{void refreshNativeArchive(append);}}
             text={draft} busy={sending || nativeHistoryLoading || nativeRetryGeneration!==null} send={()=>{void send();}} refresh={()=>{void refreshNativeHistory();}} loadMore={()=>{void refreshNativeHistory(true);}}
+            replyTo={replyingTo || null} reply={(action)=>{replyingTo=action ?? "";}}
             change={(value)=>{draft=value;saveDraftFor(chanKey());}} />
         {:else if view === "chat"}
           <!-- Header: identity on the left, the channel's description filling the middle, every

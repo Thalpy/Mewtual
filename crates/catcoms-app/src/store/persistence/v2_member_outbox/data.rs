@@ -216,6 +216,20 @@ impl MemberOutboxContextData {
     pub(in crate::store) fn id(&self) -> MemberOutboxContextId {
         self.id
     }
+    pub(in crate::store) fn shared_history_scope(
+        &self,
+        channel: u128,
+    ) -> Option<crate::store::persistence::v2_shared_history::SharedHistoryScope> {
+        use crate::store::persistence::v2_shared_history::SharedHistoryScope;
+        Some(SharedHistoryScope {
+            vault: self.vault,
+            group: self.group.as_slice().try_into().ok()?,
+            profile: self.profile,
+            tenure: self.tenure,
+            creation: self.group_nonce,
+            channel,
+        })
+    }
     /// The namespace directory leaf, `mo-<64 lowercase hex>`. No caller-supplied name exists.
     pub(super) fn namespace_leaf(&self) -> String {
         let mut name = String::with_capacity(67);

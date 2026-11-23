@@ -20,6 +20,27 @@ test("actual App native seal failure keeps composer and exact intent without any
 const token="04".repeat(32);
 const retained={version:4,drafts:{"7:9":"original"},readMarks:{},nativeTextIntents:{[token]:{kind:"create",token,server:7,channel:"9",expectedContext:context,text:"original"}}};
 const saved=(args:Record<string,unknown>)=>({backend:"text-v2",disposition:"saved-local",retry_token:args.retryToken,message_id:row.action,ordinal:"0"});
+test("native composer and automatic retry carry the same sealed reply parent", async () => {
+  const app = pendingManagerApp({});
+  await app.hydrate();
+  app.nativeConversation(7, "9", context);
+  app.type("a reply");
+  app.reply(row.action);
+  app.answer(async args => ({ backend: "text-v2", disposition: "uncertain", retry_token: args.retryToken }));
+  assert.equal(await app.send(), "uncertain");
+  const first = app.state().submissions[0];
+  const retryToken = String(first.args.retryToken);
+  assert.equal(first.args.replyTo, row.action);
+  assert.equal(first.sealed.nativeTextIntents[retryToken].replyTo, row.action);
+  app.type("a reply");
+  app.answer(async args => saved(args));
+  await app.nativeRetry();
+  const next = app.state();
+  assert.equal(next.draft, "a reply", "the identical new plain draft is independent");
+  assert.deepEqual(next.submissions[1].args, first.args);
+  assert.deepEqual(next.nativeTextIntents, {});
+  app.done();
+});
 test("actual native scheduler retries retained custody without a gesture and retires its restored composer",async()=>{
  const app=pendingManagerApp(retained);await app.hydrate();app.nativeConversation(7,"9",context);app.answer(async args=>saved(args));
  app.syncRetry();assert.deepEqual(app.retryTimers(),[5000]);app.fireRetry();await settle();await settle();

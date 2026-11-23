@@ -699,13 +699,12 @@ async fn mounted_join_fixture(recover_stage: bool) {
             text: "Joined reply to the founder's saved original".into(),
             reply_to: Some(parent),
         };
-        let reply_dependency = [original.dependency_for_test()];
         let reply_request = || V2MemberSignRequest {
             token: [145; 32],
             channel,
             body: &reply,
             parents: std::slice::from_ref(&parent),
-            dependencies: &reply_dependency,
+            dependencies: &[],
         };
         assert_eq!(
             inspect()

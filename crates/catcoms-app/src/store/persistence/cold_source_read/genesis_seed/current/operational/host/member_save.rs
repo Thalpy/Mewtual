@@ -41,7 +41,7 @@
 //! authorization; that needs the native consumer's checked factory and its own barrier tests.
 use super::member::{
     FinishMode, JoinedMemberLane, JoinedMemberSource, RecoveredMemberLane, RecoveredMemberSource,
-    V2MemberLane, V2MemberSignRequest,
+    V2MemberDependency, V2MemberLane, V2MemberSignRequest,
 };
 use super::projection::V2TextProjectionNegative;
 use super::{FounderAccess, PreparedV2TextHost};
@@ -59,11 +59,12 @@ use crate::store::persistence::v2_member_outbox::{
     MemberReceiptData, MemberRequestData, MemberRequestToken, MemberSignedOriginal,
     ReturnedMemberOriginal, MEMBER_OUTBOX_APPEND_FEE, MEMBER_OUTBOX_LOOKUP_FEE,
 };
+use crate::store::persistence::v2_shared_history::SharedHistoryScope;
 use crate::store::persistence::V2TextOwnerRef;
 use crate::store::ServerStore;
 use crate::store::{NativeTextJoinedRegistrationData, NativeTextJoinedRowSelection};
 use crate::AppError;
-use catcoms_replication::chat::{ActionId, ActionSpec};
+use catcoms_replication::chat::{ActionId, ActionSpec, Body};
 use catcoms_rt::{CryptoRngCore, MeshTransport, NativeChatPreparedKeyCut, RequestCancellation};
 use catcoms_storage::VaultPhysicalWorkLease;
 use catcoms_sync::owner_v2::PreparedV2FounderRecoveredAdd;
@@ -455,6 +456,7 @@ impl<T: MeshTransport, R: CryptoRngCore> MemberSavePath<'_, T, R> {
             .pay(MEMBER_OUTBOX_LOOKUP_FEE)
             .map_err(|_| V2MemberSaveRefusal::Busy)?;
         let (context, signer) = self.outbox_context(mount.capability().current_layout_data())?;
+        let archived_replies = context.shared_history_scope(request.channel);
         let id = context.id();
         let token = MemberRequestToken::from_bytes(request.token);
         // The caller's exact request, canonicalised and digested ONCE (funded above). Every
@@ -574,7 +576,24 @@ impl<T: MeshTransport, R: CryptoRngCore> MemberSavePath<'_, T, R> {
         // 3. Bind an existing lane BEFORE signing, so a binding refusal can never strand a
         // fresh signature; a lane this call creates has no binding and is bound right after.
         // Then author and sign (a retry reuses the cached original) and take it.
-        let original = self.sign_and_lend(&env, request)?;
+        let original = match request.body {
+            Body::Create {
+                reply_to: Some(parent),
+                ..
+            } if request.dependencies.is_empty()
+                && !matches!(&self, Self::Founder(_, FounderAccess::Library)) =>
+            {
+                self.sign_reply(
+                    &mut env,
+                    state,
+                    request,
+                    *parent,
+                    archived_replies,
+                    negative,
+                )?
+            }
+            _ => self.sign_and_lend(&env, request)?,
+        };
 
         // 4. The Store's independently paid slot owns the known original BEFORE any
         // fallible preseal payment. Host/lane replacement must not lose it and re-sign.
@@ -655,6 +674,54 @@ impl<T: MeshTransport, R: CryptoRngCore> MemberSavePath<'_, T, R> {
                 Ok((original, signer))
             }
         }
+    }
+
+    // Resolve only the exact native reply target after the saved-token lookup.
+    // Core still checks the signed Create and its Admission before key entry.
+    fn sign_reply(
+        &mut self,
+        env: &mut SaveEnvironment<'_>,
+        state: &mut MemberContextState,
+        request: V2MemberSignRequest<'_>,
+        parent: ActionId,
+        archive: Option<SharedHistoryScope>,
+        negative: &RequestCancellation,
+    ) -> Result<MemberSignedOriginal, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        let fee = env.lookup_payment()?;
+        let own = state
+            .owner
+            .as_ref()
+            .ok_or(Refusal::Stale)?
+            .lookup_action_original(env.key, parent, fee)
+            .map_err(|error| Refusal::from(&error))?;
+        let archived;
+        let (action, admission) = if let Some(saved) = &own {
+            (saved.action(), saved.receipt().admission)
+        } else {
+            archived = env
+                .store
+                .read_shared_history_record(archive.ok_or(Refusal::Signing)?, parent)
+                .map_err(|_| Refusal::Failed)?
+                .ok_or(Refusal::Signing)?;
+            (archived.original.action(), archived.admission)
+        };
+        if action.id() != parent
+            || action.spec().realm.channel() != request.channel
+            || !matches!(&action.spec().body, Body::Create { .. })
+        {
+            return Err(Refusal::Signing);
+        }
+        if negative.is_cancelled() {
+            return Err(Refusal::Cancelled);
+        }
+        self.sign_and_lend(
+            env,
+            V2MemberSignRequest {
+                dependencies: &[V2MemberDependency { action, admission }],
+                ..request
+            },
+        )
     }
 
     fn sign_and_lend(

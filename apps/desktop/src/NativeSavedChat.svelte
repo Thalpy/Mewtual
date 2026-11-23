@@ -1,11 +1,17 @@
 <script lang="ts">
   import type { NativeOriginal, NativeReceived } from "./native-text-history";
-  let { rows, received = [], archive = null, readArchive, loading, loaded, failure, more, text, busy, send, refresh, loadMore, change }: {
+  let { rows, received = [], archive = null, readArchive, loading, loaded, failure, more, text, busy, send, refresh, loadMore, change, replyTo = null, reply }: {
     rows: NativeOriginal[]; received?: NativeReceived[]; loading: boolean; loaded:boolean;failure:string|null;more: boolean; text: string; busy: boolean;
     archive?: { items: NativeReceived[]; note: string | null; loading: boolean; more: boolean } | null;
     readArchive?: (append: boolean) => void;
     send: () => void; refresh: () => void; loadMore: () => void; change: (value: string) => void;
+    replyTo?: string | null; reply?: (action: string | null) => void;
   } = $props();
+  const replyText = $derived.by(() => {
+    const original = rows.find(row => row.action === replyTo)?.body;
+    return original?.kind === "create" ? original.text
+      : received.find(row => row.action === replyTo)?.text ?? archive?.items.find(row => row.action === replyTo)?.text;
+  });
 </script>
 
 <section class="native-saved-chat" aria-label="Chat messages">
@@ -23,6 +29,7 @@
       <article>
         <small>You · {row.status === "pending" ? "Saved here" : row.status === "submitted" ? "Sent from this device" : "Not sent"}</small>
         {#if row.body.kind === "create"}<p>{row.body.text}</p>
+          {#if reply}<button type="button" onclick={() => reply(row.action)} disabled={busy}>Reply</button>{/if}
         {:else if row.body.kind === "edit"}<p>Saved edit: {row.body.text}</p>
         {:else if row.body.kind === "delete"}<p>Saved deletion.</p>
         {:else}<p>Saved change.</p>{/if}
@@ -35,6 +42,7 @@
           <article>
             <small>{item.certainty === "provisional" ? "Saved received · Provisional" : "Saved received · Verified"}</small>
             <p>{item.text}</p>
+            {#if reply}<button type="button" onclick={() => reply(item.action)} disabled={busy}>Reply</button>{/if}
           </article>
         {/each}
         {#if !archive.items.length && !archive.loading && !archive.more && !archive.note}<p>No saved received messages in this view.</p>{/if}
@@ -45,10 +53,17 @@
       <article>
         <small>{item.certainty === "provisional" ? "Received · Provisional" : "Received · Verified"}</small>
         <p>{item.text}</p>
+        {#if reply}<button type="button" onclick={() => reply(item.action)} disabled={busy}>Reply</button>{/if}
       </article>
     {/each}
     {#if more}<button onclick={loadMore} disabled={loading || busy}>Load more saved messages</button>{/if}
   </div>
+  {#if replyTo && reply}
+    <div class="native-reply" role="status">
+      <span>{replyText ? `Replying to ${replyText}` : "Replying to a message"}</span>
+      <button type="button" onclick={() => reply(null)} disabled={busy}>Cancel reply</button>
+    </div>
+  {/if}
   <form onsubmit={(event) => { event.preventDefault(); send(); }}>
     <textarea aria-label="Message" placeholder="Write a message" value={text} oninput={(event) => change(event.currentTarget.value)}></textarea>
     <button type="submit" disabled={busy || !text.trim()}>Send</button>
@@ -61,5 +76,6 @@
   .native-saved-rows{flex:1;overflow:auto;display:flex;flex-direction:column;gap:.75rem}
   .native-saved-rows section{display:flex;flex-direction:column;gap:.75rem;align-items:stretch}
   article{border:1px solid color-mix(in srgb,currentColor 18%,transparent);border-radius:.75rem;padding:.75rem}article p{white-space:pre-wrap;overflow-wrap:anywhere;margin:.4rem 0 0}
+  .native-reply{display:flex;gap:.75rem;align-items:center;justify-content:space-between}.native-reply span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   form{display:flex;gap:.75rem;align-items:flex-end}textarea{flex:1;min-height:5rem;resize:vertical}button{white-space:nowrap}
 </style>

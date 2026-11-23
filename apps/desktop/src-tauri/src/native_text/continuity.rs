@@ -69,17 +69,21 @@ pub(crate) fn validate(object: &Map<String, Value>, version: u64) -> Result<(), 
                 item.get("isDm").and_then(Value::as_bool).ok_or(REFUSED)?;
             }
             Some("create") => {
-                exact(
-                    item,
-                    &[
-                        "kind",
-                        "token",
-                        "server",
-                        "channel",
-                        "expectedContext",
-                        "text",
-                    ],
-                )?;
+                let fields = [
+                    "kind",
+                    "token",
+                    "server",
+                    "channel",
+                    "expectedContext",
+                    "text",
+                    "replyTo",
+                ];
+                if let Some(reply) = item.get("replyTo") {
+                    exact(item, &fields)?;
+                    id(Some(reply))?;
+                } else {
+                    exact(item, &fields[..fields.len() - 1])?;
+                }
                 item.get("server")
                     .and_then(Value::as_u64)
                     .filter(|n| *n <= SAFE_INTEGER)
@@ -119,6 +123,9 @@ mod tests {
         let root = envelope(create());
         assert!(validate(root.as_object().unwrap(), 4).is_ok());
         assert!(crate::validate_ui_state_json(&root.to_string()).is_ok());
+        let mut reply = create();
+        reply["replyTo"] = "03".repeat(32).into();
+        assert!(crate::validate_ui_state_json(&envelope(reply).to_string()).is_ok());
         for version in [1, 2, 3, 5] {
             let mut old = root.clone();
             old["version"] = version.into();
@@ -136,6 +143,8 @@ mod tests {
             ("text", serde_json::json!("💜".repeat(2049))),
             ("token", serde_json::json!("00".repeat(32))),
             ("expectedContext", serde_json::json!("02".repeat(16))),
+            ("replyTo", serde_json::json!(null)),
+            ("replyTo", serde_json::json!("00".repeat(32))),
             ("channel", serde_json::json!("01")),
             (
                 "channel",

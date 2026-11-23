@@ -1662,16 +1662,39 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
         found_value(retry.await.unwrap())["message_id"],
         founder_action
     );
-    let send = native_send_request(
-        &founder_window,
-        founder_row,
-        22,
-        "Founder message after restart",
-    );
+    let reply_to = |target: &str| {
+        invite_command(
+            &founder_window,
+            "send_message",
+            archive_request(
+                founder_row,
+                serde_json::json!({
+                    "retryToken":hex::encode([22;32]),
+                    "text":"Founder message after restart", "replyTo":target,
+                }),
+            ),
+        )
+    };
+    let missing_parent = "ab".repeat(32);
+    let unavailable = reply_to(&missing_parent);
+    run(&founder_queue).await;
+    refused(unavailable.await.unwrap());
+    let send = reply_to(member_action);
     run(&founder_queue).await;
     let saved = found_value(send.await.unwrap());
     assert_eq!(saved["disposition"], "saved-local");
     assert_ne!(saved["message_id"], founder_action);
+    let retry = reply_to(member_action);
+    run(&founder_queue).await;
+    assert_eq!(found_value(retry.await.unwrap()), saved);
+    let changed = reply_to(founder_action);
+    run(&founder_queue).await;
+    refused(changed.await.unwrap());
+    let page = native_history_request(&founder_window, founder_row, "0", None, 8);
+    run(&founder_queue).await;
+    let originals = found_value(page.await.unwrap());
+    assert_eq!(originals["items"][1]["action"], saved["message_id"]);
+    assert_eq!(originals["items"][1]["body"]["reply_to"], member_action);
 
     let reconnect = invite_command(
         &window,

@@ -7,7 +7,7 @@ export type NativeTextFoundIntent = Readonly<{
 }>;
 export type NativeTextCreateIntent = Readonly<{
   kind: "create"; token: string; server: number; channel: string;
-  expectedContext: string; text: string;
+  expectedContext: string; text: string; replyTo?: string;
 }>;
 export type NativeTextIntent = NativeTextFoundIntent | NativeTextCreateIntent;
 export type NativeTextIntents = Record<string, NativeTextIntent>;
@@ -61,10 +61,12 @@ export function decodeNativeTextIntents(value: unknown, version: number): Native
         serverName: text(item.serverName, 256, true), advertise: text(item.advertise, 4096),
         relay: text(item.relay, 4096), rendezvous: text(item.rendezvous, 4096), isDm: item.isDm });
     } else if (item.kind === "create") {
-      exact(item, ["kind", "token", "server", "channel", "expectedContext", "text"]);
+      const fields = ["kind", "token", "server", "channel", "expectedContext", "text"];
+      const reply = Object.hasOwn(item, "replyTo") ? { replyTo: id(item.replyTo) } : {};
+      exact(item, [...fields, ...Object.keys(reply)]);
       if (typeof item.server !== "number" || !Number.isSafeInteger(item.server) || item.server < 0) return fail();
       result[key] = Object.freeze({ kind: "create", token, server: item.server, channel: channel(item.channel),
-        expectedContext: id(item.expectedContext), text: text(item.text, 8192, true) });
+        expectedContext: id(item.expectedContext), text: text(item.text, 8192, true), ...reply });
     } else return fail();
   }
   return result;

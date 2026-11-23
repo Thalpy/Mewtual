@@ -208,8 +208,17 @@ original's display. The founder saves exact received originals in the mounted
 history namespace and can read their projection after its live receiver
 retires. Both desktop roles use the same bounded archive replay and recheck
 the archive selection and active Core view before returning a body.
-Founder startup after process restart and requests for missing peer
-dependencies remain open.
+The native founder can reopen a selected first Add after authenticated startup.
+The registered joined row can reconnect using an explicit retry of the same
+invitation and approved IP. Founder requests for missing peer dependencies
+remain open.
+
+The desktop reply composer seals the exact target ActionId with the existing
+Create token and body. Native checks the original durable receipt first. A
+new reply resolves its Create parent from the selected local outbox or
+received archive in the same channel and checks the exact signature and
+Admission through Core. A changed target conflicts with an already saved
+token. A missing parent leaves the request unsigned.
 Original audit chunks and request receipts remain retained after scheduling debt clears.
 Removal changes active view, never deletes the audit. Unproven late removed actions stay
 Held pending the separately authorized moderation path; ordinary concurrent edits resolve

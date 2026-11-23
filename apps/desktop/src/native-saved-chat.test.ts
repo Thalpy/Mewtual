@@ -54,3 +54,24 @@ test("saved received messages retain their status and coexist with a partial pag
   await unmount(app);
   target.remove();
 });
+
+test("the native reply control selects and clears the displayed action", async () => {
+  const target = document.createElement("div");
+  document.body.append(target);
+  const action = "73".repeat(32);
+  const selected: (string | null)[] = [];
+  const app = mount(NativeSavedChat, { target, props: {
+    rows: [], received: [{ action, text: "The exact parent", certainty: "provisional" }],
+    loading: false, loaded: true, failure: null, more: false, text: "The reply", busy: false,
+    send: () => {}, refresh: () => {}, loadMore: () => {}, change: () => {},
+    replyTo: action, reply: value => selected.push(value),
+  } });
+  flushSync();
+  assert.match(target.textContent ?? "", /Replying to The exact parent/);
+  const buttons = [...target.querySelectorAll("button")];
+  buttons.find(button => button.textContent === "Reply")!.click();
+  buttons.find(button => button.textContent === "Cancel reply")!.click();
+  assert.deepEqual(selected, [action, null]);
+  await unmount(app);
+  target.remove();
+});

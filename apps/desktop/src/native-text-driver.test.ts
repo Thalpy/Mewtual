@@ -36,6 +36,23 @@ test("native Create uncertainty retries same body/token and requires a matching 
   const saved=await f.driver.send(1,"9","02".repeat(32),"original");assert.equal(saved?.disposition,"saved-local");
   assert.deepEqual(f.calls[0].args,f.calls[1].args);assert.equal(f.state().draws,1);assert.deepEqual(f.state().intents,{});
 });
+test("native reply custody persists the target and never aliases another target or a plain send", async () => {
+  const f = fixture();
+  const context = "02".repeat(32), parent = "03".repeat(32), other = "04".repeat(32);
+  f.answer(async (_cmd, args) => ({ backend: "text-v2", disposition: "uncertain", retry_token: args.retryToken }));
+  await f.driver.send(1, "9", context, "same text", parent);
+  await f.driver.send(1, "9", context, "same text", other);
+  await f.driver.send(1, "9", context, "same text");
+  const original = f.calls[0];
+  const intent = original.sealed[String(original.args.retryToken)];
+  assert.equal(intent.kind === "create" && intent.replyTo, parent);
+  assert.equal(f.calls[1].args.replyTo, other);
+  assert.equal(f.calls[2].args.replyTo, null);
+  assert.equal(new Set(f.calls.map(call => call.args.retryToken)).size, 3);
+  await f.driver.send(1, "9", context, "same text", parent);
+  assert.deepEqual(f.calls[3].args, original.args);
+  assert.equal(f.state().draws, 3);
+});
 test("foreign receipts and cleanup failures preserve native custody",async()=>{
   const f=fixture();f.answer(async()=>({backend:"text-v2",disposition:"saved-local",retry_token:"ff".repeat(32),message_id:"a".repeat(64),ordinal:"0"}));
   await assert.rejects(f.driver.send(1,"9","02".repeat(32),"original"),/could not be confirmed/);assert.equal(Object.keys(f.state().intents).length,1);

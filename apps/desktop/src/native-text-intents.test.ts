@@ -21,6 +21,16 @@ test("native requests retain exact text, 32-byte token and full u128 channel", (
   assert.throws(() => retainNativeTextIntent(queue, { ...create, text: "edited retry" }));
   assert.equal(queue[token].kind, "create");
 });
+test("saved replies hold one exact target while existing plain records retain their shape", () => {
+  const reply = { ...create, replyTo: "03".repeat(32) };
+  const queue = retainNativeTextIntent({}, reply);
+  assert.deepEqual(decodeNativeTextIntents(JSON.parse(JSON.stringify(queue)), 4)[token], reply);
+  assert.throws(() => retainNativeTextIntent(queue, { ...reply, replyTo: "04".repeat(32) }));
+  assert.throws(() => retainNativeTextIntent(queue, create));
+  for (const replyTo of [null, "", "00".repeat(32), "A1".repeat(32)]) {
+    assert.throws(() => decodeNativeTextIntents({ [token]: { ...create, replyTo } }, 4));
+  }
+});
 test("native future/malformed records refuse the whole queue without mutating it", () => {
   const original = { [token]: create };
   for (const patch of [{ kind: "future" }, { token: "a".repeat(32) }, { token: "00".repeat(32) }, { channel: "01" },

@@ -1,4 +1,4 @@
-//! Plain native Create: retain the exact original from signing through actual
+//! Native Create and reply: retain the exact original from signing through actual
 //! encrypted local IO. The local receipt precedes any joined outbox attempt.
 use super::*;
 use catcoms_app::store::{
@@ -8,7 +8,7 @@ use catcoms_app::store::{
     NativeTextMemberPreparation, NativeTextMemberSaveJob, NativeUiInvocationMetadata,
     V2MemberSaveOutcome, V2MemberSaveRefusal, V2MemberSignRequest,
 };
-use catcoms_replication::chat::Body;
+use catcoms_replication::chat::{ActionId, Body};
 use tauri::ipc::InvokeResponseBody;
 use tokio::sync::OwnedMutexGuard;
 
@@ -56,6 +56,7 @@ struct Intent {
     token: [u8; 32],
     context: [u8; 32],
     text: String,
+    reply_to: Option<ActionId>,
 }
 struct Invocation {
     generation: u64,
@@ -104,12 +105,8 @@ fn parse(payload: &InvokeBody) -> Result<Intent, &'static str> {
         .parse()
         .map_err(|_| "Invalid channel.")?;
     let text = field("text", TEXT_LIMIT)?;
-    if text.is_empty()
-        || object
-            .get("replyTo")
-            .is_some_and(|v| !v.is_null() && v.as_str() != Some(""))
-    {
-        return Err("This chat currently supports plain messages only.");
+    if text.is_empty() {
+        return Err("Enter a message.");
     }
     let decode = |value: &str| {
         if value.len() != 64 {
@@ -125,6 +122,14 @@ fn parse(payload: &InvokeBody) -> Result<Intent, &'static str> {
     };
     let token = decode(field("retryToken", 64)?)?;
     let context = decode(field("expectedContext", 64)?)?;
+    let reply_to = match object.get("replyTo") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(value)) if value.is_empty() => None,
+        Some(serde_json::Value::String(value)) => Some(ActionId::from_bytes(
+            decode(value).map_err(|_| "Invalid reply target.")?,
+        )),
+        _ => return Err("Invalid reply target."),
+    };
     if object
         .get("trace")
         .is_some_and(|v| !v.is_null() && v.as_str().is_none_or(|s| s.len() > 128))
@@ -137,6 +142,7 @@ fn parse(payload: &InvokeBody) -> Result<Intent, &'static str> {
         token,
         context,
         text: text.to_owned(),
+        reply_to,
     })
 }
 
@@ -367,6 +373,7 @@ struct PrepareWork<P> {
 }
 struct InputText {
     value: String,
+    reply_to: Option<ActionId>,
     #[cfg(test)]
     _notice: Option<tests::PaymentNotice>,
 }
@@ -374,13 +381,13 @@ impl PrepareWork<Preparation> {
     fn run(self) -> Result<V2MemberSaveOutcome, V2MemberSaveRefusal> {
         let body = Body::Create {
             text: self.text.value,
-            reply_to: None,
+            reply_to: self.text.reply_to,
         };
         let request = V2MemberSignRequest {
             token: self.token,
             channel: self.channel,
             body: &body,
-            parents: &[],
+            parents: self.text.reply_to.as_slice(),
             dependencies: &[],
         };
         match self.preparation {
@@ -404,6 +411,7 @@ async fn prepare(
         preparation,
         text: InputText {
             value: invocation.intent.text.clone(),
+            reply_to: invocation.intent.reply_to,
             #[cfg(test)]
             _notice: None,
         },
@@ -696,6 +704,7 @@ mod tests {
                 preparation: notice(),
                 text: InputText {
                     value: "paid plaintext".into(),
+                    reply_to: None,
                     _notice: Some(notice()),
                 },
                 scope: RequestCancellation::new(signal, None),
@@ -750,19 +759,28 @@ mod tests {
         }
     }
     #[test]
-    fn native_text_send_parser_requires_exact_token_context_and_plain_bounded_body() {
+    fn native_text_send_parser_requires_exact_token_context_and_bounded_reply() {
         let base = serde_json::json!({"server":1,"channel":"7","text":"hello","replyTo":null,
             "retryToken":"01".repeat(32),"expectedContext":"02".repeat(32)});
         let accepted = parse(&InvokeBody::Json(base.clone())).unwrap();
         assert_eq!(accepted.token, [1; 32]);
         assert_eq!(accepted.context, [2; 32]);
+        assert!(accepted.reply_to.is_none());
+        let mut reply = base.clone();
+        reply["replyTo"] = serde_json::json!("03".repeat(32));
+        assert_eq!(
+            parse(&InvokeBody::Json(reply)).unwrap().reply_to,
+            Some(ActionId::from_bytes([3; 32])),
+        );
         for (key, value) in [
             ("retryToken", serde_json::json!("01".repeat(16))),
             ("expectedContext", serde_json::json!("00".repeat(32))),
             ("channel", serde_json::json!("x")),
             ("text", serde_json::json!("x".repeat(TEXT_LIMIT + 1))),
             ("text", serde_json::json!("")),
-            ("replyTo", serde_json::json!("01".repeat(32))),
+            ("replyTo", serde_json::json!("00".repeat(32))),
+            ("replyTo", serde_json::json!("01".repeat(33))),
+            ("replyTo", serde_json::json!([1])),
             ("trace", serde_json::json!("x".repeat(129))),
             ("protocol", serde_json::json!("legacy")),
         ] {
