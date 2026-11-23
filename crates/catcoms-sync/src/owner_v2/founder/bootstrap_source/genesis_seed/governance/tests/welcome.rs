@@ -125,6 +125,7 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     now: u64,
     joined: &crate::ClosedV2JoinedNode<T, R>,
     joined_prefix: &mut crate::PreparedV2JoinedPrefix,
+    recovered: &crate::ClosedV2JoinedNode<T, R>,
     foreign_prefix: &mut crate::PreparedV2JoinedPrefix,
 ) {
     use crate::{
@@ -246,9 +247,9 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     assert_eq!(selected.image_data(), output.image_data());
     drop(selected);
     let member_payment = Arc::new(AtomicUsize::new(0));
-    let member_candidate = joined
+    let member_candidate = recovered
         .prepare_member_add_candidate(
-            joined_prefix,
+            foreign_prefix,
             step(),
             commit,
             super::admission(&member_payment),
@@ -262,6 +263,7 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     assert!(!member_candidate.snapshot_data().is_empty());
     drop(member_candidate);
     assert_eq!(joined.selected_join_data().unwrap(), previously_selected);
+    assert_eq!(recovered.selected_join_data().unwrap(), previously_selected);
     let response = node.join_response_data().unwrap();
     let only_first = V2FirstAddProofData::decode(first).unwrap();
     assert!(joiner.finish_first_welcome(response, &only_first).is_err());
@@ -1336,6 +1338,7 @@ async fn complete_original_welcome(native_joiner: bool) {
             now,
             &joined_node,
             &mut warm_prefix,
+            &cold_node,
             &mut prefix,
         );
     }

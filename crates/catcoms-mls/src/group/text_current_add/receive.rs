@@ -41,11 +41,16 @@ impl PreparedTextCurrentReceivedAdd {
             return Err(bad());
         }
         let original = OriginalParent::observe(device, group)?;
-        let (sender, signer) = group.designated_committer_leaf().ok_or_else(bad)?;
+        let committer = group
+            .group
+            .members()
+            .min_by_key(|member| member.index.u32())
+            .ok_or_else(bad)?;
+        let sender = committer.index;
         let added = DeviceId::from_public_key_bytes(&request.subject);
         let roster = group.member_device_ids();
-        if signer != request.committer
-            || sender == original.own
+        if committer.signature_key.as_slice() != request.committer
+            || sender.u32() == original.own
             || original.epoch != request.epoch
             || roster.contains(&added)
         {
@@ -99,7 +104,7 @@ impl PreparedTextCurrentReceivedAdd {
         let processed = graph
             .group
             .group
-            .process_private_text_add(provider, message, LeafNodeIndex::new(sender))
+            .process_private_text_add(provider, message, sender)
             .map_err(proto)?;
         let ProcessedMessageContent::StagedCommitMessage(staged) = processed.into_content() else {
             return Err(bad());
