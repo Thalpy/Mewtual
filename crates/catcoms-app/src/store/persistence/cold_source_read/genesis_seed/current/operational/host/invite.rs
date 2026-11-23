@@ -286,7 +286,13 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             .as_ref()
             .is_none_or(|pending| pending.installed.is_some() && !pending.matches_request(packet));
         if starts {
-            self.require_received_join_request(layout, packet, routing_plan, keys, negative)?;
+            let checked =
+                self.require_received_join_request(layout, packet, routing_plan, keys, negative);
+            #[cfg(test)]
+            if let Err(error) = &checked {
+                eprintln!("initial Add request check: {error:?}");
+            }
+            checked?;
         }
         let require_live = || {
             if negative.is_cancelled() {
@@ -330,22 +336,32 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         let mut read = InviteRecoveryRead::prepare(store, p.fence.later_parent_data())?;
         let resources = p.parent.resources().clone();
         let selected = p.parent.selected_data().ok_or_else(refused)?;
-        store.with_v2_text_current(&owner, |admission| {
+        let captured = store.with_v2_text_current(&owner, |admission| {
             let guard = store.lock_v2_text_current_group(admission, &resources)?;
             guard.require_governed_native_invite_parent()?;
             p.fence.require_parent_current(&guard, selected)?;
             require_live()?;
             read.capture(&guard)
-        })?;
-        read.require_received_invite(
+        });
+        #[cfg(test)]
+        if let Err(error) = &captured {
+            eprintln!("Add invite files capture: {error:?}");
+        }
+        captured?;
+        let verified = read.require_received_invite(
             packet.founder_add_data().invite,
             routing_plan,
             owner.source().data(),
-        )?;
+        );
+        #[cfg(test)]
+        if let Err(error) = &verified {
+            eprintln!("Add invite match: {error:?}");
+        }
+        verified?;
         self.require_member_quiescent_for_add(layout)?;
         let p = self.governed_add.as_mut().ok_or_else(refused)?;
         let selected = p.parent.selected_data().ok_or_else(refused)?;
-        store.with_v2_text_current(&owner, |admission| {
+        let covered = store.with_v2_text_current(&owner, |admission| {
             let guard = store.lock_v2_text_current_group(admission, &resources)?;
             guard.require_governed_native_invite_parent()?;
             read.require_current(&guard)?;
@@ -353,7 +369,12 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             p.fence.cover(&guard, selected)?;
             read.require_current(&guard)?;
             require_live()
-        })?;
+        });
+        #[cfg(test)]
+        if let Err(error) = &covered {
+            eprintln!("Add fence cover: {error:?}");
+        }
+        covered?;
         require_live()
     }
 

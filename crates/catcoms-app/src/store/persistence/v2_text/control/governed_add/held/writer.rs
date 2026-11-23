@@ -142,13 +142,28 @@ impl PreparedGovernedAddFence {
         rng: &mut dyn CryptoRngCore,
     ) -> Result<Self, AppError> {
         source.require_original_negative(store)?;
-        let original = Box::new(HeldColdFounderAdd::capture(
+        let captured = HeldColdFounderAdd::capture(
             store,
             source.source(),
             *seed.head_data().context.spec_data().pin.as_bytes(),
-        )?);
-        original.require_installed_parent(source.source(), installed.0, installed.1)?;
-        Self::prepare_bound(store, source, seed, packet, rng, Some(original))
+        );
+        #[cfg(test)]
+        if let Err(error) = &captured {
+            eprintln!("later writer archive capture: {error:?}");
+        }
+        let original = Box::new(captured?);
+        let verified = original.require_installed_parent(source.source(), installed.0, installed.1);
+        #[cfg(test)]
+        if let Err(error) = &verified {
+            eprintln!("later writer captured different receipt: {error:?}");
+        }
+        verified?;
+        let prepared = Self::prepare_bound(store, source, seed, packet, rng, Some(original));
+        #[cfg(test)]
+        if let Err(error) = &prepared {
+            eprintln!("later writer bind: {error:?}");
+        }
+        prepared
     }
 
     fn prepare_bound(
