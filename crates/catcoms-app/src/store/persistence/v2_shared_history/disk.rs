@@ -30,19 +30,26 @@ const MAX_RECORDS_PER_DIRECTORY: usize = 2048;
 // Account for the full bounded native inventory, including the offending entry.
 const INVENTORY_FEE: usize = (2 * MAX_RECORDS_PER_DIRECTORY + 2) * 1024;
 
-pub(super) const DISK_FEE: usize = SHARED_HISTORY_RECORD_FEE
+pub(in crate::store::persistence) const DISK_FEE: usize = SHARED_HISTORY_RECORD_FEE
     + 3 * WAL_BYTES
     + MAX_SHARED_HISTORY_BUNDLE
     + INVENTORY_FEE
     + 16 * 1024;
 
 #[derive(Clone, Copy)]
-pub(super) struct SharedHistoryDiskQuota {
+pub(in crate::store::persistence) struct SharedHistoryDiskQuota {
     records: usize,
     bytes: usize,
 }
 
 impl SharedHistoryDiskQuota {
+    pub(in crate::store::persistence) const fn native() -> Self {
+        Self {
+            records: MAX_RECORDS_PER_DIRECTORY,
+            bytes: 256 * 1024 * 1024,
+        }
+    }
+
     pub(super) fn new(records: usize, bytes: usize) -> Result<Self, AppError> {
         if !(1..=MAX_RECORDS_PER_DIRECTORY).contains(&records) || bytes <= SELECTOR_BYTES {
             return Err(refused());
@@ -52,12 +59,12 @@ impl SharedHistoryDiskQuota {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) struct SelectedHistoryRecord {
-    pub(super) action: ActionId,
-    pub(super) manifest: PrivateChatPageId,
+pub(in crate::store::persistence) struct SelectedHistoryRecord {
+    pub(in crate::store::persistence) action: ActionId,
+    pub(in crate::store::persistence) manifest: PrivateChatPageId,
 }
 
-pub(super) struct SharedHistoryDisk {
+pub(in crate::store::persistence) struct SharedHistoryDisk {
     directory: HeldDirectory,
     scope: SharedHistoryScope,
     quota: SharedHistoryDiskQuota,
@@ -69,7 +76,7 @@ pub(super) struct SharedHistoryDisk {
 impl SharedHistoryDisk {
     /// The physical mount installs exactly one owner for this held directory
     /// and never lends this constructor to the network or a caller's DTO.
-    pub(super) fn from_held(
+    pub(in crate::store::persistence) fn from_held(
         directory: HeldDirectory,
         scope: SharedHistoryScope,
         quota: SharedHistoryDiskQuota,
@@ -89,7 +96,7 @@ impl SharedHistoryDisk {
     }
 
     /// Seal the WAL once so a short write can resume on the same held file.
-    pub(super) fn prepare_save<'a>(
+    pub(in crate::store::persistence) fn prepare_save<'a>(
         &'a self,
         key: &[u8; 32],
         expected: SelectedHistoryRecord,
@@ -121,7 +128,7 @@ impl SharedHistoryDisk {
 
     /// Recover a completely authenticated admitted frame under the original
     /// held directory. A partial or foreign frame is preserved for repair.
-    pub(super) fn recover(
+    pub(in crate::store::persistence) fn recover(
         &self,
         key: &[u8; 32],
         session: &VaultSessionGuard,
@@ -135,7 +142,7 @@ impl SharedHistoryDisk {
         self.recover_locked(key)
     }
 
-    pub(super) fn read(
+    pub(in crate::store::persistence) fn read(
         &self,
         key: &[u8; 32],
         action: ActionId,
@@ -161,6 +168,16 @@ impl SharedHistoryDisk {
             original,
             _payment: payment,
         }))
+    }
+
+    pub(in crate::store::persistence) fn require_scope(
+        &self,
+        scope: SharedHistoryScope,
+    ) -> Result<(), AppError> {
+        if self.scope != scope {
+            return Err(refused());
+        }
+        self.directory.require()
     }
 
     fn recover_locked(&self, key: &[u8; 32]) -> Result<Option<SelectedHistoryRecord>, AppError> {
@@ -378,7 +395,7 @@ impl SharedHistoryDisk {
     }
 }
 
-pub(super) struct PreparedSharedHistorySave<'disk> {
+pub(in crate::store::persistence) struct PreparedSharedHistorySave<'disk> {
     disk: &'disk SharedHistoryDisk,
     expected: SelectedHistoryRecord,
     admission: OwnerFactId,
@@ -390,7 +407,10 @@ pub(super) struct PreparedSharedHistorySave<'disk> {
 }
 
 impl PreparedSharedHistorySave<'_> {
-    pub(super) fn commit(&mut self, key: &[u8; 32]) -> Result<SelectedHistoryRecord, AppError> {
+    pub(in crate::store::persistence) fn commit(
+        &mut self,
+        key: &[u8; 32],
+    ) -> Result<SelectedHistoryRecord, AppError> {
         let disk = self.disk;
         disk.require_key(key)?;
         let _lease = self.session.retain_for_physical_work();
@@ -437,10 +457,10 @@ impl PreparedSharedHistorySave<'_> {
     }
 }
 
-pub(super) struct SavedSharedOriginal {
-    pub(super) selected: SelectedHistoryRecord,
-    pub(super) admission: OwnerFactId,
-    pub(super) original: AssembledActionOriginal,
+pub(in crate::store) struct SavedSharedOriginal {
+    pub(in crate::store::persistence) selected: SelectedHistoryRecord,
+    pub(in crate::store) admission: OwnerFactId,
+    pub(in crate::store) original: AssembledActionOriginal,
     _payment: CatalogReadReservation,
 }
 

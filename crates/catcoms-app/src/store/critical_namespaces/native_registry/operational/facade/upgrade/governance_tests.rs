@@ -121,6 +121,14 @@ fn shared_history_physical_stage_retains_the_original_catalog_claim_and_marker()
 
 #[test]
 fn shared_history_physical_selection_reopens_the_original_promoted_files() {
+    use crate::store::persistence::{
+        v2_member_outbox::member_outbox_key,
+        v2_shared_history::{PreparedSharedHistoryRecord, SharedHistoryScope},
+    };
+    use catcoms_replication::chat::{
+        owner_facts::OwnerFactId, owner_header::OwnerTenureId, ActionSpec, BasisId, Body, GrantId,
+        Realm, SignedAction,
+    };
     let dir = tempfile::tempdir().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(0xc470);
     let mut plan = original(dir.path(), &mut rng).prepare_governance().unwrap();
@@ -165,11 +173,72 @@ fn shared_history_physical_selection_reopens_the_original_promoted_files() {
         current_policy(),
     )
     .unwrap();
-    selected
+    let store = selected.actual_store_for_test().unwrap();
+    store.require_mounted_shared_history().unwrap();
+    let scope = SharedHistoryScope {
+        vault: store.chat_vault_domain().unwrap(),
+        group: [0x44; 16],
+        profile: OwnerFactId::from_bytes([0x45; 32]),
+        tenure: OwnerTenureId::from_bytes([0x46; 32]),
+        creation: [0x47; 32],
+        channel: 15,
+    };
+    // Storage fixture. Native receive authorization is separately exercised by
+    // the connected joined row before it can pass originals to this owner.
+    let action = SignedAction::sign(
+        &catcoms_crypto::DeviceKeypair::from_seed(&[0x48; 32]),
+        ActionSpec {
+            realm: Realm::new(&scope.group, scope.channel).unwrap(),
+            basis: BasisId::from_bytes([0x49; 32]),
+            grant: GrantId::from_bytes([0x50; 32]),
+            nonce: [0x51; 16],
+            presented_ms: 1,
+            parents: vec![],
+            body: Body::Create {
+                text: "exact native archived original".into(),
+                reply_to: None,
+            },
+        },
+    )
+    .unwrap();
+    let raw = action.encode();
+    let admission = OwnerFactId::from_bytes([0x52; 32]);
+    let key = member_outbox_key(store).unwrap();
+    let record =
+        PreparedSharedHistoryRecord::prepare(&scope, &key, admission, &action, &raw, &mut rng)
+            .unwrap();
+    let manifest = record.manifest.id();
+    let bundle = record.encode_bundle().unwrap();
+    assert_eq!(
+        store
+            .save_shared_history_record(scope, action.id(), manifest, &bundle, &mut rng)
+            .unwrap(),
+        manifest
+    );
+    let foreign = SharedHistoryScope {
+        channel: scope.channel + 1,
+        ..scope
+    };
+    assert!(store
+        .read_shared_history_record(foreign, action.id())
+        .is_err());
+    drop(key);
+    drop(selected);
+    let selected = NativeTextJoinedStorage::open_selected_shared_history(
+        dir.path(),
+        SECRET,
+        &mut NeverRng,
+        current_policy(),
+    )
+    .unwrap();
+    let saved = selected
         .actual_store_for_test()
         .unwrap()
-        .require_mounted_shared_history()
+        .read_shared_history_record(scope, action.id())
+        .unwrap()
         .unwrap();
+    assert_eq!(saved.admission, admission);
+    assert_eq!(saved.original.original_bytes(), raw);
 }
 
 #[test]

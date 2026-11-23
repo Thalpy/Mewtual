@@ -21,7 +21,7 @@ use catcoms_storage::private_chat_page::{
 use catcoms_wire::{Decoder, Encoder, WireError};
 use zeroize::Zeroizing;
 
-mod disk;
+pub(in crate::store::persistence) mod disk;
 
 const TAG: &[u8] = b"catcoms/private-chat-v2-shared-history-record/v1\0";
 const SCOPE_DOMAIN: &str = "catcoms/private-chat-v2-shared-history-context/v1";
@@ -49,7 +49,7 @@ pub(in crate::store) const SHARED_HISTORY_RECORD_FEE: usize = 3 * MAX_ACTION_BYT
 
 /// Stable member history address on this vault. The current Header, epoch,
 /// receiver device and sender Admission are outside this namespace identity.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::store) struct SharedHistoryScope {
     pub(in crate::store) vault: [u8; 32],
     pub(in crate::store) group: [u8; 16],

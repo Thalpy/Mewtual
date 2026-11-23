@@ -443,24 +443,38 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         self.with_member_receiver(&ledger.selection, caller, |source| {
             let channel = ledger.ledger.realm().channel();
             let saved = source.read_dependency(channel, action, rng)?;
+            let archived = if saved.is_none() && source.store.uses_shared_history_layout() {
+                source
+                    .store
+                    .read_shared_history_record(source.history_scope(channel), action)
+                    .map_err(|_| Refusal::Failed)?
+            } else {
+                None
+            };
             if ledger.signal.is_cancelled() {
                 return Err(Refusal::Stale);
             }
-            let Some(saved) = saved else {
+            let Some((signed, admission)) = saved
+                .as_ref()
+                .map(|saved| (saved.action(), saved.receipt().admission))
+                .or_else(|| {
+                    archived
+                        .as_ref()
+                        .map(|saved| (saved.original.action(), saved.admission))
+                })
+            else {
                 return Ok(None);
             };
             let verifier = source
                 .prefix
                 .selected_member_verifier()
                 .map_err(|_| Refusal::Unavailable)?;
-            let admission = verifier
-                .admission(saved.receipt().admission)
-                .map_err(|_| Refusal::Stale)?;
+            let admission = verifier.admission(admission).map_err(|_| Refusal::Stale)?;
             verifier
                 .replay_ordinary_history_original(
                     &mut ledger.ledger,
                     &ledger.view,
-                    saved.action(),
+                    signed,
                     &admission,
                     &[],
                     RECEIVE_WORK,
@@ -495,52 +509,41 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         caller: &RequestCancellation,
         rng: &mut impl CryptoRngCore,
     ) -> Result<NativeTextJoinedSharedHistoryRecord, V2MemberSaveRefusal> {
-        use V2MemberSaveRefusal as Refusal;
-        let action = original.opened.action_data();
-        if ledger.signal.is_cancelled()
-            || !original.is_for_original_row_cached(&ledger.selection)
-            || !ledger
-                .ledger
-                .matches_valid_ordinary_original(action, original.opened.admission_data())
-        {
-            return Err(Refusal::Stale);
-        }
+        require_archivable(ledger, original)?;
         self.with_member_receiver(&ledger.selection, caller, |source| {
-            let fee = source
-                .metadata
-                .reserve_join_node(SHARED_HISTORY_RECORD_FEE)
-                .map_err(|_| Refusal::Busy)?;
-            let data = source.registration;
-            let scope = SharedHistoryScope {
-                vault: data.context.vault,
-                group: data.group,
-                profile: data.selected.profile,
-                tenure: data.selected.initial_tenure,
-                creation: data.selected.profile_creation,
-                channel: ledger.ledger.realm().channel(),
-            };
-            let key = member_outbox_key(source.store).map_err(|_| Refusal::Unavailable)?;
-            let record = PreparedSharedHistoryRecord::prepare(
-                &scope,
-                &key,
-                original.opened.admission_data(),
-                action,
-                original.opened.original_data(),
-                rng,
-            )
-            .map_err(|_| Refusal::Failed)?;
-            let bundle = record.encode_bundle().map_err(|_| Refusal::Failed)?;
-            if ledger.signal.is_cancelled()
-                || !original.is_for_original_row_cached(&ledger.selection)
-            {
-                return Err(Refusal::Stale);
+            source.prepare_history_original(ledger, original, rng)
+        })
+    }
+
+    /// Persist an exact already verified original if the row has the selected
+    /// history layout. Only the disk selector supplies the saved receipt.
+    pub fn archive_received_member(
+        self,
+        ledger: &NativeTextJoinedMemberLedger,
+        original: &NativeTextJoinedReceivedOriginal,
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Option<catcoms_storage::private_chat_page::PrivateChatPageId>, V2MemberSaveRefusal>
+    {
+        use V2MemberSaveRefusal as Refusal;
+        require_archivable(ledger, original)?;
+        self.with_member_receiver(&ledger.selection, caller, |source| {
+            if !source.store.uses_shared_history_layout() {
+                return Ok(None);
             }
-            Ok(NativeTextJoinedSharedHistoryRecord {
-                action: record.action,
-                manifest: record.manifest.id(),
-                bundle,
-                _fee: fee,
-            })
+            let record = source.prepare_history_original(ledger, original, rng)?;
+            let selected = source
+                .store
+                .save_shared_history_record(
+                    source.history_scope(ledger.ledger.realm().channel()),
+                    record.action,
+                    record.manifest,
+                    &record.bundle,
+                    rng,
+                )
+                .map_err(|_| Refusal::Failed)?;
+            require_archivable(ledger, original)?;
+            Ok(Some(selected))
         })
     }
 
@@ -630,6 +633,49 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
 }
 
 impl<R: CryptoRngCore> ReceiverSource<'_, R> {
+    fn history_scope(&self, channel: u128) -> SharedHistoryScope {
+        let data = self.registration;
+        SharedHistoryScope {
+            vault: data.context.vault,
+            group: data.group,
+            profile: data.selected.profile,
+            tenure: data.selected.initial_tenure,
+            creation: data.selected.profile_creation,
+            channel,
+        }
+    }
+
+    fn prepare_history_original(
+        &self,
+        ledger: &NativeTextJoinedMemberLedger,
+        original: &NativeTextJoinedReceivedOriginal,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<NativeTextJoinedSharedHistoryRecord, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        let fee = self
+            .metadata
+            .reserve_join_node(SHARED_HISTORY_RECORD_FEE)
+            .map_err(|_| Refusal::Busy)?;
+        let key = member_outbox_key(self.store).map_err(|_| Refusal::Unavailable)?;
+        let record = PreparedSharedHistoryRecord::prepare(
+            &self.history_scope(ledger.ledger.realm().channel()),
+            &key,
+            original.opened.admission_data(),
+            original.opened.action_data(),
+            original.opened.original_data(),
+            rng,
+        )
+        .map_err(|_| Refusal::Failed)?;
+        let bundle = record.encode_bundle().map_err(|_| Refusal::Failed)?;
+        require_archivable(ledger, original)?;
+        Ok(NativeTextJoinedSharedHistoryRecord {
+            action: record.action,
+            manifest: record.manifest.id(),
+            bundle,
+            _fee: fee,
+        })
+    }
+
     fn read_dependency(
         &self,
         channel: u128,
@@ -661,4 +707,20 @@ impl<R: CryptoRngCore> ReceiverSource<'_, R> {
         }
         Ok(saved)
     }
+}
+
+fn require_archivable(
+    ledger: &NativeTextJoinedMemberLedger,
+    original: &NativeTextJoinedReceivedOriginal,
+) -> Result<(), V2MemberSaveRefusal> {
+    if !ledger.is_current_cached()
+        || !original.is_for_original_row_cached(&ledger.selection)
+        || !ledger.ledger.matches_valid_ordinary_original(
+            original.opened.action_data(),
+            original.opened.admission_data(),
+        )
+    {
+        return Err(V2MemberSaveRefusal::Stale);
+    }
+    Ok(())
 }

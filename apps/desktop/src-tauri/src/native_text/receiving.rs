@@ -88,20 +88,19 @@ async fn receive(state: &AppState, source: &Arc<Source>, frame: NativeChatMember
     else {
         return;
     };
-    let V2OrdinaryReceiveStatus::WaitingForDependencies(missing) = status else {
-        return;
-    };
     let original = Arc::new(original);
-    for action in missing.into_iter().take(DEPENDENCIES_PER_FRAME) {
-        recover_dependency(state, source, &original, action).await;
+    match status {
+        V2OrdinaryReceiveStatus::Retained(ActionState::Valid) => {
+            archive_original(state, source, original).await;
+        }
+        V2OrdinaryReceiveStatus::WaitingForDependencies(missing) => {
+            for action in missing.into_iter().take(DEPENDENCIES_PER_FRAME) {
+                recover_dependency(state, source, &original, action).await;
+            }
+            apply_and_archive(state, source, original).await;
+        }
+        V2OrdinaryReceiveStatus::Retained(_) => {}
     }
-    let _ = with_row(state, source, move |selected, _, local, scope| {
-        let mut slot = local.received.lock().ok()?;
-        selected
-            .project_received_member(slot.as_deref_mut()?, &original, &scope)
-            .ok()
-    })
-    .await;
 }
 
 async fn prepare_ledger(state: &AppState, source: &Arc<Source>) -> bool {
@@ -168,16 +167,41 @@ async fn recover_dependency(
     else {
         return;
     };
-    let _ = with_row(state, source, move |selected, _, local, scope| {
+    apply_and_archive(state, source, Arc::new(original)).await;
+}
+
+async fn apply_and_archive(
+    state: &AppState,
+    source: &Arc<Source>,
+    original: Arc<NativeTextJoinedReceivedOriginal>,
+) {
+    let candidate = original.clone();
+    let result = with_row(state, source, move |selected, _, local, scope| {
         let mut slot = local.received.lock().ok()?;
-        let status = selected
-            .project_received_member(slot.as_deref_mut()?, &original, &scope)
+        selected
+            .project_received_member(slot.as_deref_mut()?, &candidate, &scope)
+            .ok()
+    })
+    .await;
+    if matches!(
+        result,
+        Some(V2OrdinaryReceiveStatus::Retained(ActionState::Valid))
+    ) {
+        archive_original(state, source, original).await;
+    }
+}
+
+async fn archive_original(
+    state: &AppState,
+    source: &Arc<Source>,
+    original: Arc<NativeTextJoinedReceivedOriginal>,
+) {
+    let _ = with_row(state, source, move |selected, _, local, scope| {
+        let slot = local.received.lock().ok()?;
+        selected
+            .archive_received_member(slot.as_deref()?, &original, &scope, &mut OsCryptoRng)
             .ok()?;
-        matches!(
-            status,
-            V2OrdinaryReceiveStatus::Retained(ActionState::Valid)
-        )
-        .then_some(())
+        Some(())
     })
     .await;
 }

@@ -82,6 +82,15 @@ impl HeldDirectory {
             self.id,
         )
     }
+    pub(in crate::store::persistence) fn try_clone(&self) -> Result<Self, AppError> {
+        let held = Self {
+            path: self.path.clone(),
+            original: self.original.try_clone().map_err(io)?,
+            id: self.id,
+        };
+        held.require()?;
+        Ok(held)
+    }
     /// Directory durability barrier, bracketed by identity checks.
     pub(in crate::store::persistence) fn sync(&self) -> Result<(), AppError> {
         self.require()?;

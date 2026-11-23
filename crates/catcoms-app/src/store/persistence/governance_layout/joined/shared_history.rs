@@ -4,7 +4,19 @@ use super::*;
 use crate::store::critical_namespaces::{
     native_registry::verify_shared_history_parent, shared_history_namespace::declaration as history,
 };
-use crate::store::persistence::v2_member_outbox::fs::{create_namespace, HeldDirectory};
+use crate::store::persistence::v2_member_outbox::{
+    fs::{create_namespace, HeldDirectory},
+    member_outbox_key,
+};
+use crate::store::persistence::v2_shared_history::{
+    disk::{
+        SavedSharedOriginal, SelectedHistoryRecord, SharedHistoryDisk, SharedHistoryDiskQuota,
+        DISK_FEE,
+    },
+    SharedHistoryScope,
+};
+use catcoms_replication::chat::ActionId;
+use catcoms_storage::private_chat_page::PrivateChatPageId;
 
 pub(in crate::store) const MARKER_NAME: &str = "chat-critical-namespaces.shared-history.marker";
 pub(in crate::store) const DIRECTORY_NAME: &str = "chat-v2-received-history";
@@ -14,6 +26,7 @@ const _: () = assert!(history::MAX_SEED_FRAME <= governance::codec::MAX_SEED_FRA
 pub(in crate::store) struct SelectedSharedHistory {
     marker: OpenedArchiveObject,
     directory: HeldDirectory,
+    disk: Option<SharedHistoryDisk>,
     mount: crate::store::chat_admission::PhysicalMountNegative,
     _fee: CatalogReadReservation,
 }
@@ -35,6 +48,7 @@ impl SelectedSharedHistory {
         let value = Self {
             marker,
             directory,
+            disk: None,
             mount: store.capture_physical_mount_negative(),
             _fee: fee,
         };
@@ -70,6 +84,77 @@ pub(in crate::store) struct SharedHistoryDeclaration {
 }
 
 impl ServerStore {
+    /// Access the one archive scope on the mounted joined layout. The caller
+    /// supplies scope DATA derived from its original registered joined row.
+    fn with_shared_history<T>(
+        &self,
+        scope: SharedHistoryScope,
+        perform: impl FnOnce(
+            &SharedHistoryDisk,
+            &[u8; 32],
+            CatalogReadReservation,
+        ) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        if !self.uses_shared_history_layout() || scope.vault != self.chat_vault_domain()? {
+            return Err(denied());
+        }
+        self.validate_mounted_governance_layout()?;
+        let mut slot = self.shared_history_mount.try_lock().map_err(|_| denied())?;
+        let mounted = slot.as_mut().ok_or_else(denied)?;
+        mounted.require(self)?;
+        let policy = self.governance_layout_policy.as_ref().ok_or_else(denied)?;
+        let pool = &policy.current.archive.pending.pool;
+        let key = member_outbox_key(self)?;
+        if mounted.disk.is_none() {
+            let disk = SharedHistoryDisk::from_held(
+                mounted.directory.try_clone()?,
+                scope,
+                SharedHistoryDiskQuota::native(),
+                pool.clone(),
+                &key,
+            )?;
+            disk.recover(&key, &self._session, pool.try_reserve(DISK_FEE)?)?;
+            mounted.require(self)?;
+            mounted.disk = Some(disk);
+        }
+        let disk = mounted.disk.as_ref().ok_or_else(denied)?;
+        disk.require_scope(scope)?;
+        let result = perform(disk, &key, pool.try_reserve(DISK_FEE)?)?;
+        mounted.require(self)?;
+        Ok(result)
+    }
+
+    pub(in crate::store) fn save_shared_history_record(
+        &self,
+        scope: SharedHistoryScope,
+        action: ActionId,
+        manifest: PrivateChatPageId,
+        bundle: &[u8],
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<PrivateChatPageId, AppError> {
+        self.with_shared_history(scope, |disk, key, payment| {
+            let mut prepared = disk.prepare_save(
+                key,
+                SelectedHistoryRecord { action, manifest },
+                bundle,
+                rng,
+                &self._session,
+                payment,
+            )?;
+            Ok(prepared.commit(key)?.manifest)
+        })
+    }
+
+    pub(in crate::store) fn read_shared_history_record(
+        &self,
+        scope: SharedHistoryScope,
+        action: ActionId,
+    ) -> Result<Option<SavedSharedOriginal>, AppError> {
+        self.with_shared_history(scope, |disk, key, payment| {
+            disk.read(key, action, &self._session, payment)
+        })
+    }
+
     /// Keep all the original immutable dependencies before any seed or marker
     /// can be written. The native owner calls this before exposing row work.
     pub(in crate::store) fn prepare_empty_shared_history_declaration(
