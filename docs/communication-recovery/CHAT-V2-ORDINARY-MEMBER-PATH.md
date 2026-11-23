@@ -137,8 +137,10 @@ and leaves every earlier namespace entry byte-identical. Earlier catalog grammar
 refuse it. Its encrypted restart seed preserves both catalog frames and the exact
 history root marker. Seed validation also requires the original governance and outbox
 markers, joined pin index and native registry leaves.
-The empty joined layout can stage these physical files under the existing declaration claim.
-Promotion, populated-vault migration and desktop history mounting remain open. The disk owner checks a bounded
+The empty joined layout can stage and select these physical files under the existing declaration claim.
+The explicit cold reader reopens a fully selected layout by retaining its original marker through
+the earlier vault gates. Cold recovery of incomplete promotion, populated-vault migration and desktop history
+mounting remain open. The disk owner checks a bounded
 physical inventory against separate record and byte limits before admitting a new WAL.
 The quota check charges partially written files at their final size. At capacity,
 existing originals and idempotent retries remain readable and new writes are refused.

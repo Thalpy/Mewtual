@@ -283,7 +283,7 @@ pub(in crate::store::persistence) fn remove_listed(path: &Path) -> Result<Remova
 }
 
 /// Create the namespace directory. It must not exist; an existing one is opened instead.
-pub(super) fn create_namespace(path: &Path) -> Result<(), AppError> {
+pub(in crate::store::persistence) fn create_namespace(path: &Path) -> Result<(), AppError> {
     fs::create_dir(path).map_err(io)
 }
 

@@ -4,9 +4,56 @@ use super::*;
 use crate::store::critical_namespaces::{
     native_registry::verify_shared_history_parent, shared_history_namespace::declaration as history,
 };
+use crate::store::persistence::v2_member_outbox::fs::{create_namespace, HeldDirectory};
 
 pub(in crate::store) const MARKER_NAME: &str = "chat-critical-namespaces.shared-history.marker";
+pub(in crate::store) const DIRECTORY_NAME: &str = "chat-v2-received-history";
 const _: () = assert!(history::MAX_SEED_FRAME <= governance::codec::MAX_SEED_FRAME);
+
+/// Selected catalog marker custody retained through the common opener.
+pub(in crate::store) struct SelectedSharedHistory {
+    marker: OpenedArchiveObject,
+    directory: HeldDirectory,
+    mount: crate::store::chat_admission::PhysicalMountNegative,
+    _fee: CatalogReadReservation,
+}
+
+impl SelectedSharedHistory {
+    pub(super) fn capture(
+        store: &ServerStore,
+        plain: &[u8],
+        layout: CurrentLayoutData,
+        key: &[u8; 32],
+    ) -> Result<Self, AppError> {
+        let descriptor = history::selected_descriptor(plain, layout, true)?;
+        let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
+        let fee = policy.current.archive.pending.pool.try_reserve(16 * 1024)?;
+        let path = fixed(store, false, MARKER_NAME)?;
+        let directory = HeldDirectory::open(fixed(store, false, DIRECTORY_NAME)?)?;
+        let marker = read(&path, history::MARKER_BYTES)?.ok_or_else(denied)?;
+        history::validate_marker(key, layout, descriptor, &marker.1)?;
+        let value = Self {
+            marker,
+            directory,
+            mount: store.capture_physical_mount_negative(),
+            _fee: fee,
+        };
+        value.require(store)?;
+        Ok(value)
+    }
+
+    pub(super) fn require(&self, store: &ServerStore) -> Result<(), AppError> {
+        store.require_original_physical_mount(&self.mount)?;
+        self.directory.require()?;
+        exact_held(
+            &fixed(store, false, MARKER_NAME)?,
+            &self.marker.0,
+            session_id(&self.marker.0).map_err(io)?,
+            &self.marker.1,
+        )?;
+        self.directory.require()
+    }
+}
 
 pub(in crate::store) struct SharedHistoryDeclaration {
     current: OpenedArchiveObject,
@@ -14,6 +61,7 @@ pub(in crate::store) struct SharedHistoryDeclaration {
     pins: OpenedArchiveObject,
     directory: GovernanceDirectoryCapture,
     prepared: history::PreparedDeclaration,
+    archive_directory: Option<HeldDirectory>,
     claim: Option<CreatedStage>,
     marker: Option<CreatedStage>,
     stage: Option<CreatedStage>,
@@ -47,6 +95,7 @@ impl ServerStore {
             return Err(denied());
         }
         absent(&fixed(self, false, MARKER_NAME)?)?;
+        absent(&fixed(self, false, DIRECTORY_NAME)?)?;
         let current = inventory.current.ok_or_else(denied)?;
         let governance = inventory.marker.ok_or_else(denied)?;
         let native = NativeGovernanceInventory::capture(
@@ -91,6 +140,7 @@ impl ServerStore {
             pins,
             directory: inventory.directory,
             prepared,
+            archive_directory: None,
             claim: None,
             marker: None,
             stage: None,
@@ -104,14 +154,22 @@ impl ServerStore {
 
 impl SharedHistoryDeclaration {
     fn require_original(&self, store: &ServerStore) -> Result<(), AppError> {
-        store.require_governance_directory_matches_root(&self.directory)?;
+        self.require_leaves(store)?;
         self.native.require_initial_catalog(store)?;
+        let (file, expected) = &self.current;
+        exact_held(
+            &fixed(store, false, critical_namespaces::Slot::Current.name())?,
+            file,
+            session_id(file).map_err(io)?,
+            expected,
+        )
+    }
+
+    fn require_leaves(&self, store: &ServerStore) -> Result<(), AppError> {
+        store.require_governance_directory_matches_root(&self.directory)?;
+        self.native.require(store)?;
         pending::require_pending_names(store, None)?;
         for (path, (file, expected)) in [
-            (
-                fixed(store, false, critical_namespaces::Slot::Current.name())?,
-                &self.current,
-            ),
             (
                 fixed(store, true, governance::GOVERNANCE_MARKER)?,
                 &self.governance,
@@ -123,17 +181,98 @@ impl SharedHistoryDeclaration {
         Ok(())
     }
 
+    /// Select the exact held candidate. A late barrier failure keeps the
+    /// same candidate and claim available to a retry on this continuation.
+    pub(in crate::store) fn promote(&mut self, store: &ServerStore) -> Result<(), AppError> {
+        let current_path = fixed(store, false, critical_namespaces::Slot::Current.name())?;
+        let stage_path = fixed(store, false, critical_namespaces::Slot::Stage.name())?;
+        let claim_path = fixed(store, false, governance::GOVERNANCE_SEED)?;
+        let moved = self
+            .stage
+            .as_ref()
+            .and_then(|stage| stage.identity)
+            .is_some_and(|id| matches!(session_at(&current_path, id), SessionAt::Ours));
+        if !moved {
+            self.stage(store)?;
+            #[cfg(test)]
+            governance::before_stage_selection_for_test();
+            self.require_original(store)?;
+            self.require_outputs(store, &stage_path)?;
+            exact_retained(
+                &claim_path,
+                self.claim.as_ref().ok_or_else(denied)?,
+                &self.prepared.seed,
+            )?;
+            self.require_original(store)?;
+            let stage = self.stage.as_ref().ok_or_else(denied)?;
+            held(&stage_path, &stage.file, stage.identity.ok_or_else(denied)?)?;
+            install_catalog_stage(&stage_path, &current_path).map_err(io)?;
+        }
+        let durable = |error: std::io::Error| AppError::CommittedButNotDurable(error.to_string());
+        self.require_leaves(store)?;
+        self.require_outputs(store, &current_path)?;
+        let stage = self.stage.as_ref().ok_or_else(denied)?;
+        sync_selected_catalog(&stage.file).map_err(durable)?;
+        sync_directory(&store.dir).map_err(durable)?;
+        absent(&stage_path)?;
+        self.require_leaves(store)?;
+        self.require_outputs(store, &current_path)?;
+        let claim = self.claim.as_ref().ok_or_else(denied)?;
+        match session_at(&claim_path, claim.identity.ok_or_else(denied)?) {
+            SessionAt::Ours => {
+                exact_retained(&claim_path, claim, &self.prepared.seed)?;
+                retire_declaration_claim(&claim_path).map_err(durable)?;
+            }
+            SessionAt::Absent => {}
+            SessionAt::Other | SessionAt::Unknown => return Err(denied()),
+        }
+        sync_directory(&store.dir).map_err(durable)?;
+        absent(&claim_path)?;
+        absent(&stage_path)?;
+        self.require_outputs(store, &current_path)
+    }
+
+    fn require_outputs(&self, store: &ServerStore, candidate: &Path) -> Result<(), AppError> {
+        let directory = self.archive_directory.as_ref().ok_or_else(denied)?;
+        directory.require()?;
+        exact_retained(
+            &fixed(store, false, MARKER_NAME)?,
+            self.marker.as_ref().ok_or_else(denied)?,
+            &self.prepared.marker,
+        )?;
+        exact_retained(
+            candidate,
+            self.stage.as_ref().ok_or_else(denied)?,
+            &self.prepared.candidate,
+        )?;
+        directory.require()
+    }
+
     /// Retain the original claim, marker and stage across every short write.
     /// Promotion is a distinct continuation and must authenticate this tuple.
     pub(in crate::store) fn stage(&mut self, store: &ServerStore) -> Result<(), AppError> {
         let claim = fixed(store, false, governance::GOVERNANCE_SEED)?;
         let marker = fixed(store, false, MARKER_NAME)?;
+        let archive = fixed(store, false, DIRECTORY_NAME)?;
         let stage = fixed(store, false, critical_namespaces::Slot::Stage.name())?;
         self.require_original(store)?;
         if self.stage.is_none() {
             absent(&stage)?;
         }
         stage_output(store, &claim, &mut self.claim, &self.prepared.seed)?;
+        self.require_original(store)?;
+        exact_retained(
+            &claim,
+            self.claim.as_ref().ok_or_else(denied)?,
+            &self.prepared.seed,
+        )?;
+        if self.archive_directory.is_none() {
+            create_namespace(&archive)?;
+            self.archive_directory = Some(HeldDirectory::open(archive)?);
+        }
+        let directory = self.archive_directory.as_ref().ok_or_else(denied)?;
+        directory.sync()?;
+        sync_directory(&store.dir).map_err(io)?;
         self.require_original(store)?;
         exact_retained(
             &claim,
@@ -153,15 +292,14 @@ impl SharedHistoryDeclaration {
             &self.prepared.marker,
         )?;
         stage_output(store, &stage, &mut self.stage, &self.prepared.candidate)?;
+        directory.require()?;
         self.require_original(store)?;
-        for (path, held, bytes) in [
-            (claim, &self.claim, self.prepared.seed.as_slice()),
-            (marker, &self.marker, self.prepared.marker.as_slice()),
-            (stage, &self.stage, self.prepared.candidate.as_slice()),
-        ] {
-            exact_retained(&path, held.as_ref().ok_or_else(denied)?, bytes)?;
-        }
-        Ok(())
+        self.require_outputs(store, &stage)?;
+        exact_retained(
+            &claim,
+            self.claim.as_ref().ok_or_else(denied)?,
+            &self.prepared.seed,
+        )
     }
 }
 

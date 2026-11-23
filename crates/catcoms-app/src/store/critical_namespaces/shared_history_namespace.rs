@@ -91,6 +91,6 @@ pub(super) fn verify_declaration(
 ) -> Result<(), AppError> {
     catalog::parse_joined_native_registry_layout(original, domain, true)?;
     catalog_declaration::validate_insert_pair_data(original, declaration, domain, ID, VERSION)?;
-    catalog::parse_shared_history_native_registry_layout(declaration, domain)?;
+    catalog::parse_shared_history_native_registry_layout(declaration, domain, true)?;
     Ok(())
 }

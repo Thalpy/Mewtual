@@ -23,6 +23,18 @@ pub(in crate::store) use pending::{
 #[cfg(test)]
 pub(in crate::store) use pending::{AFTER_PIN_INDEX_SELECT, BEFORE_WELCOME_SDK};
 
+fn install_catalog_stage(stage: &Path, current: &Path) -> std::io::Result<()> {
+    fs::rename(stage, current)
+}
+
+fn sync_selected_catalog(selected: &File) -> std::io::Result<()> {
+    selected.sync_all()
+}
+
+fn retire_declaration_claim(claim: &Path) -> std::io::Result<()> {
+    fs::remove_file(claim)
+}
+
 /// Kept by the unique native startup continuation before any Source is exposed.
 /// The existing governance seed name is the predecessor-visible first claim.
 pub(in crate::store) struct JoinedPinDeclaration {
@@ -47,6 +59,7 @@ pub(in crate::store) struct ColdJoinedSelection {
     directory: GovernanceDirectoryCapture,
     original_leaves: Option<(OpenedArchiveObject, VerifiedGovernanceNative)>,
     index: SelectedPinIndex,
+    shared_history: Option<shared_history::SelectedSharedHistory>,
     _fee: CatalogReadReservation,
 }
 
@@ -139,6 +152,9 @@ impl ColdJoinedSelection {
         absent(&stage_path)?;
         store.require_governance_directory_matches_root_if_mounted(&self.directory)?;
         self.index.require(store)?;
+        if let Some(shared) = &self.shared_history {
+            shared.require(store)?;
+        }
         if let Some(((marker, bytes), native)) = &self.original_leaves {
             native.require(store)?;
             exact_held(
@@ -165,6 +181,13 @@ impl ServerStore {
             .as_ref()
             .and_then(|p| p.native_registry.as_ref())
             .is_some_and(|handler| handler.uses_joined_pin_layout())
+    }
+
+    pub(in crate::store) fn uses_shared_history_layout(&self) -> bool {
+        self.current_layout_policy
+            .as_ref()
+            .and_then(|p| p.native_registry.as_ref())
+            .is_some_and(|handler| handler.uses_shared_history_layout())
     }
 
     /// Only the explicitly configured joined opener enters here. The entire
@@ -210,6 +233,20 @@ impl ServerStore {
         let (current, raw) = inventory.current.ok_or_else(denied)?;
         let key = Zeroizing::new(self.keys.db_key()?);
         let directory = inventory.directory;
+        let shared_history = if self.uses_shared_history_layout() {
+            if inventory.seed.is_some() || inventory.stage.is_some() {
+                return Err(denied());
+            }
+            let plain = Zeroizing::new(unseal(&key, &unframe(&raw)?)?);
+            let layout = self.parse_joined_pin_catalog(&plain)?;
+            Some(shared_history::SelectedSharedHistory::capture(
+                self, &plain, layout, &key,
+            )?)
+        } else {
+            absent(&fixed(self, false, shared_history::MARKER_NAME)?)?;
+            absent(&fixed(self, false, shared_history::DIRECTORY_NAME)?)?;
+            None
+        };
         let (current, bytes, original_leaves, index) = if let Some((seed, raw_seed)) =
             inventory.seed
         {
@@ -349,7 +386,7 @@ impl ServerStore {
                 let stage = stage.ok_or_else(denied)?;
                 exact_retained(&stage_path, &stage, expected.candidate)?;
                 held(&current_path, &current, current_id)?;
-                fs::rename(&stage_path, &current_path).map_err(io)?;
+                install_catalog_stage(&stage_path, &current_path).map_err(io)?;
                 stage.file
             } else {
                 before_selection()?;
@@ -358,7 +395,7 @@ impl ServerStore {
             };
             let durable =
                 |error: std::io::Error| AppError::CommittedButNotDurable(error.to_string());
-            selected.sync_all().map_err(durable)?;
+            sync_selected_catalog(&selected).map_err(durable)?;
             sync_directory(&self.dir).map_err(durable)?;
             absent(&stage_path)?;
             index.require(self)?;
@@ -371,7 +408,7 @@ impl ServerStore {
                 &candidate_bytes,
             )?;
             exact_held(&seed_path, &seed, seed_id, &raw_seed)?;
-            fs::remove_file(&seed_path).map_err(durable)?;
+            retire_declaration_claim(&seed_path).map_err(durable)?;
             drop(seed);
             sync_directory(&self.dir).map_err(durable)?;
             let original_leaves = cold_native.map(|native| (marker, native));
@@ -409,6 +446,7 @@ impl ServerStore {
             directory,
             original_leaves,
             index,
+            shared_history,
             _fee: fee,
         };
         value.require(self)?;
@@ -507,11 +545,26 @@ impl ServerStore {
         }
         selected.index.require(self)?;
         let mut index = self.joined_pin_index.lock().map_err(|_| denied())?;
-        if index.is_some() {
+        let mut shared = self.shared_history_mount.lock().map_err(|_| denied())?;
+        if index.is_some() || shared.is_some() {
             return Err(denied());
         }
+        *shared = selected.shared_history;
         *index = Some(selected.index);
         Ok(())
+    }
+
+    pub(in crate::store) fn require_mounted_shared_history(&self) -> Result<(), AppError> {
+        if !self.uses_shared_history_layout() {
+            return Err(denied());
+        }
+        self.validate_mounted_governance_layout()?;
+        self.shared_history_mount
+            .lock()
+            .map_err(|_| denied())?
+            .as_ref()
+            .ok_or_else(denied)?
+            .require(self)
     }
 
     pub(in crate::store) fn selected_joined_pin_context_data(

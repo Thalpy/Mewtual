@@ -35,6 +35,7 @@ pub(in crate::store) struct Handler {
     gate: Arc<Gate>,
     payment: Arc<Payment>,
     joined_pin_layout: bool,
+    shared_history_layout: bool,
 }
 impl Handler {
     pub(in crate::store::critical_namespaces::native_registry) fn payment_tail(
@@ -74,6 +75,7 @@ impl Handler {
             gate,
             payment,
             joined_pin_layout: false,
+            shared_history_layout: false,
         })
     }
     pub(in crate::store::critical_namespaces::native_registry) fn with_joined_pin_layout(
@@ -85,6 +87,18 @@ impl Handler {
 
     pub(in crate::store) fn uses_joined_pin_layout(&self) -> bool {
         self.joined_pin_layout
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn with_shared_history_layout(
+        mut self,
+    ) -> Self {
+        self.joined_pin_layout = true;
+        self.shared_history_layout = true;
+        self
+    }
+
+    pub(in crate::store) fn uses_shared_history_layout(&self) -> bool {
+        self.shared_history_layout
     }
     pub(in crate::store) fn require(&self) -> Result<(), AppError> {
         self.payment

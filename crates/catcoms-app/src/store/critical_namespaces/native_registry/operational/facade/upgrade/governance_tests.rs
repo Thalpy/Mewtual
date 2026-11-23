@@ -18,7 +18,9 @@ struct NeverRng;
 
 #[test]
 fn shared_history_physical_stage_retains_the_original_catalog_claim_and_marker() {
-    use crate::store::persistence::governance_layout::joined::shared_history::MARKER_NAME;
+    use crate::store::persistence::governance_layout::joined::shared_history::{
+        DIRECTORY_NAME, MARKER_NAME,
+    };
 
     let dir = tempfile::tempdir().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(0xc469);
@@ -33,6 +35,7 @@ fn shared_history_physical_stage_retains_the_original_catalog_claim_and_marker()
     let stage = dir.path().join(Slot::Stage.name());
     let claim = dir.path().join(governance::GOVERNANCE_SEED);
     let marker = dir.path().join(MARKER_NAME);
+    let archive = dir.path().join(DIRECTORY_NAME);
     let base = fs::read(&current).unwrap();
     let store = joined.actual_store_for_test().unwrap();
     let mut declaration = store
@@ -41,7 +44,9 @@ fn shared_history_physical_stage_retains_the_original_catalog_claim_and_marker()
     assert!(!claim.exists());
     assert!(!stage.exists());
     assert!(!marker.exists());
+    assert!(!archive.exists());
     declaration.stage(store).unwrap();
+    assert!(archive.is_dir());
     let staged = fs::read(&stage).unwrap();
     let claimed = fs::read(&claim).unwrap();
     let covered = fs::read(&marker).unwrap();
@@ -63,6 +68,108 @@ fn shared_history_physical_stage_retains_the_original_catalog_claim_and_marker()
     assert_eq!(fs::read(&stage).unwrap(), staged);
     assert_eq!(fs::read(&claim).unwrap(), claimed);
     assert_eq!(fs::read(&marker).unwrap(), covered);
+
+    // Materialize the exact authenticated candidate as a selected fixture.
+    // The cold logic must keep the marker through its normal earlier gates.
+    fs::rename(&stage, &current).unwrap();
+    fs::remove_file(&claim).unwrap();
+    assert!(
+        NativeTextJoinedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy()).is_err()
+    );
+    fs::rename(&marker, &parked).unwrap();
+    assert!(NativeTextJoinedStorage::open_selected_shared_history(
+        dir.path(),
+        SECRET,
+        &mut NeverRng,
+        current_policy(),
+    )
+    .is_err());
+    fs::rename(&parked, &marker).unwrap();
+    let moved_archive = dir.path().join("original-history-directory");
+    fs::rename(&archive, &moved_archive).unwrap();
+    assert!(NativeTextJoinedStorage::open_selected_shared_history(
+        dir.path(),
+        SECRET,
+        &mut NeverRng,
+        current_policy(),
+    )
+    .is_err());
+    fs::rename(&moved_archive, &archive).unwrap();
+    let selected = NativeTextJoinedStorage::open_selected_shared_history(
+        dir.path(),
+        SECRET,
+        &mut NeverRng,
+        current_policy(),
+    )
+    .unwrap();
+    assert_eq!(selected.row_count_data().unwrap(), 0);
+    let store = selected.actual_store_for_test().unwrap();
+    store.require_mounted_shared_history().unwrap();
+    fs::rename(&marker, &parked).unwrap();
+    fs::write(&marker, &covered).unwrap();
+    assert!(store.require_mounted_shared_history().is_err());
+    fs::remove_file(&marker).unwrap();
+    fs::rename(&parked, &marker).unwrap();
+    store.require_mounted_shared_history().unwrap();
+    fs::rename(&archive, &moved_archive).unwrap();
+    fs::create_dir(&archive).unwrap();
+    assert!(store.require_mounted_shared_history().is_err());
+    fs::remove_dir(&archive).unwrap();
+    fs::rename(&moved_archive, &archive).unwrap();
+    store.require_mounted_shared_history().unwrap();
+}
+
+#[test]
+fn shared_history_physical_selection_reopens_the_original_promoted_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc470);
+    let mut plan = original(dir.path(), &mut rng).prepare_governance().unwrap();
+    plan.retry(&mut rng).unwrap();
+    drop(plan.into_vault().unwrap());
+    let governed =
+        NativeTextGovernedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy())
+            .unwrap();
+    let joined = governed.into_joined(&mut rng).unwrap();
+    let store = joined.actual_store_for_test().unwrap();
+    let mut declaration = store
+        .prepare_empty_shared_history_declaration(&mut rng)
+        .unwrap();
+    declaration.stage(store).unwrap();
+    let current = dir.path().join(Slot::Current.name());
+    let stage = dir.path().join(Slot::Stage.name());
+    let claim = dir.path().join(governance::GOVERNANCE_SEED);
+    let before = fs::read(&current).unwrap();
+    let expected = fs::read(&stage).unwrap();
+    let parked = dir.path().join("original-history-stage");
+    let (from, to, bytes) = (stage.clone(), parked.clone(), expected.clone());
+    governance::set_stage_selection_hook_for_test(Box::new(move || {
+        fs::rename(&from, &to).unwrap();
+        fs::write(from, bytes).unwrap();
+    }));
+    assert!(declaration.promote(store).is_err());
+    assert_eq!(fs::read(&current).unwrap(), before);
+    assert!(claim.exists());
+    fs::remove_file(&stage).unwrap();
+    fs::rename(&parked, &stage).unwrap();
+    declaration.promote(store).unwrap();
+    declaration.promote(store).unwrap();
+    assert_eq!(fs::read(&current).unwrap(), expected);
+    assert!(!stage.exists());
+    assert!(!claim.exists());
+    drop(declaration);
+    drop(joined);
+    let selected = NativeTextJoinedStorage::open_selected_shared_history(
+        dir.path(),
+        SECRET,
+        &mut NeverRng,
+        current_policy(),
+    )
+    .unwrap();
+    selected
+        .actual_store_for_test()
+        .unwrap()
+        .require_mounted_shared_history()
+        .unwrap();
 }
 
 #[test]

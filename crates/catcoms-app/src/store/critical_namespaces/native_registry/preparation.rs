@@ -72,6 +72,11 @@ impl NativeRegistryHandler {
         domain: &[u8; 32],
         executing: bool,
     ) -> Result<super::super::pending_join_codec::Parsed<'a>, AppError> {
+        if self.uses_shared_history_layout() {
+            return super::super::pending_join_codec::parse_shared_history_native_registry_layout(
+                plain, domain, executing,
+            );
+        }
         if self.uses_joined_pin_layout() {
             return super::super::pending_join_codec::parse_joined_native_registry_layout(
                 plain, domain, executing,
@@ -118,6 +123,14 @@ impl NativeRegistryHandler {
         match self {
             Self::GovernedLifecycle(handler) | Self::GovernanceOpening(handler) => {
                 handler.uses_joined_pin_layout()
+            }
+            _ => false,
+        }
+    }
+    pub(in crate::store) fn uses_shared_history_layout(&self) -> bool {
+        match self {
+            Self::GovernedLifecycle(handler) | Self::GovernanceOpening(handler) => {
+                handler.uses_shared_history_layout()
             }
             _ => false,
         }

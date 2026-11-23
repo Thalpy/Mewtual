@@ -355,6 +355,7 @@ pub(super) fn parse_joined_native_registry_layout<'a>(
 pub(super) fn parse_shared_history_native_registry_layout<'a>(
     plain: &'a [u8],
     domain: &[u8; 32],
+    executing: bool,
 ) -> Result<Parsed<'a>, AppError> {
     let parsed = parse_known(
         plain,
@@ -363,7 +364,7 @@ pub(super) fn parse_shared_history_native_registry_layout<'a>(
             joined_pin: true,
             shared_history: true,
             ..SupportedLayout::GOVERNANCE_LAYOUT
-                .executing(true)
+                .executing(executing)
                 .member_outbox(true)
                 .native_registry(Some(3))
         },

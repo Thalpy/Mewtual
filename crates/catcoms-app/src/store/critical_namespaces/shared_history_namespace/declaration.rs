@@ -9,7 +9,7 @@ const TAG: &[u8] = b"catcoms/private-chat-v2-shared-history-declaration/v1\0";
 const SEED_KEY: &str = "catcoms/private-chat-v2-shared-history-declaration-key/v1";
 const MARKER_TAG: &[u8] = b"catcoms/private-chat-v2-shared-history-root/v1\0";
 const MARKER_KEY: &str = "catcoms/private-chat-v2-shared-history-root-key/v1";
-const MARKER_BYTES: usize = 4 + MARKER_TAG.len() + 2 + 3 * 36 + 40;
+pub(in crate::store) const MARKER_BYTES: usize = 4 + MARKER_TAG.len() + 2 + 3 * 36 + 40;
 const OVERHEAD: usize = 4 + TAG.len() + 2 + 7 * 36 + 3 * 4;
 pub(in crate::store) const MAX_SEED_FRAME: usize =
     OVERHEAD + 2 * catalog::MAX_CATALOG_FRAMED + MARKER_BYTES + 40;
@@ -60,7 +60,7 @@ impl PreparedDeclaration {
     ) -> Result<Self, AppError> {
         let old = open_catalog(key, original)?;
         let new = prepare_declaration(&old, &layout.vault)?;
-        let descriptor = selected_descriptor(&new, layout)?;
+        let descriptor = selected_descriptor(&new, layout, true)?;
         let marker = seal_marker(key, layout, descriptor, rng)?;
         let candidate = Zeroizing::new(frame(&seal(key, &new, rng)?));
         let invalid = |_| refused();
@@ -130,7 +130,12 @@ impl AuthenticatedSeed {
         let old = open_catalog(key, original)?;
         let new = open_catalog(key, candidate)?;
         verify_declaration(&old, &new, &layout.vault)?;
-        validate_marker(key, layout, selected_descriptor(&new, layout)?, marker)?;
+        validate_marker(
+            key,
+            layout,
+            selected_descriptor(&new, layout, true)?,
+            marker,
+        )?;
         Ok(OpenedDeclaration {
             original,
             candidate,
@@ -146,8 +151,13 @@ fn open_catalog(key: &[u8; 32], raw: &[u8]) -> Result<Zeroizing<Vec<u8>>, AppErr
     Ok(Zeroizing::new(unseal(key, &unframe(raw)?)?))
 }
 
-fn selected_descriptor(raw: &[u8], layout: CurrentLayoutData) -> Result<&[u8], AppError> {
-    let parsed = catalog::parse_shared_history_native_registry_layout(raw, &layout.vault)?;
+pub(in crate::store) fn selected_descriptor(
+    raw: &[u8],
+    layout: CurrentLayoutData,
+    executing: bool,
+) -> Result<&[u8], AppError> {
+    let parsed =
+        catalog::parse_shared_history_native_registry_layout(raw, &layout.vault, executing)?;
     if parsed.current_layout != Some(layout) {
         return Err(refused());
     }

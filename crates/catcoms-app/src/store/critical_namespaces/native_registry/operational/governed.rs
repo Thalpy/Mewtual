@@ -162,6 +162,25 @@ impl NativeTextJoinedStorage {
         )
     }
 
+    pub(in crate::store) fn open_selected_shared_history(
+        dir: impl AsRef<std::path::Path>,
+        secret: &[u8],
+        rng: &mut impl CryptoRngCore,
+        current: crate::store::V2CurrentLayoutPolicy,
+    ) -> Result<Self, AppError> {
+        Ok(Self {
+            pending: None,
+            recovered_tcp: None,
+            index: upgrade_source::owning::Store::open_selected_shared_history(
+                dir,
+                secret,
+                rng,
+                current,
+                Self::opening_policy()?,
+            )?,
+        })
+    }
+
     pub fn open(
         dir: impl AsRef<std::path::Path>,
         secret: &[u8],

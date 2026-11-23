@@ -9,6 +9,7 @@ enum ColdOpening {
     Joined,
     IdleJoined,
     NativeStartup,
+    SelectedSharedHistory,
 }
 use crate::store::critical_namespaces::{
     native_registry::preparation::NativeRegistryHandler, pending_join_codec as grammar,
@@ -619,6 +620,23 @@ impl Store {
         )
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn open_selected_shared_history(
+        dir: impl AsRef<std::path::Path>,
+        passphrase: &[u8],
+        rng: &mut impl CryptoRngCore,
+        current: crate::store::V2CurrentLayoutPolicy,
+        policy: Policy,
+    ) -> Result<Self, AppError> {
+        Self::open_governed_family(
+            dir,
+            passphrase,
+            rng,
+            current,
+            policy,
+            ColdOpening::SelectedSharedHistory,
+        )
+    }
+
     fn open_governed_family(
         dir: impl AsRef<std::path::Path>,
         passphrase: &[u8],
@@ -638,6 +656,9 @@ impl Store {
         let mut handler = lifecycle_admission::Handler::from_reserved(&policy, policy.reserve()?)?;
         if !matches!(opening, ColdOpening::Governed) {
             handler = handler.with_joined_pin_layout();
+        }
+        if matches!(opening, ColdOpening::SelectedSharedHistory) {
+            handler = handler.with_shared_history_layout();
         }
         let physical = physical::Physical::allocate(handler.clone());
         current.native_registry = Some(NativeRegistryHandler::GovernanceOpening(handler.clone()));
@@ -660,9 +681,11 @@ impl Store {
         let count = value.row_count_data()?;
         let require_idle_joined = match (opening, count) {
             (ColdOpening::IdleJoined | ColdOpening::NativeStartup, 0) => true,
-            (ColdOpening::NativeStartup, 1) | (ColdOpening::Governed | ColdOpening::Joined, _) => {
-                false
-            }
+            (ColdOpening::NativeStartup, 1)
+            | (
+                ColdOpening::Governed | ColdOpening::Joined | ColdOpening::SelectedSharedHistory,
+                _,
+            ) => false,
             _ => return Err(refused()),
         };
         #[cfg(test)]

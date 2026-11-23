@@ -149,9 +149,9 @@ declare -A allowed=(
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|install_governance_layout_marker|original.marker.sync_all().map_err(io)?;']=1
   # Explicit joined-pin startup only. The authenticated seed identifies both whole catalogs and
   # the actual governing/outbox/native leaves. The same stage is kept through the rename.
-  ['crates/catcoms-app/src/store/persistence/governance_layout/joined.rs|select_joined_pin_catalog_with|fs::rename(&stage_path, &current_path).map_err(io)?;']=1
-  ['crates/catcoms-app/src/store/persistence/governance_layout/joined.rs|select_joined_pin_catalog_with|selected.sync_all().map_err(durable)?;']=1
-  ['crates/catcoms-app/src/store/persistence/governance_layout/joined.rs|select_joined_pin_catalog_with|fs::remove_file(&seed_path).map_err(durable)?;']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout/joined.rs|install_catalog_stage|fs::rename(stage, current)']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout/joined.rs|sync_selected_catalog|selected.sync_all()']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout/joined.rs|retire_declaration_claim|fs::remove_file(claim)']=1
   ['crates/catcoms-app/src/store/persistence/governance_layout/joined.rs|select_joined_pin_catalog_with|value.current.sync_all().map_err(durable)?;']=1
   # First joined-pending record selects only its exact one-insertion index successor.
   ['crates/catcoms-app/src/store/persistence/governance_layout/joined/pending.rs|select|fs::rename(&stage_path, &index_path).map_err(io)?;']=1
