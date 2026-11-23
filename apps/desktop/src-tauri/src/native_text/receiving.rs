@@ -197,12 +197,71 @@ async fn receive(
             Some(original.projection_target_data())
         }
         V2OrdinaryReceiveStatus::WaitingForDependencies(missing) => {
-            for action in missing.into_iter().take(DEPENDENCIES_PER_FRAME) {
-                recover_dependency(state, source, &original, action).await;
-            }
-            apply_and_archive(state, source, original).await
+            recover_dependencies(state, source, &original, missing).await;
+            let target = original.projection_target_data();
+            (apply_and_archive(state, source, original).await?
+                == V2OrdinaryReceiveStatus::Retained(ActionState::Valid))
+            .then_some(target)
         }
         V2OrdinaryReceiveStatus::Retained(_) => None,
+    }
+}
+
+enum DependencyWork {
+    Resolve(Arc<NativeTextJoinedReceivedOriginal>, ActionId),
+    Retry(Arc<NativeTextJoinedReceivedOriginal>),
+}
+
+async fn recover_dependencies(
+    state: &AppState,
+    source: &Arc<Source>,
+    child: &Arc<NativeTextJoinedReceivedOriginal>,
+    missing: Vec<ActionId>,
+) {
+    let mut pending = Vec::with_capacity(2 * DEPENDENCIES_PER_FRAME);
+    pending.extend(
+        missing
+            .into_iter()
+            .take(DEPENDENCIES_PER_FRAME)
+            .rev()
+            .map(|id| DependencyWork::Resolve(child.clone(), id)),
+    );
+    let mut remaining = DEPENDENCIES_PER_FRAME;
+    while let Some(work) = pending.pop() {
+        match work {
+            DependencyWork::Resolve(child, action) => {
+                let Some(next) = remaining.checked_sub(1) else {
+                    return;
+                };
+                remaining = next;
+                let Some(parent) = recover_dependency(state, source, &child, action).await else {
+                    continue;
+                };
+                let Some(V2OrdinaryReceiveStatus::WaitingForDependencies(missing)) =
+                    apply_and_archive(state, source, parent.clone()).await
+                else {
+                    continue;
+                };
+                let queued = pending
+                    .iter()
+                    .filter(|work| matches!(work, DependencyWork::Resolve(..)))
+                    .count();
+                if missing.len() + queued <= remaining {
+                    // This also keeps the original parent's reply scope held
+                    // until its dependencies have returned and been checked.
+                    pending.push(DependencyWork::Retry(parent.clone()));
+                    pending.extend(
+                        missing
+                            .into_iter()
+                            .rev()
+                            .map(|id| DependencyWork::Resolve(parent.clone(), id)),
+                    );
+                }
+            }
+            DependencyWork::Retry(parent) => {
+                let _ = apply_and_archive(state, source, parent).await;
+            }
+        }
     }
 }
 
@@ -231,7 +290,7 @@ async fn recover_dependency(
     source: &Arc<Source>,
     child: &Arc<NativeTextJoinedReceivedOriginal>,
     action: ActionId,
-) {
+) -> Option<Arc<NativeTextJoinedReceivedOriginal>> {
     let local_result = with_row(state, source, move |selected, _, local, scope| {
         let mut slot = local.received.lock().ok()?;
         selected
@@ -239,54 +298,47 @@ async fn recover_dependency(
             .ok()
     })
     .await;
-    // Consult the carrier when this exact original is absent from the local
-    // outbox. A local refusal leaves the child waiting.
+    // Consult the carrier when this exact original is absent from selected
+    // local storage. A local refusal leaves the child waiting.
     if !matches!(local_result, Some(None)) {
-        return;
+        return None;
     }
     let original = child.clone();
-    let Some(exchange) = with_row(state, source, move |selected, _, _, scope| {
+    let exchange = with_row(state, source, move |selected, _, _, scope| {
         selected
             .prepare_received_dependency_exchange(&original, action, scope, &mut OsCryptoRng)
             .ok()
     })
-    .await
-    else {
-        return;
-    };
-    let Ok(Ok(response)) = tokio::time::timeout(DEPENDENCY_TIMEOUT, exchange.receive()).await
-    else {
-        return;
-    };
-    let Some(original) = with_row(state, source, move |selected, row, _, scope| {
+    .await?;
+    let response = tokio::time::timeout(DEPENDENCY_TIMEOUT, exchange.receive())
+        .await
+        .ok()?
+        .ok()?;
+    with_row(state, source, move |selected, row, _, scope| {
         selected
             .open_dependency_response(&row, response, &scope)
             .ok()
             .flatten()
     })
     .await
-    else {
-        return;
-    };
-    let _ = apply_and_archive(state, source, Arc::new(original)).await;
+    .map(Arc::new)
 }
 
 async fn apply_and_archive(
     state: &AppState,
     source: &Arc<Source>,
     original: Arc<NativeTextJoinedReceivedOriginal>,
-) -> Option<ActionId> {
+) -> Option<V2OrdinaryReceiveStatus> {
     with_row(state, source, move |selected, _, local, scope| {
         let mut slot = local.received.lock().ok()?;
         let ledger = slot.as_deref_mut()?;
         let status = selected
             .project_received_member(ledger, &original, &scope)
             .ok()?;
-        if status != V2OrdinaryReceiveStatus::Retained(ActionState::Valid) {
-            return None;
+        if status == V2OrdinaryReceiveStatus::Retained(ActionState::Valid) {
+            archive_original(&selected, ledger, &original, local, &scope);
         }
-        archive_original(&selected, ledger, &original, local, &scope);
-        Some(original.projection_target_data())
+        Some(status)
     })
     .await
 }

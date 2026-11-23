@@ -331,8 +331,8 @@ jobs:
       - name: Check exact ActionId recovery after publication and restart
         if: github.event_name == 'pull_request' || inputs.scope == 'joined-member' || inputs.scope == 'member-history'
         run: python .github/scripts/check-chat-v2-invite-intent.py member-action-history
-      - name: Check bounded dependency requests on the original TCP connection
-        if: github.event_name == 'pull_request' || inputs.scope == 'joined-member'
+      - name: Check bounded dependency requests and follow-ups on the original TCP connection
+        if: github.event_name == 'pull_request' || inputs.scope == 'joined-member' || inputs.scope == 'native-contact'
         run: python .github/scripts/check-chat-v2-invite-intent.py member-dependency-transport
       - name: Check Chat V2 request and response bounds before allocation
         if: inputs.scope == 'joined-storage'

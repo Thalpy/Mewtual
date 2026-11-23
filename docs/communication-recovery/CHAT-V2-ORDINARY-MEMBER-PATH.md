@@ -108,11 +108,13 @@ channel and its one ActionId. The exact encrypted request binds the reply. An un
 reply describes only that provider's selected source. It cannot clear another member's
 history or justify importing a child with missing parents.
 Frame-triggered recovery can request a signed direct dependency on the exact original
-TCP carrier. Its reply remains bound to both the receive scope and that connection.
+TCP carrier. When an authenticated reply itself needs a signed parent or target, the
+joined receiver can follow that edge on the same carrier while the reply and its
+ancestors are still current. Explicit standalone requests supply no follow-up route.
 The desktop attaches the provider to the original joined row after Join or authenticated
 reopen. Each incoming request captures that same installed row again before doing work.
-That row also attaches an exact native gossip listener. It can recover up to four direct
-dependencies per frame through selected local storage or the frame's original carrier,
+That row also attaches an exact native gossip listener. It can attempt up to four
+dependency recoveries per frame through selected local storage or the original carrier,
 with one network request in flight. For each requested ActionId, local replay uses up to
 eight lookups in the exact row's outbox and selected archive to recover signed parents
 and targets. Unresolved originals stay outside the ledger.

@@ -13,6 +13,7 @@ use catcoms_sync::owner_v2::{
 
 // Overlapping network buffers, nested sealed original and role-specific AEAD scratch.
 const REPLY_FEE: usize = OPEN_FEE + 5 * MAX_V2_DEPENDENCY_REPLY_BYTES + 16 * 1024;
+const MAX_FRAME_DEPENDENCY_DEPTH: u8 = 4;
 
 /// One fixed ActionId and original live route, ready outside the metadata slot.
 pub struct NativeTextJoinedDependencyExchange {
@@ -21,6 +22,7 @@ pub struct NativeTextJoinedDependencyExchange {
     channel: u128,
     route: V2MemberDependencyRoute,
     request: PreparedV2MemberDependencyRequest,
+    frame_depth: Option<u8>,
     signal: RequestCancellation,
     invocation: watch::Sender<bool>,
 }
@@ -34,6 +36,7 @@ pub struct NativeTextJoinedDependencyResponse {
     route: V2MemberDependencyRoute,
     request: PreparedV2MemberDependencyRequest,
     observation: NativeChatMemberDependencyObservation,
+    frame_depth: Option<u8>,
     signal: RequestCancellation,
     invocation: watch::Sender<bool>,
 }
@@ -66,9 +69,31 @@ impl NativeTextJoinedDependencyExchange {
             route: self.route,
             request: self.request,
             observation,
+            frame_depth: self.frame_depth,
             signal: self.signal,
             invocation: self.invocation,
         })
+    }
+}
+
+#[derive(Debug)]
+struct DependencyParentScope {
+    caller: RequestCancellation,
+    parent: RequestCancellation,
+}
+
+#[async_trait::async_trait]
+impl RequestAuthority for DependencyParentScope {
+    fn authorized(&self) -> bool {
+        !self.caller.is_cancelled() && !self.parent.is_cancelled()
+    }
+
+    async fn revoked(&self) {
+        let (mut caller, mut parent) = (self.caller.clone(), self.parent.clone());
+        tokio::select! {
+            _ = caller.cancelled() => {},
+            _ = parent.cancelled() => {},
+        }
     }
 }
 
@@ -116,11 +141,19 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             .dependency_lane()?
             .capture_request(provider)
             .ok_or(Refusal::Unavailable)?;
-        self.prepare_dependency_on(exchange, selection, channel, action, caller, rng)
+        self.prepare_dependency_on(
+            exchange,
+            selection,
+            channel,
+            action,
+            (None, None),
+            caller,
+            rng,
+        )
     }
 
-    /// Recover one signed direct dependency on the frame's original carrier.
-    /// This capture cannot infer a route from the action author or reconnect.
+    /// Recover a signed direct dependency of a frame or an authenticated
+    /// reply on its original carrier. Every ancestor must stay current.
     pub fn prepare_received_dependency_exchange(
         self,
         original: &NativeTextJoinedReceivedOriginal,
@@ -137,18 +170,25 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         if spec.parents.binary_search(&action).is_err() && spec.body.create() != Some(action) {
             return Err(Refusal::Failed);
         }
-        let ReceiveOrigin::Gossip(frame) = &original.origin else {
-            return Err(Refusal::Unavailable);
+        let lane = self.dependency_lane()?;
+        let (exchange, depth, parent) = match &original.origin {
+            ReceiveOrigin::Gossip(frame) => (lane.capture_frame_request(frame), 1, None),
+            ReceiveOrigin::Dependency {
+                route,
+                frame_depth: Some(depth),
+                signal,
+                ..
+            } if *depth < MAX_FRAME_DEPENDENCY_DEPTH => {
+                (lane.capture_frame_followup(route), depth + 1, Some(signal))
+            }
+            ReceiveOrigin::Dependency { .. } => return Err(Refusal::Unavailable),
         };
-        let exchange = self
-            .dependency_lane()?
-            .capture_frame_request(frame)
-            .ok_or(Refusal::Unavailable)?;
         self.prepare_dependency_on(
-            exchange,
+            exchange.ok_or(Refusal::Unavailable)?,
             selection,
             spec.realm.channel(),
             action,
+            (Some(depth), parent),
             caller,
             rng,
         )
@@ -160,6 +200,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         selection: &NativeTextJoinedRowSelection,
         channel: u128,
         action: ActionId,
+        (frame_depth, parent): (Option<u8>, Option<&RequestCancellation>),
         caller: RequestCancellation,
         rng: &mut impl CryptoRngCore,
     ) -> Result<NativeTextJoinedDependencyExchange, V2MemberSaveRefusal> {
@@ -189,6 +230,19 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         if !observation.is_current_cached() {
             return Err(Refusal::Stale);
         }
+        let caller = if let Some(parent) = parent {
+            if parent.is_cancelled() {
+                return Err(Refusal::Stale);
+            }
+            caller
+                .clone()
+                .with_authority(Arc::new(DependencyParentScope {
+                    caller,
+                    parent: parent.clone(),
+                }))
+        } else {
+            caller
+        };
         let (signal, invocation) = self.dependency_signal(selection, caller, auth, observed);
         let signal = signal.retain_custody(Arc::new(JoinFramePayment { _fee: fee }));
         Ok(NativeTextJoinedDependencyExchange {
@@ -197,6 +251,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             channel,
             route,
             request,
+            frame_depth,
             signal,
             invocation,
         })
@@ -234,6 +289,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             let NativeTextJoinedDependencyResponse {
                 wire,
                 observation,
+                frame_depth,
                 signal,
                 invocation,
                 ..
@@ -241,6 +297,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             drop(wire);
             let origin = ReceiveOrigin::Dependency {
                 route: observation,
+                frame_depth,
                 signal,
                 _invocation: invocation,
             };

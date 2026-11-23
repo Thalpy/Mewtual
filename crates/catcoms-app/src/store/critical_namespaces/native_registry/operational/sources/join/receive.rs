@@ -91,6 +91,7 @@ enum ReceiveOrigin {
     Gossip(NativeChatMemberFrameObservation),
     Dependency {
         route: catcoms_net::NativeChatMemberDependencyObservation,
+        frame_depth: Option<u8>,
         signal: RequestCancellation,
         _invocation: watch::Sender<bool>,
     },

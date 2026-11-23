@@ -60,6 +60,23 @@ impl NativeChatMemberDependencies {
             .then(|| self.exchange(peer, current, Some(observation.clone())))
     }
 
+    /// Continue catch-up on the original frame's live connection. A direct
+    /// request that did not originate from a frame has no follow-up route.
+    pub fn capture_frame_followup(
+        &self,
+        original: &NativeChatMemberDependencyObservation,
+    ) -> Option<NativeChatMemberDependencyExchange> {
+        if !original.is_current_cached() {
+            return None;
+        }
+        let followup = self.capture_frame_request(original.frame.as_ref()?)?;
+        followup
+            .observation
+            .connection
+            .is_same(&original.connection)
+            .then_some(followup)
+    }
+
     fn exchange(
         &self,
         peer: PeerId,
@@ -268,7 +285,7 @@ impl RequestAuthority for OriginalRoute {
 mod tests {
     use super::*;
     use crate::{keypair_from_seed, NativeTcpPreparation};
-    use catcoms_rt::MeshTransport;
+    use catcoms_rt::{MeshTransport, PublishOnceError, PublishSubmission, Topic};
     use tokio::sync::watch;
 
     #[tokio::test]
@@ -292,6 +309,18 @@ mod tests {
         let (_ready, signal) = watch::channel(false);
         let scope = RequestCancellation::new(signal, None);
         tokio::time::timeout(std::time::Duration::from_secs(16), async {
+            let topic = Topic::new(vec![109; 32]);
+            let (retire_frame, frame_signal) = watch::channel(false);
+            let mut received = requester
+                .native_chat_member_ingress()
+                .unwrap()
+                .open(
+                    topic.clone(),
+                    64,
+                    RequestCancellation::new(frame_signal, None),
+                )
+                .await
+                .unwrap();
             let address = provider.next_listen_addr().await.unwrap();
             assert_eq!(
                 requester
@@ -310,6 +339,30 @@ mod tests {
                 Err(TransportError::NoResponse)
             ));
             let observation = source.capture_request(target).unwrap().observe_route();
+            assert!(source.capture_frame_followup(&observation).is_none());
+            loop {
+                match provider
+                    .publish_once(topic.clone(), Bytes::from_static(b"original frame"))
+                    .await
+                {
+                    Ok(PublishSubmission::Submitted) => break,
+                    Err(PublishOnceError::NoPeers) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await
+                    }
+                    result => panic!("unexpected gossip submission {result:?}"),
+                }
+            }
+            let Some(crate::NativeChatMemberGossipEvent::Frame(frame)) = received.next().await
+            else {
+                panic!("expected the frame from the original provider");
+            };
+            let original_route = source
+                .capture_frame_request(&frame.observe())
+                .unwrap()
+                .observe_route();
+            assert!(provider_lane
+                .capture_frame_followup(&original_route)
+                .is_none());
             let (retire, signal) = watch::channel(false);
             let candidate = RequestCancellation::new(signal, None);
             let authority = Arc::new(OriginalRoute {
@@ -317,29 +370,40 @@ mod tests {
                 caller: candidate.clone(),
             });
             let mut requests = provider_lane.try_attach(authority.clone()).unwrap();
-            let revocable = source.capture_request(target).unwrap();
-            assert_eq!(revocable.route_data(), (requester.local_peer(), target));
-            let serve = async {
-                let request = requests
-                    .next()
-                    .await
-                    .expect("exact native member dependency request");
-                assert!(provider_lane.owns_request(&request));
-                assert!(!source.owns_request(&request));
-                assert_eq!(
-                    request.current_data(),
-                    Some((requester.local_peer(), [7].as_slice()))
-                );
-                request
-                    .respond(
-                        Bytes::from_static(b"bounded reply"),
-                        authority.clone(),
-                        Arc::new(()),
-                    )
-                    .unwrap();
-            };
-            let (reply, ()) = tokio::join!(revocable.request(&[7], scope.clone()), serve);
-            assert_eq!(reply.unwrap().as_ref(), b"bounded reply");
+            for marker in [[7], [8]] {
+                let route = if marker == [7] {
+                    source.capture_frame_request(&frame.observe())
+                } else {
+                    source.capture_frame_followup(&original_route)
+                }
+                .unwrap();
+                assert_eq!(route.route_data(), (requester.local_peer(), target));
+                assert!(route.observe_connection().is_same(&observation.connection));
+                let serve = async {
+                    let request = requests
+                        .next()
+                        .await
+                        .expect("exact native member dependency request");
+                    assert!(provider_lane.owns_request(&request));
+                    assert!(!source.owns_request(&request));
+                    assert_eq!(
+                        request.current_data(),
+                        Some((requester.local_peer(), marker.as_slice()))
+                    );
+                    request
+                        .respond(
+                            Bytes::from_static(b"bounded reply"),
+                            authority.clone(),
+                            Arc::new(()),
+                        )
+                        .unwrap();
+                };
+                let (reply, ()) = tokio::join!(route.request(&marker, scope.clone()), serve);
+                assert_eq!(reply.unwrap().as_ref(), b"bounded reply");
+            }
+            retire_frame.send_replace(true);
+            assert!(source.capture_frame_followup(&original_route).is_none());
+            assert!(source.capture_request(target).is_some());
             retire.send_replace(true);
             assert!(!authority.authorized());
             assert!(requests.next().await.is_none());
