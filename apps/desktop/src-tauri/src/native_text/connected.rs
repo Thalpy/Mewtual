@@ -656,6 +656,7 @@ async fn serve<R: tauri::Runtime>(
         .await;
         if matches!(served, Ok(Ok(()))) {
             source.member_work.publication_wake.notify_one();
+            source.notify_membership(app, &state, false).await;
         }
     }
 }

@@ -1423,6 +1423,11 @@ async fn native_text_membership_selected_eviction_notifies_the_original_joined_r
     );
     run(&founder_queue).await;
     let invite = found_value(invite.await.unwrap());
+    let (notice, selected_add) = oneshot::channel();
+    founder.once_any("chat-v2-membership", move |event| {
+        let notice_data: serde_json::Value = serde_json::from_str(event.payload()).unwrap();
+        let _ = notice.send(notice_data);
+    });
     let joined = invite_command(
         &window,
         "join_server",
@@ -1435,6 +1440,13 @@ async fn native_text_membership_selected_eviction_notifies_the_original_joined_r
         .await
         .expect("the member joins over the founder's original TCP listener");
     let joined = found_value(joined.await.unwrap());
+    assert_eq!(
+        timeout(Duration::from_secs(10), selected_add)
+            .await
+            .unwrap()
+            .unwrap(),
+        serde_json::json!({"server": found["server"], "context": found["context"], "removed": false}),
+    );
 
     let roster = invite_command(
         &main,
