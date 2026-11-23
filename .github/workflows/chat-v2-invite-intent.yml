@@ -278,6 +278,9 @@ jobs:
       - name: Check distinct governing key cuts and source drain
         if: github.event_name == 'pull_request' || inputs.scope == 'remove-sdk'
         run: python .github/scripts/check-chat-v2-invite-intent.py governing-key-cuts
+      - name: Check exact Remove retry after a native refusal before primitive entry
+        if: github.event_name == 'pull_request' || inputs.scope == 'remove-sdk'
+        run: python .github/scripts/check-chat-v2-invite-intent.py remove-native-retry
       - name: Check save admission ordering against the original member eviction
         if: github.event_name == 'pull_request' || inputs.scope == 'remove-sdk'
         run: python .github/scripts/check-chat-v2-invite-intent.py joined-eviction-order

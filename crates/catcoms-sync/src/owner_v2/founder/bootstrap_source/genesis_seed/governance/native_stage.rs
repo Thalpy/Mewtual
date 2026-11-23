@@ -97,6 +97,23 @@ impl NativeStageAdmission {
         debug_assert!(self.eligible());
         self.state = AdmissionState::Unstarted; // attempts are never reset
     }
+
+    /// Reopen only a locally refused native edge. Its owning operation must
+    /// still retain the original request, source and unentered primitive.
+    pub(super) fn retry_local_refusal(
+        &mut self,
+        cut: &NativeChatPreparedKeyCut,
+        source: &NativeChatSourceObservation,
+        purpose: NativeChatKeyPurpose,
+    ) -> Result<(), SyncError> {
+        if self.state == AdmissionState::KnownLocalRefusal {
+            cut.require_never_entered_data(source, purpose)
+                .map_err(|_| unavailable())?;
+            cut.preflight(source, purpose).map_err(|_| unavailable())?;
+            self.reauthorize();
+        }
+        Ok(())
+    }
     #[cfg(test)]
     pub(super) fn attempts_for_test(&self) -> u64 {
         self.attempts

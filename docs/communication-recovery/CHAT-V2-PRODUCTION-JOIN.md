@@ -576,7 +576,9 @@ The warm founder covers the exact Remove intent and SDK entry before SDK
 work, then covers the original SDK outcome and Header attempt before signing.
 Add and Remove share the exact-file Head replacement under the original
 Current writer. A lost reply after Head replacement can finish the same
-cached Core and MLS selection. The desktop founder chooses the exact
+cached Core and MLS selection. A local refusal before SDK or header signature
+entry can retry the same covered work with a live cut on the original source.
+The desktop founder chooses the exact
 admission shown by the selected roster, and the original native row checks
 permission again before issuing the operation. A surviving joined row and a
 reopened founder read the roster from their authenticated selected history.

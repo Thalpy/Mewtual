@@ -123,6 +123,9 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2FounderGovernanceNode<T, R> {
             let purpose = NativeChatKeyPurpose::RemoveSdk;
             cut.require_never_entered_data(original, purpose)
                 .map_err(|_| unavailable())?;
+            pending
+                .sdk_entry
+                .retry_local_refusal(cut, original, purpose)?;
             pending.sdk_entry.enter(cut, original, purpose, ends)?;
             let candidate = PreparedTextCurrentRemove::prepare(
                 &seed.device,
@@ -354,6 +357,9 @@ impl V2FounderRemoveSigning<'_> {
         let purpose = NativeChatKeyPurpose::RemovalHeader;
         cut.require_never_entered_data(original, purpose)
             .map_err(|_| unavailable())?;
+        pending
+            .header_entry
+            .retry_local_refusal(cut, original, purpose)?;
         pending.header_entry.enter(cut, original, purpose, ends)?;
         pending.raw = Some(
             device

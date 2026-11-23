@@ -318,6 +318,52 @@ fn fresh_same_source_authorization_resumes_only_unentered_keys_after_closed_sdk_
 }
 
 #[test]
+fn remove_native_local_refusal_needs_a_live_original_cut_and_preserves_attempts() {
+    let mut native = Native::new();
+    for purpose in [
+        NativeChatKeyPurpose::RemoveSdk,
+        NativeChatKeyPurpose::RemovalHeader,
+    ] {
+        let original = native.source.observe();
+        let mut stage = NativeStageAdmission::new();
+        let mut stale = native.cut(purpose);
+        native.generation.fetch_add(1, SeqCst);
+        native.reauthenticate();
+        let mut stale_ends = NativeChatKeyEnds::new();
+        assert!(stage
+            .enter(&mut stale, &original, purpose, &mut stale_ends)
+            .is_err());
+        assert_eq!(stage.attempts_for_test(), 1);
+        drop(stale_ends);
+        assert!(stage
+            .retry_local_refusal(&stale, &original, purpose)
+            .is_err());
+        let foreign = Native::new();
+        assert!(stage
+            .retry_local_refusal(&foreign.cut(purpose), &original, purpose)
+            .is_err());
+        let mut fresh = native.cut(purpose);
+        stage
+            .retry_local_refusal(&fresh, &original, purpose)
+            .unwrap();
+        let mut ends = NativeChatKeyEnds::new();
+        stage
+            .enter(&mut fresh, &original, purpose, &mut ends)
+            .unwrap();
+        assert_eq!(stage.attempts_for_test(), 2);
+        let mut duplicate = native.cut(purpose);
+        stage
+            .retry_local_refusal(&duplicate, &original, purpose)
+            .unwrap();
+        let mut replacement = NativeChatKeyEnds::new();
+        assert!(stage
+            .enter(&mut duplicate, &original, purpose, &mut replacement)
+            .is_err());
+        assert_eq!(stage.attempts_for_test(), 2);
+    }
+}
+
+#[test]
 fn local_native_sdk_refusal_can_reauthorize_before_constructor_without_resetting_attempts() {
     let clock = ManualClock::new(NOW);
     let (original, _reservation, _opened, _old_fee) =
