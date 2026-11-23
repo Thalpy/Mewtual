@@ -1,17 +1,40 @@
 <script lang="ts">
-  import type { NativeOriginal, NativeReceived } from "./native-text-history";
-  let { rows, received = [], archive = null, readArchive, loading, loaded, failure, more, text, busy, send, refresh, loadMore, change, replyTo = null, reply }: {
+  import type { NativeOriginal, NativeOwnMessage, NativeReceived } from "./native-text-history";
+  let { rows, own = {}, readOwn, mutate, received = [], archive = null, readArchive, loading, loaded, failure, more, text, busy, send, refresh, loadMore, change, replyTo = null, reply }: {
     rows: NativeOriginal[]; received?: NativeReceived[]; loading: boolean; loaded:boolean;failure:string|null;more: boolean; text: string; busy: boolean;
+    own?: Record<string, NativeOwnMessage>;
+    readOwn?: (action: string) => void;
+    mutate?: (action: string, revision: string, text: string | null) => void;
     archive?: { items: NativeReceived[]; note: string | null; loading: boolean; more: boolean } | null;
     readArchive?: (append: boolean) => void;
     send: () => void; refresh: () => void; loadMore: () => void; change: (value: string) => void;
     replyTo?: string | null; reply?: (action: string | null) => void;
   } = $props();
-  const replyText = $derived.by(() => {
-    const original = rows.find(row => row.action === replyTo)?.body;
-    return original?.kind === "create" ? original.text
-      : received.find(row => row.action === replyTo)?.text ?? archive?.items.find(row => row.action === replyTo)?.text;
+  const ownRows = $derived(rows.filter(row => row.body.kind === "create"));
+  const shownOwn = $derived(ownRows.filter(row => !own[row.action] || own[row.action].scanning || own[row.action].item));
+  const replyText = $derived((replyTo && own[replyTo]?.item?.text)
+    || received.find(row => row.action === replyTo)?.text || archive?.items.find(row => row.action === replyTo)?.text);
+  let changeTarget = $state<{ action: string; revision: string; editing: boolean } | null>(null);
+  let editText = $state("");
+  function begin(action: string, revision: string, text: string | null) {
+    changeTarget = { action, revision, editing: text !== null };
+    editText = text ?? "";
+  }
+  function cancel() {
+    changeTarget = null;
+    editText = "";
+  }
+  $effect(() => {
+    if (changeTarget && own[changeTarget.action]?.item?.revision !== changeTarget.revision) cancel();
   });
+  function submit() {
+    if (busy || !changeTarget || !mutate || own[changeTarget.action]?.item?.revision !== changeTarget.revision) return;
+    const { action, revision, editing } = changeTarget;
+    if (editing && !editText.trim()) return;
+    const value = editing ? editText : null;
+    cancel();
+    mutate(action, revision, value);
+  }
 </script>
 
 <section class="native-saved-chat" aria-label="Chat messages">
@@ -22,17 +45,35 @@
   </header>
   <div class="native-saved-rows" aria-busy={loading}>
     {#if failure}<p role="status">{failure}</p>
-    {:else if (loading || !loaded) && !rows.length}<p>Loading messages…</p>
-    {:else if !rows.length && more}<p>More history is available.</p>
-    {:else if !rows.length && !received.length && !archive && loaded}<p>Nothing saved here yet.</p>{/if}
-    {#each rows as row (`${row.ordinal}:${row.action}`)}
+    {:else if (loading || !loaded) && !shownOwn.length}<p>Loading messages…</p>
+    {:else if !shownOwn.length && more}<p>More history is available.</p>
+    {:else if !shownOwn.length && !received.length && !archive && loaded}<p>Nothing saved here yet.</p>{/if}
+    {#each shownOwn as row (row.action)}
+      {@const view = own[row.action]?.item}
       <article>
-        <small>You · {row.status === "pending" ? "Saved here" : row.status === "submitted" ? "Sent from this device" : "Not sent"}</small>
-        {#if row.body.kind === "create"}<p>{row.body.text}</p>
-          {#if reply}<button type="button" onclick={() => reply(row.action)} disabled={busy}>Reply</button>{/if}
-        {:else if row.body.kind === "edit"}<p>Saved edit: {row.body.text}</p>
-        {:else if row.body.kind === "delete"}<p>Saved deletion.</p>
-        {:else}<p>Saved change.</p>{/if}
+        {#if view}
+          <small>You · {view.status === "pending" ? "Saved here" : view.status === "submitted" ? "Sent from this device" : "Not sent"}</small>
+          {#if changeTarget?.action === row.action && changeTarget.revision === view.revision}
+            <form class="native-mutation" onsubmit={(event) => { event.preventDefault(); submit(); }}>
+              {#if changeTarget.editing}
+                <textarea aria-label="Edit message" bind:value={editText}></textarea>
+              {:else}
+                <p>Delete this message?</p>
+              {/if}
+              <button type="submit" disabled={busy || (changeTarget.editing && !editText.trim())}>{changeTarget.editing ? "Save edit" : "Delete message"}</button>
+              <button type="button" onclick={cancel}>Cancel</button>
+            </form>
+          {:else}
+            <p>{view.text}</p>
+            {#if reply}<button type="button" onclick={() => reply(row.action)} disabled={busy}>Reply</button>{/if}
+            {#if mutate}
+              <button type="button" onclick={() => begin(row.action, view.revision, view.text)} disabled={busy}>Edit</button>
+              <button type="button" onclick={() => begin(row.action, view.revision, null)} disabled={busy}>Delete</button>
+            {/if}
+          {/if}
+        {:else if readOwn}
+          <button type="button" onclick={() => readOwn(row.action)} disabled={busy}>Load saved message</button>
+        {/if}
       </article>
     {/each}
     {#if archive}
@@ -77,5 +118,6 @@
   .native-saved-rows section{display:flex;flex-direction:column;gap:.75rem;align-items:stretch}
   article{border:1px solid color-mix(in srgb,currentColor 18%,transparent);border-radius:.75rem;padding:.75rem}article p{white-space:pre-wrap;overflow-wrap:anywhere;margin:.4rem 0 0}
   .native-reply{display:flex;gap:.75rem;align-items:center;justify-content:space-between}.native-reply span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .native-mutation{margin-top:.4rem}
   form{display:flex;gap:.75rem;align-items:flex-end}textarea{flex:1;min-height:5rem;resize:vertical}button{white-space:nowrap}
 </style>

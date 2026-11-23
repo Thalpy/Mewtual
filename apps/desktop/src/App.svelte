@@ -215,7 +215,7 @@
   import type { NativeTextIntents } from "./native-text-intents";
   import { createNativeTextDriver } from "./native-text-driver";
   import { decodeRestoredChatSession, type NativeTextServer } from "./native-text-session";
-  import { decodeNativeReceived, decodeNativeReceivedNotice, readNativeOriginals, readNativeReceivedArchive, updateNativeReceived, type NativeOriginal, type NativeReceived } from "./native-text-history";
+  import { decodeNativeReceived, decodeNativeReceivedNotice, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, updateNativeReceived, type NativeOriginal, type NativeOwnMessage, type NativeReceived } from "./native-text-history";
   import NativeSavedChat from "./NativeSavedChat.svelte";
   import {
     captureLockContinuity, closeContinuityAcknowledgement, NativeVaultLockCoordinator, type NativeVaultCloseOutcome, type NativeVaultLockOutcome,
@@ -386,6 +386,8 @@
   let servers = $state<ServerState[]>([]);
   let chatBackend = $state<"legacy" | "text-v2" | null>(null);
   let nativeOriginals = $state.raw<NativeOriginal[]>([]);
+  let nativeOwnMessages = $state.raw<Record<string, NativeOwnMessage>>({});
+  let nativeOwnLoading = $state(false);
   let nativeReceived = $state.raw<NativeReceived[]>([]);
   let nativeReceivedScope = $state.raw<{ server: number; channel: string; context: string } | null>(null);
   let nativeReceivedRevision = 0;
@@ -3625,7 +3627,7 @@
     pendingSendRetry.update(
       !locked && uiStateReady && !windowCloseInFlight ? uiStateLoadGeneration : null,
       chatBackend==="text-v2" ? Object.keys(nativeTextIntents).length>0 : Object.values(pendingSends).some(intent => !quarantinedPendingIntent(intent) && (intent.resolution || !intent.retryBlock)),
-      sending || (chatBackend==="text-v2" ? nativeHistoryLoading || busy || nativeRetryGeneration===uiStateLoadGeneration : retryingPendingSends || pendingManagerOpen || pendingSendResolution !== null),
+      sending || (chatBackend==="text-v2" ? nativeHistoryLoading || nativeOwnLoading || busy || nativeRetryGeneration===uiStateLoadGeneration : retryingPendingSends || pendingManagerOpen || pendingSendResolution !== null),
     );
   });
   onMount(() => () => pendingSendRetry.cancel());
@@ -6954,6 +6956,7 @@
     nativeTextIntents = {};
     chatBackend = null;
     nativeOriginals = [];nativeCursor=null;nativeHistoryLoading=false;nativeHistoryRevision++;
+    nativeOwnMessages = {};nativeOwnLoading = false;
     nativeReceived = [];
     nativeReceivedScope = null;
     nativeReceivedRevision++;
@@ -6999,7 +7002,7 @@
     };
   }
   async function retryNativeTextRequests() {
-    if(nativeRetryGeneration===uiStateLoadGeneration || nativeHistoryLoading || busy || sending || locked || !uiStateReady || windowCloseInFlight || chatBackend!=="text-v2" || !Object.keys(nativeTextIntents).length)return;
+    if(nativeRetryGeneration===uiStateLoadGeneration || nativeHistoryLoading || nativeOwnLoading || busy || sending || locked || !uiStateReady || windowCloseInFlight || chatBackend!=="text-v2" || !Object.keys(nativeTextIntents).length)return;
     const session=uiStateLoadGeneration;nativeRetryGeneration=session;
     try {
       for(const intent of Object.values(nativeTextIntents)) {
@@ -7039,9 +7042,9 @@
     // the latest selected view after retiring, so a switch need not compete for
     // that permit or lose its history when the write's original view changed.
     if(sending || busy || nativeRetryGeneration!==null)return;
-    if(nativeHistoryLoading)return;
+    if(nativeHistoryLoading || nativeOwnLoading)return;
     const session=uiStateLoadGeneration,viewToken=viewGeneration,revision=++nativeHistoryRevision,channel=selected.active,context=selected.context;
-    const current=()=>!locked && session===uiStateLoadGeneration && viewToken===viewGeneration && revision===nativeHistoryRevision && activeServerId===server && cur?.active===channel && cur?.context===context;
+    const current=()=>!locked && !uiSessionRetired && uiStateReady && !windowCloseInFlight && session===uiStateLoadGeneration && viewToken===viewGeneration && revision===nativeHistoryRevision && activeServerId===server && cur?.active===channel && cur?.context===context;
     nativeHistoryLoading=true;nativeHistoryError=null;
     try {
       const result=await readNativeOriginals((_command,args)=>invoke<unknown>("get_message_page",args),{server,channel,context},current,append?nativeCursor:null);
@@ -7051,8 +7054,71 @@
       nativeOriginals=append?[...nativeOriginals,...result.items].slice(-256):result.items;
       nativeCursor={next:result.next,end:result.end};
       nativeHistoryLoaded=true;
+      const visible = new Set(nativeOriginals.filter(row => row.body.kind === "create").map(row => row.action));
+      nativeOwnMessages = append ? Object.fromEntries(Object.entries(nativeOwnMessages).filter(([action]) => visible.has(action))) : {};
+      const recent = result.items.filter(row => row.body.kind === "create").slice(-8).reverse();
+      for (const row of recent) {
+        if (!current()) return;
+        await selectNativeOwnMessage({ server, channel, context }, row.action, current);
+      }
     }catch(failure){if(current()){nativeHistoryError="Saved messages could not be loaded. Try again.";error=errorText(failure);}}
     finally{if(revision===nativeHistoryRevision)nativeHistoryLoading=false;}
+  }
+
+  async function selectNativeOwnMessage(target: {server: number; channel: string; context: string}, action: string, current: () => boolean) {
+    try {
+      const result = await readNativeOwnMessage((_command, args) => invoke<unknown>("get_message_page", args), target, action, current);
+      if (result && current()) nativeOwnMessages = { ...nativeOwnMessages, [action]: result };
+    } catch {
+      if (current()) {
+        const next = { ...nativeOwnMessages };
+        delete next[action];
+        nativeOwnMessages = next;
+      }
+    }
+  }
+
+  async function refreshNativeOwnMessage(action: string) {
+    const selected = cur, server = activeServerId;
+    if (server === null || selected?.backend !== "text-v2" || !selected.context || locked || !uiStateReady
+      || uiSessionRetired || windowCloseInFlight || busy || sending || nativeHistoryLoading
+      || nativeOwnLoading || nativeRetryGeneration !== null || !nativeOriginals.some(row => row.action === action && row.body.kind === "create")) return;
+    const { active: channel, context } = selected;
+    const session = uiStateLoadGeneration, view = viewGeneration, revision = nativeHistoryRevision;
+    const current = () => !locked && !uiSessionRetired && !windowCloseInFlight && uiStateReady
+      && session === uiStateLoadGeneration && view === viewGeneration && revision === nativeHistoryRevision
+      && activeServerId === server && cur?.active === channel && cur.context === context;
+    nativeOwnLoading = true;
+    try {
+      await selectNativeOwnMessage({ server, channel, context }, action, current);
+    } finally {
+      if (revision === nativeHistoryRevision) nativeOwnLoading = false;
+    }
+  }
+
+  async function changeNativeOwnMessage(action: string, revision: string, text: string | null) {
+    const selected = cur, server = activeServerId;
+    if (server === null || selected?.backend !== "text-v2" || !selected.context || locked || !uiStateReady
+      || uiSessionRetired || windowCloseInFlight || busy || sending || nativeHistoryLoading || nativeOwnLoading
+      || nativeRetryGeneration !== null || nativeOwnMessages[action]?.item?.revision !== revision) return;
+    const session = uiStateLoadGeneration, view = viewGeneration, operation = ++pendingSendNonce;
+    const target = { server, channel: selected.active, expectedContext: selected.context, messageId: action, expectedRevision: revision };
+    const data = text === null ? { ...target, kind: "delete" as const } : { ...target, kind: "edit" as const, text };
+    sending = true;
+    error = "";
+    try {
+      const result = await nativeTextDriver(session).change(data);
+      if (!locked && session === uiStateLoadGeneration && view === viewGeneration && result?.disposition === "uncertain") {
+        error = "The change is waiting to be confirmed.";
+      }
+    } catch (failure) {
+      if (!locked && session === uiStateLoadGeneration && view === viewGeneration) error = errorText(failure);
+    } finally {
+      if (pendingSendNonce === operation) {
+        sending = false;
+        if (!locked && session === uiStateLoadGeneration) await refreshNativeHistory();
+      }
+    }
   }
 
   async function refreshNativeReceived(payload: unknown) {
@@ -7117,7 +7183,7 @@
     const selected = cur, server = activeServerId;
     if (server === null || selected?.backend !== "text-v2" || !selected.context
       || locked || !uiStateReady || uiSessionRetired || windowCloseInFlight
-      || sending || busy || nativeHistoryLoading || nativeRetryGeneration !== null || nativeArchive?.loading) return;
+      || sending || busy || nativeHistoryLoading || nativeOwnLoading || nativeRetryGeneration !== null || nativeArchive?.loading) return;
     const { active: channel, context } = selected;
     const session = uiStateLoadGeneration, view = viewGeneration, revision = ++nativeArchiveRevision;
     const current = () => !locked && !uiSessionRetired && uiStateReady && !windowCloseInFlight
@@ -7634,6 +7700,8 @@
     // and invalidate old admission callbacks, including after a failed first seal.
     cancelEdit();
     resetNativeArchive();
+    nativeOwnMessages = {};
+    nativeOwnLoading = false;
     view = "chat";
     moderationSelected = new Set();
     moderationDeleteArmed = false;
@@ -8246,6 +8314,7 @@
     if (!cur) return false;
     if ((!route.current() || studioHasWork?.()) && !(await route.scope())) return false;
     if (!route.current() || windowCloseInFlight) return false;
+    if (cur.backend === "text-v2") return cur.active === id;
     saveDraftFor(chanKey()); // stash the current channel's draft before leaving it
     // Channel-scoped content, dropped before the move rather than when the read returns: the
     // group's own state (roster, files, branding) is unchanged by a channel hop and stays put.
@@ -21657,7 +21726,7 @@
   // Resolves to what the press came to (`SendOutcome`), for "post now" to report; every other
   // caller ignores it.
   async function send(): Promise<SendOutcome> {
-    if(cur?.backend==="text-v2" && (nativeHistoryLoading || busy || nativeRetryGeneration===uiStateLoadGeneration))return "refused";
+    if(cur?.backend==="text-v2" && (nativeHistoryLoading || nativeOwnLoading || busy || nativeRetryGeneration===uiStateLoadGeneration))return "refused";
     const text = draft.trim();
     if (!text || !cur?.active || activeServerId === null || sending || retryingPendingSends || locked || !uiStateReady || windowCloseInFlight || pendingSendResolution !== null || pendingManagerOpen) return "refused";
     const server = activeServerId;
@@ -23960,6 +24029,8 @@
     unlockAttempt++;
     viewGeneration++;
     uiStateReady=false;
+    nativeOwnMessages = {};
+    nativeOwnLoading = false;
     clearTimeout(uiStateSaveTimer);
     pendingSendRetry.cancel();
   }
@@ -28543,13 +28614,17 @@
         {/if}
         {#if cur?.backend === "text-v2"}
           {@const archive = nativeArchive !== null && nativeArchive.server === activeServerId && nativeArchive.channel === cur.active && nativeArchive.context === cur.context ? nativeArchive : null}
-          <NativeSavedChat rows={nativeOriginals}
-            received={nativeReceivedScope !== null && nativeReceivedScope.server === activeServerId && nativeReceivedScope.channel === cur.active && nativeReceivedScope.context === cur.context ? nativeReceived : []}
-            loading={nativeHistoryLoading} loaded={nativeHistoryLoaded} failure={nativeHistoryError} more={!!nativeCursor && nativeCursor.next!==nativeCursor.end}
-            {archive} readArchive={(append)=>{void refreshNativeArchive(append);}}
-            text={draft} busy={sending || nativeHistoryLoading || nativeRetryGeneration!==null} send={()=>{void send();}} refresh={()=>{void refreshNativeHistory();}} loadMore={()=>{void refreshNativeHistory(true);}}
-            replyTo={replyingTo || null} reply={(action)=>{replyingTo=action ?? "";}}
-            change={(value)=>{draft=value;saveDraftFor(chanKey());}} />
+          {#key `${activeServerId}:${cur.active}:${cur.context}`}
+            <NativeSavedChat rows={nativeOriginals} own={nativeOwnMessages}
+              readOwn={(action) => {void refreshNativeOwnMessage(action);}}
+              mutate={(action, revision, text) => {void changeNativeOwnMessage(action, revision, text);}}
+              received={nativeReceivedScope !== null && nativeReceivedScope.server === activeServerId && nativeReceivedScope.channel === cur.active && nativeReceivedScope.context === cur.context ? nativeReceived : []}
+              loading={nativeHistoryLoading} loaded={nativeHistoryLoaded} failure={nativeHistoryError} more={!!nativeCursor && nativeCursor.next!==nativeCursor.end}
+              {archive} readArchive={(append)=>{void refreshNativeArchive(append);}}
+              text={draft} busy={sending || nativeHistoryLoading || nativeOwnLoading || nativeRetryGeneration!==null} send={()=>{void send();}} refresh={()=>{void refreshNativeHistory();}} loadMore={()=>{void refreshNativeHistory(true);}}
+              replyTo={replyingTo || null} reply={(action)=>{replyingTo=action ?? "";}}
+              change={(value)=>{draft=value;saveDraftFor(chanKey());}} />
+          {/key}
         {:else if view === "chat"}
           <!-- Header: identity on the left, the channel's description filling the middle, every
                action on the right. The member count lives in the members column, not here. -->

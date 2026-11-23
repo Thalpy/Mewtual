@@ -7,7 +7,7 @@ import { persistenceWarning, sendAndRefresh, sendOutcome } from "./message-send.
 import { closeContinuityAcknowledgement, NativeVaultLockCoordinator } from "./window-close.ts";
 import { VideoReviewQueue } from "./video-review.ts";
 import { createNativeTextDriver } from "./native-text-driver.ts";
-import { decodeNativeReceived, decodeNativeReceivedNotice, readNativeOriginals, readNativeReceivedArchive, updateNativeReceived } from "./native-text-history.ts";
+import { decodeNativeReceived, decodeNativeReceivedNotice, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, updateNativeReceived } from "./native-text-history.ts";
 import { PendingSendRetry } from "./pending-send-retry.ts";
 import { decodeRestoredChatSession } from "./native-text-session.ts";
 import { sessionContinuationCurrent } from "./viewscope.ts";
@@ -44,7 +44,7 @@ export function pendingManagerBackend(initial:unknown){return{sealed:JSON.string
 /** Shared test fixture for real App save queue, hydration, decisions and submit/retry. */
 export function pendingManagerApp(initial: unknown, backend=pendingManagerBackend(initial)) {
   const dependencies = { initial, backend, addPendingSend, durableStopOriginal, durableStopTerminal, retiredStopWarning, matchingPendingMutation, matchingPendingSend, samePendingIntent, pendingSendRetryBlock, resolvePendingSend, recoverQuarantinedIntent, quarantinedPendingIntent, validateMutationPayload, validateSendPayload, pendingContinuityVersion, sendRefusedUnaccepted,
-    MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity, persistenceWarning, sendAndRefresh, sendOutcome, NativeVaultLockCoordinator, closeContinuityAcknowledgement, VideoReviewQueue, createNativeTextDriver, decodeNativeReceived, decodeNativeReceivedNotice, readNativeOriginals, readNativeReceivedArchive, updateNativeReceived, PendingSendRetry, decodeRestoredChatSession, sessionContinuationCurrent };
+    MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity, persistenceWarning, sendAndRefresh, sendOutcome, NativeVaultLockCoordinator, closeContinuityAcknowledgement, VideoReviewQueue, createNativeTextDriver, decodeNativeReceived, decodeNativeReceivedNotice, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, updateNativeReceived, PendingSendRetry, decodeRestoredChatSession, sessionContinuationCurrent };
   return new Function(...Object.keys(dependencies), `
     let locked = false, uiStateReady = false, uiStateLoadGeneration = 1, uiStateHydrationAttempt = 0, uiStateSaveTimer,uiSessionRetired=false;
     let uiStateSaveChain = Promise.resolve(), uiStateSaveFailed = false, uiStateFailureToast = 0;
@@ -52,6 +52,7 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
     let retryingPendingSends = false, pendingManagerOpen = false, sending = false;
     let chatBackend = "legacy", nativeOriginals = [], nativeCursor = null, nativeHistoryLoading = false, nativeHistoryLoaded = false, nativeHistoryError = null, nativeHistoryRevision = 0, nativeRetryGeneration = null, viewGeneration = 1;
     let nativePages = [], nativeHistoryCalls = [];
+    let nativeOwnMessages = {}, nativeOwnLoading = false, nativeOwnPages = [], nativeOwnCalls = [];
     let nativeReceived = [], nativeReceivedScope = null, nativeReceivedRevision = 0;
     const nativeReceivedReads = new Map();
     let nativeArchive = null, nativeArchiveRevision = 0;
@@ -103,6 +104,12 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
     const chatScopeKey = (s,c) => s + ":" + c;
     const chanKey = () => activeServerId === null || !cur?.active ? null : chatScopeKey(activeServerId,cur.active);
     const invoke = async (command, args) => {
+      if (command === "get_message_page" && "ownAction" in args) {
+        nativeOwnCalls.push(structuredClone(args));
+        const next = nativeOwnPages.shift();
+        if (next instanceof Error) throw next;
+        return await (next ?? {backend:"text-v2",scope:"own-message-revision",action:args.ownAction,scanning:false,item:null});
+      }
       if(command === "get_message_page") { nativeHistoryCalls.push(structuredClone(args));const next=nativePages.shift();if(next instanceof Error)throw next;return await(next ?? {backend:"text-v2",scope:"own-saved-originals",next:"0",end_exclusive:"0",items:[]}); }
       if (command === "get_ui_state") { const captured = backend.sealed; const gate = readGates.shift(); if (gate) await gate; return captured; }
       if (command === "durable_send_context") { contextCalls++; if (contextGate) await contextGate; return "a".repeat(64); }
@@ -174,6 +181,9 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
       conversation(server, channel) { activeServerId = server; cur = channel === null ? null : { active: channel }; draft = chanKey() ? drafts[chanKey()] ?? "" : ""; },
       nativeConversation(server,channel,context) {chatBackend="text-v2";activeServerId=server;cur={id:server,backend:"text-v2",active:channel,context};servers=[cur];draft=drafts[chanKey()]??"";},
       nativeHistory(...pages) {nativePages=pages;},
+      nativeOwnHistory(...pages) { nativeOwnPages = pages; },
+      nativeOwn() { return { messages: structuredClone(nativeOwnMessages), calls: nativeOwnCalls }; },
+      nativeChange: changeNativeOwnMessage,
       nativeRefresh: refreshNativeHistory,
       nativeArchiveRefresh: refreshNativeArchive,
       archive() { return structuredClone(nativeArchive); },

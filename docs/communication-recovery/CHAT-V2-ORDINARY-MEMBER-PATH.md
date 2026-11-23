@@ -231,9 +231,12 @@ received archive in the same channel and checks the exact signature and
 Admission through Core. A changed target conflicts with an already saved
 token. A missing parent leaves the request unsigned.
 The native Edit and Delete commands author only against an exact Create and
-explicit revision in the member's own outbox. These commands retain signed
-originals and exact retry receipts. Display of the current own-message
-projection and its editor controls still need to use that revision evidence.
+the selected revision in the member's own outbox. The desktop displays the
+selected text and carries that revision through edit and delete confirmation.
+It loads up to eight recent messages with each history batch and offers to
+load the remaining messages individually. An incomplete revision read exposes
+no text. An exact retry recovers its signed original and receipt after later
+changes, including deletion.
 Original audit chunks and request receipts remain retained after scheduling debt clears.
 Removal changes active view, never deletes the audit. Unproven late removed actions stay
 Held pending the separately authorized moderation path; ordinary concurrent edits resolve

@@ -20,6 +20,37 @@ test("actual App native seal failure keeps composer and exact intent without any
 const token="04".repeat(32);
 const retained={version:4,drafts:{"7:9":"original"},readMarks:{},nativeTextIntents:{[token]:{kind:"create",token,server:7,channel:"9",expectedContext:context,text:"original"}}};
 const saved=(args:Record<string,unknown>)=>({backend:"text-v2",disposition:"saved-local",retry_token:args.retryToken,message_id:row.action,ordinal:"0"});
+test("native App seals only a mutation for its displayed revision and discards retired reads", async () => {
+  const app = pendingManagerApp({});
+  await app.hydrate();
+  app.nativeConversation(7, "9", context);
+  const history = { backend: "text-v2", scope: "own-saved-originals", next: "1", end_exclusive: "1", items: [row] };
+  const revision = "09".repeat(32);
+  const visible = { backend: "text-v2", scope: "own-message-revision", action: row.action, scanning: false,
+    item: { revision, text: "Current text", status: "pending" } };
+  app.nativeHistory(history);
+  app.nativeOwnHistory({ ...visible, scanning: true, item: null }, visible);
+  await app.nativeRefresh();
+  assert.equal(app.nativeOwn().messages[row.action].item.revision, revision);
+  assert.deepEqual(app.nativeOwn().calls, [0, 1].map(() => ({ server: 7, channel: "9", expectedContext: context, ownAction: row.action })));
+  await app.nativeChange(row.action, row.action, "stale edit");
+  assert.equal(app.state().submissions.length, 0);
+  app.answer(async args => saved(args));
+  const late = deferred<unknown>();
+  app.nativeHistory(history);
+  app.nativeOwnHistory(late.promise);
+  const mutation = app.nativeChange(row.action, revision, "Next edit");
+  await settle();
+  const submit = app.state().submissions[0];
+  assert.equal(submit.command, "edit_message");
+  assert.equal(submit.args.expectedRevision, revision);
+  assert.equal(submit.sealed.nativeTextIntents[submit.args.retryToken].expectedRevision, revision);
+  app.retireFoundUiForReauth();
+  late.resolve(visible);
+  await mutation;
+  assert.deepEqual(app.nativeOwn().messages, {});
+  app.done();
+});
 test("native composer and automatic retry carry the same sealed reply parent", async () => {
   const app = pendingManagerApp({});
   await app.hydrate();

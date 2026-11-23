@@ -9,6 +9,8 @@ export type NativeOriginal = {
 export type NativeOriginalPage = { backend: "text-v2"; scope: "own-saved-originals"; next: string; end_exclusive: string; items: NativeOriginal[] };
 export type NativeReceivedTarget = { server: number; channel: string; context: string; action: string | null };
 export type NativeReceived = { action: string; text: string; certainty: "provisional" | "proven" };
+export type NativeOwnRevision = { revision: string; text: string; status: NativeOriginal["status"] };
+export type NativeOwnMessage = { scanning: boolean; item: NativeOwnRevision | null };
 const fail = (): never => { throw new Error("Saved messages could not be read. Try again."); };
 const object = (value: unknown): Record<string, unknown> => { if (!value || typeof value !== "object" || Array.isArray(value)) return fail(); return value as Record<string, unknown>; };
 function fields(value: Record<string, unknown>, expected: string[]) { if (Object.keys(value).length !== expected.length || expected.some(key => !Object.hasOwn(value, key))) fail(); }
@@ -54,6 +56,37 @@ export function decodeNativeReceived(
 
 type NativeHistoryTarget = { server: number; channel: string; context: string };
 type NativeInvoke = (command: string, args: Record<string, unknown>) => Promise<unknown>;
+
+export function decodeNativeOwnMessage(value: unknown, target: string): NativeOwnMessage {
+  const result = object(value);
+  fields(result, ["backend", "scope", "action", "scanning", "item"]);
+  if (result.backend !== "text-v2" || result.scope !== "own-message-revision"
+    || hex(result.action) !== target || typeof result.scanning !== "boolean") return fail();
+  if (result.item === null) return { scanning: result.scanning, item: null };
+  if (result.scanning) return fail();
+  const item = object(result.item);
+  fields(item, ["revision", "text", "status"]);
+  const status = item.status;
+  if (status !== "pending" && status !== "submitted" && status !== "held") return fail();
+  return { scanning: false, item: { revision: hex(item.revision), text: text(item.text), status } };
+}
+
+export async function readNativeOwnMessage(
+  invoke: NativeInvoke,
+  target: NativeHistoryTarget,
+  action: string,
+  current: () => boolean,
+): Promise<NativeOwnMessage | null> {
+  const address = { server: target.server, channel: target.channel, expectedContext: target.context, ownAction: action };
+  for (let step = 0; step < 16; step++) {
+    if (!current()) return null;
+    const raw = await invoke("get_message_page", address);
+    if (!current()) return null;
+    const result = decodeNativeOwnMessage(raw, action);
+    if (!result.scanning) return result;
+  }
+  return { scanning: true, item: null };
+}
 
 /** Fetch one bounded page, resolving each body under its own native guard. */
 export async function readNativeReceivedArchive(

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mount,unmount,flushSync } from "svelte";
 import NativeSavedChat from "./NativeSavedChat.svelte";
+import type { NativeOriginal } from "./native-text-history.ts";
 const w=window as Window & typeof globalThis;
 Object.assign(globalThis,{HTMLMediaElement:w.HTMLMediaElement,HTMLInputElement:w.HTMLInputElement,HTMLTextAreaElement:w.HTMLTextAreaElement,Event:w.Event});
 test("native local history renders absence only after a complete successful empty read",async()=>{
@@ -72,6 +73,47 @@ test("the native reply control selects and clears the displayed action", async (
   buttons.find(button => button.textContent === "Reply")!.click();
   buttons.find(button => button.textContent === "Cancel reply")!.click();
   assert.deepEqual(selected, [action, null]);
+  await unmount(app);
+  target.remove();
+});
+
+test("own message controls use the selected revision and hide original and deleted bodies", async () => {
+  const target = document.createElement("div");
+  document.body.append(target);
+  const action = "24".repeat(32), revision = "25".repeat(32), deleted = "26".repeat(32);
+  const rows: NativeOriginal[] = [action, deleted].map((action, ordinal) => ({
+    action, ordinal: String(ordinal), signer: "93".repeat(32), channel: "1", presented_ms: "3", status: "pending",
+    body: { kind: "create", text: `Historical body ${ordinal}`, reply_to: null },
+  }));
+  const changes: [string, string, string | null][] = [];
+  const app = mount(NativeSavedChat, { target, props: {
+    rows, own: { [action]: { scanning: false, item: { revision, text: "Selected edit", status: "pending" } },
+      [deleted]: { scanning: false, item: null } },
+    loading: false, loaded: true, failure: null, more: false, text: "", busy: false,
+    send: () => {}, refresh: () => {}, loadMore: () => {}, change: () => {}, mutate: (...change) => changes.push(change),
+  } });
+  flushSync();
+  assert.match(target.textContent ?? "", /Selected edit/);
+  assert.doesNotMatch(target.textContent ?? "", /Historical body/);
+  assert.equal(target.querySelectorAll("article").length, 1);
+  const click = (label: string) => {
+    [...target.querySelectorAll("button")].find(button => button.textContent === label)!.click();
+    flushSync();
+  };
+  const submit = () => {
+    target.querySelector("article form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    flushSync();
+  };
+  click("Edit");
+  const edit = target.querySelector("article textarea")!;
+  assert.equal(edit.value, "Selected edit");
+  edit.value = "Next edit";
+  edit.dispatchEvent(new Event("input", { bubbles: true }));
+  submit();
+  click("Delete");
+  assert.match(target.textContent ?? "", /Delete this message/);
+  submit();
+  assert.deepEqual(changes, [[action, revision, "Next edit"], [action, revision, null]]);
   await unmount(app);
   target.remove();
 });
