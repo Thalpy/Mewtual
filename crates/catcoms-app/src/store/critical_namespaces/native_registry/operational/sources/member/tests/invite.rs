@@ -527,6 +527,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
     let mut saved = None;
     let mut founder_archived = None;
     let mut founder_reply = None;
+    let mut founder_debt = None;
     if !recover_stage {
         let mut after = rng.clone();
         let row = register(&mut rng).unwrap();
@@ -604,36 +605,38 @@ async fn mounted_join_fixture(recover_stage: bool) {
         let mut ledger = inspect()
             .prepare_member_ledger(&view, channel, fresh.clone())
             .unwrap();
-        let (receipt, original) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
-            let receipt = loop {
-                let prepared = founder_capture()
-                    .prepare_founder_member_publication(fresh.clone())
-                    .unwrap()
-                    .expect("the cancelled transmission must leave the exact debt");
-                match prepared.submit().await {
-                    Ok(Some(receipt)) => break receipt,
-                    Err(catcoms_sync::SyncError::Publication(
-                        catcoms_rt::PublishOnceError::NoPeers,
-                    )) => {
-                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let (receipt, original, founder_topic) =
+            tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                let receipt = loop {
+                    let prepared = founder_capture()
+                        .prepare_founder_member_publication(fresh.clone())
+                        .unwrap()
+                        .expect("the cancelled transmission must leave the exact debt");
+                    match prepared.submit().await {
+                        Ok(Some(receipt)) => break receipt,
+                        Err(catcoms_sync::SyncError::Publication(
+                            catcoms_rt::PublishOnceError::NoPeers,
+                        )) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                        }
+                        _ => panic!("expected the founder debt to reach the native mesh"),
                     }
-                    _ => panic!("expected the founder debt to reach the native mesh"),
-                }
-            };
-            let Some(NativeChatMemberGossipEvent::Frame(frame)) = receiver.next().await else {
-                panic!("expected the founder's original on the joined actor");
-            };
-            let (original, status) = inspect()
-                .receive_member_frame(&mut ledger, &frame, &fresh)
-                .unwrap();
-            assert_eq!(
-                status,
-                V2OrdinaryReceiveStatus::Retained(ActionState::Valid)
-            );
-            (receipt, original)
-        })
-        .await
-        .expect("bounded founder publication through both actual TCP actors");
+                };
+                let Some(NativeChatMemberGossipEvent::Frame(frame)) = receiver.next().await else {
+                    panic!("expected the founder's original on the joined actor");
+                };
+                let topic = frame.current_data().unwrap().0.clone();
+                let (original, status) = inspect()
+                    .receive_member_frame(&mut ledger, &frame, &fresh)
+                    .unwrap();
+                assert_eq!(
+                    status,
+                    V2OrdinaryReceiveStatus::Retained(ActionState::Valid)
+                );
+                (receipt, original, topic)
+            })
+            .await
+            .expect("bounded founder publication through both actual TCP actors");
         assert_eq!(
             founder_capture()
                 .checkpoint_founder_member_publication(receipt, &fresh)
@@ -782,6 +785,38 @@ async fn mounted_join_fixture(recover_stage: bool) {
             .with_publication(|_| panic!("retired founder archive body escaped"))
             .is_err());
         drop((archived, page));
+        let deferred = body("Founder action saved before the process closed");
+        let deferred_request = || V2MemberSignRequest {
+            channel,
+            token: [146; 32],
+            ..sign_request(&deferred)
+        };
+        assert_eq!(
+            founder_capture()
+                .finish()
+                .unwrap()
+                .prepare_member_save(deferred_request(), &fresh)
+                .unwrap(),
+            V2MemberSaveOutcome::Ready,
+        );
+        let pending = founder_capture()
+            .finish_admission(deferred_request().token)
+            .unwrap();
+        let commit = Arc::new(tokio::sync::Mutex::new(()));
+        let (custody, _) = super::admission::custody(&commit, &fresh).await;
+        assert_eq!(
+            pending.try_admit(custody).unwrap().run(),
+            MemberSaveJobReport::SavedLocal
+        );
+        let V2MemberSaveOutcome::Saved { action, ordinal } = founder_capture()
+            .finish()
+            .unwrap()
+            .prepare_member_save(deferred_request(), &fresh)
+            .unwrap()
+        else {
+            panic!("the exact founder debt must survive the restart");
+        };
+        founder_debt = Some((action, ordinal, founder_topic));
         assert_eq!(
             inspect()
                 .prepare_member_save(&view, request(), &fresh, &mut rng)
@@ -1350,6 +1385,77 @@ async fn mounted_join_fixture(recover_stage: bool) {
             assert!(original
                 .archived_message_projection(channel + 1, reply_id, &fresh, &mut founder_rng)
                 .is_err());
+            let (action, ordinal, topic) = founder_debt.expect("unsent original founder action");
+            original.bind_original_tcp(&fresh).unwrap();
+            let (cancelled, signal) = tokio::sync::watch::channel(false);
+            let pending = original
+                .prepare_member_publication(
+                    RequestCancellation::new(signal, None),
+                    &mut founder_rng,
+                )
+                .unwrap()
+                .unwrap();
+            cancelled.send_replace(true);
+            assert!(matches!(
+                pending.submit().await,
+                Err(catcoms_sync::SyncError::Publication(
+                    catcoms_rt::PublishOnceError::Revoked
+                )),
+            ));
+            let (probe, _) = catcoms_net::MeshService::new_tcp(None, &[]).unwrap();
+            let address = invite.direct_address_data(std::net::Ipv4Addr::LOCALHOST.into());
+            let peer = invite.connected_peer_data();
+            probe.subscribe(topic.clone()).await.unwrap();
+            assert_eq!(
+                probe.dial_outcome(address.parse().unwrap()).await.unwrap(),
+                catcoms_rt::DialSubmission::Submitted,
+            );
+            let (receipt, wire) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                probe.wait_for_peer_connected(peer).await.unwrap();
+                let receipt = loop {
+                    let debt = original
+                        .prepare_member_publication(fresh.clone(), &mut founder_rng)
+                        .unwrap()
+                        .expect("cancellation leaves the same founder debt");
+                    match debt.submit().await {
+                        Ok(Some(accepted)) => break accepted,
+                        Err(catcoms_sync::SyncError::Publication(
+                            catcoms_rt::PublishOnceError::NoPeers,
+                        )) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+                        _ => panic!("expected the restarted founder to publish its original debt"),
+                    }
+                };
+                loop {
+                    if let Some(catcoms_rt::TransportEvent::Gossip {
+                        topic: received,
+                        from,
+                        data,
+                    }) = probe.next_event().await
+                    {
+                        assert_eq!(received, topic);
+                        assert_eq!(from, peer);
+                        break (receipt, data);
+                    }
+                }
+            })
+            .await
+            .expect("the original founder message reached the mesh after restart");
+            assert_eq!(
+                original
+                    .opened_action_for_test(channel, &topic, &wire)
+                    .unwrap(),
+                action
+            );
+            assert_eq!(
+                original
+                    .checkpoint_member_publication(receipt, &fresh, &mut founder_rng)
+                    .unwrap(),
+                ordinal + 1
+            );
+            assert!(original
+                .prepare_member_publication(fresh.clone(), &mut founder_rng)
+                .unwrap()
+                .is_none());
             drop(original);
             assert!(archived
                 .with_publication(|_| panic!("the closed restored founder published a body"))

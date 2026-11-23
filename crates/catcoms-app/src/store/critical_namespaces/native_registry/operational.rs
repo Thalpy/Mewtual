@@ -15,6 +15,7 @@ mod governed;
 mod join_tcp;
 pub use governed::{
     NativeTextColdFounderJoinRequest, NativeTextColdFounderJoinRequests,
+    NativeTextColdFounderPublication, NativeTextColdFounderPublicationReceipt,
     NativeTextColdFounderSource, NativeTextGovernedStorage, NativeTextJoinedRuntime,
     NativeTextJoinedStorage,
 };

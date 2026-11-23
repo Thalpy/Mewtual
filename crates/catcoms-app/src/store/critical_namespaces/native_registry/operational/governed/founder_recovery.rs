@@ -8,7 +8,9 @@ use catcoms_rt::PeerId;
 use catcoms_sync::owner_v2::PreparedV2FounderRecoveredAdd;
 
 mod history;
+mod publication;
 mod replies;
+pub use publication::{NativeTextColdFounderPublication, NativeTextColdFounderPublicationReceipt};
 pub use replies::{NativeTextColdFounderJoinRequest, NativeTextColdFounderJoinRequests};
 
 /// The cold opener's original founder custody. A bound TCP actor still

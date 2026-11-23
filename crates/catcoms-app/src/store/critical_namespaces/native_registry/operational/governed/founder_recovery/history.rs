@@ -109,17 +109,9 @@ impl NativeTextColdFounderSource {
                     caller: &signal,
                 }
                 .replay_message(&mut ledger, &view, create, |id| {
-                    let context = MemberOutboxContextData::from_spec(MemberOutboxContextSpec {
-                        vault: scope.vault,
-                        layout: self.selection.binding.layout,
-                        pin: self.selection.binding.pin,
-                        profile: scope.profile,
-                        tenure: scope.tenure,
-                        group_nonce: scope.creation,
-                        device: self.selection.binding.signer,
-                        group: &scope.group,
-                    })
-                    .map_err(|_| V2MemberSaveRefusal::Stale)?;
+                    let context = self
+                        .outbox_context()
+                        .map_err(|_| V2MemberSaveRefusal::Stale)?;
                     let saved = mount
                         .lookup_existing_action(store, context, &key, id, rng)
                         .map_err(|_| V2MemberSaveRefusal::Failed)?;
@@ -175,6 +167,22 @@ impl NativeTextColdFounderSource {
             tenure: profile.tenure(),
             creation: profile.spec().creation,
             channel,
+        })
+    }
+
+    pub(super) fn outbox_context(&self) -> Result<MemberOutboxContextData, AppError> {
+        let profile = self.source.data().genesis_public_data();
+        let profile = profile.profile_data();
+        let original = &self.selection.binding;
+        MemberOutboxContextData::from_spec(MemberOutboxContextSpec {
+            vault: original.vault,
+            layout: original.layout,
+            pin: original.pin,
+            profile: profile.id(),
+            tenure: profile.tenure(),
+            group_nonce: profile.spec().creation,
+            device: original.signer,
+            group: &original.group,
         })
     }
 }

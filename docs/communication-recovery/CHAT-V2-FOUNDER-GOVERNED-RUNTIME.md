@@ -26,6 +26,10 @@ the original request waiter until the lower queue sends it.
 The same reopened owner can read its saved received archive from the
 original vault. Archive replay uses the selected Core Admission and the
 founder's exact own outbox dependencies under a separately paid view.
+The recovered graph also seals the exact outstanding founder outbox original
+for its reserved mesh. Only acceptance by that driver yields a receipt that
+can advance the same outbox. Revocation, duplicate submission, and a mesh
+with no peers leave the original pending.
 
 The stage-lifetime continuation is under validation. Native key drainage is
 being separated from retained CLOSED snapshot DATA: an actual completed Cell

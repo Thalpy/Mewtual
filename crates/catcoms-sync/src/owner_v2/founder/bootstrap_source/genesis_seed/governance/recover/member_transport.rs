@@ -125,7 +125,7 @@ impl PreparedV2FounderRecoveredAdd {
         channel: u128,
         original: &[u8],
         mount: RequestCancellation,
-        rng: &mut dyn CryptoRngCore,
+        rng: &mut impl CryptoRngCore,
     ) -> Result<PreparedV2MemberSubmission, SyncError> {
         let (scope, observation) = self.observe_selected(verifier, channel, mount)?;
         let transport = transport

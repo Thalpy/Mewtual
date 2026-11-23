@@ -98,6 +98,7 @@ pub use critical_namespaces::{
 };
 pub use critical_namespaces::{
     NativeTextColdFounderJoinRequest, NativeTextColdFounderJoinRequests,
+    NativeTextColdFounderPublication, NativeTextColdFounderPublicationReceipt,
     NativeTextColdFounderSource,
 };
 pub use critical_namespaces::{

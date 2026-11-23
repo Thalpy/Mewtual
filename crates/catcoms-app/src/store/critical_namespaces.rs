@@ -95,6 +95,7 @@ pub use native_registry::{
 };
 pub use native_registry::{
     NativeTextColdFounderJoinRequest, NativeTextColdFounderJoinRequests,
+    NativeTextColdFounderPublication, NativeTextColdFounderPublicationReceipt,
     NativeTextColdFounderSource,
 };
 pub use native_registry::{
