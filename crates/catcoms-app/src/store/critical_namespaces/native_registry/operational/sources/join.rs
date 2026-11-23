@@ -1,8 +1,8 @@
 //! Affine capture for the first accepted request on a mounted native vault.
 use super::super::super::lifecycle::joined::LocalNames;
 use super::super::governed::{
-    connect_approved_host, receive_connected_join, ConnectedJoinDelivery, JoinFramePayment,
-    NativeTextJoinedStorage,
+    connect_approved_host, receive_connected_join, ApprovedContact, ConnectedJoinDelivery,
+    JoinFramePayment, NativeTextJoinedStorage,
 };
 use super::super::join_tcp;
 use super::super::native_ui::UiEffectNegative;
@@ -360,8 +360,7 @@ impl NativeTextJoinedExchange {
     ) -> Result<(), AppError> {
         NativeTextJoinedStorage::require_invite_bytes(&self.request, invite)?;
         connect_approved_host(
-            invite,
-            approved_host,
+            ApprovedContact::from_invite(invite, approved_host),
             &self.tcp.borrow()?.capture_connection_dial(),
             scheduler,
             self.signal.clone(),

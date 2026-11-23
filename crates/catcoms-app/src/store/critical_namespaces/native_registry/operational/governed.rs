@@ -18,7 +18,7 @@ use catcoms_sync::{
 mod contact;
 mod founder_recovery;
 mod runtime;
-pub(super) use contact::connect_approved_host;
+pub(super) use contact::{connect_approved_host, ApprovedContact};
 pub use founder_recovery::{
     NativeTextColdFounderJoinRequest, NativeTextColdFounderJoinRequests,
     NativeTextColdFounderMemberIngress, NativeTextColdFounderMemberReceiver,

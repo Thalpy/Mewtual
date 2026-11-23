@@ -8,8 +8,7 @@ use std::net::IpAddr;
 pub struct NativeTextJoinedReconnect {
     _invocation: watch::Sender<bool>,
     transport: catcoms_net::MeshConnectionDial,
-    invite: [u8; 32],
-    host: IpAddr,
+    contact: ApprovedContact,
     signal: RequestCancellation,
     mount: RequestCancellation,
     payment: Arc<JoinFramePayment>,
@@ -17,17 +16,9 @@ pub struct NativeTextJoinedReconnect {
 }
 
 impl NativeTextJoinedReconnect {
-    pub async fn connect(
-        self,
-        invite: &NativeTextInvitePacketData<'_>,
-        scheduler: &EndpointDialScheduler,
-    ) -> Result<(), AppError> {
-        if invite.binding().id_data() != self.invite {
-            return Err(refused());
-        }
+    pub async fn connect(self, scheduler: &EndpointDialScheduler) -> Result<(), AppError> {
         connect_approved_host(
-            invite,
-            self.host,
+            self.contact,
             &self.transport,
             scheduler,
             self.signal.clone(),
@@ -50,7 +41,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         caller: RequestCancellation,
     ) -> Result<NativeTextJoinedReconnect, AppError> {
         self.original.require_current(&caller)?;
-        let invite = invite.binding().id_data();
+        let invite_id = invite.binding().id_data();
         let (transport, authentication, mount, fee) = {
             let metadata = self.original.work.as_ref().ok_or_else(refused)?;
             let pending = self.original.pending.upgrade().ok_or_else(refused)?;
@@ -62,7 +53,10 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 .filter(|runtime| runtime.matches_selection(selection))
                 .ok_or_else(refused)?;
             let data = runtime.registration_data().ok_or_else(refused)?;
-            if !selection.is_current_cached() || data.invocation != token || data.invite != invite {
+            if !selection.is_current_cached()
+                || data.invocation != token
+                || data.invite != invite_id
+            {
                 return Err(refused());
             }
             let (row, names) = runtime.observe_selected(metadata, data)?;
@@ -99,8 +93,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         Ok(NativeTextJoinedReconnect {
             _invocation: invocation,
             transport,
-            invite,
-            host: approved_host,
+            contact: ApprovedContact::from_invite(invite, approved_host),
             signal,
             mount,
             payment: Arc::new(JoinFramePayment { _fee: fee }),

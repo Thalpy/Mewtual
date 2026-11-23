@@ -4,6 +4,25 @@ use catcoms_discovery::{parse_peer_dial_route, EndpointDialPermit, EndpointDialS
 use catcoms_rt::{DialPermit, DialSubmission};
 use std::{net::IpAddr, time::Duration};
 
+pub(in super::super) struct ApprovedContact {
+    peer: catcoms_rt::PeerId,
+    group: Vec<u8>,
+    address: String,
+}
+
+impl ApprovedContact {
+    pub(in super::super) fn from_invite(
+        invite: &crate::store::NativeTextInvitePacketData<'_>,
+        approved_host: IpAddr,
+    ) -> Self {
+        Self {
+            peer: invite.connected_peer_data(),
+            group: invite.binding().spec_data().anchor.group.clone(),
+            address: invite.direct_address_data(approved_host),
+        }
+    }
+}
+
 struct JoinDial {
     permit: EndpointDialPermit,
     caller: RequestCancellation,
@@ -81,8 +100,7 @@ impl NativeTextJoinedStorage {
             }));
         self.require_contact_request(invite, &mut recovered)?;
         connect_approved_host(
-            invite,
-            approved_host,
+            ApprovedContact::from_invite(invite, approved_host),
             &transport.capture_connection_dial(),
             scheduler,
             caller.clone(),
@@ -99,8 +117,7 @@ impl NativeTextJoinedStorage {
 }
 
 pub(in super::super) async fn connect_approved_host(
-    invite: &crate::store::NativeTextInvitePacketData<'_>,
-    approved_host: IpAddr,
+    contact: ApprovedContact,
     transport: &catcoms_net::MeshConnectionDial,
     scheduler: &EndpointDialScheduler,
     mut caller: RequestCancellation,
@@ -110,8 +127,11 @@ pub(in super::super) async fn connect_approved_host(
     if caller.is_cancelled() || mount.is_cancelled() {
         return Err(refused());
     }
-    let peer = invite.connected_peer_data();
-    let address = invite.direct_address_data(approved_host);
+    let ApprovedContact {
+        peer,
+        group,
+        address,
+    } = contact;
     let route = parse_peer_dial_route(&address, peer.as_bytes()).ok_or_else(refused)?;
     if catcoms_net::addr_is_undialable(&address.parse().map_err(|_| refused())?) {
         return Err(refused());
@@ -126,8 +146,7 @@ pub(in super::super) async fn connect_approved_host(
             Ok(())
         };
     }
-    let group = &invite.binding().spec_data().anchor.group;
-    let mut permits = scheduler.reserve_permits(group, &[route.endpoint]);
+    let mut permits = scheduler.reserve_permits(&group, &[route.endpoint]);
     let permit = permits.pop().ok_or_else(refused)?;
     // Owning the publisher keeps the queued actor command live only for
     // this invocation. A timeout or a dropped invocation revokes it.

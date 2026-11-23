@@ -1,9 +1,9 @@
 //! Native first-join bridge for an exact invite and an explicitly approved IP.
 use super::*;
 use catcoms_app::store::{
-    NativeTextInvitePacketData, NativeTextJoinedRequestPreparation, NativeTextJoinedRowSelection,
-    NativeTextJoinedSelectionPreparation, NativeTextSourceCommand, NativeUiInvocationMetadata,
-    MAX_NATIVE_TEXT_INVITE_PACKET_BYTES,
+    NativeTextInvitePacketData, NativeTextJoinedReconnect, NativeTextJoinedRequestPreparation,
+    NativeTextJoinedRowSelection, NativeTextJoinedSelectionPreparation, NativeTextSourceCommand,
+    NativeUiInvocationMetadata, MAX_NATIVE_TEXT_INVITE_PACKET_BYTES,
 };
 use catcoms_rt::RequestCancellation;
 use std::net::IpAddr;
@@ -76,9 +76,14 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
                     )
                     .await;
                     if parked && selection.name_data() == invocation.name {
+                        let Some(attempt) = prepare_reconnect(&state, &invocation, selection).await
+                        else {
+                            return;
+                        };
                         let desktop = app.clone();
                         drop(tauri::async_runtime::spawn(async move {
-                            reconnect(&desktop.state::<AppState>(), invocation, selection).await;
+                            let state = desktop.state::<AppState>();
+                            let _ = attempt.connect(&state.endpoint_dials).await;
                         }));
                     }
                 }
@@ -321,11 +326,11 @@ async fn complete(
     .map_err(|_| FAILED)?
 }
 
-async fn reconnect(
+async fn prepare_reconnect(
     state: &AppState,
-    invocation: Arc<Invocation>,
+    invocation: &Arc<Invocation>,
     selection: NativeTextJoinedRowSelection,
-) -> Option<()> {
+) -> Option<NativeTextJoinedReconnect> {
     let (work, scope) = {
         let table = state.servers.lock().await;
         let row = table.native(&selection.id_data())?;
@@ -339,14 +344,14 @@ async fn reconnect(
             row.scope(invocation.account.clone())?,
         )
     };
-    let foreground = work.foreground(scope.clone()).await?;
-    let prepared = capture_active(state, &invocation, |sources, command| {
+    let _foreground = work.foreground(scope.clone()).await?;
+    let prepared = capture_active(state, invocation, |sources, command| {
         sources.capture_joined_selection(command)
     })
     .await
     .ok()?;
     let original = invocation.clone();
-    let attempt = tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || {
         let invite = original.invite().ok()?;
         prepared
             .prepare_reconnect(
@@ -359,12 +364,7 @@ async fn reconnect(
             .ok()
     })
     .await
-    .ok()??;
-    drop(foreground);
-    attempt
-        .connect(&invocation.invite().ok()?, &state.endpoint_dials)
-        .await
-        .ok()
+    .ok()?
 }
 
 async fn publish<R: tauri::Runtime>(
