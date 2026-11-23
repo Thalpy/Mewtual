@@ -18,6 +18,11 @@ The original pin also anchors the Core replay of genesis and the first Add.
 Selection rechecks the held files and confirms that the restored MLS epoch,
 governing Header, and both active Admissions agree. Desktop startup still
 requires native runtime activation before publishing a recovered founder row.
+The bound cold actor can serve the original covered Welcome on its original
+join ingress. It accepts the exact stored signed JoinRequest and rebuilds
+the public proof from the checked genesis and Add. The transport response
+uses the existing signed Welcome and enrolled KeyPackage and remains tied to
+the original request waiter until the lower queue sends it.
 
 The stage-lifetime continuation is under validation. Native key drainage is
 being separated from retained CLOSED snapshot DATA: an actual completed Cell

@@ -403,6 +403,11 @@ impl std::fmt::Debug for NativeTextJoinedDelivery {
 }
 
 impl NativeTextJoinedDelivery {
+    #[cfg(test)]
+    pub(in crate::store::critical_namespaces::native_registry) fn wire_for_test(&self) -> &[u8] {
+        &self.delivery.bytes
+    }
+
     /// Cover Welcome outside native guards only while the original connection,
     /// invocation and mounted files still authorize the original request.
     pub fn cover(self, rng: &mut impl CryptoRngCore) -> Result<(OwnerHeaderId, u64), AppError> {

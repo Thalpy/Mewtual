@@ -60,7 +60,6 @@ pub use critical_namespaces::NativeTextJoinedRequestPreparation;
 pub use critical_namespaces::NativeTextJoinedRowSelection;
 pub use critical_namespaces::NativeTextJoinedRuntime;
 pub use critical_namespaces::NativeTextJoinedVaultUpgrade;
-pub use critical_namespaces::NativeTextColdFounderSource;
 pub use critical_namespaces::{
     ActivatedCheckpointJoin, ArchiveBootstrapCatalogPolicy, ArchiveFounderBegin,
     ArchiveFounderCreation, ArchiveFounderExisting, ArchiveFounderInputs, ArchiveFounderPlanning,
@@ -96,6 +95,10 @@ pub use critical_namespaces::{
     PreparedV2GovernanceLayoutStore, ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs,
     ReturnedArchiveFounderPlanning, ReturnedCheckpointJoinActivation, V2CurrentLayoutPolicy,
     V2CurrentLayoutStore, V2GovernanceLayoutPolicy, V2GovernanceLayoutStore, V2MemberOutboxPolicy,
+};
+pub use critical_namespaces::{
+    NativeTextColdFounderJoinRequest, NativeTextColdFounderJoinRequests,
+    NativeTextColdFounderSource,
 };
 pub use critical_namespaces::{
     NativeTextJoinedArchivedActions, NativeTextJoinedDependencyExchange,

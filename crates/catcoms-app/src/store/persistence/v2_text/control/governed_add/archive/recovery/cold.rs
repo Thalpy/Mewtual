@@ -24,6 +24,7 @@ use catcoms_replication::chat::{
 use catcoms_storage::kept::{session_id, SessionId};
 use catcoms_storage::VaultPhysicalWorkLease;
 use catcoms_sync::owner_v2::{PreparedV2FounderRecoveredAdd, V2InstalledFounderAddData};
+use catcoms_sync::{V2AdmissionStepData, V2FirstAddProofData, V2FirstJoinDeliveryData};
 use std::sync::Arc;
 use std::{
     fs,
@@ -65,6 +66,38 @@ struct ColdFounderCore {
 }
 
 impl HeldColdFounderAdd {
+    pub(in crate::store) fn covers_request_data(&self, request: &[u8]) -> bool {
+        self.recovered.request.as_slice() == request
+    }
+
+    pub(in crate::store) fn encode_join_delivery(
+        &self,
+        source: &RetainedBootstrapSourceData,
+    ) -> Result<Vec<u8>, AppError> {
+        self.original.require_same_original(source)?;
+        if self.core.is_none() {
+            return Err(refused());
+        }
+        let genesis = source.data().genesis_public_data();
+        let proof = V2FirstAddProofData::encode(
+            genesis.profile_data(),
+            V2AdmissionStepData {
+                admission: genesis.admission_data(),
+                header: genesis.header_data(),
+                image: genesis.image_data(),
+            },
+            V2AdmissionStepData {
+                admission: &self.recovered.admission,
+                header: &self.recovered.header,
+                image: self.recovered.image_data()?,
+            },
+        )?;
+        Ok(V2FirstJoinDeliveryData::encode(
+            &self.recovered.response,
+            &proof,
+        )?)
+    }
+
     pub(in crate::store) fn capture(
         store: &ServerStore,
         source: &RetainedBootstrapSourceData,

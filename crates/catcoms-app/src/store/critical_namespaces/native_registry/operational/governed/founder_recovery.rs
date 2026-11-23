@@ -7,9 +7,13 @@ use catcoms_replication::chat::owner_header::OwnerHeaderId;
 use catcoms_rt::PeerId;
 use catcoms_sync::owner_v2::PreparedV2FounderRecoveredAdd;
 
+mod replies;
+pub use replies::{NativeTextColdFounderJoinRequest, NativeTextColdFounderJoinRequests};
+
 /// The cold opener's original founder custody. A bound TCP actor still
-/// supplies no Core selection, room runtime, key admission or native UI row.
+/// supplies no room runtime, authoring key admission or native UI row.
 pub struct NativeTextColdFounderSource {
+    ingress: Option<replies::Owner>,
     actor: Option<super::super::join_tcp::Loan>,
     tcp: Option<Arc<super::super::join_tcp::Transport>>,
     sdk: Option<PreparedV2FounderRecoveredAdd>,
@@ -29,6 +33,7 @@ impl NativeTextJoinedStorage {
         }
         match self.index.recovered_founder_input() {
             Ok(Some((selection, source, local))) => Ok(NativeTextColdFounderSource {
+                ingress: None,
                 actor: None,
                 tcp: None,
                 sdk: None,
@@ -53,8 +58,8 @@ impl NativeTextColdFounderSource {
         self.local
     }
 
-    /// Check the exact selected first Add and restore its closed MLS graph.
-    /// The selected Core runtime and native row still require activation.
+    /// Check the exact selected first Add, restore its closed MLS graph and
+    /// match the Core replay to that graph. Native row activation is separate.
     pub fn restore_first_add(
         &mut self,
         negative: &RequestCancellation,

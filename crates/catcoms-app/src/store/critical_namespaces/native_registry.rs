@@ -26,7 +26,6 @@ pub use lifecycle::joined::NativeTextJoinedRegistryRowData;
 pub use operational::NativeTextInvitePublication;
 pub use operational::NativeTextJoinedRequestPreparation;
 pub use operational::NativeTextJoinedRowSelection;
-pub use operational::NativeTextColdFounderSource;
 pub use operational::NativeTextJoinedRuntime;
 pub use operational::NativeTextJoinedVaultUpgrade;
 pub use operational::{
@@ -51,6 +50,10 @@ pub use operational::{
     NativeTextVaultUpgradeRefusal, NativeTextWorkRetirement, NativeTextWorkRetirementPreparation,
     NativeUiInvocationBudget, NativeUiInvocationMetadata, NativeUiStateBudget, NativeUiStateCredit,
     NativeUiStatePreparation, NativeUiStateRead, NativeUiStateSaved,
+};
+pub use operational::{
+    NativeTextColdFounderJoinRequest, NativeTextColdFounderJoinRequests,
+    NativeTextColdFounderSource,
 };
 pub use operational::{
     NativeTextJoinedArchivedActions, NativeTextJoinedDependencyExchange,

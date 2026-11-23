@@ -337,6 +337,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
     let mut requests = founder_capture()
         .open_connected_join_requests(negative.clone())
         .unwrap();
+    let mut covered_request = None;
     let mut serve = async || {
         let Some(catcoms_rt::TransportEvent::Request {
             from,
@@ -350,6 +351,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
         };
         assert_eq!(from, local_transport.0);
         assert_eq!(blake3::hash(&data[1..]).as_bytes(), &selected.0);
+        covered_request = Some(data.clone());
         founder_capture()
             .serve_connected_join_request(proto, &data, responder, negative.clone())
             .unwrap();
@@ -398,6 +400,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
     let delivery = tokio::time::timeout(std::time::Duration::from_secs(10), receive(exact))
         .await
         .unwrap();
+    let covered_delivery = delivery.wire_for_test().to_vec();
 
     let mut delivery = Some(delivery);
     let mut inputs = Some((
@@ -1304,10 +1307,11 @@ async fn mounted_join_fixture(recover_stage: bool) {
         .await
         .expect("the original founder drained before the first Add was reopened");
         drop((retirement, row, owner, founder));
+        let mut founder_rng = rand_chacha::ChaCha20Rng::seed_from_u64(0xe729);
         let cold = crate::store::NativeTextJoinedStorage::open_for_native_startup(
             founder_dir.path(),
             SECRET,
-            &mut rng,
+            &mut founder_rng,
             current_policy(),
         )
         .unwrap();
@@ -1324,6 +1328,42 @@ async fn mounted_join_fixture(recover_stage: bool) {
         std::fs::remove_file(&path).unwrap();
         std::fs::rename(parked, path).unwrap();
         assert_eq!(original.restore_first_add(&fresh).unwrap(), (head, epoch));
+        original.bind_original_tcp(&fresh).unwrap();
+        let mut requests = original
+            .open_recovered_join_requests(fresh.clone())
+            .unwrap();
+        let (probe, _) = catcoms_net::MeshService::new_tcp(None, &[]).unwrap();
+        use catcoms_rt::MeshTransport as _;
+        let address = invite.direct_address_data(std::net::Ipv4Addr::LOCALHOST.into());
+        assert_eq!(
+            probe.dial_outcome(address.parse().unwrap()).await.unwrap(),
+            catcoms_rt::DialSubmission::Submitted,
+        );
+        let peer = invite.connected_peer_data();
+        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            probe.wait_for_peer_connected(peer).await.unwrap();
+            let request = covered_request.expect("the original request reached the warm founder");
+            let mut wrong = request.to_vec();
+            *wrong.last_mut().unwrap() ^= 1;
+            for (bytes, valid) in [(bytes::Bytes::from(wrong), false), (request, true)] {
+                let send = probe.request_connected(
+                    peer,
+                    crate::store::critical_namespaces::native_registry::operational::governed::JOIN_PROTOCOL,
+                    bytes,
+                );
+                let serve = async {
+                    original.serve_recovered_join_request(requests.next().await.unwrap())
+                };
+                let (response, served) = tokio::join!(send, serve);
+                if valid {
+                    served.unwrap();
+                    assert_eq!(response.unwrap().as_ref(), covered_delivery.as_slice());
+                } else {
+                    assert!(served.is_err());
+                    assert!(matches!(response, Err(catcoms_rt::TransportError::NoResponse)));
+                }
+            }
+        }).await.expect("the recovered founder served only the original exact delivery");
     }
 }
 

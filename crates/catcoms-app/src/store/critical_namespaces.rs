@@ -67,7 +67,6 @@ pub use native_registry::NativeTextJoinedRegistryRowData;
 pub use native_registry::NativeTextJoinedRequestPreparation;
 pub use native_registry::NativeTextJoinedRowSelection;
 pub use native_registry::NativeTextJoinedRuntime;
-pub use native_registry::NativeTextColdFounderSource;
 pub use native_registry::NativeTextJoinedVaultUpgrade;
 pub use native_registry::{
     NativeCreationStateData, NativeCreationStatusData, NativeIndexPolicy, NativeIndexStore,
@@ -93,6 +92,10 @@ pub use native_registry::{
     NativeTextWorkRetirement, NativeTextWorkRetirementPreparation, NativeUiInvocationBudget,
     NativeUiInvocationMetadata, NativeUiStateBudget, NativeUiStateCredit, NativeUiStatePreparation,
     NativeUiStateRead, NativeUiStateSaved, PreparedNativeRegistryMigration,
+};
+pub use native_registry::{
+    NativeTextColdFounderJoinRequest, NativeTextColdFounderJoinRequests,
+    NativeTextColdFounderSource,
 };
 pub use native_registry::{
     NativeTextJoinedArchivedActions, NativeTextJoinedDependencyExchange,

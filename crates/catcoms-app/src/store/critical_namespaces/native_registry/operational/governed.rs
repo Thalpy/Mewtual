@@ -19,7 +19,10 @@ mod contact;
 mod founder_recovery;
 mod runtime;
 pub(super) use contact::connect_approved_host;
-pub use founder_recovery::NativeTextColdFounderSource;
+pub use founder_recovery::{
+    NativeTextColdFounderJoinRequest, NativeTextColdFounderJoinRequests,
+    NativeTextColdFounderSource,
+};
 pub use runtime::NativeTextJoinedRuntime;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 
