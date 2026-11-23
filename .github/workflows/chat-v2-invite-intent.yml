@@ -313,6 +313,9 @@ jobs:
       - name: Check shared history restart seed custody and layout binding
         if: github.event_name == 'pull_request' || inputs.scope == 'joined-member' || inputs.scope == 'member-history'
         run: python .github/scripts/check-chat-v2-invite-intent.py member-shared-history-seed
+      - name: Check physical history declaration staging and older-reader custody
+        if: github.event_name == 'pull_request' || inputs.scope == 'joined-member' || inputs.scope == 'member-history'
+        run: python .github/scripts/check-chat-v2-invite-intent.py member-shared-history-stage
       - name: Check archived dependency replay and removed author visibility
         if: github.event_name == 'pull_request' || inputs.scope == 'joined-member' || inputs.scope == 'member-history'
         run: python .github/scripts/check-chat-v2-invite-intent.py member-shared-history-replay

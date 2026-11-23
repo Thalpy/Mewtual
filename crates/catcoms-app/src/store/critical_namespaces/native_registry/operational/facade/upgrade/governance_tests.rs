@@ -17,6 +17,55 @@ use std::{fs, path::Path, sync::atomic::Ordering};
 struct NeverRng;
 
 #[test]
+fn shared_history_physical_stage_retains_the_original_catalog_claim_and_marker() {
+    use crate::store::persistence::governance_layout::joined::shared_history::MARKER_NAME;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc469);
+    let mut plan = original(dir.path(), &mut rng).prepare_governance().unwrap();
+    plan.retry(&mut rng).unwrap();
+    drop(plan.into_vault().unwrap());
+    let governed =
+        NativeTextGovernedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy())
+            .unwrap();
+    let joined = governed.into_joined(&mut rng).unwrap();
+    let current = dir.path().join(Slot::Current.name());
+    let stage = dir.path().join(Slot::Stage.name());
+    let claim = dir.path().join(governance::GOVERNANCE_SEED);
+    let marker = dir.path().join(MARKER_NAME);
+    let base = fs::read(&current).unwrap();
+    let store = joined.actual_store_for_test().unwrap();
+    let mut declaration = store
+        .prepare_empty_shared_history_declaration(&mut rng)
+        .unwrap();
+    assert!(!claim.exists());
+    assert!(!stage.exists());
+    assert!(!marker.exists());
+    declaration.stage(store).unwrap();
+    let staged = fs::read(&stage).unwrap();
+    let claimed = fs::read(&claim).unwrap();
+    let covered = fs::read(&marker).unwrap();
+    assert_eq!(fs::read(&current).unwrap(), base);
+    let parked = dir.path().join("original-history-marker");
+    fs::rename(&marker, &parked).unwrap();
+    fs::write(&marker, &covered).unwrap();
+    assert!(declaration.stage(store).is_err());
+    fs::remove_file(&marker).unwrap();
+    fs::rename(&parked, &marker).unwrap();
+    declaration.stage(store).unwrap();
+    drop(declaration);
+    drop(joined);
+
+    assert!(
+        NativeTextJoinedStorage::open(dir.path(), SECRET, &mut NeverRng, current_policy()).is_err()
+    );
+    assert_eq!(fs::read(&current).unwrap(), base);
+    assert_eq!(fs::read(&stage).unwrap(), staged);
+    assert_eq!(fs::read(&claim).unwrap(), claimed);
+    assert_eq!(fs::read(&marker).unwrap(), covered);
+}
+
+#[test]
 fn governed_joined_pin_native_factory_proves_the_selected_catalog_before_exposure() {
     let dir = tempfile::tempdir().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(0xc465);

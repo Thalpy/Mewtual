@@ -17,7 +17,8 @@ mod migration;
 mod network;
 pub(super) mod preparation;
 pub(in crate::store) use preparation::{
-    verify_governance_native, verify_joined_pin_parent, VerifiedGovernanceNative,
+    verify_governance_native, verify_joined_pin_parent, verify_shared_history_parent,
+    VerifiedGovernanceNative,
 };
 
 /// Finish only the actual constructor-private native opening observation.

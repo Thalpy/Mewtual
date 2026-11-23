@@ -148,6 +148,13 @@ pub struct NativeTextJoinedStorage {
 }
 
 impl NativeTextJoinedStorage {
+    #[cfg(test)]
+    pub(in crate::store::critical_namespaces::native_registry) fn actual_store_for_test(
+        &self,
+    ) -> Result<&crate::store::ServerStore, AppError> {
+        self.index.actual_store_for_test()
+    }
+
     fn opening_policy() -> Result<Policy, AppError> {
         Policy::new(
             CriticalCatalogReadPool::new(super::super::lifecycle::preparation::PREPARATION_FEE)?,

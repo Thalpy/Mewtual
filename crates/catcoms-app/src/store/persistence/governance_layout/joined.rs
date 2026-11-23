@@ -16,6 +16,7 @@ use critical_namespaces::{
 pub(in crate::store) const INDEX_NAME: &str = "chat-critical-namespaces.joined-pin.index";
 const INDEX_FEE: usize = 12 * MAX_INDEX_FRAME + 512 * 1024;
 mod pending;
+pub(in crate::store) mod shared_history;
 pub(in crate::store) use pending::{
     AcceptedFirstJoin, AcceptedJoinTransport, JoinedPendingIo, JoinedRegistrationDependency,
 };

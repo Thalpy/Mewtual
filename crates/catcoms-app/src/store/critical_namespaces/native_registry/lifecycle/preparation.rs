@@ -354,7 +354,13 @@ pub(in crate::store) fn verify_governance_native(
     original_catalog: &[u8],
     expected: Option<crate::store::critical_namespaces::governance_layout::codec::NativeTupleData>,
 ) -> Result<VerifiedGovernanceNative, AppError> {
-    verify_declaration_parent(store, inventory, original_catalog, expected, None)
+    verify_declaration_parent(
+        store,
+        inventory,
+        original_catalog,
+        expected,
+        DeclarationParent::Native,
+    )
 }
 
 pub(in crate::store) fn verify_joined_pin_parent(
@@ -368,8 +374,29 @@ pub(in crate::store) fn verify_joined_pin_parent(
         inventory,
         original_catalog,
         None,
-        Some(governance_marker),
+        DeclarationParent::Governed(governance_marker),
     )
+}
+
+pub(in crate::store) fn verify_shared_history_parent(
+    store: &crate::store::ServerStore,
+    inventory: crate::store::persistence::native_registry::lifecycle::governed::NativeGovernanceInventory,
+    original_catalog: &[u8],
+    governance_marker: &[u8],
+) -> Result<VerifiedGovernanceNative, AppError> {
+    verify_declaration_parent(
+        store,
+        inventory,
+        original_catalog,
+        None,
+        DeclarationParent::Joined(governance_marker),
+    )
+}
+
+enum DeclarationParent<'a> {
+    Native,
+    Governed(&'a [u8]),
+    Joined(&'a [u8]),
 }
 
 fn verify_declaration_parent(
@@ -377,24 +404,31 @@ fn verify_declaration_parent(
     inventory: crate::store::persistence::native_registry::lifecycle::governed::NativeGovernanceInventory,
     original_catalog: &[u8],
     expected: Option<crate::store::critical_namespaces::governance_layout::codec::NativeTupleData>,
-    governance_marker: Option<&[u8]>,
+    parent: DeclarationParent<'_>,
 ) -> Result<VerifiedGovernanceNative, AppError> {
     inventory.require_leaves(store)?;
     let layout = inventory.layout(store)?;
     let original = NativeCapabilityData::for_current_data(layout, &layout.encode_data()?)?;
     let key = Zeroizing::new(store.keys.db_key()?);
     let plain = Zeroizing::new(unseal(&key, &unframe(original_catalog)?)?);
-    let parsed = if let Some(marker) = governance_marker {
-        let parsed = grammar::parse_governed_native_registry_layout(&plain, &original.vault, true)?;
+    let parsed = match parent {
+        DeclarationParent::Native => {
+            grammar::parse_lifecycle_native_registry_layout(&plain, &original.vault, true)?
+        }
+        DeclarationParent::Governed(_) => {
+            grammar::parse_governed_native_registry_layout(&plain, &original.vault, true)?
+        }
+        DeclarationParent::Joined(_) => {
+            grammar::parse_joined_native_registry_layout(&plain, &original.vault, true)?
+        }
+    };
+    if let DeclarationParent::Governed(marker) | DeclarationParent::Joined(marker) = parent {
         crate::store::critical_namespaces::governance_layout::codec::require_marker(
             &key,
             parsed.governance.ok_or_else(refused)?,
             marker,
         )?;
-        parsed
-    } else {
-        grammar::parse_lifecycle_native_registry_layout(&plain, &original.vault, true)?
-    };
+    }
     if parsed.member_outbox.is_none() || parsed.count != 0 {
         return Err(refused());
     }
