@@ -2,20 +2,23 @@
 use super::*;
 use crate::store::persistence::native_registry::network::NetworkDependency;
 use crate::store::persistence::v2_member_transport::{
-    archive_founder_member, prepare_founder_dependency_reply, project_founder_member,
-    FounderDependencyReply, FounderReceiveSession, FOUNDER_DEPENDENCY_REPLY_FEE,
-    FOUNDER_RECEIVE_ACTIONS, FOUNDER_RECEIVE_BYTES, FOUNDER_RECEIVE_LEDGER_FEE,
-    FOUNDER_RECEIVE_WORK,
+    archive_founder_member, prepare_founder_dependency_exchange, prepare_founder_dependency_reply,
+    project_founder_member, FounderDependencyReply, FounderReceiveSession,
+    NativeTextFounderDependencyResponse, NativeTextFounderFrameOutcome,
+    FOUNDER_DEPENDENCY_REPLY_FEE, FOUNDER_RECEIVE_ACTIONS, FOUNDER_RECEIVE_BYTES,
+    FOUNDER_RECEIVE_LEDGER_FEE, FOUNDER_RECEIVE_WORK,
 };
 use crate::store::{
     NativeTextFounderReceived, NativeTextJoinedMemberProjection, V2MemberSaveRefusal,
 };
 use catcoms_net::{
-    NativeChatMemberDependencyIncoming, NativeChatMemberFrame, NativeChatMemberGossip,
-    NativeChatMemberGossipError, NativeChatMemberGossipEvent, NativeChatMemberIngress,
+    NativeChatMemberDependencyExchange, NativeChatMemberDependencyIncoming, NativeChatMemberFrame,
+    NativeChatMemberGossip, NativeChatMemberGossipError, NativeChatMemberGossipEvent,
+    NativeChatMemberIngress,
 };
 use catcoms_replication::chat::{
-    ActionId, ChatLedger, LedgerLimits, ProjectionView, Realm, MAX_ACTION_BYTES,
+    ActionId, ActionState, ChatLedger, LedgerLimits, ProjectionView, Realm,
+    V2OrdinaryReceiveStatus, MAX_ACTION_BYTES,
 };
 use catcoms_rt::Topic;
 use catcoms_sync::owner_v2::{V2MemberPublicationObservation, MAX_V2_MEMBER_TRANSPORT_BYTES};
@@ -120,7 +123,7 @@ impl NativeTextColdFounderSource {
             .sdk
             .as_ref()
             .ok_or_else(refused)?
-            .select_member_dependency_provider(verifier, channel, self.local.0, mount)?;
+            .select_member_dependency_access(verifier, channel, self.local.0, mount)?;
         let reply =
             self.work
                 .with_recovered_founder_store(&self.selection, &self.source, |store| {
@@ -208,7 +211,9 @@ impl NativeTextColdFounderSource {
         {
             return Err(refused());
         }
-        self.receive_selected_member_frame(receiver.channel, &receiver.session, frame, rng)
+        Ok(self
+            .receive_selected_member_frame(receiver.channel, &receiver.session, frame, None, rng)?
+            .retained())
     }
 
     pub(in crate::store::critical_namespaces::native_registry) fn receive_selected_member_frame(
@@ -216,8 +221,9 @@ impl NativeTextColdFounderSource {
         channel: u128,
         session: &FounderReceiveSession,
         frame: &NativeChatMemberFrame,
+        carrier: Option<NativeChatMemberDependencyExchange>,
         rng: &mut impl CryptoRngCore,
-    ) -> Result<Option<NativeTextFounderReceived>, AppError> {
+    ) -> Result<NativeTextFounderFrameOutcome, AppError> {
         let ingress = self.runtime_ingress()?.1;
         if !ingress.owns_frame(frame) {
             return Err(refused());
@@ -279,7 +285,7 @@ impl NativeTextColdFounderSource {
             }
             work.require_recovered_founder_source(selection, source)
         };
-        let retained = work.with_recovered_founder_store(selection, source, |store| {
+        let status = work.with_recovered_founder_store(selection, source, |store| {
             project_founder_member(
                 &original,
                 verifier,
@@ -294,8 +300,30 @@ impl NativeTextColdFounderSource {
             )
             .map_err(|_| refused())
         })?;
-        if !retained {
-            return Ok(None);
+        if let V2OrdinaryReceiveStatus::WaitingForDependencies(missing) = &status {
+            if let (Some(carrier), [id, ..]) = (carrier, missing.as_slice()) {
+                if missing.len() <= 4 {
+                    check_lifetime()?;
+                    let (mount, fee) = self
+                        .work
+                        .recovered_founder_resources(FOUNDER_DEPENDENCY_REPLY_FEE)?;
+                    let access = sdk.select_member_dependency_access(
+                        verifier,
+                        channel,
+                        self.local.0,
+                        mount,
+                    )?;
+                    let request = prepare_founder_dependency_exchange(
+                        access, carrier, session, &original, *id, fee, rng,
+                    )
+                    .map_err(|_| refused())?;
+                    self.restore_first_add(&session.signal)?;
+                    return Ok(NativeTextFounderFrameOutcome::NeedsDependency(request));
+                }
+            }
+        }
+        if status != V2OrdinaryReceiveStatus::Retained(ActionState::Valid) {
+            return Ok(NativeTextFounderFrameOutcome::Unresolved);
         }
         self.restore_first_add(&session.signal)?;
         let governed = self.governed.as_mut().ok_or_else(refused)?;
@@ -316,11 +344,79 @@ impl NativeTextColdFounderSource {
             return Err(refused());
         }
         let action = original.action_data();
-        Ok(Some(NativeTextFounderReceived {
-            action: action.id(),
-            projection_target: action.spec().body.create().unwrap_or_else(|| action.id()),
-            archived,
-        }))
+        Ok(NativeTextFounderFrameOutcome::Retained(
+            NativeTextFounderReceived {
+                action: action.id(),
+                projection_target: action.spec().body.create().unwrap_or_else(|| action.id()),
+                archived,
+            },
+        ))
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn recover_selected_dependency(
+        &mut self,
+        channel: u128,
+        session: &FounderReceiveSession,
+        response: &NativeTextFounderDependencyResponse,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<bool, AppError> {
+        let require_response = || response.require_current(session).map_err(|_| refused());
+        require_response()?;
+        self.restore_first_add(&session.signal)?;
+        let scope = self.history_scope(channel)?;
+        let (verifier, _) = self.governed.as_ref().ok_or_else(refused)?.member_parts()?;
+        let sdk = self.sdk.as_ref().ok_or_else(refused)?;
+        let (mount, _fee) = self.work.recovered_founder_resources(FRAME_FEE)?;
+        let access = sdk.select_member_dependency_access(verifier, channel, self.local.0, mount)?;
+        let Some(original) = response.open(access, session).map_err(|_| refused())? else {
+            return Ok(false);
+        };
+        let ledger = self
+            .received
+            .as_mut()
+            .filter(|ledger| {
+                Arc::ptr_eq(&ledger.session.identity, &session.identity)
+                    && ledger.ledger.realm().channel() == channel
+            })
+            .ok_or_else(refused)?;
+        let selection = &self.selection;
+        let source = &self.source;
+        let work = &self.work;
+        let status = work.with_recovered_founder_store(selection, source, |store| {
+            project_founder_member(
+                &original,
+                verifier,
+                &mut ledger.ledger,
+                &ledger.view,
+                (store, scope),
+                |id| {
+                    let context = history::outbox_context(selection, source);
+                    history::saved_dependency(store, context, source, scope, id, rng)
+                },
+                || {
+                    require_response().map_err(|_| V2MemberSaveRefusal::Stale)?;
+                    work.require_recovered_founder_source(selection, source)
+                        .map_err(|_| V2MemberSaveRefusal::Stale)
+                },
+            )
+            .map_err(|_| refused())
+        })?;
+        if status != V2OrdinaryReceiveStatus::Retained(ActionState::Valid) {
+            return Ok(false);
+        }
+        self.restore_first_add(&session.signal)?;
+        let governed = self.governed.as_mut().ok_or_else(refused)?;
+        self.work
+            .with_recovered_founder_store(&self.selection, &self.source, |store| {
+                archive_founder_member(store, scope, &original, rng, || {
+                    require_response()?;
+                    governed.require_current(store, &self.source)?;
+                    Ok(())
+                })
+            })?;
+        require_response()?;
+        self.restore_first_add(&session.signal)?;
+        Ok(true)
     }
 
     pub fn read_member_projection(

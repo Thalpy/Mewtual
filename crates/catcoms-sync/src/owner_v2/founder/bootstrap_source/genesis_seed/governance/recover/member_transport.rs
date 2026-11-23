@@ -3,7 +3,7 @@ use super::*;
 use crate::owner_v2::{
     open_v2_member_envelope_data, seal_v2_member_envelope_data, v2_member_envelope_topic_data,
     MemberTransportFence, PreparedV2MemberSubmission, SelectedV2MemberEnvelope,
-    V2FounderMemberDependencyProvider, V2MemberEnvelopeScopeData, V2MemberPublicationObservation,
+    V2FounderMemberDependencyAccess, V2MemberEnvelopeScopeData, V2MemberPublicationObservation,
     MAX_V2_MEMBER_TRANSPORT_BYTES,
 };
 use catcoms_replication::chat::V2GeneralPrefixVerifier;
@@ -100,19 +100,19 @@ impl PreparedV2FounderRecoveredAdd {
         ))
     }
 
-    pub fn select_member_dependency_provider(
+    pub fn select_member_dependency_access(
         &self,
         verifier: &V2GeneralPrefixVerifier,
         channel: u128,
         local: PeerId,
         mount: RequestCancellation,
-    ) -> Result<V2FounderMemberDependencyProvider<'_>, SyncError> {
+    ) -> Result<V2FounderMemberDependencyAccess<'_>, SyncError> {
         let (scope, observation) = self.observe_selected(verifier, channel, mount)?;
-        Ok(V2FounderMemberDependencyProvider {
+        Ok(V2FounderMemberDependencyAccess {
             group: &self.group,
             device: &self.device,
             scope,
-            member: self.founder,
+            member: self.member.as_ref().ok_or_else(unavailable)?,
             local,
             observation,
         })

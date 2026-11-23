@@ -124,7 +124,10 @@ pub use native_text_invite::{
     NativeTextInvitePacketData, NativeTextInviteRecovery, NativeTextSavedInvite,
     NativeTextSavedJoinResponse, MAX_NATIVE_TEXT_INVITE_PACKET_BYTES,
 };
-pub use persistence::v2_member_transport::NativeTextFounderReceived;
+pub use persistence::v2_member_transport::{
+    NativeTextFounderDependencyExchange, NativeTextFounderDependencyResponse,
+    NativeTextFounderFrameOutcome, NativeTextFounderReceived,
+};
 mod owner_evidence;
 pub use chat_admission::{
     ChatAdmissionBinding, ChatAdmissionCapture, ChatAdmissionFinish, ChatAdmissionKey,

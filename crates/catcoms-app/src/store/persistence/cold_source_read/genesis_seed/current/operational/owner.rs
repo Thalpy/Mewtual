@@ -117,15 +117,15 @@ impl<T, R> V2TextOwnedCurrent<T, R> {
 }
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurrent<T, R> {
-    pub(super) fn select_governed_dependency_provider(
+    pub(super) fn select_governed_dependency_access(
         &self,
         store: &ServerStore,
         verifier: &catcoms_replication::chat::V2GeneralPrefixVerifier,
         channel: u128,
-    ) -> Result<catcoms_sync::owner_v2::V2FounderMemberDependencyProvider<'_>, AppError> {
+    ) -> Result<catcoms_sync::owner_v2::V2FounderMemberDependencyAccess<'_>, AppError> {
         match &self.core {
             OwnedCurrent::Warm(current) => {
-                current.select_governed_dependency_provider(store, verifier, channel)
+                current.select_governed_dependency_access(store, verifier, channel)
             }
             OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
         }

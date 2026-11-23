@@ -860,76 +860,135 @@ async fn mounted_join_fixture(recover_stage: bool) {
         .expect("the founder serves its own selected outbox and keeps the archive private");
         drop(provider);
 
-        let nested_text = "Joined reply with an archived parent and a saved grandparent";
-        let nested = catcoms_replication::chat::Body::Create {
-            text: nested_text.into(),
-            reply_to: Some(reply_id),
-        };
-        let nested_request = || V2MemberSignRequest {
-            token: [147; 32],
-            channel,
-            body: &nested,
-            parents: std::slice::from_ref(&reply_id),
-            dependencies: &[],
-        };
-        assert_eq!(
-            inspect()
-                .prepare_member_save(&view, nested_request(), &fresh, &mut rng)
-                .unwrap(),
-            V2MemberSaveOutcome::Ready,
-        );
-        let mut final_nested = Some(
-            inspect()
-                .finish_member_admission(view.clone(), nested_request().token, &fresh)
-                .unwrap(),
-        );
-        let job = NativeTextJoinedMemberFinalPreparation::try_admit_member_save(
-            &mut final_nested,
-            &fresh,
-            MemberSaveNativeAdmission::new((), fresh.clone()),
-        )
-        .unwrap();
-        assert_eq!(job.run(), MemberSaveJobReport::SavedLocal);
-        let (nested_id, ordinal) = inspect()
-            .lookup_saved_member(&view, &nested_request(), &fresh, &mut rng)
-            .unwrap()
-            .unwrap();
-        let (receipt, topic, ciphertext) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        let nested_text = "Joined reply with a parent missed by the original receiver";
+        let (stop_recovery, recovery_scope) = tokio::sync::watch::channel(false);
+        let recovery_scope = RequestCancellation::new(recovery_scope, None);
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
             let mut receiver = loop {
-                let prepared = founder_capture().prepare_founder_member_ingress(channel, fresh.clone()).unwrap();
+                let prepared = founder_capture()
+                    .prepare_founder_member_ingress(channel, recovery_scope.clone())
+                    .unwrap();
                 match prepared.open().await {
                     Ok(receiver) => break receiver,
-                    Err(catcoms_net::NativeChatMemberGossipError::Busy) => tokio::task::yield_now().await,
+                    Err(catcoms_net::NativeChatMemberGossipError::Busy) => {
+                        tokio::task::yield_now().await
+                    }
                     Err(error) => panic!("the original founder listener could not reopen: {error}"),
                 }
             };
-            let receipt = loop {
-                let prepared = inspect().prepare_member_publication(&view, fresh.clone(), &mut rng).unwrap().unwrap();
-                match prepared.submit().await {
-                    Ok(Some(receipt)) => break receipt,
-                    Err(catcoms_sync::SyncError::Publication(catcoms_rt::PublishOnceError::NoPeers)) => {
-                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let mut provider = inspect()
+                .attach_dependency_provider(&view, fresh.clone())
+                .unwrap();
+            let mut previous = reply_id;
+            for (token, text) in [(147, "Parent missed by the founder"), (148, nested_text)] {
+                let draft = catcoms_replication::chat::Body::Create {
+                    text: text.into(),
+                    reply_to: Some(previous),
+                };
+                let reply = || V2MemberSignRequest {
+                    token: [token; 32],
+                    channel,
+                    body: &draft,
+                    parents: std::slice::from_ref(&previous),
+                    dependencies: &[],
+                };
+                assert_eq!(
+                    inspect()
+                        .prepare_member_save(&view, reply(), &fresh, &mut rng)
+                        .unwrap(),
+                    V2MemberSaveOutcome::Ready
+                );
+                let mut work = Some(
+                    inspect()
+                        .finish_member_admission(view.clone(), reply().token, &fresh)
+                        .unwrap(),
+                );
+                let job = NativeTextJoinedMemberFinalPreparation::try_admit_member_save(
+                    &mut work,
+                    &fresh,
+                    MemberSaveNativeAdmission::new((), fresh.clone()),
+                )
+                .unwrap();
+                assert_eq!(job.run(), MemberSaveJobReport::SavedLocal);
+                let (action, ordinal) = inspect()
+                    .lookup_saved_member(&view, &reply(), &fresh, &mut rng)
+                    .unwrap()
+                    .unwrap();
+                let receipt = loop {
+                    let prepared = inspect()
+                        .prepare_member_publication(&view, fresh.clone(), &mut rng)
+                        .unwrap()
+                        .unwrap();
+                    match prepared.submit().await {
+                        Ok(Some(receipt)) => break receipt,
+                        Err(catcoms_sync::SyncError::Publication(
+                            catcoms_rt::PublishOnceError::NoPeers,
+                        )) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                        }
+                        _ => panic!("expected the joined original to reach the founder mesh"),
                     }
-                    _ => panic!("expected the nested reply to reach the founder mesh"),
+                };
+                let Some(NativeChatMemberGossipEvent::Frame(frame)) = receiver.next().await else {
+                    panic!("the founder original did not arrive");
+                };
+                assert_eq!(
+                    inspect()
+                        .checkpoint_member_publication(receipt, &fresh, &mut rng)
+                        .unwrap(),
+                    ordinal + 1
+                );
+                if token == 147 {
+                    previous = action;
+                    continue;
                 }
-            };
-            let Some(NativeChatMemberGossipEvent::Frame(frame)) = receiver.next().await else {
-                panic!("the founder did not receive the nested reply");
-            };
-            let (topic, _, ciphertext) = frame.current_data().unwrap();
-            let received = founder_capture().receive_founder_member(&receiver, &frame).unwrap()
-                .expect("the new receive ledger loaded the archived parent and the founder's saved grandparent");
-            assert_eq!(received.action, nested_id);
-            assert_eq!(received.archived, Some(true));
-            (receipt, topic.clone(), bytes::Bytes::copy_from_slice(ciphertext))
-        }).await.expect("bounded nested reply over the original TCP connection");
-        assert_eq!(
-            inspect()
-                .checkpoint_member_publication(receipt, &fresh, &mut rng)
-                .unwrap(),
-            ordinal + 1
-        );
-        founder_reply = Some((reply_id, nested_id, nested_text, topic, ciphertext));
+                let crate::store::NativeTextFounderFrameOutcome::NeedsDependency(exchange) =
+                    founder_capture()
+                        .receive_founder_member_with_recovery(&receiver, &frame)
+                        .unwrap()
+                else {
+                    panic!("the founder should need the intentionally skipped parent");
+                };
+                assert!(founder_capture()
+                    .archived_founder_message_projection(channel, previous, &fresh)
+                    .unwrap()
+                    .is_none());
+                let serve = async {
+                    let incoming = provider
+                        .next()
+                        .await
+                        .expect("the original joined provider receives one addressed request");
+                    inspect()
+                        .serve_dependency_request(&view, channel, incoming, fresh.clone(), &mut rng)
+                        .unwrap();
+                };
+                let (response, ()) = tokio::join!(exchange.receive(), serve);
+                let response = response.unwrap();
+                assert!(founder_capture()
+                    .recover_founder_dependency(&receiver, &response)
+                    .unwrap());
+                let received = founder_capture()
+                    .receive_founder_member(&receiver, &frame)
+                    .unwrap()
+                    .expect("the original child can now use the exact missing parent");
+                assert_eq!(received.action, action);
+                assert_eq!(received.archived, Some(true));
+                let (topic, _, ciphertext) = frame.current_data().unwrap();
+                founder_reply = Some((
+                    [reply_id, previous, action],
+                    action,
+                    nested_text,
+                    topic.clone(),
+                    bytes::Bytes::copy_from_slice(ciphertext),
+                ));
+                stop_recovery.send_replace(true);
+                assert!(founder_capture()
+                    .recover_founder_dependency(&receiver, &response)
+                    .is_err());
+            }
+        })
+        .await
+        .expect("bounded addressed dependency and original reply over the real TCP connection");
 
         let deferred = super::body("Founder action saved before the process closed");
         let deferred_request = || V2MemberSignRequest {
@@ -1544,13 +1603,12 @@ async fn mounted_join_fixture(recover_stage: bool) {
         std::fs::remove_file(&path).unwrap();
         std::fs::rename(parked, path).unwrap();
         assert_eq!(original.restore_first_add(&fresh).unwrap(), (head, epoch));
-        if let Some((parent_id, reply_id, reply_text, reply_topic, reply_wire)) = founder_reply {
+        if let Some((mut expected, reply_id, reply_text, reply_topic, reply_wire)) = founder_reply {
             let channel = request().channel;
             let page = original
                 .archived_action_page(channel, None, 8, &fresh)
                 .unwrap()
                 .unwrap();
-            let mut expected = [parent_id, reply_id];
             expected.sort_unstable();
             assert_eq!(page.actions(), &expected);
             let archived = original

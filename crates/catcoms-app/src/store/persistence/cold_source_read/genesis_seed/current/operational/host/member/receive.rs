@@ -1,13 +1,14 @@
 //! One paid founder receiver ledger in the original selected text host.
 use super::*;
 use crate::store::persistence::v2_member_transport::{
-    prepare_founder_dependency_reply, project_founder_member, FounderReceiveOperation,
-    FounderReceiveOutcome, FounderReceiveSession, NativeTextFounderReceived,
-    FOUNDER_DEPENDENCY_REPLY_FEE, FOUNDER_RECEIVE_ACTIONS as ACTION_LIMIT,
-    FOUNDER_RECEIVE_BYTES as ACTION_BYTES, FOUNDER_RECEIVE_LEDGER_FEE as LEDGER_FEE,
-    FOUNDER_RECEIVE_WORK as WORK_LIMIT,
+    prepare_founder_dependency_exchange, prepare_founder_dependency_reply, project_founder_member,
+    FounderReceiveOperation, FounderReceiveOutcome, FounderReceiveSession,
+    NativeTextFounderFrameOutcome, NativeTextFounderReceived, FOUNDER_DEPENDENCY_REPLY_FEE,
+    FOUNDER_RECEIVE_ACTIONS as ACTION_LIMIT, FOUNDER_RECEIVE_BYTES as ACTION_BYTES,
+    FOUNDER_RECEIVE_LEDGER_FEE as LEDGER_FEE, FOUNDER_RECEIVE_WORK as WORK_LIMIT,
 };
 use crate::store::persistence::v2_shared_history::SharedHistoryActionQuery;
+use catcoms_replication::chat::{ActionState, V2OrdinaryReceiveStatus};
 
 mod archive;
 use archive::FounderHistory;
@@ -80,7 +81,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     .map_err(|_| Refusal::Busy)?;
                 let provider = self
                     .owner
-                    .select_governed_dependency_provider(store, verifier, channel)
+                    .select_governed_dependency_access(store, verifier, channel)
                     .map_err(|_| Refusal::Unavailable)?;
                 let reply = prepare_founder_dependency_reply(
                     provider,
@@ -110,7 +111,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     .map_err(|_| Refusal::Stale)?;
                 Ok(FounderReceiveOutcome::Dependency(reply))
             }
-            FounderReceiveOperation::Frame(frame, session) => {
+            FounderReceiveOperation::Frame(frame, session, carrier) => {
                 if session.signal.is_cancelled() {
                     return Err(Refusal::Cancelled);
                 }
@@ -184,7 +185,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     }
                     Ok(())
                 };
-                if !project_founder_member(
+                let status = project_founder_member(
                     &original,
                     verifier,
                     &mut received.ledger,
@@ -198,16 +199,40 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                         history.saved(&mount, &key, id, rng)
                     },
                     &mut require_current,
-                )? {
-                    return Ok(FounderReceiveOutcome::Frame(None));
+                )?;
+                if let V2OrdinaryReceiveStatus::WaitingForDependencies(missing) = &status {
+                    if let (Some(carrier), [id, ..]) = (carrier, missing.as_slice()) {
+                        if missing.len() <= 4 {
+                            require_current()?;
+                            let fee = pool
+                                .try_reserve(FOUNDER_DEPENDENCY_REPLY_FEE)
+                                .map_err(|_| Refusal::Busy)?;
+                            let access = self
+                                .owner
+                                .select_governed_dependency_access(store, verifier, channel)
+                                .map_err(|_| Refusal::Unavailable)?;
+                            let request = prepare_founder_dependency_exchange(
+                                access, carrier, session, &original, *id, fee, rng,
+                            )?;
+                            require_current()?;
+                            return Ok(FounderReceiveOutcome::Frame(
+                                NativeTextFounderFrameOutcome::NeedsDependency(request),
+                            ));
+                        }
+                    }
+                }
+                if status != V2OrdinaryReceiveStatus::Retained(ActionState::Valid) {
+                    return Ok(FounderReceiveOutcome::Frame(
+                        NativeTextFounderFrameOutcome::Unresolved,
+                    ));
                 }
                 let action = original.action_data();
                 let archived = history
                     .save(&original, rng, || require_current().map_err(|_| refused()))
                     .unwrap_or(Some(false));
                 require_current()?;
-                Ok(FounderReceiveOutcome::Frame(Some(
-                    NativeTextFounderReceived {
+                Ok(FounderReceiveOutcome::Frame(
+                    NativeTextFounderFrameOutcome::Retained(NativeTextFounderReceived {
                         action: action.id(),
                         projection_target: action
                             .spec()
@@ -215,8 +240,68 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                             .create()
                             .unwrap_or_else(|| action.id()),
                         archived,
+                    }),
+                ))
+            }
+            FounderReceiveOperation::Recover(response, session) => {
+                response.require_current(session)?;
+                let _fee = pool
+                    .try_reserve(FOUNDER_TRANSPORT_FEE)
+                    .map_err(|_| Refusal::Busy)?;
+                let access = self
+                    .owner
+                    .select_governed_dependency_access(store, verifier, channel)
+                    .map_err(|_| Refusal::Unavailable)?;
+                let Some(original) = response.open(access, session)? else {
+                    return Ok(FounderReceiveOutcome::Recovered(false));
+                };
+                let outbox = lane.outbox_context();
+                let received = lane
+                    .received
+                    .as_mut()
+                    .filter(|ledger| {
+                        Arc::ptr_eq(&ledger.session.identity, &session.identity)
+                            && ledger.ledger.realm().channel() == channel
+                    })
+                    .ok_or(Refusal::Stale)?;
+                let history = FounderHistory::new(
+                    store,
+                    verifier,
+                    self.owner
+                        .borrow_current()
+                        .map_err(|_| Refusal::Unavailable)?,
+                    channel,
+                    lane.admission,
+                    outbox,
+                )?;
+                let mut require_current = || {
+                    check_governed_member(&self.owner, governed, &lane.domain, verifier, store)
+                        .map_err(|_| Refusal::Stale)?;
+                    response.require_current(session)
+                };
+                let status = project_founder_member(
+                    &original,
+                    verifier,
+                    &mut received.ledger,
+                    &received.view,
+                    (store, history.scope),
+                    |id| {
+                        let mount = store
+                            .member_outbox_mount()
+                            .map_err(|_| Refusal::Unavailable)?;
+                        let key = member_outbox_key(store).map_err(|_| Refusal::Unavailable)?;
+                        history.saved(&mount, &key, id, rng)
                     },
-                )))
+                    &mut require_current,
+                )?;
+                if status != V2OrdinaryReceiveStatus::Retained(ActionState::Valid) {
+                    return Ok(FounderReceiveOutcome::Recovered(false));
+                }
+                history
+                    .save(&original, rng, || require_current().map_err(|_| refused()))
+                    .map_err(|_| Refusal::Failed)?;
+                require_current()?;
+                Ok(FounderReceiveOutcome::Recovered(true))
             }
             FounderReceiveOperation::Read(create) => {
                 let Some(received) = lane.received.as_ref().filter(|received| {

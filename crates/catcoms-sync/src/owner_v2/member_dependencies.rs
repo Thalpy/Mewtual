@@ -4,12 +4,15 @@
 use super::member_envelope::member_exporter_key;
 use super::{
     open_v2_member_envelope_data, seal_v2_member_envelope_data, OpenedV2MemberEnvelopeData,
-    V2MemberEnvelopeScopeData, V2MemberPublicationObservation, MAX_V2_MEMBER_TRANSPORT_BYTES,
+    SelectedV2MemberEnvelope, V2MemberEnvelopeScopeData, V2MemberPublicationObservation,
+    MAX_V2_MEMBER_TRANSPORT_BYTES,
 };
 use crate::SyncError;
 use catcoms_crypto::{seal, unseal, SealedBlob};
 use catcoms_mls::{MlsDevice, ServerGroup};
-use catcoms_replication::chat::{owner_facts::OwnerFactId, ActionId, SignedAction};
+use catcoms_replication::chat::{
+    owner_facts::OwnerFactId, ActionId, SignedAction, V2AuthenticatedAdmission,
+};
 use catcoms_rt::{CryptoRngCore, PeerId};
 use catcoms_wire::{Decoder, Encoder, WireError};
 use zeroize::Zeroizing;
@@ -41,16 +44,64 @@ pub struct V2MemberDependencyRoute {
 
 /// A borrow of the original founder's selected MLS graph and Core Admission.
 /// The host still owns the connected request and selected outbox receipt.
-pub struct V2FounderMemberDependencyProvider<'a> {
+pub struct V2FounderMemberDependencyAccess<'a> {
     pub(super) group: &'a ServerGroup,
     pub(super) device: &'a MlsDevice,
     pub(super) scope: V2MemberEnvelopeScopeData,
-    pub(super) member: OwnerFactId,
+    pub(super) member: &'a V2AuthenticatedAdmission,
     pub(super) local: PeerId,
     pub(super) observation: V2MemberPublicationObservation,
 }
 
-impl V2FounderMemberDependencyProvider<'_> {
+impl V2FounderMemberDependencyAccess<'_> {
+    pub fn prepare_request(
+        &self,
+        original: &SelectedV2MemberEnvelope,
+        route: V2MemberDependencyRoute,
+        action: ActionId,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<PreparedV2MemberDependencyRequest, SyncError> {
+        let spec = original.action_data().spec();
+        if route.requester != self.local
+            || !self.observation.is_current_cached()
+            || !original.is_current_cached()
+            || !original.recipient.same_original(self.member)
+            || !original.opened.matches_scope_data(&self.scope)
+            || (spec.parents.binary_search(&action).is_err() && spec.body.create() != Some(action))
+        {
+            return Err(SyncError::JoinRejected);
+        }
+        PreparedV2MemberDependencyRequest::prepare(
+            self.group,
+            self.device,
+            self.scope,
+            route,
+            action,
+            rng,
+        )
+    }
+
+    pub fn open_reply(
+        self,
+        route: V2MemberDependencyRoute,
+        request: &PreparedV2MemberDependencyRequest,
+        wire: &[u8],
+    ) -> Result<Option<SelectedV2MemberEnvelope>, SyncError> {
+        if route.requester != self.local || !self.observation.is_current_cached() {
+            return Err(SyncError::JoinRejected);
+        }
+        let opened = request.open_reply(self.group, self.device, &self.scope, route, wire)?;
+        if !self.observation.is_current_cached() {
+            return Err(SyncError::JoinRejected);
+        }
+        Ok(opened.map(|opened| SelectedV2MemberEnvelope {
+            opened,
+            recipient: self.member.clone(),
+            recipient_id: self.member.admission_data().admission_id(),
+            observation: self.observation,
+        }))
+    }
+
     pub fn route_data(&self, requester: PeerId) -> V2MemberDependencyRoute {
         V2MemberDependencyRoute {
             requester,
@@ -88,7 +139,9 @@ impl V2FounderMemberDependencyProvider<'_> {
     ) -> Result<Vec<u8>, SyncError> {
         if route.provider != self.local
             || !self.observation.is_current_cached()
-            || saved.is_some_and(|(admission, _)| admission != self.member)
+            || saved.is_some_and(|(admission, _)| {
+                admission != self.member.admission_data().admission_id()
+            })
         {
             return Err(SyncError::JoinRejected);
         }

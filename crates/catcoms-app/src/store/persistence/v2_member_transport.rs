@@ -8,15 +8,19 @@ use crate::store::critical_namespaces::read_pool::CatalogReadReservation;
 use crate::store::critical_namespaces::refused;
 use crate::store::{NativeTextJoinedMemberProjection, ServerStore, V2MemberSaveRefusal as Refusal};
 use crate::AppError;
-use catcoms_net::{NativeChatMemberDependencyIncoming, NativeChatMemberFrame};
-use catcoms_replication::chat::{
-    ActionId, ActionState, ChatLedger, GuardedMessageProjection, ProjectionView,
-    V2GeneralPrefixVerifier, V2OrdinaryReceiveStatus, MAX_PARENTS,
+use catcoms_net::{
+    NativeChatMemberDependencyExchange, NativeChatMemberDependencyIncoming,
+    NativeChatMemberDependencyObservation, NativeChatMemberFrame,
 };
-use catcoms_rt::{CryptoRngCore, RequestCancellation, Topic};
+use catcoms_replication::chat::{
+    ActionId, ChatLedger, GuardedMessageProjection, ProjectionView, V2GeneralPrefixVerifier,
+    V2OrdinaryReceiveStatus, MAX_PARENTS,
+};
+use catcoms_rt::{CryptoRngCore, RequestCancellation, Topic, TransportError};
 use catcoms_sync::owner_v2::{
-    PreparedV2MemberSubmission, SelectedV2MemberEnvelope, V2FounderMemberDependencyProvider,
-    V2MemberPublicationObservation, MAX_V2_DEPENDENCY_REPLY_BYTES, MAX_V2_MEMBER_TRANSPORT_BYTES,
+    PreparedV2MemberDependencyRequest, PreparedV2MemberSubmission, SelectedV2MemberEnvelope,
+    V2FounderMemberDependencyAccess, V2MemberDependencyRoute, V2MemberPublicationObservation,
+    MAX_V2_DEPENDENCY_REPLY_BYTES, MAX_V2_MEMBER_TRANSPORT_BYTES,
 };
 use std::sync::Arc;
 
@@ -37,8 +41,122 @@ pub(in crate::store) struct FounderDependencyReply {
     pub(in crate::store) fee: CatalogReadReservation,
 }
 
+pub struct NativeTextFounderDependencyExchange {
+    exchange: NativeChatMemberDependencyExchange,
+    route: V2MemberDependencyRoute,
+    request: PreparedV2MemberDependencyRequest,
+    session: Arc<()>,
+    signal: RequestCancellation,
+}
+
+pub struct NativeTextFounderDependencyResponse {
+    route: V2MemberDependencyRoute,
+    request: PreparedV2MemberDependencyRequest,
+    session: Arc<()>,
+    carrier: NativeChatMemberDependencyObservation,
+    signal: RequestCancellation,
+    wire: bytes::Bytes,
+}
+
+struct DependencyPayment {
+    _fee: CatalogReadReservation,
+}
+
+impl std::fmt::Debug for DependencyPayment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DependencyPayment").finish_non_exhaustive()
+    }
+}
+
+impl NativeTextFounderDependencyExchange {
+    pub async fn receive(self) -> Result<NativeTextFounderDependencyResponse, TransportError> {
+        let carrier = self.exchange.observe_route();
+        let wire = self
+            .exchange
+            .request(self.request.wire_data(), self.signal.clone())
+            .await?;
+        if self.signal.is_cancelled() || !carrier.is_current_cached() {
+            return Err(TransportError::Cancelled);
+        }
+        Ok(NativeTextFounderDependencyResponse {
+            route: self.route,
+            request: self.request,
+            session: self.session,
+            carrier,
+            signal: self.signal,
+            wire,
+        })
+    }
+}
+
+impl NativeTextFounderDependencyResponse {
+    pub(in crate::store) fn require_current(
+        &self,
+        session: &FounderReceiveSession,
+    ) -> Result<(), Refusal> {
+        if !Arc::ptr_eq(&self.session, &session.identity)
+            || self.signal.is_cancelled()
+            || session.signal.is_cancelled()
+            || !self.carrier.is_current_cached()
+        {
+            return Err(Refusal::Stale);
+        }
+        Ok(())
+    }
+
+    pub(in crate::store) fn open(
+        &self,
+        access: V2FounderMemberDependencyAccess<'_>,
+        session: &FounderReceiveSession,
+    ) -> Result<Option<SelectedV2MemberEnvelope>, Refusal> {
+        self.require_current(session)?;
+        let opened = access
+            .open_reply(self.route, &self.request, &self.wire)
+            .map_err(|_| Refusal::Failed)?;
+        self.require_current(session)?;
+        Ok(opened)
+    }
+}
+
+pub(in crate::store) fn prepare_founder_dependency_exchange(
+    access: V2FounderMemberDependencyAccess<'_>,
+    exchange: NativeChatMemberDependencyExchange,
+    session: &FounderReceiveSession,
+    original: &SelectedV2MemberEnvelope,
+    action: ActionId,
+    fee: CatalogReadReservation,
+    rng: &mut impl CryptoRngCore,
+) -> Result<NativeTextFounderDependencyExchange, Refusal> {
+    let carrier = exchange.observe_route();
+    if session.signal.is_cancelled() || !carrier.is_current_cached() {
+        return Err(Refusal::Stale);
+    }
+    let (requester, provider) = exchange.route_data();
+    let route = V2MemberDependencyRoute {
+        requester,
+        provider,
+    };
+    let request = access
+        .prepare_request(original, route, action, rng)
+        .map_err(|_| Refusal::Failed)?;
+    let signal = access
+        .into_observation()
+        .constrain(session.signal.clone())
+        .retain_custody(Arc::new(DependencyPayment { _fee: fee }));
+    if signal.is_cancelled() || !carrier.is_current_cached() {
+        return Err(Refusal::Stale);
+    }
+    Ok(NativeTextFounderDependencyExchange {
+        exchange,
+        route,
+        request,
+        session: session.identity.clone(),
+        signal,
+    })
+}
+
 pub(in crate::store) fn prepare_founder_dependency_reply<R: CryptoRngCore>(
-    provider: V2FounderMemberDependencyProvider<'_>,
+    provider: V2FounderMemberDependencyAccess<'_>,
     incoming: &NativeChatMemberDependencyIncoming,
     fee: CatalogReadReservation,
     caller: &RequestCancellation,
@@ -87,14 +205,15 @@ pub(in crate::store) fn project_founder_member(
     archive: (&ServerStore, SharedHistoryScope),
     mut saved_dependency: impl FnMut(ActionId) -> Result<Option<MemberSavedOriginal>, Refusal>,
     mut require_current: impl FnMut() -> Result<(), Refusal>,
-) -> Result<bool, Refusal> {
+) -> Result<V2OrdinaryReceiveStatus, Refusal> {
     require_current()?;
     let mut status = original
         .project_from_ledger(verifier, ledger, view, FOUNDER_RECEIVE_WORK)
         .map_err(|_| Refusal::Failed)?;
     if let V2OrdinaryReceiveStatus::WaitingForDependencies(missing) = &status {
         if missing.len() > 4 {
-            return Ok(false);
+            require_current()?;
+            return Ok(status);
         }
         replay_local_member_dependencies(
             missing,
@@ -109,7 +228,7 @@ pub(in crate::store) fn project_founder_member(
             .map_err(|_| Refusal::Failed)?;
     }
     require_current()?;
-    Ok(status == V2OrdinaryReceiveStatus::Retained(ActionState::Valid))
+    Ok(status)
 }
 
 /// Restore historical semantics without issuing live projection tokens. The
@@ -233,7 +352,15 @@ pub(in crate::store) struct FounderReceiveSession {
 
 pub(in crate::store) enum FounderReceiveOperation<'a> {
     Subscription,
-    Frame(&'a NativeChatMemberFrame, &'a FounderReceiveSession),
+    Frame(
+        &'a NativeChatMemberFrame,
+        &'a FounderReceiveSession,
+        Option<NativeChatMemberDependencyExchange>,
+    ),
+    Recover(
+        &'a NativeTextFounderDependencyResponse,
+        &'a FounderReceiveSession,
+    ),
     Dependency(&'a NativeChatMemberDependencyIncoming),
     Read(ActionId),
     ArchivePage(SharedHistoryActionQuery),
@@ -247,6 +374,21 @@ pub struct NativeTextFounderReceived {
     /// Whether the selected archive covered the action. No value means this
     /// vault has no mounted shared history namespace.
     pub archived: Option<bool>,
+}
+
+pub enum NativeTextFounderFrameOutcome {
+    Retained(NativeTextFounderReceived),
+    NeedsDependency(NativeTextFounderDependencyExchange),
+    Unresolved,
+}
+
+impl NativeTextFounderFrameOutcome {
+    pub(in crate::store) fn retained(self) -> Option<NativeTextFounderReceived> {
+        match self {
+            Self::Retained(action) => Some(action),
+            Self::NeedsDependency(_) | Self::Unresolved => None,
+        }
+    }
 }
 
 pub(in crate::store) struct FounderArchivedMessage {
@@ -263,7 +405,8 @@ pub(in crate::store) enum FounderReceiveOutcome {
         V2MemberPublicationObservation,
         CatalogReadReservation,
     ),
-    Frame(Option<NativeTextFounderReceived>),
+    Frame(NativeTextFounderFrameOutcome),
+    Recovered(bool),
     Read(
         Option<(
             GuardedMessageProjection,

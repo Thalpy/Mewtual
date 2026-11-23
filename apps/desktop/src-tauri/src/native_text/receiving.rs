@@ -2,8 +2,8 @@
 //! projection and archive selection under the same local permit.
 use super::{connected::Source, *};
 use catcoms_app::store::{
-    NativeTextFounderMemberReceiver, NativeTextJoinedMemberLedger, NativeTextJoinedMemberReceiver,
-    NativeTextJoinedReceivedOriginal, NativeTextJoinedRowSelection,
+    NativeTextFounderFrameOutcome, NativeTextFounderMemberReceiver, NativeTextJoinedMemberLedger,
+    NativeTextJoinedMemberReceiver, NativeTextJoinedReceivedOriginal, NativeTextJoinedRowSelection,
     NativeTextJoinedSelectionPreparation, NativeUiInvocationMetadata,
 };
 use catcoms_net::{NativeChatMemberFrame, NativeChatMemberGossipEvent};
@@ -56,35 +56,9 @@ pub(super) async fn run_founder<R: tauri::Runtime>(
         };
         match event {
             Some(NativeChatMemberGossipEvent::Frame(frame)) => {
-                let local = source.member_work().clone();
-                let Some(permit) = local.foreground(scope.clone()).await else {
-                    return;
-                };
-                let Some(preparation) = source.capture(&state).await else {
-                    receiver = Some(original);
-                    continue;
-                };
-                let output = tauri::async_runtime::spawn_blocking(move || {
-                    let _permit = permit;
-                    let receipt = preparation
-                        .receive_founder_member(&original, &frame)
-                        .ok()
-                        .flatten();
-                    if let Some(receipt) = &receipt {
-                        if receipt.action != receipt.projection_target {
-                            if let Some(settled) = receipt.archived {
-                                local.note_archive_change(
-                                    receipt.action,
-                                    receipt.projection_target,
-                                    settled,
-                                );
-                            }
-                        }
-                    }
-                    (original, receipt.map(|receipt| receipt.projection_target))
-                })
-                .await;
-                if let Ok((original, action)) = output {
+                if let Some((original, action)) =
+                    receive_founder_frame(&state, source, original, frame).await
+                {
                     receiver = Some(original);
                     if let Some(action) = action {
                         source.notify_received(app, &state, Some(action)).await;
@@ -98,6 +72,85 @@ pub(super) async fn run_founder<R: tauri::Runtime>(
             }
         }
     }
+}
+
+async fn receive_founder_frame(
+    state: &AppState,
+    source: &Arc<Source>,
+    mut receiver: NativeTextFounderMemberReceiver<OsCryptoRng>,
+    mut frame: NativeChatMemberFrame,
+) -> Option<(
+    NativeTextFounderMemberReceiver<OsCryptoRng>,
+    Option<ActionId>,
+)> {
+    let local = source.member_work();
+    let scope = source.negative();
+    for attempt in 0..=DEPENDENCIES_PER_FRAME {
+        let permit = local.foreground(scope.clone()).await?;
+        let Some(preparation) = source.capture(state).await else {
+            return Some((receiver, None));
+        };
+        let local = local.clone();
+        let (original, original_frame, next) = tauri::async_runtime::spawn_blocking(move || {
+            let _permit = permit;
+            let result = if attempt < DEPENDENCIES_PER_FRAME {
+                preparation.receive_founder_member_with_recovery(&receiver, &frame)
+            } else {
+                preparation
+                    .receive_founder_member(&receiver, &frame)
+                    .map(|received| {
+                        received.map_or(
+                            NativeTextFounderFrameOutcome::Unresolved,
+                            NativeTextFounderFrameOutcome::Retained,
+                        )
+                    })
+            };
+            if let Ok(NativeTextFounderFrameOutcome::Retained(receipt)) = &result {
+                if receipt.action != receipt.projection_target {
+                    if let Some(settled) = receipt.archived {
+                        local.note_archive_change(
+                            receipt.action,
+                            receipt.projection_target,
+                            settled,
+                        );
+                    }
+                }
+            }
+            (receiver, frame, result)
+        })
+        .await
+        .ok()?;
+        receiver = original;
+        frame = original_frame;
+
+        let exchange = match next {
+            Ok(NativeTextFounderFrameOutcome::Retained(receipt)) => {
+                return Some((receiver, Some(receipt.projection_target)))
+            }
+            Ok(NativeTextFounderFrameOutcome::NeedsDependency(exchange)) => exchange,
+            _ => break,
+        };
+        let Ok(Ok(response)) = tokio::time::timeout(DEPENDENCY_TIMEOUT, exchange.receive()).await
+        else {
+            break;
+        };
+        let permit = source.member_work().foreground(scope.clone()).await?;
+        let Some(preparation) = source.capture(state).await else {
+            break;
+        };
+        let (original, recovered) = tauri::async_runtime::spawn_blocking(move || {
+            let _permit = permit;
+            let result = preparation.recover_founder_dependency(&receiver, &response);
+            (receiver, matches!(result, Ok(true)))
+        })
+        .await
+        .ok()?;
+        receiver = original;
+        if !recovered {
+            break;
+        }
+    }
+    Some((receiver, None))
 }
 
 pub(super) async fn serve_founder_dependencies<R: tauri::Runtime>(

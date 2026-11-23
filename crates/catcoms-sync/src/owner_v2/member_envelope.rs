@@ -193,6 +193,10 @@ pub struct OpenedV2MemberEnvelopeData {
 }
 
 impl OpenedV2MemberEnvelopeData {
+    pub(super) fn matches_scope_data(&self, scope: &V2MemberEnvelopeScopeData) -> bool {
+        &self.scope == scope
+    }
+
     pub fn admission_data(&self) -> OwnerFactId {
         self.admission
     }
