@@ -1261,6 +1261,7 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
         .unwrap()
         .data()
         .instance;
+    assert_joined_dependency_provider(&state, id).await;
 
     // The saved native row can be reported after the actual founder retires.
     let locked = snapshot_request(&founder_window, None);
@@ -1334,6 +1335,7 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     let restored = restored["servers"].as_array().unwrap();
     assert_eq!(restored.len(), 1);
     assert_eq!(restored[0], original);
+    assert_joined_dependency_provider(&state, id).await;
     let retry = native_send_request(&window, &restored[0], 9, "Joined message");
     run(&queue).await;
     assert_eq!(found_value(retry.await.unwrap()), saved);
@@ -1361,6 +1363,48 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
         .await
         .unwrap();
     drop(close);
+}
+
+async fn assert_joined_dependency_provider(state: &AppState, id: u64) {
+    let generation = state.ui_session_generation.load(Ordering::SeqCst);
+    let target = state.native_text.ui_state.original_target().unwrap();
+    let mut ui = Some(
+        founding::ui_capture(state, generation, &target)
+            .await
+            .unwrap(),
+    );
+    let mut preparation = None;
+    let (selection, scope) = {
+        let _commit = require_ui_session_generation(state, generation)
+            .await
+            .unwrap();
+        let store = state.store.lock().await;
+        let table = state.servers.lock().await;
+        let original = table.native(&id).unwrap();
+        let server_table::NativeSelection::Joined(selection) = &original.data().selection else {
+            panic!("the registered row must still be the original joined source");
+        };
+        let scope = original
+            .scope(keep_session::current(state, generation).unwrap())
+            .unwrap();
+        state
+            .native_text
+            .sources
+            .capture_joined_member(&store, &mut ui, selection, &mut preparation)
+            .unwrap();
+        (selection.clone(), scope)
+    };
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        preparation
+            .unwrap()
+            .attach_dependency_provider(&selection, scope)
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        result,
+        Err(catcoms_app::store::V2MemberSaveRefusal::Busy)
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

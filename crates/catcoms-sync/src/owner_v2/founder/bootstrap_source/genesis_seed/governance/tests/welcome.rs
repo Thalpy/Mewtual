@@ -706,6 +706,48 @@ async fn complete_original_welcome(native_joiner: bool) {
         );
         assert_eq!(cold_ledger.action_ids().count(), 1);
         assert_eq!(cold_ledger.action(action.id()).unwrap().encode(), raw);
+        let route = crate::owner_v2::V2MemberDependencyRoute {
+            requester: cold_node.local_peer_data(),
+            provider: joined_node.local_peer_data(),
+        };
+        let mut wire_rng = rand_chacha::ChaCha20Rng::seed_from_u64(9001);
+        assert!(cold_node
+            .prepare_member_dependency_request(&warm_prefix, 42, route, action.id(), &mut wire_rng)
+            .is_err());
+        let missing = cold_node
+            .prepare_member_dependency_request(&prefix, 42, route, action.id(), &mut wire_rng)
+            .unwrap();
+        assert!(cold_node
+            .open_member_dependency_request(&prefix, 42, route, missing.wire_data())
+            .is_err());
+        let dependency = joined_node
+            .open_member_dependency_request(&warm_prefix, 42, route, missing.wire_data())
+            .unwrap();
+        assert_eq!(dependency.action_id_data(), action.id());
+        let response = joined_node
+            .seal_member_dependency_reply(
+                &warm_prefix,
+                42,
+                route,
+                &dependency,
+                Some((admission, &raw)),
+                &mut wire_rng,
+            )
+            .unwrap();
+        let recovered = cold_node
+            .open_member_dependency_reply(&prefix, 42, route, &missing, &response)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.original_data(), raw);
+        assert!(recovered
+            .project_from_ledger(
+                warm_prefix.selected_member_verifier().unwrap(),
+                &mut warm_ledger,
+                &warm_channel,
+                8
+            )
+            .is_err());
+        assert!(warm_ledger.action(action.id()).is_none());
         revoked_submission = Some(
             joined_node
                 .prepare_member_submission(&warm_prefix, 42, admission, &raw)

@@ -750,7 +750,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
             let mut provider = recovered_row().attach_dependency_provider(&selection, live.clone()).unwrap();
             let malformed = relay.request_connected(
                 local_transport.0,
-                catcoms_rt::ProtocolId(catcoms_net::RR_PROTOCOL),
+                crate::store::critical_namespaces::native_registry::operational::governed::JOIN_PROTOCOL,
                 bytes::Bytes::from_static(&[catcoms_rt::CHAT_V2_DEPENDENCY_KIND, 1]),
             );
             let serve = async {

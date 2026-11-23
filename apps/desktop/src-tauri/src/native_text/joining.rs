@@ -66,7 +66,17 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
         let state = app.state::<AppState>();
         let result = complete(&state, &invocation).await;
         match result {
-            Ok(selection) => publish(&state, &invocation, selection, resolver).await,
+            Ok(selection) => {
+                if publish(&state, &invocation, selection, resolver).await {
+                    connected::start_current(
+                        &app,
+                        &state,
+                        invocation.generation,
+                        &invocation.target,
+                    )
+                    .await;
+                }
+            }
             Err(error) => resolver.reject(error),
         }
     }));
@@ -309,7 +319,7 @@ async fn publish<R: tauri::Runtime>(
     invocation: &Invocation,
     original: NativeTextJoinedRowSelection,
     resolver: tauri::ipc::InvokeResolver<R>,
-) {
+) -> bool {
     let id = original.id_data();
     let request = original.request_data();
     let channel = channel_id("general");
@@ -317,7 +327,7 @@ async fn publish<R: tauri::Runtime>(
     let display = original.display_name_data().unwrap_or("me");
     if display != invocation.display {
         resolver.reject("The invitation already has a registered display name.");
-        return;
+        return false;
     }
     let response = serde_json::json!({"backend":"text-v2", "server":id,
         "context":hex::encode(request), "channel":channel.to_string(),
@@ -346,13 +356,13 @@ async fn publish<R: tauri::Runtime>(
         Ok(row) => Some(row),
         Err(error) => {
             resolver.reject(error);
-            return;
+            return false;
         }
     };
     let selection = server_table::NativeSelection::Joined(original.clone());
     let Ok(_commit) = require_ui_session_generation(state, invocation.generation).await else {
         resolver.reject(listing::STALE);
-        return;
+        return false;
     };
     let store = state.store.lock().await;
     let mut table = state.servers.lock().await;
@@ -369,7 +379,7 @@ async fn publish<R: tauri::Runtime>(
         || state.native_text.sources.is_closing_cached()
     {
         resolver.reject(listing::STALE);
-        return;
+        return false;
     }
     let admitted = match table.native(&id) {
         Some(row)
@@ -384,7 +394,13 @@ async fn publish<R: tauri::Runtime>(
         None => table.install_native(&mut candidate),
     };
     match admitted {
-        Ok(()) => resolver.resolve(InvokeResponseBody::Json(response)),
-        Err(error) => resolver.reject(error),
+        Ok(()) => {
+            resolver.resolve(InvokeResponseBody::Json(response));
+            true
+        }
+        Err(error) => {
+            resolver.reject(error);
+            false
+        }
     }
 }

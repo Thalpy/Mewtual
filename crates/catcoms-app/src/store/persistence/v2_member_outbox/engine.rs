@@ -37,7 +37,7 @@ use catcoms_replication::chat::cold_actions::{
     assemble_action, ActionChunk, ActionPagesExpectation, AssembledActionOriginal,
 };
 use catcoms_replication::chat::owner_facts::OwnerFactId;
-use catcoms_replication::chat::SignedAction;
+use catcoms_replication::chat::{ActionId, SignedAction};
 use catcoms_rt::CryptoRngCore;
 use catcoms_storage::private_chat_page::{open_private_chat_page, PrivateChatPageId};
 use catcoms_storage::VaultPhysicalWorkLease;
