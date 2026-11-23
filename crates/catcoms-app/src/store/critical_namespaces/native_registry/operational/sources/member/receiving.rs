@@ -268,14 +268,35 @@ impl<R: CryptoRngCore> NativeTextMemberPreparation<catcoms_net::MeshService, R> 
         receiver: &NativeTextFounderMemberReceiver<R>,
         response: &NativeTextFounderDependencyResponse,
     ) -> Result<bool, V2MemberSaveRefusal> {
+        Ok(self
+            .recover_founder_dependency_with_followup(receiver, response, false)?
+            .retained()
+            .is_some())
+    }
+
+    pub fn recover_founder_dependency_with_followup(
+        self,
+        receiver: &NativeTextFounderMemberReceiver<R>,
+        response: &NativeTextFounderDependencyResponse,
+        followup: bool,
+    ) -> Result<NativeTextFounderFrameOutcome, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
         if !self.row.same_original(&receiver.row) {
             return Err(Refusal::Stale);
         }
         response.require_current(&receiver.session)?;
+        let carrier = if followup {
+            self.row
+                .original
+                .dependency_lane
+                .as_ref()
+                .and_then(|lane| response.capture_followup(lane))
+        } else {
+            None
+        };
         match self.finish()?.run_founder_member_receive(
             receiver.channel,
-            FounderReceiveOperation::Recover(response, &receiver.session),
+            FounderReceiveOperation::Recover(response, &receiver.session, carrier),
             &receiver.session.signal,
         )? {
             FounderReceiveOutcome::Recovered(retained) => Ok(retained),
@@ -416,9 +437,11 @@ fn run_recovered_receive(
         FounderReceiveOperation::Frame(frame, session, carrier) => FounderReceiveOutcome::Frame(
             founder.receive_selected_member_frame(channel, session, frame, carrier, rng)?,
         ),
-        FounderReceiveOperation::Recover(response, session) => FounderReceiveOutcome::Recovered(
-            founder.recover_selected_dependency(channel, session, response, rng)?,
-        ),
+        FounderReceiveOperation::Recover(response, session, carrier) => {
+            FounderReceiveOutcome::Recovered(
+                founder.recover_selected_dependency(channel, session, response, carrier, rng)?,
+            )
+        }
         FounderReceiveOperation::Dependency(incoming) => FounderReceiveOutcome::Dependency(
             founder.prepare_dependency_reply(channel, incoming, caller, rng)?,
         ),

@@ -894,7 +894,12 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 .attach_dependency_provider(&view, fresh.clone())
                 .unwrap();
             let mut previous = reply_id;
-            for (token, text) in [(147, "Parent missed by the founder"), (148, nested_text)] {
+            let mut skipped = None;
+            for (token, text) in [
+                (147, "Grandparent missed by the founder"),
+                (148, "Parent missed by the founder"),
+                (149, nested_text),
+            ] {
                 let draft = catcoms_replication::chat::Body::Create {
                     text: text.into(),
                     reply_to: Some(previous),
@@ -952,7 +957,10 @@ async fn mounted_join_fixture(recover_stage: bool) {
                         .unwrap(),
                     ordinal + 1
                 );
-                if token == 147 {
+                if token != 149 {
+                    if token == 147 {
+                        skipped = Some(action);
+                    }
                     previous = action;
                     continue;
                 }
@@ -967,19 +975,49 @@ async fn mounted_join_fixture(recover_stage: bool) {
                     .archived_founder_message_projection(channel, previous, &fresh)
                     .unwrap()
                     .is_none());
-                let serve = async {
-                    let incoming = provider
-                        .next()
-                        .await
-                        .expect("the original joined provider receives one addressed request");
-                    inspect()
-                        .serve_dependency_request(&view, channel, incoming, fresh.clone(), &mut rng)
-                        .unwrap();
-                };
-                let (response, ()) = tokio::join!(exchange.receive(), serve);
-                let response = response.unwrap();
+                let mut next = Some(exchange);
+                let mut responses = Vec::with_capacity(2);
+                for round in 0..2 {
+                    let exchange = next
+                        .take()
+                        .expect("both skipped signed originals require the original carrier");
+                    let serve = async {
+                        let incoming = provider
+                            .next()
+                            .await
+                            .expect("the original joined provider receives the addressed request");
+                        inspect()
+                            .serve_dependency_request(
+                                &view,
+                                channel,
+                                incoming,
+                                fresh.clone(),
+                                &mut rng,
+                            )
+                            .unwrap();
+                    };
+                    let (response, ()) = tokio::join!(exchange.receive(), serve);
+                    let response = response.unwrap();
+                    match founder_capture()
+                        .recover_founder_dependency_with_followup(&receiver, &response, true)
+                        .unwrap()
+                    {
+                        crate::store::NativeTextFounderFrameOutcome::NeedsDependency(exchange)
+                            if round == 0 =>
+                        {
+                            next = Some(exchange)
+                        }
+                        crate::store::NativeTextFounderFrameOutcome::Retained(receipt)
+                            if round == 1 =>
+                        {
+                            assert_eq!(Some(receipt.action), skipped)
+                        }
+                        _ => panic!("unexpected outcome while restoring the two signed ancestors"),
+                    }
+                    responses.push(response);
+                }
                 assert!(founder_capture()
-                    .recover_founder_dependency(&receiver, &response)
+                    .recover_founder_dependency(&receiver, &responses[0])
                     .unwrap());
                 let received = founder_capture()
                     .receive_founder_member(&receiver, &frame)
@@ -989,7 +1027,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 assert_eq!(received.archived, Some(true));
                 let (topic, _, ciphertext) = frame.current_data().unwrap();
                 founder_reply = Some((
-                    [reply_id, previous, action],
+                    [reply_id, skipped.unwrap(), previous, action],
                     action,
                     nested_text,
                     topic.clone(),
@@ -997,7 +1035,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
                 ));
                 stop_recovery.send_replace(true);
                 assert!(founder_capture()
-                    .recover_founder_dependency(&receiver, &response)
+                    .recover_founder_dependency(&receiver, &responses[0])
                     .is_err());
             }
         })

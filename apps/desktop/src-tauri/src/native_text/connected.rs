@@ -72,11 +72,18 @@ pub(super) async fn start_current<R: tauri::Runtime>(
             let source = Arc::new(source);
             let app = app.clone();
             drop(tauri::async_runtime::spawn(async move {
+                let mut scope = source.negative();
                 tokio::select! {
-                    _ = serve(&app, &source, requests) => {}
-                    _ = drain_outbox(&app, &source) => {}
-                    _ = super::receiving::run_founder(&app, &source) => {}
-                    _ = super::receiving::serve_founder_dependencies(&app, &source) => {}
+                    biased;
+                    _ = scope.cancelled() => {}
+                    _ = async {
+                        tokio::join!(
+                            serve(&app, &source, requests),
+                            drain_outbox(&app, &source),
+                            super::receiving::run_founder(&app, &source),
+                            super::receiving::serve_founder_dependencies(&app, &source),
+                        );
+                    } => {}
                 }
             }));
         }

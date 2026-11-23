@@ -2,7 +2,8 @@
 //! projection and archive selection under the same local permit.
 use super::{connected::Source, *};
 use catcoms_app::store::{
-    NativeTextFounderFrameOutcome, NativeTextFounderMemberReceiver, NativeTextJoinedMemberLedger,
+    NativeTextFounderDependencyExchange, NativeTextFounderFrameOutcome,
+    NativeTextFounderMemberReceiver, NativeTextFounderReceived, NativeTextJoinedMemberLedger,
     NativeTextJoinedMemberReceiver, NativeTextJoinedReceivedOriginal, NativeTextJoinedRowSelection,
     NativeTextJoinedSelectionPreparation, NativeUiInvocationMetadata,
 };
@@ -85,7 +86,8 @@ async fn receive_founder_frame(
 )> {
     let local = source.member_work();
     let scope = source.negative();
-    for attempt in 0..=DEPENDENCIES_PER_FRAME {
+    let mut remaining = DEPENDENCIES_PER_FRAME;
+    loop {
         let permit = local.foreground(scope.clone()).await?;
         let Some(preparation) = source.capture(state).await else {
             return Some((receiver, None));
@@ -93,7 +95,7 @@ async fn receive_founder_frame(
         let local = local.clone();
         let (original, original_frame, next) = tauri::async_runtime::spawn_blocking(move || {
             let _permit = permit;
-            let result = if attempt < DEPENDENCIES_PER_FRAME {
+            let result = if remaining > 0 {
                 preparation.receive_founder_member_with_recovery(&receiver, &frame)
             } else {
                 preparation
@@ -106,15 +108,7 @@ async fn receive_founder_frame(
                     })
             };
             if let Ok(NativeTextFounderFrameOutcome::Retained(receipt)) = &result {
-                if receipt.action != receipt.projection_target {
-                    if let Some(settled) = receipt.archived {
-                        local.note_archive_change(
-                            receipt.action,
-                            receipt.projection_target,
-                            settled,
-                        );
-                    }
-                }
+                note_founder_archive_change(&local, receipt);
             }
             (receiver, frame, result)
         })
@@ -130,27 +124,82 @@ async fn receive_founder_frame(
             Ok(NativeTextFounderFrameOutcome::NeedsDependency(exchange)) => exchange,
             _ => break,
         };
-        let Ok(Ok(response)) = tokio::time::timeout(DEPENDENCY_TIMEOUT, exchange.receive()).await
-        else {
-            break;
-        };
-        let permit = source.member_work().foreground(scope.clone()).await?;
-        let Some(preparation) = source.capture(state).await else {
-            break;
-        };
-        let (original, recovered) = tauri::async_runtime::spawn_blocking(move || {
-            let _permit = permit;
-            let result = preparation.recover_founder_dependency(&receiver, &response);
-            (receiver, matches!(result, Ok(true)))
-        })
-        .await
-        .ok()?;
+        let (original, recovered) =
+            recover_founder_chain(state, source, receiver, exchange, &mut remaining).await?;
         receiver = original;
         if !recovered {
             break;
         }
     }
     Some((receiver, None))
+}
+
+async fn recover_founder_chain(
+    state: &AppState,
+    source: &Arc<Source>,
+    mut receiver: NativeTextFounderMemberReceiver<OsCryptoRng>,
+    first: NativeTextFounderDependencyExchange,
+    remaining: &mut usize,
+) -> Option<(NativeTextFounderMemberReceiver<OsCryptoRng>, bool)> {
+    let local = source.member_work();
+    let scope = source.negative();
+    let mut next = Some(first);
+    let mut waiting = Vec::with_capacity(*remaining);
+    loop {
+        if let Some(exchange) = next.take() {
+            let Some(budget) = remaining.checked_sub(1) else {
+                break;
+            };
+            *remaining = budget;
+            let Ok(Ok(response)) =
+                tokio::time::timeout(DEPENDENCY_TIMEOUT, exchange.receive()).await
+            else {
+                break;
+            };
+            waiting.push(response);
+        }
+        let Some(response) = waiting.pop() else {
+            return Some((receiver, true));
+        };
+        let permit = local.foreground(scope.clone()).await?;
+        let Some(preparation) = source.capture(state).await else {
+            break;
+        };
+        let may_follow = *remaining > 0;
+        let local = local.clone();
+        let (original, response, result) = tauri::async_runtime::spawn_blocking(move || {
+            let _permit = permit;
+            let result = preparation
+                .recover_founder_dependency_with_followup(&receiver, &response, may_follow);
+            if let Ok(NativeTextFounderFrameOutcome::Retained(receipt)) = &result {
+                note_founder_archive_change(&local, receipt);
+            }
+            (receiver, response, result)
+        })
+        .await
+        .ok()?;
+        receiver = original;
+        match result {
+            Ok(NativeTextFounderFrameOutcome::Retained(_)) => {}
+            Ok(NativeTextFounderFrameOutcome::NeedsDependency(exchange)) => {
+                waiting.push(response);
+                next = Some(exchange);
+            }
+            _ => break,
+        }
+    }
+    Some((receiver, false))
+}
+
+fn note_founder_archive_change(
+    local: &server_table::NativeMemberWork,
+    receipt: &NativeTextFounderReceived,
+) {
+    if receipt.action != receipt.projection_target {
+        if let Some(settled) = receipt.archived {
+            local.note_archive_change(receipt.action, receipt.projection_target, settled);
+        }
+    }
 }
 
 pub(super) async fn serve_founder_dependencies<R: tauri::Runtime>(
@@ -167,8 +216,8 @@ pub(super) async fn serve_founder_dependencies<R: tauri::Runtime>(
         }
         let state = app.state::<AppState>();
         let local = source.member_work();
-        let Some(permit) = local.try_background() else {
-            continue;
+        let Some(permit) = local.foreground(scope.clone()).await else {
+            return;
         };
         let Some(preparation) = source.capture(&state).await else {
             continue;
@@ -189,7 +238,11 @@ pub(super) async fn serve_founder_dependencies<R: tauri::Runtime>(
                 continue;
             }
         };
+        #[cfg(test)]
+        eprintln!("native founder dependency provider attached");
         while let Some(request) = provider.next().await {
+            #[cfg(test)]
+            eprintln!("native founder dependency provider received a request");
             let Some(permit) = local.foreground(scope.clone()).await else {
                 return;
             };
@@ -208,10 +261,14 @@ pub(super) async fn serve_founder_dependencies<R: tauri::Runtime>(
                 provider
             })
             .await;
-            let Ok(next) = processed else {
-                break;
+            provider = match processed {
+                Ok(next) => next,
+                Err(_error) => {
+                    #[cfg(test)]
+                    eprintln!("native founder dependency handler stopped: {_error:?}");
+                    break;
+                }
             };
-            provider = next;
         }
     }
 }

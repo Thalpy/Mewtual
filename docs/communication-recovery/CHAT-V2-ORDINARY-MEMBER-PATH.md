@@ -220,8 +220,9 @@ The registered joined row can reconnect using an explicit retry of the same
 invitation and approved IP. A joined member can request the founder's own saved
 original on that connection. The founder can likewise recover a missing direct
 dependency from the frame's original connected carrier and retry the signed child.
-It attempts up to four recoveries per frame, one in flight at a time. Each reply and
-archive write requires the same live subscription and selected founder state.
+An authenticated reply can lead to another missing signed ancestor on that carrier.
+The founder attempts up to four recoveries per frame, one in flight at a time. Each
+reply and archive write requires the same live subscription and selected founder state.
 
 The desktop reply composer seals the exact target ActionId with the existing
 Create token and body. Native checks the original durable receipt first. A

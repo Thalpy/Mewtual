@@ -2,9 +2,9 @@
 use super::*;
 use crate::store::persistence::native_registry::network::NetworkDependency;
 use crate::store::persistence::v2_member_transport::{
-    archive_founder_member, prepare_founder_dependency_exchange, prepare_founder_dependency_reply,
-    project_founder_member, FounderDependencyReply, FounderReceiveSession,
-    NativeTextFounderDependencyResponse, NativeTextFounderFrameOutcome,
+    archive_founder_member, first_founder_missing, prepare_founder_dependency_exchange,
+    prepare_founder_dependency_reply, project_founder_member, FounderDependencyReply,
+    FounderReceiveSession, NativeTextFounderDependencyResponse, NativeTextFounderFrameOutcome,
     FOUNDER_DEPENDENCY_REPLY_FEE, FOUNDER_RECEIVE_ACTIONS, FOUNDER_RECEIVE_BYTES,
     FOUNDER_RECEIVE_LEDGER_FEE, FOUNDER_RECEIVE_WORK,
 };
@@ -300,27 +300,25 @@ impl NativeTextColdFounderSource {
             )
             .map_err(|_| refused())
         })?;
-        if let V2OrdinaryReceiveStatus::WaitingForDependencies(missing) = &status {
-            if let (Some(carrier), [id, ..]) = (carrier, missing.as_slice()) {
-                if missing.len() <= 4 {
-                    check_lifetime()?;
-                    let (mount, fee) = self
-                        .work
-                        .recovered_founder_resources(FOUNDER_DEPENDENCY_REPLY_FEE)?;
-                    let access = sdk.select_member_dependency_access(
-                        verifier,
-                        channel,
-                        self.local.0,
-                        mount,
-                    )?;
-                    let request = prepare_founder_dependency_exchange(
-                        access, carrier, session, &original, *id, fee, rng,
-                    )
-                    .map_err(|_| refused())?;
-                    self.restore_first_add(&session.signal)?;
-                    return Ok(NativeTextFounderFrameOutcome::NeedsDependency(request));
-                }
-            }
+        if let (Some(carrier), Some(id)) = (carrier, first_founder_missing(&status)) {
+            check_lifetime()?;
+            let (mount, fee) = self
+                .work
+                .recovered_founder_resources(FOUNDER_DEPENDENCY_REPLY_FEE)?;
+            let access =
+                sdk.select_member_dependency_access(verifier, channel, self.local.0, mount)?;
+            let request = prepare_founder_dependency_exchange(
+                access,
+                carrier,
+                (session, None),
+                &original,
+                id,
+                fee,
+                rng,
+            )
+            .map_err(|_| refused())?;
+            self.restore_first_add(&session.signal)?;
+            return Ok(NativeTextFounderFrameOutcome::NeedsDependency(request));
         }
         if status != V2OrdinaryReceiveStatus::Retained(ActionState::Valid) {
             return Ok(NativeTextFounderFrameOutcome::Unresolved);
@@ -343,13 +341,8 @@ impl NativeTextColdFounderSource {
         if !ingress.owns_frame(frame) {
             return Err(refused());
         }
-        let action = original.action_data();
         Ok(NativeTextFounderFrameOutcome::Retained(
-            NativeTextFounderReceived {
-                action: action.id(),
-                projection_target: action.spec().body.create().unwrap_or_else(|| action.id()),
-                archived,
-            },
+            NativeTextFounderReceived::from_original(&original, archived),
         ))
     }
 
@@ -358,8 +351,9 @@ impl NativeTextColdFounderSource {
         channel: u128,
         session: &FounderReceiveSession,
         response: &NativeTextFounderDependencyResponse,
+        carrier: Option<NativeChatMemberDependencyExchange>,
         rng: &mut impl CryptoRngCore,
-    ) -> Result<bool, AppError> {
+    ) -> Result<NativeTextFounderFrameOutcome, AppError> {
         let require_response = || response.require_current(session).map_err(|_| refused());
         require_response()?;
         self.restore_first_add(&session.signal)?;
@@ -369,7 +363,7 @@ impl NativeTextColdFounderSource {
         let (mount, _fee) = self.work.recovered_founder_resources(FRAME_FEE)?;
         let access = sdk.select_member_dependency_access(verifier, channel, self.local.0, mount)?;
         let Some(original) = response.open(access, session).map_err(|_| refused())? else {
-            return Ok(false);
+            return Ok(NativeTextFounderFrameOutcome::Unresolved);
         };
         let ledger = self
             .received
@@ -401,22 +395,43 @@ impl NativeTextColdFounderSource {
             )
             .map_err(|_| refused())
         })?;
+        if let (Some(carrier), Some(id)) = (carrier, first_founder_missing(&status)) {
+            require_response()?;
+            let (mount, fee) = work.recovered_founder_resources(FOUNDER_DEPENDENCY_REPLY_FEE)?;
+            let access =
+                sdk.select_member_dependency_access(verifier, channel, self.local.0, mount)?;
+            let request = prepare_founder_dependency_exchange(
+                access,
+                carrier,
+                (session, Some(response)),
+                &original,
+                id,
+                fee,
+                rng,
+            )
+            .map_err(|_| refused())?;
+            self.restore_first_add(&session.signal)?;
+            return Ok(NativeTextFounderFrameOutcome::NeedsDependency(request));
+        }
         if status != V2OrdinaryReceiveStatus::Retained(ActionState::Valid) {
-            return Ok(false);
+            return Ok(NativeTextFounderFrameOutcome::Unresolved);
         }
         self.restore_first_add(&session.signal)?;
         let governed = self.governed.as_mut().ok_or_else(refused)?;
-        self.work
-            .with_recovered_founder_store(&self.selection, &self.source, |store| {
-                archive_founder_member(store, scope, &original, rng, || {
-                    require_response()?;
-                    governed.require_current(store, &self.source)?;
-                    Ok(())
-                })
-            })?;
+        let archived =
+            self.work
+                .with_recovered_founder_store(&self.selection, &self.source, |store| {
+                    archive_founder_member(store, scope, &original, rng, || {
+                        require_response()?;
+                        governed.require_current(store, &self.source)?;
+                        Ok(())
+                    })
+                })?;
         require_response()?;
         self.restore_first_add(&session.signal)?;
-        Ok(true)
+        Ok(NativeTextFounderFrameOutcome::Retained(
+            NativeTextFounderReceived::from_original(&original, archived),
+        ))
     }
 
     pub fn read_member_projection(

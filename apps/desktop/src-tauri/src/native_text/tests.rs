@@ -1847,11 +1847,56 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     let peer = catcoms_app::store::NativeTextInvitePacketData::decode(&packet)
         .unwrap()
         .connected_peer_data();
+    let founder_generation = state.ui_session_generation.load(Ordering::SeqCst);
+    let source = {
+        let target = state.native_text.ui_state.original_target().unwrap();
+        let account = keep_session::current(&state, founder_generation).unwrap();
+        let mut paid = Some(state.native_text.ui_budget.prepare().unwrap());
+        let table = state.servers.lock().await;
+        let founder_id = founder_row["server"].as_u64().unwrap();
+        connected::Source::for_row(
+            founder_generation,
+            &target,
+            table.native(&founder_id).unwrap(),
+            account,
+            &mut paid,
+        )
+        .unwrap()
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let permit = source
+                .member_work()
+                .foreground(source.negative())
+                .await
+                .unwrap();
+            if let Some(preparation) = source.capture(&state).await {
+                let scope = source.negative();
+                let channel = source.channel();
+                let attached = tauri::async_runtime::spawn_blocking(move || {
+                    let _permit = permit;
+                    preparation.attach_founder_dependency_provider(channel, scope)
+                })
+                .await
+                .unwrap();
+                if matches!(attached, Err(catcoms_app::store::V2MemberSaveRefusal::Busy)) {
+                    break;
+                }
+                drop(attached);
+            } else {
+                drop(permit);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the resumed native founder's dependency receiver owns the original lane");
+    drop(source);
     let founder_saved = action;
     let joined_generation = joined_state.ui_session_generation.load(Ordering::SeqCst);
     let joined_work = joined_work(&joined_state, id).await;
     let mut last_refusal = String::new();
-    let recovered_parent = tokio::time::timeout(Duration::from_secs(15), async {
+    let recovered_parent = tokio::time::timeout(Duration::from_secs(28), async {
         loop {
             let (prepare, selection, channel, scope) =
                 capture_joined_worker(&joined_state, id, joined_generation).await;
@@ -1867,7 +1912,7 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
             drop(guard);
             match exchange {
                 Ok(exchange) => {
-                    match tokio::time::timeout(Duration::from_secs(2), exchange.receive()).await {
+                    match tokio::time::timeout(Duration::from_secs(8), exchange.receive()).await {
                         Ok(Ok(reply)) => {
                             let (prepare, selection, _, scope) =
                                 capture_joined_worker(&joined_state, id, joined_generation).await;

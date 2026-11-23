@@ -9,8 +9,9 @@ use crate::store::critical_namespaces::refused;
 use crate::store::{NativeTextJoinedMemberProjection, ServerStore, V2MemberSaveRefusal as Refusal};
 use crate::AppError;
 use catcoms_net::{
-    NativeChatMemberDependencyExchange, NativeChatMemberDependencyIncoming,
-    NativeChatMemberDependencyObservation, NativeChatMemberFrame,
+    NativeChatMemberDependencies, NativeChatMemberDependencyExchange,
+    NativeChatMemberDependencyIncoming, NativeChatMemberDependencyObservation,
+    NativeChatMemberFrame,
 };
 use catcoms_replication::chat::{
     ActionId, ChatLedger, GuardedMessageProjection, ProjectionView, V2GeneralPrefixVerifier,
@@ -32,6 +33,8 @@ pub(in crate::store) const FOUNDER_RECEIVE_LEDGER_FEE: usize = 2 * FOUNDER_RECEI
     + V2GeneralPrefixVerifier::ordinary_authorization_temporary_layout_bytes()
     + 16 * 1024;
 const LOCAL_DEPENDENCY_READS: usize = 8;
+const MAX_FOUNDER_DEPENDENCY_DEPTH: u8 = 4;
+const FOUNDER_RECOVERY_BREADTH: usize = 4;
 pub(in crate::store) const FOUNDER_DEPENDENCY_REPLY_FEE: usize =
     4 * MAX_V2_MEMBER_TRANSPORT_BYTES + 5 * MAX_V2_DEPENDENCY_REPLY_BYTES + 16 * 1024;
 
@@ -46,6 +49,7 @@ pub struct NativeTextFounderDependencyExchange {
     route: V2MemberDependencyRoute,
     request: PreparedV2MemberDependencyRequest,
     session: Arc<()>,
+    depth: u8,
     signal: RequestCancellation,
 }
 
@@ -53,6 +57,7 @@ pub struct NativeTextFounderDependencyResponse {
     route: V2MemberDependencyRoute,
     request: PreparedV2MemberDependencyRequest,
     session: Arc<()>,
+    depth: u8,
     carrier: NativeChatMemberDependencyObservation,
     signal: RequestCancellation,
     wire: bytes::Bytes,
@@ -82,6 +87,7 @@ impl NativeTextFounderDependencyExchange {
             route: self.route,
             request: self.request,
             session: self.session,
+            depth: self.depth,
             carrier,
             signal: self.signal,
             wire,
@@ -90,6 +96,16 @@ impl NativeTextFounderDependencyExchange {
 }
 
 impl NativeTextFounderDependencyResponse {
+    pub(in crate::store) fn capture_followup(
+        &self,
+        lane: &NativeChatMemberDependencies,
+    ) -> Option<NativeChatMemberDependencyExchange> {
+        if self.depth >= MAX_FOUNDER_DEPENDENCY_DEPTH || self.signal.is_cancelled() {
+            return None;
+        }
+        lane.capture_frame_followup(&self.carrier)
+    }
+
     pub(in crate::store) fn require_current(
         &self,
         session: &FounderReceiveSession,
@@ -121,7 +137,10 @@ impl NativeTextFounderDependencyResponse {
 pub(in crate::store) fn prepare_founder_dependency_exchange(
     access: V2FounderMemberDependencyAccess<'_>,
     exchange: NativeChatMemberDependencyExchange,
-    session: &FounderReceiveSession,
+    (session, parent): (
+        &FounderReceiveSession,
+        Option<&NativeTextFounderDependencyResponse>,
+    ),
     original: &SelectedV2MemberEnvelope,
     action: ActionId,
     fee: CatalogReadReservation,
@@ -131,17 +150,31 @@ pub(in crate::store) fn prepare_founder_dependency_exchange(
     if session.signal.is_cancelled() || !carrier.is_current_cached() {
         return Err(Refusal::Stale);
     }
+    let (caller, depth) = if let Some(parent) = parent {
+        parent.require_current(session)?;
+        let depth = parent
+            .depth
+            .checked_add(1)
+            .filter(|depth| *depth <= MAX_FOUNDER_DEPENDENCY_DEPTH)
+            .ok_or(Refusal::Unavailable)?;
+        (parent.signal.clone(), depth)
+    } else {
+        (session.signal.clone(), 1)
+    };
     let (requester, provider) = exchange.route_data();
     let route = V2MemberDependencyRoute {
         requester,
         provider,
     };
+    if parent.is_some_and(|parent| parent.route != route) {
+        return Err(Refusal::Stale);
+    }
     let request = access
         .prepare_request(original, route, action, rng)
         .map_err(|_| Refusal::Failed)?;
     let signal = access
         .into_observation()
-        .constrain(session.signal.clone())
+        .constrain(caller)
         .retain_custody(Arc::new(DependencyPayment { _fee: fee }));
     if signal.is_cancelled() || !carrier.is_current_cached() {
         return Err(Refusal::Stale);
@@ -151,6 +184,7 @@ pub(in crate::store) fn prepare_founder_dependency_exchange(
         route,
         request,
         session: session.identity.clone(),
+        depth,
         signal,
     })
 }
@@ -211,7 +245,7 @@ pub(in crate::store) fn project_founder_member(
         .project_from_ledger(verifier, ledger, view, FOUNDER_RECEIVE_WORK)
         .map_err(|_| Refusal::Failed)?;
     if let V2OrdinaryReceiveStatus::WaitingForDependencies(missing) = &status {
-        if missing.len() > 4 {
+        if missing.len() > FOUNDER_RECOVERY_BREADTH {
             require_current()?;
             return Ok(status);
         }
@@ -229,6 +263,19 @@ pub(in crate::store) fn project_founder_member(
     }
     require_current()?;
     Ok(status)
+}
+
+pub(in crate::store) fn first_founder_missing(
+    status: &V2OrdinaryReceiveStatus,
+) -> Option<ActionId> {
+    match status {
+        V2OrdinaryReceiveStatus::WaitingForDependencies(missing)
+            if missing.len() <= FOUNDER_RECOVERY_BREADTH =>
+        {
+            missing.first().copied()
+        }
+        _ => None,
+    }
 }
 
 /// Restore historical semantics without issuing live projection tokens. The
@@ -360,6 +407,7 @@ pub(in crate::store) enum FounderReceiveOperation<'a> {
     Recover(
         &'a NativeTextFounderDependencyResponse,
         &'a FounderReceiveSession,
+        Option<NativeChatMemberDependencyExchange>,
     ),
     Dependency(&'a NativeChatMemberDependencyIncoming),
     Read(ActionId),
@@ -374,6 +422,20 @@ pub struct NativeTextFounderReceived {
     /// Whether the selected archive covered the action. No value means this
     /// vault has no mounted shared history namespace.
     pub archived: Option<bool>,
+}
+
+impl NativeTextFounderReceived {
+    pub(in crate::store) fn from_original(
+        original: &SelectedV2MemberEnvelope,
+        archived: Option<bool>,
+    ) -> Self {
+        let action = original.action_data();
+        Self {
+            action: action.id(),
+            projection_target: action.spec().body.create().unwrap_or_else(|| action.id()),
+            archived,
+        }
+    }
 }
 
 pub enum NativeTextFounderFrameOutcome {
@@ -406,7 +468,7 @@ pub(in crate::store) enum FounderReceiveOutcome {
         CatalogReadReservation,
     ),
     Frame(NativeTextFounderFrameOutcome),
-    Recovered(bool),
+    Recovered(NativeTextFounderFrameOutcome),
     Read(
         Option<(
             GuardedMessageProjection,

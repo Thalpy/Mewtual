@@ -1,8 +1,8 @@
 //! One paid founder receiver ledger in the original selected text host.
 use super::*;
 use crate::store::persistence::v2_member_transport::{
-    prepare_founder_dependency_exchange, prepare_founder_dependency_reply, project_founder_member,
-    FounderReceiveOperation, FounderReceiveOutcome, FounderReceiveSession,
+    first_founder_missing, prepare_founder_dependency_exchange, prepare_founder_dependency_reply,
+    project_founder_member, FounderReceiveOperation, FounderReceiveOutcome, FounderReceiveSession,
     NativeTextFounderFrameOutcome, NativeTextFounderReceived, FOUNDER_DEPENDENCY_REPLY_FEE,
     FOUNDER_RECEIVE_ACTIONS as ACTION_LIMIT, FOUNDER_RECEIVE_BYTES as ACTION_BYTES,
     FOUNDER_RECEIVE_LEDGER_FEE as LEDGER_FEE, FOUNDER_RECEIVE_WORK as WORK_LIMIT,
@@ -200,50 +200,45 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     },
                     &mut require_current,
                 )?;
-                if let V2OrdinaryReceiveStatus::WaitingForDependencies(missing) = &status {
-                    if let (Some(carrier), [id, ..]) = (carrier, missing.as_slice()) {
-                        if missing.len() <= 4 {
-                            require_current()?;
-                            let fee = pool
-                                .try_reserve(FOUNDER_DEPENDENCY_REPLY_FEE)
-                                .map_err(|_| Refusal::Busy)?;
-                            let access = self
-                                .owner
-                                .select_governed_dependency_access(store, verifier, channel)
-                                .map_err(|_| Refusal::Unavailable)?;
-                            let request = prepare_founder_dependency_exchange(
-                                access, carrier, session, &original, *id, fee, rng,
-                            )?;
-                            require_current()?;
-                            return Ok(FounderReceiveOutcome::Frame(
-                                NativeTextFounderFrameOutcome::NeedsDependency(request),
-                            ));
-                        }
-                    }
+                if let (Some(carrier), Some(id)) = (carrier, first_founder_missing(&status)) {
+                    require_current()?;
+                    let fee = pool
+                        .try_reserve(FOUNDER_DEPENDENCY_REPLY_FEE)
+                        .map_err(|_| Refusal::Busy)?;
+                    let access = self
+                        .owner
+                        .select_governed_dependency_access(store, verifier, channel)
+                        .map_err(|_| Refusal::Unavailable)?;
+                    let request = prepare_founder_dependency_exchange(
+                        access,
+                        carrier,
+                        (session, None),
+                        &original,
+                        id,
+                        fee,
+                        rng,
+                    )?;
+                    require_current()?;
+                    return Ok(FounderReceiveOutcome::Frame(
+                        NativeTextFounderFrameOutcome::NeedsDependency(request),
+                    ));
                 }
                 if status != V2OrdinaryReceiveStatus::Retained(ActionState::Valid) {
                     return Ok(FounderReceiveOutcome::Frame(
                         NativeTextFounderFrameOutcome::Unresolved,
                     ));
                 }
-                let action = original.action_data();
                 let archived = history
                     .save(&original, rng, || require_current().map_err(|_| refused()))
                     .unwrap_or(Some(false));
                 require_current()?;
                 Ok(FounderReceiveOutcome::Frame(
-                    NativeTextFounderFrameOutcome::Retained(NativeTextFounderReceived {
-                        action: action.id(),
-                        projection_target: action
-                            .spec()
-                            .body
-                            .create()
-                            .unwrap_or_else(|| action.id()),
-                        archived,
-                    }),
+                    NativeTextFounderFrameOutcome::Retained(
+                        NativeTextFounderReceived::from_original(&original, archived),
+                    ),
                 ))
             }
-            FounderReceiveOperation::Recover(response, session) => {
+            FounderReceiveOperation::Recover(response, session, carrier) => {
                 response.require_current(session)?;
                 let _fee = pool
                     .try_reserve(FOUNDER_TRANSPORT_FEE)
@@ -253,7 +248,9 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     .select_governed_dependency_access(store, verifier, channel)
                     .map_err(|_| Refusal::Unavailable)?;
                 let Some(original) = response.open(access, session)? else {
-                    return Ok(FounderReceiveOutcome::Recovered(false));
+                    return Ok(FounderReceiveOutcome::Recovered(
+                        NativeTextFounderFrameOutcome::Unresolved,
+                    ));
                 };
                 let outbox = lane.outbox_context();
                 let received = lane
@@ -294,14 +291,43 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     },
                     &mut require_current,
                 )?;
-                if status != V2OrdinaryReceiveStatus::Retained(ActionState::Valid) {
-                    return Ok(FounderReceiveOutcome::Recovered(false));
+                if let (Some(carrier), Some(id)) = (carrier, first_founder_missing(&status)) {
+                    require_current()?;
+                    let fee = pool
+                        .try_reserve(FOUNDER_DEPENDENCY_REPLY_FEE)
+                        .map_err(|_| Refusal::Busy)?;
+                    let access = self
+                        .owner
+                        .select_governed_dependency_access(store, verifier, channel)
+                        .map_err(|_| Refusal::Unavailable)?;
+                    let request = prepare_founder_dependency_exchange(
+                        access,
+                        carrier,
+                        (session, Some(response)),
+                        &original,
+                        id,
+                        fee,
+                        rng,
+                    )?;
+                    require_current()?;
+                    return Ok(FounderReceiveOutcome::Recovered(
+                        NativeTextFounderFrameOutcome::NeedsDependency(request),
+                    ));
                 }
-                history
+                if status != V2OrdinaryReceiveStatus::Retained(ActionState::Valid) {
+                    return Ok(FounderReceiveOutcome::Recovered(
+                        NativeTextFounderFrameOutcome::Unresolved,
+                    ));
+                }
+                let archived = history
                     .save(&original, rng, || require_current().map_err(|_| refused()))
                     .map_err(|_| Refusal::Failed)?;
                 require_current()?;
-                Ok(FounderReceiveOutcome::Recovered(true))
+                Ok(FounderReceiveOutcome::Recovered(
+                    NativeTextFounderFrameOutcome::Retained(
+                        NativeTextFounderReceived::from_original(&original, archived),
+                    ),
+                ))
             }
             FounderReceiveOperation::Read(create) => {
                 let Some(received) = lane.received.as_ref().filter(|received| {
