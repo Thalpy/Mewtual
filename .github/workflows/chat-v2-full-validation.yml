@@ -203,12 +203,12 @@ jobs:
               raise RuntimeError('native join dispatch exceeded its deadline')
           guard['validate'](''.join(summaries), code, 5)
           PY
-      # Collect the separate compile gate even if a native test fails, without masking it.
-      - name: Check the native workspace
-        if: ${{ !cancelled() }}
-        run: cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: chat-v2-native-gates-${{ matrix.os }}
           path: logs/chat-v2-native-gates/
+      # Collect the separate compile gate even if a native test fails, without masking it.
+      - name: Check the native workspace
+        if: ${{ !cancelled() }}
+        run: cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml

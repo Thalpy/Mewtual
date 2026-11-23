@@ -1240,6 +1240,14 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     let found = found_request(&founder_window, 1, "Founder group");
     run(&founder_queue).await;
     let found = found_value(found.await.unwrap());
+    let listing = resume_request(&founder_window);
+    run(&founder_queue).await;
+    let listing = found_value(listing.await.unwrap());
+    let [warm_founder] = listing["servers"].as_array().unwrap().as_slice() else {
+        panic!("expected the original founder row");
+    };
+    assert_eq!(warm_founder["name"], "Founder group");
+    assert_eq!(warm_founder["display_name"], "Founder");
     let minted = invite_command(
         &founder_window,
         "mint_invite_fresh",
@@ -1633,7 +1641,10 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
         panic!("expected the restored founder row");
     };
     for field in ["server", "name", "display_name", "channel", "backend"] {
-        assert_eq!(founder_row[field], found[field], "restored founder {field}");
+        assert_eq!(
+            founder_row[field], warm_founder[field],
+            "restored founder {field}"
+        );
     }
     let probe = invite_command(
         &founder_window,
