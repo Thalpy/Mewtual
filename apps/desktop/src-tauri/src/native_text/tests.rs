@@ -1850,7 +1850,8 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     let founder_saved = action;
     let joined_generation = joined_state.ui_session_generation.load(Ordering::SeqCst);
     let joined_work = joined_work(&joined_state, id).await;
-    tokio::time::timeout(Duration::from_secs(15), async {
+    let mut last_refusal = String::new();
+    let recovered_parent = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             let (prepare, selection, channel, scope) =
                 capture_joined_worker(&joined_state, id, joined_generation).await;
@@ -1864,26 +1865,34 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
                 &mut OsCryptoRng,
             );
             drop(guard);
-            if let Ok(exchange) = exchange {
-                if let Ok(Ok(reply)) =
-                    tokio::time::timeout(Duration::from_secs(2), exchange.receive()).await
-                {
-                    let (prepare, selection, _, scope) =
-                        capture_joined_worker(&joined_state, id, joined_generation).await;
-                    let _guard = joined_work.foreground(scope.clone()).await.unwrap();
-                    let original = prepare
-                        .open_dependency_response(&selection, reply, &scope)
-                        .unwrap()
-                        .expect("the cold founder has its exact original outbox receipt");
-                    assert_eq!(original.action_id_data(), founder_saved);
-                    break;
+            match exchange {
+                Ok(exchange) => {
+                    match tokio::time::timeout(Duration::from_secs(2), exchange.receive()).await {
+                        Ok(Ok(reply)) => {
+                            let (prepare, selection, _, scope) =
+                                capture_joined_worker(&joined_state, id, joined_generation).await;
+                            let _guard = joined_work.foreground(scope.clone()).await.unwrap();
+                            let original = prepare
+                                .open_dependency_response(&selection, reply, &scope)
+                                .unwrap()
+                                .expect("the cold founder has its exact original outbox receipt");
+                            assert_eq!(original.action_id_data(), founder_saved);
+                            break;
+                        }
+                        Ok(Err(error)) => last_refusal = format!("transport reported {error:?}"),
+                        Err(_) => last_refusal = "transport timed out".into(),
+                    }
                 }
+                Err(error) => last_refusal = format!("preparation reported {error:?}"),
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
-    .await
-    .expect("the cold founder's native worker answered on its reopened connection");
+    .await;
+    assert!(
+        recovered_parent.is_ok(),
+        "the cold founder's native worker did not answer: {last_refusal}"
+    );
     let close = register_vault_close(&joined_state).await.unwrap();
     sources::close_server_rows(&joined_state, &SystemClock)
         .await

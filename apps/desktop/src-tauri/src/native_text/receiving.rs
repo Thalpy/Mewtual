@@ -174,24 +174,37 @@ pub(super) async fn serve_founder_dependencies<R: tauri::Runtime>(
             continue;
         };
         let caller = scope.clone();
-        let Ok(Ok(mut provider)) = tauri::async_runtime::spawn_blocking(move || {
+        let opened = tauri::async_runtime::spawn_blocking(move || {
             let _permit = permit;
             preparation.attach_founder_dependency_provider(channel, caller)
         })
-        .await
-        else {
-            continue;
+        .await;
+        let mut provider = match opened {
+            Ok(Ok(provider)) => provider,
+            _other => {
+                #[cfg(test)]
+                if let Ok(Err(error)) = _other {
+                    eprintln!("native founder dependency provider could not attach: {error:?}");
+                }
+                continue;
+            }
         };
         while let Some(request) = provider.next().await {
-            let Some(permit) = local.try_background() else {
-                continue;
+            let Some(permit) = local.foreground(scope.clone()).await else {
+                return;
             };
             let Some(preparation) = source.capture(&state).await else {
+                #[cfg(test)]
+                eprintln!("native founder dependency provider could not recapture its row");
                 continue;
             };
             let processed = tauri::async_runtime::spawn_blocking(move || {
                 let _permit = permit;
-                let _ = preparation.serve_founder_dependency_request(&provider, request);
+                let _result = preparation.serve_founder_dependency_request(&provider, request);
+                #[cfg(test)]
+                if let Err(error) = &_result {
+                    eprintln!("native founder dependency reply refused: {error:?}");
+                }
                 provider
             })
             .await;
