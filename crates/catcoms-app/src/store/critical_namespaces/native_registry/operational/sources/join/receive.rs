@@ -443,7 +443,12 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         self.with_member_receiver(&ledger.selection, caller, |source| {
             let channel = ledger.ledger.realm().channel();
             let saved = source.read_dependency(channel, action, rng)?;
-            let archived = if saved.is_none() && source.store.uses_shared_history_layout() {
+            let archived = if saved.is_none()
+                && source
+                    .store
+                    .has_mounted_shared_history()
+                    .map_err(|_| Refusal::Busy)?
+            {
                 source
                     .store
                     .read_shared_history_record(source.history_scope(channel), action)
@@ -528,7 +533,11 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         use V2MemberSaveRefusal as Refusal;
         require_archivable(ledger, original)?;
         self.with_member_receiver(&ledger.selection, caller, |source| {
-            if !source.store.uses_shared_history_layout() {
+            if !source
+                .store
+                .has_mounted_shared_history()
+                .map_err(|_| Refusal::Busy)?
+            {
                 return Ok(None);
             }
             let record = source.prepare_history_original(ledger, original, rng)?;

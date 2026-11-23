@@ -28,12 +28,27 @@ impl ServerStore {
         &self,
         plain: &[u8],
     ) -> Result<archive_current_namespace_codec::CurrentLayoutData, AppError> {
+        Ok(self.parse_joined_catalog_descriptors(plain)?.0)
+    }
+
+    pub(in crate::store) fn parse_joined_catalog_descriptors<'a>(
+        &self,
+        plain: &'a [u8],
+    ) -> Result<
+        (
+            archive_current_namespace_codec::CurrentLayoutData,
+            Option<&'a [u8]>,
+        ),
+        AppError,
+    > {
         if !self.uses_joined_pin_layout() {
             return Err(refused());
         }
-        self.parse_configured_join_catalog(plain)?
-            .current_layout
-            .ok_or_else(refused)
+        let parsed = self.parse_configured_join_catalog(plain)?;
+        Ok((
+            parsed.current_layout.ok_or_else(refused)?,
+            parsed.shared_history_payload,
+        ))
     }
 
     pub(in crate::store) fn prepare_governance_layout_declaration(

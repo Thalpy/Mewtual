@@ -13,6 +13,7 @@ enum ColdOpening {
 }
 use crate::store::critical_namespaces::{
     native_registry::preparation::NativeRegistryHandler, pending_join_codec as grammar,
+    shared_history_namespace::Opening,
 };
 use crate::store::persistence::governance_layout::joined::{AcceptedFirstJoin, JoinedPendingIo};
 use crate::store::persistence::native_registry::lifecycle::upgrade::{UpgradeInventory, UpgradeIo};
@@ -657,8 +658,14 @@ impl Store {
         if !matches!(opening, ColdOpening::Governed) {
             handler = handler.with_joined_pin_layout();
         }
-        if matches!(opening, ColdOpening::SelectedSharedHistory) {
-            handler = handler.with_shared_history_layout();
+        match opening {
+            ColdOpening::SelectedSharedHistory => {
+                handler = handler.with_shared_history_layout(Opening::Required)
+            }
+            ColdOpening::NativeStartup => {
+                handler = handler.with_shared_history_layout(Opening::Optional)
+            }
+            _ => {}
         }
         let physical = physical::Physical::allocate(handler.clone());
         current.native_registry = Some(NativeRegistryHandler::GovernanceOpening(handler.clone()));

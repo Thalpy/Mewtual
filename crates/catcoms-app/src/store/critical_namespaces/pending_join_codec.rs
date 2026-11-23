@@ -357,6 +357,18 @@ pub(super) fn parse_shared_history_native_registry_layout<'a>(
     domain: &[u8; 32],
     executing: bool,
 ) -> Result<Parsed<'a>, AppError> {
+    let parsed = parse_joined_history_family(plain, domain, executing)?;
+    if parsed.shared_history_payload.is_none() {
+        return Err(refused());
+    }
+    Ok(parsed)
+}
+
+pub(super) fn parse_joined_history_family<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+    executing: bool,
+) -> Result<Parsed<'a>, AppError> {
     let parsed = parse_known(
         plain,
         domain,
@@ -369,7 +381,7 @@ pub(super) fn parse_shared_history_native_registry_layout<'a>(
                 .native_registry(Some(3))
         },
     )?;
-    if parsed.shared_history_payload.is_none() {
+    if parsed.joined_pin_payload.is_none() || parsed.native_registry_payload.is_none() {
         return Err(refused());
     }
     Ok(parsed)

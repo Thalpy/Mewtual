@@ -11,6 +11,7 @@ use critical_namespaces::{
     joined_pin::index::{JoinedPinIndex, MAX_FRAME as MAX_INDEX_FRAME},
     native_registry::{verify_joined_pin_parent, VerifiedGovernanceNative},
     pending_join::CreatedStage,
+    shared_history_namespace::Opening,
 };
 
 pub(in crate::store) const INDEX_NAME: &str = "chat-critical-namespaces.joined-pin.index";
@@ -183,11 +184,13 @@ impl ServerStore {
             .is_some_and(|handler| handler.uses_joined_pin_layout())
     }
 
-    pub(in crate::store) fn uses_shared_history_layout(&self) -> bool {
+    fn shared_history_opening(&self) -> Opening {
         self.current_layout_policy
             .as_ref()
             .and_then(|p| p.native_registry.as_ref())
-            .is_some_and(|handler| handler.uses_shared_history_layout())
+            .map_or(Opening::Disabled, |handler| {
+                handler.shared_history_opening()
+            })
     }
 
     /// Only the explicitly configured joined opener enters here. The entire
@@ -233,20 +236,28 @@ impl ServerStore {
         let (current, raw) = inventory.current.ok_or_else(denied)?;
         let key = Zeroizing::new(self.keys.db_key()?);
         let directory = inventory.directory;
-        let shared_history = if self.uses_shared_history_layout() {
-            if inventory.seed.is_some() || inventory.stage.is_some() {
-                return Err(denied());
-            }
+        let opening = self.shared_history_opening();
+        let shared_history = if opening != Opening::Disabled
+            && inventory.seed.is_none()
+            && inventory.stage.is_none()
+        {
             let plain = Zeroizing::new(unseal(&key, &unframe(&raw)?)?);
-            let layout = self.parse_joined_pin_catalog(&plain)?;
-            Some(shared_history::SelectedSharedHistory::capture(
-                self, &plain, layout, &key,
-            )?)
+            let (layout, descriptor) = self.parse_joined_catalog_descriptors(&plain)?;
+            descriptor
+                .map(|descriptor| {
+                    shared_history::SelectedSharedHistory::capture(self, descriptor, layout, &key)
+                })
+                .transpose()?
         } else {
-            absent(&fixed(self, false, shared_history::MARKER_NAME)?)?;
-            absent(&fixed(self, false, shared_history::DIRECTORY_NAME)?)?;
             None
         };
+        if shared_history.is_none() {
+            if opening == Opening::Required {
+                return Err(denied());
+            }
+            absent(&fixed(self, false, shared_history::MARKER_NAME)?)?;
+            absent(&fixed(self, false, shared_history::DIRECTORY_NAME)?)?;
+        }
         let (current, bytes, original_leaves, index) = if let Some((seed, raw_seed)) =
             inventory.seed
         {
@@ -555,9 +566,6 @@ impl ServerStore {
     }
 
     pub(in crate::store) fn require_mounted_shared_history(&self) -> Result<(), AppError> {
-        if !self.uses_shared_history_layout() {
-            return Err(denied());
-        }
         self.validate_mounted_governance_layout()?;
         self.shared_history_mount
             .lock()
@@ -565,6 +573,14 @@ impl ServerStore {
             .as_ref()
             .ok_or_else(denied)?
             .require(self)
+    }
+
+    pub(in crate::store) fn has_mounted_shared_history(&self) -> Result<bool, AppError> {
+        Ok(self
+            .shared_history_mount
+            .try_lock()
+            .map_err(|_| denied())?
+            .is_some())
     }
 
     pub(in crate::store) fn selected_joined_pin_context_data(

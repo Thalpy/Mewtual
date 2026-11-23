@@ -224,7 +224,7 @@ fn shared_history_physical_selection_reopens_the_original_promoted_files() {
         .is_err());
     drop(key);
     drop(selected);
-    let selected = NativeTextJoinedStorage::open_selected_shared_history(
+    let selected = NativeTextJoinedStorage::open_for_native_startup(
         dir.path(),
         SECRET,
         &mut NeverRng,

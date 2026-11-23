@@ -34,11 +34,10 @@ pub(in crate::store) struct SelectedSharedHistory {
 impl SelectedSharedHistory {
     pub(super) fn capture(
         store: &ServerStore,
-        plain: &[u8],
+        descriptor: &[u8],
         layout: CurrentLayoutData,
         key: &[u8; 32],
     ) -> Result<Self, AppError> {
-        let descriptor = history::selected_descriptor(plain, layout, true)?;
         let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
         let fee = policy.current.archive.pending.pool.try_reserve(16 * 1024)?;
         let path = fixed(store, false, MARKER_NAME)?;
@@ -95,7 +94,7 @@ impl ServerStore {
             CatalogReadReservation,
         ) -> Result<T, AppError>,
     ) -> Result<T, AppError> {
-        if !self.uses_shared_history_layout() || scope.vault != self.chat_vault_domain()? {
+        if scope.vault != self.chat_vault_domain()? {
             return Err(denied());
         }
         self.validate_mounted_governance_layout()?;

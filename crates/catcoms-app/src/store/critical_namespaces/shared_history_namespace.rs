@@ -16,6 +16,13 @@ pub(super) const VERSION: u32 = 1;
 const TAG: &[u8] = b"catcoms/private-chat-v2-shared-history-namespace/v1\0";
 const BYTES: usize = 4 + TAG.len() + 2 + 5 * 36;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::store) enum Opening {
+    Disabled,
+    Optional,
+    Required,
+}
+
 fn fields(
     layout: CurrentLayoutData,
     current: &[u8],
