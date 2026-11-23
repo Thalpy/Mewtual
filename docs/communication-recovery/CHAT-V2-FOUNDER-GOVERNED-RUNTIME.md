@@ -41,6 +41,12 @@ the founder's outbox. Live and archived receive use the same authorization and
 archive seal as the warm founder. A retired subscription revokes live body
 access, while already covered history can still be opened under a fresh scope.
 
+The restored SDK can sign one ordinary action under an authenticated native
+MemberAction cut and the original live Core Admission. A different key
+purpose or a second Source with the same UI generation refuses. The request's
+timestamp and nonce remain bound to the SDK instance that drew them. Desktop
+startup and the durable save path still need to carry this Source.
+
 The stage-lifetime continuation is under validation. Native key drainage is
 being separated from retained CLOSED snapshot DATA: an actual completed Cell
 proof precedes monotone SDK-continuation retirement and an outside-writer move

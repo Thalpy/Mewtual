@@ -1557,6 +1557,41 @@ async fn mounted_join_fixture(recover_stage: bool) {
             assert!(live
                 .with_publication(|_| panic!("a cancelled recovered receiver exposed a body"))
                 .is_err());
+            let vault = original
+                .take_native_vault_for_test(
+                    (
+                        Arc::new(std::sync::atomic::AtomicU64::new(7)),
+                        Arc::new(std::sync::atomic::AtomicU64::new(7)),
+                        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    ),
+                    founder_budget.clone(),
+                    &fresh,
+                )
+                .unwrap();
+            let authentication = vault
+                .prepare_native_authentication(founder_budget.prepare().unwrap())
+                .verify(SECRET)
+                .unwrap();
+            assert!(authentication.is_for_original_vault(&vault));
+            let command = command(&vault, &founder_budget);
+            let pool = policy().pool;
+            let key_owner = || {
+                let payment = Arc::new(RuntimeMetadata {
+                    pool: pool.clone(),
+                    _debit: pool.try_reserve(ENTRY_BYTES).unwrap(),
+                });
+                catcoms_rt::NativeChatSourceOwner::for_trusted_source(&command.ui.command, payment)
+                    .unwrap()
+            };
+            original.sign_recovered_member_for_test(
+                channel,
+                &key_owner(),
+                &key_owner(),
+                &command.ui.command,
+                &fresh,
+                &mut founder_rng,
+            );
+            drop((command, vault));
             drop(original);
             assert!(archived
                 .with_publication(|_| panic!("the closed restored founder published a body"))

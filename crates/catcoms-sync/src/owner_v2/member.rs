@@ -3,13 +3,15 @@
 //! An ordinary member (including the Profile founder acting as an ordinary member) signs its
 //! own Create/reply, own Edit/Delete and Join with its retained MLS leaf key. Nothing here
 //! signs an owner Header, reaches the founder A/I/S/B Append lane, exports a channel secret,
-//! mutates the sender ratchet or extracts a key. Two node families expose the same seams:
+//! mutates the sender ratchet or extracts a key. These owners expose the same seams:
 //!
 //! - the founder's closed genesis node (`UnboundV2GenesisNode`, in
 //!   `founder/bootstrap_source/genesis_seed/ordinary_member.rs`), used by the founder vertical;
 //! - a joined member's live `ChannelSync` (below), bound to its exact process incarnation by
 //!   `RegistrySyncInstance`. Its App owner is the separate joined-member source, which must
 //!   supply the independently trusted V2 pin/Profile/governing prefix itself.
+//! - the founder's recovered first-Add SDK, bound to a freshly authorized
+//!   native Source and the original selected Core Admission.
 //!
 //! Seams, in the order the App host uses them:
 //! 1. `draw_ordinary_draft_inputs` (outside every writer) binds the request's
@@ -28,6 +30,7 @@
 use crate::owner_v2::{OriginalV2GenesisSeedObservation, UnboundV2GenesisSeed};
 use crate::*;
 use catcoms_replication::chat::{V2OrdinarySigningGuard, MAX_ACTION_BYTES};
+use std::sync::{Arc, Weak};
 
 /// Closed refusal classes for the ordinary-member seams. They carry no key, text or source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +66,7 @@ enum DrawStage {
 /// nothing alive and a replacement node with equal key/group labels never matches them.
 enum DrawOrigin {
     Founder(OriginalV2GenesisSeedObservation),
+    RecoveredFounder(Weak<()>),
     Joined(RegistrySyncInstance),
 }
 
@@ -119,6 +123,30 @@ impl V2MemberDraftInputs {
             Some(DrawOrigin::Founder(original)) => original
                 .require_same_seed_data(seed)
                 .map_err(|_| V2MemberSignRefusal::Source),
+            _ => Err(V2MemberSignRefusal::Source),
+        }
+    }
+
+    pub(crate) fn bind_recovered_founder_origin(
+        &mut self,
+        lifetime: &Arc<()>,
+    ) -> Result<(), V2MemberSignRefusal> {
+        if self.origin.is_none() {
+            self.origin = Some(DrawOrigin::RecoveredFounder(Arc::downgrade(lifetime)));
+        }
+        self.require_recovered_founder_origin(lifetime)
+    }
+
+    pub(crate) fn require_recovered_founder_origin(
+        &self,
+        lifetime: &Arc<()>,
+    ) -> Result<(), V2MemberSignRefusal> {
+        match &self.origin {
+            Some(DrawOrigin::RecoveredFounder(original))
+                if original.ptr_eq(&Arc::downgrade(lifetime)) =>
+            {
+                Ok(())
+            }
             _ => Err(V2MemberSignRefusal::Source),
         }
     }

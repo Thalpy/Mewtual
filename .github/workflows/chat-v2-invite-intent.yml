@@ -43,6 +43,7 @@ on:
       - 'crates/catcoms-net/src/native_chat_members.rs'
       - 'crates/catcoms-net/src/native_chat_member_dependencies.rs'
       - 'crates/catcoms-net/src/publication/**'
+      - 'crates/catcoms-sync/src/owner_v2/member.rs'
       - 'crates/catcoms-sync/src/owner_v2/member_envelope.rs'
       - 'crates/catcoms-sync/src/owner_v2/member_dependencies.rs'
       - 'crates/catcoms-sync/src/owner_v2/joined_fence.rs'
@@ -117,6 +118,7 @@ on:
           - joined-predecessor
           - selected-history
           - native-contact
+          - cold-founder
           - joined-member
           - member-history
 
@@ -135,7 +137,7 @@ env:
 
 jobs:
   invitation:
-    if: inputs.scope != 'joined-storage' && inputs.scope != 'joined-predecessor' && inputs.scope != 'selected-history' && inputs.scope != 'native-contact' && inputs.scope != 'joined-member' && inputs.scope != 'member-history'
+    if: inputs.scope != 'joined-storage' && inputs.scope != 'joined-predecessor' && inputs.scope != 'selected-history' && inputs.scope != 'native-contact' && inputs.scope != 'cold-founder' && inputs.scope != 'joined-member' && inputs.scope != 'member-history'
     name: Invitation intent (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
@@ -240,7 +242,7 @@ jobs:
           if-no-files-found: error
 
   joined-storage:
-    if: github.event_name == 'pull_request' || inputs.scope == 'joined-storage' || inputs.scope == 'joined-predecessor' || inputs.scope == 'selected-history' || inputs.scope == 'native-contact' || inputs.scope == 'joined-member' || inputs.scope == 'member-history'
+    if: github.event_name == 'pull_request' || inputs.scope == 'joined-storage' || inputs.scope == 'joined-predecessor' || inputs.scope == 'selected-history' || inputs.scope == 'native-contact' || inputs.scope == 'cold-founder' || inputs.scope == 'joined-member' || inputs.scope == 'member-history'
     name: Joined pin storage (${{ matrix.os }}, ${{ inputs.scope || 'joined-member' }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
@@ -272,11 +274,11 @@ jobs:
       - name: Check retirement of an approved native join dial
         if: inputs.scope == 'joined-storage' || inputs.scope == 'native-contact'
         run: python .github/scripts/check-chat-v2-invite-intent.py joined-contact
-      - name: Check mounted request restart, connected Welcome, and joined runtime ownership
-        if: github.event_name == 'pull_request' || inputs.scope == 'joined-storage' || inputs.scope == 'native-contact' || inputs.scope == 'joined-member'
+      - name: Check mounted request, Welcome and member restart
+        if: github.event_name == 'pull_request' || inputs.scope == 'joined-storage' || inputs.scope == 'native-contact' || inputs.scope == 'cold-founder' || inputs.scope == 'joined-member'
         run: python .github/scripts/check-chat-v2-invite-intent.py mounted-join-request
       - name: Check the cold founder's original source and reserved TCP listener
-        if: github.event_name == 'pull_request' || inputs.scope == 'joined-storage' || inputs.scope == 'joined-member'
+        if: github.event_name == 'pull_request' || inputs.scope == 'joined-storage' || inputs.scope == 'cold-founder' || inputs.scope == 'joined-member'
         run: python .github/scripts/check-chat-v2-invite-intent.py cold-founder-source
       - name: Check joined registry labels and historical row encodings
         if: inputs.scope == 'joined-storage' || inputs.scope == 'native-contact'

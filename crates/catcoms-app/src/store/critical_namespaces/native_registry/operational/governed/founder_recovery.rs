@@ -13,6 +13,8 @@ mod history;
 mod publication;
 mod receiving;
 mod replies;
+#[cfg(test)]
+mod tests;
 pub use publication::{NativeTextColdFounderPublication, NativeTextColdFounderPublicationReceipt};
 pub use receiving::{NativeTextColdFounderMemberIngress, NativeTextColdFounderMemberReceiver};
 pub use replies::{NativeTextColdFounderJoinRequest, NativeTextColdFounderJoinRequests};
@@ -64,7 +66,7 @@ pub struct NativeTextColdFounderSource {
     // All recovered operations recheck the same original physical mount.
     // The affine index stays here to close admission when this owner retires.
     work: SourceWork,
-    _index: Store,
+    index: Option<Store>,
 }
 
 impl NativeTextJoinedStorage {
@@ -90,7 +92,7 @@ impl NativeTextJoinedStorage {
                     selection,
                     local,
                     work,
-                    _index: self.index,
+                    index: Some(self.index),
                 })
             }
             Ok(None) => Err((self, refused())),
@@ -106,6 +108,21 @@ impl NativeTextColdFounderSource {
 
     pub fn transport_data(&self) -> (PeerId, u16) {
         self.local
+    }
+
+    #[cfg(test)]
+    pub(in crate::store::critical_namespaces::native_registry) fn take_native_vault_for_test(
+        &mut self,
+        atoms: (Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicBool>),
+        budget: crate::store::NativeUiInvocationBudget,
+        caller: &RequestCancellation,
+    ) -> Result<crate::store::NativeTextVault, AppError> {
+        self.restore_first_add(caller)?;
+        crate::store::NativeTextVault::from_recovered_joined_index(
+            self.index.take().ok_or_else(refused)?,
+            atoms,
+            budget,
+        )
     }
 
     /// Check the exact selected first Add, restore its closed MLS graph and

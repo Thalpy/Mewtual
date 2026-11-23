@@ -6,6 +6,7 @@ use catcoms_replication::chat::{
     owner_facts::OwnerFactId, owner_header::HeaderKind, owner_state::StateFrame,
 };
 
+mod member_signing;
 mod member_transport;
 
 /// Paid private graph. Source installation, Core replay and publication have
@@ -17,6 +18,7 @@ pub struct PreparedV2FounderRecoveredAdd {
     founder: OwnerFactId,
     signer: [u8; 32],
     member: Option<V2AuthenticatedAdmission>,
+    native_origin: Option<catcoms_rt::NativeChatSourceObservation>,
     lifetime: Arc<()>,
 }
 
@@ -142,6 +144,7 @@ impl PreparedV2FounderRecoveredAdd {
             founder: context.founder,
             signer: context.signer,
             member: None,
+            native_origin: None,
             lifetime: Arc::new(()),
         })
     }

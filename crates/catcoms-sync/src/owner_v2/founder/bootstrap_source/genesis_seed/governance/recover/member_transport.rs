@@ -52,21 +52,27 @@ impl PreparedV2FounderRecoveredAdd {
         Ok(original)
     }
 
+    pub(super) fn bound_member(
+        &self,
+        verifier: &V2GeneralPrefixVerifier,
+    ) -> Result<&V2AuthenticatedAdmission, SyncError> {
+        let selected = self.require_selected(verifier)?;
+        self.member
+            .as_ref()
+            .filter(|member| member.same_original(&selected))
+            .ok_or_else(unavailable)
+    }
+
     fn observe_selected(
         &self,
         verifier: &V2GeneralPrefixVerifier,
         channel: u128,
         mount: RequestCancellation,
     ) -> Result<(V2MemberEnvelopeScopeData, V2MemberPublicationObservation), SyncError> {
-        let original = self.require_selected(verifier)?;
-        if mount.is_cancelled()
-            || self
-                .member
-                .as_ref()
-                .is_none_or(|member| !member.same_original(&original))
-        {
+        if mount.is_cancelled() {
             return Err(unavailable());
         }
+        self.bound_member(verifier)?;
         let scope = V2MemberEnvelopeScopeData::for_selected_prefix(verifier, channel)?;
         let observation = V2MemberPublicationObservation {
             member: verifier
