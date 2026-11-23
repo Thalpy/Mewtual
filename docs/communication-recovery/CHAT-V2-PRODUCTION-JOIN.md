@@ -366,8 +366,8 @@ original pin. It prepares the final Add for host selection and retains its
 own Admission from that Add. The native joined journal writes a distinct
 later-entry version and requires the exact new selected-history page on cold
 open. The original first-entry version and legacy first outcome remain
-readable. The connected later Welcome and physical joiner reopen still need
-end-to-end coverage.
+readable. The three-vault regression exercises the connected later Welcome
+and native registration of its new Admission.
 
 An existing joined member can stage and merge the exact later Add on a closed
 candidate graph while its live epoch remains unchanged. The SDK checks the
@@ -506,7 +506,9 @@ namespace. Each body replays the exact selected actions under the current
 Core guard. Joined dependency repair is bounded to the original authenticated
 carrier. The installed founder can recover its own saved direct dependencies
 and show its saved received messages after the live receiver retires. Cold
-founder startup and general peer catch-up remain open.
+founder startup restores ordinary member history and its original listener
+from a covered Add. New cold-founder invitations, later governing writes and
+general peer discovery still need implementation.
 
 The warm joined node can draw and sign an ordinary action through the original
 native Joiner Source. Its signing cut requires the ordinary member purpose and

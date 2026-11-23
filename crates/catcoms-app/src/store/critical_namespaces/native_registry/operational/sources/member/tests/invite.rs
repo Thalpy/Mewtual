@@ -1402,6 +1402,16 @@ async fn mounted_join_fixture(recover_stage: bool, governing: bool) {
         .await
         .unwrap();
         let received = received.unwrap();
+        let (_retired, gone) = tokio::sync::watch::channel(true);
+        assert_eq!(
+            recovered_row().apply_governing_response(
+                &selection,
+                &received,
+                &RequestCancellation::new(gone, None),
+                &mut history_rng,
+            ),
+            Err(V2MemberSaveRefusal::Cancelled)
+        );
         assert_eq!(
             recovered_row().apply_governing_response(
                 &selection,
@@ -1603,6 +1613,31 @@ async fn mounted_join_fixture(recover_stage: bool, governing: bool) {
         assert_eq!(
             next.complete_recovery(&fresh).unwrap(),
             (expected, own_add, 2)
+        );
+        let (reopened_vault, reopened_sources) = next
+            .into_recovered_native_sources(
+                (
+                    Arc::new(AtomicU64::new(7)),
+                    Arc::new(AtomicU64::new(7)),
+                    Arc::new(AtomicBool::new(false)),
+                ),
+                budget.clone(),
+                &policy(),
+                &fresh,
+            )
+            .unwrap();
+        let reopened_row =
+            || reopened_sources.capture_joined_selection(command(&reopened_vault, &budget));
+        let current = reopened_row().select_registered(&fresh).unwrap();
+        assert_eq!(
+            current.member_outbox_context_id_data(),
+            original_member_outbox
+        );
+        assert_eq!(
+            reopened_row()
+                .lookup_saved_member(&current, &offline(), &fresh, &mut history_rng)
+                .unwrap(),
+            Some((action, ordinal))
         );
         return;
     }
@@ -3329,6 +3364,27 @@ async fn native_governed_add_fixture(case: JoinCase) {
             reopened_member.complete_recovery(&negative).unwrap(),
             (later_head, own, 2)
         );
+        drop(reopened_member);
+        let name = covered_path.file_name().unwrap().to_str().unwrap();
+        let absent_middle =
+            covered_path.with_file_name(format!("{}.3.bin", name.strip_suffix(".2.bin").unwrap()));
+        std::fs::rename(&covered_path, &absent_middle).unwrap();
+        let storage =
+            NativeTextJoinedStorage::open(join_dir, SECRET, &mut join_rng, current_policy())
+                .unwrap();
+        let (mesh, _) = catcoms_net::MeshService::new_tcp(None, &[]).unwrap();
+        let mut blocked = storage
+            .bind_recovered_join_runtime(
+                mesh,
+                rand_chacha::ChaCha20Rng::seed_from_u64(0xe725),
+                Box::new(catcoms_rt::SystemClock),
+            )
+            .ok()
+            .unwrap();
+        assert!(blocked.complete_recovery(&negative).is_err());
+        assert!(absent_middle.is_file() && !covered_path.exists());
+        drop(blocked);
+        std::fs::rename(absent_middle, &covered_path).unwrap();
         drop(governing);
         drop(client);
         let mut close = owner.prepare_retirement().unwrap();

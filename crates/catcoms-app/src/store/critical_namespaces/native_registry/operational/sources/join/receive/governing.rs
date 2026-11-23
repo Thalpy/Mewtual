@@ -253,7 +253,10 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                             .ok_or(Refusal::Unavailable)?
                             .cover_member_add(store, node, &response.frame, &signal, rng)
                     };
-                    retired = Some(result.map_err(|_| Refusal::Failed)?);
+                    retired = Some(result.map_err(|error| match error {
+                        AppError::Io(_) => Refusal::Busy,
+                        _ => Refusal::Failed,
+                    })?);
                     mount.require_live(store).map_err(|_| Refusal::Cancelled)?;
                     let (head, _, epoch) = node
                         .selected_join_data()
