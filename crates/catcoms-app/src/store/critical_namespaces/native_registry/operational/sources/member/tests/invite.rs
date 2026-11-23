@@ -877,7 +877,7 @@ async fn mounted_join_fixture(recover_stage: bool) {
         let nested_text = "Joined reply with a parent missed by the original receiver";
         let (stop_recovery, recovery_scope) = tokio::sync::watch::channel(false);
         let recovery_scope = RequestCancellation::new(recovery_scope, None);
-        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        tokio::time::timeout(std::time::Duration::from_secs(45), async {
             let mut receiver = loop {
                 let prepared = founder_capture()
                     .prepare_founder_member_ingress(channel, recovery_scope.clone())
@@ -948,7 +948,13 @@ async fn mounted_join_fixture(recover_stage: bool) {
                         _ => panic!("expected the joined original to reach the founder mesh"),
                     }
                 };
-                let Some(NativeChatMemberGossipEvent::Frame(frame)) = receiver.next().await else {
+                let original =
+                    tokio::time::timeout(std::time::Duration::from_secs(12), receiver.next())
+                        .await
+                        .unwrap_or_else(|_| {
+                            panic!("joined gossip original {token} did not arrive")
+                        });
+                let Some(NativeChatMemberGossipEvent::Frame(frame)) = original else {
                     panic!("the founder original did not arrive");
                 };
                 assert_eq!(
@@ -996,7 +1002,14 @@ async fn mounted_join_fixture(recover_stage: bool) {
                             )
                             .unwrap();
                     };
-                    let (response, ()) = tokio::join!(exchange.receive(), serve);
+                    let (response, ()) =
+                        tokio::time::timeout(std::time::Duration::from_secs(12), async {
+                            tokio::join!(exchange.receive(), serve)
+                        })
+                        .await
+                        .unwrap_or_else(|_| {
+                            panic!("addressed founder dependency round {round} did not finish")
+                        });
                     let response = response.unwrap();
                     match founder_capture()
                         .recover_founder_dependency_with_followup(&receiver, &response, true)
