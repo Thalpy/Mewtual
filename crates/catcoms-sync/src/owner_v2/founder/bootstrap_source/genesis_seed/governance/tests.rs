@@ -265,6 +265,8 @@ fn install_for_test(
     verifier: &mut catcoms_replication::chat::V2GeneralPrefixVerifier,
 ) -> (Retired, catcoms_replication::chat::V2GeneralRetiredData) {
     node.require_sdk_current_data().unwrap();
+    let nonce = node.pending.as_ref().unwrap().request.invite_nonce();
+    let invite_slot = node.available_invite_slot(nonce).unwrap();
     let p = node.pending.as_mut().unwrap();
     assert!(p.phase == Phase::Materialized);
     let result = p.cell.as_ref().unwrap().completed_result_data().unwrap();
@@ -308,6 +310,7 @@ fn install_for_test(
         .unwrap();
     let sdk_retired = mls.install();
     node.installed = Some(installed);
+    node.installed_invites[invite_slot] = Some(nonce);
     let pending = node.pending.take().unwrap();
     (
         Retired {

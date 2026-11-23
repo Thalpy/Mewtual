@@ -15,6 +15,8 @@ pub struct PreparedV2FounderAddInstall<'a> {
     negative: V2FounderGovernanceNegative<'a>,
     after: V2InstalledFounderAddData,
     installed: &'a mut Option<V2InstalledFounderAddData>,
+    installed_invite: &'a mut Option<[u8; 16]>,
+    invite_nonce: [u8; 16],
     founder: OwnerFactId,
     member: &'a mut Option<V2AuthenticatedAdmission>,
     core_retired: &'a mut Option<V2GeneralRetiredData>,
@@ -36,6 +38,15 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2FounderGovernanceNode<T, R> {
     ) -> Result<(V2GenesisSourceFields<'_>, PreparedV2FounderAddInstall<'_>), SyncError> {
         self.require_sdk_current_data()?;
         self.signed_welcome_data()?;
+        let invite_nonce = self
+            .pending
+            .as_ref()
+            .ok_or_else(unavailable)?
+            .request
+            .invite_nonce();
+        let invite_slot = self
+            .available_invite_slot(invite_nonce)
+            .ok_or_else(unavailable)?;
         let p = self.pending.as_deref_mut().ok_or_else(unavailable)?;
         if p.phase != Phase::Materialized
             || p.retired_sdk.is_some()
@@ -93,6 +104,8 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2FounderGovernanceNode<T, R> {
                 negative,
                 after,
                 installed: &mut self.installed,
+                installed_invite: &mut self.installed_invites[invite_slot],
+                invite_nonce,
                 founder,
                 member: &mut self.member,
                 core_retired: &mut p.retired_core,
@@ -151,6 +164,7 @@ impl PreparedV2FounderAddInstall<'_> {
         *self.core_retired = Some(retired);
         *self.sdk_retired = Some(self.mls.install());
         *self.installed = Some(self.after);
+        *self.installed_invite = Some(self.invite_nonce);
         if let Some(founder) = first_member {
             *self.member = Some(founder);
         }

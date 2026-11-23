@@ -239,6 +239,7 @@ impl V2FounderAddSigning<'_> {
 pub struct PreparedV2FounderGovernanceNode<T, R> {
     pending: Option<Box<PendingAdd>>,
     installed: Option<V2InstalledFounderAddData>,
+    installed_invites: [Option<[u8; 16]>; crate::MAX_V2_GOVERNING_JOIN_STEPS],
     member: Option<V2AuthenticatedAdmission>,
     node: UnboundV2GenesisNode<T, R>,
 }
@@ -281,6 +282,7 @@ impl<T, R> UnboundV2GenesisNode<T, R> {
         Ok(PreparedV2FounderGovernanceNode {
             pending: None,
             installed: None,
+            installed_invites: [None; crate::MAX_V2_GOVERNING_JOIN_STEPS],
             member: None,
             node: self,
         })
@@ -305,6 +307,7 @@ impl<T, R> UnboundV2GenesisNode<T, R> {
         *destination = Some(PreparedV2FounderGovernanceNode {
             pending: None,
             installed: None,
+            installed_invites: [None; crate::MAX_V2_GOVERNING_JOIN_STEPS],
             member: None,
             node,
         });
@@ -341,6 +344,9 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
         self.require_sdk_current_data()?;
         let installed = self.installed.ok_or_else(unavailable)?;
         if self.pending.is_some()
+            || self
+                .available_invite_slot(request.invite.spec_data().nonce)
+                .is_none()
             || replay.profile() != &self.node.seed.body.genesis.profile
             || replay.header().id() != installed.header
             || replay.header().spec().state != installed.state
@@ -350,6 +356,13 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
         }
         self.node.check_add_package(request, limits)?;
         self.require_sdk_current_data()
+    }
+
+    fn available_invite_slot(&self, nonce: [u8; 16]) -> Option<usize> {
+        if self.installed_invites.contains(&Some(nonce)) {
+            return None;
+        }
+        self.installed_invites.iter().position(Option::is_none)
     }
 
     /// Original immutable provenance, always the initial pin/source context.
@@ -420,6 +433,9 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
         welcome_cut: NativeChatPreparedKeyCut,
     ) -> Result<(), V2FounderAddPreparationRefusal> {
         if self.pending.is_some()
+            || self
+                .available_invite_slot(request.invite.spec_data().nonce)
+                .is_none()
             || !admission.supports_routing_data()
             || sdk_cut
                 .require_never_entered_data(&original, NativeChatKeyPurpose::AddSdk)

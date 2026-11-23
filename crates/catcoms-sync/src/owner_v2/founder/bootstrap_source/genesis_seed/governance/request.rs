@@ -95,6 +95,10 @@ impl V2FounderAddRequestData<'_> {
 }
 
 impl FrozenAddRequest {
+    pub(super) fn invite_nonce(&self) -> [u8; 16] {
+        self.nonce
+    }
+
     pub(super) fn prepare(
         seed: &SeedBody,
         installed: Option<V2InstalledFounderAddData>,

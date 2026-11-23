@@ -132,6 +132,29 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
         V2GoverningJoinStepData, V2JoinRequestPacketData, MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES,
     };
     let replay = verifier.replay_data();
+    let used = node.installed_invites[0].unwrap();
+    let mut reused = Request::with_package_times(node, used[0], now / 1000 - 60, now / 1000 + 3600);
+    assert_eq!(reused.invite.spec_data().nonce, used);
+    reused.change_invite(node, |spec| spec.expires_at_ms = now + 90_000);
+    let limits = TextCurrentAddLimits::governed_text_v2();
+    node.node.check_add_package(reused.data(), limits).unwrap();
+    assert!(node
+        .preflight_subsequent_add_package_data(replay, reused.data(), limits)
+        .is_err());
+    let refused_source = Native::new();
+    let refused_payment = Arc::new(AtomicUsize::new(0));
+    assert!(node
+        .prepare_add_data(
+            reused.data(),
+            refused_source.source.observe(),
+            super::admission(&refused_payment),
+            refused_source.cut(NativeChatKeyPurpose::AddSdk),
+            refused_source.cut(NativeChatKeyPurpose::GoverningHeader),
+            refused_source.cut(NativeChatKeyPurpose::JoinWelcome),
+        )
+        .is_err());
+    assert!(node.pending.is_none());
+    assert_eq!(refused_payment.load(SeqCst), 0);
     let mut fixture = Request::new(node, 96);
     fixture.change_invite(node, |spec| spec.expires_at_ms = now + 60_000);
     let anchor = &fixture.invite.spec_data().anchor;
@@ -155,7 +178,6 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
         genesis.state,
     )
     .unwrap();
-    let limits = TextCurrentAddLimits::governed_text_v2();
     assert!(node
         .preflight_subsequent_add_package_data(&stale, request, limits)
         .is_err());
@@ -319,6 +341,10 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     assert_eq!(installed.epoch, 2);
     assert_eq!(installed.header, expected_header);
     assert_eq!(installed.authenticator, expected_authenticator);
+    assert_eq!(
+        node.installed_invites[1],
+        Some(fixture.invite.spec_data().nonce)
+    );
     assert!(node
         .member
         .as_ref()
