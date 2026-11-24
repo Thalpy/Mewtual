@@ -21,12 +21,14 @@ impl<T: MeshTransport, R: CryptoRngCore> V2TextOwnedCurrent<T, R> {
         verifier: &V2GeneralPrefixVerifier,
         target: OwnerBodyId,
         original: &NativeChatSourceObservation,
-        payment: &mut Option<TextCurrentAddAdmission>,
-        cut: &mut NativeChatPreparedKeyCut,
-        ends: &mut NativeChatKeyEnds,
+        signing: (
+            &mut Option<TextCurrentAddAdmission>,
+            &mut NativeChatPreparedKeyCut,
+            &mut NativeChatKeyEnds,
+        ),
     ) -> Result<(), AppError> {
         self.warm_removal_mut()?
-            .execute_governed_removal(store, verifier, target, original, payment, cut, ends)
+            .execute_governed_removal(store, verifier, target, original, signing)
     }
 
     pub(in crate::store::persistence::cold_source_read::genesis_seed::current::operational) fn governed_removal_outcome(

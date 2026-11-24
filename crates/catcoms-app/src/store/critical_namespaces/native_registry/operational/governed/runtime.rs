@@ -32,6 +32,10 @@ pub struct NativeTextJoinedRuntime<T: MeshTransport, R: CryptoRngCore> {
 impl NativeTextJoinedStorage {
     /// Bind the transport before exchanging the covered request. A retry of
     /// the owning runtime keeps the same transport and private request.
+    #[expect(
+        clippy::result_large_err,
+        reason = "A refused bind returns the original paid storage owner."
+    )]
     pub fn bind_first_join_runtime<T: MeshTransport, R: CryptoRngCore>(
         self,
         transport: T,
@@ -49,6 +53,10 @@ impl NativeTextJoinedStorage {
 
     /// Bind already-funded runtime resources to the independently recovered
     /// selected outcome. The returned owner has no fresh Welcome authority.
+    #[expect(
+        clippy::result_large_err,
+        reason = "A refused bind returns the original paid storage owner."
+    )]
     pub fn bind_recovered_join_runtime<T: MeshTransport, R: CryptoRngCore>(
         self,
         transport: T,
@@ -69,6 +77,10 @@ impl NativeTextJoinedStorage {
 
     /// Restore the same reserved identity from a completed and selected native
     /// joined row. The old Welcome is independently verified without SDK entry.
+    #[expect(
+        clippy::result_large_err,
+        reason = "A refused bind returns the original paid storage owner."
+    )]
     pub fn bind_recovered_native_runtime<R: CryptoRngCore>(
         mut self,
         rng: R,
@@ -116,6 +128,10 @@ impl NativeTextJoinedStorage {
         }
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "A refused bind returns the original paid storage owner."
+    )]
     fn bind_runtime<T: MeshTransport, R: CryptoRngCore>(
         self,
         checked: Result<(), AppError>,

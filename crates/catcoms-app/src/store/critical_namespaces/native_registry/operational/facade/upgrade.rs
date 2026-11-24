@@ -201,6 +201,10 @@ impl NativeTextJoinedVaultUpgrade {
     }
 
     /// Reprove the held new catalog and move the same native owner.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The original upgrade and its paid reservations return intact on refusal."
+    )]
     pub fn into_vault(mut self) -> Result<NativeTextVault, Self> {
         if self.require_complete().is_err() {
             return Err(self);

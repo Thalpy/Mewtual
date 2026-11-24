@@ -23,9 +23,11 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> UnexposedV2Gene
         verifier: &V2GeneralPrefixVerifier,
         admission: OwnerBodyId,
         original: &NativeChatSourceObservation,
-        payment: &mut Option<TextCurrentAddAdmission>,
-        cut: &mut NativeChatPreparedKeyCut,
-        ends: &mut NativeChatKeyEnds,
+        (payment, cut, ends): (
+            &mut Option<TextCurrentAddAdmission>,
+            &mut NativeChatPreparedKeyCut,
+            &mut NativeChatKeyEnds,
+        ),
     ) -> Result<(), crate::AppError> {
         use crate::store::critical_namespaces::refused;
         self.require_text_original_data(store)

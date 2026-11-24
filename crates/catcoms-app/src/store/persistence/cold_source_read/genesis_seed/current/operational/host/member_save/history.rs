@@ -26,6 +26,10 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
     }
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The mounted history read carries the fixed registration inline."
+)]
 enum HistoryContext<'a> {
     Founder(V2TextOwnerRef<'a>),
     Joined(NativeTextJoinedRegistrationData),

@@ -163,9 +163,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
                 verifier,
                 target,
                 &keys.original,
-                &mut pending.sdk,
-                sdk_cut,
-                ends,
+                (&mut pending.sdk, sdk_cut, ends),
             )?;
             let outcome = self.owner.governed_removal_outcome(store)?;
             pending.fence.prepare_outcome(store, &outcome, rng)?;

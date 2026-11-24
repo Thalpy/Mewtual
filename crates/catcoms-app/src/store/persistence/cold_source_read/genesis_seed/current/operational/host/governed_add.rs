@@ -179,8 +179,10 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         layout: &V2CurrentLayoutStore,
         packet: &V2JoinRequestPacketData<'_>,
         routing_plan: &[u8],
-        keys: &NativeFounderKeys,
-        cuts: [catcoms_rt::NativeChatPreparedKeyCut; 3],
+        (keys, cuts): (
+            &NativeFounderKeys,
+            [catcoms_rt::NativeChatPreparedKeyCut; 3],
+        ),
         rng: &mut impl catcoms_rt::CryptoRngCore,
         negative: &catcoms_rt::RequestCancellation,
     ) -> Result<crate::store::NativeTextSavedJoinResponse, AppError> {
@@ -198,7 +200,14 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             pending.matches_request(packet) && pending.fence.head_selection_entered()
         });
         if !continuing_selection {
-            self.execute_governed_add_sdk(layout, packet, routing_plan, keys, cuts, rng, negative)?;
+            self.execute_governed_add_sdk(
+                layout,
+                packet,
+                routing_plan,
+                (keys, cuts),
+                rng,
+                negative,
+            )?;
         }
         self.install_governed_add(layout, packet, routing_plan, keys, rng, negative)?;
         self.saved_governed_response(layout, packet, keys, negative)
@@ -395,8 +404,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             owner.source(),
             &preimage,
             &outcome,
-            &signed_header,
-            &response,
+            (&signed_header, &response),
             rng,
         )?;
         store.with_v2_text_current(&owner, |admission| {
@@ -584,8 +592,10 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         layout: &V2CurrentLayoutStore,
         packet: &V2JoinRequestPacketData<'_>,
         routing_plan: &[u8],
-        keys: &NativeFounderKeys,
-        cuts: [catcoms_rt::NativeChatPreparedKeyCut; 3],
+        (keys, cuts): (
+            &NativeFounderKeys,
+            [catcoms_rt::NativeChatPreparedKeyCut; 3],
+        ),
         rng: &mut impl catcoms_rt::CryptoRngCore,
         negative: &catcoms_rt::RequestCancellation,
     ) -> Result<(), AppError> {

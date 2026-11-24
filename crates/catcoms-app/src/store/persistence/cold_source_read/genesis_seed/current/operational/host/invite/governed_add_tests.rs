@@ -8,9 +8,8 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         layout: &V2CurrentLayoutStore,
         packet: &catcoms_sync::V2JoinRequestPacketData<'_>,
         routing_plan: &[u8],
-        keys: &NativeFounderKeys,
+        (keys, negative): (&NativeFounderKeys, &RequestCancellation),
         rng: &mut impl catcoms_rt::CryptoRngCore,
-        negative: &RequestCancellation,
         mut replace_head: impl FnMut(bool),
     ) -> Result<(), AppError> {
         let (sender, receiver) = tokio::sync::watch::channel(false);
@@ -90,13 +89,16 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
     pub(in crate::store) fn cover_governed_add_fence_for_test(
         &mut self,
         layout: &V2CurrentLayoutStore,
-        packet: &catcoms_sync::V2JoinRequestPacketData<'_>,
-        replacement: &catcoms_sync::V2JoinRequestPacketData<'_>,
+        (packet, replacement): (
+            &catcoms_sync::V2JoinRequestPacketData<'_>,
+            &catcoms_sync::V2JoinRequestPacketData<'_>,
+        ),
         routing_plan: &[u8],
-        keys: &NativeFounderKeys,
-        rng: &mut impl catcoms_rt::CryptoRngCore,
-        negative: &RequestCancellation,
-        cuts: [catcoms_rt::NativeChatPreparedKeyCut; 3],
+        (keys, cuts): (
+            &NativeFounderKeys,
+            [catcoms_rt::NativeChatPreparedKeyCut; 3],
+        ),
+        (rng, negative): (&mut impl catcoms_rt::CryptoRngCore, &RequestCancellation),
         mut inject: impl FnMut(&str, bool),
     ) -> Result<(), AppError> {
         use crate::store::persistence::v2_text::{
@@ -209,7 +211,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
             .authenticate_outcome(store, owner.source())
             .is_err());
         inject("text.add.outcome.v2", false);
-        self.execute_governed_add_sdk(layout, packet, routing_plan, keys, cuts, rng, negative)?;
+        self.execute_governed_add_sdk(layout, packet, routing_plan, (keys, cuts), rng, negative)?;
         let original = self.governed_add.as_mut().ok_or_else(refused)?;
         let resources = original.parent.resources().clone();
         let selected = original.parent.selected_data().ok_or_else(refused)?;
@@ -303,17 +305,17 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
                            selected: &SelectedV2TextHead| {
             let mut reader = read_fence(fence, owner, selected)?;
             reader.prepare_outcome_read(store, owner.source())?;
-            store.with_v2_text_current(&owner, |admission| {
+            store.with_v2_text_current(owner, |admission| {
                 let guard = store.lock_v2_text_current_group(admission, &resources)?;
                 reader.capture_outcome(&guard, selected)
             })?;
             reader.authenticate_outcome(store, owner.source())?;
-            store.with_v2_text_current(&owner, |admission| {
+            store.with_v2_text_current(owner, |admission| {
                 let guard = store.lock_v2_text_current_group(admission, &resources)?;
                 reader.capture_header(&guard, selected)
             })?;
             reader.authenticate_header(store, owner.source())?;
-            store.with_v2_text_current(&owner, |admission| {
+            store.with_v2_text_current(owner, |admission| {
                 let guard = store.lock_v2_text_current_group(admission, &resources)?;
                 reader.capture_governing_record(&guard, selected)
             })?;

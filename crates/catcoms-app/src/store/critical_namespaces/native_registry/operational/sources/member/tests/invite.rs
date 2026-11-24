@@ -262,7 +262,6 @@ async fn cold_native_founder_reuses_the_covered_source_and_listener() {
     use crate::store::critical_namespaces::native_registry::preparation::tests::{
         current_policy, SECRET,
     };
-    use catcoms_rt::MeshTransport as _;
     use rand_core::SeedableRng;
     let dir = tempfile::tempdir().unwrap();
     let (vault, budget) = selected_joined(dir.path());
@@ -1429,8 +1428,6 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 .sign_member_contact(&selection, &fresh)
                 .unwrap()
         });
-        drop(receive);
-        drop(serve);
         drop(requests);
         let capture = || {
             owner.capture_member(
@@ -2516,8 +2513,6 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
         assert!(recovered_row().select_registered(&fresh).is_err());
     };
     {
-        drop(receive);
-        drop(serve);
         drop(requests);
         let mut retirement = owner.prepare_retirement().unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(8), async {
@@ -2896,7 +2891,6 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 prepare_save(&mut original, &mut founder_rng).unwrap(),
                 V2MemberSaveOutcome::Saved { action, ordinal }
             );
-            drop(prepare_save);
             native_owner.close();
             assert!(original
                 .finish_member_save(
@@ -3970,13 +3964,10 @@ async fn native_governed_add_fixture(case: JoinCase) {
         .host_for_governed_add_test()
         .cover_governed_add_fence_for_test(
             runtime.work.current_for_governed_add_test(),
-            &packet,
-            &replacement,
+            (&packet, &replacement),
             &route,
-            &job.inner.keys,
-            runtime.rng.as_mut().unwrap(),
-            &negative,
-            cuts,
+            (&job.inner.keys, cuts),
+            (runtime.rng.as_mut().unwrap(), &negative),
             |name, present| {
                 if name == "invite.raw.v1" {
                     if present {
@@ -4114,9 +4105,8 @@ async fn native_governed_add_fixture(case: JoinCase) {
                 runtime.work.current_for_governed_add_test(),
                 &packet,
                 &route,
-                &job.inner.keys,
+                (&job.inner.keys, &negative),
                 runtime.rng.as_mut().unwrap(),
-                &negative,
                 |replace| {
                     if replace {
                         std::fs::rename(&head, &original_head).unwrap();

@@ -89,12 +89,7 @@ fn path(
 
 fn reserve(store: &ServerStore) -> Result<CatalogReadReservation, AppError> {
     let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
-    Ok(policy
-        .current
-        .archive
-        .pending
-        .pool
-        .try_reserve(RECORD_FEE)?)
+    policy.current.archive.pending.pool.try_reserve(RECORD_FEE)
 }
 
 impl MemberAdds {
@@ -157,11 +152,9 @@ impl MemberAdds {
 
     pub(super) fn cover<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore>(
         &mut self,
-        store: &ServerStore,
-        context: V2PendingJoinContextData,
+        (store, context): (&ServerStore, V2PendingJoinContextData),
         welcome: &[u8],
-        core: &mut PreparedV2JoinedPrefix,
-        node: &mut ClosedV2JoinedNode<T, R>,
+        (core, node): (&mut PreparedV2JoinedPrefix, &mut ClosedV2JoinedNode<T, R>),
         delivery: &[u8],
         caller: &catcoms_rt::RequestCancellation,
         rng: &mut impl catcoms_rt::CryptoRngCore,
@@ -188,10 +181,13 @@ impl MemberAdds {
             .last()
             .map_or(welcome, |entry| entry.file.1.as_slice());
         header_witness::observe_live(
-            store,
-            &key,
-            context,
-            (epoch, predecessor),
+            header_witness::Scope {
+                store,
+                key: &key,
+                context,
+                epoch,
+                predecessor,
+            },
             (&mut self.first, &mut self.fork),
             (core, node),
             frame.header_data(),

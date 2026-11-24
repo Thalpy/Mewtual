@@ -1243,8 +1243,10 @@ impl SourceWork {
         driver: &mut crate::store::PreparedFreshV2TextFounder<T, R>,
         incoming: &catcoms_sync::V2JoinRequestPacketData<'_>,
         routing_plan: &[u8],
-        keys: &crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounderKeys,
-        cuts: [catcoms_rt::NativeChatPreparedKeyCut; 3],
+        signing: (
+            &crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounderKeys,
+            [catcoms_rt::NativeChatPreparedKeyCut; 3],
+        ),
         rng: &mut impl CryptoRngCore,
         negative: &catcoms_rt::RequestCancellation,
     ) -> Result<crate::store::NativeTextSavedJoinResponse, AppError> {
@@ -1252,8 +1254,7 @@ impl SourceWork {
             self.physical.current()?,
             incoming,
             routing_plan,
-            keys,
-            cuts,
+            signing,
             rng,
             negative,
         )

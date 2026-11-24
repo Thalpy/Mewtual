@@ -279,6 +279,10 @@ fn ensure_owner<'s>(
     Ok(owner)
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The save retains one bounded original source and registration inline."
+)]
 enum MemberSavePath<'a, T: MeshTransport, R: CryptoRngCore> {
     Founder(&'a mut PreparedV2TextHost<T, R>, FounderAccess<'a>),
     Joined(

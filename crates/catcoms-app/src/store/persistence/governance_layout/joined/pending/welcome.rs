@@ -66,11 +66,9 @@ impl WarmWelcome {
             .ok_or_else(denied)?;
         let welcome = self.outcome.as_ref().ok_or_else(denied)?;
         self.member_adds.cover(
-            store,
-            context,
+            (store, context),
             welcome,
-            &mut selected.core,
-            node,
+            (&mut selected.core, node),
             delivery,
             caller,
             rng,
@@ -523,11 +521,9 @@ impl RecoveredWelcome {
         let selected = Arc::get_mut(&mut outcome.selection).ok_or_else(denied)?;
         selected.initial.ok_or_else(denied)?;
         outcome.member_adds.cover(
-            store,
-            context,
+            (store, context),
             &outcome.file.1,
-            &mut selected.core,
-            node,
+            (&mut selected.core, node),
             delivery,
             caller,
             rng,

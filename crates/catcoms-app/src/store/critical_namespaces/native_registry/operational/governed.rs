@@ -132,6 +132,10 @@ impl NativeTextGovernedStorage {
 
     /// Promote the declared original on this same physical owner. A refusal
     /// retains the original continuation, including a possibly promoted file.
+    #[expect(
+        clippy::result_large_err,
+        reason = "A failed promotion returns the original declaration and all its custody."
+    )]
     pub fn into_joined(
         mut self,
         rng: &mut impl CryptoRngCore,

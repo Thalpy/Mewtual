@@ -226,8 +226,10 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
         layout: &V2CurrentLayoutStore,
         incoming: &catcoms_sync::V2JoinRequestPacketData<'_>,
         routing_plan: &[u8],
-        keys: &super::founder::NativeFounderKeys,
-        cuts: [catcoms_rt::NativeChatPreparedKeyCut; 3],
+        signing: (
+            &super::founder::NativeFounderKeys,
+            [catcoms_rt::NativeChatPreparedKeyCut; 3],
+        ),
         rng: &mut impl catcoms_rt::CryptoRngCore,
         negative: &catcoms_rt::RequestCancellation,
     ) -> Result<crate::store::NativeTextSavedJoinResponse, AppError> {
@@ -237,7 +239,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
         self.host
             .as_mut()
             .ok_or_else(refused)?
-            .handle_received_join_request(layout, incoming, routing_plan, keys, cuts, rng, negative)
+            .handle_received_join_request(layout, incoming, routing_plan, signing, rng, negative)
     }
 
     pub(in crate::store) fn encode_selected_member_add(

@@ -167,8 +167,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 invocation,
                 transport,
                 ApprovedContact::from_selected_member(peer, group, address),
-                signal,
-                mount,
+                (signal, mount),
                 fee,
                 self.original.end.ok_or(Refusal::Unavailable)?,
                 (

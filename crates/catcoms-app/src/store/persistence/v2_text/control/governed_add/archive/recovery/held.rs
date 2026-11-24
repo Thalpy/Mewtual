@@ -14,10 +14,6 @@ use crate::store::persistence::v2_text::{
 };
 use crate::store::persistence::GenesisSourceDataRef;
 use crate::store::ServerStore;
-use catcoms_mls::persist::{
-    text_current_add::TextCurrentAddLimits, TextCurrentSdkGraphReservation,
-    TextCurrentSdkRestoreAdmission, TextCurrentSdkRestoreLimits,
-};
 use catcoms_replication::chat::owner_state::transition::REPLAY_MATH_PRIVATE_INVOICE;
 use catcoms_storage::{kept::SessionId, VaultPhysicalWorkLease};
 use catcoms_sync::owner_v2::{PreparedV2FounderRecoveredAdd, V2InstalledFounderAddData};
@@ -39,17 +35,6 @@ struct ObservedHead {
     raw: OpenedTextControl,
     context: TextContextIdData,
     archive: Option<(selected_head::GovernedHeadData, PathBuf)>,
-}
-
-struct RestoredSdkPayment {
-    limits: TextCurrentSdkRestoreLimits,
-    _fee: CatalogReadReservation,
-}
-
-impl TextCurrentSdkGraphReservation for RestoredSdkPayment {
-    fn limits(&self) -> TextCurrentSdkRestoreLimits {
-        self.limits
-    }
 }
 
 impl HeldGovernedArchiveRead {
@@ -267,30 +252,4 @@ impl HeldGovernedArchiveRead {
         )?;
         guard.validate_source_only()
     }
-}
-
-pub(super) fn restore_admission(
-    store: &ServerStore,
-) -> Result<TextCurrentSdkRestoreAdmission, AppError> {
-    let limits = TextCurrentAddLimits::governed_text_v2();
-    let max_typed_bytes = limits.restore_typed_bytes + 128 * 1024;
-    let bytes = max_typed_bytes
-        + limits.max_provider_backing_bytes
-        + limits.max_provider_payload_bytes
-        + 2 * limits.max_snapshot_bytes;
-    let pool = &store
-        .archive_bootstrap_policy
-        .as_ref()
-        .ok_or_else(refused)?
-        .pending
-        .pool;
-    let fee = pool.try_reserve(bytes)?;
-    fee.validate(pool, bytes)?;
-    Ok(TextCurrentSdkRestoreAdmission::new(RestoredSdkPayment {
-        limits: TextCurrentSdkRestoreLimits {
-            max_typed_bytes,
-            max_work: limits.restore_work,
-        },
-        _fee: fee,
-    })?)
 }

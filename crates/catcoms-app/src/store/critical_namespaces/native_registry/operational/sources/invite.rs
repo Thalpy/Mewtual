@@ -79,8 +79,7 @@ impl<T: MeshTransport, R: CryptoRngCore> member::NativeTextMemberJob<T, R> {
             driver,
             packet,
             &route,
-            &inner.keys,
-            cuts,
+            (&inner.keys, cuts),
             body.rng.as_mut().ok_or(Error::Unavailable)?,
             negative,
         );

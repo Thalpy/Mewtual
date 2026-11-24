@@ -192,6 +192,10 @@ pub(in crate::store) struct OpenedMemberAdd {
     version: u16,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The bounded candidate carries the paid original transition inline through selection."
+)]
 pub(in crate::store) enum JoinedMembershipCandidate {
     Continuing(Option<PreparedV2JoinedMembership>),
     Eviction(Option<PreparedV2JoinedEviction>),
@@ -259,6 +263,10 @@ impl JoinedMembershipCandidate {
 }
 
 #[must_use = "retire the displaced joined continuation outside the host writers"]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Installing a selected transition returns its whole retired custody without allocating."
+)]
 pub(in crate::store) enum RetiredJoinedMembership {
     Continuing {
         _retired: RetiredV2JoinedAdd,

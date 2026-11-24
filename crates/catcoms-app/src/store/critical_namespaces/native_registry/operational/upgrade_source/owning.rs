@@ -13,6 +13,11 @@ enum ColdOpening {
     SelectedSharedHistory,
 }
 use super::super::super::lifecycle::network::ColdFounderSelection;
+type RecoveredFounderInput = (
+    ColdFounderSelection,
+    crate::store::RetainedBootstrapSourceData,
+    (catcoms_rt::PeerId, u16),
+);
 use crate::store::critical_namespaces::{
     native_registry::preparation::NativeRegistryHandler, pending_join_codec as grammar,
     shared_history_namespace::Opening,
@@ -445,14 +450,7 @@ impl Store {
 
     pub(in crate::store::critical_namespaces::native_registry) fn recovered_founder_input(
         &self,
-    ) -> Result<
-        Option<(
-            ColdFounderSelection,
-            crate::store::RetainedBootstrapSourceData,
-            (catcoms_rt::PeerId, u16),
-        )>,
-        AppError,
-    > {
+    ) -> Result<Option<RecoveredFounderInput>, AppError> {
         let Some(original) = self.physical.recovered_cold_founder()? else {
             return Ok(None);
         };

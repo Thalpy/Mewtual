@@ -34,8 +34,7 @@ impl PreparedGovernedAddFence {
         source: &GenesisSourceDataRef<'_>,
         preimage: &[u8],
         outcome: &V2FounderAddOutcomeData<'_>,
-        signed_header: &SignedOwnerHeader,
-        response: &V2JoinResponseData<'_>,
+        (signed_header, response): (&SignedOwnerHeader, &V2JoinResponseData<'_>),
         rng: &mut dyn CryptoRngCore,
     ) -> Result<(), AppError> {
         self.held

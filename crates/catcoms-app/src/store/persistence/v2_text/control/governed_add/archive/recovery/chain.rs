@@ -39,6 +39,10 @@ enum MembershipBody {
     Remove(RemovalBody),
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The replay invoice covers the original decoded journal inline."
+)]
 pub(super) enum RecoveredMembershipJournal {
     Add(RecoveredAddJournal),
     Remove(Zeroizing<Vec<u8>>),

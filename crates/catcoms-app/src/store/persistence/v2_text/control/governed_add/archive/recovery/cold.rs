@@ -57,6 +57,10 @@ pub(in crate::store) struct HeldColdFounderAdd {
     _fee: CatalogReadReservation,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The founder archive read prepays one whole recovered selection inline."
+)]
 enum ColdRecoveredArchive {
     First(RecoveredGovernedAdd),
     Later(RecoveredArchiveChain),
@@ -631,7 +635,7 @@ impl HeldColdFounderAdd {
             header: head.header,
             state: head.state,
         };
-        let admission = super::held::restore_admission(store)?;
+        let admission = restore_admission(store)?;
         let restored = match &self.recovered {
             ColdRecoveredArchive::First(first) => {
                 PreparedV2FounderRecoveredAdd::restore_from_bootstrap(

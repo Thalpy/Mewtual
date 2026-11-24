@@ -388,6 +388,10 @@ pub(in crate::store) enum FounderDebtOperation {
     Checkpoint(MemberDebtBatch),
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The paid publication handoff moves the original submission inline."
+)]
 pub(in crate::store) enum FounderDebtOutcome {
     Idle,
     Prepared {
@@ -445,6 +449,10 @@ impl NativeTextFounderReceived {
     }
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The receive result moves one paid dependency exchange inline."
+)]
 pub enum NativeTextFounderFrameOutcome {
     Retained(NativeTextFounderReceived),
     NeedsDependency(NativeTextFounderDependencyExchange),

@@ -79,7 +79,18 @@ pub struct NativeTextColdFounderSource {
     index: Option<Store>,
 }
 
+type RecoveredFounderNativeSources<R> = (
+    crate::store::NativeTextVault,
+    crate::store::NativeTextSources<catcoms_net::MeshService, R>,
+    crate::store::NativeTextRuntimeSelection<catcoms_net::MeshService, R>,
+    crate::store::NativeTextVaultAuthenticationCheck,
+);
+
 impl NativeTextJoinedStorage {
+    #[expect(
+        clippy::result_large_err,
+        reason = "The original storage owner returns intact on refusal."
+    )]
     pub fn prepare_recovered_founder(
         self,
     ) -> Result<NativeTextColdFounderSource, (Self, AppError)> {
@@ -222,15 +233,7 @@ impl NativeTextColdFounderSource {
         secret: &[u8],
         inputs: crate::store::NativeTextCreationInputs<R>,
         caller: &RequestCancellation,
-    ) -> Result<
-        (
-            crate::store::NativeTextVault,
-            crate::store::NativeTextSources<catcoms_net::MeshService, R>,
-            crate::store::NativeTextRuntimeSelection<catcoms_net::MeshService, R>,
-            crate::store::NativeTextVaultAuthenticationCheck,
-        ),
-        AppError,
-    > {
+    ) -> Result<RecoveredFounderNativeSources<R>, AppError> {
         let vault = self.take_native_vault(atoms, ui_budget.clone(), caller)?;
         let authentication = vault
             .prepare_native_authentication(ui_budget.prepare()?)

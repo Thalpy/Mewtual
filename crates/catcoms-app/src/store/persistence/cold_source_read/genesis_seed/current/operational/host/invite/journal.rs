@@ -295,20 +295,15 @@ impl InviteIntentJournal {
         route: &[u8],
     ) -> Result<Option<([u8; 32], u64)>, AppError> {
         self.bind(guard)?;
-        if self.intent.is_some() {
-            self.intent.as_ref().unwrap().result(request, route)?;
+        if let Some(intent) = &self.intent {
+            let result = intent.result(request, route)?;
             if !self.covered && !self.loaded {
                 return Ok(None);
             }
             self.object
                 .sync(self.pages.as_ref().ok_or_else(refused)?, &self.names.intent)?;
             self.covered = true;
-            return self
-                .intent
-                .as_ref()
-                .unwrap()
-                .result(request, route)
-                .map(Some);
+            return Ok(Some(result));
         }
         if self.observed_absent {
             return Ok(None);

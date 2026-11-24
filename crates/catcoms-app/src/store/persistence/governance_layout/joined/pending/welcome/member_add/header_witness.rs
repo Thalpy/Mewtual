@@ -34,12 +34,12 @@ impl HeaderWitness {
     }
 }
 
-struct Scope<'a> {
-    store: &'a ServerStore,
-    key: &'a [u8; 32],
-    context: V2PendingJoinContextData,
-    epoch: u64,
-    predecessor: &'a [u8],
+pub(super) struct Scope<'a> {
+    pub(super) store: &'a ServerStore,
+    pub(super) key: &'a [u8; 32],
+    pub(super) context: V2PendingJoinContextData,
+    pub(super) epoch: u64,
+    pub(super) predecessor: &'a [u8],
 }
 
 impl Scope<'_> {
@@ -126,23 +126,14 @@ impl Scope<'_> {
 }
 
 pub(super) fn observe_live<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore>(
-    store: &ServerStore,
-    key: &[u8; 32],
-    context: V2PendingJoinContextData,
-    (epoch, predecessor): (u64, &[u8]),
+    scope: Scope<'_>,
     (first, fork): (&mut Option<HeaderWitness>, &mut Option<HeaderWitness>),
     (core, node): (&mut PreparedV2JoinedPrefix, &ClosedV2JoinedNode<T, R>),
     header: &SignedOwnerHeader,
     require_live: &impl Fn() -> Result<(), AppError>,
     rng: &mut impl catcoms_rt::CryptoRngCore,
 ) -> Result<(), AppError> {
-    let scope = Scope {
-        store,
-        key,
-        context,
-        epoch,
-        predecessor,
-    };
+    let store = scope.store;
     let conflict_path = scope.path(true)?;
     absent(&conflict_path)?;
     if let Some(original) = first {

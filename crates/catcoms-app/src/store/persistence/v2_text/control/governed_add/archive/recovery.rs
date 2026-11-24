@@ -1,10 +1,17 @@
 //! Authenticate the complete original transition outside writers. The
 //! recovered snapshot still needs independent SDK restore and Head2 reproof.
 use super::*;
-use crate::store::critical_namespaces::archive_current_codec::GenesisPublicData;
+use crate::store::critical_namespaces::{
+    archive_current_codec::GenesisPublicData, read_pool::CatalogReadReservation,
+};
 use crate::store::persistence::v2_text::{
     archive::TextArchiveData,
     head::{TextHeadData, TextPendingData},
+};
+use crate::store::ServerStore;
+use catcoms_mls::persist::{
+    text_current_add::TextCurrentAddLimits, TextCurrentSdkGraphReservation,
+    TextCurrentSdkRestoreAdmission, TextCurrentSdkRestoreLimits,
 };
 use catcoms_replication::chat::{
     owner_header::SignedOwnerHeader,
@@ -22,6 +29,41 @@ mod held;
 pub(in crate::store) use cold::{HeldColdFounderAdd, HeldColdFounderGenesis};
 #[cfg(all(test, any(windows, target_os = "linux")))]
 pub(in crate::store) use held::HeldGovernedArchiveRead;
+
+struct RestoredSdkPayment {
+    limits: TextCurrentSdkRestoreLimits,
+    _fee: CatalogReadReservation,
+}
+
+impl TextCurrentSdkGraphReservation for RestoredSdkPayment {
+    fn limits(&self) -> TextCurrentSdkRestoreLimits {
+        self.limits
+    }
+}
+
+fn restore_admission(store: &ServerStore) -> Result<TextCurrentSdkRestoreAdmission, AppError> {
+    let limits = TextCurrentAddLimits::governed_text_v2();
+    let max_typed_bytes = limits.restore_typed_bytes + 128 * 1024;
+    let bytes = max_typed_bytes
+        + limits.max_provider_backing_bytes
+        + limits.max_provider_payload_bytes
+        + 2 * limits.max_snapshot_bytes;
+    let pool = &store
+        .archive_bootstrap_policy
+        .as_ref()
+        .ok_or_else(refused)?
+        .pending
+        .pool;
+    let fee = pool.try_reserve(bytes)?;
+    fee.validate(pool, bytes)?;
+    Ok(TextCurrentSdkRestoreAdmission::new(RestoredSdkPayment {
+        limits: TextCurrentSdkRestoreLimits {
+            max_typed_bytes,
+            max_work: limits.restore_work,
+        },
+        _fee: fee,
+    })?)
+}
 
 pub(in crate::store) struct RecoveredGovernedAdd {
     pub(in crate::store) request: Zeroizing<Vec<u8>>,
