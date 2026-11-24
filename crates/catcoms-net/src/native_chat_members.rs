@@ -1,4 +1,11 @@
 //! One bounded ordinary-member gossip receiver on the original native mesh.
+catcoms_rt::redacted_debug! {
+    NativeChatMemberIngress;
+    NativeChatMemberGossip;
+    NativeChatMemberGossipEvent;
+    NativeChatMemberFrame;
+}
+
 use std::sync::{Arc, Weak};
 
 use bytes::Bytes;

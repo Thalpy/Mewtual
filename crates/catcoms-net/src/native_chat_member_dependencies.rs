@@ -1,4 +1,11 @@
 //! Bounded connected dependency requests under the original native mesh and lease.
+catcoms_rt::redacted_debug! {
+    NativeChatMemberDependencies;
+    NativeChatMemberDependencyRequests;
+    NativeChatMemberDependencyIncoming;
+    NativeChatMemberDependencyExchange;
+}
+
 use super::native_chat_join::{NativeChatJoinIngress, NativeChatJoinRequests};
 use super::native_chat_members::NativeChatMemberFrameObservation;
 use super::{connection_leases, Command, RR_PROTOCOL};

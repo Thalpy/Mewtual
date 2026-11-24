@@ -1,4 +1,8 @@
 //! A closed SDK candidate restored from the exact authenticated Add archive.
+catcoms_rt::redacted_debug! {
+    PreparedV2FounderRecoveredAdd;
+}
+
 use super::*;
 use catcoms_crypto::DeviceId;
 use catcoms_mls::persist::{restore_server_text_current_bounded, TextCurrentSdkRestoreAdmission};

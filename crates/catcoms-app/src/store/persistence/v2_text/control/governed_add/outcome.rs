@@ -197,6 +197,7 @@ pub(in crate::store::persistence::v2_text) fn open_outcome_data(
 }
 
 /// Call only on the plaintext of the authenticated exact held Outcome.
+#[cfg(all(test, any(windows, target_os = "linux")))]
 pub(super) fn header_signing_bytes<'a>(
     entry: &[u8],
     plain: &'a [u8],

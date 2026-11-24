@@ -1,4 +1,10 @@
 //! Bind one received session to the exact native founder runtime and mesh.
+catcoms_rt::redacted_debug! {
+    [R: CryptoRngCore] NativeTextFounderMemberIngressPreparation<R>;
+    [R: CryptoRngCore] NativeTextFounderMemberReceiver<R>;
+    [R: CryptoRngCore] NativeTextFounderDependencyProvider<R>;
+}
+
 use super::*;
 use crate::store::persistence::v2_member_transport::{
     FounderReceiveOperation, FounderReceiveOutcome, FounderReceiveSession,

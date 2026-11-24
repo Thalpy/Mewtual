@@ -1,4 +1,8 @@
 //! One explicitly approved connection on an existing joined actor.
+catcoms_rt::redacted_debug! {
+    NativeTextJoinedReconnect;
+}
+
 use super::*;
 use catcoms_discovery::EndpointDialScheduler;
 use std::net::IpAddr;

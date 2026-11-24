@@ -111,6 +111,151 @@ enum MountedSuccessor {
     OfflineDelivery,
     Remove,
 }
+
+#[test]
+fn mounted_founder_reopens_at_the_governing_epoch_limit() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(founder_epoch_limit_fixture());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+async fn founder_epoch_limit_fixture() {
+    use super::super::super::tests::selected_joined;
+    use crate::store::critical_namespaces::native_registry::preparation::tests::{
+        current_policy, SECRET,
+    };
+    use catcoms_sync::{DirectJoinLimits, PreparedV2JoinRequest, MAX_V2_GOVERNING_JOIN_STEPS};
+
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, budget) = selected_joined(dir.path());
+    let (owner, row) = activate(
+        prepared_mesh_founder_with_clock(
+            &vault,
+            &budget,
+            0xe729,
+            Box::new(catcoms_rt::SystemClock),
+        ),
+        &vault,
+        &budget,
+    );
+    let (_owner, lifetime) = tokio::sync::watch::channel(false);
+    let caller = RequestCancellation::new(lifetime, None);
+    let capture = || {
+        owner.capture_member(
+            &row,
+            command(&vault, &budget),
+            owner.policy.prepare_member().unwrap(),
+        )
+    };
+
+    let add = |index: u8| {
+        let before = capture().governed_roster(&caller).unwrap();
+        let invite = capture()
+            .finish()
+            .unwrap()
+            .save_invite([index; 32], 60_000, &caller)
+            .unwrap();
+        let packet =
+            crate::store::NativeTextInvitePacketData::decode(invite.packet_bytes_data()).unwrap();
+        let request = PreparedV2JoinRequest::prepare(
+            catcoms_mls::MlsDevice::generate().unwrap(),
+            &packet.binding().spec_data().anchor,
+            packet.binding(),
+            [index + 64; 32],
+            invite.expires_at_ms() - 1,
+            DirectJoinLimits::new(512 * 1024, 512 * 1024, 64 * 1024).unwrap(),
+        )
+        .unwrap();
+        capture()
+            .accept_join_request(request.request_bytes_data(), &caller)
+            .unwrap_or_else(|error| panic!("native Add {index} failed: {error:?}"));
+        let after = capture().governed_roster(&caller).unwrap();
+        let mut joined = after.members().iter().filter(|entry| {
+            !before
+                .members()
+                .iter()
+                .any(|original| original.admission == entry.admission)
+        });
+        let admission = joined
+            .next()
+            .expect("the selected Add introduces an admission")
+            .admission;
+        assert!(joined.next().is_none());
+        admission
+    };
+
+    let limit = MAX_V2_GOVERNING_JOIN_STEPS as u64;
+    for index in 1..=(limit as u8 - 4) / 2 {
+        let joined = add(index);
+        let (_, epoch) = capture()
+            .remove_governed_admission(joined, &caller)
+            .unwrap();
+        assert_eq!(epoch, 2 * u64::from(index));
+    }
+    let retained = add(limit as u8 / 2 - 1);
+    add(limit as u8 / 2);
+    let removed = add(limit as u8 / 2 + 1);
+    let at_limit = capture()
+        .remove_governed_admission(removed, &caller)
+        .unwrap();
+    assert_eq!(at_limit.1, limit);
+    let selected = only_named(dir.path(), "text.add.response.v2").with_file_name("head.bin");
+    let names = || {
+        std::fs::read_dir(selected.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let before = names();
+    let head = std::fs::read(&selected).unwrap();
+    assert!(capture()
+        .remove_governed_admission(retained, &caller)
+        .is_err());
+    assert_eq!(
+        names(),
+        before,
+        "refusal leaves every successor stage absent"
+    );
+    assert_eq!(std::fs::read(&selected).unwrap(), head);
+    assert_eq!(
+        capture().governed_roster(&caller).unwrap().members().len(),
+        3
+    );
+
+    let mut retirement = owner.prepare_retirement().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        while retirement.try_retire().unwrap()
+            == crate::store::NativeTextSourceRetirementStatus::Pending
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    drop((retirement, row, owner, vault));
+    let storage = crate::store::NativeTextJoinedStorage::open_for_native_startup(
+        dir.path(),
+        SECRET,
+        &mut catcoms_rt::OsCryptoRng,
+        current_policy(),
+    )
+    .unwrap();
+    let mut recovered = storage
+        .prepare_recovered_founder()
+        .map_err(|(_, error)| error)
+        .unwrap();
+    assert_eq!(recovered.restore_first_add(&caller).unwrap(), at_limit);
+}
+
 #[tokio::test]
 async fn cold_native_founder_reuses_the_covered_source_and_listener() {
     use super::super::super::tests::selected_joined;

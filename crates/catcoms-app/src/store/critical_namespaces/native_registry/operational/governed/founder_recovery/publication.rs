@@ -1,4 +1,9 @@
 //! Exact saved founder debt and its real acknowledgement across a restart.
+catcoms_rt::redacted_debug! {
+    NativeTextColdFounderPublication;
+    NativeTextColdFounderPublicationReceipt;
+}
+
 use super::*;
 use crate::store::persistence::native_registry::network::NetworkDependency;
 use crate::store::persistence::v2_member_outbox::{

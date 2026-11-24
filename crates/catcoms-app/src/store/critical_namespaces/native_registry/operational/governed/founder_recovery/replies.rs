@@ -1,4 +1,11 @@
 //! Return the original covered Welcome through this same recovered TCP actor.
+catcoms_rt::redacted_debug! {
+    NativeTextColdFounderJoinRequests;
+    NativeTextColdFounderJoinRequest;
+    NativeTextColdFounderGoverningRequests;
+    NativeTextColdFounderGoverningRequest;
+}
+
 use super::*;
 use catcoms_net::{MeshService, NativeChatJoinIngress, NativeChatJoinRequests};
 use catcoms_rt::{

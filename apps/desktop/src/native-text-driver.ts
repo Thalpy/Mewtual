@@ -51,12 +51,12 @@ export function createNativeTextDriver(deps: NativeTextDriverDependencies) {
   async function dispatch(intent: ActionIntent): Promise<NativeSavedMessage | { disposition: "uncertain" } | null> {
     if (!await prepare(intent) || !ready(intent)) return null;
     const common = { server: intent.server, channel: intent.channel, expectedContext: intent.expectedContext, retryToken: intent.token };
+    const mutation = intent.kind === "create" ? null : { messageId: intent.messageId, expectedRevision: intent.expectedRevision };
     const result = intent.kind === "create"
       ? await deps.invoke("send_message", { ...common, text: intent.text, replyTo: intent.replyTo ?? null })
-      : await deps.invoke(intent.kind === "edit" ? "edit_message" : "delete_message", {
-        ...common, messageId: intent.messageId, expectedRevision: intent.expectedRevision,
-        ...(intent.kind === "edit" ? { text: intent.text } : {}),
-      });
+      : intent.kind === "edit"
+        ? await deps.invoke("edit_message", { ...common, ...mutation, text: intent.text })
+        : await deps.invoke("delete_message", { ...common, ...mutation });
     if (!deps.current()) return null;
     const response = object(result);
     if (response.backend !== "text-v2" || response.retry_token !== intent.token) throw new Error("The message reply could not be confirmed. Retry the same message.");

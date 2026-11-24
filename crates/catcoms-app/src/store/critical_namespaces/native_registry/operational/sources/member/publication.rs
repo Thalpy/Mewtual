@@ -1,4 +1,9 @@
 //! Native founder publication of the original durable ordinary outbox debt.
+catcoms_rt::redacted_debug! {
+    [T: MeshTransport, R: CryptoRngCore] NativeTextFounderMemberPublication<T, R>;
+    [T: MeshTransport, R: CryptoRngCore] NativeTextFounderMemberPublicationReceipt<T, R>;
+}
+
 use super::*;
 use crate::store::persistence::v2_member_outbox::MemberDebtBatch;
 use crate::store::persistence::v2_member_transport::{FounderDebtOperation, FounderDebtOutcome};

@@ -1,4 +1,8 @@
 //! One selected warm join with its original private graph and transport.
+catcoms_rt::redacted_debug! {
+    [T: MeshTransport, R: CryptoRngCore] NativeTextJoinedRuntime<T, R>;
+}
+
 use super::super::join_tcp;
 use super::*;
 use crate::store::persistence::governance_layout::joined::JoinedRuntimeInputs;

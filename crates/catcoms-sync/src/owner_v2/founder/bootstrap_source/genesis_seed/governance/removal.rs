@@ -1,4 +1,11 @@
 //! Exclusive founder Remove on the original selected Core and MLS parent.
+catcoms_rt::redacted_debug! {
+    V2FounderRemoveOutcomeData<'_>;
+    V2FounderRemoveSigning<'_>;
+    PreparedV2FounderRemoveInstall<'_>;
+    RetiredV2FounderRemoveInstall;
+}
+
 use super::*;
 use catcoms_mls::group::text_current_add::{
     CompletedTextCurrentRemoveData, PreparedTextCurrentRemove,

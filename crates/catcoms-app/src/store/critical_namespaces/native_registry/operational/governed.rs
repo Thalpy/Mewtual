@@ -1,5 +1,9 @@
 //! Explicit governed cold storage, with no signer/Source/native command or
 //! facade conversion. Operational cold authoring needs its separate owner.
+catcoms_rt::redacted_debug! {
+    NativeTextJoinedStorage;
+}
+
 use super::super::lifecycle::preparation::Policy;
 use super::*;
 use crate::store::persistence::governance_layout::joined::{
@@ -170,6 +174,7 @@ impl NativeTextJoinedStorage {
         )
     }
 
+    #[cfg(test)]
     pub(in crate::store) fn open_selected_shared_history(
         dir: impl AsRef<std::path::Path>,
         secret: &[u8],

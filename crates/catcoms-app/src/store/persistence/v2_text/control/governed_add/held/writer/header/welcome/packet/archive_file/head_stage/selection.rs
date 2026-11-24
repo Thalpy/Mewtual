@@ -26,7 +26,7 @@ impl PreparedGovernedAddFence {
         guard.require_governed_native_invite_parent()?;
         guard.require_text_control_io_quiescent()?;
         let parent = selected.physical_query_data();
-        let (target, directory, id) = guard.target_directory_data();
+        let (target, _, id) = guard.target_directory_data();
         if parent.target != target || parent.target_id != id {
             return Err(refused());
         }

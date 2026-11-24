@@ -1,6 +1,12 @@
 //! One exact dependency request under the current group channel exporter.
 //! The connected route is bound into the request. Neither a request nor a
 //! response grants a current view, historical acceptance, or global absence.
+catcoms_rt::redacted_debug! {
+    V2FounderMemberDependencyAccess<'_>;
+    PreparedV2MemberDependencyRequest;
+    OpenedV2MemberDependencyRequest;
+}
+
 use super::member_envelope::member_exporter_key;
 use super::{
     open_v2_member_envelope_data, seal_v2_member_envelope_data, OpenedV2MemberEnvelopeData,

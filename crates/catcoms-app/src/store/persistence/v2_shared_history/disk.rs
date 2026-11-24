@@ -53,6 +53,7 @@ impl SharedHistoryDiskQuota {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn new(records: usize, bytes: usize) -> Result<Self, AppError> {
         if !(1..=MAX_RECORDS_PER_DIRECTORY).contains(&records) || bytes <= SELECTOR_BYTES {
             return Err(refused());
@@ -181,13 +182,14 @@ impl SharedHistoryDisk {
         if observe(&self.directory.child(WAL_NAME))? == Presence::Present {
             return Err(refused());
         }
-        let Some((selected, admission, original)) = self.read_selected(key, action)? else {
+        let Some((_selected, admission, original)) = self.read_selected(key, action)? else {
             self.directory.require()?;
             return Ok(None);
         };
         self.directory.require()?;
         Ok(Some(SavedSharedOriginal {
-            selected,
+            #[cfg(test)]
+            selected: _selected,
             admission,
             original,
             _payment: payment,
@@ -681,6 +683,7 @@ pub(in crate::store) fn fail_next_history_wal_write_for_test() {
 }
 
 pub(in crate::store) struct SavedSharedOriginal {
+    #[cfg(test)]
     pub(in crate::store::persistence) selected: SelectedHistoryRecord,
     pub(in crate::store) admission: OwnerFactId,
     pub(in crate::store) original: AssembledActionOriginal,

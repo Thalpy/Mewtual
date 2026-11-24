@@ -1,4 +1,11 @@
 //! Fetch and apply the exact next governing change on an existing joined row.
+catcoms_rt::redacted_debug! {
+    NativeTextJoinedGoverningExchange;
+    NativeTextJoinedGoverningResponse;
+    NativeTextJoinedGoverningProvider;
+    NativeTextJoinedGoverningIncoming;
+}
+
 use super::dependencies::{ReplyPayment, ScopeAuthority};
 use super::*;
 use crate::store::critical_namespaces::native_registry::operational::governed::JOIN_PROTOCOL;

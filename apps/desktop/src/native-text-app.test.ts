@@ -211,11 +211,12 @@ test("joining with an approved recovery preview starts history after the join re
   await app.nativeJoin();
   assert.deepEqual(app.nativeJoinCalls().map((call: { command: string }) => call.command), ["preview_invite"]);
   assert.equal(app.state().nativeHistoryCalls.length, 0);
+  app.nativeHistory(new Error("Chat history is busy. Try again."));
   await app.nativeJoin();
   assert.deepEqual(app.nativeJoinCalls().map((call: { command: string }) => call.command), ["preview_invite", "join_server"]);
   assert.equal(app.nativeJoinCalls()[1].args.approvedHost, "127.0.0.1");
   assert.equal(app.state().activeServerId, 7);
-  assert.equal(app.state().nativeHistoryCalls[0].expectedContext, context);
+  assert.deepEqual(app.state().nativeHistoryCalls.map((call: { expectedContext: string }) => call.expectedContext), [context, context]);
   assert.equal(app.state().nativeHistoryLoaded, true);
   app.done();
 });

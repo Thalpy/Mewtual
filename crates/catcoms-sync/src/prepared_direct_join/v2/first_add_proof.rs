@@ -1,4 +1,10 @@
 //! The bounded public genesis and first Add records needed by a new joiner.
+catcoms_rt::redacted_debug! {
+    V2AdmissionStepData<'_>;
+    PreparedV2JoinedPrefix;
+    V2FirstJoinDeliveryData<'_>;
+}
+
 use super::*;
 use catcoms_replication::chat::{
     cold_records::{encode_header_row, HeaderRow, MAX_HEADER_ROW_BYTES},

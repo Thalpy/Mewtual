@@ -643,7 +643,7 @@ pub(super) fn validate_pinned_delivery_data(
     Ok(())
 }
 
-pub(super) fn matches_welcome_roster(group: &ServerGroup, state: &StateFrame) -> bool {
+pub(super) fn matches_welcome_roster(group: &ServerGroup, state: &StateFrame<'_>) -> bool {
     group.member_count() == state.slots().len()
         && state.slots().all(|slot| {
             group

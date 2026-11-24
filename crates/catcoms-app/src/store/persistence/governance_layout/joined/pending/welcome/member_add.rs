@@ -420,14 +420,14 @@ fn install_transition<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore
         JoinedMembershipCandidate::Continuing(candidate) => {
             let retired =
                 node.install_host_selected_membership(core, candidate, &expected, selected)?;
-            Ok(RetiredJoinedMembership::Continuing(retired))
+            Ok(RetiredJoinedMembership::Continuing { _retired: retired })
         }
         JoinedMembershipCandidate::Eviction(candidate) => {
             let retired =
                 node.install_host_selected_eviction(core, candidate, &expected, selected)?;
             Ok(RetiredJoinedMembership::Evicted {
                 terminal: (head, selected.0),
-                retired,
+                _retired: retired,
             })
         }
     }

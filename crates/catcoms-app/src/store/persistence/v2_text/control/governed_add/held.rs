@@ -85,8 +85,13 @@ pub(super) fn require_successor_stages_absent(
     Ok(())
 }
 
+// Read-only inspectors exercise interrupted stages without turning a cold
+// observation into authority to resume MLS or signing.
+#[cfg(all(test, any(windows, target_os = "linux")))]
 mod header_read;
+#[cfg(all(test, any(windows, target_os = "linux")))]
 mod outcome_read;
+#[cfg(all(test, any(windows, target_os = "linux")))]
 pub(in crate::store) use header_read::{
     GovernedAddHeaderRecoveryState, GovernedAddWelcomeRecoveryState,
 };
@@ -107,9 +112,13 @@ pub(in crate::store) struct HeldGovernedAddFence {
     governing_path: PathBuf,
     welcome_paths: WelcomeControlPaths,
     original: Option<OpenedTextControl>,
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     request: Option<ObservedRequest>,
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     entry: Option<ObservedSdkEntry>,
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     outcome: Option<outcome_read::ObservedOutcome>,
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     header: Option<header_read::ObservedHeader>,
     parent: (TextContextIdData, TextHeadIdData),
     expected: Option<GovernedAddFenceData>,
@@ -122,11 +131,13 @@ pub(in crate::store) struct HeldGovernedAddFence {
     _fee: CatalogReadReservation,
 }
 
+#[cfg(all(test, any(windows, target_os = "linux")))]
 enum ObservedSdkEntry {
     Absent,
     Present(OpenedTextControl),
 }
 
+#[cfg(all(test, any(windows, target_os = "linux")))]
 struct ObservedRequest {
     original: Option<OpenedTextControl>,
     packet: Option<Zeroizing<Vec<u8>>>,
@@ -165,6 +176,7 @@ impl WelcomeControlPaths {
 
 /// Historical disk status for the exact reservation. Even ReservationOnly
 /// requires separate proofs of all downstream absences before disposal.
+#[cfg(all(test, any(windows, target_os = "linux")))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::store) enum GovernedAddRecoveryState {
     ReservationOnly,
@@ -212,6 +224,7 @@ impl HeldGovernedAddFence {
 
     /// Prepare outside Current. Keep this whole receiver outside the writers
     /// through capture and any late refusal, so its file and lease drain there.
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store::persistence::v2_text) fn prepare(
         store: &ServerStore,
         source: &GenesisSourceDataRef<'_>,
@@ -276,9 +289,13 @@ impl HeldGovernedAddFence {
             governing_path: path(governing_record::NAME)?,
             welcome_paths,
             original: None,
+            #[cfg(all(test, any(windows, target_os = "linux")))]
             request: None,
+            #[cfg(all(test, any(windows, target_os = "linux")))]
             entry: None,
+            #[cfg(all(test, any(windows, target_os = "linux")))]
             outcome: None,
+            #[cfg(all(test, any(windows, target_os = "linux")))]
             header: None,
             parent,
             expected,
@@ -290,6 +307,7 @@ impl HeldGovernedAddFence {
         })
     }
 
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store) fn capture(
         &mut self,
         guard: &V2TextCurrentGroupGuard<'_, '_>,
@@ -318,6 +336,7 @@ impl HeldGovernedAddFence {
 
     /// Outside Current. MAC success becomes usable only after a fresh check
     /// of the same original, named bytes and selected parent.
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store) fn authenticate(
         &mut self,
         store: &ServerStore,
@@ -364,6 +383,7 @@ impl HeldGovernedAddFence {
         guard.validate_source_only()
     }
 
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store) fn require_recovery_state(
         &mut self,
         guard: &V2TextCurrentGroupGuard<'_, '_>,
@@ -390,6 +410,7 @@ impl HeldGovernedAddFence {
         Ok(state)
     }
 
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store) fn require_request_current(
         &mut self,
         guard: &V2TextCurrentGroupGuard<'_, '_>,

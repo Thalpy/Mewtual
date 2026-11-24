@@ -46,6 +46,7 @@ COHORTS = {
     "mounted-join-request": ("catcoms-app", "mounted_join_request_", 3),
     "mounted-governing": ("catcoms-app", "mounted_join_request_applies_the_next_governing_add_under_its_original_row", 1),
     "mounted-removal": ("catcoms-app", "mounted_native_remove_retires_the_exact_joined_row_and_preserves_the_survivor", 1),
+    "governing-epoch-limit": ("catcoms-app", "mounted_founder_reopens_at_the_governing_epoch_limit", 1),
     "cold-founder-source": ("catcoms-app", "cold_native_founder_reuses_the_covered_source_and_listener", 1),
     "joined-registry-codec": ("catcoms-app", "native_birth_discriminant_preserves_all_existing_encodings_and_uses_four", 1),
     "member-outbox-admission": ("catcoms-app", "admission_must_name_the_exact_prepared_facts_and_returns_everything_when_refused", 1),

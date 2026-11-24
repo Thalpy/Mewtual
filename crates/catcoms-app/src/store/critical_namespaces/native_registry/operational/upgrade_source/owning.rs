@@ -9,6 +9,7 @@ enum ColdOpening {
     Joined,
     IdleJoined,
     NativeStartup,
+    #[cfg(test)]
     SelectedSharedHistory,
 }
 use super::super::super::lifecycle::network::ColdFounderSelection;
@@ -686,6 +687,7 @@ impl Store {
         )
     }
 
+    #[cfg(test)]
     pub(in crate::store::critical_namespaces::native_registry) fn open_selected_shared_history(
         dir: impl AsRef<std::path::Path>,
         passphrase: &[u8],
@@ -724,6 +726,7 @@ impl Store {
             handler = handler.with_joined_pin_layout();
         }
         match opening {
+            #[cfg(test)]
             ColdOpening::SelectedSharedHistory => {
                 handler = handler.with_shared_history_layout(Opening::Required)
             }
@@ -754,11 +757,11 @@ impl Store {
         let joined = match (opening, count) {
             (ColdOpening::IdleJoined, 0) => JoinedPinOpening::Idle,
             (ColdOpening::NativeStartup, 0) => JoinedPinOpening::NativeWithoutRow,
-            (ColdOpening::NativeStartup, 1)
-            | (
-                ColdOpening::Governed | ColdOpening::Joined | ColdOpening::SelectedSharedHistory,
-                _,
-            ) => JoinedPinOpening::Any,
+            (ColdOpening::NativeStartup, 1) | (ColdOpening::Governed | ColdOpening::Joined, _) => {
+                JoinedPinOpening::Any
+            }
+            #[cfg(test)]
+            (ColdOpening::SelectedSharedHistory, _) => JoinedPinOpening::Any,
             _ => return Err(refused()),
         };
         #[cfg(test)]

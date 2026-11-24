@@ -1,4 +1,8 @@
 //! Public membership data from one checked native selected prefix.
+catcoms_rt::redacted_debug! {
+    NativeTextRoster;
+}
+
 use super::*;
 use catcoms_replication::chat::{
     owner_header::OwnerBodyId, owner_profile::MAX_CURRENT_MEMBERS,

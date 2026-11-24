@@ -69,6 +69,7 @@ pub(super) fn seal_with_fetch_verifier(
     Ok(Zeroizing::new(frame(&seal(&key, &plain, rng)?)))
 }
 
+#[cfg(all(test, any(windows, target_os = "linux")))]
 pub(super) fn open_data(
     key: &[u8; 32],
     fence: &[u8],

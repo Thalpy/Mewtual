@@ -1,4 +1,13 @@
 //! Verify one exact private membership Commit on a separately paid graph.
+catcoms_rt::redacted_debug! {
+    TextCurrentReceivedAddData<'_>;
+    TextCurrentReceivedRemoveData<'_>;
+    VerifiedTextCurrentEviction;
+    PreparedTextCurrentReceivedAdd;
+    PreparedTextReceivedAddInstallation<'_>;
+    RetiredTextReceivedAdd;
+}
+
 use super::*;
 use crate::device::key_package_identity::credential_digest_with;
 use openmls_traits::OpenMlsProvider;

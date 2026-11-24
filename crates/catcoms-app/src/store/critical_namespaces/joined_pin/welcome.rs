@@ -260,17 +260,19 @@ impl JoinedMembershipCandidate {
 
 #[must_use = "retire the displaced joined continuation outside the host writers"]
 pub(in crate::store) enum RetiredJoinedMembership {
-    Continuing(RetiredV2JoinedAdd),
+    Continuing {
+        _retired: RetiredV2JoinedAdd,
+    },
     Evicted {
         terminal: (OwnerHeaderId, u64),
-        retired: RetiredV2JoinedEviction,
+        _retired: RetiredV2JoinedEviction,
     },
 }
 
 impl RetiredJoinedMembership {
     pub(in crate::store) fn terminal_data(&self) -> Option<(OwnerHeaderId, u64)> {
         match self {
-            Self::Continuing(_) => None,
+            Self::Continuing { .. } => None,
             Self::Evicted { terminal, .. } => Some(*terminal),
         }
     }

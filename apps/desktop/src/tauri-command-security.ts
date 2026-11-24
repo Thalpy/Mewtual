@@ -110,6 +110,9 @@ export const TAURI_COMMAND_GROUPS = {
     commands: [
       "found_server", "preview_invite", "join_server", "apply_join_reply", "leave_server", "get_invite", "mint_invite_fresh",
       "set_admin", "remove_member", "revoke_device",
+      // Native removal binds the exact current admission. Direct contact uses a
+      // member-signed offer and the numeric host explicitly approved in the UI.
+      "get_native_chat_members", "remove_native_chat_member", "share_native_chat_contact", "connect_native_chat_contact",
     ],
   },
   authenticated_server_reads: {

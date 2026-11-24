@@ -7145,7 +7145,7 @@
       }
     }
   }
-  async function refreshNativeHistory(append=false) {
+  async function refreshNativeHistory(append=false, retryBusy=false) {
     const selected=cur,server=activeServerId;
     if(selected?.backend!=="text-v2" || !selected.context || server===null || locked || !uiStateReady || nativeConversationRemoved(server, selected.context))return;
     // Reads and writes share native admission. The write owner always refreshes
@@ -7157,7 +7157,17 @@
     const current=()=>!locked && !uiSessionRetired && uiStateReady && !windowCloseInFlight && session===uiStateLoadGeneration && viewToken===viewGeneration && revision===nativeHistoryRevision && activeServerId===server && cur?.active===channel && cur?.context===context && !nativeConversationRemoved(server, context);
     nativeHistoryLoading=true;nativeHistoryError=null;
     try {
-      const result=await readNativeOriginals((_command,args)=>invoke<unknown>("get_message_page",args),{server,channel,context},current,append?nativeCursor:null);
+      const result=await readNativeOriginals(async (_command,args) => {
+        for (let attempt=0; current(); attempt++) {
+          try { return await invoke<unknown>("get_message_page",args); }
+          catch (failure) {
+            const message = failure instanceof Error ? failure.message : failure;
+            if (!retryBusy || attempt >= 9 || message !== "Chat history is busy. Try again.") throw failure;
+            await new Promise<void>(resolve => setTimeout(resolve, 100));
+          }
+        }
+        return null;
+      },{server,channel,context},current,append?nativeCursor:null);
       if(!result || !current())return;
       // This is a local original list. Do not populate Legacy pageTotal,
       // unread/version anchors or derive full-group absence from this subset.
@@ -7263,7 +7273,8 @@
       };
     }
     const earlier = nativeReceivedReads.get(action);
-    if (earlier) { earlier.dirty = true; return; }
+    if (earlier?.current()) { earlier.dirty = true; return; }
+    if (earlier) nativeReceivedReads.delete(action);
     if (nativeReceivedScope?.server === server && nativeReceivedScope.channel === channel && nativeReceivedScope.context === context) {
       nativeReceived = updateNativeReceived(nativeReceived, action, null);
     }
@@ -7461,7 +7472,7 @@
     } finally {
       if (!locked && session === uiStateLoadGeneration) {
         busy = false;
-        if (refreshHistory && uiStateReady && !uiSessionRetired && !windowCloseInFlight) await refreshNativeHistory();
+        if (refreshHistory && uiStateReady && !uiSessionRetired && !windowCloseInFlight) await refreshNativeHistory(false, true);
       }
     }
   }

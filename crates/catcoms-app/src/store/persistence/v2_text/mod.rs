@@ -51,9 +51,9 @@ pub(in crate::store) use control::governed_add::held::{
 pub(in crate::store) use control::governed_add::held::{
     PreparedGovernedAddFence, PreparedGovernedRemoveFence,
 };
-pub(in crate::store) use control::governed_add::{
-    HeldColdFounderAdd, HeldColdFounderGenesis, HeldGovernedArchiveRead,
-};
+#[cfg(all(test, any(windows, target_os = "linux")))]
+pub(in crate::store) use control::governed_add::HeldGovernedArchiveRead;
+pub(in crate::store) use control::governed_add::{HeldColdFounderAdd, HeldColdFounderGenesis};
 pub(in crate::store) use head::{TextPendingData, TextRootData};
 #[cfg(all(test, windows))]
 pub(in crate::store) use ordinary_data::{

@@ -1,4 +1,9 @@
 //! Live ordinary text from the recovered founder's exact reserved mesh.
+catcoms_rt::redacted_debug! {
+    NativeTextColdFounderMemberIngress;
+    NativeTextColdFounderMemberReceiver;
+}
+
 use super::*;
 use crate::store::persistence::native_registry::network::NetworkDependency;
 use crate::store::persistence::v2_member_transport::{

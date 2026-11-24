@@ -1,4 +1,10 @@
 //! Bounded full-prefix data for a Welcome after the first governing Add.
+catcoms_rt::redacted_debug! {
+    V2GoverningJoinStepData<'_>;
+    V2JoinDeliveryData<'_>;
+    V2GoverningJoinDeliveryData<'_>;
+}
+
 use super::first_add_proof::FIRST_JOIN_DELIVERY_TAG;
 use super::*;
 use catcoms_replication::chat::{

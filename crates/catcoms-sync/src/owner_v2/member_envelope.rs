@@ -1,4 +1,12 @@
 //! Epoch-protected transport bytes for an exact ordinary signed original.
+catcoms_rt::redacted_debug! {
+    PreparedV2MemberSubmission;
+    V2MemberPublicationObservation;
+    V2MemberEnvelopeScopeData;
+    OpenedV2MemberEnvelopeData;
+    SelectedV2MemberEnvelope;
+}
+
 use crate::owner_v2::V2JoinedPublicationFence;
 use crate::SyncError;
 use catcoms_crypto::{seal, unseal, SealedBlob};

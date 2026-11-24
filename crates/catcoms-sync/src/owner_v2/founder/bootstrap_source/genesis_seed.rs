@@ -1,5 +1,9 @@
 //! Closed initial V2 DATA/resource reconstruction. No legacy synchronizer, runnable scheduler,
 //! Fresh decoder, SDK getter, Current receipt or positive publication capability is exposed.
+catcoms_rt::redacted_debug! {
+    V2GenesisSourceFields<'_>;
+}
+
 use super::*;
 use crate::{
     chat_scope::{OriginalFounderObservation, VerifiedFreshChatAdmission},

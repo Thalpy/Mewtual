@@ -1,5 +1,9 @@
 //! The initial founder invitation packet is inert wire data. Its only routing
 //! profile describes a reservation with zero contact addresses.
+catcoms_rt::redacted_debug! {
+    NativeTextSavedJoinResponse;
+}
+
 use super::critical_namespaces::{
     read_pool::{CatalogReadReservation, CriticalCatalogReadPool},
     refused,

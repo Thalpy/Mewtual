@@ -1,4 +1,9 @@
 //! Same-parent paid private preparation of one surviving-founder Remove.
+catcoms_rt::redacted_debug! {
+    PreparedTextCurrentRemoveInstallation<'_>;
+    RetiredTextCurrentRemove;
+}
+
 use super::*;
 use openmls_traits::OpenMlsProvider;
 

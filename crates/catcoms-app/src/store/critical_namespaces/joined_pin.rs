@@ -107,6 +107,7 @@ pub(super) fn seal_initial(
 
 /// Rejoin checks the exact selected ciphertext ID and the pinned anchor.
 /// The original acceptance and pending join provenance remain unchanged.
+#[cfg(test)]
 pub(super) fn open_original(
     key: &[u8; 32],
     layout: CurrentLayoutData,

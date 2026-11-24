@@ -299,6 +299,9 @@ jobs:
       - name: Check three native vaults across the later Add and the founder disconnect
         if: inputs.scope == 'mounted-governing'
         run: python .github/scripts/check-chat-v2-invite-intent.py mounted-governing
+      - name: Reopen the founder at the supported governing epoch limit
+        if: inputs.scope == 'mounted-governing'
+        run: python .github/scripts/check-chat-v2-invite-intent.py governing-epoch-limit
       - name: Check a selected Remove and relay it after the original founder drains
         if: github.event_name == 'pull_request' || inputs.scope == 'mounted-governing' || inputs.scope == 'peer-relay'
         run: python .github/scripts/check-chat-v2-invite-intent.py mounted-removal

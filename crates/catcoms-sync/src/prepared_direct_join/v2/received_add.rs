@@ -1,5 +1,11 @@
 //! A bounded member transition delivery. The signed Header is readable separately
 //! from the untrusted body so corrupt bytes cannot hide a signed sibling.
+catcoms_rt::redacted_debug! {
+    V2MemberAddRequestData;
+    V2MemberAddFrameData<'_>;
+    V2MemberTransitionFrameData<'_>;
+}
+
 use super::*;
 use catcoms_mls::group::text_current_add::MAX_TEXT_RECEIVED_ADD_COMMIT_BYTES;
 use catcoms_replication::chat::{

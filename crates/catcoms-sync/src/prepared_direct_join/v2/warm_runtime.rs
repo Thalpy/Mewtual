@@ -1,4 +1,12 @@
 //! Move the actual private Welcome into one closed joined node.
+catcoms_rt::redacted_debug! {
+    [T: MeshTransport, R: CryptoRngCore] ClosedV2JoinedNode<T, R>;
+    PreparedV2JoinedMembership;
+    PreparedV2JoinedEviction;
+    RetiredV2JoinedEviction;
+    RetiredV2JoinedAdd;
+}
+
 use super::first_add_proof::SelectedJoinData;
 use super::received_add::TransitionBody;
 use super::*;

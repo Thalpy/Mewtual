@@ -500,9 +500,12 @@ async fn execute_received(
         let projection = if let Some(original) = founder {
             original
                 .read_founder_member_projection(channel, action, &scope)
-                .map_err(|_| STALE.to_owned())?
+                .map_err(|failure| match failure {
+                    V2MemberSaveRefusal::Busy => BUSY.to_owned(),
+                    _ => STALE.to_owned(),
+                })?
         } else {
-            let slot = local.received.lock().map_err(|_| BUSY.to_owned())?;
+            let slot = local.received.lock().map_err(|_| STALE.to_owned())?;
             slot.as_ref()
                 .map(|ledger| ledger.read_message_projection(action))
                 .transpose()

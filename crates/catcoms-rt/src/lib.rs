@@ -20,6 +20,20 @@ pub mod protocol_rng;
 pub mod rng;
 pub mod transport;
 
+/// Implements Debug for opaque values without formatting any of their fields.
+#[macro_export]
+macro_rules! redacted_debug {
+    ($($( [$($generics:tt)+] )? $name:ident $(< $($arguments:tt),+ >)?;)+) => {
+        $(
+            impl $(<$($generics)+>)? ::core::fmt::Debug for $name $(<$($arguments),+>)? {
+                fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                    f.debug_struct(stringify!($name)).finish_non_exhaustive()
+                }
+            }
+        )+
+    };
+}
+
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use mem::{Hub, MemNetwork};
 pub use native_chat_key::{

@@ -1,5 +1,10 @@
 //! Prepare an exact durable original, submit it outside the native metadata
 //! slot, then checkpoint the driver's acknowledgement through the same mount.
+catcoms_rt::redacted_debug! {
+    NativeTextJoinedMemberPublication;
+    NativeTextJoinedMemberPublicationReceipt;
+}
+
 use super::*;
 use crate::store::persistence::v2_member_outbox::{
     member_outbox_key, MemberDebtBatch, MemberDebtClass,

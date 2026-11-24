@@ -1,4 +1,9 @@
 //! Exclusive original MLS installation and disjoint stable source proof.
+catcoms_rt::redacted_debug! {
+    PreparedV2FounderAddInstall<'_>;
+    RetiredV2FounderAddInstall;
+}
+
 use super::*;
 use catcoms_mls::group::text_current_add::{
     PreparedTextCurrentAddInstallation, RetiredTextCurrentAdd,

@@ -1,6 +1,10 @@
 //! Owning native factory continuation. The genuine index2 owner moves through
 //! its existing paid upgrade and becomes selected3 before any Source or SDK is
 //! created. Errors retain this SAME original; no alternate opener is attempted.
+catcoms_rt::redacted_debug! {
+    NativeTextJoinedVaultUpgrade;
+}
+
 use super::super::upgrade_source::{self, owning};
 use super::*;
 use crate::store::critical_namespaces::native_registry::lifecycle::preparation;

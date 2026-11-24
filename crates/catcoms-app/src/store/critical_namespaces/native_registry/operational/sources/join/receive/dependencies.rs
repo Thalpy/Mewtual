@@ -1,4 +1,10 @@
 //! Connected catch-up of one exact ActionId. No method may dial or sign anew.
+catcoms_rt::redacted_debug! {
+    NativeTextJoinedDependencyExchange;
+    NativeTextJoinedDependencyResponse;
+    NativeTextJoinedDependencyProvider;
+}
+
 use super::*;
 use catcoms_net::{
     NativeChatMemberDependencies, NativeChatMemberDependencyExchange,

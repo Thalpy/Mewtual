@@ -1,4 +1,8 @@
 //! Dedicated, bounded admission for Chat V2 requests on the original native mesh.
+catcoms_rt::redacted_debug! {
+    NativeChatJoinRequests;
+}
+
 use catcoms_rt::{RequestAuthority, TransportEvent};
 use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::{mpsc, watch};

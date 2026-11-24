@@ -1,4 +1,8 @@
 //! Bound Add cleanup of the original runtime cells before waiting for UI keys.
+catcoms_rt::redacted_debug! {
+    [T: MeshTransport, R: CryptoRngCore] NativeTextUiAddRetirement<T, R>;
+}
+
 use super::super::native_ui::RetirementDrain;
 use super::*;
 use std::sync::{TryLockError, Weak};

@@ -1,4 +1,8 @@
 //! The exact founder row, bootstrap source and reserved actor before SDK restore.
+catcoms_rt::redacted_debug! {
+    NativeTextColdFounderSource;
+}
+
 use super::super::upgrade_source::owning::{SourceWork, Store};
 use super::*;
 use crate::store::critical_namespaces::native_registry::lifecycle::network::ColdFounderSelection;

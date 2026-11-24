@@ -17,8 +17,10 @@ use catcoms_sync::{
 
 mod chain;
 mod cold;
+#[cfg(all(test, any(windows, target_os = "linux")))]
 mod held;
 pub(in crate::store) use cold::{HeldColdFounderAdd, HeldColdFounderGenesis};
+#[cfg(all(test, any(windows, target_os = "linux")))]
 pub(in crate::store) use held::HeldGovernedArchiveRead;
 
 pub(in crate::store) struct RecoveredGovernedAdd {
@@ -26,7 +28,9 @@ pub(in crate::store) struct RecoveredGovernedAdd {
     pub(in crate::store) response: Zeroizing<Vec<u8>>,
     pub(in crate::store) header: SignedOwnerHeader,
     pub(in crate::store) admission: AdmissionBody,
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store) parent: TextHeadData,
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     consumed_nonce: [u8; 16],
     entry: [u8; ENTRY_BYTES],
     outcome: Zeroizing<Vec<u8>>,
@@ -148,6 +152,7 @@ impl RecoveredGovernedAdd {
         Ok(outcome::governing_bodies(&self.entry, &self.outcome)?[2])
     }
 
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store) fn consumed_invite(&self, packet: &V2JoinRequestPacketData<'_>) -> bool {
         packet.founder_add_data().invite.spec_data().nonce == self.consumed_nonce
     }
@@ -176,7 +181,7 @@ fn authenticate_first_archive(
     if labels != head.transition || labels.context != context {
         return Err(refused());
     }
-    let parent = parent_head(key, &head, &frames, trusted)?;
+    let _parent = parent_head(key, &head, &frames, trusted)?;
     let mut replay = AddReplay::from_genesis(trusted)?;
     let journal = replay.verify_add(key, labels, &frames, trusted)?;
     replay.selected = Some((TextHeadIdData::of_data(raw_head), head.archive));
@@ -186,7 +191,9 @@ fn authenticate_first_archive(
             response: journal.response,
             header: journal.header,
             admission: journal.admission,
-            parent,
+            #[cfg(all(test, any(windows, target_os = "linux")))]
+            parent: _parent,
+            #[cfg(all(test, any(windows, target_os = "linux")))]
             consumed_nonce: journal.nonce,
             entry: journal.entry,
             outcome: journal.outcome,

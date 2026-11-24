@@ -1,4 +1,9 @@
 //! The completed private Join graph, tied to the same sealed request.
+catcoms_rt::redacted_debug! {
+    SealedV2JoinedOutcome;
+    RecoveredV2JoinedOutcome;
+}
+
 use super::super::first_add_proof::SelectedJoinData;
 use super::super::welcome::{
     matches_welcome_roster, open_routing, ValidatedWelcome, WelcomeAdmission,

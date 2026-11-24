@@ -1,4 +1,13 @@
 //! Bind ciphertext from the original native actor to the actual registered row.
+catcoms_rt::redacted_debug! {
+    NativeTextJoinedMemberIngressPreparation;
+    NativeTextJoinedMemberReceiver;
+    NativeTextJoinedReceivedOriginal;
+    NativeTextJoinedMemberLedger;
+    NativeTextJoinedMemberProjection;
+    NativeTextJoinedArchivedActions;
+}
+
 use super::*;
 use crate::store::persistence::v2_member_outbox::{member_outbox_key, MemberSavedOriginal};
 use crate::store::persistence::v2_member_transport::replay_local_member_dependencies;
@@ -653,6 +662,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
     /// Find one exact selected own original for dependency catch-up. A
     /// request handler still needs a distinct current sealed response and
     /// the original requesting peer's authenticated scope.
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store::critical_namespaces::native_registry) fn read_member_dependency(
         self,
         selection: &NativeTextJoinedRowSelection,
@@ -668,6 +678,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
 
     /// Freeze the exact admitted original into paid archive pages. Preparing
     /// these pages does not select them in the vault's shared history.
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store::critical_namespaces::native_registry) fn prepare_shared_history_record(
         self,
         ledger: &NativeTextJoinedMemberLedger,

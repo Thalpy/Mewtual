@@ -4,6 +4,10 @@
 //! The original genesis provenance never changes. Only an exact completed MLS
 //! candidate may replace the SDK pair, and its actual installed fingerprint is
 //! kept separately. In particular an epoch comparison cannot renew Fresh.
+catcoms_rt::redacted_debug! {
+    V2FounderAddSigning<'_>;
+}
+
 use super::*;
 use crate::owner_v2::V2MemberSignRefusal;
 use catcoms_mls::group::text_current_add::{

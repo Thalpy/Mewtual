@@ -50,7 +50,7 @@ fn governed_add_head2_preserves_the_old_head_envelope_and_refuses_legacy_selecti
         archive,
         kind: GovernedHeadKind::Add,
     }
-    .seal_kind(&key, GovernedHeadKind::Add, &mut rng)
+    .seal_kind(&key, &mut rng, GovernedHeadKind::Add)
     .unwrap();
     let removal = GovernedArchiveLabels {
         before_head: TextHeadIdData::of_data(&parent),
@@ -71,7 +71,7 @@ fn governed_add_head2_preserves_the_old_head_envelope_and_refuses_legacy_selecti
     )
     .unwrap();
     let selected_bytes = selected
-        .seal_kind(&key, GovernedHeadKind::Remove, &mut rng)
+        .seal_kind(&key, &mut rng, GovernedHeadKind::Remove)
         .unwrap();
     let beyond = GovernedArchiveLabels {
         before_head: TextHeadIdData::of_data(&selected_bytes),

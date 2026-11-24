@@ -1,4 +1,9 @@
 //! Affine capture for the first accepted request on a mounted native vault.
+catcoms_rt::redacted_debug! {
+    [R: CryptoRngCore] NativeTextJoinedMemberSaveJob<R>;
+    [R: CryptoRngCore] NativeTextJoinedMemberFinalPreparation<R>;
+}
+
 use super::super::super::lifecycle::joined::LocalNames;
 use super::super::governed::{
     connect_approved_host, receive_connected_join, ApprovedContact, ConnectedJoinDelivery,

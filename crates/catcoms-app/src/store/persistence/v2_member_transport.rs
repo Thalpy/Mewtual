@@ -1,4 +1,11 @@
 //! Internal finite operations on the original selected founder member source.
+catcoms_rt::redacted_debug! {
+    NativeTextFounderDependencyExchange;
+    NativeTextFounderDependencyResponse;
+    NativeTextFounderReceived;
+    NativeTextFounderFrameOutcome;
+}
+
 use super::v2_member_outbox::{member_outbox_key, MemberDebtBatch, MemberSavedOriginal};
 use super::v2_shared_history::{
     PreparedSharedHistoryRecord, SharedHistoryActionPage, SharedHistoryActionQuery,

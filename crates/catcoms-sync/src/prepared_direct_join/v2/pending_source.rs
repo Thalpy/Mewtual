@@ -1,4 +1,10 @@
 //! Seal the original private KeyPackage provider under the exact joined pin.
+catcoms_rt::redacted_debug! {
+    V2PendingJoinContextData;
+    SealedV2PendingJoinSource;
+    RecoveredV2PendingJoinSource;
+}
+
 use super::*;
 
 const TAG: &[u8] = b"catcoms/private-chat-v2-pending-join-source/v1\0";
