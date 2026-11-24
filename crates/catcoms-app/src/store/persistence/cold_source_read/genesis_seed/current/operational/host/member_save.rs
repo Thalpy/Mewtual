@@ -297,6 +297,13 @@ enum MemberSavePath<'a, T: MeshTransport, R: CryptoRngCore> {
     ),
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::large_enum_variant,
+        reason = "Either kind keeps its already paid exact original inline through the signing loan."
+    )
+)]
 enum SavedDependency {
     Own(MemberSavedOriginal),
     Received(SavedSharedOriginal),
