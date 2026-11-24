@@ -106,9 +106,11 @@ impl PreparedV2FounderRecoveredAdd {
         inputs: &V2MemberDraftInputs,
         draft: &'a ActionDraft,
         plan: &'a mut V2OrdinarySigningPlan,
-        original: &NativeChatSourceObservation,
-        cut: &mut NativeChatPreparedKeyCut,
-        ends: &mut NativeChatKeyEnds,
+        (original, cut, ends): (
+            &NativeChatSourceObservation,
+            &mut NativeChatPreparedKeyCut,
+            &mut NativeChatKeyEnds,
+        ),
     ) -> Result<V2OrdinarySigningGuard<'a>, V2MemberSignRefusal> {
         let signer = self.member_signer_data(verifier, original, cut)?;
         inputs.require_recovered_founder_origin(&self.lifetime)?;

@@ -166,9 +166,7 @@ impl RecoveredMemberLane {
                     inputs,
                     draft,
                     plan,
-                    &self.original,
-                    source.cut,
-                    source.ends,
+                    (&self.original, source.cut, source.ends),
                 )
                 .map(drop)
                 .map_err(|_| refused())

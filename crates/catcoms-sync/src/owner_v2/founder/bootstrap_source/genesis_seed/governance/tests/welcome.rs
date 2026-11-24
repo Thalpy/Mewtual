@@ -123,10 +123,14 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     first: &[u8],
     verifier: &mut catcoms_replication::chat::V2GeneralPrefixVerifier,
     now: u64,
-    joined: &crate::ClosedV2JoinedNode<T, R>,
-    joined_prefix: &mut crate::PreparedV2JoinedPrefix,
-    recovered: &mut crate::ClosedV2JoinedNode<T, R>,
-    foreign_prefix: &mut crate::PreparedV2JoinedPrefix,
+    (joined, joined_prefix): (
+        &crate::ClosedV2JoinedNode<T, R>,
+        &mut crate::PreparedV2JoinedPrefix,
+    ),
+    (recovered, foreign_prefix): (
+        &mut crate::ClosedV2JoinedNode<T, R>,
+        &mut crate::PreparedV2JoinedPrefix,
+    ),
 ) {
     use crate::{
         DirectJoinLimits, PreparedV2JoinRequest, RecoveredV2JoinedOutcome,
@@ -1905,10 +1909,8 @@ async fn complete_original_welcome(native_joiner: bool) {
             &proof,
             &mut g.verifier,
             now,
-            &joined_node,
-            &mut warm_prefix,
-            &mut cold_node,
-            &mut prefix,
+            (&joined_node, &mut warm_prefix),
+            (&mut cold_node, &mut prefix),
         );
     }
     drop(warm_view.revoker().close());

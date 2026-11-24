@@ -103,7 +103,11 @@ impl NativeTextColdFounderSource {
         let mut ends = NativeChatKeyEnds::new();
         let guard = sdk
             .sign_member_action_native(
-                verifier, &inputs, &draft, &mut plan, &native, &mut cut, &mut ends,
+                verifier,
+                &inputs,
+                &draft,
+                &mut plan,
+                (&native, &mut cut, &mut ends),
             )
             .unwrap();
         let raw = *guard.cached_raw64_data().unwrap();
