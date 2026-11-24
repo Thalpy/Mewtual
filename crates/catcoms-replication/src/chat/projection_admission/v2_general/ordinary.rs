@@ -304,7 +304,7 @@ impl V2GeneralPrefixVerifier {
         let mut owners = Vec::with_capacity(required.len());
         let mut used_frozen = 0_u128;
         const {
-            assert!(MAX_PARENTS + 1 <= u128::BITS as usize);
+            assert!(MAX_PARENTS < u128::BITS as usize);
         }
         for id in required {
             let Some(entry) = ledger.entries.get(&id) else {

@@ -41,7 +41,6 @@ struct Invocation {
     name: String,
     display: String,
     _credits: Vec<NativeUiInvocationMetadata>,
-    _permit: OwnedSemaphorePermit,
 }
 
 impl Invocation {
@@ -69,8 +68,8 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
     }
     let app = invoke.message.webview_ref().app_handle().clone();
     let captured = capture_input(&app.state::<AppState>(), invoke.message.payload());
-    let invocation = match captured {
-        Ok(original) => Arc::new(original),
+    let (invocation, permit) = match captured {
+        Ok((original, permit)) => (Arc::new(original), permit),
         Err(error) => {
             invoke.resolver.reject(error);
             return true;
@@ -83,7 +82,7 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
         let result = complete(&state, &invocation).await;
         match result {
             Ok((selection, parked)) => {
-                if publish(&state, &invocation, selection.clone(), resolver).await {
+                if publish(&state, &invocation, selection.clone(), permit, resolver).await {
                     connected::start_current(
                         &app,
                         &state,
@@ -110,7 +109,10 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
     true
 }
 
-fn capture_input(state: &AppState, payload: &InvokeBody) -> Result<Invocation, &'static str> {
+fn capture_input(
+    state: &AppState,
+    payload: &InvokeBody,
+) -> Result<(Invocation, OwnedSemaphorePermit), &'static str> {
     let generation = state.ui_session_generation.load(Ordering::SeqCst);
     if ui_session_closed(state) || state.native_text.sources.is_closing_cached() {
         return Err(listing::STALE);
@@ -177,17 +179,19 @@ fn capture_input(state: &AppState, payload: &InvokeBody) -> Result<Invocation, &
     }
     let mut packet = Zeroizing::new(vec![0; hex.len() / 2]);
     hex::decode_to_slice(hex.as_bytes(), &mut packet).map_err(|_| INPUT)?;
-    Ok(Invocation {
-        generation,
-        target,
-        account,
-        packet,
-        host,
-        name: name.to_owned(),
-        display: display.to_owned(),
-        _credits: credits,
-        _permit: permit,
-    })
+    Ok((
+        Invocation {
+            generation,
+            target,
+            account,
+            packet,
+            host,
+            name: name.to_owned(),
+            display: display.to_owned(),
+            _credits: credits,
+        },
+        permit,
+    ))
 }
 
 async fn capture_active<T: JoinCapture>(
@@ -408,6 +412,7 @@ async fn publish<R: tauri::Runtime>(
     state: &AppState,
     invocation: &Invocation,
     original: NativeTextJoinedRowSelection,
+    permit: OwnedSemaphorePermit,
     resolver: tauri::ipc::InvokeResolver<R>,
 ) -> bool {
     let id = original.id_data();
@@ -485,6 +490,9 @@ async fn publish<R: tauri::Runtime>(
     };
     match admitted {
         Ok(()) => {
+            // The installed row can service history while its guarded
+            // background receiver and optional reconnect are starting.
+            drop(permit);
             resolver.resolve(InvokeResponseBody::Json(response));
             true
         }
