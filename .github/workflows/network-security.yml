@@ -66,9 +66,9 @@ jobs:
               ('vendor-regressions', ['--manifest-path', 'vendor/libp2p-gossipsub/Cargo.toml', '--lib', 'mewtual_'], 6),
               ('vendor-protocol', ['--manifest-path', 'vendor/libp2p-gossipsub/Cargo.toml', '--lib', 'protocol::'], 9),
               ('vendor-library', ['--manifest-path', 'vendor/libp2p-gossipsub/Cargo.toml', '--lib'], 159),
-              # Foundation security/publication cases plus the later reviewed
-              # native transport identity and lifetime regressions.
-              ('net', ['-p', 'catcoms-net', '--lib'], 187),
+              # Include the native join, dependency exchange, member gossip,
+              # and publication custody regressions.
+              ('net', ['-p', 'catcoms-net', '--lib'], 191),
               ('protocol-rng', ['-p', 'catcoms-rt', '--lib', 'protocol_rng::tests'], 3),
           )
           for label, arguments, count in cohorts:
