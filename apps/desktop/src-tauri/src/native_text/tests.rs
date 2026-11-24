@@ -1549,8 +1549,18 @@ async fn native_text_expired_preview_reproves_the_original_pending_after_restart
         .unwrap();
     let pending = path.join("chat-critical-namespaces.joined-pending.bin");
     let original = std::fs::read(&pending).unwrap();
+    let occupied = {
+        let store = state.store.lock().await;
+        let vault = store.as_ref().unwrap().as_text_v2().unwrap();
+        vault.prepare_native_authentication(state.native_text.ui_budget.prepare().unwrap())
+    };
+    assert!(!occupied.is_capture_busy_cached());
     let warm = preview_request(&window, code.clone());
-    run(&queue).await;
+    let release = async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(occupied);
+    };
+    tokio::join!(run(&queue), release);
     let warm = found_value(warm.await.unwrap());
     assert_eq!(warm["expires_at_ms"], expires);
 

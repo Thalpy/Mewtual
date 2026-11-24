@@ -137,13 +137,16 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
             .unwrap_or(Err(INVALID));
         let result = match result {
             Ok((preview, bytes)) if preview.metadata.expires_at_ms <= now_ms(&state) => {
-                let proof =
-                    joining::capture_once(&state, generation, &target, |sources, command| {
-                        sources.capture_joined_selection(command)
-                    })
-                    .await;
+                let proof = joining::capture_with_retry(
+                    &state,
+                    generation,
+                    &target,
+                    &cancellation,
+                    BUSY,
+                    |sources, command| sources.capture_joined_selection(command),
+                )
+                .await;
                 match proof {
-                    Ok(prepared) if prepared.is_capture_busy_cached() => Err(BUSY),
                     Ok(prepared) => {
                         let caller = cancellation.clone();
                         tauri::async_runtime::spawn_blocking(move || {
@@ -161,6 +164,7 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
                         .await
                         .unwrap_or(Err(EXPIRED))
                     }
+                    Err(error) if error == BUSY => Err(BUSY),
                     Err(_) => Err(STALE),
                 }
             }
