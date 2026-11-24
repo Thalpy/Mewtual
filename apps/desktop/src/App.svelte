@@ -391,7 +391,8 @@
   let nativeReceived = $state.raw<NativeReceived[]>([]);
   let nativeReceivedScope = $state.raw<{ server: number; channel: string; context: string } | null>(null);
   let nativeReceivedRevision = 0;
-  const nativeReceivedReads = new Map<string, { dirty: boolean }>();
+  const nativeReceivedReads = new Map<string, { dirty: boolean; current: () => boolean; read: () => Promise<void> }>();
+  let nativeReceivedPump: Promise<void> | null = null;
   let nativeArchive = $state.raw<{
     server: number; channel: string; context: string; items: NativeReceived[];
     after: string | null; more: boolean; loading: boolean; note: string | null;
@@ -7083,7 +7084,9 @@
       token:()=>Array.from(crypto.getRandomValues(new Uint8Array(32)),byte=>byte.toString(16).padStart(2,"0")).join(""),
       invoke:async(command,args)=>{
         if(command==="found_server")return(await invokeDebugged<unknown>("found_server",args)).value;
-        if(command==="send_message" || command==="edit_message" || command==="delete_message")return(await invokeDebugged<unknown>(command,args)).value;
+        if(command==="send_message")return(await invokeDebugged<unknown>("send_message",args)).value;
+        if(command==="edit_message")return(await invokeDebugged<unknown>("edit_message",args)).value;
+        if(command==="delete_message")return(await invokeDebugged<unknown>("delete_message",args)).value;
         throw new Error("Unsupported native chat request.");
       },
       sealed:()=>sealed?.(),
@@ -7237,7 +7240,8 @@
     const current = () => !locked && !uiSessionRetired && uiStateReady && !windowCloseInFlight
       && session === uiStateLoadGeneration && view === viewGeneration && activeServerId === server
       && revision === nativeReceivedRevision
-      && cur?.backend === "text-v2" && cur.active === channel && cur.context === context;
+      && cur?.backend === "text-v2" && cur.active === channel && cur.context === context
+      && !nativeConversationRemoved(server, context);
     if (!current()) return;
     if (action === null) {
       nativeArchiveRevision++;
@@ -7260,24 +7264,53 @@
     }
     const earlier = nativeReceivedReads.get(action);
     if (earlier) { earlier.dirty = true; return; }
-    if (nativeReceivedReads.size >= 8) return;
-    const work = { dirty: false };
-    nativeReceivedReads.set(action, work);
-    try {
-      do {
-        work.dirty = false;
+    if (nativeReceivedScope?.server === server && nativeReceivedScope.channel === channel && nativeReceivedScope.context === context) {
+      nativeReceived = updateNativeReceived(nativeReceived, action, null);
+    }
+    if (nativeReceivedReads.size >= 64) {
+      error = "Too many live messages arrived at once.";
+      return;
+    }
+    const work = {
+      dirty: false,
+      current,
+      async read() {
         const raw = await invoke<unknown>("get_message_page", {
           server, channel, expectedContext: context, receivedAction: action,
         });
-        if (!current()) return;
+        if (!current() || work.dirty) return;
         const sameScope = nativeReceivedScope?.server === server && nativeReceivedScope.channel === channel
           && nativeReceivedScope.context === context;
         nativeReceived = updateNativeReceived(sameScope ? nativeReceived : [], action, decodeNativeReceived(raw, action));
         nativeReceivedScope = { server, channel, context };
-      } while (work.dirty);
-    } catch { /* The original scope may close while the read is pending. */ }
-    finally {
-      if (nativeReceivedReads.get(action) === work) nativeReceivedReads.delete(action);
+      },
+    };
+    nativeReceivedReads.set(action, work);
+    nativeReceivedPump ??= Promise.resolve().then(drainNativeReceived);
+    await nativeReceivedPump;
+  }
+
+  async function drainNativeReceived() {
+    try {
+      for (const [action, work] of nativeReceivedReads) {
+        let busy = false;
+        work.dirty = false;
+        if (work.current()) {
+          try { await work.read(); }
+          catch (failure) {
+            const message = failure instanceof Error ? failure.message : failure;
+            busy = message === "Chat history is busy. Try again.";
+          }
+        }
+        if (nativeReceivedReads.get(action) !== work) continue;
+        nativeReceivedReads.delete(action);
+        if (work.current() && (busy || work.dirty)) {
+          nativeReceivedReads.set(action, work);
+          if (busy) await new Promise<void>(resolve => setTimeout(resolve, 100));
+        }
+      }
+    } finally {
+      nativeReceivedPump = null;
     }
   }
 
@@ -7395,6 +7428,7 @@
     if (!invite) return;
     busy = true;
     joinError = "";
+    let refreshHistory = false;
     try {
       if (joinPreviewCode !== invite || !joinPreview?.approved_host_required) {
         const preview = await invoke<InvitePreview>("preview_invite", { inviteHex: invite });
@@ -7420,11 +7454,15 @@
       joinInvite = "";
       joinServerName = "";
       resetJoinAttempt();
-      await switchServer(restored.servers[0].server, () => {}, route);
+      if (!await switchServer(restored.servers[0].server, () => {}, route)) return;
+      refreshHistory = true;
     } catch (failure) {
       if (current()) joinError = errorText(failure);
     } finally {
-      if (!locked && session === uiStateLoadGeneration) busy = false;
+      if (!locked && session === uiStateLoadGeneration) {
+        busy = false;
+        if (refreshHistory && uiStateReady && !uiSessionRetired && !windowCloseInFlight) await refreshNativeHistory();
+      }
     }
   }
 

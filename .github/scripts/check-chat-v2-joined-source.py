@@ -16,7 +16,7 @@ REGISTRY_NORMAL_COUNT = 360
 COHORTS = (
     ("core-read-accessors", "catcoms-replication", "v2_general::tests::read_accessors", 3),
     ("joined-facts", "catcoms-sync", "owner_v2::joined_source::tests", 4),
-    ("joined-fence", "catcoms-sync", "owner_v2::joined_fence::tests", 18),
+    ("joined-fence", "catcoms-sync", "owner_v2::joined_fence::tests", 19),
     # The eleven operation cases include both new V1 exclusion tests and the genuine
     # preexisting success controls, so they are not counted/run again as a separate cohort.
     ("owner-operations", "catcoms-sync", "owner_evidence::initial_tail::operation::tests", 11),

@@ -6,6 +6,7 @@ use catcoms_app::store::{
 
 const BUSY: &str = "Invite preview is busy. Try again.";
 const INVALID: &str = "Enter a valid Chat V2 invite.";
+const EXPIRED: &str = "This Chat V2 invite has expired.";
 const STALE: &str = listing::STALE;
 // Covers the retained hex, decoded packet, bounded signature/policy scratch
 // and result through the worker and the final resolver call.
@@ -29,15 +30,12 @@ struct NativePreview {
 }
 
 impl Work {
-    fn verify(self) -> Result<NativePreview, &'static str> {
+    fn verify(self) -> Result<(NativePreview, Zeroizing<Vec<u8>>), &'static str> {
         let mut bytes = Zeroizing::new(vec![0; self.hex.len() / 2]);
         hex::decode_to_slice(self.hex.as_bytes(), &mut bytes).map_err(|_| INVALID)?;
         let packet = NativeTextInvitePacketData::decode(&bytes).map_err(|_| INVALID)?;
         let binding = packet.binding();
-        if binding.expired_at_data(SystemClock.now_ms()) {
-            return Err("This Chat V2 invite has expired.");
-        }
-        Ok(NativePreview {
+        let preview = NativePreview {
             metadata: InvitePreview {
                 direct_routes: 0,
                 rendezvous_routes: 0,
@@ -46,8 +44,20 @@ impl Work {
                 communication_mode: group_policy::mode_name(catcoms_mls::GroupMode::PeerToPeer),
             },
             approved_host_required: true,
-        })
+        };
+        Ok((preview, bytes))
     }
+}
+
+fn now_ms(_state: &AppState) -> u64 {
+    #[cfg(test)]
+    {
+        let now = _state.native_text.invite_preview_now.load(Ordering::SeqCst);
+        if now != 0 {
+            return now;
+        }
+    }
+    SystemClock.now_ms()
 }
 
 pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task)) -> bool {
@@ -125,6 +135,38 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
         let result = tauri::async_runtime::spawn_blocking(move || work.verify())
             .await
             .unwrap_or(Err(INVALID));
+        let result = match result {
+            Ok((preview, bytes)) if preview.metadata.expires_at_ms <= now_ms(&state) => {
+                let proof =
+                    joining::capture_once(&state, generation, &target, |sources, command| {
+                        sources.capture_joined_selection(command)
+                    })
+                    .await;
+                match proof {
+                    Ok(prepared) if prepared.is_capture_busy_cached() => Err(BUSY),
+                    Ok(prepared) => {
+                        let caller = cancellation.clone();
+                        tauri::async_runtime::spawn_blocking(move || {
+                            let invite =
+                                NativeTextInvitePacketData::decode(&bytes).map_err(|_| INVALID)?;
+                            prepared
+                                .require_recovery_invite(
+                                    &invite,
+                                    joining::request_token(&invite),
+                                    &caller,
+                                )
+                                .map_err(|_| EXPIRED)?;
+                            Ok((preview, true))
+                        })
+                        .await
+                        .unwrap_or(Err(EXPIRED))
+                    }
+                    Err(_) => Err(STALE),
+                }
+            }
+            Ok((preview, _)) => Ok((preview, false)),
+            Err(error) => Err(error),
+        };
         let Ok(_commit) = require_ui_session_generation(&state, generation).await else {
             resolver.reject(STALE);
             return;
@@ -140,10 +182,12 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
             return;
         }
         match result {
-            Ok(preview) if preview.metadata.expires_at_ms > SystemClock.now_ms() => {
+            Ok((preview, recovery))
+                if recovery || preview.metadata.expires_at_ms > now_ms(&state) =>
+            {
                 resolver.resolve(preview)
             }
-            Ok(_) => resolver.reject("This Chat V2 invite has expired."),
+            Ok(_) => resolver.reject(EXPIRED),
             Err(error) => resolver.reject(error),
         }
     }));

@@ -7,10 +7,16 @@ use tauri::ipc::InvokeResponseBody;
 
 const BUSY: &str = "Chat membership is busy. Retry the request.";
 const FAILED: &str = "Chat membership is unavailable for this conversation.";
-const LIST: &str = "get_native_chat_members";
-const REMOVE: &str = "remove_native_chat_member";
-const SHARE: &str = "share_native_chat_contact";
-const CONNECT: &str = "connect_native_chat_contact";
+pub(super) const COMMANDS: &[&str] = &[
+    "get_native_chat_members",
+    "remove_native_chat_member",
+    "share_native_chat_contact",
+    "connect_native_chat_contact",
+];
+const LIST: &str = COMMANDS[0];
+const REMOVE: &str = COMMANDS[1];
+const SHARE: &str = COMMANDS[2];
+const CONNECT: &str = COMMANDS[3];
 
 enum Operation {
     List,
@@ -20,7 +26,7 @@ enum Operation {
 }
 
 pub(super) fn handles(command: &str) -> bool {
-    matches!(command, LIST | REMOVE | SHARE | CONNECT)
+    COMMANDS.contains(&command)
 }
 
 pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task)) -> bool {

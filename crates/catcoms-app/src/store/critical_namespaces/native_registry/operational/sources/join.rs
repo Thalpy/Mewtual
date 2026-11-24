@@ -1359,15 +1359,36 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         token: [u8; 32],
         negative: &RequestCancellation,
     ) -> Result<Option<NativeTextJoinedRegistrationData>, AppError> {
+        self.inspect_join(invite, token, negative, false)
+    }
+
+    /// Authorize a recovery preview of an exact covered request or registered
+    /// row. This opens no network route and issues no native key cut.
+    pub fn require_recovery_invite(
+        self,
+        invite: &NativeTextInvitePacketData<'_>,
+        token: [u8; 32],
+        negative: &RequestCancellation,
+    ) -> Result<(), AppError> {
+        self.inspect_join(invite, token, negative, true).map(drop)
+    }
+
+    fn inspect_join(
+        self,
+        invite: &NativeTextInvitePacketData<'_>,
+        token: [u8; 32],
+        negative: &RequestCancellation,
+        require_pending_if_unparked: bool,
+    ) -> Result<Option<NativeTextJoinedRegistrationData>, AppError> {
         self.original.require_current(negative)?;
         let original = self.original.pending.upgrade().ok_or_else(refused)?;
         let pending = original.state.try_lock().map_err(|_| refused())?;
         let mounted = self.mounted.upgrade().ok_or_else(refused)?;
         let slot = mounted.try_lock().map_err(|_| refused())?;
+        let metadata = self.original.work.as_ref().ok_or_else(refused)?;
         let result = if let Some(runtime) = slot.as_ref() {
             let node = runtime.node.as_ref().ok_or_else(refused)?;
             node.selected_join_data().map_err(|_| refused())?;
-            let metadata = self.original.work.as_ref().ok_or_else(refused)?;
             let receipt = if let Some(recovered) = runtime.recovered {
                 if recovered.invocation != token || recovered.invite != invite.binding().id_data() {
                     return Err(refused());
@@ -1386,6 +1407,13 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             }
             Some(receipt)
         } else {
+            if require_pending_if_unparked {
+                metadata.require_pending_join_intent(
+                    pending.io.as_ref(),
+                    invite.binding(),
+                    token,
+                )?;
+            }
             None
         };
         self.original.require_current(negative)?;

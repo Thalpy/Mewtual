@@ -836,6 +836,7 @@ redacted_debug!(
     NativeChatSourceOwner,
     NativeChatSourceObservation,
     NativeChatPreparedKeyCut,
+    NativeChatKeyCurrentCheck,
     NativeChatKeyEnds,
     NativeChatKeyDrain,
     NativeChatWarmSdkReopenCut,

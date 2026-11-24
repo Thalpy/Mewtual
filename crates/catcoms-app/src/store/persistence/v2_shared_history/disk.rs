@@ -14,7 +14,7 @@ use crate::store::persistence::v2_member_outbox::fs::{
 };
 use crate::store::{frame, unframe};
 use catcoms_storage::kept::SessionId;
-use catcoms_storage::VaultSessionGuard;
+use catcoms_storage::{VaultPhysicalWorkLease, VaultSessionGuard};
 use std::fs::File;
 use std::sync::{Arc, Mutex, Weak};
 
@@ -118,15 +118,15 @@ impl SharedHistoryDisk {
     }
 
     /// Seal the WAL once so a short write can resume on the same held file.
-    pub(in crate::store::persistence) fn prepare_save<'a>(
-        &'a self,
+    pub(in crate::store::persistence) fn prepare_save(
+        &self,
         key: &[u8; 32],
         expected: SelectedHistoryRecord,
         bundle: &[u8],
         rng: &mut impl CryptoRngCore,
-        session: &'a VaultSessionGuard,
+        session: &VaultSessionGuard,
         payment: CatalogReadReservation,
-    ) -> Result<PreparedSharedHistorySave<'a>, AppError> {
+    ) -> Result<PreparedSharedHistorySave, AppError> {
         payment.validate(&self.pool, DISK_FEE)?;
         self.require_key(key)?;
         let (admission, original) = open_shared_history_bundle(
@@ -138,13 +138,13 @@ impl SharedHistoryDisk {
         let target = projection_target(original.action(), expected.action);
         let selector = self.seal_selector(key, expected, Some(target), rng)?;
         Ok(PreparedSharedHistorySave {
-            disk: self,
+            owner: Arc::downgrade(&self.gate),
             expected,
             admission,
             original,
-            session,
             wal: encode_wal(&selector, bundle)?,
             attempt: None,
+            _lease: session.retain_for_physical_work(),
             _payment: payment,
         })
     }
@@ -592,32 +592,38 @@ pub(in crate::store) struct SharedHistoryActionQuery {
     pub(in crate::store) limit: usize,
 }
 
-pub(in crate::store::persistence) struct PreparedSharedHistorySave<'disk> {
-    disk: &'disk SharedHistoryDisk,
+pub(in crate::store::persistence) struct PreparedSharedHistorySave {
+    owner: Weak<Mutex<u64>>,
     expected: SelectedHistoryRecord,
     admission: OwnerFactId,
     original: AssembledActionOriginal,
     wal: Zeroizing<Vec<u8>>,
     attempt: Option<(File, SessionId)>,
-    session: &'disk VaultSessionGuard,
+    _lease: VaultPhysicalWorkLease,
     _payment: CatalogReadReservation,
 }
 
-impl PreparedSharedHistorySave<'_> {
+impl PreparedSharedHistorySave {
+    pub(in crate::store::persistence) fn has_wal(&self) -> bool {
+        self.attempt.is_some()
+    }
+
     pub(in crate::store::persistence) fn commit(
         &mut self,
+        disk: &SharedHistoryDisk,
         key: &[u8; 32],
     ) -> Result<SelectedHistoryRecord, AppError> {
-        let disk = self.disk;
+        if !self.owner.ptr_eq(&Arc::downgrade(&disk.gate)) {
+            return Err(refused());
+        }
         disk.require_key(key)?;
-        let _lease = self.session.retain_for_physical_work();
         let mut gate = disk.gate.try_lock().map_err(|_| refused())?;
         disk.directory.require()?;
         advance_revision(&mut gate)?;
         let path = disk.directory.child(WAL_NAME);
         if self.attempt.is_none() {
             disk.recover_locked(key)?;
-            if let Some(selected) = self.prior_selection(key)? {
+            if let Some(selected) = self.prior_selection(disk, key)? {
                 return Ok(selected);
             }
             let (selector, bundle) = decode_wal(&self.wal)?;
@@ -626,11 +632,16 @@ impl PreparedSharedHistorySave<'_> {
         } else if observe(&path)? == Presence::Absent {
             // The selection may already be durable when the final cleanup
             // barrier fails. Recheck the original before acknowledging it.
-            let selected = self.prior_selection(key)?.ok_or_else(refused)?;
+            let selected = self.prior_selection(disk, key)?.ok_or_else(refused)?;
             self.attempt = None;
             return Ok(selected);
         }
         let held = self.attempt.as_mut().ok_or_else(refused)?;
+        #[cfg(test)]
+        if SHORT_WAL_WRITE.with(|fault| fault.replace(false)) {
+            finish_exact_write(&path, held, &self.wal[..80])?;
+            return Err(AppError::Io("injected short history WAL write".into()));
+        }
         finish_exact_write(&path, held, &self.wal)?;
         disk.directory.sync()?;
         let selected = disk.finish_wal(key, &self.wal, held)?;
@@ -638,11 +649,15 @@ impl PreparedSharedHistorySave<'_> {
         Ok(selected)
     }
 
-    fn prior_selection(&self, key: &[u8; 32]) -> Result<Option<SelectedHistoryRecord>, AppError> {
+    fn prior_selection(
+        &self,
+        disk: &SharedHistoryDisk,
+        key: &[u8; 32],
+    ) -> Result<Option<SelectedHistoryRecord>, AppError> {
         let Some((selected, admission, original)) =
-            self.disk.read_selected(key, self.expected.action)?
+            disk.read_selected(key, self.expected.action)?
         else {
-            self.disk.directory.require()?;
+            disk.directory.require()?;
             return Ok(None);
         };
         if admission != self.admission
@@ -650,9 +665,19 @@ impl PreparedSharedHistorySave<'_> {
         {
             return Err(refused());
         }
-        self.disk.directory.sync()?;
+        disk.directory.sync()?;
         Ok(Some(selected))
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static SHORT_WAL_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(in crate::store) fn fail_next_history_wal_write_for_test() {
+    SHORT_WAL_WRITE.with(|fault| fault.set(true));
 }
 
 pub(in crate::store) struct SavedSharedOriginal {

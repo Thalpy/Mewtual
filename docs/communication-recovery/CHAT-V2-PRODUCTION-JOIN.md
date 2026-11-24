@@ -240,6 +240,9 @@ request bytes, TCP identity and port. An expired invite can only reach this
 path as an exact retry of the already covered request. An unresolved join
 prevents native Found on that vault. A selected native founder prevents the
 vault from covering a first join.
+An expired desktop preview authenticates the original Pending or registered
+row in the unlocked vault. Preview leaves the transport closed until the user
+approves a host. A fresh join still requires an unexpired invitation.
 Revision-one requests keep their current read path. The mounted owner starts
 one actual paid TCP actor from the covered seed and loans it to the original
 request invocation. Cancelling before installation returns that actor for the
@@ -525,7 +528,11 @@ original invocation and settings on that authenticated row. A conflicting
 retry cannot create a new group or start the original network again.
 A separate desktop view pages saved received messages through the held history
 namespace. Each body replays the exact selected actions under the current
-Core guard. Joined dependency repair is bounded to the original authenticated
+Core guard. A mounted history writer retains the exact partially written WAL
+and its resource reservation. The next archive read or write completes the
+original file before using that archive. The renderer serializes live reads
+and retains their invalidations through transient admission contention.
+Joined dependency repair is bounded to the original authenticated
 carrier. The installed founder can recover its own saved direct dependencies
 and show its saved received messages after the live receiver retires. The
 desktop briefly retains an incoming founder frame or dependency reply while
@@ -601,6 +608,8 @@ joined row and a reopened founder read the roster from their authenticated
 selected history.
 A cold restart during an incomplete governing transaction still needs recovery
 work.
+Add and Remove check the same membership epoch bound as cold replay before
+covering a successor intent. Both writers can select epoch 64.
 
 ## Acceptance before enabling
 
@@ -616,3 +625,6 @@ missing/corrupt archive pages, persisted contradictions and actual cold reopen.
 Use at least three real peers for founder-offline delivery, then the planned
 20–50-member bubble/epoch/restart/load matrix. Physical multi-device evidence is
 separate. No newly decoded DATA or in-memory mock can stand in for these results.
+Archived replies across a removal still need the exact historical admission
+and its frozen cut before production enablement.
+See [selected history proofs](CHAT-V2-SELECTED-HISTORY-PROOFS.md).

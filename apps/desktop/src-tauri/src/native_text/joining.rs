@@ -48,13 +48,13 @@ impl Invocation {
     fn invite(&self) -> Result<NativeTextInvitePacketData<'_>, &'static str> {
         NativeTextInvitePacketData::decode(&self.packet).map_err(|_| INPUT)
     }
+}
 
-    fn token(invite: &NativeTextInvitePacketData<'_>) -> [u8; 32] {
-        blake3::derive_key(
-            "mewtual/native-chat-first-join/v2",
-            &invite.binding().id_data(),
-        )
-    }
+pub(super) fn request_token(invite: &NativeTextInvitePacketData<'_>) -> [u8; 32] {
+    blake3::derive_key(
+        "mewtual/native-chat-first-join/v2",
+        &invite.binding().id_data(),
+    )
 }
 
 pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task)) -> bool {
@@ -91,7 +91,7 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
                         &invocation.target,
                     )
                     .await;
-                    if parked && selection.name_data() == invocation.name {
+                    if parked {
                         let Some(attempt) = prepare_reconnect(&state, &invocation, selection).await
                         else {
                             return;
@@ -200,7 +200,8 @@ async fn capture_active<T: JoinCapture>(
 ) -> Result<T, String> {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
-        let original = capture_once(state, invocation, &capture).await?;
+        let original =
+            capture_once(state, invocation.generation, &invocation.target, &capture).await?;
         if !original.is_capture_busy() {
             return Ok(original);
         }
@@ -215,34 +216,29 @@ async fn capture_active<T: JoinCapture>(
     }
 }
 
-async fn capture_once<T>(
+pub(super) async fn capture_once<T>(
     state: &AppState,
-    invocation: &Invocation,
+    generation: u64,
+    target: &NativeTextVaultAuthenticationCheck,
     capture: impl FnOnce(
         &catcoms_app::store::NativeTextSources<catcoms_net::MeshService, OsCryptoRng>,
         NativeTextSourceCommand,
     ) -> T,
 ) -> Result<T, String> {
-    let mut ui =
-        Some(founding::ui_capture(state, invocation.generation, &invocation.target).await?);
+    let mut ui = Some(founding::ui_capture(state, generation, target).await?);
     let mut output = None;
-    founding::with_current_vault(
-        state,
-        invocation.generation,
-        &invocation.target,
-        |store, _| {
-            state
-                .native_text
-                .sources
-                .capture_join(store, |sources, vault| {
-                    let command = vault
-                        .bind_native_source_command(&mut ui)
-                        .map_err(|_| listing::STALE)?;
-                    output = Some(capture(sources, command));
-                    Ok(())
-                })
-        },
-    )
+    founding::with_current_vault(state, generation, target, |store, _| {
+        state
+            .native_text
+            .sources
+            .capture_join(store, |sources, vault| {
+                let command = vault
+                    .bind_native_source_command(&mut ui)
+                    .map_err(|_| listing::STALE)?;
+                output = Some(capture(sources, command));
+                Ok(())
+            })
+    })
     .await?;
     output.ok_or_else(|| listing::STALE.to_owned())
 }
@@ -278,7 +274,7 @@ async fn complete(
                 .cover(
                     &invite,
                     &invite.binding().spec_data().anchor,
-                    Invocation::token(&invite),
+                    request_token(&invite),
                     SystemClock.now_ms(),
                     &original.account,
                     &mut OsCryptoRng,
@@ -342,7 +338,7 @@ async fn complete(
         prepared
             .register(
                 &invite,
-                Invocation::token(&invite),
+                request_token(&invite),
                 original.name.clone(),
                 original.display.clone(),
                 &original.account,
@@ -398,7 +394,7 @@ async fn prepare_reconnect(
             .prepare_reconnect(
                 &selection,
                 &invite,
-                Invocation::token(&invite),
+                request_token(&invite),
                 original.host,
                 scope,
             )

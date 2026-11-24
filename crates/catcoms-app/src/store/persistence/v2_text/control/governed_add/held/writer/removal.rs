@@ -49,6 +49,7 @@ impl PreparedGovernedRemoveFence {
         verifier: [u8; 32],
         rng: &mut dyn CryptoRngCore,
     ) -> Result<Self, AppError> {
+        selected_head::next_supported_epoch(installed.1.epoch)?;
         source.require_original_negative(store)?;
         let prior = HeldColdFounderAdd::capture(
             store,

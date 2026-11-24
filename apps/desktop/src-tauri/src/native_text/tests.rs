@@ -1496,6 +1496,98 @@ async fn native_text_membership_selected_eviction_notifies_the_original_joined_r
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_expired_preview_reproves_the_original_pending_after_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("joiner");
+    let (founder, main, founder_queue) = app(root.path().join("founder"), None, true);
+    let (joiner, window, queue) = app(path.clone(), None, true);
+    unlock_current(&founder, &main, &founder_queue).await;
+    unlock_current(&joiner, &window, &queue).await;
+    let found = found_request(&main, 1, "Founder");
+    run(&founder_queue).await;
+    let found = found_value(found.await.unwrap());
+    let minted = invite_command(
+        &main,
+        "mint_invite_fresh",
+        serde_json::json!({"server": found["server"], "expectedContext": found["context"]}),
+    );
+    run(&founder_queue).await;
+    let code = found_value(minted.await.unwrap())
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let wire = hex::decode(&code).unwrap();
+    let invite = catcoms_app::store::NativeTextInvitePacketData::decode(&wire).unwrap();
+    let expires = invite.binding().spec_data().expires_at_ms;
+
+    let state = joiner.state::<AppState>();
+    state
+        .native_text
+        .invite_preview_now
+        .store(expires, Ordering::SeqCst);
+    let fresh = preview_request(&window, code.clone());
+    run(&queue).await;
+    refused(fresh.await.unwrap());
+    let generation = state.ui_session_generation.load(Ordering::SeqCst);
+    let target = state.native_text.ui_state.original_target().unwrap();
+    let caller = keep_session::current(&state, generation).unwrap();
+    let preparation = joining::capture_once(&state, generation, &target, |sources, command| {
+        sources.capture_join_request(command)
+    })
+    .await
+    .unwrap();
+    let token = joining::request_token(&invite);
+    preparation
+        .cover(
+            &invite,
+            &invite.binding().spec_data().anchor,
+            token,
+            expires - 1,
+            &caller,
+            &mut OsCryptoRng,
+        )
+        .unwrap();
+    let pending = path.join("chat-critical-namespaces.joined-pending.bin");
+    let original = std::fs::read(&pending).unwrap();
+    let warm = preview_request(&window, code.clone());
+    run(&queue).await;
+    let warm = found_value(warm.await.unwrap());
+    assert_eq!(warm["expires_at_ms"], expires);
+
+    let close = register_vault_close(&state).await.unwrap();
+    sources::close_server_rows(&state, &SystemClock)
+        .await
+        .unwrap();
+    drop((close, caller, target, state));
+    drop((window, joiner));
+    let (reopened, window, queue) = app(path, None, true);
+    unlock_current(&reopened, &window, &queue).await;
+    let state = reopened.state::<AppState>();
+    state
+        .native_text
+        .invite_preview_now
+        .store(expires, Ordering::SeqCst);
+    let cold = preview_request(&window, code);
+    run(&queue).await;
+    assert_eq!(found_value(cold.await.unwrap()), warm);
+    let generation = state.ui_session_generation.load(Ordering::SeqCst);
+    let target = state.native_text.ui_state.original_target().unwrap();
+    let caller = keep_session::current(&state, generation).unwrap();
+    let preparation = joining::capture_once(&state, generation, &target, |sources, command| {
+        sources.capture_joined_selection(command)
+    })
+    .await
+    .unwrap();
+    let mut wrong_token = token;
+    wrong_token[0] ^= 1;
+    assert!(preparation
+        .require_recovery_invite(&invite, wrong_token, &caller)
+        .is_err());
+    assert_eq!(std::fs::read(pending).unwrap(), original);
+    assert!(state.servers.lock().await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_text_connected_join_retries_original_welcome_after_authenticated_unlock() {
     use catcoms_rt::{MeshTransport, ProtocolId, TransportError, CHAT_V2_JOIN_KIND};
     use catcoms_sync::{DirectJoinLimits, PreparedV2JoinRequest};
@@ -1555,6 +1647,24 @@ async fn native_text_connected_join_retries_original_welcome_after_authenticated
             "approved_host_required": true
         })
     );
+    state
+        .native_text
+        .invite_preview_now
+        .store(expires, Ordering::SeqCst);
+    // Even this founder's exact code has no covered join in this vault.
+    let expired = preview_request(&main, hex.clone());
+    run(&queue).await;
+    let tauri::ipc::InvokeResponse::Err(error) = expired.await.unwrap() else {
+        panic!("an expired invite cannot start a new join");
+    };
+    assert_eq!(
+        error.0,
+        serde_json::json!("This Chat V2 invite has expired.")
+    );
+    state
+        .native_text
+        .invite_preview_now
+        .store(0, Ordering::SeqCst);
     let trailing = preview_request(&main, format!("{hex}00"));
     run(&queue).await;
     refused(trailing.await.unwrap());
@@ -1993,6 +2103,19 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     let restored = restored["servers"].as_array().unwrap();
     assert_eq!(restored.len(), 1);
     assert_eq!(restored[0], original);
+    let code_text = code.as_str().unwrap();
+    let wire = hex::decode(code_text).unwrap();
+    let invite = catcoms_app::store::NativeTextInvitePacketData::decode(&wire).unwrap();
+    let expires = invite.binding().spec_data().expires_at_ms;
+    state
+        .native_text
+        .invite_preview_now
+        .store(expires, Ordering::SeqCst);
+    let expired = preview_request(&window, code_text.to_owned());
+    run(&queue).await;
+    let preview = found_value(expired.await.unwrap());
+    assert_eq!(preview["expires_at_ms"], expires);
+    assert_eq!(preview["approved_host_required"], true);
     let recovered_publication = assert_joined_connected_workers(&state, id).await;
     let retry = native_send_request(&window, &restored[0], 9, "Joined message");
     run(&queue).await;
@@ -2148,7 +2271,7 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
         "join_server",
         serde_json::json!({
             "inviteHex":code, "approvedHost":"127.0.0.1", "displayName":"Member",
-            "serverName":"My joined group", "isDm":false, "allowSwitchboards":false,
+            "serverName":"New group", "isDm":false, "allowSwitchboards":false,
         }),
     );
     run(&queue).await;

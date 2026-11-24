@@ -64,6 +64,8 @@ pub(super) struct Registry {
     #[cfg(test)]
     text_reply_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
     #[cfg(test)]
+    invite_preview_now: AtomicU64,
+    #[cfg(test)]
     send_final_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
     #[cfg(test)]
     send_io_edge: StdMutex<Option<Arc<tests::BlockingIoBarrier>>>,
@@ -139,6 +141,8 @@ impl Default for Registry {
             found_publication_edge: StdMutex::new(None),
             #[cfg(test)]
             text_reply_edge: StdMutex::new(None),
+            #[cfg(test)]
+            invite_preview_now: AtomicU64::new(0),
             #[cfg(test)]
             send_final_edge: StdMutex::new(None),
             #[cfg(test)]

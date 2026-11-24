@@ -6,6 +6,14 @@ use catcoms_replication::chat::{
     cold_manifest::ArchiveHeadId,
     owner_header::{OwnerHeaderId, OwnerStateCommitment},
 };
+use catcoms_sync::MAX_V2_GOVERNING_JOIN_STEPS;
+
+pub(super) fn next_supported_epoch(parent: u64) -> Result<u64, AppError> {
+    parent
+        .checked_add(1)
+        .filter(|next| *next <= MAX_V2_GOVERNING_JOIN_STEPS as u64)
+        .ok_or_else(refused)
+}
 
 const KIND: TextControlKindData = TextControlKindData::Head;
 const TAG: &[u8] = KIND.domains().0;
@@ -107,7 +115,7 @@ impl GovernedHeadData {
         if transition.context != original.transition.context
             || transition.before_head != TextHeadIdData::of_data(predecessor)
             || transition.before_archive != original.archive
-            || original.transition.epoch.checked_add(1) != Some(transition.epoch)
+            || next_supported_epoch(original.transition.epoch)? != transition.epoch
             || transition.header == original.transition.header
             || transition.state == original.transition.state
             || transition.authenticator == original.transition.authenticator
@@ -208,7 +216,7 @@ impl GovernedHeadData {
         let valid = match kind {
             GovernedHeadKind::FirstAdd => self.transition.epoch == 1 && self.generation == 2,
             GovernedHeadKind::Add | GovernedHeadKind::Remove => {
-                self.transition.epoch >= 2
+                (2..=MAX_V2_GOVERNING_JOIN_STEPS as u64).contains(&self.transition.epoch)
                     && self.transition.epoch.checked_add(1) == Some(self.generation)
             }
         };

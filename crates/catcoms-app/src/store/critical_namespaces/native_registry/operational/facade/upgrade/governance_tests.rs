@@ -150,6 +150,9 @@ fn shared_history_physical_stage_retains_the_original_catalog_claim_and_marker()
 
 #[test]
 fn shared_history_physical_selection_reopens_the_original_promoted_files() {
+    use crate::store::persistence::governance_layout::joined::shared_history::{
+        fail_next_history_wal_write_for_test, DIRECTORY_NAME,
+    };
     use crate::store::persistence::{
         v2_member_outbox::member_outbox_key,
         v2_shared_history::{
@@ -240,12 +243,15 @@ fn shared_history_physical_selection_reopens_the_original_promoted_files() {
             .unwrap();
     let manifest = record.manifest.id();
     let bundle = record.encode_bundle().unwrap();
-    assert_eq!(
+    fail_next_history_wal_write_for_test();
+    assert!(matches!(
         store
-            .save_shared_history_record(scope, action.id(), manifest, &bundle, &mut rng)
-            .unwrap(),
-        manifest
-    );
+            .save_shared_history_record(scope, action.id(), manifest, &bundle, &mut rng),
+        Err(AppError::Io(error)) if error == "injected short history WAL write"
+    ));
+    let wal = dir.path().join(DIRECTORY_NAME).join("history.wal");
+    let partial = fs::read(&wal).unwrap();
+    assert_eq!(partial.len(), 80);
     let foreign = SharedHistoryScope {
         channel: scope.channel + 1,
         ..scope
@@ -259,6 +265,22 @@ fn shared_history_physical_selection_reopens_the_original_promoted_files() {
         limit: 1,
     };
     assert!(store.shared_history_action_page(foreign, query()).is_err());
+    assert_eq!(fs::read(&wal).unwrap(), partial);
+    // Pagination recovers the exact original mounted file without resealing.
+    assert_eq!(
+        store
+            .shared_history_action_page(scope, query())
+            .unwrap()
+            .actions,
+        [action.id()]
+    );
+    assert!(!wal.exists());
+    assert_eq!(
+        store
+            .save_shared_history_record(scope, action.id(), manifest, &bundle, &mut rng)
+            .unwrap(),
+        manifest,
+    );
     drop(key);
     drop(selected);
     let selected = NativeTextJoinedStorage::open_for_native_startup(

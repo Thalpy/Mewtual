@@ -37,4 +37,58 @@ fn governed_add_head2_preserves_the_old_head_envelope_and_refuses_legacy_selecti
     };
     assert!(GovernedHeadData::after_first_archive(later, archive, 1).is_err());
     assert!(GovernedHeadData::after_first_archive(later, archive, 2).is_err());
+
+    let limit = MAX_V2_GOVERNING_JOIN_STEPS as u64;
+    assert_eq!(next_supported_epoch(limit - 1).unwrap(), limit);
+    assert!(next_supported_epoch(limit).is_err());
+    let parent = GovernedHeadData {
+        transition: GovernedArchiveLabels {
+            epoch: limit - 1,
+            ..transition
+        },
+        generation: limit,
+        archive,
+        kind: GovernedHeadKind::Add,
+    }
+    .seal_kind(&key, GovernedHeadKind::Add, &mut rng)
+    .unwrap();
+    let removal = GovernedArchiveLabels {
+        before_head: TextHeadIdData::of_data(&parent),
+        before_archive: archive,
+        header: OwnerHeaderId::from_bytes([8; 32]),
+        state: OwnerStateCommitment::from_bytes([9; 32]),
+        authenticator: [10; 32],
+        epoch: limit,
+        ..transition
+    };
+    let selected_archive = ArchiveHeadId::from_bytes([11; 32]);
+    let selected = GovernedHeadData::after_successor(
+        &key,
+        &parent,
+        removal,
+        selected_archive,
+        GovernedHeadKind::Remove,
+    )
+    .unwrap();
+    let selected_bytes = selected
+        .seal_kind(&key, GovernedHeadKind::Remove, &mut rng)
+        .unwrap();
+    let beyond = GovernedArchiveLabels {
+        before_head: TextHeadIdData::of_data(&selected_bytes),
+        before_archive: selected_archive,
+        header: OwnerHeaderId::from_bytes([12; 32]),
+        state: OwnerStateCommitment::from_bytes([13; 32]),
+        authenticator: [14; 32],
+        epoch: limit + 1,
+        ..removal
+    };
+    assert!(GovernedHeadData::after_successor(
+        &key,
+        &selected_bytes,
+        beyond,
+        archive,
+        GovernedHeadKind::Remove
+    )
+    .is_err());
+    assert!(GovernedHeadData::open_governed_data(&key, &selected_bytes).unwrap() == selected);
 }

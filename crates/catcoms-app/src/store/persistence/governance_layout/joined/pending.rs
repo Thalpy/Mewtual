@@ -804,6 +804,20 @@ impl ServerStore {
         self.require_recovered_request(selected).map(|_| ())
     }
 
+    pub(in crate::store) fn require_recovered_join_intent(
+        &self,
+        invite: &SignedInviteBindingData,
+        token: [u8; 32],
+    ) -> Result<(), AppError> {
+        self.validate_mounted_governance_layout()?;
+        let slot = self.joined_pin_index.lock().map_err(|_| denied())?;
+        let selected = slot.as_ref().ok_or_else(denied)?;
+        self.require_native_pre_welcome(selected)?;
+        let source = self.require_recovered_request(selected)?;
+        require_join_intent(source.request_bytes_data(), invite, token)?;
+        self.require_recovered_request(selected).map(|_| ())
+    }
+
     pub(in crate::store) fn validate_recovered_join_delivery(
         &self,
         exact_request: &[u8],
@@ -907,16 +921,7 @@ impl JoinedPendingIo {
         invite: &SignedInviteBindingData,
         request_token: [u8; 32],
     ) -> Result<(), AppError> {
-        let packet =
-            catcoms_sync::V2JoinRequestPacketData::decode(self.prepared.request_bytes_data())
-                .map_err(|_| denied())?;
-        let original = packet.founder_add_data();
-        if original.invite.encode() != invite.encode()
-            || original.request.spec_data().request_token != request_token
-        {
-            return Err(denied());
-        }
-        Ok(())
+        require_join_intent(self.prepared.request_bytes_data(), invite, request_token)
     }
 
     fn require_catalog(&self, store: &ServerStore) -> Result<(), AppError> {
@@ -1212,6 +1217,21 @@ impl JoinedPendingIo {
         self.request_data(store)?;
         Ok(frame)
     }
+}
+
+fn require_join_intent(
+    request: &[u8],
+    invite: &SignedInviteBindingData,
+    token: [u8; 32],
+) -> Result<(), AppError> {
+    let packet = catcoms_sync::V2JoinRequestPacketData::decode(request).map_err(|_| denied())?;
+    let original = packet.founder_add_data();
+    if original.invite.encode() != invite.encode()
+        || original.request.spec_data().request_token != token
+    {
+        return Err(denied());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

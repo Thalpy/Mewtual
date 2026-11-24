@@ -55,10 +55,14 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
     let nativeOwnMessages = {}, nativeOwnLoading = false, nativeOwnPages = [], nativeOwnCalls = [];
     let nativeReceived = [], nativeReceivedScope = null, nativeReceivedRevision = 0;
     const nativeReceivedReads = new Map();
+    let nativeReceivedPump = null;
     let nativeArchive = null, nativeArchiveRevision = 0;
     let nativeRemovedContexts = {}, membersOpen = false;
     let busy=false,showAdd=false,startTab="join";
     let displayName="Catte",newServerName="Group",advertise="",relay="",rendezvous="";
+    let joinInvite = "", joinPreview = null, joinPreviewCode = "", approvedJoinHost = "", joinServerName = "", joinError = "";
+    let nativeJoinReplies = [], nativeJoinCalls = [];
+    function resetJoinAttempt() { joinPreview = null; joinPreviewCode = ""; approvedJoinHost = ""; }
     const studioExit={begin(){const generation=viewGeneration;return{current:()=>generation===viewGeneration};}};
     // The navigation's dispatch decision is tested separately against the
     // actual switchServer. Here retain the real history read after selection.
@@ -105,6 +109,12 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
     const chatScopeKey = (s,c) => s + ":" + c;
     const chanKey = () => activeServerId === null || !cur?.active ? null : chatScopeKey(activeServerId,cur.active);
     const invoke = async (command, args) => {
+      if (command === "preview_invite" || command === "join_server") {
+        nativeJoinCalls.push({ command, args: structuredClone(args) });
+        const next = nativeJoinReplies.shift();
+        if (next instanceof Error) throw next;
+        return await next;
+      }
       if (command === "get_message_page" && "ownAction" in args) {
         nativeOwnCalls.push(structuredClone(args));
         const next = nativeOwnPages.shift();
@@ -195,6 +205,9 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
       received() { return structuredClone(nativeReceived); },
       nativeRetry: retryNativeTextRequests,
       nativeFound: found,
+      nativeJoin: joinNative,
+      setNativeJoin(code, host, ...replies) { chatBackend = "text-v2"; joinInvite = code; approvedJoinHost = host; nativeJoinReplies = replies; },
+      nativeJoinCalls: () => nativeJoinCalls,
       dispose:retireUiSessionOnUnmount,
       debounce:scheduleUiStateSave,
       pendingDebounce:()=>saveTimers.values().next().value,

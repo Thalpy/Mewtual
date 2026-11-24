@@ -1785,6 +1785,22 @@ impl MetadataWork {
         self.with_joined_store(|store| Ok(store.selected_pending_join_data()?.is_some()))
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn require_pending_join_intent(
+        &self,
+        pending: Option<&JoinedPendingIo>,
+        invite: &catcoms_replication::chat::join_bindings::SignedInviteBindingData,
+        token: [u8; 32],
+    ) -> Result<(), AppError> {
+        self.with_joined_store(|store| match pending {
+            Some(original) => {
+                original.request_data(store)?;
+                original.require_original_join_intent(invite, token)?;
+                original.request_data(store).map(|_| ())
+            }
+            None => store.require_recovered_join_intent(invite, token),
+        })
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn cover_join_delivery(
         &self,
         pending: &mut JoinedPendingIo,

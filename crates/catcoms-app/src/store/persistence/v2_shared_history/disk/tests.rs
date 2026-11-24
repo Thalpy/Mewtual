@@ -87,7 +87,7 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
     assert_eq!(
         disk.prepare_save(&KEY, expected, &bytes, &mut rng, &session, pay())
             .unwrap()
-            .commit(&KEY)
+            .commit(&disk, &KEY)
             .unwrap(),
         expected
     );
@@ -96,7 +96,7 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
     assert_eq!(
         disk.prepare_save(&KEY, retry, &resealed, &mut rng, &session, pay())
             .unwrap()
-            .commit(&KEY)
+            .commit(&disk, &KEY)
             .unwrap(),
         expected
     );
@@ -104,7 +104,7 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
     assert!(disk
         .prepare_save(&KEY, conflict, &altered, &mut rng, &session, pay())
         .unwrap()
-        .commit(&KEY)
+        .commit(&disk, &KEY)
         .is_err());
     assert!(disk
         .read(&[255; 32], expected.action, &session, pay())
@@ -167,17 +167,17 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
     let mut reencoded = disk
         .prepare_save(&KEY, selected, &bundle, &mut rng, &session, pay())
         .unwrap();
-    assert!(reencoded.commit(&KEY).is_err());
+    assert!(reencoded.commit(&disk, &KEY).is_err());
     assert_eq!(std::fs::read(&wal_name).unwrap(), &prepared.wal[..80]);
     drop(reencoded);
     assert!(disk.recover(&KEY, &session, pay()).is_err());
     std::fs::rename(&wal_name, &parked).unwrap();
     std::fs::write(&wal_name, &prepared.wal[..80]).unwrap();
-    assert!(prepared.commit(&KEY).is_err());
+    assert!(prepared.commit(&disk, &KEY).is_err());
     assert!(!disk.selector_path(&KEY, selected.action).exists());
     std::fs::remove_file(&wal_name).unwrap();
     std::fs::rename(&parked, &wal_name).unwrap();
-    assert_eq!(prepared.commit(&KEY).unwrap(), selected);
+    assert_eq!(prepared.commit(&disk, &KEY).unwrap(), selected);
     assert!(!wal_name.exists());
     drop(prepared);
     drop(disk);
@@ -233,7 +233,7 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
     assert!(disk
         .prepare_save(&KEY, fourth, &bundle, &mut rng, &session, pay())
         .unwrap()
-        .commit(&KEY)
+        .commit(&disk, &KEY)
         .is_err());
     assert!(!wal_name.exists());
     assert!(!disk.bundle_path(fourth.manifest).exists());
@@ -245,7 +245,7 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
     assert_eq!(
         disk.prepare_save(&KEY, retry, &resealed, &mut rng, &session, pay())
             .unwrap()
-            .commit(&KEY)
+            .commit(&disk, &KEY)
             .unwrap(),
         expected
     );
@@ -263,7 +263,7 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
     assert!(disk
         .prepare_save(&KEY, fourth, &bundle, &mut rng, &session, pay())
         .unwrap()
-        .commit(&KEY)
+        .commit(&disk, &KEY)
         .is_err());
     assert!(!wal_name.exists());
     assert_eq!(
@@ -284,7 +284,7 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
     assert!(disk
         .prepare_save(&KEY, fourth, &bundle, &mut rng, &session, pay())
         .unwrap()
-        .commit(&KEY)
+        .commit(&disk, &KEY)
         .is_err());
     assert_eq!(std::fs::read_dir(&path).unwrap().count(), 0);
     std::fs::remove_dir(&path).unwrap();
@@ -347,7 +347,7 @@ fn shared_history_disk_resolves_exact_creation_targets_across_selector_versions(
         let (expected, bytes) = encode(&scope, action, admission, &mut rng);
         disk.prepare_save(&KEY, expected, &bytes, &mut rng, &session, pay())
             .unwrap()
-            .commit(&KEY)
+            .commit(&disk, &KEY)
             .unwrap();
     }
     let (expected, bytes) = encode(&scope, &edit, admission, &mut rng);

@@ -10,8 +10,8 @@ use crate::store::persistence::v2_member_outbox::{
 };
 use crate::store::persistence::v2_shared_history::{
     disk::{
-        SavedSharedOriginal, SelectedHistoryRecord, SharedHistoryDisk, SharedHistoryDiskQuota,
-        DISK_FEE,
+        PreparedSharedHistorySave, SavedSharedOriginal, SelectedHistoryRecord, SharedHistoryDisk,
+        SharedHistoryDiskQuota, DISK_FEE,
     },
     SharedHistoryActionPage, SharedHistoryActionQuery, SharedHistoryScope,
 };
@@ -21,12 +21,15 @@ use catcoms_storage::private_chat_page::PrivateChatPageId;
 pub(in crate::store) const MARKER_NAME: &str = "chat-critical-namespaces.shared-history.marker";
 pub(in crate::store) const DIRECTORY_NAME: &str = "chat-v2-received-history";
 pub(in crate::store) const CLAIM_STAGE_NAME: &str = "chat-critical-namespaces.shared-history.claim";
+#[cfg(test)]
+pub(in crate::store) use crate::store::persistence::v2_shared_history::disk::fail_next_history_wal_write_for_test;
 const _: () = assert!(history::MAX_SEED_FRAME <= governance::codec::MAX_SEED_FRAME);
 
 /// Selected catalog marker custody retained through the common opener.
 pub(in crate::store) struct SelectedSharedHistory {
     marker: OpenedArchiveObject,
     directory: HeldDirectory,
+    pending: Option<PreparedSharedHistorySave>,
     disk: Option<SharedHistoryDisk>,
     mount: crate::store::chat_admission::PhysicalMountNegative,
     _fee: CatalogReadReservation,
@@ -48,6 +51,7 @@ impl SelectedSharedHistory {
         let value = Self {
             marker,
             directory,
+            pending: None,
             disk: None,
             mount: store.capture_physical_mount_negative(),
             _fee: fee,
@@ -142,6 +146,7 @@ impl ServerStore {
         scope: SharedHistoryScope,
         perform: impl FnOnce(
             &SharedHistoryDisk,
+            &mut Option<PreparedSharedHistorySave>,
             &[u8; 32],
             CatalogReadReservation,
         ) -> Result<T, AppError>,
@@ -170,7 +175,16 @@ impl ServerStore {
         }
         let disk = mounted.disk.as_ref().ok_or_else(denied)?;
         disk.require_scope(scope)?;
-        let result = perform(disk, &key, pool.try_reserve(DISK_FEE)?)?;
+        if let Some(previous) = mounted.pending.as_mut() {
+            previous.commit(disk, &key)?;
+            mounted.pending = None;
+        }
+        let result = perform(
+            disk,
+            &mut mounted.pending,
+            &key,
+            pool.try_reserve(DISK_FEE)?,
+        )?;
         mounted.require(self)?;
         Ok(result)
     }
@@ -183,8 +197,8 @@ impl ServerStore {
         bundle: &[u8],
         rng: &mut impl CryptoRngCore,
     ) -> Result<PrivateChatPageId, AppError> {
-        self.with_shared_history(scope, |disk, key, payment| {
-            let mut prepared = disk.prepare_save(
+        self.with_shared_history(scope, |disk, pending, key, payment| {
+            let prepared = disk.prepare_save(
                 key,
                 SelectedHistoryRecord { action, manifest },
                 bundle,
@@ -192,7 +206,12 @@ impl ServerStore {
                 &self._session,
                 payment,
             )?;
-            Ok(prepared.commit(key)?.manifest)
+            let original = pending.insert(prepared);
+            let result = original.commit(disk, key);
+            if result.is_ok() || !original.has_wal() {
+                *pending = None;
+            }
+            Ok(result?.manifest)
         })
     }
 
@@ -201,7 +220,7 @@ impl ServerStore {
         scope: SharedHistoryScope,
         action: ActionId,
     ) -> Result<Option<SavedSharedOriginal>, AppError> {
-        self.with_shared_history(scope, |disk, key, payment| {
+        self.with_shared_history(scope, |disk, _, key, payment| {
             disk.read(key, action, &self._session, payment)
         })
     }
@@ -211,7 +230,7 @@ impl ServerStore {
         scope: SharedHistoryScope,
         query: SharedHistoryActionQuery,
     ) -> Result<SharedHistoryActionPage, AppError> {
-        self.with_shared_history(scope, |disk, key, payment| {
+        self.with_shared_history(scope, |disk, _, key, payment| {
             disk.action_page(key, query, &self._session, payment)
         })
     }

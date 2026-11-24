@@ -176,6 +176,50 @@ test("received text is fetched for the exact installed view and discarded after 
   app.done();
 });
 
+test("received invalidations survive a Busy read and other actions wait for the same lane", async () => {
+  const app = pendingManagerApp({});
+  await app.hydrate();
+  app.nativeConversation(7, "9", context);
+  const notice = { server: 7, channel: "9", context, action: row.action };
+  const other = "93".repeat(32);
+  const reply = (action: string, text: string) => ({ backend: "text-v2", scope: "received-live", item: { action, text, certainty: "provisional" } });
+  app.nativeHistory(reply(row.action, "Original"));
+  await app.receiveNotice(notice);
+
+  const blocked = deferred<unknown>();
+  app.nativeHistory(blocked.promise, reply(other, "Second"), { backend: "text-v2", scope: "received-live", item: null });
+  const changed = app.receiveNotice(notice);
+  await settle();
+  const queued = app.receiveNotice({ ...notice, action: other });
+  await app.receiveNotice(notice);
+  assert.deepEqual(app.received(), []);
+  assert.deepEqual(app.state().nativeHistoryCalls.map((call: { receivedAction: string }) => call.receivedAction), [row.action, row.action]);
+  blocked.reject(new Error("Chat history is busy. Try again."));
+  await Promise.all([changed, queued]);
+  assert.deepEqual(app.state().nativeHistoryCalls.map((call: { receivedAction: string }) => call.receivedAction), [row.action, row.action, other, row.action]);
+  assert.deepEqual(app.received().map((item: { text: string }) => item.text), ["Second"]);
+  app.done();
+});
+
+test("joining with an approved recovery preview starts history after the join releases Busy", async () => {
+  const app = pendingManagerApp({});
+  await app.hydrate();
+  app.setNativeJoin("original invitation", "127.0.0.1",
+    { approved_host_required: true, expires_at_ms: 1 },
+    { backend: "text-v2", server: 7, context, channel: "9", name: "Joined group", display_name: "Catte", is_dm: false },
+  );
+  await app.nativeJoin();
+  assert.deepEqual(app.nativeJoinCalls().map((call: { command: string }) => call.command), ["preview_invite"]);
+  assert.equal(app.state().nativeHistoryCalls.length, 0);
+  await app.nativeJoin();
+  assert.deepEqual(app.nativeJoinCalls().map((call: { command: string }) => call.command), ["preview_invite", "join_server"]);
+  assert.equal(app.nativeJoinCalls()[1].args.approvedHost, "127.0.0.1");
+  assert.equal(app.state().activeServerId, 7);
+  assert.equal(app.state().nativeHistoryCalls[0].expectedContext, context);
+  assert.equal(app.state().nativeHistoryLoaded, true);
+  app.done();
+});
+
 test("real App reads saved received bodies and suppresses them after a live change", async () => {
   const app = pendingManagerApp({});
   await app.hydrate();
