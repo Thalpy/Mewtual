@@ -23,10 +23,10 @@ use zeroize::Zeroizing;
 
 pub(in crate::store::persistence) mod disk;
 mod replay;
-pub(in crate::store) use disk::{
-    SharedHistoryActionPage, SharedHistoryActionQuery, SharedHistoryObservation,
+pub(in crate::store) use disk::{SharedHistoryActionPage, SharedHistoryActionQuery};
+pub(in crate::store) use replay::{
+    SharedHistoryMessageSelection, SharedHistoryProjectionLease, SharedHistoryReplay,
 };
-pub(in crate::store) use replay::{SharedHistoryProjectionLease, SharedHistoryReplay};
 
 const TAG: &[u8] = b"catcoms/private-chat-v2-shared-history-record/v1\0";
 const SCOPE_DOMAIN: &str = "catcoms/private-chat-v2-shared-history-context/v1";

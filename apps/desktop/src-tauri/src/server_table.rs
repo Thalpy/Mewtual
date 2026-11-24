@@ -158,15 +158,19 @@ impl NativeMemberWork {
         }
     }
 
-    pub(super) fn archive_target_settled(&self, target: ActionId) -> bool {
-        self.archive_changes.lock().is_ok_and(|changes| {
-            !changes.overflow
-                && !changes
-                    .unsettled
-                    .iter()
-                    .flatten()
-                    .any(|(_, pending)| *pending == target)
-        })
+    pub(super) fn unsettled_archive_changes(
+        &self,
+        target: ActionId,
+    ) -> Option<[Option<ActionId>; MAX_UNSETTLED_ARCHIVE_CHANGES]> {
+        let changes = self.archive_changes.lock().ok()?;
+        if changes.overflow {
+            return None;
+        }
+        Some(changes.unsettled.map(|entry| {
+            entry
+                .filter(|(_, pending_target)| *pending_target == target)
+                .map(|(action, _)| action)
+        }))
     }
 }
 

@@ -187,9 +187,12 @@ when any individual original cannot be replayed. Recovery beyond the live worker
 bounded direct dependency window remains open.
 The native row serializes live application, archive selection and body publication.
 A failed archive write for a live mutation holds that target out of archive replies
-for the installed row. An exact selected retry clears its entry. This bounded in-session
-state stays with the row through receiver reattachment. Durable protection after
-unsettled mutations and a process or vault restart still needs a selected negative record.
+for the installed row. The mounted Store can resume the held WAL before replay.
+An exact selected retry clears its entry. A fresh archive projection can also clear
+it when its authenticated target action set contains that exact mutation. This
+bounded in-session state stays with the row through receiver reattachment.
+Durable protection after unsettled mutations and a process or vault restart
+still needs a selected negative record.
 
 The installed founder Sync node can now prepare and open ordinary encrypted frames on
 the joined member's selected topic after the first Add. Its exact Core Admission is

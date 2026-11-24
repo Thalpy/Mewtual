@@ -120,7 +120,7 @@ impl<'a> FounderHistory<'a> {
             .member_outbox_mount()
             .map_err(|_| Refusal::Unavailable)?;
         let key = member_outbox_key(self.store).map_err(|_| Refusal::Unavailable)?;
-        let observation = SharedHistoryReplay {
+        let selected = SharedHistoryReplay {
             store: self.store,
             scope: self.scope,
             verifier: self.verifier,
@@ -129,7 +129,7 @@ impl<'a> FounderHistory<'a> {
         .replay_message(&mut ledger, &view, create, |action| {
             self.saved(&mount, &key, action, rng)
         })?;
-        let Some(observation) = observation else {
+        let Some(selected) = selected else {
             return Ok(None);
         };
         let projection_fee = pool
@@ -142,7 +142,7 @@ impl<'a> FounderHistory<'a> {
             projection,
             signal,
             lease: Box::new(SharedHistoryProjectionLease {
-                observation,
+                selected,
                 _view: view,
                 _ledger: ledger,
                 _invocation: None,

@@ -1,5 +1,6 @@
 //! Bounded replay of one selected received message and its minimal dependencies.
-use super::{SharedHistoryActionQuery, SharedHistoryObservation, SharedHistoryScope};
+use super::disk::SharedHistoryObservation;
+use super::{SharedHistoryActionQuery, SharedHistoryScope};
 use crate::store::critical_namespaces::read_pool::CatalogReadReservation;
 use crate::store::persistence::v2_member_outbox::MemberSavedOriginal;
 use crate::store::{ServerStore, V2MemberSaveRefusal};
@@ -17,7 +18,7 @@ const LEDGER_WORK: usize = 4 * ACTION_LIMIT + MAX_PARENTS;
 /// The archive revision, projection view and ledger stay owned until final UI
 /// publication. A joined view also retains its original invocation sender.
 pub(in crate::store) struct SharedHistoryProjectionLease {
-    pub(in crate::store) observation: SharedHistoryObservation,
+    pub(in crate::store) selected: SharedHistoryMessageSelection,
     pub(in crate::store) _view: ProjectionView,
     pub(in crate::store) _ledger: ChatLedger,
     pub(in crate::store) _invocation: Option<tokio::sync::watch::Sender<bool>>,
@@ -29,7 +30,18 @@ impl SharedHistoryProjectionLease {
         &self,
         publish: impl FnOnce() -> T,
     ) -> Result<T, AppError> {
-        self.observation.with_publication(publish)
+        self.selected.observation.with_publication(publish)
+    }
+}
+
+pub(in crate::store) struct SharedHistoryMessageSelection {
+    observation: SharedHistoryObservation,
+    actions: Vec<ActionId>,
+}
+
+impl SharedHistoryMessageSelection {
+    pub(in crate::store) fn includes(&self, action: ActionId) -> bool {
+        self.actions.binary_search(&action).is_ok()
     }
 }
 
@@ -47,7 +59,7 @@ impl SharedHistoryReplay<'_> {
         view: &ProjectionView,
         create: ActionId,
         mut read_local: impl FnMut(ActionId) -> Result<Option<MemberSavedOriginal>, V2MemberSaveRefusal>,
-    ) -> Result<Option<SharedHistoryObservation>, V2MemberSaveRefusal> {
+    ) -> Result<Option<SharedHistoryMessageSelection>, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
         if !self
             .store
@@ -143,6 +155,9 @@ impl SharedHistoryReplay<'_> {
         observation
             .with_publication(|| ())
             .map_err(|_| Refusal::Stale)?;
-        Ok(Some(observation))
+        Ok(Some(SharedHistoryMessageSelection {
+            observation,
+            actions: roots,
+        }))
     }
 }

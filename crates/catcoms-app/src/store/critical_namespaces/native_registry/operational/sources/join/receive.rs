@@ -13,7 +13,7 @@ use crate::store::persistence::v2_member_outbox::{member_outbox_key, MemberSaved
 use crate::store::persistence::v2_member_transport::replay_local_member_dependencies;
 use crate::store::persistence::v2_shared_history::{
     PreparedSharedHistoryRecord, SharedHistoryActionPage, SharedHistoryActionQuery,
-    SharedHistoryObservation, SharedHistoryProjectionLease, SharedHistoryReplay,
+    SharedHistoryMessageSelection, SharedHistoryProjectionLease, SharedHistoryReplay,
     SharedHistoryScope, SHARED_HISTORY_RECORD_FEE,
 };
 use crate::store::ServerStore;
@@ -240,6 +240,14 @@ impl NativeTextJoinedArchivedActions {
 }
 
 impl NativeTextJoinedMemberProjection {
+    /// Exact member of the replayed target's selected archive action set.
+    /// Historical dependencies and local outbox entries cannot satisfy it.
+    pub fn archived_includes(&self, action: ActionId) -> bool {
+        self.archive
+            .as_ref()
+            .is_some_and(|archive| archive.selected.includes(action))
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn from_live(
         projection: GuardedMessageProjection,
         signal: RequestCancellation,
@@ -353,7 +361,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         caller: RequestCancellation,
         rng: &mut impl CryptoRngCore,
     ) -> Result<Option<NativeTextJoinedMemberProjection>, V2MemberSaveRefusal> {
-        let (ledger, observation) = self.prepare_member_ledger_with(
+        let (ledger, selected) = self.prepare_member_ledger_with(
             selection,
             channel,
             caller.clone(),
@@ -361,12 +369,12 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 source.replay_archived_message(ledger, view, create, &caller, rng)
             },
         )?;
-        let Some(observation) = observation else {
+        let Some(selected) = selected else {
             return Ok(None);
         };
         let mut projection = ledger.prepare_message_projection(create)?;
         projection.archive = Some(Box::new(SharedHistoryProjectionLease {
-            observation,
+            selected,
             _view: ledger.view,
             _ledger: ledger.ledger,
             _invocation: Some(ledger._invocation),
@@ -855,7 +863,7 @@ impl<R: CryptoRngCore> ReceiverSource<'_, R> {
         create: ActionId,
         caller: &RequestCancellation,
         rng: &mut impl CryptoRngCore,
-    ) -> Result<Option<SharedHistoryObservation>, V2MemberSaveRefusal> {
+    ) -> Result<Option<SharedHistoryMessageSelection>, V2MemberSaveRefusal> {
         let channel = ledger.realm().channel();
         SharedHistoryReplay {
             store: self.store,

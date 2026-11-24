@@ -229,7 +229,7 @@ impl NativeTextColdFounderSource {
                         saved_dependency(store, self.outbox_context(), original, scope, id, rng)
                     })
                     .map_err(|_| refused())?;
-                    let Some(observation) = original else {
+                    let Some(selected) = original else {
                         return Ok(None);
                     };
                     let projection_fee = pool.try_reserve(2 * MAX_ACTION_BYTES + 32 * 1024)?;
@@ -241,7 +241,7 @@ impl NativeTextColdFounderSource {
                         signal,
                         projection_fee,
                         Box::new(SharedHistoryProjectionLease {
-                            observation,
+                            selected,
                             _view: view,
                             _ledger: ledger,
                             _invocation: None,

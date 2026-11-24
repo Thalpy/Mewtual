@@ -2407,14 +2407,17 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
             let delete_id = deleted.action_id_data();
             assert_eq!(deleted.projection_target_data(), action);
             assert_eq!(status, V2OrdinaryReceiveStatus::Retained(ActionState::Valid));
+            assert!(!archived.archived_includes(delete_id));
+            crate::store::persistence::governance_layout::joined::shared_history::fail_next_history_wal_write_for_test();
             assert!(recovered_row()
                 .archive_received_member(&ledger, &deleted, &live, &mut history_rng)
-                .unwrap().is_some());
+                .is_err());
             assert!(archived.with_publication(|_| panic!("pre-delete archive projection escaped")).is_err());
             drop(archived);
             let archived = recovered_row()
                 .archived_message_projection(&selection, channel, action, live.clone(), &mut history_rng)
                 .unwrap().unwrap();
+            assert!(archived.archived_includes(delete_id));
             assert!(archived.with_publication(|view| matches!(
                 view, GuardedProjection::Deleted { create, certainty: ProjectionCertainty::Provisional, .. }
                 if *create == action

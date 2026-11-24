@@ -565,9 +565,8 @@ async fn execute_archive(
             }))
         }
         ArchiveRead::Message(action) => {
-            if !local.archive_target_settled(action) {
-                return Err("A received change is waiting to be saved.".into());
-            }
+            const INCOMPLETE: &str = "A received change is waiting to be saved.";
+            let unsettled = local.unsettled_archive_changes(action).ok_or(INCOMPLETE)?;
             let projection = match original {
                 Preparation::Founder(original) => {
                     original.archived_founder_message_projection(channel, action, &scope)
@@ -581,6 +580,18 @@ async fn execute_archive(
                 ),
             }
             .map_err(|_| "Saved received messages could not be read. Try again.")?;
+            // Opening the target may finish its original in-process WAL. Only
+            // the exact actions in the replayed archive can settle that debt.
+            if unsettled.iter().flatten().any(|change| {
+                !projection
+                    .as_ref()
+                    .is_some_and(|original| original.archived_includes(*change))
+            }) {
+                return Err(INCOMPLETE.into());
+            }
+            for change in unsettled.into_iter().flatten() {
+                local.note_archive_change(change, action, true);
+            }
             Ok(Response::Received(ReceivedOutput {
                 scope: "received-archive",
                 projection,
