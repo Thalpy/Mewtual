@@ -5,7 +5,7 @@ use catcoms_sync::V2_MEMBER_CONTACT_BYTES;
 use std::net::IpAddr;
 use tauri::ipc::InvokeResponseBody;
 
-const BUSY: &str = "Chat membership is busy. Retry the request.";
+pub(super) const BUSY: &str = "Chat membership is busy. Retry the request.";
 const FAILED: &str = "Chat membership is unavailable for this conversation.";
 pub(super) const COMMANDS: &[&str] = &[
     "get_native_chat_members",

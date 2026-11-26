@@ -1286,6 +1286,34 @@ fn invite_command(
     reply
 }
 
+async fn membership_command_value(
+    window: &tauri::WebviewWindow<MockRuntime>,
+    queue: &Queue,
+    command: &str,
+    input: serde_json::Value,
+) -> serde_json::Value {
+    // A transient admission refusal can precede scheduling or come from the
+    // worker. Every retry uses the same row, context and admission data.
+    let retry_until = SystemClock.monotonic_ms().saturating_add(5_000);
+    loop {
+        let reply = invite_command(window, command, input.clone());
+        let pending = queue.lock().unwrap().pop();
+        if let Some(work) = pending {
+            work.await;
+        }
+        match reply.await.unwrap() {
+            tauri::ipc::InvokeResponse::Ok(body) => return body.deserialize().unwrap(),
+            tauri::ipc::InvokeResponse::Err(error)
+                if error.0.as_str() == Some(membership::BUSY)
+                    && SystemClock.monotonic_ms() < retry_until =>
+            {
+                SystemClock.sleep(Duration::from_millis(25)).await;
+            }
+            tauri::ipc::InvokeResponse::Err(error) => panic!("{command} refused: {error:?}"),
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_text_membership_dispatch_uses_the_original_founder_row() {
     let root = tempfile::tempdir().unwrap();
@@ -1495,13 +1523,13 @@ async fn native_text_membership_selected_eviction_notifies_the_original_joined_r
         serde_json::json!({"server": found["server"], "context": found["context"], "removed": false}),
     );
 
-    let roster = invite_command(
+    let roster = membership_command_value(
         &main,
+        &founder_queue,
         "get_native_chat_members",
         serde_json::json!({"server": found["server"], "expectedContext": found["context"]}),
-    );
-    run(&founder_queue).await;
-    let roster = found_value(roster.await.unwrap());
+    )
+    .await;
     let admission = roster["members"]
         .as_array()
         .unwrap()
@@ -1514,16 +1542,17 @@ async fn native_text_membership_selected_eviction_notifies_the_original_joined_r
         let notice_data: serde_json::Value = serde_json::from_str(event.payload()).unwrap();
         let _ = notice.send(notice_data);
     });
-    let removal = invite_command(
+    let removal = membership_command_value(
         &main,
+        &founder_queue,
         "remove_native_chat_member",
         serde_json::json!({
             "server": found["server"], "expectedContext": found["context"],
             "expectedAdmission": admission["admission"],
         }),
-    );
-    run(&founder_queue).await;
-    assert!(found_value(removal.await.unwrap()).is_null());
+    )
+    .await;
+    assert!(removal.is_null());
     let selected_eviction = timeout(Duration::from_secs(40), selected_eviction)
         .await
         .expect("closing the joined worker must preserve the selected eviction notice")
@@ -1619,24 +1648,25 @@ async fn native_text_joined_dependency_provider_reopens_after_selected_add() {
         })
     );
 
-    let contact = invite_command(
+    let contact = membership_command_value(
         &member_window,
+        &member_queue,
         "share_native_chat_contact",
         serde_json::json!({"server": joined["server"], "expectedContext": joined["context"]}),
-    );
-    run(&member_queue).await;
-    let contact = found_value(contact.await.unwrap());
+    )
+    .await;
     let raw = hex::decode(contact.as_str().unwrap()).unwrap();
     let signed = catcoms_sync::V2MemberContactData::decode(&raw).unwrap();
     let peer = PeerId::new(*blake3::hash(signed.address_data().0).as_bytes());
-    let connect = invite_command(
+    let connect = membership_command_value(
         &new_window,
+        &new_queue,
         "connect_native_chat_contact",
         serde_json::json!({"server": new_row["server"], "expectedContext": new_row["context"],
             "contact": contact, "approvedHost": "127.0.0.1"}),
-    );
-    run(&new_queue).await;
-    assert!(found_value(connect.await.unwrap()).is_null());
+    )
+    .await;
+    assert!(connect.is_null());
 
     let founder_state = founder.state::<AppState>();
     let close = register_vault_close(&founder_state).await.unwrap();
