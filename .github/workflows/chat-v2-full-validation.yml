@@ -228,6 +228,10 @@ jobs:
               ('native-membership-parser', 'native_text::membership::tests::native_membership_requires_the_exact_admission', 1),
               ('native-membership-dispatch', 'native_text::tests::native_text_membership_dispatch_uses_the_original_founder_row', 1),
           ]
+          two_row_founders = [
+              ('native-found-two-rows', 'native_text::tests::native_text_found_router_installs_two_original_rows_retries_and_releases_real_files', 1),
+              ('native-listing-two-rows', 'native_text::tests::native_listing_empty_unlock_and_two_real_rows_resume_with_exact_contexts', 1),
+          ]
           cases = [
               ('native-send-parser', 'native_text_send_parser_', 1),
               ('native-mutation-dispatch', 'native_text_mutations_', 1),
@@ -235,7 +239,7 @@ jobs:
           ] + membership
           scope = os.environ['CHAT_V2_NATIVE_SCOPE']
           if scope == 'native-membership':
-              cases = membership + [
+              cases = membership + two_row_founders + [
                   ('native-join-history-startup', 'native_text::tests::native_text_connected_join_gated_route_publishes_one_original_joined_row', 1),
                   ('native-idle-reopen', 'native_text::tests::native_text_connected_join_cold_idle_unlock_requires_the_existing_vault', 1),
                   ('native-eviction-notice', 'native_text::tests::native_text_membership_selected_eviction_notifies_the_original_joined_row', 1),
@@ -256,10 +260,8 @@ jobs:
                   1,
               )] + membership
           elif scope == 'native-review':
-              cases = [
+              cases = two_row_founders + [
                   ('native-join-history-startup', 'native_text::tests::native_text_connected_join_gated_route_publishes_one_original_joined_row', 1),
-                  ('native-listing-two-rows', 'native_text::tests::native_listing_empty_unlock_and_two_real_rows_resume_with_exact_contexts', 1),
-                  ('native-found-two-rows', 'native_text::tests::native_text_found_router_installs_two_original_rows_retries_and_releases_real_files', 1),
                   ('native-snapshot-ack', 'native_text::tests::native_snapshot_foreign_origin_loss_can_be_acknowledged_without_writing_either_vault', 1),
                   ('native-history-custody', 'native_text::tests::native_text_history_real_resolver_unwind_and_lost_observers_release_original_work_and_credits', 1),
               ]

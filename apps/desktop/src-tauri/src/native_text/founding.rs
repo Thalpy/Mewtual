@@ -3,14 +3,15 @@
 //! then leaves all native guards before Root storage/key/runtime work.
 use super::*;
 use catcoms_app::store::{
-    NativeTextCreationBudget, NativeTextCreationInputs, NativeTextCreationPreparation,
-    NativeTextCreationRequest, NativeTextCreationSettings, NativeTextUiObservation,
-    NativeUiInvocationMetadata,
+    NativeTextCreationBudget, NativeTextCreationInputs, NativeTextCreationJob,
+    NativeTextCreationPreparation, NativeTextCreationRefusal, NativeTextCreationRequest,
+    NativeTextCreationSettings, NativeTextUiObservation, NativeUiInvocationMetadata,
 };
 use tauri::ipc::InvokeResponseBody;
 
 type Preparation = NativeTextCreationPreparation<catcoms_net::MeshService, OsCryptoRng>;
 type CreationBudget = NativeTextCreationBudget<catcoms_net::MeshService, OsCryptoRng>;
+type CreationJob = NativeTextCreationJob<catcoms_net::MeshService, OsCryptoRng>;
 const BUSY: &str = "Chat setup is busy. Retry with the same request.";
 const SUPERSEDED: &str = "Chat setup was interrupted. Retry with the same request.";
 
@@ -324,49 +325,66 @@ async fn capture(state: &AppState, invocation: &Invocation) -> Result<Preparatio
     Ok(output.take().unwrap())
 }
 
+async fn run_setup_step<T: Send + 'static>(
+    state: &AppState,
+    invocation: &Invocation,
+    _name: &'static str,
+    run: impl Fn(CreationJob) -> Result<T, NativeTextCreationRefusal> + Copy + Send + 'static,
+) -> Result<T, String> {
+    let deadline = SystemClock.monotonic_ms().saturating_add(2_000);
+    loop {
+        let preparation = capture(state, invocation).await?;
+        let result = tauri::async_runtime::spawn_blocking(move || run(preparation.finish()?))
+            .await
+            .map_err(|_| SUPERSEDED)?;
+        match result {
+            Ok(value) => return Ok(value),
+            Err(NativeTextCreationRefusal::Busy) => {
+                if SystemClock.monotonic_ms() >= deadline {
+                    return Err(BUSY.to_owned());
+                }
+                #[cfg(test)]
+                if let Some(probe) = state.native_text.found_setup_busy.lock().unwrap().as_ref() {
+                    probe.notify_one();
+                }
+                // The completed job returned its original runtime and all guards.
+                SystemClock.sleep(Duration::from_millis(25)).await;
+            }
+            Err(error) => {
+                #[cfg(test)]
+                eprintln!("Native founder {_name} failed: {error:?}");
+                return Err(format!(
+                    "Server setup did not finish ({error:?}). Retry with the same request."
+                ));
+            }
+        }
+    }
+}
+
 async fn execute(state: &AppState, invocation: &Invocation) -> Result<Output, String> {
     if let Some(receipt) = recovered_receipt(state, invocation).await? {
         return Ok(receipt);
     }
-    // Each consuming call restores the SAME whole runtime before another UI
-    // acquisition. Root caches exact primitive results across later refusals.
-    for stage in 0..6 {
-        let preparation = capture(state, invocation).await?;
-        tauri::async_runtime::spawn_blocking(move || {
-            let job = preparation.finish()?;
-            match stage {
-                0 => job.prepare_device(),
-                1 => job.prepare_network(),
-                2 => job.cover_pending_network(),
-                3 => job.prepare_transport(),
-                4 => job.prepare_founder(),
-                _ => job.cover_founder_activation(),
-            }
-        })
-        .await
-        .map_err(|_| SUPERSEDED)?
-        .map_err(|error| {
-            #[cfg(test)]
-            eprintln!(
-                "Native founder {} failed: {error:?}",
-                [
-                    "device preparation",
-                    "network preparation",
-                    "pending network save",
-                    "transport preparation",
-                    "founder preparation",
-                    "founder activation save"
-                ][stage]
-            );
-            format!("Server setup did not finish ({error:?}). Retry with the same request.")
-        })?;
+    // Each consuming call restores the same whole runtime before acquisition.
+    // Only explicit contention retries the current step, with its original data.
+    let steps: [(_, fn(CreationJob) -> _); 6] = [
+        ("device preparation", CreationJob::prepare_device),
+        ("network preparation", CreationJob::prepare_network),
+        ("pending network save", CreationJob::cover_pending_network),
+        ("transport preparation", CreationJob::prepare_transport),
+        ("founder preparation", CreationJob::prepare_founder),
+        ("activation save", CreationJob::cover_founder_activation),
+    ];
+    for (name, step) in steps {
+        run_setup_step(state, invocation, name, step).await?;
     }
-    let preparation = capture(state, invocation).await?;
-    let founder =
-        tauri::async_runtime::spawn_blocking(move || preparation.finish()?.select_stored_runtime())
-            .await
-            .map_err(|_| SUPERSEDED)?
-            .map_err(|_| SUPERSEDED)?;
+    let founder = run_setup_step(
+        state,
+        invocation,
+        "stored row selection",
+        CreationJob::select_stored_runtime,
+    )
+    .await?;
     let context = founder.context_data();
     if context != invocation.intent.request {
         return Err(SUPERSEDED.into());

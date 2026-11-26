@@ -147,6 +147,27 @@ fn found_value(reply: tauri::ipc::InvokeResponse) -> serde_json::Value {
     }
 }
 
+async fn hold_vault_metadata(
+    state: &AppState,
+) -> catcoms_app::store::NativeTextVaultAuthentication {
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let preparation = {
+                let store = state.store.lock().await;
+                let vault = store.as_ref().unwrap().as_text_v2().unwrap();
+                vault.prepare_native_authentication(state.native_text.ui_budget.prepare().unwrap())
+            };
+            if !preparation.is_capture_busy_cached() {
+                break preparation;
+            }
+            drop(preparation);
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the original vault's metadata slot became available")
+}
+
 fn resume_request(window: &tauri::WebviewWindow<MockRuntime>) -> Reply {
     resume_request_with_reply(window, false)
 }
@@ -1136,9 +1157,18 @@ async fn native_text_found_router_installs_two_original_rows_retries_and_release
     let conflict = found_request(&main, 1, "Changed");
     run(&queue).await;
     refused(conflict.await.unwrap());
+    let occupied = hold_vault_metadata(&state).await;
+    let busy = Arc::new(Notify::new());
+    *state.native_text.found_setup_busy.lock().unwrap() = Some(busy.clone());
     let second = found_request(&main, 2, "Second");
-    run(&queue).await;
+    let second_task = tokio::spawn(run(&queue));
+    timeout(Duration::from_secs(5), busy.notified())
+        .await
+        .expect("the second Found reached the busy original metadata slot");
+    drop(occupied);
+    second_task.await.unwrap();
     let second = found_value(second.await.unwrap());
+    *state.native_text.found_setup_busy.lock().unwrap() = None;
     assert_ne!(second["server"], first["server"]);
     assert_eq!(state.servers.lock().await.native_iter().count(), 2);
     // Both rows must really sign/save using the production funded two-context
@@ -1746,22 +1776,7 @@ async fn native_text_connected_join_retries_original_welcome_after_authenticated
     refused(stale_preview.await.unwrap());
     refused(mint().await.unwrap());
     assert!(matches!(send().await, Err(TransportError::NoResponse)));
-    let occupied = tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let preparation = {
-                let store = state.store.lock().await;
-                let vault = store.as_ref().unwrap().as_text_v2().unwrap();
-                vault.prepare_native_authentication(state.native_text.ui_budget.prepare().unwrap())
-            };
-            if !preparation.is_capture_busy_cached() {
-                break preparation;
-            }
-            drop(preparation);
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("the original session's metadata work drained");
+    let occupied = hold_vault_metadata(&state).await;
     let release = async {
         SystemClock.sleep(Duration::from_millis(100)).await;
         drop(occupied);

@@ -463,6 +463,9 @@ The first history page can hold the native row table during admission or take
 the mounted metadata slot as soon as Join replies. Joined worker startup
 retries either contention against the original row and stops when the row or
 session retires.
+Native Found also retries a busy metadata slot at its current setup step.
+Each retry rechecks the original vault and request. A storage refusal is
+reported to the caller with the same request token available for a later retry.
 
 Unknown/ambiguous remnants are preserved and refused, never cleared as debris.
 The `joined-predecessor` CI scope builds the pinned governed reader from

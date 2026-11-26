@@ -187,8 +187,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextCreationJob<T, R> {
                 .is_none_or(|driver| !driver.is_ready_data())
             || body
                 .work
-                .lookup_creation(request.invocation, request.digest)
-                .map_err(|_| Error::Storage)?
+                .lookup_native_creation(request.invocation, request.digest)?
                 != Some(active)
         {
             return Err(Error::Unavailable);
@@ -332,11 +331,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextCreationJob<T, R> {
         let pending = network.pending.as_ref().ok_or(Error::Unavailable)?;
         let rng = body.rng.as_mut().ok_or(Error::Unavailable)?;
         if network.status.is_none() {
-            network.status = Some(
-                body.work
-                    .birth_native_network(pending, rng)
-                    .map_err(|_| Error::Storage)?,
-            );
+            network.status = Some(body.work.birth_native_network(pending, rng)?);
         }
         let status = network.status.unwrap();
         if status.identity != network.identity
@@ -519,15 +514,11 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextCreationJob<T, R> {
                 pin: *binding.pin_data(),
             },
         };
-        network.active = Some(
-            body.work
-                .activate_native_founder(
-                    &request,
-                    network.activation.as_ref().unwrap(),
-                    body.rng.as_mut().ok_or(Error::Unavailable)?,
-                )
-                .map_err(|_| Error::Storage)?,
-        );
+        network.active = Some(body.work.activate_native_founder(
+            &request,
+            network.activation.as_ref().unwrap(),
+            body.rng.as_mut().ok_or(Error::Unavailable)?,
+        )?);
         let active = network.active.unwrap();
         if active.id != request.id
             || active.identity != network.identity

@@ -960,29 +960,33 @@ impl SourceWork {
         &self,
         pending: &founder::Pending,
         rng: &mut impl CryptoRngCore,
-    ) -> Result<crate::store::NativeCreationStatusData, AppError> {
-        let work = self.metadata().ok_or_else(refused)?;
-        let (status, debt) = work.physical.birth_founder_data(pending, rng)?;
-        drop(debt); // Actual IO/claim retirement OUTSIDE all cell/catalog writers.
-        Ok(status)
+    ) -> Result<crate::store::NativeCreationStatusData, crate::store::NativeTextCreationRefusal>
+    {
+        self.with_creation_metadata(|original| {
+            let (status, debt) = original.birth_founder_data(pending, rng)?;
+            drop(debt); // Retire the claim after the cell/catalog guards leave.
+            Ok(status)
+        })
     }
     pub(in crate::store::critical_namespaces::native_registry) fn activate_native_founder(
         &self,
         request: &founder::Activate,
         network: &Arc<crate::store::persistence::native_registry::network::NetworkDependency>,
         rng: &mut impl CryptoRngCore,
-    ) -> Result<crate::store::NativeCreationStatusData, AppError> {
-        let work = self.metadata().ok_or_else(refused)?;
-        let (status, debt) = cell::activate_native_founder(
-            &work.physical.cell,
-            work.physical.current()?,
-            &work.physical.handler,
-            request,
-            network,
-            rng,
-        )?;
-        drop(debt);
-        Ok(status)
+    ) -> Result<crate::store::NativeCreationStatusData, crate::store::NativeTextCreationRefusal>
+    {
+        self.with_creation_metadata(|original| {
+            let (status, debt) = cell::activate_native_founder(
+                &original.cell,
+                original.current()?,
+                &original.handler,
+                request,
+                network,
+                rng,
+            )?;
+            drop(debt);
+            Ok(status)
+        })
     }
     pub(in crate::store::critical_namespaces::native_registry) fn prepare_native_network_dependency(
         &self,
@@ -1035,6 +1039,32 @@ impl SourceWork {
     ) -> Result<Option<crate::store::NativeCreationStatusData>, AppError> {
         let work = self.metadata().ok_or_else(refused)?;
         work.physical.lookup_creation_data(invocation, request)
+    }
+    pub(in crate::store::critical_namespaces::native_registry) fn lookup_native_creation(
+        &self,
+        invocation: [u8; 32],
+        request: [u8; 32],
+    ) -> Result<
+        Option<crate::store::NativeCreationStatusData>,
+        crate::store::NativeTextCreationRefusal,
+    > {
+        self.with_creation_metadata(|original| original.lookup_creation_data(invocation, request))
+    }
+    /// Distinguish a live slot claimed by another row before any registry IO.
+    /// Only that refusal permits the native caller to retry the same stage.
+    fn with_creation_metadata<T>(
+        &self,
+        run: impl FnOnce(&Physical) -> Result<T, AppError>,
+    ) -> Result<T, crate::store::NativeTextCreationRefusal> {
+        use crate::store::NativeTextCreationRefusal as Error;
+        let work = self.metadata().ok_or_else(|| {
+            if self.is_live_cached() {
+                Error::Busy
+            } else {
+                Error::Unavailable
+            }
+        })?;
+        run(&work.physical).map_err(|_| Error::Storage)
     }
     /// The concrete source factory reserves its runtime invoice BEFORE asking
     /// for this additional original pin. There is no public Clone/getter and

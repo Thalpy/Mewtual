@@ -70,6 +70,8 @@ pub(super) struct Registry {
     #[cfg(test)]
     found_publication_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
     #[cfg(test)]
+    found_setup_busy: StdMutex<Option<Arc<tokio::sync::Notify>>>,
+    #[cfg(test)]
     founder_workers_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
     #[cfg(test)]
     text_reply_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
@@ -157,6 +159,8 @@ impl Default for Registry {
             source_work_waiting: tokio::sync::Notify::new(),
             #[cfg(test)]
             found_publication_edge: StdMutex::new(None),
+            #[cfg(test)]
+            found_setup_busy: StdMutex::new(None),
             #[cfg(test)]
             founder_workers_edge: StdMutex::new(None),
             #[cfg(test)]
