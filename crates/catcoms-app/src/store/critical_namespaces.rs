@@ -107,11 +107,12 @@ pub use native_registry::{
     NativeTextJoinedDependencyExchange, NativeTextJoinedDependencyProvider,
     NativeTextJoinedDependencyResponse, NativeTextJoinedGoverningExchange,
     NativeTextJoinedGoverningIncoming, NativeTextJoinedGoverningProvider,
-    NativeTextJoinedGoverningResponse, NativeTextJoinedMemberIngressPreparation,
-    NativeTextJoinedMemberLedger, NativeTextJoinedMemberProjection,
-    NativeTextJoinedMemberPublication, NativeTextJoinedMemberPublicationReceipt,
-    NativeTextJoinedMemberReceiver, NativeTextJoinedReceivedOriginal,
-    NativeTextJoinedSelectionPreparation,
+    NativeTextJoinedGoverningResponse, NativeTextJoinedHistoryExchange,
+    NativeTextJoinedHistoryPage, NativeTextJoinedHistoryResponse,
+    NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberLedger,
+    NativeTextJoinedMemberProjection, NativeTextJoinedMemberPublication,
+    NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
+    NativeTextJoinedReceivedOriginal, NativeTextJoinedSelectionPreparation,
 };
 pub use native_registry::{
     NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,

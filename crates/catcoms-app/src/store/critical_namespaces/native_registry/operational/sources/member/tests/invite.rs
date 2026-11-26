@@ -92,6 +92,11 @@ fn mounted_join_request_applies_the_next_governing_add_under_its_original_row() 
 }
 
 #[test]
+fn mounted_history_discovers_disconnected_originals_and_covers_their_archive() {
+    run_mounted_successor(MountedSuccessor::MissedHistory);
+}
+
+#[test]
 fn mounted_native_remove_retires_the_exact_joined_row_and_preserves_the_survivor() {
     run_mounted_successor(MountedSuccessor::Remove);
 }
@@ -116,6 +121,7 @@ fn run_mounted_successor(successor: MountedSuccessor) {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MountedSuccessor {
     OfflineDelivery,
+    MissedHistory,
     Remove,
 }
 
@@ -407,6 +413,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
         (true, _) => 0xe770,
         (false, Some(MountedSuccessor::OfflineDelivery)) => 0xe780,
         (false, Some(MountedSuccessor::Remove)) => 0xe790,
+        (false, Some(MountedSuccessor::MissedHistory)) => 0xe7a0,
     };
     let founder_dir = tempfile::tempdir().unwrap();
     let (founder, founder_budget) = selected_joined(founder_dir.path());
@@ -799,7 +806,10 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
     let mut founder_archived = None;
     let mut founder_reply = None;
     let mut founder_debt = None;
-    if !recover_stage {
+    if successor == Some(MountedSuccessor::MissedHistory) {
+        assert_eq!(register(&mut rng).unwrap().id, 1);
+        assert!(!outbox_path.exists());
+    } else if !recover_stage {
         let mut after = rng.clone();
         let row = register(&mut rng).unwrap();
         assert_eq!(row.id, 1);
@@ -1467,7 +1477,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
     let mut history_rng = catcoms_rt::OsCryptoRng;
     if let Some(successor) = successor {
         use catcoms_rt::TransportEvent;
-        let stale_contact = (successor == MountedSuccessor::OfflineDelivery).then(|| {
+        let stale_contact = (successor != MountedSuccessor::Remove).then(|| {
             recovered_row()
                 .sign_member_contact(&selection, &fresh)
                 .unwrap()
@@ -2012,12 +2022,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
             assert!(recovered_row()
                 .prepare_member_contact(&selection, &contact, host, cancelled)
                 .is_err());
-            recovered_row()
-                .prepare_member_contact(&selection, &contact, host, fresh.clone())
-                .unwrap()
-                .connect(&scheduler)
-                .await
-                .unwrap();
+            let missed_history = successor == MountedSuccessor::MissedHistory;
             use crate::store::{
                 MemberSaveJobReport, MemberSaveNativeAdmission, NativeTextJoinedMemberFinalPreparation,
             };
@@ -2029,15 +2034,26 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 body: &text,
                 ..request()
             };
-            let mut third_receiver = third_row()
-                .prepare_member_ingress(&third_selection, channel, fresh.clone())
-                .unwrap()
-                .open()
-                .await
-                .unwrap();
-            let mut ledger = third_row()
-                .prepare_member_ledger(&third_selection, channel, fresh.clone())
-                .unwrap();
+            let mut live_receive = if missed_history {
+                None
+            } else {
+                recovered_row()
+                    .prepare_member_contact(&selection, &contact, host, fresh.clone())
+                    .unwrap()
+                    .connect(&scheduler)
+                    .await
+                    .unwrap();
+                let receiver = third_row()
+                    .prepare_member_ingress(&third_selection, channel, fresh.clone())
+                    .unwrap()
+                    .open()
+                    .await
+                    .unwrap();
+                let ledger = third_row()
+                    .prepare_member_ledger(&third_selection, channel, fresh.clone())
+                    .unwrap();
+                Some((receiver, ledger))
+            };
             let mut save_receive = async |draft: V2MemberSignRequest<'_>| {
                 let work = || V2MemberSignRequest { ..draft };
                 assert_eq!(
@@ -2061,6 +2077,9 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     .unwrap()
                 else {
                     panic!("the original founder-offline action was saved");
+                };
+                let Some((third_receiver, ledger)) = live_receive.as_mut() else {
+                    return (action, ordinal);
                 };
                 // ActionId identifies the semantic action. Compare the complete
                 // signed envelope too, including its original signature bytes.
@@ -2101,7 +2120,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                             continue;
                         };
                         let (original, status) = third_row()
-                            .receive_member_frame(&mut ledger, &frame, &fresh)
+                            .receive_member_frame(ledger, &frame, &fresh)
                             .unwrap();
                         if original.action_id_data() == action {
                             assert_eq!(original.original_digest_for_test(), original_digest);
@@ -2112,7 +2131,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                                 )
                             );
                             assert!(third_row()
-                                .archive_received_member(&ledger, &original, &fresh, &mut third_rng)
+                                .archive_received_member(ledger, &original, &fresh, &mut third_rng)
                                 .unwrap()
                                 .is_some());
                             return;
@@ -2189,11 +2208,105 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 ..offline
             };
             let deleted = save_receive(V2MemberSignRequest { ..delete }).await;
+            if missed_history {
+                use catcoms_replication::chat::{ActionState, V2OrdinaryReceiveStatus};
+                // No subscription or publication ran while the texts were
+                // saved. The receiver only learns IDs from the approved peer.
+                let provider = local_transport.0;
+                let member_contact = recovered_row().sign_member_contact(&selection, &fresh).unwrap();
+                let first = |rng: &mut rand_chacha::ChaCha20Rng| {
+                    third_row().prepare_history_exchange(
+                        &third_selection, channel, provider, fresh.clone(), rng,
+                    )
+                };
+                assert!(matches!(first(&mut third_rng), Err(V2MemberSaveRefusal::Unavailable)));
+                third_row()
+                    .prepare_member_contact(&third_selection, &member_contact, host, fresh.clone())
+                    .unwrap()
+                    .connect(&scheduler)
+                    .await
+                    .unwrap();
+                let mut service = recovered_row()
+                    .attach_dependency_provider(&selection, fresh.clone())
+                    .unwrap();
+                let serve = async |service: &mut crate::store::NativeTextJoinedDependencyProvider,
+                                   rng: &mut catcoms_rt::OsCryptoRng| {
+                    let incoming = service.next().await.expect("original connected history request");
+                    recovered_row()
+                        .serve_dependency_request(&selection, channel, incoming, fresh.clone(), rng)
+                };
+                let exchange = first(&mut third_rng).unwrap();
+                let (reply, served) = tokio::time::timeout(
+                    catcoms_rt::REQUEST_TIMEOUT + Duration::from_secs(2),
+                    async { tokio::join!(exchange.receive(), serve(&mut service, &mut history_rng)) },
+                ).await.unwrap();
+                assert_eq!(served, Err(V2MemberSaveRefusal::Stale));
+                assert!(reply.is_err());
+                recovered_row()
+                    .prepare_member_contact(&selection, &contact, host, fresh.clone())
+                    .unwrap()
+                    .connect(&scheduler)
+                    .await
+                    .unwrap();
+                let exchange = first(&mut third_rng).unwrap();
+                let (reply, served) = tokio::time::timeout(Duration::from_secs(10), async {
+                    tokio::join!(exchange.receive(), serve(&mut service, &mut history_rng))
+                }).await.unwrap();
+                served.unwrap();
+                let page = third_row()
+                    .open_history_response(&third_selection, reply.unwrap(), &fresh)
+                    .unwrap();
+                let mut discovered = Vec::new();
+                for entry in page.data().unwrap().entries() {
+                    let exchange = third_row().prepare_discovered_original(
+                        &third_selection, &page, entry.action, fresh.clone(), &mut third_rng,
+                    ).unwrap();
+                    let (reply, served) = tokio::time::timeout(Duration::from_secs(10), async {
+                        tokio::join!(exchange.receive(), serve(&mut service, &mut history_rng))
+                    }).await.unwrap();
+                    served.unwrap();
+                    let original = third_row()
+                        .open_dependency_response(&third_selection, reply.unwrap(), &fresh)
+                        .unwrap()
+                        .unwrap();
+                    let saved = recovered_row()
+                        .read_member_dependency(&selection, channel, entry.action, &fresh, &mut history_rng)
+                        .unwrap().unwrap();
+                    assert_eq!(original.original_digest_for_test(), blake3::hash(saved.original_bytes()));
+                    let mut stage = third_row()
+                        .prepare_member_ledger(&third_selection, channel, fresh.clone()).unwrap();
+                    let valid = V2OrdinaryReceiveStatus::Retained(ActionState::Valid);
+                    let mut status = third_row().project_received_member(&mut stage, &original, &fresh).unwrap();
+                    if let V2OrdinaryReceiveStatus::WaitingForDependencies(missing) = status {
+                        for dependency in missing {
+                            assert_eq!(
+                                third_row().replay_saved_member_dependency(
+                                    &mut stage, dependency, &fresh, &mut third_rng,
+                                ).unwrap(),
+                                Some(V2OrdinaryReceiveStatus::Retained(ActionState::Valid))
+                            );
+                        }
+                        status = third_row().project_received_member(&mut stage, &original, &fresh).unwrap();
+                    }
+                    assert_eq!(status, valid);
+                    assert!(third_row()
+                        .archive_received_member(&stage, &original, &fresh, &mut third_rng)
+                        .unwrap().is_some());
+                    discovered.push((entry.action, entry.ordinal));
+                }
+                assert_eq!(discovered, [created, edited, deleted]);
+                assert!(third_row()
+                    .prepare_history_continuation(&third_selection, &page, fresh.clone(), &mut third_rng)
+                    .unwrap().is_none());
+                third_selection.replace_history_contact_for_test(provider, third_own);
+                third_selection.replace_history_contact_for_test(provider, own_add);
+                assert!(page.data().is_none(), "reapproval revived an old page");
+            }
             let recipient = third_row()
                 .inspect_registration(&invite_two, third_token, &fresh)
                 .unwrap()
                 .unwrap();
-            drop((third_receiver, ledger));
+            drop(live_receive);
             let retire = async |sources: &Owner| {
                 let mut retirement = sources.prepare_retirement().unwrap();
                 tokio::time::timeout(Duration::from_secs(8), async {

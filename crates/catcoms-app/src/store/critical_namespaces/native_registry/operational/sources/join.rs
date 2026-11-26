@@ -55,8 +55,10 @@ pub use receive::{
     NativeTextJoinedDependencyExchange, NativeTextJoinedDependencyProvider,
     NativeTextJoinedDependencyResponse, NativeTextJoinedGoverningExchange,
     NativeTextJoinedGoverningIncoming, NativeTextJoinedGoverningProvider,
-    NativeTextJoinedGoverningResponse, NativeTextJoinedMemberIngressPreparation,
-    NativeTextJoinedMemberLedger, NativeTextJoinedMemberProjection, NativeTextJoinedMemberReceiver,
+    NativeTextJoinedGoverningResponse, NativeTextJoinedHistoryExchange,
+    NativeTextJoinedHistoryPage, NativeTextJoinedHistoryResponse,
+    NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberLedger,
+    NativeTextJoinedMemberProjection, NativeTextJoinedMemberReceiver,
     NativeTextJoinedReceivedOriginal,
 };
 mod reconnect;
@@ -116,6 +118,7 @@ pub(super) fn invoice<R: CryptoRngCore>() -> usize {
         + std::mem::size_of::<join_tcp::Transport>()
         + 2 * std::mem::size_of::<NativeChatKeyEnds>()
         + std::mem::size_of::<JoinedRowSelection>() + 512 // bounded original row name and its handles
+        + MAX_APPROVED_MEMBER_PEERS * 1024 // one approval watch and its waiters per installed contact
         + 4096 // original joined Source counter, cuts, and their Arc allocations
         + 6 * std::mem::size_of::<usize>()
 }
@@ -680,7 +683,7 @@ struct JoinedRowSelection {
     member_outbox: MemberOutboxContextId,
     scope: Arc<Scope>,
     retired: AtomicBool,
-    governing_peers: Mutex<[Option<ApprovedMemberPeer>; 16]>,
+    governing_peers: Mutex<[Option<InstalledMemberPeer>; MAX_APPROVED_MEMBER_PEERS]>,
     next_governing_peer: AtomicUsize,
     keys: Arc<OnceLock<NativeChatSourceClose>>,
     _metadata: Arc<retirement::Control>,
@@ -690,6 +693,13 @@ struct JoinedRowSelection {
 struct ApprovedMemberPeer {
     peer: PeerId,
     admission: OwnerBodyId,
+}
+
+const MAX_APPROVED_MEMBER_PEERS: usize = 16;
+
+struct InstalledMemberPeer {
+    contact: ApprovedMemberPeer,
+    live: watch::Sender<bool>,
 }
 
 impl std::fmt::Debug for NativeTextJoinedRowSelection {
@@ -735,11 +745,60 @@ impl NativeTextJoinedRowSelection {
             .map_err(|_| refused())?;
         let index = peers
             .iter()
-            .position(|slot| slot.is_some_and(|slot| slot.peer == original.peer))
+            .position(|slot| {
+                slot.as_ref()
+                    .is_some_and(|slot| slot.contact.peer == original.peer)
+            })
             .or_else(|| peers.iter().position(Option::is_none))
             .ok_or_else(refused)?;
-        peers[index] = Some(original);
+        if peers[index]
+            .as_ref()
+            .is_none_or(|slot| slot.contact.admission != original.admission)
+        {
+            // Replacing an admission closes the earlier watch permanently.
+            // Reapproving that same identity later cannot revive old work.
+            let (live, _) = watch::channel(false);
+            peers[index] = Some(InstalledMemberPeer {
+                contact: original,
+                live,
+            });
+        }
         Ok(())
+    }
+
+    fn approved_history_peer(
+        &self,
+        peer: PeerId,
+        selected: &ReplayMath,
+    ) -> Option<(OwnerBodyId, RequestCancellation)> {
+        self.original
+            .governing_peers
+            .try_lock()
+            .ok()?
+            .iter()
+            .flatten()
+            .find(|slot| {
+                slot.contact.peer == peer && selected.slot(slot.contact.admission).is_some()
+            })
+            .map(|slot| {
+                (
+                    slot.contact.admission,
+                    RequestCancellation::new(slot.live.subscribe(), None),
+                )
+            })
+    }
+
+    #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(in crate::store::critical_namespaces::native_registry) fn replace_history_contact_for_test(
+        &self,
+        peer: PeerId,
+        admission: catcoms_replication::chat::owner_facts::OwnerFactId,
+    ) {
+        self.remember_governing_peer(ApprovedMemberPeer {
+            peer,
+            admission: OwnerBodyId::from_bytes(*admission.as_bytes()),
+        })
+        .unwrap();
     }
 
     fn governing_connection(
@@ -750,13 +809,16 @@ impl NativeTextJoinedRowSelection {
     ) -> Option<catcoms_net::NativeChatMemberDependencyExchange> {
         let mut peers = self.original.governing_peers.try_lock().ok()?;
         for slot in peers.iter_mut() {
-            if slot.is_some_and(|slot| selected.slot(slot.admission).is_none()) {
+            if slot
+                .as_ref()
+                .is_some_and(|slot| selected.slot(slot.contact.admission).is_none())
+            {
                 *slot = None;
             }
         }
         let candidates = founder
             .into_iter()
-            .chain(peers.iter().flatten().map(|slot| slot.peer));
+            .chain(peers.iter().flatten().map(|slot| slot.contact.peer));
         let count = candidates.clone().count();
         let start = self
             .original
@@ -893,7 +955,7 @@ impl<R: CryptoRngCore> MountedNode<R> {
                     member_outbox,
                     scope: scope.clone(),
                     retired: AtomicBool::new(false),
-                    governing_peers: Mutex::new([None; 16]),
+                    governing_peers: Mutex::new(std::array::from_fn(|_| None)),
                     next_governing_peer: AtomicUsize::new(0),
                     keys,
                     _metadata: control.clone(),

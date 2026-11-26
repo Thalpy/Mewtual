@@ -12,11 +12,12 @@ import re
 import sys
 
 REPO = Path(__file__).resolve().parents[2]
-REGISTRY_NORMAL_COUNT = 383
+REGISTRY_NORMAL_COUNT = 384
 COHORTS = (
     ("core-read-accessors", "catcoms-replication", "v2_general::tests::read_accessors", 3),
     ("joined-facts", "catcoms-sync", "owner_v2::joined_source::tests", 4),
     ("joined-fence", "catcoms-sync", "owner_v2::joined_fence::tests", 19),
+    ("member-history-wire", "catcoms-sync", "owner_v2::member_dependencies::history::tests", 2),
     # The eleven operation cases include both new V1 exclusion tests and the genuine
     # preexisting success controls, so they are not counted/run again as a separate cohort.
     ("owner-operations", "catcoms-sync", "owner_evidence::initial_tail::operation::tests", 11),
@@ -82,7 +83,7 @@ REGISTRY_PARTITIONS = (
     ("preparation", "preparation::", (), 39),
     ("operational-cell", "operational::cell::", (), 49),
     ("operational-facade", "operational::facade::", (), 34),
-    ("operational-sources", "operational::sources::", (), 107),
+    ("operational-sources", "operational::sources::", (), 108),
     ("operational-rest", "operational::", (
         "operational::cell::", "operational::facade::", "operational::sources::"), 72),
 )

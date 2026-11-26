@@ -1,5 +1,11 @@
 # Mewtual: message flow and micelle convergence
 
+The disabled Chat V2 joined path can request a bounded page of missed action
+IDs from an explicitly approved member over an existing connection. It
+fetches each original on the exact dependency path and rechecks its signature
+and dependencies before archiving it. The desktop scheduler and archive
+relaying are still open. [Chat V2 discovery flow](communication-recovery/CHAT-V2-ORDINARY-MEMBER-PATH.md#discovering-missed-originals-from-a-joined-member).
+
 Security prerequisite: an incoming subscription retries retained publication
 only for its exact canonical topic. Other retained originals preserve their
 ownership/order and normal periodic retry; wire and delivery claims below are

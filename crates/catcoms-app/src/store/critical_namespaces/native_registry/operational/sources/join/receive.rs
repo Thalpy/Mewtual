@@ -33,6 +33,7 @@ use catcoms_sync::PreparedV2JoinedPrefix;
 mod contact;
 mod dependencies;
 mod governing;
+mod history_discovery;
 pub use dependencies::{
     NativeTextJoinedDependencyAttachRefusal, NativeTextJoinedDependencyExchange,
     NativeTextJoinedDependencyProvider, NativeTextJoinedDependencyResponse,
@@ -40,6 +41,9 @@ pub use dependencies::{
 pub use governing::{
     NativeTextJoinedGoverningExchange, NativeTextJoinedGoverningIncoming,
     NativeTextJoinedGoverningProvider, NativeTextJoinedGoverningResponse,
+};
+pub use history_discovery::{
+    NativeTextJoinedHistoryExchange, NativeTextJoinedHistoryPage, NativeTextJoinedHistoryResponse,
 };
 
 const INGRESS_FEE: usize = 8 * 1024;
