@@ -1870,6 +1870,15 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     )
     .await
     .expect("startup observed the same metadata slot busy while history was paused");
+    {
+        let _table = joiner_state.servers.lock().await;
+        timeout(
+            Duration::from_secs(5),
+            joiner_state.native_text.join_startup_table_busy.notified(),
+        )
+        .await
+        .expect("startup retries a contended row lookup before attaching workers");
+    }
     history.release.notify_one();
     timeout(Duration::from_secs(15), history_task)
         .await

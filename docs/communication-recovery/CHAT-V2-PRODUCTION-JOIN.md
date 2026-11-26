@@ -459,9 +459,10 @@ approves a numeric IP address for the founder. The native scheduler uses the
 signed port and peer identity, and the desktop publishes the closed joined node
 only after covering Welcome and selecting the registered row. The first invite
 profile carries no certified address, rendezvous, or switchboard routes.
-The first history page can take the mounted metadata slot as soon as Join
-replies. Joined worker startup retries that contention against the original
-row and stops when the row or session retires.
+The first history page can hold the native row table during admission or take
+the mounted metadata slot as soon as Join replies. Joined worker startup
+retries either contention against the original row and stops when the row or
+session retires.
 
 Unknown/ambiguous remnants are preserved and refused, never cleared as debris.
 The `joined-predecessor` CI scope builds the pinned governed reader from

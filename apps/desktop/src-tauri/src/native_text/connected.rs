@@ -9,6 +9,15 @@ use catcoms_app::store::{
 use catcoms_rt::{RequestCancellation, TransportEvent};
 
 type Preparation = NativeTextMemberPreparation<catcoms_net::MeshService, OsCryptoRng>;
+type JoinedPreparation = (
+    NativeTextJoinedSelectionPreparation<OsCryptoRng>,
+    NativeTextJoinedRowSelection,
+);
+
+enum JoinedCaptureRefusal {
+    TableBusy,
+    Stale,
+}
 
 pub(super) struct Source {
     generation: u64,
@@ -150,43 +159,45 @@ impl Source {
         })
     }
 
-    pub(super) async fn capture_joined(
+    pub(super) async fn capture_joined(&self, state: &AppState) -> Option<JoinedPreparation> {
+        self.try_capture_joined(state).await.ok()
+    }
+
+    async fn try_capture_joined(
         &self,
         state: &AppState,
-    ) -> Option<(
-        NativeTextJoinedSelectionPreparation<OsCryptoRng>,
-        NativeTextJoinedRowSelection,
-    )> {
+    ) -> Result<JoinedPreparation, JoinedCaptureRefusal> {
+        use JoinedCaptureRefusal::{Stale, TableBusy};
         let server_table::NativeSelection::Joined(row) = &self.selection else {
-            return None;
+            return Err(Stale);
         };
         if self.scope.is_cancelled() {
-            return None;
+            return Err(Stale);
         }
         let mut ui = Some(
             founding::ui_capture(state, self.generation, &self.target)
                 .await
-                .ok()?,
+                .map_err(|_| Stale)?,
         );
         let mut output = None;
         {
             let _commit = require_ui_session_generation(state, self.generation)
                 .await
-                .ok()?;
+                .map_err(|_| Stale)?;
             let store = state.store.lock().await;
             {
-                let table = state.servers.try_lock().ok()?;
+                let table = state.servers.try_lock().map_err(|_| TableBusy)?;
                 if !self.still_installed(state, &store, &table) {
-                    return None;
+                    return Err(Stale);
                 }
             }
             state
                 .native_text
                 .sources
                 .capture_joined_member(&store, &mut ui, row, &mut output)
-                .ok()?;
+                .map_err(|_| Stale)?;
         }
-        Some((output?, row.clone()))
+        Ok((output.ok_or(Stale)?, row.clone()))
     }
 
     pub(super) fn negative(&self) -> RequestCancellation {
@@ -318,17 +329,24 @@ async fn start_dependencies<R: tauri::Runtime>(
 ) {
     let mut startup_scope = source.negative();
     let (original, row) = loop {
-        let Some((original, row)) = source.capture_joined(state).await else {
-            return;
-        };
-        if !original.is_capture_busy_cached() {
-            break (original, row);
+        match source.try_capture_joined(state).await {
+            Ok((original, row)) => {
+                if !original.is_capture_busy_cached() {
+                    break (original, row);
+                }
+                // Release the empty capture before retrying the original row.
+                drop((original, row));
+                #[cfg(test)]
+                state.native_text.join_startup_busy.notify_one();
+            }
+            Err(JoinedCaptureRefusal::TableBusy) => {
+                #[cfg(test)]
+                state.native_text.join_startup_table_busy.notify_one();
+            }
+            Err(JoinedCaptureRefusal::Stale) => return,
         }
-        // The first history read can hold the metadata slot after Join
-        // replies. Recapture the same row and vault after that work drains.
-        drop((original, row));
-        #[cfg(test)]
-        state.native_text.join_startup_busy.notify_one();
+        // The first history read can hold the table during ingress or take
+        // the metadata slot for IO. Wait without either guard or preparation.
         tokio::select! {
             biased;
             _ = startup_scope.cancelled() => return,
