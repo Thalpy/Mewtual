@@ -6,6 +6,7 @@ use catcoms_app::store::{
     NativeTextFounderMemberReceiver, NativeTextFounderReceived, NativeTextJoinedMemberLedger,
     NativeTextJoinedMemberReceiver, NativeTextJoinedReceivedOriginal, NativeTextJoinedRowSelection,
     NativeTextJoinedSelectionPreparation, NativeTextMemberPreparation, NativeUiInvocationMetadata,
+    V2MemberSaveRefusal,
 };
 use catcoms_net::{NativeChatMemberFrame, NativeChatMemberGossipEvent};
 use catcoms_replication::chat::{ActionId, ActionState, V2OrdinaryReceiveStatus};
@@ -17,14 +18,16 @@ const DEPENDENCY_TIMEOUT: Duration = Duration::from_secs(2);
 const DEPENDENCIES_PER_FRAME: usize = 4;
 const FOUNDER_CAPTURE_RETRY_DELAY: Duration = Duration::from_millis(25);
 const FOUNDER_CAPTURE_ATTEMPTS: usize = 8;
+const FOUNDER_RECEIVE_RETRY_MS: u64 = 2_000;
+
+type FounderPreparation = NativeTextMemberPreparation<catcoms_net::MeshService, OsCryptoRng>;
+type FounderReceiver = NativeTextFounderMemberReceiver<OsCryptoRng>;
+type FounderReceiveResult = Result<NativeTextFounderFrameOutcome, V2MemberSaveRefusal>;
 
 pub(super) async fn capture_founder_frame(
     state: &AppState,
     source: &Source,
-) -> Option<(
-    tokio::sync::OwnedMutexGuard<()>,
-    NativeTextMemberPreparation<catcoms_net::MeshService, OsCryptoRng>,
-)> {
+) -> Option<(tokio::sync::OwnedMutexGuard<()>, FounderPreparation)> {
     let mut scope = source.negative();
     for attempt in 0..FOUNDER_CAPTURE_ATTEMPTS {
         let permit = source.member_work().foreground(scope.clone()).await?;
@@ -50,7 +53,7 @@ pub(super) async fn run_founder<R: tauri::Runtime>(
 ) {
     let mut scope = source.negative();
     let channel = source.channel();
-    let mut receiver: Option<NativeTextFounderMemberReceiver<OsCryptoRng>> = None;
+    let mut receiver: Option<FounderReceiver> = None;
     loop {
         let state = app.state::<AppState>();
         let Some(mut original) = receiver.take() else {
@@ -76,6 +79,10 @@ pub(super) async fn run_founder<R: tauri::Runtime>(
                 continue;
             };
             receiver = prepared.open().await.ok();
+            #[cfg(test)]
+            if receiver.is_some() {
+                state.native_text.founder_ingress_ready.notify_one();
+            }
             continue;
         };
         let event = tokio::select! {
@@ -103,45 +110,87 @@ pub(super) async fn run_founder<R: tauri::Runtime>(
     }
 }
 
-async fn receive_founder_frame(
+async fn run_founder_receive<I: Send + 'static>(
     state: &AppState,
-    source: &Arc<Source>,
-    mut receiver: NativeTextFounderMemberReceiver<OsCryptoRng>,
-    mut frame: NativeChatMemberFrame,
-) -> Option<(
-    NativeTextFounderMemberReceiver<OsCryptoRng>,
-    Option<ActionId>,
-)> {
-    let local = source.member_work();
-    let mut remaining = DEPENDENCIES_PER_FRAME;
+    source: &Source,
+    mut receiver: FounderReceiver,
+    mut input: I,
+    run: impl Fn(FounderPreparation, &FounderReceiver, &I) -> FounderReceiveResult
+        + Copy
+        + Send
+        + 'static,
+) -> Option<(FounderReceiver, I, FounderReceiveResult)> {
+    let deadline = SystemClock
+        .monotonic_ms()
+        .saturating_add(FOUNDER_RECEIVE_RETRY_MS);
+    let mut scope = source.negative();
     loop {
-        // The caller still holds the exact frame and its receiver. A failed
-        // capture admits no App/SDK work and can retry after short contention.
         let Some((permit, preparation)) = capture_founder_frame(state, source).await else {
-            return Some((receiver, None));
+            return Some((receiver, input, Err(V2MemberSaveRefusal::Busy)));
         };
-        let local = local.clone();
-        let (original, original_frame, next) = tauri::async_runtime::spawn_blocking(move || {
+        let local = source.member_work().clone();
+        let (next_receiver, next_input, result) = tauri::async_runtime::spawn_blocking(move || {
             let _permit = permit;
-            let result = if remaining > 0 {
-                preparation.receive_founder_member_with_recovery(&receiver, &frame)
-            } else {
-                preparation
-                    .receive_founder_member(&receiver, &frame)
-                    .map(|received| {
-                        received.map_or(
-                            NativeTextFounderFrameOutcome::Unresolved,
-                            NativeTextFounderFrameOutcome::Retained,
-                        )
-                    })
-            };
+            let result = run(preparation, &receiver, &input);
             if let Ok(NativeTextFounderFrameOutcome::Retained(receipt)) = &result {
                 note_founder_archive_change(&local, receipt);
             }
-            (receiver, frame, result)
+            (receiver, input, result)
         })
         .await
         .ok()?;
+        receiver = next_receiver;
+        input = next_input;
+        if !matches!(result, Err(V2MemberSaveRefusal::Busy))
+            || SystemClock.monotonic_ms() >= deadline
+        {
+            #[cfg(test)]
+            if let Err(ref refusal) = result {
+                eprintln!("native founder receive stopped: {refusal:?}");
+            }
+            return Some((receiver, input, result));
+        }
+        // The original input still owns its carrier scope. The local permit
+        // and the refused physical preparation have both returned.
+        #[cfg(test)]
+        state.native_text.founder_receive_busy.notify_one();
+        tokio::select! {
+            biased;
+            _ = scope.cancelled() => return None,
+            _ = SystemClock.sleep(FOUNDER_CAPTURE_RETRY_DELAY) => {},
+        }
+    }
+}
+
+async fn receive_founder_frame(
+    state: &AppState,
+    source: &Arc<Source>,
+    mut receiver: FounderReceiver,
+    mut frame: NativeChatMemberFrame,
+) -> Option<(FounderReceiver, Option<ActionId>)> {
+    let mut remaining = DEPENDENCIES_PER_FRAME;
+    loop {
+        let (original, original_frame, next) = run_founder_receive(
+            state,
+            source,
+            receiver,
+            frame,
+            move |prepared, receiver, frame| {
+                if remaining > 0 {
+                    prepared.receive_founder_member_with_recovery(receiver, frame)
+                } else {
+                    prepared
+                        .receive_founder_member(receiver, frame)
+                        .map(|received| {
+                            received.map_or(
+                                NativeTextFounderFrameOutcome::Unresolved,
+                                NativeTextFounderFrameOutcome::Retained,
+                            )
+                        })
+                }
+            },
+        )
+        .await?;
         receiver = original;
         frame = original_frame;
 
@@ -165,11 +214,10 @@ async fn receive_founder_frame(
 async fn recover_founder_chain(
     state: &AppState,
     source: &Arc<Source>,
-    mut receiver: NativeTextFounderMemberReceiver<OsCryptoRng>,
+    mut receiver: FounderReceiver,
     first: NativeTextFounderDependencyExchange,
     remaining: &mut usize,
-) -> Option<(NativeTextFounderMemberReceiver<OsCryptoRng>, bool)> {
-    let local = source.member_work();
+) -> Option<(FounderReceiver, bool)> {
     let mut next = Some(first);
     let mut waiting = Vec::with_capacity(*remaining);
     loop {
@@ -188,22 +236,17 @@ async fn recover_founder_chain(
         let Some(response) = waiting.pop() else {
             return Some((receiver, true));
         };
-        let Some((permit, preparation)) = capture_founder_frame(state, source).await else {
-            break;
-        };
         let may_follow = *remaining > 0;
-        let local = local.clone();
-        let (original, response, result) = tauri::async_runtime::spawn_blocking(move || {
-            let _permit = permit;
-            let result = preparation
-                .recover_founder_dependency_with_followup(&receiver, &response, may_follow);
-            if let Ok(NativeTextFounderFrameOutcome::Retained(receipt)) = &result {
-                note_founder_archive_change(&local, receipt);
-            }
-            (receiver, response, result)
-        })
-        .await
-        .ok()?;
+        let (original, response, result) = run_founder_receive(
+            state,
+            source,
+            receiver,
+            response,
+            move |prepared, receiver, response| {
+                prepared.recover_founder_dependency_with_followup(receiver, response, may_follow)
+            },
+        )
+        .await?;
         receiver = original;
         match result {
             Ok(NativeTextFounderFrameOutcome::Retained(_)) => {}

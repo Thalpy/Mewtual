@@ -2407,6 +2407,16 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     let changed = native_send_request(&window, &restored[0], 9, "Changed joined message");
     run(&queue).await;
     refused(changed.await.unwrap());
+
+    let founder_state = founder.state::<AppState>();
+    let close = register_vault_close(&founder_state).await.unwrap();
+    sources::close_server_rows(&founder_state, &SystemClock)
+        .await
+        .unwrap();
+    drop(close);
+    drop(founder_window);
+    drop(founder);
+
     let fresh = invite_command(
         &window,
         "send_message",
@@ -2461,14 +2471,6 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
         std::fs::read(joiner_path.join("chat-critical-namespaces.joined-pin.index")).unwrap(),
         saved_pins
     );
-    let founder_state = founder.state::<AppState>();
-    let close = register_vault_close(&founder_state).await.unwrap();
-    sources::close_server_rows(&founder_state, &SystemClock)
-        .await
-        .unwrap();
-    drop(close);
-    drop(founder_window);
-    drop(founder);
     let (reopened_founder, founder_window, founder_queue) =
         app(root.path().join("founder"), None, true);
     let wrong = invoke(&founder_window, "1", "different secret");
@@ -2547,6 +2549,13 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     assert_eq!(originals["items"][1]["action"], saved["message_id"]);
     assert_eq!(originals["items"][1]["body"]["reply_to"], member_action);
 
+    timeout(
+        Duration::from_secs(15),
+        state.native_text.founder_ingress_ready.notified(),
+    )
+    .await
+    .expect("the cold founder has subscribed on its original mesh");
+    let occupied = hold_vault_metadata(&state).await;
     let reconnect = invite_command(
         &window,
         "join_server",
@@ -2562,6 +2571,13 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
         "original joined row reconnect after restart"
     );
     assert_eq!(found_value(reconnect_response), original);
+    timeout(
+        Duration::from_secs(20),
+        state.native_text.founder_receive_busy.notified(),
+    )
+    .await
+    .expect("a reconnected member frame reached the held founder metadata slot");
+    drop(occupied);
     for (window, queue, row, action, expected) in [
         (
             &window,

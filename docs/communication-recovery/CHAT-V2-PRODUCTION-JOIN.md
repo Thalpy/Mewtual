@@ -549,13 +549,14 @@ and retains their invalidations through transient admission contention.
 Joined dependency repair is bounded to the original authenticated
 carrier. The installed founder can recover its own saved direct dependencies
 and show its saved received messages after the live receiver retires. The
-desktop briefly retains an incoming founder frame or dependency reply while
-local capture is busy. Each retry rechecks the same mounted row. Cold
-founder startup restores ordinary member history and its original listener
-from a covered Add. If no governing Add has entered, startup authenticates the
-original promoted genesis and exposes its singleton roster and saved local
-history. New cold-founder invitations, authoring before the first governing
-Add, later governing writes and automatic peer discovery still need implementation.
+desktop briefly retains an incoming founder frame or dependency reply through
+temporary row capture and metadata contention. Each retry rechecks the same
+mounted row and carrier. Cold founder startup restores ordinary member history
+and its original listener from a covered Add. If no governing Add has entered,
+startup authenticates the original promoted genesis and exposes its singleton
+roster and saved local history. New cold-founder invitations, authoring before
+the first governing Add, later governing writes and automatic peer discovery
+still need implementation.
 
 The warm joined node can draw and sign an ordinary action through the original
 native Joiner Source. Its signing cut requires the ordinary member purpose and

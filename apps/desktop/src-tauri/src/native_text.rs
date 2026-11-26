@@ -76,6 +76,10 @@ pub(super) struct Registry {
     #[cfg(test)]
     founder_workers_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
     #[cfg(test)]
+    founder_ingress_ready: tokio::sync::Notify,
+    #[cfg(test)]
+    founder_receive_busy: tokio::sync::Notify,
+    #[cfg(test)]
     text_reply_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
     #[cfg(test)]
     invite_preview_now: AtomicU64,
@@ -169,6 +173,10 @@ impl Default for Registry {
             found_setup_busy: StdMutex::new(None),
             #[cfg(test)]
             founder_workers_edge: StdMutex::new(None),
+            #[cfg(test)]
+            founder_ingress_ready: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            founder_receive_busy: tokio::sync::Notify::new(),
             #[cfg(test)]
             text_reply_edge: StdMutex::new(None),
             #[cfg(test)]
