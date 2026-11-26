@@ -299,6 +299,14 @@ impl NativeTextColdFounderSource {
         mesh.native_chat_member_dependencies().ok_or_else(refused)
     }
 
+    #[cfg(test)]
+    pub(in crate::store::critical_namespaces::native_registry) fn connections_for_test(
+        &self,
+    ) -> Result<Vec<catcoms_rt::PeerConnectionSnapshot>, AppError> {
+        let mesh = self.actor.as_ref().ok_or_else(refused)?.borrow()?;
+        Ok(mesh.connection_snapshot())
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn runtime_governing_ingress(
         &self,
     ) -> Result<catcoms_net::NativeChatJoinIngress, AppError> {
