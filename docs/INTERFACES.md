@@ -23,6 +23,7 @@ An archive stage can issue an opaque missing-parent ticket after an exact
 local miss. Only its original page can use the ticket. The worker drops
 the original stage before requesting the parent and compares the child's
 signed bytes and Admission before retrying it.
+
 The founder can read selected received history through `get_message_page`
 with `auditAction` (null for Creates, or an exact Create ActionId),
 `auditAfter` (null or an ActionId) and a limit of 1 to 8. The request uses
@@ -32,6 +33,12 @@ digest, parents and operation body. `items: null` means the archive is
 unavailable. ActionId cursors order each captured page independently of
 device timestamps. Refresh from the first page to include records whose
 IDs precede an earlier cursor.
+
+Joined contact consent is optional on the native connect command. The
+original four-field request connects once. An explicit `remember` boolean
+can add a bounded, encrypted native approval. `forget_native_chat_contacts`
+uses the same server and exact context and clears remembered approvals for
+that row.
 [Request and cursor contract](communication-recovery/CHAT-V2-ORDINARY-MEMBER-PATH.md#discovering-missed-originals-from-a-joined-member).
 
 16 November Score/voice integration candidate: this branch combines the reviewed

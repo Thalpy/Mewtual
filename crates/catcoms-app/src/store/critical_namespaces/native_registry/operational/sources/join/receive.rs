@@ -32,10 +32,12 @@ use catcoms_sync::PreparedV2JoinedPrefix;
 
 mod archive_discovery;
 mod contact;
+mod contact_recovery;
 mod dependencies;
 mod governing;
 mod history_discovery;
 pub(super) use archive_discovery::ArchiveRelayState;
+pub use contact_recovery::NativeTextJoinedSavedContactApprovals;
 pub use dependencies::{
     NativeTextJoinedArchiveDependency, NativeTextJoinedArchiveReplay,
     NativeTextJoinedDependencyAttachRefusal, NativeTextJoinedDependencyExchange,

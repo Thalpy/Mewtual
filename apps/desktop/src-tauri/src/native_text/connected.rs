@@ -1,4 +1,5 @@
 //! Native connected request dispatch for the exact mounted row.
+mod contact_recovery;
 mod history;
 
 use super::*;
@@ -213,6 +214,10 @@ impl Source {
 
     pub(super) fn channel(&self) -> u128 {
         self.channel
+    }
+
+    pub(super) fn generation_data(&self) -> u64 {
+        self.generation
     }
 
     /// Notify the main renderer of one changed Create. Text is available only
@@ -443,6 +448,7 @@ async fn start_dependencies<R: tauri::Runtime>(
                     drain_outbox(&app, &source),
                     serve_joined_governing(&app, &source),
                     history::recover(&app, &source),
+                    contact_recovery::restore(&app, &source),
                     async {
                         if let Some((initial, payment)) = receive {
                             #[cfg(test)]
@@ -764,6 +770,22 @@ async fn serve_dependencies<R: tauri::Runtime>(
             let source = source.clone();
             let _ = tauri::async_runtime::spawn_blocking(move || {
                 let _local = local;
+                #[cfg(test)]
+                let purpose = request.current_data().map(|(_, wire)| {
+                    use catcoms_sync::owner_v2::{
+                        OpenedV2ArchiveHistoryRequest, OpenedV2MemberDependencyRequest,
+                        OpenedV2MemberHistoryRequest,
+                    };
+                    if OpenedV2ArchiveHistoryRequest::recognizes(wire) {
+                        "archive inventory"
+                    } else if OpenedV2MemberDependencyRequest::recognizes_archive_relay(wire) {
+                        "archive original"
+                    } else if OpenedV2MemberHistoryRequest::recognizes(wire) {
+                        "own-outbox inventory"
+                    } else {
+                        "own original"
+                    }
+                });
                 let result = original.serve_dependency_request(
                     &row,
                     source.channel,
@@ -773,7 +795,7 @@ async fn serve_dependencies<R: tauri::Runtime>(
                 );
                 #[cfg(test)]
                 if let Err(ref failure) = result {
-                    eprintln!("joined dependency provider refused a request: {failure:?}");
+                    eprintln!("joined dependency provider refused {purpose:?}: {failure:?}");
                 }
                 result
             })

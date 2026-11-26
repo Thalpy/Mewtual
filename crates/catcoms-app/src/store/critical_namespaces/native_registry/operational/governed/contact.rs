@@ -11,6 +11,10 @@ pub(in super::super) struct ApprovedContact {
 }
 
 impl ApprovedContact {
+    pub(in super::super) fn target_data(&self) -> (catcoms_rt::PeerId, &str) {
+        (self.peer, &self.address)
+    }
+
     pub(in super::super) fn from_selected_member(
         peer: catcoms_rt::PeerId,
         group: Vec<u8>,

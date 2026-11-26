@@ -92,6 +92,16 @@ pub struct NativeTextJoinedDependencyResponse {
     invocation: watch::Sender<bool>,
 }
 
+impl NativeTextJoinedDependencyResponse {
+    /// The exact response may wait for local staging while all of its
+    /// original leases and observations remain live.
+    pub fn is_current_cached(&self) -> bool {
+        self.selected.is_current_cached()
+            && self.observation.is_current_cached()
+            && !self.signal.is_cancelled()
+    }
+}
+
 /// One exact offered original and its paid staging ledger. It can yield
 /// between local ancestor batches without retaining a physical row borrow.
 pub struct NativeTextJoinedArchiveReplay {
@@ -462,15 +472,20 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         response: NativeTextJoinedDependencyResponse,
         caller: &RequestCancellation,
     ) -> Result<Option<NativeTextJoinedReceivedOriginal>, V2MemberSaveRefusal> {
+        self.open_exact_dependency_reply(selection, &response, caller)
+    }
+
+    fn open_exact_dependency_reply(
+        &self,
+        selection: &NativeTextJoinedRowSelection,
+        response: &NativeTextJoinedDependencyResponse,
+        caller: &RequestCancellation,
+    ) -> Result<Option<NativeTextJoinedReceivedOriginal>, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
-        if !selection.same_original(&response.selected)
-            || response.signal.is_cancelled()
-            || !response.observation.is_current_cached()
-        {
+        if !selection.same_original(&response.selected) || !response.is_current_cached() {
             return Err(Refusal::Stale);
         }
         self.with_member_receiver(selection, caller, |source| {
-            let response = response;
             let fee = source
                 .metadata
                 .reserve_join_node(OPEN_FEE)
@@ -492,20 +507,11 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             }) {
                 return Err(Refusal::Stale);
             }
-            let NativeTextJoinedDependencyResponse {
-                wire,
-                observation,
-                frame_depth,
-                signal,
-                invocation,
-                ..
-            } = response;
-            drop(wire);
             let origin = ReceiveOrigin::Dependency {
-                route: observation,
-                frame_depth,
-                signal,
-                _invocation: invocation,
+                route: response.observation.clone(),
+                frame_depth: response.frame_depth,
+                signal: response.signal.clone(),
+                _invocation: response.invocation.clone(),
             };
             if !origin.is_current_cached() {
                 return Err(Refusal::Stale);
@@ -527,6 +533,17 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         response: NativeTextJoinedDependencyResponse,
         caller: RequestCancellation,
     ) -> Result<Option<NativeTextJoinedArchiveReplay>, V2MemberSaveRefusal> {
+        self.prepare_parked_discovered_archive(selection, &response, caller)
+    }
+
+    /// Take one attempt at opening a retained paid response. The original
+    /// route, invitation and signal stay bound to that response on retry.
+    pub fn prepare_parked_discovered_archive(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        response: &NativeTextJoinedDependencyResponse,
+        caller: RequestCancellation,
+    ) -> Result<Option<NativeTextJoinedArchiveReplay>, V2MemberSaveRefusal> {
         use catcoms_replication::chat::ActionState;
         use V2MemberSaveRefusal as Refusal;
         if matches!(&response.provenance, DependencyProvenance::Direct) {
@@ -537,7 +554,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             DependencyProvenance::ArchivePage { proof, .. } => Some(proof.clone()),
             _ => None,
         };
-        let Some(original) = self.open_dependency_response(selection, response, &caller)? else {
+        let Some(original) = self.open_exact_dependency_reply(selection, response, &caller)? else {
             return Ok(None);
         };
         let require_current = || {

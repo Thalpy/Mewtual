@@ -1,11 +1,13 @@
 //! One explicitly approved connection on an existing joined actor.
 catcoms_rt::redacted_debug! {
     NativeTextJoinedReconnect;
+    NativeTextJoinedContactApprovalProof;
 }
 
 use super::*;
 use catcoms_discovery::EndpointDialScheduler;
 use std::net::IpAddr;
+use std::time::Duration;
 
 /// Establish one authenticated transport connection for an existing row.
 pub struct NativeTextJoinedReconnect {
@@ -15,11 +17,36 @@ pub struct NativeTextJoinedReconnect {
     signal: RequestCancellation,
     mount: RequestCancellation,
     payment: Arc<JoinFramePayment>,
-    member: Option<(NativeTextJoinedRowSelection, ApprovedMemberPeer)>,
+    member: Option<JoinedContactCandidate>,
     _end: retirement::PreparationEnd,
 }
 
+pub(super) struct JoinedContactCandidate {
+    pub(super) row: NativeTextJoinedRowSelection,
+    pub(super) contact: ApprovedMemberPeer,
+    pub(super) digest: blake3::Hash,
+    pub(super) host: IpAddr,
+    pub(super) restored: bool,
+}
+
+/// Result of the original approved connection. An inbound path can prove
+/// identity approval. Only the exact authenticated outbound path can
+/// supply a host to reuse during a later native startup.
+pub struct NativeTextJoinedContactApprovalProof {
+    pub(super) candidate: JoinedContactCandidate,
+    pub(super) connection: catcoms_rt::ConnectionLease,
+    pub(super) outbound: bool,
+    pub(super) consent: NativeTextJoinedContactConsent,
+    _payment: Arc<JoinFramePayment>,
+}
+
 impl NativeTextJoinedReconnect {
+    pub(super) fn as_restored(mut self) -> Self {
+        if let Some(candidate) = self.member.as_mut() {
+            candidate.restored = true;
+        }
+        self
+    }
     pub(super) fn from_selected_member(
         invocation: watch::Sender<bool>,
         transport: catcoms_net::MeshConnectionDial,
@@ -27,7 +54,7 @@ impl NativeTextJoinedReconnect {
         (signal, mount): (RequestCancellation, RequestCancellation),
         fee: CatalogReadReservation,
         end: retirement::PreparationEnd,
-        member: (NativeTextJoinedRowSelection, ApprovedMemberPeer),
+        member: JoinedContactCandidate,
     ) -> Self {
         Self {
             _invocation: invocation,
@@ -42,6 +69,34 @@ impl NativeTextJoinedReconnect {
     }
 
     pub async fn connect(self, scheduler: &EndpointDialScheduler) -> Result<(), AppError> {
+        self.establish(scheduler, None).await.map(|_| ())
+    }
+
+    pub async fn connect_for_contact_approval(
+        mut self,
+        scheduler: &EndpointDialScheduler,
+        consent: NativeTextJoinedContactConsent,
+    ) -> Result<NativeTextJoinedContactApprovalProof, AppError> {
+        if self
+            .member
+            .as_ref()
+            .is_none_or(|candidate| candidate.restored || !consent.is_current_for(&candidate.row))
+        {
+            return Err(refused());
+        }
+        self.signal = consent.constrain(self.signal);
+        self.establish(scheduler, Some(consent))
+            .await?
+            .ok_or_else(refused)
+    }
+
+    async fn establish(
+        self,
+        scheduler: &EndpointDialScheduler,
+        consent: Option<NativeTextJoinedContactConsent>,
+    ) -> Result<Option<NativeTextJoinedContactApprovalProof>, AppError> {
+        let (peer, address) = self.contact.target_data();
+        let route = consent.as_ref().map(|_| address.to_owned());
         connect_approved_host(
             self.contact,
             &self.transport,
@@ -51,13 +106,50 @@ impl NativeTextJoinedReconnect {
             self.payment.clone(),
         )
         .await?;
-        if let Some((row, peer)) = self.member {
-            if self.signal.is_cancelled() || self.mount.is_cancelled() {
-                return Err(refused());
-            }
-            row.remember_governing_peer(peer)?;
+        let Some(candidate) = self.member else {
+            return Ok(None);
+        };
+        if self.signal.is_cancelled() || self.mount.is_cancelled() {
+            return Err(refused());
         }
-        Ok(())
+        let Some(route) = route else {
+            if candidate.restored {
+                candidate
+                    .row
+                    .install_restored_peer(candidate.contact, &self.signal)?;
+            } else {
+                candidate.row.remember_governing_peer(candidate.contact)?;
+            }
+            return Ok(None);
+        };
+        let original = self.transport.connection_lease(peer).ok_or_else(refused)?;
+        let mut signal = self.signal.clone();
+        let mut mount = self.mount.clone();
+        let checked = tokio::select! {
+            biased;
+            _ = signal.cancelled() => return Err(refused()),
+            _ = mount.cancelled() => return Err(refused()),
+            proof = tokio::time::timeout(Duration::from_secs(3), self.transport.authenticated_direct_route(peer, &route)) => {
+                proof.map_err(|_| refused())?.map_err(|_| refused())?
+            }
+        };
+        if !original.is_live()
+            || self
+                .transport
+                .connection_lease(peer)
+                .is_none_or(|current| !current.is_same(&original))
+            || self.signal.is_cancelled()
+            || self.mount.is_cancelled()
+        {
+            return Err(refused());
+        }
+        Ok(Some(NativeTextJoinedContactApprovalProof {
+            candidate,
+            consent: consent.ok_or_else(refused)?,
+            outbound: checked.is_some_and(|route| route.is_same(&original)),
+            connection: original,
+            _payment: self.payment,
+        }))
     }
 }
 

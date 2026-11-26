@@ -14,10 +14,35 @@ archive write. The full frontend suite passed with 3,948 tests and the
 additional compiled Svelte dialog test passed separately. The browser
 flow could not connect to the local browser debugger.
 
-The native warm/cold audit and final source retirement checks are
+The native audit request parser passed. The first mounted run stopped
+before its audit assertions when an existing archive read received a
+transient Busy before scheduling. The fixture now retries that exact
+read. The warm/cold audit and final source retirement checks are
 pending. Audit covers selected received records on this device.
 It does not include the founder's own outbox or unproven late originals
 from removed members. Chat V2 remains disabled.
+
+## 26 November 2026 — Restore approved joined contacts after reopening
+
+The disabled native Chat V2 joined row can remember a signed contact for
+its current covered Header and epoch. A verified outbound connection can
+retain its approved numeric address. Passive consent waits for the same
+authenticated peer to connect. Forget cancels saved approvals and prevents
+earlier Remember requests from restoring them.
+
+Two focused Windows App tests passed. The mounted three-peer TCP test
+retired and reopened both joined peers, verified passive and outbound
+restoration, fetched an archive inventory with the restored approvals,
+and rejected a Remember proof after Forget. The fault cases covered
+a nonregular approval file and a truncated authenticated record.
+The focused renderer and command-policy checks passed, as did Svelte
+checking and the production renderer build. Native desktop automation
+and cross-platform suite evidence are pending.
+
+Each consent record is scoped to the original joined row and current
+Header. A change of governing state requires fresh contact consent.
+This does not cover governed rejoin or physical network acceptance.
+Chat V2 remains disabled.
 
 ## 26 November 2026 — Fetch exact missing parents before the next archive page
 
@@ -25,13 +50,22 @@ A verified archive-stage miss can steer the desktop to a specific missing
 parent. The worker retains the original page scope and signed identities,
 drops the child's staging ledger, and selects the parent before retrying
 the same child. Each chain has a fixed deadline, depth and attempt limit.
+An authenticated exact reply can wait for local staging with its
+original connection, approval, deadline and memory reservation. Local
+transport saturation has a distinct pre-submission result and preserves
+the wire retry. A running replay gets shorter local turns while idle
+peer scans keep their ordinary interval.
 
 The focused Windows mounted App test passed with the offline founder's
 Edit presented before its Create. It rejected a ticket presented with
 another opened page, fetched the exact parent, checked the same signed
 Edit on retry and verified the edited message after reopening. The
 adversarial re-review found no remaining blocker, high or medium finding.
-The native scheduler and own-outbox fallback still need execution evidence.
+The focused Windows transport test held the lower owner after caller
+cancellation, observed local Busy, then observed a real retry after
+the lower owner retired. An earlier desktop run selected the offline
+author's Edit and Delete but missed the deepest nested reply within
+the scenario's bound. The latest combined desktop regression is pending.
 
 Chat V2 remains disabled. Cold contact approval, governed rejoin,
 authorized audit and wider acceptance remain open.

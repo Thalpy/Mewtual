@@ -646,3 +646,17 @@ separate. No newly decoded DATA or in-memory mock can stand in for these results
 Archived replies across a removal still need the exact historical admission
 and its frozen cut before production enablement.
 See [selected history proofs](CHAT-V2-SELECTED-HISTORY-PROOFS.md).
+## Remembered joined contacts
+
+Members can opt to remember a signed contact for the original joined row.
+The encrypted local record keeps the exact approved contact and its covered
+governing Header and epoch. An address is reusable when the native actor
+proves that exact numeric outbound route authenticated the expected peer.
+An incoming connection can support a passive approval without supplying a
+future dial address.
+
+On cold restart the original joined row verifies the saved signature and
+live Admission at the actual selected head before attempting a route. Both
+peers need an authenticated live connection before history recovery starts.
+**Forget saved contacts** clears the disk record and revokes pending restored
+work. A later governing head needs a fresh contact approval for cold startup.

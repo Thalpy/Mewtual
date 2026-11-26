@@ -45,6 +45,15 @@ verifying its child and checking the selected local stores. An original
 page, approval and connection bound the request. Chains have a fixed
 deadline, attempt cap and depth cap.
 
+Cold joined-contact recovery begins with explicit local recurring consent.
+The saved contact is tenant-bound and epoch-bound, and the current signed
+Admission and expected peer must authenticate again. An outbound route to
+the exact approved numeric address supplies a future dial target. Passive
+consent requires a fresh authenticated connection and contains no dial
+address. Forgetting the contacts revokes the original live approval.
+Rolling the local contact file back to an earlier authentic version at the
+same governing head can restore its previous consent.
+
 16 November Score/voice integration candidate: this branch combines the reviewed
 Score and voice admission history with the newer Chat/security and Studio save
 baseline. The entries below retain each branch's evidence; they do not establish

@@ -94,7 +94,7 @@ function manualCommands(sources: Map<string, string>): string[] {
     "the native membership inventory must dispatch through the production router");
   return [
     ...inventory("admin_chat_ledger/mod.rs", ["get_admin_chat_ledger", "get_admin_chat_ledger_detail"]),
-    ...inventory("native_text/membership.rs", ["get_native_chat_members", "remove_native_chat_member", "share_native_chat_contact", "connect_native_chat_contact"]),
+    ...inventory("native_text/membership.rs", ["get_native_chat_members", "remove_native_chat_member", "share_native_chat_contact", "connect_native_chat_contact", "forget_native_chat_contacts"]),
   ];
 }
 
