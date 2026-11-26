@@ -2,8 +2,8 @@
 //! Applying those originals still goes through exact dependency fetch and
 //! the signed-action receiver. Cursor progress alone never covers a write.
 use super::dependencies::{
-    DependencyProvenance, NativeTextJoinedDependencyExchange, ReplyPayment, ScopeAuthority,
-    REPLY_FEE,
+    DependencyProvenance, NativeTextJoinedArchiveDependency, NativeTextJoinedDependencyExchange,
+    ReplyPayment, ScopeAuthority, REPLY_FEE,
 };
 use super::*;
 use crate::store::persistence::v2_member_outbox::{DispositionCode, MemberEntryStatus};
@@ -27,6 +27,9 @@ catcoms_rt::redacted_debug! {
 // A page can wait between turns. Pay for its bounded IDs, approval, and
 // row/lease observations without retaining the departed wire buffers.
 const PARKED_PAGE_FEE: usize = 8 * 1024;
+// Archive pages also pay for the worker's bounded stack of exact signed
+// identities while it drops a child's paid ledger to ask for a parent.
+const ARCHIVE_ANCESTRY_FEE: usize = 4 * 1024;
 
 pub struct NativeTextJoinedHistoryExchange {
     transport: NativeChatMemberDependencyExchange,
@@ -62,8 +65,13 @@ enum HistoryPage {
     Archive {
         page: V2ArchiveHistoryPage,
         highest: Option<ActionId>,
+        proof: Arc<ArchivePageProof>,
     },
 }
+
+/// Identity of one opened archive page. Ancestry tickets retain this
+/// identity without retaining wire buffers or an active native command.
+pub(super) struct ArchivePageProof(());
 
 impl HistoryPage {
     fn contains(&self, action: ActionId) -> bool {
@@ -76,7 +84,7 @@ impl HistoryPage {
     fn continuation(&self) -> Option<HistoryCursor> {
         match self {
             Self::Own(page) => page.continuation().map(HistoryCursor::Own),
-            Self::Archive { page, highest } => Some(HistoryCursor::Archive {
+            Self::Archive { page, highest, .. } => Some(HistoryCursor::Archive {
                 cursor: Some(page.continuation()?),
                 after: *highest,
             }),
@@ -378,9 +386,14 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                     .metadata
                     .reserve_join_node(REPLY_FEE)
                     .map_err(|_| Refusal::Busy)?;
+                let ancestry_fee = if matches!(&cursor, HistoryCursor::Archive { .. }) {
+                    ARCHIVE_ANCESTRY_FEE
+                } else {
+                    0
+                };
                 let page_fee = source
                     .metadata
-                    .reserve_join_node(PARKED_PAGE_FEE)
+                    .reserve_join_node(PARKED_PAGE_FEE + ancestry_fee)
                     .map_err(|_| Refusal::Busy)?;
                 let access = source
                     .node
@@ -440,6 +453,51 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         if !page.query.is_current(selection) || !page.page.contains(action) {
             return Err(Refusal::Stale);
         }
+        let provenance = match &page.page {
+            HistoryPage::Own(_) => DependencyProvenance::ApprovedAuthor(page.query.admission),
+            HistoryPage::Archive { proof, .. } => DependencyProvenance::ArchivePage {
+                proof: proof.clone(),
+                own_author: None,
+            },
+        };
+        self.prepare_page_exact(selection, page, action, provenance, caller, rng)
+    }
+
+    /// Fetch the exact missing parent proved by a child on this archive page.
+    /// An own-outbox fallback still requires the holder's original Admission.
+    pub fn prepare_archive_parent_request(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        page: &NativeTextJoinedHistoryPage,
+        dependency: &NativeTextJoinedArchiveDependency,
+        holder_outbox: bool,
+        caller: RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<NativeTextJoinedDependencyExchange, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        let HistoryPage::Archive { proof, .. } = &page.page else {
+            return Err(Refusal::Stale);
+        };
+        if !Arc::ptr_eq(proof, &dependency.page) || !page.query.is_current(selection) {
+            return Err(Refusal::Stale);
+        }
+        let provenance = DependencyProvenance::ArchivePage {
+            proof: proof.clone(),
+            own_author: holder_outbox.then_some(page.query.admission),
+        };
+        self.prepare_page_exact(selection, page, dependency.parent, provenance, caller, rng)
+    }
+
+    fn prepare_page_exact(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        page: &NativeTextJoinedHistoryPage,
+        action: ActionId,
+        provenance: DependencyProvenance,
+        caller: RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<NativeTextJoinedDependencyExchange, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
         let exchange = self
             .dependency_lane()?
             .capture_request(page.query.peer)
@@ -454,16 +512,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             exchange,
             selection,
             (page.query.channel, action),
-            (
-                None,
-                Some(&page.query.signal),
-                match page.page {
-                    HistoryPage::Own(_) => {
-                        DependencyProvenance::ApprovedAuthor(page.query.admission)
-                    }
-                    HistoryPage::Archive { .. } => DependencyProvenance::ArchiveRelay,
-                },
-            ),
+            (None, Some(&page.query.signal), provenance),
             caller,
             rng,
         )
@@ -504,7 +553,11 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                         return Err(Refusal::Failed);
                     }
                     let highest = page.actions().last().copied().or(*after);
-                    Ok(HistoryPage::Archive { page, highest })
+                    Ok(HistoryPage::Archive {
+                        page,
+                        highest,
+                        proof: Arc::new(ArchivePageProof(())),
+                    })
                 }
             }
         })?;

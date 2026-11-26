@@ -1,12 +1,13 @@
 //! Connected catch-up of one exact ActionId. No method may dial or sign anew.
 catcoms_rt::redacted_debug! {
+    NativeTextJoinedArchiveDependency;
     NativeTextJoinedArchiveReplay;
     NativeTextJoinedDependencyExchange;
     NativeTextJoinedDependencyResponse;
     NativeTextJoinedDependencyProvider;
 }
 
-use super::history_discovery::HistoryContactScope;
+use super::history_discovery::{ArchivePageProof, HistoryContactScope};
 use super::*;
 use crate::store::persistence::v2_member_transport::{
     LocalHistoryDependencyReplay, HISTORY_REPLAY_FEE,
@@ -28,11 +29,39 @@ use join_tcp::DependencyCaptureRefusal;
 pub(super) const REPLY_FEE: usize = OPEN_FEE + 5 * MAX_V2_DEPENDENCY_REPLY_BYTES + 16 * 1024;
 const MAX_FRAME_DEPENDENCY_DEPTH: u8 = 4;
 
-#[derive(Clone, Copy)]
 pub(super) enum DependencyProvenance {
     Direct,
     ApprovedAuthor(OwnerBodyId),
     ArchiveRelay,
+    ArchivePage {
+        proof: Arc<ArchivePageProof>,
+        own_author: Option<OwnerBodyId>,
+    },
+}
+
+impl DependencyProvenance {
+    fn requires_holder_approval(&self) -> bool {
+        matches!(self, Self::ArchiveRelay | Self::ArchivePage { .. })
+    }
+
+    fn uses_archive_wire(&self) -> bool {
+        matches!(
+            self,
+            Self::ArchiveRelay
+                | Self::ArchivePage {
+                    own_author: None,
+                    ..
+                }
+        )
+    }
+
+    fn bound_author(&self) -> Option<OwnerBodyId> {
+        match self {
+            Self::ApprovedAuthor(author) => Some(*author),
+            Self::ArchivePage { own_author, .. } => *own_author,
+            Self::Direct | Self::ArchiveRelay => None,
+        }
+    }
 }
 
 /// One fixed ActionId and original live route, ready outside the metadata slot.
@@ -69,10 +98,59 @@ pub struct NativeTextJoinedArchiveReplay {
     ledger: NativeTextJoinedMemberLedger,
     original: NativeTextJoinedReceivedOriginal,
     dependencies: Option<LocalHistoryDependencyReplay>,
+    archive_page: Option<Arc<ArchivePageProof>>,
     _fee: CatalogReadReservation,
 }
 
+/// One exact missing ancestor derived from a checked original on a live
+/// archive page. It retains no original, native invocation or wire payment.
+#[derive(Clone)]
+pub struct NativeTextJoinedArchiveDependency {
+    pub(super) page: Arc<ArchivePageProof>,
+    pub(super) parent: ActionId,
+    child: ActionId,
+    admission: [u8; 32],
+    original: blake3::Hash,
+}
+
+impl NativeTextJoinedArchiveDependency {
+    pub fn parent_data(&self) -> ActionId {
+        self.parent
+    }
+
+    pub fn matches_child(&self, replay: &NativeTextJoinedArchiveReplay) -> bool {
+        self.child == replay.original.action_id_data()
+            && self.admission == *replay.original.opened.admission_data().as_bytes()
+            && self.original == blake3::hash(replay.original.opened.original_data())
+            && replay
+                .archive_page
+                .as_ref()
+                .is_some_and(|page| Arc::ptr_eq(page, &self.page))
+    }
+}
+
 impl NativeTextJoinedArchiveReplay {
+    /// Only a checked original that found no selected local parent may
+    /// issue this ticket. Refusals and traversal limits carry no ActionId.
+    pub fn missing_archive_dependency(&self) -> Option<NativeTextJoinedArchiveDependency> {
+        let page = self.archive_page.as_ref()?;
+        let parent = self.dependencies.as_ref()?.exact_miss()?;
+        if !self.ledger.is_current_cached()
+            || !self
+                .original
+                .is_for_original_row_cached(&self.ledger.selection)
+        {
+            return None;
+        }
+        Some(NativeTextJoinedArchiveDependency {
+            page: page.clone(),
+            parent,
+            child: self.original.action_id_data(),
+            admission: *self.original.opened.admission_data().as_bytes(),
+            original: blake3::hash(self.original.opened.original_data()),
+        })
+    }
+
     /// The Create target to invalidate after this exact write settles.
     pub fn target_data(&self) -> ActionId {
         self.original.projection_target_data()
@@ -312,7 +390,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 if !observation.is_current_cached() {
                     return Err(Refusal::Stale);
                 }
-                let approval = if matches!(provenance, DependencyProvenance::ArchiveRelay) {
+                let approval = if provenance.requires_holder_approval() {
                     Some(source.require_history_peer(selection, provider)?.1)
                 } else {
                     None
@@ -321,7 +399,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                     .metadata
                     .reserve_join_node(REPLY_FEE)
                     .map_err(|_| Refusal::Busy)?;
-                let request = if approval.is_some() {
+                let request = if provenance.uses_archive_wire() {
                     source.node.prepare_member_archive_relay_request(
                         source.prefix,
                         channel,
@@ -407,10 +485,11 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                     &response.wire,
                 )
                 .map_err(|_| Refusal::Failed)?;
-            if matches!(response.provenance, DependencyProvenance::ApprovedAuthor(author)
-            if opened.as_ref().is_some_and(|original| {
-                original.admission_data().as_bytes() != author.as_bytes()
-            })) {
+            if response.provenance.bound_author().is_some_and(|author| {
+                opened.as_ref().is_some_and(|original| {
+                    original.admission_data().as_bytes() != author.as_bytes()
+                })
+            }) {
                 return Err(Refusal::Stale);
             }
             let NativeTextJoinedDependencyResponse {
@@ -450,10 +529,14 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
     ) -> Result<Option<NativeTextJoinedArchiveReplay>, V2MemberSaveRefusal> {
         use catcoms_replication::chat::ActionState;
         use V2MemberSaveRefusal as Refusal;
-        if matches!(response.provenance, DependencyProvenance::Direct) {
+        if matches!(&response.provenance, DependencyProvenance::Direct) {
             return Err(Refusal::Stale);
         }
         let channel = response.channel;
+        let archive_page = match &response.provenance {
+            DependencyProvenance::ArchivePage { proof, .. } => Some(proof.clone()),
+            _ => None,
+        };
         let Some(original) = self.open_dependency_response(selection, response, &caller)? else {
             return Ok(None);
         };
@@ -497,6 +580,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             ledger,
             original,
             dependencies,
+            archive_page,
             _fee: fee,
         }))
     }
@@ -515,6 +599,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             ledger,
             original,
             dependencies,
+            archive_page,
             ..
         } = replay;
         let selection = &ledger.selection;
@@ -528,11 +613,23 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             }
             Ok(())
         };
-        require_current()?;
         let Some(ancestors) = dependencies.as_mut() else {
+            require_current()?;
             return Ok(true);
         };
+        // Every call owns its own miss. An early mount or authority refusal
+        // must never expose a previous traversal's result as a new ticket.
+        ancestors.clear_exact_miss();
+        require_current()?;
         let ready = self.with_member_receiver(selection, caller, |source| {
+            if archive_page.is_some()
+                && !source
+                    .store
+                    .has_mounted_shared_history()
+                    .map_err(|_| Refusal::Busy)?
+            {
+                return Err(Refusal::Unavailable);
+            }
             let verifier = source
                 .prefix
                 .selected_member_verifier()

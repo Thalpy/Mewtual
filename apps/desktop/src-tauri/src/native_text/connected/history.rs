@@ -2,7 +2,8 @@
 //! Each peer gets at most one bounded page or original exchange per turn.
 use super::*;
 use catcoms_app::store::{
-    NativeTextJoinedArchiveReplay, NativeTextJoinedDependencyExchange, NativeTextJoinedHistoryPage,
+    NativeTextJoinedArchiveDependency, NativeTextJoinedArchiveReplay,
+    NativeTextJoinedDependencyExchange, NativeTextJoinedHistoryPage,
 };
 use catcoms_replication::chat::ActionId;
 use std::collections::VecDeque;
@@ -16,11 +17,86 @@ const RESCAN_MS: u64 = 30_000;
 const REPLAY_MS: u64 = 15_000;
 const MAX_ARCHIVE_SWEEP_PAGES: u16 = 256;
 const MAX_ARCHIVE_CONTINUATION_FAILURES: u8 = 3;
+const MAX_ARCHIVE_ANCESTORS: usize = 8;
+const MAX_ARCHIVE_ANCESTRY_REQUESTS: u8 = 24;
+const ARCHIVE_ANCESTRY_MS: u64 = 45_000;
 
 struct ParkedOriginal {
     action: ActionId,
     replay: NativeTextJoinedArchiveReplay,
     deadline: u64,
+}
+
+#[derive(Clone)]
+enum ExactRequest {
+    Offered(ActionId),
+    Parent {
+        proof: NativeTextJoinedArchiveDependency,
+        holder_outbox: bool,
+    },
+}
+
+impl ExactRequest {
+    fn action(&self) -> ActionId {
+        match self {
+            Self::Offered(action) => *action,
+            Self::Parent { proof, .. } => proof.parent_data(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct PlannedOriginal {
+    request: ExactRequest,
+    expected: Option<NativeTextJoinedArchiveDependency>,
+}
+
+/// Only IDs and original digests are held between requests. Each suspended
+/// child's paid stage is dropped before asking for its missing parent.
+struct ArchiveAncestry {
+    stack: Vec<PlannedOriginal>,
+    requests: u8,
+    deadline: u64,
+}
+
+impl ArchiveAncestry {
+    fn new(action: ActionId) -> Self {
+        let mut stack = Vec::with_capacity(MAX_ARCHIVE_ANCESTORS + 1);
+        stack.push(PlannedOriginal {
+            request: ExactRequest::Offered(action),
+            expected: None,
+        });
+        Self {
+            stack,
+            requests: 0,
+            deadline: SystemClock
+                .monotonic_ms()
+                .saturating_add(ARCHIVE_ANCESTRY_MS),
+        }
+    }
+
+    fn note_missing(&mut self, proof: NativeTextJoinedArchiveDependency) -> bool {
+        if self.stack.len() > MAX_ARCHIVE_ANCESTORS
+            || self
+                .stack
+                .iter()
+                .any(|step| step.request.action() == proof.parent_data())
+        {
+            return false;
+        }
+        self.stack
+            .last_mut()
+            .expect("active ancestry original")
+            .expected = Some(proof.clone());
+        self.stack.push(PlannedOriginal {
+            request: ExactRequest::Parent {
+                proof,
+                holder_outbox: false,
+            },
+            expected: None,
+        });
+        true
+    }
 }
 
 struct PeerSweep {
@@ -32,6 +108,7 @@ struct PeerSweep {
     pages: u8,
     total_pages: u16,
     continuation_failures: u8,
+    ancestry: Option<ArchiveAncestry>,
     due: u64,
 }
 
@@ -46,6 +123,7 @@ impl PeerSweep {
             pages: 0,
             total_pages: 0,
             continuation_failures: 0,
+            ancestry: None,
             due: 0,
         }
     }
@@ -57,7 +135,45 @@ impl PeerSweep {
         self.pages = 0;
         self.total_pages = 0;
         self.continuation_failures = 0;
+        self.ancestry = None;
         self.due = SystemClock.monotonic_ms().saturating_add(delay);
+    }
+
+    fn finish_original(&mut self, covered: bool) {
+        if let Some(ancestry) = self.ancestry.as_mut().filter(|_| covered) {
+            ancestry.stack.pop();
+            if !ancestry.stack.is_empty() {
+                return;
+            }
+        }
+        self.ancestry = None;
+        self.next_entry += 1;
+        self.deferred |= !covered;
+    }
+
+    fn missing_original(&mut self, action: ActionId, proof: NativeTextJoinedArchiveDependency) {
+        let ancestry = self
+            .ancestry
+            .get_or_insert_with(|| ArchiveAncestry::new(action));
+        if !ancestry.note_missing(proof) {
+            self.finish_original(false);
+        }
+    }
+
+    /// Retry only an authenticated empty archive result against the
+    /// holder's separate own-outbox authority.
+    fn holder_archive_empty(&mut self) {
+        match self
+            .ancestry
+            .as_mut()
+            .and_then(|chain| chain.stack.last_mut())
+            .map(|step| &mut step.request)
+        {
+            Some(ExactRequest::Parent { holder_outbox, .. }) if !*holder_outbox => {
+                *holder_outbox = true;
+            }
+            _ => self.finish_original(false),
+        }
     }
 }
 
@@ -79,9 +195,21 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
         let state = app.state::<AppState>();
         if let Some((mut sweep, parked)) = replay.take() {
             let mut parked = Some(parked);
-            if let Some((covered, notice)) = resume_entry(&state, source, &mut parked).await {
-                sweep.next_entry += 1;
-                sweep.deferred |= !covered;
+            if let Some(outcome) = resume_entry(&state, source, &mut parked).await {
+                let notice = match outcome {
+                    ReplayOutcome::Missing(action, proof) => {
+                        sweep.missing_original(action, proof);
+                        None
+                    }
+                    ReplayOutcome::Selected(target) => {
+                        sweep.finish_original(true);
+                        Some(target)
+                    }
+                    ReplayOutcome::Deferred(notice) => {
+                        sweep.finish_original(false);
+                        notice
+                    }
+                };
                 peers.push_back(sweep);
                 if let Some(target) = notice {
                     source.notify_received(app, &state, Some(target)).await;
@@ -183,11 +311,29 @@ async fn turn(
             if !allow_fetch {
                 return None;
             }
-            let covered = fetch_entry(state, source, page.clone(), action, parked).await?;
-            sweep.next_entry += 1;
-            // Preserve the obligation to revisit the whole frozen sweep.
-            // Later IDs and other authors can progress while a parent is absent.
-            sweep.deferred |= !covered;
+            let mut deadline = None;
+            let planned = if let Some(ancestry) = &mut sweep.ancestry {
+                if ancestry.requests == MAX_ARCHIVE_ANCESTRY_REQUESTS
+                    || SystemClock.monotonic_ms() >= ancestry.deadline
+                {
+                    sweep.finish_original(false);
+                    return None;
+                }
+                ancestry.requests += 1;
+                deadline = Some(ancestry.deadline);
+                ancestry.stack.last().expect("active original").clone()
+            } else {
+                PlannedOriginal {
+                    request: ExactRequest::Offered(action),
+                    expected: None,
+                }
+            };
+            match fetch_entry(state, source, page.clone(), planned, deadline, parked).await {
+                Some(EntryResult::Covered) => sweep.finish_original(true),
+                Some(EntryResult::Empty) => sweep.holder_archive_empty(),
+                Some(EntryResult::Deferred) => sweep.finish_original(false),
+                None => {}
+            }
             return None;
         }
     }
@@ -286,48 +432,97 @@ enum Fetch {
     Request(NativeTextJoinedDependencyExchange),
 }
 
+enum EntryResult {
+    Covered,
+    Empty,
+    Deferred,
+}
+
 async fn fetch_entry(
     state: &AppState,
     source: &Arc<Source>,
     page: Arc<NativeTextJoinedHistoryPage>,
-    action: ActionId,
+    planned: PlannedOriginal,
+    ancestry_deadline: Option<u64>,
     parked: &mut Option<ParkedOriginal>,
-) -> Option<bool> {
-    let fetch = with_row(state, source, move |original, row, _, scope| {
-        if original
-            .selected_discovered_target(&row, &page, action, &scope)?
-            .is_some()
-        {
-            return Ok(Fetch::Covered);
-        }
-        original
-            .prepare_discovered_original(&row, &page, action, scope, &mut OsCryptoRng)
+) -> Option<EntryResult> {
+    let action = planned.request.action();
+    let request = planned.request.clone();
+    let channel = source.channel();
+    let check_local = planned.expected.is_none();
+    let fetch = with_row_until(
+        state,
+        source,
+        ancestry_deadline,
+        move |original, row, _, scope| {
+            if !page.is_current_cached() {
+                return Err(V2MemberSaveRefusal::Stale);
+            }
+            let local = if !check_local {
+                None
+            } else if matches!(&request, ExactRequest::Offered(_)) {
+                original.selected_discovered_target(&row, &page, action, &scope)?
+            } else {
+                original.selected_archive_target_data(&row, channel, action, &scope)?
+            };
+            if local.is_some() && page.is_current_cached() {
+                return Ok(Fetch::Covered);
+            }
+            match request {
+                ExactRequest::Offered(action) => original.prepare_discovered_original(
+                    &row,
+                    &page,
+                    action,
+                    scope,
+                    &mut OsCryptoRng,
+                ),
+                ExactRequest::Parent {
+                    proof,
+                    holder_outbox,
+                } => original.prepare_archive_parent_request(
+                    &row,
+                    &page,
+                    &proof,
+                    holder_outbox,
+                    scope,
+                    &mut OsCryptoRng,
+                ),
+            }
             .map(Fetch::Request)
-    })
+        },
+    )
     .await?;
     let exchange = match fetch {
-        Ok(Fetch::Covered) => return Some(true),
+        Ok(Fetch::Covered) => return Some(EntryResult::Covered),
         Ok(Fetch::Request(exchange)) => exchange,
         Err(V2MemberSaveRefusal::Busy) => return None,
         Err(failure) => {
             #[cfg(test)]
             eprintln!("chat history worker could not prepare exact fetch: {failure:?}");
             let _ = failure;
-            return Some(false);
+            return Some(EntryResult::Deferred);
         }
     };
-    let requested = tokio::time::timeout(REQUEST, exchange.receive()).await;
+    let request_time = time_remaining(ancestry_deadline, REQUEST);
+    if request_time.is_zero() {
+        return Some(EntryResult::Deferred);
+    }
+    let requested = tokio::time::timeout(request_time, exchange.receive()).await;
     let Ok(Ok(reply)) = requested else {
         #[cfg(test)]
         eprintln!("chat history worker exact request stopped: {requested:?}");
-        return Some(false);
+        return Some(EntryResult::Deferred);
     };
-    let stage = with_row(state, source, move |original, row, _, scope| {
-        original.prepare_discovered_archive(&row, reply, scope)
-    })
+    let stage = with_row_until(
+        state,
+        source,
+        ancestry_deadline,
+        move |original, row, _, scope| original.prepare_discovered_archive(&row, reply, scope),
+    )
     .await?;
     let replay = match stage {
         Ok(Some(stage)) => stage,
+        Ok(None) => return Some(EntryResult::Empty),
         Err(V2MemberSaveRefusal::Busy) => return None,
         other => {
             #[cfg(test)]
@@ -336,29 +531,43 @@ async fn fetch_entry(
                 other.as_ref().err()
             );
             let _ = other;
-            return Some(false);
+            return Some(EntryResult::Deferred);
         }
     };
+    if planned
+        .expected
+        .as_ref()
+        .is_some_and(|expected| !expected.matches_child(&replay))
+    {
+        return Some(EntryResult::Deferred);
+    }
+    let deadline = SystemClock.monotonic_ms().saturating_add(REPLAY_MS);
     *parked = Some(ParkedOriginal {
         action,
         replay,
-        deadline: SystemClock.monotonic_ms().saturating_add(REPLAY_MS),
+        deadline: ancestry_deadline.map_or(deadline, |earlier| earlier.min(deadline)),
     });
     None
+}
+
+enum ReplayOutcome {
+    Missing(ActionId, NativeTextJoinedArchiveDependency),
+    Selected(ActionId),
+    Deferred(Option<ActionId>),
 }
 
 async fn resume_entry(
     state: &AppState,
     source: &Arc<Source>,
     parked: &mut Option<ParkedOriginal>,
-) -> Option<(bool, Option<ActionId>)> {
+) -> Option<ReplayOutcome> {
     let remaining = parked
         .as_ref()?
         .deadline
         .saturating_sub(SystemClock.monotonic_ms());
     if remaining == 0 {
         *parked = None;
-        return Some((false, None));
+        return Some(ReplayOutcome::Deferred(None));
     }
     // Acquire both before moving the paid continuation. Contention must
     // preserve it while foreground history or signing uses this row.
@@ -372,7 +581,7 @@ async fn resume_entry(
         Ok(value) => value?,
         Err(_) if remaining <= TURN.as_millis() as u64 => {
             *parked = None;
-            return Some((false, None));
+            return Some(ReplayOutcome::Deferred(None));
         }
         Err(_) => return None,
     };
@@ -381,7 +590,7 @@ async fn resume_entry(
     let processing = tauri::async_runtime::spawn_blocking(move || {
         let _permit = permit;
         if SystemClock.monotonic_ms() >= work.deadline {
-            return (work, Some((false, None)));
+            return (work, Some(ReplayOutcome::Deferred(None)));
         }
         let scope = source.negative();
         let local = source.member_work();
@@ -390,24 +599,31 @@ async fn resume_entry(
         let ready = original.advance_discovered_archive(&mut work.replay, &scope, &mut OsCryptoRng);
         match ready {
             Ok(false) | Err(V2MemberSaveRefusal::Busy) => return (work, None),
-            Err(_) => return (work, Some((false, None))),
+            Err(V2MemberSaveRefusal::Unavailable) => {
+                let missing = work
+                    .replay
+                    .missing_archive_dependency()
+                    .map(|proof| ReplayOutcome::Missing(action, proof));
+                return (work, Some(missing.unwrap_or(ReplayOutcome::Deferred(None))));
+            }
+            Err(_) => return (work, Some(ReplayOutcome::Deferred(None))),
             Ok(true) => {}
         }
         if SystemClock.monotonic_ms() >= work.deadline {
-            return (work, Some((false, None)));
+            return (work, Some(ReplayOutcome::Deferred(None)));
         }
         // Reserve before any write. Even a Stale result can mean the disk
         // selected the original and the remote route then retired.
         if local.reserve_archive_change(action, target).is_none() {
             // Yield this exact entry so the next turn can reconcile one of
             // the existing debts and make room for the later sweep.
-            return (work, Some((false, None)));
+            return (work, Some(ReplayOutcome::Deferred(None)));
         }
         let result =
             match original.select_discovered_archive(&work.replay, &scope, &mut OsCryptoRng) {
                 Ok(Some(_)) => {
                     local.note_archive_change(action, target, true);
-                    (true, Some(target))
+                    ReplayOutcome::Selected(target)
                 }
                 other => {
                     #[cfg(test)]
@@ -416,14 +632,14 @@ async fn resume_entry(
                         other.as_ref().err()
                     );
                     let _ = other;
-                    (false, Some(target))
+                    ReplayOutcome::Deferred(Some(target))
                 }
             };
         (work, Some(result))
     })
     .await;
     let Ok((work, result)) = processing else {
-        return Some((false, None));
+        return Some(ReplayOutcome::Deferred(None));
     };
     if result.is_none() {
         *parked = Some(work);
@@ -443,19 +659,62 @@ async fn with_row<T: Send + 'static>(
         + Send
         + 'static,
 ) -> Option<T> {
+    with_row_until(state, source, None, perform).await
+}
+
+fn time_remaining(deadline: Option<u64>, maximum: Duration) -> Duration {
+    deadline.map_or(maximum, |end| {
+        Duration::from_millis(end.saturating_sub(SystemClock.monotonic_ms())).min(maximum)
+    })
+}
+
+async fn with_row_until<T: Send + 'static>(
+    state: &AppState,
+    source: &Arc<Source>,
+    deadline: Option<u64>,
+    perform: impl FnOnce(
+            NativeTextJoinedSelectionPreparation<OsCryptoRng>,
+            NativeTextJoinedRowSelection,
+            &server_table::NativeMemberWork,
+            RequestCancellation,
+        ) -> T
+        + Send
+        + 'static,
+) -> Option<T> {
     // A blocking cut retains the original row, native permit, and fees until
     // the actual work leaves, even if lock drops the async observer earlier.
-    let permit = source.member_work.foreground(source.negative()).await?;
-    let Some((original, row)) = source.capture_joined(state).await else {
-        #[cfg(test)]
-        eprintln!("chat history worker could not capture its original row");
-        return None;
+    let admit = async {
+        let permit = source.member_work.foreground(source.negative()).await?;
+        let Some((original, row)) = source.capture_joined(state).await else {
+            #[cfg(test)]
+            eprintln!("chat history worker could not capture its original row");
+            return None;
+        };
+        Some((permit, original, row))
+    };
+    let (permit, original, row) = if deadline.is_some() {
+        let wait = time_remaining(deadline, TURN);
+        if wait.is_zero() {
+            return None;
+        }
+        tokio::time::timeout(wait, admit).await.ok()??
+    } else {
+        admit.await?
     };
     let source = source.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _permit = permit;
-        perform(original, row, source.member_work(), source.negative())
+        if time_remaining(deadline, TURN).is_zero() {
+            return None;
+        }
+        Some(perform(
+            original,
+            row,
+            source.member_work(),
+            source.negative(),
+        ))
     })
     .await
     .ok()
+    .flatten()
 }

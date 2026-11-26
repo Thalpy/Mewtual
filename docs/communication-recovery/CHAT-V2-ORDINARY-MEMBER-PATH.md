@@ -397,9 +397,15 @@ sweep can expire.
 The holder checks each offered original's still-open Admission and signed
 delegation against the selected prefix. Its continuation carries no raw
 archive offset or filtered ID. A fetched signed original can reference
-earlier actions. A missing ancestor defers selection until its verified
-original is available locally through recovery. The worker revisits
-deferred pages and keeps one paid ancestor traversal per row.
+earlier actions. A verified exact local miss can trigger a parent fetch
+before the next page. The recipient keeps the original page and its
+approval and connection, drops the child's staging ledger, and asks for
+only that missing ActionId. The parent must be selected locally before
+the recipient retries the child's exact signed bytes and Admission.
+An authenticated empty archive reply permits one own-outbox lookup under
+the holder's author Admission. The worker allows eight nested parents and
+24 attempts across a 45-second chain. A refusal or exhausted chain
+defers that item while other pages and peers progress.
 
 Automatic discovery currently requires reciprocal approved contacts on the
 installed rows. Restoring those approvals and their connections after a

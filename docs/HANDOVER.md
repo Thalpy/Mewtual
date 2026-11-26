@@ -1,5 +1,22 @@
 # Mewtual; Handover
 
+## 26 November 2026 — Fetch exact missing parents before the next archive page
+
+A verified archive-stage miss can steer the desktop to a specific missing
+parent. The worker retains the original page scope and signed identities,
+drops the child's staging ledger, and selects the parent before retrying
+the same child. Each chain has a fixed deadline, depth and attempt limit.
+
+The focused Windows mounted App test passed with the offline founder's
+Edit presented before its Create. It rejected a ticket presented with
+another opened page, fetched the exact parent, checked the same signed
+Edit on retry and verified the edited message after reopening. The
+adversarial re-review found no remaining blocker, high or medium finding.
+The native scheduler and own-outbox fallback still need execution evidence.
+
+Chat V2 remains disabled. Cold contact approval, governed rejoin,
+authorized audit and wider acceptance remain open.
+
 ## 26 November 2026 — Discover missed IDs at a joined archive holder
 
 The joined desktop runs distinct own-outbox and archive sweeps through

@@ -384,6 +384,7 @@ fn replay_local_member_original(
 pub(in crate::store) struct LocalHistoryDependencyReplay {
     pending: Vec<(ActionId, bool)>,
     reads: usize,
+    exact_miss: Option<ActionId>,
 }
 
 impl LocalHistoryDependencyReplay {
@@ -393,7 +394,19 @@ impl LocalHistoryDependencyReplay {
         }
         let mut pending = Vec::with_capacity(HISTORY_PENDING_IDS);
         pending.extend(roots.into_iter().rev().map(|id| (id, false)));
-        Ok(Self { pending, reads: 0 })
+        Ok(Self {
+            pending,
+            reads: 0,
+            exact_miss: None,
+        })
+    }
+
+    pub(in crate::store) fn exact_miss(&self) -> Option<ActionId> {
+        self.exact_miss
+    }
+
+    pub(in crate::store) fn clear_exact_miss(&mut self) {
+        self.exact_miss = None;
     }
 
     /// Return false only after yielding a bounded slice. Missing data or
@@ -421,7 +434,7 @@ impl LocalHistoryDependencyReplay {
             }
             reads += 1;
             self.reads += 1;
-            let status = replay_local_member_original(
+            let Some(status) = replay_local_member_original(
                 id,
                 (verifier, ledger, view),
                 work,
@@ -429,7 +442,11 @@ impl LocalHistoryDependencyReplay {
                 &mut saved_dependency,
                 &mut require_current,
             )?
-            .ok_or(Refusal::Unavailable)?;
+            else {
+                require_current()?;
+                self.exact_miss = Some(id);
+                return Err(Refusal::Unavailable);
+            };
             self.pending.pop();
             match status {
                 V2OrdinaryReceiveStatus::Retained(ActionState::Valid) => {}

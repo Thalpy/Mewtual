@@ -51,12 +51,13 @@ pub use publication::{
 };
 mod receive;
 pub use receive::{
-    NativeTextJoinedArchiveReplay, NativeTextJoinedArchivedActions,
-    NativeTextJoinedDependencyAttachRefusal, NativeTextJoinedDependencyExchange,
-    NativeTextJoinedDependencyProvider, NativeTextJoinedDependencyResponse,
-    NativeTextJoinedGoverningExchange, NativeTextJoinedGoverningIncoming,
-    NativeTextJoinedGoverningProvider, NativeTextJoinedGoverningResponse,
-    NativeTextJoinedHistoryExchange, NativeTextJoinedHistoryPage, NativeTextJoinedHistoryResponse,
+    NativeTextJoinedArchiveDependency, NativeTextJoinedArchiveReplay,
+    NativeTextJoinedArchivedActions, NativeTextJoinedDependencyAttachRefusal,
+    NativeTextJoinedDependencyExchange, NativeTextJoinedDependencyProvider,
+    NativeTextJoinedDependencyResponse, NativeTextJoinedGoverningExchange,
+    NativeTextJoinedGoverningIncoming, NativeTextJoinedGoverningProvider,
+    NativeTextJoinedGoverningResponse, NativeTextJoinedHistoryExchange,
+    NativeTextJoinedHistoryPage, NativeTextJoinedHistoryResponse,
     NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberLedger,
     NativeTextJoinedMemberProjection, NativeTextJoinedMemberReceiver,
     NativeTextJoinedReceivedOriginal,

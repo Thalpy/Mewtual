@@ -28,6 +28,10 @@ the same sweep to tolerate reply loss. The source rechecks the exact
 selected files and the open Admission for each offered original. A fetched
 original can carry references in its signed content. Those references
 confer no authority on the referenced action.
+The native worker can follow an exact unresolved dependency only after
+verifying its child and checking the selected local stores. An original
+page, approval and connection bound the request. Chains have a fixed
+deadline, attempt cap and depth cap.
 
 16 November Score/voice integration candidate: this branch combines the reviewed
 Score and voice admission history with the newer Chat/security and Studio save

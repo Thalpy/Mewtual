@@ -37,9 +37,9 @@ mod governing;
 mod history_discovery;
 pub(super) use archive_discovery::ArchiveRelayState;
 pub use dependencies::{
-    NativeTextJoinedArchiveReplay, NativeTextJoinedDependencyAttachRefusal,
-    NativeTextJoinedDependencyExchange, NativeTextJoinedDependencyProvider,
-    NativeTextJoinedDependencyResponse,
+    NativeTextJoinedArchiveDependency, NativeTextJoinedArchiveReplay,
+    NativeTextJoinedDependencyAttachRefusal, NativeTextJoinedDependencyExchange,
+    NativeTextJoinedDependencyProvider, NativeTextJoinedDependencyResponse,
 };
 pub use governing::{
     NativeTextJoinedGoverningExchange, NativeTextJoinedGoverningIncoming,
