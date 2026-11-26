@@ -61,6 +61,8 @@ pub(super) struct Registry {
     join_dependency_transport_busy: tokio::sync::Notify,
     #[cfg(test)]
     join_dependency_reopen_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
+    #[cfg(test)]
+    join_dependency_pending: StdMutex<Option<tokio::sync::oneshot::Sender<()>>>,
     pub(super) ui_state: ui_state::Controller,
     retirement: retirement::Coalescer,
     pub(super) preludes: Arc<retirement::Prelude>,
@@ -165,6 +167,8 @@ impl Default for Registry {
             join_dependency_transport_busy: tokio::sync::Notify::new(),
             #[cfg(test)]
             join_dependency_reopen_edge: StdMutex::new(None),
+            #[cfg(test)]
+            join_dependency_pending: StdMutex::new(None),
             ui_state,
             retirement,
             preludes,

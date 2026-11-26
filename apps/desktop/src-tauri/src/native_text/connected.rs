@@ -718,22 +718,64 @@ async fn serve_dependencies<R: tauri::Runtime>(
     let state = app.state::<AppState>();
     loop {
         while let Some(request) = provider.next().await {
-            let Some(local) = source.member_work.try_background() else {
+            let waiting = request.cancellation_authority();
+            let permit = source.member_work.foreground(source.negative());
+            #[cfg(test)]
+            let permit = async {
+                let mut permit = std::pin::pin!(permit);
+                std::future::poll_fn(|context| {
+                    let result = std::future::Future::poll(permit.as_mut(), context);
+                    if result.is_pending() {
+                        if let Some(entered) = state
+                            .native_text
+                            .join_dependency_pending
+                            .lock()
+                            .unwrap()
+                            .take()
+                        {
+                            let _ = entered.send(());
+                        }
+                    }
+                    result
+                })
+                .await
+            };
+            // This subscription keeps one paid request while waiting for
+            // the current local save to finish. Both cancellations remain
+            // active during the wait. The reply keeps its own scope.
+            let local = tokio::select! {
+                biased;
+                _ = waiting.revoked() => continue,
+                local = permit => local,
+            };
+            let Some(local) = local else {
                 continue;
             };
-            let Some((original, row)) = source.capture_joined(&state).await else {
+            let prepared = tokio::select! {
+                biased;
+                _ = waiting.revoked() => continue,
+                prepared = source.capture_joined(&state) => prepared,
+            };
+            let Some((original, row)) = prepared else {
+                #[cfg(test)]
+                eprintln!("joined dependency provider could not capture its original row");
                 continue;
             };
             let source = source.clone();
             let _ = tauri::async_runtime::spawn_blocking(move || {
                 let _local = local;
-                original.serve_dependency_request(
+                let result = original.serve_dependency_request(
                     &row,
                     source.channel,
                     request,
                     source.scope.clone(),
                     &mut OsCryptoRng,
-                )
+                );
+                #[cfg(test)]
+                if let Err(ref failure) = result {
+                    eprintln!("joined dependency provider refused a request: {failure:?}");
+                }
+                result
             })
             .await;
         }

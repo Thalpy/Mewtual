@@ -2208,7 +2208,25 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 ..offline
             };
             let deleted = save_receive(V2MemberSignRequest { ..delete }).await;
+            let mut chain = Vec::new();
             if missed_history {
+                let mut parent = created.0;
+                for depth in 1..=5 {
+                    let body = Body::Create {
+                        text: format!("Reply at depth {depth}"),
+                        reply_to: Some(parent),
+                    };
+                    let parents = [parent];
+                    let original = save_receive(V2MemberSignRequest {
+                        token: [0xd0 + depth; 32],
+                        body: &body,
+                        parents: &parents,
+                        ..offline
+                    }).await;
+                    chain.push(original);
+                    parent = original.0;
+                }
+                let deepest = chain.last().unwrap().0;
                 // No subscription or publication ran while the texts were
                 // saved. The receiver only learns IDs from the approved peer.
                 let provider = local_transport.0;
@@ -2264,6 +2282,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     .unwrap();
                 assert_eq!(available_ui_captures(), before_page, "a parked page retains no native invocation");
                 let mut discovered = Vec::new();
+                let mut last_stage = None;
                 for entry in page.data().unwrap().entries() {
                     let exchange = third_row().prepare_discovered_original(
                         &third_selection, &page, entry.action, fresh.clone(), &mut third_rng,
@@ -2272,33 +2291,59 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         tokio::join!(exchange.receive(), serve(&mut service, &mut history_rng))
                     }).await.unwrap();
                     served.unwrap();
-                    let (stage, original) = third_row()
+                    let mut stage = third_row()
                         .prepare_discovered_archive(
-                            &third_selection, reply.unwrap(), fresh.clone(), &mut third_rng,
+                            &third_selection, reply.unwrap(), fresh.clone(),
                         )
                         .unwrap()
                         .unwrap();
                     let saved = recovered_row()
                         .read_member_dependency(&selection, channel, entry.action, &fresh, &mut history_rng)
                         .unwrap().unwrap();
-                    assert_eq!(original.original_digest_for_test(), blake3::hash(saved.original_bytes()));
+                    assert_eq!(stage.original_digest_for_test(), blake3::hash(saved.original_bytes()));
+                    let ready = third_row().advance_discovered_archive(&mut stage, &fresh, &mut third_rng).unwrap();
+                    if entry.action == deepest {
+                        assert!(!ready, "five nested replies must yield after one local slice");
+                        assert_eq!(
+                            third_row().select_discovered_archive(&stage, &fresh, &mut third_rng),
+                            Err(V2MemberSaveRefusal::Unavailable),
+                        );
+                        let (_retired, signal) = tokio::sync::watch::channel(true);
+                        let cancelled = RequestCancellation::new(signal, None);
+                        assert_eq!(
+                            third_row().advance_discovered_archive(&mut stage, &cancelled, &mut third_rng),
+                            Err(V2MemberSaveRefusal::Stale),
+                        );
+                        assert!(third_row().advance_discovered_archive(&mut stage, &fresh, &mut third_rng).unwrap(),
+                            "the already paid local continuation must finish without fetching again");
+                    } else {
+                        assert!(ready);
+                    }
                     assert!(third_row()
-                        .archive_received_member(&stage, &original, &fresh, &mut third_rng)
+                        .select_discovered_archive(&stage, &fresh, &mut third_rng)
                         .unwrap().is_some());
                     assert_eq!(
                         third_row().selected_discovered_target(&third_selection, &page, entry.action, &fresh)
                             .unwrap(),
-                        Some(created.0),
+                        Some(if chain.iter().any(|(id, _)| *id == entry.action) { entry.action } else { created.0 }),
                     );
                     discovered.push((entry.action, entry.ordinal));
+                    if entry.action == deepest {
+                        last_stage = Some(stage);
+                    }
                 }
-                assert_eq!(discovered, [created, edited, deleted]);
+                assert_eq!(discovered, [created, edited, deleted].into_iter().chain(chain.iter().copied()).collect::<Vec<_>>());
                 assert!(third_row()
                     .prepare_history_continuation(&third_selection, &page, fresh.clone(), &mut third_rng)
                     .unwrap().is_none());
                 third_selection.replace_history_contact_for_test(provider, third_own);
                 third_selection.replace_history_contact_for_test(provider, own_add);
                 assert!(page.data().is_none(), "reapproval revived an old page");
+                assert_eq!(
+                    third_row().select_discovered_archive(&last_stage.unwrap(), &fresh, &mut third_rng),
+                    Err(V2MemberSaveRefusal::Stale),
+                    "a fresh native capture cannot reuse the retired original approval",
+                );
             }
             let recipient = third_row()
                 .inspect_registration(&invite_two, third_token, &fresh)
@@ -2427,6 +2472,16 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     if *create == created.0 && *delete == deleted.0
             )).unwrap());
             drop((projection, current));
+            if let Some((deepest, _)) = chain.last() {
+                let current = recipient_row().select_registered(&fresh).unwrap();
+                let projection = recipient_row().archived_message_projection(
+                    &current, channel, *deepest, fresh.clone(), &mut third_rng,
+                ).unwrap().unwrap();
+                assert!(projection.with_publication(|view| matches!(
+                    view, GuardedProjection::Visible { create, text, .. }
+                        if create == deepest && text == "Reply at depth 5"
+                )).unwrap());
+            }
             retire(&sources).await;
         }).await;
         return;

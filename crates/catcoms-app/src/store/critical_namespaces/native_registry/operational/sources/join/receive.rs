@@ -35,8 +35,9 @@ mod dependencies;
 mod governing;
 mod history_discovery;
 pub use dependencies::{
-    NativeTextJoinedDependencyAttachRefusal, NativeTextJoinedDependencyExchange,
-    NativeTextJoinedDependencyProvider, NativeTextJoinedDependencyResponse,
+    NativeTextJoinedArchiveReplay, NativeTextJoinedDependencyAttachRefusal,
+    NativeTextJoinedDependencyExchange, NativeTextJoinedDependencyProvider,
+    NativeTextJoinedDependencyResponse,
 };
 pub use governing::{
     NativeTextJoinedGoverningExchange, NativeTextJoinedGoverningIncoming,

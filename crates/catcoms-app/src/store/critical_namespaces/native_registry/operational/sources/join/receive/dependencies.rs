@@ -1,11 +1,15 @@
 //! Connected catch-up of one exact ActionId. No method may dial or sign anew.
 catcoms_rt::redacted_debug! {
+    NativeTextJoinedArchiveReplay;
     NativeTextJoinedDependencyExchange;
     NativeTextJoinedDependencyResponse;
     NativeTextJoinedDependencyProvider;
 }
 
 use super::*;
+use crate::store::persistence::v2_member_transport::{
+    LocalHistoryDependencyReplay, HISTORY_REPLAY_FEE,
+};
 use catcoms_net::{
     NativeChatIngressAttachRefusal, NativeChatMemberDependencies,
     NativeChatMemberDependencyExchange, NativeChatMemberDependencyIncoming,
@@ -48,6 +52,29 @@ pub struct NativeTextJoinedDependencyResponse {
     approved_author: Option<OwnerBodyId>,
     signal: RequestCancellation,
     invocation: watch::Sender<bool>,
+}
+
+/// One exact offered original and its paid staging ledger. It can yield
+/// between local ancestor batches without retaining a physical row borrow.
+pub struct NativeTextJoinedArchiveReplay {
+    ledger: NativeTextJoinedMemberLedger,
+    original: NativeTextJoinedReceivedOriginal,
+    dependencies: Option<LocalHistoryDependencyReplay>,
+    _fee: CatalogReadReservation,
+}
+
+impl NativeTextJoinedArchiveReplay {
+    /// The Create target to invalidate after this exact write settles.
+    pub fn target_data(&self) -> ActionId {
+        self.original.projection_target_data()
+    }
+
+    #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(in crate::store::critical_namespaces::native_registry) fn original_digest_for_test(
+        &self,
+    ) -> blake3::Hash {
+        self.original.original_digest_for_test()
+    }
 }
 
 pub struct NativeTextJoinedDependencyProvider {
@@ -355,22 +382,14 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         })
     }
 
-    /// Check an offered original in a fresh, paid staging ledger. A single
-    /// bounded replay of local ancestors can resolve its prerequisites. The
-    /// returned original still needs the usual archive write to settle work.
+    /// Open an offered original in a fresh paid staging ledger. Missing exact
+    /// ancestors become a resumable traversal bound to the same original.
     pub fn prepare_discovered_archive(
         self,
         selection: &NativeTextJoinedRowSelection,
         response: NativeTextJoinedDependencyResponse,
         caller: RequestCancellation,
-        rng: &mut impl CryptoRngCore,
-    ) -> Result<
-        Option<(
-            NativeTextJoinedMemberLedger,
-            NativeTextJoinedReceivedOriginal,
-        )>,
-        V2MemberSaveRefusal,
-    > {
+    ) -> Result<Option<NativeTextJoinedArchiveReplay>, V2MemberSaveRefusal> {
         use catcoms_replication::chat::ActionState;
         use V2MemberSaveRefusal as Refusal;
         if response.approved_author.is_none() {
@@ -387,7 +406,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 Ok(())
             }
         };
-        let (stage, status) = self.prepare_member_ledger_with(
+        let (ledger, (dependencies, fee)) = self.prepare_member_ledger_with(
             selection,
             channel,
             caller.clone(),
@@ -397,32 +416,107 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                     .prefix
                     .selected_member_verifier()
                     .map_err(|_| Refusal::Unavailable)?;
-                let apply = |ledger: &mut ChatLedger| {
-                    original
-                        .opened
-                        .project_from_ledger(verifier, ledger, view, RECEIVE_WORK)
-                        .map_err(|_| Refusal::Failed)
+                let fee = source
+                    .metadata
+                    .reserve_join_node(HISTORY_REPLAY_FEE)
+                    .map_err(|_| Refusal::Busy)?;
+                let status = original
+                    .opened
+                    .stage_from_ledger(verifier, ledger, view, RECEIVE_WORK)
+                    .map_err(|_| Refusal::Failed)?;
+                let dependencies = match status {
+                    V2OrdinaryReceiveStatus::WaitingForDependencies(missing) => {
+                        Some(LocalHistoryDependencyReplay::new(missing)?)
+                    }
+                    V2OrdinaryReceiveStatus::Retained(ActionState::Valid) => None,
+                    V2OrdinaryReceiveStatus::Retained(_) => return Err(Refusal::Failed),
                 };
-                let mut status = apply(ledger)?;
-                if let V2OrdinaryReceiveStatus::WaitingForDependencies(missing) = status {
-                    replay_local_member_dependencies(
-                        &missing,
-                        (verifier, ledger, view),
-                        RECEIVE_WORK,
-                        (source.store, source.history_scope(channel)),
-                        |id| source.read_dependency(channel, id, rng),
-                        require_current,
-                    )?;
-                    status = apply(ledger)?;
-                }
-                Ok(status)
+                Ok((dependencies, fee))
             },
         )?;
         require_current()?;
-        Ok(
-            (status == V2OrdinaryReceiveStatus::Retained(ActionState::Valid))
-                .then_some((stage, original)),
-        )
+        Ok(Some(NativeTextJoinedArchiveReplay {
+            ledger,
+            original,
+            dependencies,
+            _fee: fee,
+        }))
+    }
+
+    /// Advance at most one bounded ancestor slice. A successful completion
+    /// still needs the ordinary durable selector to publish its exact result.
+    pub fn advance_discovered_archive(
+        &self,
+        replay: &mut NativeTextJoinedArchiveReplay,
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<bool, V2MemberSaveRefusal> {
+        use catcoms_replication::chat::ActionState;
+        use V2MemberSaveRefusal as Refusal;
+        let NativeTextJoinedArchiveReplay {
+            ledger,
+            original,
+            dependencies,
+            ..
+        } = replay;
+        let selection = &ledger.selection;
+        let signal = &ledger.signal;
+        let require_current = || {
+            if signal.is_cancelled()
+                || caller.is_cancelled()
+                || !original.is_for_original_row_cached(selection)
+            {
+                return Err(Refusal::Stale);
+            }
+            Ok(())
+        };
+        require_current()?;
+        let Some(ancestors) = dependencies.as_mut() else {
+            return Ok(true);
+        };
+        let ready = self.with_member_receiver(selection, caller, |source| {
+            let verifier = source
+                .prefix
+                .selected_member_verifier()
+                .map_err(|_| Refusal::Unavailable)?;
+            let channel = ledger.ledger.realm().channel();
+            if !ancestors.advance(
+                (verifier, &mut ledger.ledger, &ledger.view),
+                RECEIVE_WORK,
+                (source.store, source.history_scope(channel)),
+                |id| source.read_dependency(channel, id, rng),
+                require_current,
+            )? {
+                return Ok(false);
+            }
+            let status = original
+                .opened
+                .stage_from_ledger(verifier, &mut ledger.ledger, &ledger.view, RECEIVE_WORK)
+                .map_err(|_| Refusal::Failed)?;
+            if status != V2OrdinaryReceiveStatus::Retained(ActionState::Valid) {
+                return Err(Refusal::Unavailable);
+            }
+            require_current()?;
+            Ok(true)
+        })?;
+        if ready {
+            *dependencies = None;
+        }
+        Ok(ready)
+    }
+
+    /// Write the fully replayed original through the existing exact selector.
+    pub fn select_discovered_archive(
+        &self,
+        replay: &NativeTextJoinedArchiveReplay,
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Option<catcoms_storage::private_chat_page::PrivateChatPageId>, V2MemberSaveRefusal>
+    {
+        if replay.dependencies.is_some() {
+            return Err(V2MemberSaveRefusal::Unavailable);
+        }
+        self.archive_received_member(&replay.ledger, &replay.original, caller, rng)
     }
 
     pub fn attach_dependency_provider(

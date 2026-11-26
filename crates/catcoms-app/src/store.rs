@@ -106,12 +106,12 @@ pub use critical_namespaces::{
     NativeTextColdFounderSource,
 };
 pub use critical_namespaces::{
-    NativeTextJoinedArchivedActions, NativeTextJoinedDependencyAttachRefusal,
-    NativeTextJoinedDependencyExchange, NativeTextJoinedDependencyProvider,
-    NativeTextJoinedDependencyResponse, NativeTextJoinedGoverningExchange,
-    NativeTextJoinedGoverningIncoming, NativeTextJoinedGoverningProvider,
-    NativeTextJoinedGoverningResponse, NativeTextJoinedHistoryExchange,
-    NativeTextJoinedHistoryPage, NativeTextJoinedHistoryResponse,
+    NativeTextJoinedArchiveReplay, NativeTextJoinedArchivedActions,
+    NativeTextJoinedDependencyAttachRefusal, NativeTextJoinedDependencyExchange,
+    NativeTextJoinedDependencyProvider, NativeTextJoinedDependencyResponse,
+    NativeTextJoinedGoverningExchange, NativeTextJoinedGoverningIncoming,
+    NativeTextJoinedGoverningProvider, NativeTextJoinedGoverningResponse,
+    NativeTextJoinedHistoryExchange, NativeTextJoinedHistoryPage, NativeTextJoinedHistoryResponse,
     NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberLedger,
     NativeTextJoinedMemberProjection, NativeTextJoinedMemberPublication,
     NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
