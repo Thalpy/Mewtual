@@ -56,6 +56,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Build the locked repair test graph on Windows
+        if: runner.os == 'Windows'
+        timeout-minutes: 30
+        shell: bash
+        run: |
+          mkdir -p logs/agent3-runtime-mutations
+          cargo test --locked --config profile.test.package.catcoms-app.debug=0 -j 1 \
+            -p catcoms-app --lib --no-run 2>&1 | tee logs/agent3-runtime-mutations/cold-build.log
       - name: Verify repair job runtime mutations and exact restored controls (shard ${{ matrix.shard }} of 3)
         run: python scripts/check-agent3-runtime-mutations.py --shard ${{ matrix.shard }}/3
       - name: Preserve runtime mutation and restoration evidence
