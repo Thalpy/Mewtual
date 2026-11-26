@@ -355,3 +355,21 @@ reordered dependencies/duplicates; transport epoch changes; A1/A2 isolation; bou
 and memory pressure; original File/session/payment destruction; real 20/50-member bubbles,
 restart and native dispatch. Complete root/native/frontend and adversarial review remain
 mandatory. Two-device physical acceptance is unavailable on the current single desktop.
+### Fetching a known original from a joined archive holder
+
+A joined member can request one exact ActionId from another joined member's
+selected archive. Both sides must have approved the other's signed contact
+under the selected governing state, and the request uses the existing
+authenticated connection. The reply uses a separate request and key domain,
+bound to that exact request, channel, governing Header and current MLS epoch.
+The archive holder reads the selected record without finishing an in-flight
+save or a cold recovery write. Both sides check that the original author's
+Admission is still open and matches the original signature and delegation.
+The author can be offline. The reply carries the original signed bytes and
+Admission, so the holder never becomes the author.
+
+The receiver still verifies ancestry and selects the archive record through
+the same path as a directly fetched original. A missing reply only describes
+this exchange. The original own-outbox request still serves the provider's
+own saved originals. Automatic discovery from a holder's archive and relay
+of proven historical actions from removed authors remain open.

@@ -10,6 +10,11 @@ projection before falling back to the live ledger.
 Joined archive selection requires the exact signed ancestry to be durable.
 It looks in the selected shared archive before using the own outbox for
 eligible ancestors. A missing original defers the selection.
+An exact archive fetch uses separate request and reply domains on that
+connected dependency class. The holder and requester must both retain
+current contact approval. The reply carries the selected signed original
+and its author Admission. The own-outbox page and fetch contracts are
+unchanged.
 [Request and cursor contract](communication-recovery/CHAT-V2-ORDINARY-MEMBER-PATH.md#discovering-missed-originals-from-a-joined-member).
 
 16 November Score/voice integration candidate: this branch combines the reviewed

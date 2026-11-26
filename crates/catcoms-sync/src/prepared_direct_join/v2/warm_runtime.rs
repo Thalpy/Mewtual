@@ -35,9 +35,10 @@ use catcoms_replication::chat::{
     owner_facts::OwnerFactId,
     owner_header::{HeaderKind, OwnerHeaderId, SignedOwnerHeader},
     owner_profile::AdmissionOrigin,
-    ActionDraft, ActionId, V2AdmissionCloseCompletion, V2AuthenticatedAdmission, V2FrozenAdmission,
-    V2GeneralCandidate, V2GeneralPrefixVerifier, V2GeneralRetiredData, V2HostSelectionExpectation,
-    V2OrdinarySigningGuard, V2OrdinarySigningPlan, V2PreparedSelectedHistoryData,
+    ActionDraft, ActionId, SignedAction, V2AdmissionCloseCompletion, V2AuthenticatedAdmission,
+    V2FrozenAdmission, V2GeneralCandidate, V2GeneralPrefixVerifier, V2GeneralRetiredData,
+    V2HostSelectionExpectation, V2OrdinarySigningGuard, V2OrdinarySigningPlan,
+    V2PreparedSelectedHistoryData,
 };
 
 /// Owns the original verified group, device, routing and runtime. Only a
@@ -762,6 +763,95 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
         )
     }
 
+    /// Prepare an exact archive fetch on the caller's approved connected
+    /// route. This purpose never falls back to the provider's own outbox.
+    pub fn prepare_member_archive_relay_request(
+        &self,
+        prefix: &PreparedV2JoinedPrefix,
+        channel: u128,
+        route: V2MemberDependencyRoute,
+        action: ActionId,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<PreparedV2MemberDependencyRequest, SyncError> {
+        if route.requester != self.local_peer_data() {
+            return Err(SyncError::JoinRejected);
+        }
+        let scope =
+            V2MemberEnvelopeScopeData::for_selected_prefix(self.member_prefix(prefix)?, channel)?;
+        PreparedV2MemberDependencyRequest::prepare_archive_relay(
+            &self.node.group,
+            &self.node.device,
+            scope,
+            route,
+            action,
+            rng,
+        )
+    }
+
+    /// Authenticate one exact relay request. The host must separately check
+    /// its contact approval and retain the original transport lease.
+    pub fn open_member_archive_relay_request(
+        &self,
+        prefix: &PreparedV2JoinedPrefix,
+        channel: u128,
+        route: V2MemberDependencyRoute,
+        wire: &[u8],
+    ) -> Result<OpenedV2MemberDependencyRequest, SyncError> {
+        if route.provider != self.local_peer_data() {
+            return Err(SyncError::JoinRejected);
+        }
+        let scope =
+            V2MemberEnvelopeScopeData::for_selected_prefix(self.member_prefix(prefix)?, channel)?;
+        OpenedV2MemberDependencyRequest::open_archive_relay(
+            &self.node.group,
+            &self.node.device,
+            scope,
+            route,
+            wire,
+        )
+    }
+
+    /// Seal a copy of the exact selected original. A connected holder may
+    /// carry the action only while its original author Admission is live.
+    pub fn seal_member_archive_relay_reply(
+        &self,
+        prefix: &PreparedV2JoinedPrefix,
+        channel: u128,
+        route: V2MemberDependencyRoute,
+        request: &OpenedV2MemberDependencyRequest,
+        saved: Option<(OwnerFactId, &SignedAction, &[u8])>,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Vec<u8>, SyncError> {
+        if route.provider != self.local_peer_data() {
+            return Err(SyncError::JoinRejected);
+        }
+        let verifier = self.member_prefix(prefix)?;
+        let scope = V2MemberEnvelopeScopeData::for_selected_prefix(verifier, channel)?;
+        // Do not distinguish an ineligible retained original from a miss
+        // on the wire. Storage failures still fail in the caller.
+        let eligible = saved.filter(|(admission, action, _)| {
+            require_live_relay_author(verifier, *admission, action).is_ok()
+        });
+        let original = if let Some((admission, action, bytes)) = eligible {
+            // Both the parsed action and bytes come from the selected bundle.
+            // Confirm their equality at this boundary before using its author.
+            if SignedAction::decode(bytes).as_ref().ok() != Some(action) {
+                return Err(SyncError::Malformed);
+            }
+            Some((admission, bytes))
+        } else {
+            None
+        };
+        request.seal_archive_reply(
+            &self.node.group,
+            &self.node.device,
+            &scope,
+            route,
+            original,
+            rng,
+        )
+    }
+
     pub fn seal_member_dependency_reply(
         &self,
         prefix: &PreparedV2JoinedPrefix,
@@ -800,10 +890,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
             return Err(SyncError::JoinRejected);
         }
         let observation = self.observe_member_publication(prefix)?;
-        let scope =
-            V2MemberEnvelopeScopeData::for_selected_prefix(self.member_prefix(prefix)?, channel)?;
+        let verifier = self.member_prefix(prefix)?;
+        let scope = V2MemberEnvelopeScopeData::for_selected_prefix(verifier, channel)?;
         let opened =
             request.open_reply(&self.node.group, &self.node.device, &scope, route, wire)?;
+        if request.is_archive_relay() {
+            if let Some(original) = &opened {
+                require_live_relay_author(
+                    verifier,
+                    original.admission_data(),
+                    original.action_data(),
+                )?;
+            }
+        }
         Ok(opened.map(|opened| SelectedV2MemberEnvelope {
             opened,
             recipient: self.admission.clone(),
@@ -931,6 +1030,20 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
             native_origin: None,
         })
     }
+}
+
+fn require_live_relay_author(
+    verifier: &V2GeneralPrefixVerifier,
+    admission: OwnerFactId,
+    action: &SignedAction,
+) -> Result<(), SyncError> {
+    verifier
+        .observe_live_member(admission)
+        .map_err(|_| SyncError::JoinRejected)?;
+    verifier
+        .admission(admission)
+        .and_then(|author| author.admission_data().matches_action_delegation(action))
+        .map_err(|_| SyncError::JoinRejected)
 }
 
 fn removal_request<'a>(

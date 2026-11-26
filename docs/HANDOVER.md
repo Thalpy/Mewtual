@@ -1,5 +1,27 @@
 # Mewtual; Handover
 
+## 26 November 2026 — Fetch exact originals through a joined archive holder
+
+A joined archive holder can serve an exact known ActionId over the existing
+connected request class. Each side checks the other's signed contact. The
+exchange uses separate authenticated domains and the reply preserves the
+original author's still-open Admission and signed bytes. The holder reads
+only selected records without settling a local archive write. The receiver
+uses the existing verification and durable ancestry path.
+
+The focused Windows MLS test passed wire isolation, original bytes and
+request binding. The mounted Windows test also passed with three native
+TCP actors. A second joiner fetched the offline founder's exact original
+from the first joiner's archive after a governing Add, and read the same
+message after a cold reopen. The holder refused the request before approving
+the requester, and the separate own-outbox request returned empty.
+These checks preceded the change to return empty for ineligible authors.
+Coverage for a pending archive WAL and approval replacement at staging
+remains open.
+
+Automatic archive inventory, removed-author proof and wider acceptance
+remain open. The native Chat V2 switch remains off.
+
 ## 26 November 2026 — Require stored ancestry before archive selection
 
 A joined receiver checks the complete signed ancestry of each original
