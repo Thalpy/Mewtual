@@ -4,7 +4,7 @@ catcoms_rt::redacted_debug! {
 }
 
 use catcoms_rt::{RequestAuthority, TransportEvent};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, TryLockError, Weak};
 use tokio::sync::{mpsc, watch};
 
 pub(super) type Slot = Mutex<Option<Subscription>>;
@@ -44,6 +44,23 @@ impl RequestAuthority for Epoch {
 #[derive(Clone, Debug)]
 pub struct NativeChatJoinIngress(pub(super) Weak<Slot>);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeChatIngressAttachRefusal {
+    Contended,
+    Occupied,
+    Revoked,
+    Closed,
+}
+
+impl<T> From<TryLockError<T>> for NativeChatIngressAttachRefusal {
+    fn from(error: TryLockError<T>) -> Self {
+        match error {
+            TryLockError::WouldBlock => Self::Contended,
+            TryLockError::Poisoned(_) => Self::Closed,
+        }
+    }
+}
+
 impl NativeChatJoinIngress {
     /// Claim the sole queue without waiting. A receiver never inherits events
     /// from an earlier registration, even on the same original mesh.
@@ -51,11 +68,19 @@ impl NativeChatJoinIngress {
         &self,
         authority: Arc<dyn RequestAuthority>,
     ) -> Option<NativeChatJoinRequests> {
+        self.try_attach_checked(authority).ok()
+    }
+
+    pub(super) fn try_attach_checked(
+        &self,
+        authority: Arc<dyn RequestAuthority>,
+    ) -> Result<NativeChatJoinRequests, NativeChatIngressAttachRefusal> {
+        use NativeChatIngressAttachRefusal as Refusal;
         if !authority.authorized() {
-            return None;
+            return Err(Refusal::Revoked);
         }
-        let slot = self.0.upgrade()?;
-        let mut held = slot.try_lock().ok()?;
+        let slot = self.0.upgrade().ok_or(Refusal::Closed)?;
+        let mut held = slot.try_lock()?;
         let original = held.as_ref().and_then(|old| old.epoch.upgrade());
         if let Some(original) = &original {
             // A newer authenticated generation may attach while an older
@@ -63,14 +88,14 @@ impl NativeChatJoinIngress {
             // guard and then reprove that no racing attachment replaced it.
             drop(held);
             if original.authorized() {
-                return None;
+                return Err(Refusal::Occupied);
             }
-            held = slot.try_lock().ok()?;
+            held = slot.try_lock()?;
             if held
                 .as_ref()
                 .is_some_and(|old| !std::ptr::eq(old.epoch.as_ptr(), Arc::as_ptr(original)))
             {
-                return None;
+                return Err(Refusal::Contended);
             }
         }
         let (queue, events) = mpsc::channel(1);
@@ -85,7 +110,7 @@ impl NativeChatJoinIngress {
         });
         drop(held);
         drop(previous);
-        Some(NativeChatJoinRequests {
+        Ok(NativeChatJoinRequests {
             _owner: owner,
             events,
             epoch,

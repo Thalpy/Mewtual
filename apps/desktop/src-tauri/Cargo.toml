@@ -105,6 +105,7 @@ tauri-plugin-process = "2"
 rfd = { version = "0.16", default-features = false, features = ["common-controls-v6", "gtk3"] }
 
 [dev-dependencies]
+catcoms-app = { path = "../../../crates/catcoms-app", features = ["native-chat-test-hooks"] }
 # Exercise the actual IPC argument/handler/serialization path with MockRuntime;
 # this empty Tauri feature only exposes its test helpers, not a shipped command.
 tauri = { version = "2.12.5", features = ["test"] }

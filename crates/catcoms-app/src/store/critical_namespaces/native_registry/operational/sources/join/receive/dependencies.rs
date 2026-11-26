@@ -7,9 +7,9 @@ catcoms_rt::redacted_debug! {
 
 use super::*;
 use catcoms_net::{
-    NativeChatMemberDependencies, NativeChatMemberDependencyExchange,
-    NativeChatMemberDependencyIncoming, NativeChatMemberDependencyObservation,
-    NativeChatMemberDependencyRequests,
+    NativeChatIngressAttachRefusal, NativeChatMemberDependencies,
+    NativeChatMemberDependencyExchange, NativeChatMemberDependencyIncoming,
+    NativeChatMemberDependencyObservation, NativeChatMemberDependencyRequests,
 };
 use catcoms_rt::TransportError;
 use catcoms_sync::owner_v2::{
@@ -50,6 +50,19 @@ pub struct NativeTextJoinedDependencyResponse {
 pub struct NativeTextJoinedDependencyProvider {
     _invocation: watch::Sender<bool>,
     requests: NativeChatMemberDependencyRequests,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeTextJoinedDependencyAttachRefusal {
+    Occupied,
+    IngressContended,
+    Member(V2MemberSaveRefusal),
+}
+
+impl From<V2MemberSaveRefusal> for NativeTextJoinedDependencyAttachRefusal {
+    fn from(refusal: V2MemberSaveRefusal) -> Self {
+        Self::Member(refusal)
+    }
 }
 
 impl NativeTextJoinedDependencyProvider {
@@ -321,6 +334,19 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         selection: &NativeTextJoinedRowSelection,
         caller: RequestCancellation,
     ) -> Result<NativeTextJoinedDependencyProvider, V2MemberSaveRefusal> {
+        self.attach_dependency_provider_checked(selection, caller)
+            .map_err(|refusal| match refusal {
+                NativeTextJoinedDependencyAttachRefusal::Member(refusal) => refusal,
+                _ => V2MemberSaveRefusal::Busy,
+            })
+    }
+
+    pub fn attach_dependency_provider_checked(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        caller: RequestCancellation,
+    ) -> Result<NativeTextJoinedDependencyProvider, NativeTextJoinedDependencyAttachRefusal> {
+        use NativeTextJoinedDependencyAttachRefusal as Attach;
         use V2MemberSaveRefusal as Refusal;
         let lane = self.dependency_lane()?;
         let (observed, auth, fee) = self.with_member_receiver(selection, &caller, |source| {
@@ -334,12 +360,26 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         let (signal, invocation) = self.dependency_signal(selection, caller, auth, observed);
         let signal = signal.retain_custody(Arc::new(JoinFramePayment { _fee: fee }));
         let requests = lane
-            .try_attach(Arc::new(ScopeAuthority(signal)))
-            .ok_or(Refusal::Busy)?;
+            .try_attach_checked(Arc::new(ScopeAuthority(signal)))
+            .map_err(|refusal| match refusal {
+                NativeChatIngressAttachRefusal::Contended => Attach::IngressContended,
+                NativeChatIngressAttachRefusal::Occupied => Attach::Occupied,
+                NativeChatIngressAttachRefusal::Revoked => Attach::Member(Refusal::Cancelled),
+                NativeChatIngressAttachRefusal::Closed => Attach::Member(Refusal::Unavailable),
+            })?;
         Ok(NativeTextJoinedDependencyProvider {
             _invocation: invocation,
             requests,
         })
+    }
+
+    #[cfg(feature = "native-chat-test-hooks")]
+    #[doc(hidden)]
+    pub fn hold_dependency_ingress_for_test(self, hold: impl FnOnce()) -> Option<()> {
+        let lane = self.dependency_lane().ok()?;
+        // The network lock test must leave the metadata slot available.
+        drop(self);
+        lane.hold_ingress_for_test(hold)
     }
 
     pub fn serve_dependency_request(

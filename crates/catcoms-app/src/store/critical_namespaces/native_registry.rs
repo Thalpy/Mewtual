@@ -61,14 +61,15 @@ pub use operational::{
     NativeTextColdFounderSource,
 };
 pub use operational::{
-    NativeTextJoinedArchivedActions, NativeTextJoinedDependencyExchange,
-    NativeTextJoinedDependencyProvider, NativeTextJoinedDependencyResponse,
-    NativeTextJoinedGoverningExchange, NativeTextJoinedGoverningIncoming,
-    NativeTextJoinedGoverningProvider, NativeTextJoinedGoverningResponse,
-    NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberLedger,
-    NativeTextJoinedMemberProjection, NativeTextJoinedMemberPublication,
-    NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
-    NativeTextJoinedReceivedOriginal, NativeTextJoinedSelectionPreparation,
+    NativeTextJoinedArchivedActions, NativeTextJoinedDependencyAttachRefusal,
+    NativeTextJoinedDependencyExchange, NativeTextJoinedDependencyProvider,
+    NativeTextJoinedDependencyResponse, NativeTextJoinedGoverningExchange,
+    NativeTextJoinedGoverningIncoming, NativeTextJoinedGoverningProvider,
+    NativeTextJoinedGoverningResponse, NativeTextJoinedMemberIngressPreparation,
+    NativeTextJoinedMemberLedger, NativeTextJoinedMemberProjection,
+    NativeTextJoinedMemberPublication, NativeTextJoinedMemberPublicationReceipt,
+    NativeTextJoinedMemberReceiver, NativeTextJoinedReceivedOriginal,
+    NativeTextJoinedSelectionPreparation,
 };
 pub use operational::{
     NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,

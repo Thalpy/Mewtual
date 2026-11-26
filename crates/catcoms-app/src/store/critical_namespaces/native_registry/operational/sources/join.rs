@@ -51,12 +51,12 @@ pub use publication::{
 };
 mod receive;
 pub use receive::{
-    NativeTextJoinedArchivedActions, NativeTextJoinedDependencyExchange,
-    NativeTextJoinedDependencyProvider, NativeTextJoinedDependencyResponse,
-    NativeTextJoinedGoverningExchange, NativeTextJoinedGoverningIncoming,
-    NativeTextJoinedGoverningProvider, NativeTextJoinedGoverningResponse,
-    NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberLedger,
-    NativeTextJoinedMemberProjection, NativeTextJoinedMemberReceiver,
+    NativeTextJoinedArchivedActions, NativeTextJoinedDependencyAttachRefusal,
+    NativeTextJoinedDependencyExchange, NativeTextJoinedDependencyProvider,
+    NativeTextJoinedDependencyResponse, NativeTextJoinedGoverningExchange,
+    NativeTextJoinedGoverningIncoming, NativeTextJoinedGoverningProvider,
+    NativeTextJoinedGoverningResponse, NativeTextJoinedMemberIngressPreparation,
+    NativeTextJoinedMemberLedger, NativeTextJoinedMemberProjection, NativeTextJoinedMemberReceiver,
     NativeTextJoinedReceivedOriginal,
 };
 mod reconnect;

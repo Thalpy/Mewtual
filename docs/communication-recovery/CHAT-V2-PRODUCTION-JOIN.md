@@ -461,8 +461,11 @@ only after covering Welcome and selecting the registered row. The first invite
 profile carries no certified address, rendezvous, or switchboard routes.
 The first history page can hold the native row table during admission or take
 the mounted metadata slot as soon as Join replies. Joined worker startup
-retries either contention against the original row and stops when the row or
-session retires.
+retries those conflicts and temporary contention on the dependency ingress
+mutex. One worker group belongs to each original row and authenticated
+generation. A membership transition revokes the old dependency subscription
+and its pending replies. The worker then captures the current row again and
+attaches a fresh subscription for the selected membership.
 Native Found also retries a busy metadata slot at its current setup step.
 Each retry rechecks the original vault and request. A storage refusal is
 reported to the caller with the same request token available for a later retry.

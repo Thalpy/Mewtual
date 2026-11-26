@@ -96,6 +96,7 @@ pub(super) struct NativeRowData {
 /// no UI guard or Core loan, and network effects never retain this permit.
 pub(super) struct NativeMemberWork {
     pub(super) publication_wake: tokio::sync::Notify,
+    pub(super) joined_worker_generation: AtomicU64,
     pub(super) received: StdMutex<Option<Box<NativeTextJoinedMemberLedger>>>,
     archive_changes: StdMutex<ArchiveChanges>,
     local: Arc<tokio::sync::Mutex<()>>,
@@ -114,6 +115,7 @@ impl NativeMemberWork {
     fn new() -> Self {
         Self {
             publication_wake: tokio::sync::Notify::new(),
+            joined_worker_generation: AtomicU64::new(0),
             received: StdMutex::new(None),
             archive_changes: StdMutex::new(ArchiveChanges::default()),
             local: Arc::new(tokio::sync::Mutex::new(())),

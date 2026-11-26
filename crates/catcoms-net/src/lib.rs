@@ -122,7 +122,9 @@ use tokio::task::JoinHandle;
 mod connection_leases;
 mod event_dispatch;
 mod native_chat_join;
-pub use native_chat_join::{NativeChatJoinIngress, NativeChatJoinRequests};
+pub use native_chat_join::{
+    NativeChatIngressAttachRefusal, NativeChatJoinIngress, NativeChatJoinRequests,
+};
 mod native_chat_members;
 pub use native_chat_members::{
     NativeChatMemberFrame, NativeChatMemberFrameObservation, NativeChatMemberGossip,

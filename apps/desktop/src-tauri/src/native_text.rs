@@ -53,6 +53,8 @@ pub(super) struct Registry {
     join_startup_busy: tokio::sync::Notify,
     #[cfg(test)]
     join_startup_table_busy: tokio::sync::Notify,
+    #[cfg(test)]
+    join_dependency_ingress_busy: tokio::sync::Notify,
     pub(super) ui_state: ui_state::Controller,
     retirement: retirement::Coalescer,
     pub(super) preludes: Arc<retirement::Prelude>,
@@ -143,6 +145,8 @@ impl Default for Registry {
             join_startup_busy: tokio::sync::Notify::new(),
             #[cfg(test)]
             join_startup_table_busy: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            join_dependency_ingress_busy: tokio::sync::Notify::new(),
             ui_state,
             retirement,
             preludes,

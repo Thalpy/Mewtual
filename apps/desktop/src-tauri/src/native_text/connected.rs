@@ -2,9 +2,10 @@
 use super::*;
 use catcoms_app::store::{
     NativeTextFounderMemberPublication, NativeTextFounderMemberPublicationReceipt,
-    NativeTextJoinedDependencyProvider, NativeTextJoinedMemberPublication,
-    NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedRowSelection,
-    NativeTextJoinedSelectionPreparation, NativeTextMemberPreparation, NativeUiInvocationMetadata,
+    NativeTextJoinedDependencyAttachRefusal, NativeTextJoinedDependencyProvider,
+    NativeTextJoinedMemberPublication, NativeTextJoinedMemberPublicationReceipt,
+    NativeTextJoinedRowSelection, NativeTextJoinedSelectionPreparation,
+    NativeTextMemberPreparation, NativeUiInvocationMetadata, V2MemberSaveRefusal,
 };
 use catcoms_rt::{RequestCancellation, TransportEvent};
 
@@ -322,43 +323,95 @@ impl Source {
     }
 }
 
-async fn start_dependencies<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
+async fn attach_joined_dependency_provider(
     state: &AppState,
-    source: Arc<Source>,
-) {
-    let mut startup_scope = source.negative();
-    let (original, row) = loop {
+    source: &Arc<Source>,
+) -> Option<NativeTextJoinedDependencyProvider> {
+    use NativeTextJoinedDependencyAttachRefusal as Attach;
+    let mut scope = source.negative();
+    loop {
         match source.try_capture_joined(state).await {
             Ok((original, row)) => {
-                if !original.is_capture_busy_cached() {
-                    break (original, row);
+                if original.is_capture_busy_cached() {
+                    drop((original, row));
+                    #[cfg(test)]
+                    state.native_text.join_startup_busy.notify_one();
+                } else {
+                    let original_source = source.clone();
+                    match tauri::async_runtime::spawn_blocking(move || {
+                        original
+                            .attach_dependency_provider_checked(&row, original_source.negative())
+                    })
+                    .await
+                    .ok()?
+                    {
+                        Ok(provider) => return Some(provider),
+                        Err(Attach::IngressContended) => {
+                            #[cfg(test)]
+                            state.native_text.join_dependency_ingress_busy.notify_one();
+                        }
+                        Err(Attach::Member(
+                            V2MemberSaveRefusal::Busy | V2MemberSaveRefusal::Cancelled,
+                        )) => {}
+                        Err(_) => return None,
+                    }
                 }
-                // Release the empty capture before retrying the original row.
-                drop((original, row));
-                #[cfg(test)]
-                state.native_text.join_startup_busy.notify_one();
             }
             Err(JoinedCaptureRefusal::TableBusy) => {
                 #[cfg(test)]
                 state.native_text.join_startup_table_busy.notify_one();
             }
-            Err(JoinedCaptureRefusal::Stale) => return,
+            Err(JoinedCaptureRefusal::Stale) => return None,
         }
-        // The first history read can hold the table during ingress or take
-        // the metadata slot for IO. Wait without either guard or preparation.
+        // Each failed attempt has returned all original guards and payment.
         tokio::select! {
             biased;
-            _ = startup_scope.cancelled() => return,
+            _ = scope.cancelled() => return None,
             _ = SystemClock.sleep(Duration::from_millis(25)) => {},
         }
+    }
+}
+
+struct JoinedWorkers {
+    row: Arc<server_table::NativeMemberWork>,
+    generation: u64,
+}
+
+impl Drop for JoinedWorkers {
+    fn drop(&mut self) {
+        // A previous authenticated generation cannot release a newer claim.
+        let _ = self.row.joined_worker_generation.compare_exchange(
+            self.generation,
+            0,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
+    }
+}
+
+async fn start_dependencies<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &AppState,
+    source: Arc<Source>,
+) {
+    // Provider authority changes with membership while this group stays live.
+    // A second startup must not duplicate workers during provider rollover.
+    if source.scope.is_cancelled()
+        || source
+            .member_work
+            .joined_worker_generation
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                (current < source.generation).then_some(source.generation)
+            })
+            .is_err()
+    {
+        return;
+    }
+    let worker_group = JoinedWorkers {
+        row: source.member_work.clone(),
+        generation: source.generation,
     };
-    let payment = source.clone();
-    let Ok(Ok(provider)) = tauri::async_runtime::spawn_blocking(move || {
-        original.attach_dependency_provider(&row, payment.scope.clone())
-    })
-    .await
-    else {
+    let Some(provider) = attach_joined_dependency_provider(state, &source).await else {
         return;
     };
     let receive = match state.native_text.ui_budget.prepare() {
@@ -367,6 +420,7 @@ async fn start_dependencies<R: tauri::Runtime>(
     };
     let app = app.clone();
     drop(tauri::async_runtime::spawn(async move {
+        let _worker_group = worker_group;
         let mut scope = source.negative();
         tokio::select! {
             biased;
@@ -643,26 +697,35 @@ async fn serve_dependencies<R: tauri::Runtime>(
     source: Arc<Source>,
     mut provider: NativeTextJoinedDependencyProvider,
 ) {
-    while let Some(request) = provider.next().await {
-        let state = app.state::<AppState>();
-        let Some(local) = source.member_work.try_background() else {
-            continue;
+    let state = app.state::<AppState>();
+    loop {
+        while let Some(request) = provider.next().await {
+            let Some(local) = source.member_work.try_background() else {
+                continue;
+            };
+            let Some((original, row)) = source.capture_joined(&state).await else {
+                continue;
+            };
+            let source = source.clone();
+            let _ = tauri::async_runtime::spawn_blocking(move || {
+                let _local = local;
+                original.serve_dependency_request(
+                    &row,
+                    source.channel,
+                    request,
+                    source.scope.clone(),
+                    &mut OsCryptoRng,
+                )
+            })
+            .await;
+        }
+        // Membership selection revokes the old scope and its queued replies.
+        // Capture the current original row before registering a new provider.
+        drop(provider);
+        let Some(current) = attach_joined_dependency_provider(&state, &source).await else {
+            return;
         };
-        let Some((original, row)) = source.capture_joined(&state).await else {
-            continue;
-        };
-        let source = source.clone();
-        let _ = tauri::async_runtime::spawn_blocking(move || {
-            let _local = local;
-            original.serve_dependency_request(
-                &row,
-                source.channel,
-                request,
-                source.scope.clone(),
-                &mut OsCryptoRng,
-            )
-        })
-        .await;
+        provider = current;
     }
 }
 

@@ -6,7 +6,9 @@ catcoms_rt::redacted_debug! {
     NativeChatMemberDependencyExchange;
 }
 
-use super::native_chat_join::{NativeChatJoinIngress, NativeChatJoinRequests};
+use super::native_chat_join::{
+    NativeChatIngressAttachRefusal, NativeChatJoinIngress, NativeChatJoinRequests,
+};
 use super::native_chat_members::NativeChatMemberFrameObservation;
 use super::{connection_leases, Command, RR_PROTOCOL};
 use bytes::Bytes;
@@ -38,12 +40,28 @@ impl NativeChatMemberDependencies {
         &self,
         authority: Arc<dyn RequestAuthority>,
     ) -> Option<NativeChatMemberDependencyRequests> {
-        self.ingress
-            .try_attach(authority)
-            .map(|events| NativeChatMemberDependencyRequests {
+        self.try_attach_checked(authority).ok()
+    }
+
+    pub fn try_attach_checked(
+        &self,
+        authority: Arc<dyn RequestAuthority>,
+    ) -> Result<NativeChatMemberDependencyRequests, NativeChatIngressAttachRefusal> {
+        self.ingress.try_attach_checked(authority).map(|events| {
+            NativeChatMemberDependencyRequests {
                 original: self.ingress.clone(),
                 events,
-            })
+            }
+        })
+    }
+
+    #[cfg(feature = "native-chat-test-hooks")]
+    #[doc(hidden)]
+    pub fn hold_ingress_for_test(&self, hold: impl FnOnce()) -> Option<()> {
+        let original = self.ingress.0.upgrade()?;
+        let _slot = original.lock().ok()?;
+        hold();
+        Some(())
     }
 
     pub fn owns_request(&self, request: &NativeChatMemberDependencyIncoming) -> bool {
