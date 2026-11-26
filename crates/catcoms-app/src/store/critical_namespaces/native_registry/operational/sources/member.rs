@@ -156,8 +156,12 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
             .work
             .as_ref()
             .unwrap()
-            .lookup_creation(self.row.original.invocation, self.row.original.request)
-            .map_err(|_| Error::Failed)?;
+            .lookup_native_creation(self.row.original.invocation, self.row.original.request)
+            .map_err(|refusal| match refusal {
+                NativeTextCreationRefusal::Busy => Error::Busy,
+                NativeTextCreationRefusal::Unavailable => Error::Unavailable,
+                _ => Error::Failed,
+            })?;
         if actual != Some(self.row.original.status) {
             return Err(Error::Stale);
         }

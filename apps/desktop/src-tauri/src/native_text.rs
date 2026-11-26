@@ -82,6 +82,8 @@ pub(super) struct Registry {
     #[cfg(test)]
     send_final_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
     #[cfg(test)]
+    send_preparation_busy: tokio::sync::Notify,
+    #[cfg(test)]
     send_io_edge: StdMutex<Option<Arc<tests::BlockingIoBarrier>>>,
     #[cfg(test)]
     source_retirement_waiting: tokio::sync::Notify,
@@ -173,6 +175,8 @@ impl Default for Registry {
             invite_preview_now: AtomicU64::new(0),
             #[cfg(test)]
             send_final_edge: StdMutex::new(None),
+            #[cfg(test)]
+            send_preparation_busy: tokio::sync::Notify::new(),
             #[cfg(test)]
             send_io_edge: StdMutex::new(None),
             #[cfg(test)]

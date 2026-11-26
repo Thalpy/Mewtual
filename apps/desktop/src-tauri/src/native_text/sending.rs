@@ -432,8 +432,39 @@ impl PrepareWork<Preparation> {
                 original.finish()?.prepare_member_save(request, &self.scope)
             }
             Preparation::Joined(original, row) => {
+                if original.is_capture_busy_cached() {
+                    return Err(V2MemberSaveRefusal::Busy);
+                }
                 original.prepare_member_save(&row, request, &self.scope, &mut OsCryptoRng)
             }
+        }
+    }
+}
+
+async fn retry_preparation<T, F>(
+    invocation: &Invocation,
+    #[cfg(test)] state: &AppState,
+    attempt: impl Fn() -> F,
+) -> Result<T, String>
+where
+    F: Future<Output = Result<Result<T, V2MemberSaveRefusal>, String>> + Send,
+{
+    let deadline = SystemClock.monotonic_ms().saturating_add(2_000);
+    let mut scope = invocation.scope.clone();
+    loop {
+        match attempt().await? {
+            Err(V2MemberSaveRefusal::Busy) if SystemClock.monotonic_ms() < deadline => {
+                #[cfg(test)]
+                state.native_text.send_preparation_busy.notify_one();
+                // The failed preparation is gone before waiting. The command
+                // still owns its original row, action and retry token.
+                tokio::select! {
+                    biased;
+                    _ = scope.cancelled() => return Err(STALE.into()),
+                    _ = SystemClock.sleep(Duration::from_millis(25)) => {},
+                }
+            }
+            result => return result.map_err(refusal),
         }
     }
 }
@@ -443,27 +474,35 @@ async fn prepare(
     invocation: &Invocation,
     local: Arc<OwnedMutexGuard<()>>,
 ) -> Result<V2MemberSaveOutcome, String> {
-    let preparation = capture(state, invocation).await?;
-    let work = PrepareWork {
-        preparation,
-        input: ActionInput {
-            body: invocation.intent.body.clone(),
-            parent: invocation.intent.parent,
-            #[cfg(test)]
-            _notice: None,
+    retry_preparation(
+        invocation,
+        #[cfg(test)]
+        state,
+        || async {
+            let preparation = capture(state, invocation).await?;
+            let work = PrepareWork {
+                preparation,
+                input: ActionInput {
+                    body: invocation.intent.body.clone(),
+                    parent: invocation.intent.parent,
+                    #[cfg(test)]
+                    _notice: None,
+                },
+                scope: invocation.scope.clone(),
+                token: invocation.intent.token,
+                channel: invocation.intent.channel,
+                _payment: invocation.payment.clone(),
+            };
+            let local = local.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let _local = local;
+                work.run()
+            })
+            .await
+            .map_err(|_| STALE.to_owned())
         },
-        scope: invocation.scope.clone(),
-        token: invocation.intent.token,
-        channel: invocation.intent.channel,
-        _payment: invocation.payment.clone(),
-    };
-    tauri::async_runtime::spawn_blocking(move || {
-        let _local = local;
-        work.run()
-    })
+    )
     .await
-    .map_err(|_| STALE)?
-    .map_err(refusal)
 }
 fn refusal(reason: V2MemberSaveRefusal) -> String {
     match reason {
@@ -623,28 +662,41 @@ async fn execute(state: &AppState, invocation: &Invocation) -> Result<Reply, Str
     );
     let mut outcome = prepare(state, invocation, local.clone()).await?;
     if outcome == V2MemberSaveOutcome::Ready {
-        let preparation = capture(state, invocation).await?;
         let token = invocation.intent.token;
-        let scope = invocation.scope.clone();
-        let worker = Worker {
-            value: preparation,
-            _payment: invocation.payment.clone(),
-        };
-        let local_during_preparation = local.clone();
-        let prepared = tauri::async_runtime::spawn_blocking(move || {
-            let _local = local_during_preparation;
-            worker.map(|value| match value {
-                Preparation::Founder(original) => original
-                    .finish_admission(token)
-                    .map(FinalPreparation::Founder),
-                Preparation::Joined(original, row) => original
-                    .finish_member_admission(row, token, &scope)
-                    .map(|ready| FinalPreparation::Joined(Some(ready))),
-            })
-        })
-        .await
-        .map_err(|_| STALE)?;
-        let preparation = prepared.value.map_err(refusal)?;
+        let preparation = retry_preparation(
+            invocation,
+            #[cfg(test)]
+            state,
+            || async {
+                let preparation = capture(state, invocation).await?;
+                let scope = invocation.scope.clone();
+                let worker = Worker {
+                    value: preparation,
+                    _payment: invocation.payment.clone(),
+                };
+                let local = local.clone();
+                let prepared = tauri::async_runtime::spawn_blocking(move || {
+                    let _local = local;
+                    worker.map(|value| match value {
+                        Preparation::Founder(original) => original
+                            .finish_admission(token)
+                            .map(FinalPreparation::Founder),
+                        Preparation::Joined(original, row) => {
+                            if original.is_capture_busy_cached() {
+                                return Err(V2MemberSaveRefusal::Busy);
+                            }
+                            original
+                                .finish_member_admission(row, token, &scope)
+                                .map(|ready| FinalPreparation::Joined(Some(ready)))
+                        }
+                    })
+                })
+                .await
+                .map_err(|_| STALE.to_owned())?;
+                Ok(prepared.value)
+            },
+        )
+        .await?;
         #[cfg(test)]
         {
             let edge = state.native_text.send_final_edge.lock().unwrap().clone();

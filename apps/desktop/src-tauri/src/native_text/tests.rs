@@ -1173,8 +1173,17 @@ async fn native_text_found_router_installs_two_original_rows_retries_and_release
     assert_eq!(state.servers.lock().await.native_iter().count(), 2);
     // Both rows must really sign/save using the production funded two-context
     // mount. Installing two UI rows alone establishes no such capacity.
+    let occupied = hold_vault_metadata(&state).await;
     let post = native_send_request(&main, &first, 9, "First native message");
-    run(&queue).await;
+    let post_task = tokio::spawn(run(&queue));
+    timeout(
+        Duration::from_secs(5),
+        state.native_text.send_preparation_busy.notified(),
+    )
+    .await
+    .expect("native send retries the original metadata lookup");
+    drop(occupied);
+    post_task.await.unwrap();
     let post = found_value(post.await.unwrap());
     assert_eq!(post["disposition"], "saved-local");
     assert_eq!(post["ordinal"], "0");
