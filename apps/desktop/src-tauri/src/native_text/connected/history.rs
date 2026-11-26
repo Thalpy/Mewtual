@@ -1,0 +1,299 @@
+//! Reconcile a joined row from its explicitly approved connected contacts.
+//! Each peer gets at most one bounded page or original exchange per turn.
+use super::*;
+use catcoms_app::store::{NativeTextJoinedDependencyExchange, NativeTextJoinedHistoryPage};
+use catcoms_replication::chat::ActionId;
+use std::collections::VecDeque;
+use std::time::Duration;
+
+const TURN: Duration = Duration::from_millis(500);
+const REQUEST: Duration = Duration::from_secs(3);
+const PAGES_PER_SLICE: u8 = 4;
+const RETRY_MS: u64 = 5_000;
+const RESCAN_MS: u64 = 30_000;
+
+struct PeerSweep {
+    peer: PeerId,
+    page: Option<Arc<NativeTextJoinedHistoryPage>>,
+    next_entry: usize,
+    deferred: bool,
+    pages: u8,
+    due: u64,
+}
+
+impl PeerSweep {
+    fn new(peer: PeerId) -> Self {
+        Self {
+            peer,
+            page: None,
+            next_entry: 0,
+            deferred: false,
+            pages: 0,
+            due: 0,
+        }
+    }
+
+    fn rescan_after(&mut self, delay: u64) {
+        self.page = None;
+        self.next_entry = 0;
+        self.deferred = false;
+        self.pages = 0;
+        self.due = SystemClock.monotonic_ms().saturating_add(delay);
+    }
+}
+
+pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source: &Arc<Source>) {
+    let server_table::NativeSelection::Joined(row) = &source.selection else {
+        return;
+    };
+    let mut scope = source.negative();
+    let mut peers: VecDeque<PeerSweep> = VecDeque::new();
+    let mut pending_cursor = 0;
+    loop {
+        tokio::select! {
+            biased;
+            _ = scope.cancelled() => return,
+            _ = SystemClock.sleep(TURN) => {}
+        }
+        let state = app.state::<AppState>();
+        if let Some(target) = reconcile_archive_change(&state, source, &mut pending_cursor).await {
+            source.notify_received(app, &state, Some(target)).await;
+        }
+        let Some(candidates) = row.history_peer_candidates() else {
+            continue;
+        };
+        peers.retain(|sweep| candidates.contains(&sweep.peer));
+        for peer in candidates {
+            if !peers.iter().any(|sweep| sweep.peer == peer) {
+                peers.push_back(PeerSweep::new(peer));
+            }
+        }
+        let now = SystemClock.monotonic_ms();
+        let Some(index) = peers.iter().position(|sweep| sweep.due <= now) else {
+            continue;
+        };
+        let mut sweep = peers.remove(index).expect("selected due history peer");
+        if let Some(target) = turn(&state, source, &mut sweep).await {
+            source.notify_received(app, &state, Some(target)).await;
+        }
+        peers.push_back(sweep);
+    }
+}
+
+async fn reconcile_archive_change(
+    state: &AppState,
+    source: &Arc<Source>,
+    cursor: &mut usize,
+) -> Option<ActionId> {
+    let pending = source.member_work().pending_archive_changes();
+    // This point lookup may finish a durable WAL. It is scoped to the
+    // installed local row, even if the peer that supplied the action left.
+    let index = (0..pending.len())
+        .map(|offset| (*cursor + offset) % pending.len())
+        .find(|index| pending[*index].is_some())?;
+    *cursor = (index + 1) % pending.len();
+    let change = pending[index]?;
+    let channel = source.channel();
+    with_row(state, source, move |original, row, local, scope| {
+        let selected = original
+            .selected_archive_target_data(&row, channel, change.action, &scope)
+            .ok()?;
+        local.reconcile_archive_change(change, selected)
+    })
+    .await
+    .flatten()
+}
+
+async fn turn(state: &AppState, source: &Arc<Source>, sweep: &mut PeerSweep) -> Option<ActionId> {
+    let page = sweep.page.clone();
+    if let Some(page) = &page {
+        let Some(data) = page.data() else {
+            sweep.rescan_after(RETRY_MS);
+            return None;
+        };
+        if let Some(entry) = data.entries().get(sweep.next_entry) {
+            let (covered, notice) = fetch_entry(state, source, page.clone(), entry.action).await?;
+            sweep.next_entry += 1;
+            // Preserve the obligation to revisit the whole frozen sweep.
+            // Later IDs and other authors can progress while a parent is absent.
+            sweep.deferred |= !covered;
+            return notice;
+        }
+    }
+    if sweep.pages == PAGES_PER_SLICE {
+        // Bound continuous scans even for a member advertising an inflated
+        // end. Preserve the actual cursor for the next slice.
+        sweep.pages = 0;
+        sweep.due = SystemClock.monotonic_ms().saturating_add(RETRY_MS);
+        return None;
+    }
+    let peer = sweep.peer;
+    let channel = source.channel();
+    let request = with_row(state, source, move |original, row, _, scope| match page {
+        Some(page) => original.prepare_history_continuation(&row, &page, scope, &mut OsCryptoRng),
+        None => original
+            .prepare_history_exchange(&row, channel, peer, scope, &mut OsCryptoRng)
+            .map(Some),
+    })
+    .await?;
+    let exchange = match request {
+        Ok(Some(exchange)) => exchange,
+        Ok(None) => {
+            sweep.rescan_after(if sweep.deferred { RETRY_MS } else { RESCAN_MS });
+            return None;
+        }
+        Err(V2MemberSaveRefusal::Busy) => return None,
+        Err(failure) => {
+            #[cfg(test)]
+            eprintln!("chat history worker could not prepare page: {failure:?}");
+            let _ = failure;
+            sweep.rescan_after(RETRY_MS);
+            return None;
+        }
+    };
+    let requested = tokio::time::timeout(REQUEST, exchange.receive()).await;
+    let Ok(Ok(reply)) = requested else {
+        #[cfg(test)]
+        eprintln!("chat history worker page request stopped: {requested:?}");
+        // Retain the exact earlier cursor on refused or lost replies. Slow
+        // peers still yield their turn after each bounded network wait.
+        sweep.due = SystemClock.monotonic_ms().saturating_add(RETRY_MS);
+        return None;
+    };
+    let page = with_row(state, source, move |original, row, _, scope| {
+        original.open_history_response(&row, reply, &scope)
+    })
+    .await?;
+    match page {
+        Ok(page) => {
+            #[cfg(test)]
+            eprintln!(
+                "chat history worker opened a page with {:?} entries",
+                page.data().map(|data| data.entries().len())
+            );
+            sweep.page = Some(Arc::new(page));
+            sweep.next_entry = 0;
+            sweep.pages += 1;
+        }
+        Err(V2MemberSaveRefusal::Busy) => {}
+        Err(failure) => {
+            #[cfg(test)]
+            eprintln!("chat history worker refused page: {failure:?}");
+            let _ = failure;
+            sweep.rescan_after(RETRY_MS);
+        }
+    }
+    None
+}
+
+enum Fetch {
+    Covered,
+    Request(NativeTextJoinedDependencyExchange),
+}
+
+async fn fetch_entry(
+    state: &AppState,
+    source: &Arc<Source>,
+    page: Arc<NativeTextJoinedHistoryPage>,
+    action: ActionId,
+) -> Option<(bool, Option<ActionId>)> {
+    let fetch = with_row(state, source, move |original, row, _, scope| {
+        if original
+            .selected_discovered_target(&row, &page, action, &scope)?
+            .is_some()
+        {
+            return Ok(Fetch::Covered);
+        }
+        original
+            .prepare_discovered_original(&row, &page, action, scope, &mut OsCryptoRng)
+            .map(Fetch::Request)
+    })
+    .await?;
+    let exchange = match fetch {
+        Ok(Fetch::Covered) => return Some((true, None)),
+        Ok(Fetch::Request(exchange)) => exchange,
+        Err(V2MemberSaveRefusal::Busy) => return None,
+        Err(failure) => {
+            #[cfg(test)]
+            eprintln!("chat history worker could not prepare exact fetch: {failure:?}");
+            let _ = failure;
+            return Some((false, None));
+        }
+    };
+    let requested = tokio::time::timeout(REQUEST, exchange.receive()).await;
+    let Ok(Ok(reply)) = requested else {
+        #[cfg(test)]
+        eprintln!("chat history worker exact request stopped: {requested:?}");
+        return Some((false, None));
+    };
+    let stage = with_row(state, source, move |original, row, _, scope| {
+        original.prepare_discovered_archive(&row, reply, scope, &mut OsCryptoRng)
+    })
+    .await?;
+    let (ledger, opened) = match stage {
+        Ok(Some(stage)) => stage,
+        Err(V2MemberSaveRefusal::Busy) => return None,
+        other => {
+            #[cfg(test)]
+            eprintln!(
+                "chat history worker could not stage exact original: {:?}",
+                other.as_ref().err()
+            );
+            let _ = other;
+            return Some((false, None));
+        }
+    };
+    let target = opened.projection_target_data();
+    with_row(state, source, move |original, _, local, scope| {
+        // Reserve before any write. Even a Stale result can mean the disk
+        // selected the original and the remote route then retired.
+        if local.reserve_archive_change(action, target).is_none() {
+            return (false, None);
+        }
+        match original.archive_received_member(&ledger, &opened, &scope, &mut OsCryptoRng) {
+            Ok(Some(_)) => {
+                local.note_archive_change(action, target, true);
+                (true, Some(target))
+            }
+            other => {
+                #[cfg(test)]
+                eprintln!(
+                    "chat history worker selection was incomplete: {:?}",
+                    other.as_ref().err()
+                );
+                let _ = other;
+                (false, Some(target))
+            }
+        }
+    })
+    .await
+}
+
+async fn with_row<T: Send + 'static>(
+    state: &AppState,
+    source: &Arc<Source>,
+    perform: impl FnOnce(
+            NativeTextJoinedSelectionPreparation<OsCryptoRng>,
+            NativeTextJoinedRowSelection,
+            &server_table::NativeMemberWork,
+            RequestCancellation,
+        ) -> T
+        + Send
+        + 'static,
+) -> Option<T> {
+    // A blocking cut retains the original row, native permit, and fees until
+    // the actual work leaves, even if lock drops the async observer earlier.
+    let permit = source.member_work.foreground(source.negative()).await?;
+    let Some((original, row)) = source.capture_joined(state).await else {
+        #[cfg(test)]
+        eprintln!("chat history worker could not capture its original row");
+        return None;
+    };
+    let source = source.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        perform(original, row, source.member_work(), source.negative())
+    })
+    .await
+    .ok()
+}

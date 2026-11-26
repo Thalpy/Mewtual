@@ -7272,12 +7272,12 @@
         loading: false,
       };
     }
-    const earlier = nativeReceivedReads.get(action);
-    if (earlier?.current()) { earlier.dirty = true; return; }
-    if (earlier) nativeReceivedReads.delete(action);
     if (nativeReceivedScope?.server === server && nativeReceivedScope.channel === channel && nativeReceivedScope.context === context) {
       nativeReceived = updateNativeReceived(nativeReceived, action, null);
     }
+    const earlier = nativeReceivedReads.get(action);
+    if (earlier?.current()) { earlier.dirty = true; return; }
+    if (earlier) nativeReceivedReads.delete(action);
     if (nativeReceivedReads.size >= 64) {
       error = "Too many live messages arrived at once.";
       return;

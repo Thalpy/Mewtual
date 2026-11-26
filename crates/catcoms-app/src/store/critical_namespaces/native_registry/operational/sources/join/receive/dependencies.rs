@@ -293,7 +293,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
     }
 
     pub fn open_dependency_response(
-        self,
+        &self,
         selection: &NativeTextJoinedRowSelection,
         response: NativeTextJoinedDependencyResponse,
         caller: &RequestCancellation,
@@ -353,6 +353,76 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 _fee: fee,
             }))
         })
+    }
+
+    /// Check an offered original in a fresh, paid staging ledger. A single
+    /// bounded replay of local ancestors can resolve its prerequisites. The
+    /// returned original still needs the usual archive write to settle work.
+    pub fn prepare_discovered_archive(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        response: NativeTextJoinedDependencyResponse,
+        caller: RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<
+        Option<(
+            NativeTextJoinedMemberLedger,
+            NativeTextJoinedReceivedOriginal,
+        )>,
+        V2MemberSaveRefusal,
+    > {
+        use catcoms_replication::chat::ActionState;
+        use V2MemberSaveRefusal as Refusal;
+        if response.approved_author.is_none() {
+            return Err(Refusal::Stale);
+        }
+        let channel = response.channel;
+        let Some(original) = self.open_dependency_response(selection, response, &caller)? else {
+            return Ok(None);
+        };
+        let require_current = || {
+            if caller.is_cancelled() || !original.is_for_original_row_cached(selection) {
+                Err(Refusal::Stale)
+            } else {
+                Ok(())
+            }
+        };
+        let (stage, status) = self.prepare_member_ledger_with(
+            selection,
+            channel,
+            caller.clone(),
+            |source, ledger, view| {
+                require_current()?;
+                let verifier = source
+                    .prefix
+                    .selected_member_verifier()
+                    .map_err(|_| Refusal::Unavailable)?;
+                let apply = |ledger: &mut ChatLedger| {
+                    original
+                        .opened
+                        .project_from_ledger(verifier, ledger, view, RECEIVE_WORK)
+                        .map_err(|_| Refusal::Failed)
+                };
+                let mut status = apply(ledger)?;
+                if let V2OrdinaryReceiveStatus::WaitingForDependencies(missing) = status {
+                    replay_local_member_dependencies(
+                        &missing,
+                        (verifier, ledger, view),
+                        RECEIVE_WORK,
+                        (source.store, source.history_scope(channel)),
+                        |id| source.read_dependency(channel, id, rng),
+                        require_current,
+                    )?;
+                    status = apply(ledger)?;
+                }
+                Ok(status)
+            },
+        )?;
+        require_current()?;
+        Ok(
+            (status == V2OrdinaryReceiveStatus::Retained(ActionState::Valid))
+                .then_some((stage, original)),
+        )
     }
 
     pub fn attach_dependency_provider(

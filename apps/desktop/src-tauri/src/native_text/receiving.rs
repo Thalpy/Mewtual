@@ -399,13 +399,14 @@ async fn receive(
     if !prepare_ledger(state, source).await {
         return None;
     }
-    let Some((original, status)) = with_row(state, source, move |selected, _, local, scope| {
+    let channel = source.channel();
+    let Some((original, status)) = with_row(state, source, move |selected, row, local, scope| {
         let mut slot = local.received.lock().ok()?;
         let ledger = slot.as_deref_mut()?;
-        let (original, status) = selected.receive_member_frame(ledger, &frame, &scope).ok()?;
-        if status == V2OrdinaryReceiveStatus::Retained(ActionState::Valid) {
-            archive_original(&selected, ledger, &original, local, &scope);
-        }
+        let original = selected
+            .open_member_frame(&row, channel, &frame, &scope)
+            .ok()?;
+        let status = apply_original(&selected, ledger, &original, local, &scope)?;
         Some((original, status))
     })
     .await
@@ -553,34 +554,54 @@ async fn apply_and_archive(
     with_row(state, source, move |selected, _, local, scope| {
         let mut slot = local.received.lock().ok()?;
         let ledger = slot.as_deref_mut()?;
-        let status = selected
-            .project_received_member(ledger, &original, &scope)
-            .ok()?;
-        if status == V2OrdinaryReceiveStatus::Retained(ActionState::Valid) {
-            archive_original(&selected, ledger, &original, local, &scope);
-        }
-        Some(status)
+        apply_original(&selected, ledger, &original, local, &scope)
     })
     .await
 }
 
-fn archive_original(
+fn apply_original(
     selected: &NativeTextJoinedSelectionPreparation<OsCryptoRng>,
-    ledger: &NativeTextJoinedMemberLedger,
+    ledger: &mut NativeTextJoinedMemberLedger,
     original: &NativeTextJoinedReceivedOriginal,
     local: &server_table::NativeMemberWork,
     scope: &RequestCancellation,
-) {
-    let result = selected.archive_received_member(ledger, original, scope, &mut OsCryptoRng);
+) -> Option<V2OrdinaryReceiveStatus> {
     let action = original.action_id_data();
     let target = original.projection_target_data();
-    if action != target {
-        match result {
-            Ok(Some(_)) => local.note_archive_change(action, target, true),
-            Err(_) => local.note_archive_change(action, target, false),
-            Ok(None) => {}
+    let mutation = action != target;
+    let admitted = local.reserve_archive_change(action, target);
+    if admitted.is_none() && mutation {
+        // A live mutation could supersede a saved body. Defer it if we
+        // cannot track the target through the corresponding archive write.
+        return None;
+    }
+    let status = if mutation {
+        selected.stage_received_member(ledger, original, scope)
+    } else {
+        selected.project_received_member(ledger, original, scope)
+    }
+    .ok();
+    if status != Some(V2OrdinaryReceiveStatus::Retained(ActionState::Valid)) {
+        if admitted == Some(true) {
+            local.note_archive_change(action, target, true);
+        }
+        return status;
+    }
+    if admitted.is_some() {
+        match selected.archive_received_member(ledger, original, scope, &mut OsCryptoRng) {
+            Ok(None) if mutation => {
+                // Old mounts without the archive keep their existing live
+                // view. Mounted archives alone publish selected mutations.
+                local.note_archive_change(action, target, true);
+                return selected
+                    .project_received_member(ledger, original, scope)
+                    .ok();
+            }
+            Ok(_) => local.note_archive_change(action, target, true),
+            Err(_) => {}
         }
     }
+    status
 }
 
 async fn with_row<T: Send + 'static>(

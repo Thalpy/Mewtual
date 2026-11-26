@@ -22,10 +22,15 @@ catcoms_rt::redacted_debug! {
     NativeTextJoinedHistoryPage;
 }
 
+// A page can wait between turns. Pay for its bounded IDs, approval, and
+// row/lease observations without retaining the departed wire buffers.
+const PARKED_PAGE_FEE: usize = 8 * 1024;
+
 pub struct NativeTextJoinedHistoryExchange {
     transport: NativeChatMemberDependencyExchange,
     request: PreparedV2MemberHistoryRequest,
     source: HistoryQuery,
+    wire_scope: HistoryWireScope,
 }
 
 struct HistoryQuery {
@@ -35,6 +40,13 @@ struct HistoryQuery {
     channel: u128,
     observation: NativeChatMemberDependencyObservation,
     connection: ConnectionLease,
+    signal: RequestCancellation,
+    _fee: CatalogReadReservation,
+}
+
+// Only a live request/response holds a captured native command and the
+// maximum wire reservation. Parked pages keep row and selection observations.
+struct HistoryWireScope {
     signal: RequestCancellation,
     _invocation: watch::Sender<bool>,
 }
@@ -86,6 +98,7 @@ pub struct NativeTextJoinedHistoryResponse {
     wire: bytes::Bytes,
     request: PreparedV2MemberHistoryRequest,
     source: HistoryQuery,
+    wire_scope: HistoryWireScope,
 }
 
 /// Bounded hints from the original request. The caller keeps the same
@@ -105,20 +118,74 @@ impl NativeTextJoinedHistoryExchange {
     pub async fn receive(self) -> Result<NativeTextJoinedHistoryResponse, TransportError> {
         let wire = self
             .transport
-            .request(self.request.wire_data(), self.source.signal.clone())
+            .request(self.request.wire_data(), self.wire_scope.signal.clone())
             .await?;
-        if !self.source.is_current(&self.source.row) {
+        if self.wire_scope.signal.is_cancelled() || !self.source.is_current(&self.source.row) {
             return Err(TransportError::Cancelled);
         }
         Ok(NativeTextJoinedHistoryResponse {
             wire,
             request: self.request,
             source: self.source,
+            wire_scope: self.wire_scope,
         })
     }
 }
 
 impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
+    /// Select an already authenticated archive entry before sending an exact
+    /// fetch. A successful lookup supplies its Create target for UI invalidation.
+    pub fn selected_discovered_target(
+        &self,
+        selection: &NativeTextJoinedRowSelection,
+        page: &NativeTextJoinedHistoryPage,
+        action: ActionId,
+        caller: &RequestCancellation,
+    ) -> Result<Option<ActionId>, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        if !page.query.is_current(selection)
+            || !page
+                .page
+                .entries()
+                .iter()
+                .any(|entry| entry.action == action)
+        {
+            return Err(Refusal::Stale);
+        }
+        let selected = self.with_member_receiver(selection, caller, |source| {
+            if !source
+                .store
+                .has_mounted_shared_history()
+                .map_err(|_| Refusal::Busy)?
+            {
+                return Err(Refusal::Unavailable);
+            }
+            let record = source
+                .store
+                .read_shared_history_record(source.history_scope(page.query.channel), action)
+                .map_err(|_| Refusal::Failed)?;
+            let Some(record) = record else {
+                return Ok(None);
+            };
+            if record.admission.as_bytes() != page.query.admission.as_bytes() {
+                return Err(Refusal::Stale);
+            }
+            Ok(Some(
+                record
+                    .original
+                    .action()
+                    .spec()
+                    .body
+                    .create()
+                    .unwrap_or(action),
+            ))
+        })?;
+        if !page.query.is_current(selection) {
+            return Err(Refusal::Stale);
+        }
+        Ok(selected)
+    }
+
     /// Request one page from a previously approved signed contact. This
     /// captures an existing connection only and does not initiate dialing.
     pub fn prepare_history_exchange(
@@ -178,8 +245,8 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             .ok_or(Refusal::Unavailable)?;
         let observation = transport.observe_route();
         let connection = transport.observe_connection();
-        let (request, admission, approval, observed, auth, fee) =
-            self.with_member_receiver(selection, &caller, |source| {
+        let (request, admission, approval, observed, parked, auth, wire_fee, page_fee) = self
+            .with_member_receiver(selection, &caller, |source| {
                 if !observation.is_current_cached() {
                     return Err(Refusal::Stale);
                 }
@@ -193,9 +260,13 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 }
                 // The underlying dependency lane keeps its original reply
                 // bound. Account for that overlap even for a small page.
-                let fee = source
+                let wire_fee = source
                     .metadata
                     .reserve_join_node(REPLY_FEE)
+                    .map_err(|_| Refusal::Busy)?;
+                let page_fee = source
+                    .metadata
+                    .reserve_join_node(PARKED_PAGE_FEE)
                     .map_err(|_| Refusal::Busy)?;
                 let request = source
                     .node
@@ -203,11 +274,16 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                     .and_then(|access| access.prepare_request(provider, cursor, rng))
                     .map_err(|_| Refusal::Failed)?;
                 let (observed, auth) = source.effect_data()?;
-                Ok((request, admission, approval, observed, auth, fee))
+                let parked = source
+                    .node
+                    .observe_member_publication(source.prefix)
+                    .map_err(|_| Refusal::Stale)?;
+                Ok((
+                    request, admission, approval, observed, parked, auth, wire_fee, page_fee,
+                ))
             })?;
         let caller = HistoryContactScope::constrain(approval, caller);
-        let (signal, invocation) = self.dependency_signal(selection, caller, auth, observed);
-        let signal = signal.retain_custody(Arc::new(JoinFramePayment { _fee: fee }));
+        let (wire, invocation) = self.dependency_signal(selection, caller.clone(), auth, observed);
         Ok(NativeTextJoinedHistoryExchange {
             transport,
             request,
@@ -218,7 +294,11 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 channel,
                 observation,
                 connection,
-                signal,
+                signal: parked.constrain(caller),
+                _fee: page_fee,
+            },
+            wire_scope: HistoryWireScope {
+                signal: wire.retain_custody(Arc::new(JoinFramePayment { _fee: wire_fee })),
                 _invocation: invocation,
             },
         })
@@ -271,12 +351,8 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         caller: &RequestCancellation,
     ) -> Result<NativeTextJoinedHistoryPage, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
-        let NativeTextJoinedHistoryResponse {
-            wire,
-            request,
-            source: query,
-        } = response;
-        if !query.is_current(selection) {
+        let query = &response.source;
+        if response.wire_scope.signal.is_cancelled() || !query.is_current(selection) {
             return Err(Refusal::Stale);
         }
         let page = self.with_member_receiver(selection, caller, |source| {
@@ -286,13 +362,17 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             source
                 .node
                 .member_history_access(source.prefix, query.channel)
-                .and_then(|access| access.open_reply(query.peer, &request, &wire))
+                .and_then(|access| access.open_reply(query.peer, &response.request, &response.wire))
                 .map_err(|_| Refusal::Failed)
         })?;
-        if !query.is_current(selection) {
+        if response.wire_scope.signal.is_cancelled() || !query.is_current(selection) {
             return Err(Refusal::Stale);
         }
-        Ok(NativeTextJoinedHistoryPage { page, query })
+        // The response drops its paid wire before refunding that payment.
+        Ok(NativeTextJoinedHistoryPage {
+            page,
+            query: response.source,
+        })
     }
 
     pub(super) fn serve_history_request(

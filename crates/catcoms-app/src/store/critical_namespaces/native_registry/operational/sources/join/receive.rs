@@ -453,7 +453,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
     }
 
     pub fn open_member_frame(
-        self,
+        &self,
         selection: &NativeTextJoinedRowSelection,
         channel: u128,
         frame: &NativeChatMemberFrame,
@@ -593,7 +593,18 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         original: &NativeTextJoinedReceivedOriginal,
         caller: &RequestCancellation,
     ) -> Result<V2OrdinaryReceiveStatus, V2MemberSaveRefusal> {
-        self.project_received_for(ledger, original, caller)
+        self.apply_received_member(ledger, original, caller, true)
+    }
+
+    /// Validate a live mutation and retain it as causal evidence without
+    /// changing any projection before the receiver's archive selects it.
+    pub fn stage_received_member(
+        &self,
+        ledger: &mut NativeTextJoinedMemberLedger,
+        original: &NativeTextJoinedReceivedOriginal,
+        caller: &RequestCancellation,
+    ) -> Result<V2OrdinaryReceiveStatus, V2MemberSaveRefusal> {
+        self.apply_received_member(ledger, original, caller, false)
     }
 
     /// Apply one exact frame on the same paid mounted row. Waiting children
@@ -611,15 +622,16 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             frame,
             caller,
         )?;
-        let status = self.project_received_for(ledger, &original, caller)?;
+        let status = self.project_received_member(ledger, &original, caller)?;
         Ok((original, status))
     }
 
-    fn project_received_for(
+    fn apply_received_member(
         &self,
         ledger: &mut NativeTextJoinedMemberLedger,
         original: &NativeTextJoinedReceivedOriginal,
         caller: &RequestCancellation,
+        publish: bool,
     ) -> Result<V2OrdinaryReceiveStatus, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
         if ledger.signal.is_cancelled() || !original.is_for_original_row_cached(&ledger.selection) {
@@ -635,10 +647,13 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             {
                 return Err(Refusal::Stale);
             }
-            original
-                .opened
-                .project_from_ledger(verifier, &mut ledger.ledger, &ledger.view, RECEIVE_WORK)
-                .map_err(|_| Refusal::Failed)
+            let opened = &original.opened;
+            if publish {
+                opened.project_from_ledger(verifier, &mut ledger.ledger, &ledger.view, RECEIVE_WORK)
+            } else {
+                opened.stage_from_ledger(verifier, &mut ledger.ledger, &ledger.view, RECEIVE_WORK)
+            }
+            .map_err(|_| Refusal::Failed)
         })
     }
 
@@ -744,6 +759,42 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 .map_err(|_| Refusal::Failed)?;
             require_archivable(ledger, original)?;
             Ok(Some(selected))
+        })
+    }
+
+    /// Reconcile an exact attempted archive write from the still-installed
+    /// local row. An original peer's lease can end after disk selection. The
+    /// result is only target data for a fresh guarded projection, not new
+    /// ingress or proof that another peer holds this record.
+    pub fn selected_archive_target_data(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        channel: u128,
+        action: ActionId,
+        caller: &RequestCancellation,
+    ) -> Result<Option<ActionId>, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        self.with_member_receiver(selection, caller, |source| {
+            if !source
+                .store
+                .has_mounted_shared_history()
+                .map_err(|_| Refusal::Busy)?
+            {
+                return Ok(None);
+            }
+            let record = source
+                .store
+                .read_shared_history_record(source.history_scope(channel), action)
+                .map_err(|_| Refusal::Failed)?;
+            Ok(record.map(|record| {
+                record
+                    .original
+                    .action()
+                    .spec()
+                    .body
+                    .create()
+                    .unwrap_or(action)
+            }))
         })
     }
 

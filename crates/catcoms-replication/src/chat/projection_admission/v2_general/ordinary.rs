@@ -241,6 +241,31 @@ impl V2GeneralPrefixVerifier {
         admission: &V2AuthenticatedAdmission,
         work: usize,
     ) -> Result<V2OrdinaryReceiveStatus, ChatError> {
+        self.apply_open_original(ledger, view, action, admission, work, true)
+    }
+
+    /// Retain the same verified causal original without changing the live
+    /// projection. The archive can then select it before readers see it.
+    pub fn stage_provisional_from_ledger(
+        &self,
+        ledger: &mut ChatLedger,
+        view: &ProjectionView,
+        action: &SignedAction,
+        admission: &V2AuthenticatedAdmission,
+        work: usize,
+    ) -> Result<V2OrdinaryReceiveStatus, ChatError> {
+        self.apply_open_original(ledger, view, action, admission, work, false)
+    }
+
+    fn apply_open_original(
+        &self,
+        ledger: &mut ChatLedger,
+        view: &ProjectionView,
+        action: &SignedAction,
+        admission: &V2AuthenticatedAdmission,
+        work: usize,
+        publish: bool,
+    ) -> Result<V2OrdinaryReceiveStatus, ChatError> {
         self.require_receiver_ledger(ledger, view, action)?;
         let LedgerDependencies { missing, exact } =
             self.ledger_dependencies(ledger, action, &[])?;
@@ -256,8 +281,12 @@ impl V2GeneralPrefixVerifier {
             .collect::<Vec<_>>();
         let (verified, token) =
             self.provisional_evidence(action, admission, &dependencies, view)?;
-        Self::apply_provisional(ledger, action, work, verified, token)
-            .map(V2OrdinaryReceiveStatus::Retained)
+        let state = if publish {
+            Self::apply_provisional(ledger, action, work, verified, token)?
+        } else {
+            Self::apply_verified(ledger, action, work, verified)?
+        };
+        Ok(V2OrdinaryReceiveStatus::Retained(state))
     }
 
     /// Rebuild semantic history from exact stored originals and the verified

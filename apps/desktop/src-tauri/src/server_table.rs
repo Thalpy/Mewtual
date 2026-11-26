@@ -107,8 +107,15 @@ const MAX_NATIVE_NAME_BYTES: usize = 256;
 
 #[derive(Default)]
 struct ArchiveChanges {
-    unsettled: [Option<(ActionId, ActionId)>; MAX_UNSETTLED_ARCHIVE_CHANGES],
+    unsettled: [Option<ArchiveChange>; MAX_UNSETTLED_ARCHIVE_CHANGES],
+    // Older founder ingress has no pre-write admission yet.
     overflow: bool,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct ArchiveChange {
+    pub(super) action: ActionId,
+    pub(super) target: ActionId,
 }
 
 impl NativeMemberWork {
@@ -137,23 +144,73 @@ impl NativeMemberWork {
         self.local.clone().try_lock_owned().ok()
     }
 
-    /// The same local permit covers applying the live change, attempting the
-    /// archive write, and publishing any visible archive body.
+    /// Admit an exact write before changing a joined live view or archive.
+    /// The caller holds the original row's local work permit.
+    pub(super) fn reserve_archive_change(
+        &self,
+        action: ActionId,
+        target: ActionId,
+    ) -> Option<bool> {
+        let mut changes = self.archive_changes.lock().ok()?;
+        if let Some(change) = changes
+            .unsettled
+            .iter()
+            .flatten()
+            .find(|change| change.action == action)
+        {
+            return (change.target == target).then_some(false);
+        }
+        let slot = changes.unsettled.iter_mut().find(|item| item.is_none())?;
+        *slot = Some(ArchiveChange { action, target });
+        Some(true)
+    }
+
+    pub(super) fn pending_archive_changes(
+        &self,
+    ) -> [Option<ArchiveChange>; MAX_UNSETTLED_ARCHIVE_CHANGES] {
+        self.archive_changes
+            .lock()
+            .map_or([None; MAX_UNSETTLED_ARCHIVE_CHANGES], |changes| {
+                changes.unsettled
+            })
+    }
+
+    /// Retire only the exact outstanding joined entry. A confirmed absence
+    /// is safe because a joined mutation was staged without a live effect.
+    pub(super) fn reconcile_archive_change(
+        &self,
+        attempted: ArchiveChange,
+        selected_target: Option<ActionId>,
+    ) -> Option<ActionId> {
+        let mut changes = self.archive_changes.lock().ok()?;
+        let slot = changes.unsettled.iter_mut().find(|item| {
+            item.as_ref().is_some_and(|entry| {
+                entry.action == attempted.action && entry.target == attempted.target
+            })
+        })?;
+        let current = slot.as_ref()?;
+        if selected_target.is_none_or(|target| target == current.target) {
+            let target = current.target;
+            *slot = None;
+            return Some(target);
+        }
+        None
+    }
+
     pub(super) fn note_archive_change(&self, action: ActionId, target: ActionId, selected: bool) {
         let Ok(mut changes) = self.archive_changes.lock() else {
             return;
         };
-        if let Some(existing) = changes
-            .unsettled
-            .iter_mut()
-            .find(|item| item.as_ref().is_some_and(|(pending, _)| *pending == action))
-        {
+        if let Some(existing) = changes.unsettled.iter_mut().find(|item| {
+            item.as_ref()
+                .is_some_and(|change| change.action == action && change.target == target)
+        }) {
             if selected {
                 *existing = None;
             }
         } else if !selected {
             if let Some(empty) = changes.unsettled.iter_mut().find(|item| item.is_none()) {
-                *empty = Some((action, target));
+                *empty = Some(ArchiveChange { action, target });
             } else {
                 changes.overflow = true;
             }
@@ -170,8 +227,8 @@ impl NativeMemberWork {
         }
         Some(changes.unsettled.map(|entry| {
             entry
-                .filter(|(_, pending_target)| *pending_target == target)
-                .map(|(action, _)| action)
+                .filter(|change| change.target == target)
+                .map(|change| change.action)
         }))
     }
 }
@@ -545,6 +602,51 @@ impl ServerTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn joined_archive_debt_stays_targeted_and_recovers_exactly() {
+        let work = NativeMemberWork::new();
+        let _permit = work.try_background().unwrap();
+        let target = ActionId::from_bytes([100; 32]);
+        let other = ActionId::from_bytes([101; 32]);
+        // One uncertain Create and enough independent mutations to fill the
+        // table. A ninth write must be refused before touching the archive.
+        assert_eq!(work.reserve_archive_change(target, target), Some(true));
+        for index in 1..MAX_UNSETTLED_ARCHIVE_CHANGES {
+            let action = ActionId::from_bytes([index as u8; 32]);
+            let affected = ActionId::from_bytes([120 + index as u8; 32]);
+            assert_eq!(work.reserve_archive_change(action, affected), Some(true));
+        }
+        assert_eq!(work.reserve_archive_change(other, other), None);
+        assert!(work
+            .unsettled_archive_changes(other)
+            .unwrap()
+            .iter()
+            .all(Option::is_none));
+        assert_eq!(work.reserve_archive_change(target, target), Some(false));
+        assert_eq!(work.reserve_archive_change(target, other), None);
+
+        let [Some(create), Some(mutation), ..] = work.pending_archive_changes() else {
+            panic!("the exact pending actions must survive");
+        };
+        assert_eq!(work.reconcile_archive_change(create, Some(other)), None);
+        // Selection can appear after the original wire lease has ended.
+        assert_eq!(
+            work.reconcile_archive_change(create, Some(target)),
+            Some(target)
+        );
+        assert_eq!(work.reconcile_archive_change(create, Some(target)), None);
+        assert_eq!(work.reserve_archive_change(other, other), Some(true));
+        let [Some(unselected), ..] = work.pending_archive_changes() else {
+            panic!("the freed slot must accept a new attempt");
+        };
+        assert_eq!(work.reconcile_archive_change(unselected, None), Some(other));
+        assert_eq!(
+            work.reconcile_archive_change(mutation, None),
+            Some(mutation.target)
+        );
+    }
+
     #[test]
     fn native_names_copy_length_without_retaining_unbounded_input_capacity() {
         let mut inflated = String::with_capacity(1024 * 1024);

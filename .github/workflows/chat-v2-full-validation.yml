@@ -240,6 +240,7 @@ jobs:
           scope = os.environ['CHAT_V2_NATIVE_SCOPE']
           if scope == 'native-membership':
               cases = membership + two_row_founders + [
+                  ('native-archive-debt', 'server_table::tests::joined_archive_debt_stays_targeted_and_recovers_exactly', 1),
                   ('native-join-history-startup', 'native_text::tests::native_text_connected_join_gated_route_publishes_one_original_joined_row', 1),
                   ('native-dependency-after-add', 'native_text::tests::native_text_joined_dependency_provider_reopens_after_selected_add', 1),
                   ('native-idle-reopen', 'native_text::tests::native_text_connected_join_cold_idle_unlock_requires_the_existing_vault', 1),
