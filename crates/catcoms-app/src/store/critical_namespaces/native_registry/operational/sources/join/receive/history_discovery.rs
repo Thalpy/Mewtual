@@ -179,6 +179,16 @@ impl NativeTextJoinedHistoryPage {
         self.query.is_current(&self.query.row)
     }
 
+    #[cfg(feature = "native-chat-test-hooks")]
+    #[doc(hidden)]
+    pub fn current_checks_for_test(&self) -> (bool, bool, bool) {
+        (
+            self.query.row.is_current_cached(),
+            self.query.observation.is_current_cached(),
+            !self.query.signal.is_cancelled(),
+        )
+    }
+
     pub fn action_at(&self, index: usize) -> Option<ActionId> {
         if !self.is_current_cached() {
             return None;

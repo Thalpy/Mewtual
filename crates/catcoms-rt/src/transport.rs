@@ -112,6 +112,9 @@ pub enum TransportError {
     /// The transport has shut down.
     #[error("transport closed")]
     Closed,
+    /// The request could not obtain local capacity before entering the driver.
+    #[error("local request capacity is busy")]
+    Busy,
     /// The caller explicitly retired this request before a response arrived.
     #[error("request cancelled")]
     Cancelled,

@@ -107,6 +107,7 @@ fn ordinary_trace_retains_only_byte_count_after_a_reply_then_outer_waiter_is_los
 /// error string. A received reply is distinct from its eventual return through injected delay.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum OrdinaryOutcome {
+    Busy,
     Reply(usize),
     Unreachable,
     Timeout,
@@ -193,6 +194,7 @@ impl OrdinaryObservation {
             Err(TransportError::Unreachable(_)) => OrdinaryOutcome::Unreachable,
             Err(TransportError::Timeout(_)) => OrdinaryOutcome::Timeout,
             Err(TransportError::Closed) => OrdinaryOutcome::Closed,
+            Err(TransportError::Busy) => OrdinaryOutcome::Busy,
             Err(TransportError::NoResponse) => OrdinaryOutcome::NoResponse,
             Err(TransportError::Cancelled) => OrdinaryOutcome::Cancelled,
             Err(TransportError::InvalidDialBatch) => OrdinaryOutcome::InvalidDialBatch,

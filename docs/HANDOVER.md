@@ -6,13 +6,22 @@ A verified archive-stage miss can steer the desktop to a specific missing
 parent. The worker retains the original page scope and signed identities,
 drops the child's staging ledger, and selects the parent before retrying
 the same child. Each chain has a fixed deadline, depth and attempt limit.
+An authenticated exact reply can wait for local staging with its
+original connection, approval, deadline and memory reservation. Local
+transport saturation has a distinct pre-submission result and preserves
+the wire retry. A running replay gets shorter local turns while idle
+peer scans keep their ordinary interval.
 
 The focused Windows mounted App test passed with the offline founder's
 Edit presented before its Create. It rejected a ticket presented with
 another opened page, fetched the exact parent, checked the same signed
 Edit on retry and verified the edited message after reopening. The
 adversarial re-review found no remaining blocker, high or medium finding.
-The native scheduler and own-outbox fallback still need execution evidence.
+The focused Windows transport test held the lower owner after caller
+cancellation, observed local Busy, then observed a real retry after
+the lower owner retired. An earlier desktop run selected the offline
+author's Edit and Delete but missed the deepest nested reply within
+the scenario's bound. The latest combined desktop regression is pending.
 
 Chat V2 remains disabled. Cold contact approval, governed rejoin,
 authorized audit and wider acceptance remain open.
