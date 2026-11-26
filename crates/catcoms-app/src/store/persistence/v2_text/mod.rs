@@ -23,6 +23,7 @@ mod request;
 mod resources;
 mod retain;
 mod retirement;
+mod sdk_admission;
 mod transaction;
 mod wal;
 mod workspace;
@@ -42,6 +43,17 @@ pub(in crate::store) use common::{
     TextHeadIdData, TextRetirementPlanIdData, TextTransactionIdData,
 };
 pub(in crate::store) use context::TextContextData;
+#[cfg(all(test, any(windows, target_os = "linux")))]
+pub(in crate::store) use control::governed_add::held::{
+    GovernedAddHeaderRecoveryState, GovernedAddRecoveryState, GovernedAddWelcomeRecoveryState,
+    HeldGovernedAddFence,
+};
+pub(in crate::store) use control::governed_add::held::{
+    PreparedGovernedAddFence, PreparedGovernedRemoveFence,
+};
+#[cfg(all(test, any(windows, target_os = "linux")))]
+pub(in crate::store) use control::governed_add::HeldGovernedArchiveRead;
+pub(in crate::store) use control::governed_add::{HeldColdFounderAdd, HeldColdFounderGenesis};
 pub(in crate::store) use head::{TextPendingData, TextRootData};
 #[cfg(all(test, windows))]
 pub(in crate::store) use ordinary_data::{
@@ -69,6 +81,7 @@ pub(in crate::store) use request::TextRequestDigestData;
 #[cfg(all(test, windows))]
 pub(in crate::store) use request::TextTokenKeyData;
 pub(in crate::store) use resources::V2TextReadResources;
+pub(in crate::store) use sdk_admission::prepare_sdk_admission;
 #[cfg(all(test, windows))]
 pub(in crate::store) use transaction::V2TextRetainTestCut;
 pub(in crate::store) use transaction::V2_TEXT_RETAIN_ROOT_PHASE_BYTES;

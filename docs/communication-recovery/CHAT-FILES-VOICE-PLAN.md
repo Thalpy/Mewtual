@@ -13,12 +13,12 @@ documents apply to their named source, not automatically to current `main`.
 
 ## Chat V2 completion status
 
-| Area | Implemented and merged | Still required |
+| Area | Implementation and evidence | Still required |
 | --- | --- | --- |
 | Native foundations | Typed protocol/storage boundaries, source/key custody, accounting, signed binding codecs and recovery primitives. | Production consumers and end-to-end acceptance of the combined system. |
 | Warm native local messages | Real App group creation, native saves, own-saved-original reader, sealed exact-intent retry journal and warm session restoration. | Shared message delivery and projection. The UI currently promises only **messages saved on this device**. |
-| Invitations | Same-row unsigned preparation, retained routing-plan data, an initial one-intent durable journal under hosted validation, and a separate native signing-key tail. | Durable KeyAttempt/raw/signature coverage, SavedInvite issuer, native invitation command and usable publication. |
-| MLS Add and join | Real SDK candidate, exact ownership handoff, sealed routing transfer and Welcome binding/signature primitives. | Root-covered transaction, current native Source4 admission, durable installation, Welcome release and joined native/transport consumers. |
+| Invitations | The warm native branch covers KeyAttempt and Raw, builds a verified packet with zero certified contacts, and inspects the authenticated journal. The focused Linux and Windows workflows passed on `3d3bce63`. | Native invitation command, certified contacts, usable publication, a cold operational caller and broader retention. |
+| MLS Add and join | Real SDK candidate and ownership handoff. Hosted CI at `3d3bce63` covers the retained V2 request, exact response framing and private Welcome processing with test Host selection. | Root-covered transaction, current native Source4 admission, durable installation, Welcome release and joined native/transport consumers. |
 | Shared chat | Original-operation and recovery machinery at library boundaries. | Real V2 transport/delivery loop, catch-up, shared projection, edits/deletes and authorized audit through the production path. |
 | Restart and membership | Durable data readers, recovery formats and warm continuity. | Scalable governing history/pins, cold operational authoring restore, usable durable Leave/Retired/rejoin and joined cold reconstruction. |
 | Voice V2 | Bounded native/browser machinery and two-peer evidence; #73's unscripted three-peer reproduction and diagnostics are now merged. | Resolve its recorded positive-test failure, complete automatic admission/rounds, production audio/lifecycle, member relay and physical acceptance. |

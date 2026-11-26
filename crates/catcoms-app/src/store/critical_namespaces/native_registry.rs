@@ -13,34 +13,68 @@ pub(in crate::store) use lifecycle::preparation::VerifiedColdCatalog as Verified
 pub(in crate::store) use lifecycle::wal::{
     Decision as NativeIndex3WalDecision, VerifiedWal as VerifiedNativeIndex3Wal,
 };
-pub(in crate::store) use lifecycle::VerifiedGovernanceNative;
+pub(in crate::store) use lifecycle::{
+    verify_joined_pin_parent, verify_shared_history_parent, VerifiedGovernanceNative,
+};
 // Named full invoice shared with the closed physical reader. Publishing its
 // size grants no policy, reserve, handler or physical/native authority.
 pub(in crate::store) const NATIVE_INDEX3_FULL_FEE: usize = lifecycle::preparation::PREPARATION_FEE;
 pub(in crate::store::critical_namespaces) mod operational;
 pub(in crate::store) mod preparation;
 
+pub use lifecycle::joined::NativeTextJoinedRegistryRowData;
+pub use operational::NativeTextFounderDependencyProvider;
+pub use operational::NativeTextInvitePublication;
+pub use operational::NativeTextJoinedReconnect;
+pub use operational::NativeTextJoinedRequestPreparation;
+pub use operational::NativeTextJoinedRowSelection;
+pub use operational::NativeTextJoinedRuntime;
+pub use operational::NativeTextJoinedVaultUpgrade;
 pub use operational::{
     NativeCreationStateData, NativeCreationStatusData, NativeIndexPolicy, NativeIndexStore,
     NativeIndexUpgrade, NativeTextCreationBudget, NativeTextCreationInputs, NativeTextCreationJob,
     NativeTextCreationPreparation, NativeTextCreationProgress, NativeTextCreationRefusal,
-    NativeTextCreationRequest, NativeTextCreationSettings, NativeTextGovernanceUpgrade,
-    NativeTextGovernedStorage, NativeTextHistoryResponseBudget, NativeTextHistoryResponseCredit,
-    NativeTextMemberAdmissionFailure, NativeTextMemberBudget, NativeTextMemberFinalPreparation,
-    NativeTextMemberHistoryItem, NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus,
-    NativeTextMemberJob, NativeTextMemberPreparation, NativeTextMemberSaveJob,
-    NativeTextRuntimeSelection, NativeTextSourceBudget, NativeTextSourceCommand,
-    NativeTextSourcePolicy, NativeTextSourcePreparation, NativeTextSourceRetirement,
-    NativeTextSourceRetirementPreparation, NativeTextSourceRetirementRefusal,
-    NativeTextSourceRetirementStatus, NativeTextSources, NativeTextUiCandidate,
-    NativeTextUiGarbage, NativeTextUiObservation, NativeTextUiPreparation, NativeTextUiRetirement,
-    NativeTextUiRetirementBatch, NativeTextUiRetirementDrain, NativeTextUiRetirementState,
-    NativeTextVault, NativeTextVaultAuthentication, NativeTextVaultAuthenticationCheck,
-    NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal, NativeTextWorkRetirement,
-    NativeTextWorkRetirementPreparation, NativeUiInvocationBudget, NativeUiInvocationMetadata,
-    NativeUiStateBudget, NativeUiStateCredit, NativeUiStatePreparation, NativeUiStateRead,
-    NativeUiStateSaved,
+    NativeTextCreationRequest, NativeTextCreationSettings,
+    NativeTextFounderMemberIngressPreparation, NativeTextFounderMemberPublication,
+    NativeTextFounderMemberPublicationReceipt, NativeTextFounderMemberReceiver,
+    NativeTextGovernanceUpgrade, NativeTextGovernedStorage, NativeTextHistoryResponseBudget,
+    NativeTextHistoryResponseCredit, NativeTextJoinedStorage, NativeTextMemberAdmissionFailure,
+    NativeTextMemberBudget, NativeTextMemberFinalPreparation, NativeTextMemberHistoryItem,
+    NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus, NativeTextMemberJob,
+    NativeTextMemberPreparation, NativeTextMemberSaveJob, NativeTextRuntimeSelection,
+    NativeTextSourceBudget, NativeTextSourceCommand, NativeTextSourcePolicy,
+    NativeTextSourcePreparation, NativeTextSourceRetirement, NativeTextSourceRetirementPreparation,
+    NativeTextSourceRetirementRefusal, NativeTextSourceRetirementStatus, NativeTextSources,
+    NativeTextUiAddRetirement, NativeTextUiCandidate, NativeTextUiGarbage, NativeTextUiObservation,
+    NativeTextUiPreparation, NativeTextUiRetirement, NativeTextUiRetirementBatch,
+    NativeTextUiRetirementDrain, NativeTextUiRetirementState, NativeTextVault,
+    NativeTextVaultAuthentication, NativeTextVaultAuthenticationCheck, NativeTextVaultUpgrade,
+    NativeTextVaultUpgradeRefusal, NativeTextWorkRetirement, NativeTextWorkRetirementPreparation,
+    NativeUiInvocationBudget, NativeUiInvocationMetadata, NativeUiStateBudget, NativeUiStateCredit,
+    NativeUiStatePreparation, NativeUiStateRead, NativeUiStateSaved,
 };
+pub use operational::{
+    NativeTextColdFounderGoverningRequest, NativeTextColdFounderGoverningRequests,
+    NativeTextColdFounderJoinRequest, NativeTextColdFounderJoinRequests,
+    NativeTextColdFounderMemberIngress, NativeTextColdFounderMemberReceiver,
+    NativeTextColdFounderPublication, NativeTextColdFounderPublicationReceipt,
+    NativeTextColdFounderSource,
+};
+pub use operational::{
+    NativeTextJoinedArchivedActions, NativeTextJoinedDependencyAttachRefusal,
+    NativeTextJoinedDependencyExchange, NativeTextJoinedDependencyProvider,
+    NativeTextJoinedDependencyResponse, NativeTextJoinedGoverningExchange,
+    NativeTextJoinedGoverningIncoming, NativeTextJoinedGoverningProvider,
+    NativeTextJoinedGoverningResponse, NativeTextJoinedMemberIngressPreparation,
+    NativeTextJoinedMemberLedger, NativeTextJoinedMemberProjection,
+    NativeTextJoinedMemberPublication, NativeTextJoinedMemberPublicationReceipt,
+    NativeTextJoinedMemberReceiver, NativeTextJoinedReceivedOriginal,
+    NativeTextJoinedSelectionPreparation,
+};
+pub use operational::{
+    NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,
+};
+pub use operational::{NativeTextJoinedMemberFinalPreparation, NativeTextJoinedMemberSaveJob};
 pub use preparation::{
     NativeRegistryInstallation, NativeRegistryPolicy, NativeRegistryPreparationPolicy,
     NativeRegistryStore, PreparedNativeRegistryMigration,

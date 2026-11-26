@@ -52,6 +52,16 @@ mod chat_fences;
 mod critical_namespaces;
 mod governance_open;
 mod mounted;
+mod native_text_invite;
+mod native_text_roster;
+pub use critical_namespaces::NativeTextFounderDependencyProvider;
+pub use critical_namespaces::NativeTextInvitePublication;
+pub use critical_namespaces::NativeTextJoinedRegistrationData;
+pub use critical_namespaces::NativeTextJoinedRegistryRowData;
+pub use critical_namespaces::NativeTextJoinedRequestPreparation;
+pub use critical_namespaces::NativeTextJoinedRowSelection;
+pub use critical_namespaces::NativeTextJoinedRuntime;
+pub use critical_namespaces::NativeTextJoinedVaultUpgrade;
 pub use critical_namespaces::{
     ActivatedCheckpointJoin, ArchiveBootstrapCatalogPolicy, ArchiveFounderBegin,
     ArchiveFounderCreation, ArchiveFounderExisting, ArchiveFounderInputs, ArchiveFounderPlanning,
@@ -65,29 +75,64 @@ pub use critical_namespaces::{
     NativeRegistryPreparationPolicy, NativeRegistryStore, NativeTextCreationBudget,
     NativeTextCreationInputs, NativeTextCreationJob, NativeTextCreationPreparation,
     NativeTextCreationProgress, NativeTextCreationRefusal, NativeTextCreationRequest,
-    NativeTextCreationSettings, NativeTextGovernanceUpgrade, NativeTextGovernedStorage,
-    NativeTextHistoryResponseBudget, NativeTextHistoryResponseCredit,
+    NativeTextCreationSettings, NativeTextFounderMemberIngressPreparation,
+    NativeTextFounderMemberPublication, NativeTextFounderMemberPublicationReceipt,
+    NativeTextFounderMemberReceiver, NativeTextGovernanceUpgrade, NativeTextGovernedStorage,
+    NativeTextHistoryResponseBudget, NativeTextHistoryResponseCredit, NativeTextJoinedStorage,
     NativeTextMemberAdmissionFailure, NativeTextMemberBudget, NativeTextMemberFinalPreparation,
     NativeTextMemberHistoryItem, NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus,
     NativeTextMemberJob, NativeTextMemberPreparation, NativeTextMemberSaveJob,
     NativeTextRuntimeSelection, NativeTextSourceBudget, NativeTextSourceCommand,
     NativeTextSourcePolicy, NativeTextSourcePreparation, NativeTextSourceRetirement,
     NativeTextSourceRetirementPreparation, NativeTextSourceRetirementRefusal,
-    NativeTextSourceRetirementStatus, NativeTextSources, NativeTextUiCandidate,
-    NativeTextUiGarbage, NativeTextUiObservation, NativeTextUiPreparation, NativeTextUiRetirement,
-    NativeTextUiRetirementBatch, NativeTextUiRetirementDrain, NativeTextUiRetirementState,
-    NativeTextVault, NativeTextVaultAuthentication, NativeTextVaultAuthenticationCheck,
-    NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal, NativeTextWorkRetirement,
-    NativeTextWorkRetirementPreparation, NativeUiInvocationBudget, NativeUiInvocationMetadata,
-    NativeUiStateBudget, NativeUiStateCredit, NativeUiStatePreparation, NativeUiStateRead,
-    NativeUiStateSaved, PendingJoinCatalogPolicy, PreparedArchiveBootstrapStore,
+    NativeTextSourceRetirementStatus, NativeTextSources, NativeTextUiAddRetirement,
+    NativeTextUiCandidate, NativeTextUiGarbage, NativeTextUiObservation, NativeTextUiPreparation,
+    NativeTextUiRetirement, NativeTextUiRetirementBatch, NativeTextUiRetirementDrain,
+    NativeTextUiRetirementState, NativeTextVault, NativeTextVaultAuthentication,
+    NativeTextVaultAuthenticationCheck, NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal,
+    NativeTextWorkRetirement, NativeTextWorkRetirementPreparation, NativeUiInvocationBudget,
+    NativeUiInvocationMetadata, NativeUiStateBudget, NativeUiStateCredit, NativeUiStatePreparation,
+    NativeUiStateRead, NativeUiStateSaved, PendingJoinCatalogPolicy, PreparedArchiveBootstrapStore,
     PreparedFreshV2TextFounder, PreparedNativeRegistryMigration, PreparedV2CurrentLayoutStore,
     PreparedV2GovernanceLayoutStore, ReturnedArchiveFounderCreation, ReturnedArchiveFounderInputs,
     ReturnedArchiveFounderPlanning, ReturnedCheckpointJoinActivation, V2CurrentLayoutPolicy,
     V2CurrentLayoutStore, V2GovernanceLayoutPolicy, V2GovernanceLayoutStore, V2MemberOutboxPolicy,
 };
+pub use critical_namespaces::{
+    NativeTextColdFounderGoverningRequest, NativeTextColdFounderGoverningRequests,
+    NativeTextColdFounderJoinRequest, NativeTextColdFounderJoinRequests,
+    NativeTextColdFounderMemberIngress, NativeTextColdFounderMemberReceiver,
+    NativeTextColdFounderPublication, NativeTextColdFounderPublicationReceipt,
+    NativeTextColdFounderSource,
+};
+pub use critical_namespaces::{
+    NativeTextJoinedArchivedActions, NativeTextJoinedDependencyAttachRefusal,
+    NativeTextJoinedDependencyExchange, NativeTextJoinedDependencyProvider,
+    NativeTextJoinedDependencyResponse, NativeTextJoinedGoverningExchange,
+    NativeTextJoinedGoverningIncoming, NativeTextJoinedGoverningProvider,
+    NativeTextJoinedGoverningResponse, NativeTextJoinedMemberIngressPreparation,
+    NativeTextJoinedMemberLedger, NativeTextJoinedMemberProjection,
+    NativeTextJoinedMemberPublication, NativeTextJoinedMemberPublicationReceipt,
+    NativeTextJoinedMemberReceiver, NativeTextJoinedReceivedOriginal, NativeTextJoinedReconnect,
+    NativeTextJoinedSelectionPreparation,
+};
+pub use critical_namespaces::{
+    NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,
+};
+pub use critical_namespaces::{
+    NativeTextJoinedMemberFinalPreparation, NativeTextJoinedMemberSaveJob,
+};
 pub(crate) use mounted::LegacyStoreCustody;
 pub use mounted::{MountedLeaseRefusal, MountedLeaseRefusalKind, MountedVault};
+pub use native_text_invite::{
+    NativeTextInvitePacketData, NativeTextInviteRecovery, NativeTextSavedInvite,
+    NativeTextSavedJoinResponse, MAX_NATIVE_TEXT_INVITE_PACKET_BYTES,
+};
+pub use native_text_roster::{NativeTextRoster, NativeTextRosterMember};
+pub use persistence::v2_member_transport::{
+    NativeTextFounderDependencyExchange, NativeTextFounderDependencyResponse,
+    NativeTextFounderFrameOutcome, NativeTextFounderReceived,
+};
 mod owner_evidence;
 pub use chat_admission::{
     ChatAdmissionBinding, ChatAdmissionCapture, ChatAdmissionFinish, ChatAdmissionKey,
@@ -597,9 +642,11 @@ mod persistence {
     #[cfg(target_os = "linux")]
     mod exact_inventory_linux;
     pub(in crate::store) use cold_source_read::{
-        OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
+        prepare_joined_member_history, prepare_recovered_founder_history, JoinedMemberLane,
+        JoinedMemberSource, OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
         PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
-        PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis,
+        PreparedV2UnsignedOriginalCustody, RecoveredMemberLane, RecoveredMemberSource,
+        V2AdvancedAppendBasis,
     };
     mod current_group;
     mod current_layout;
@@ -611,9 +658,12 @@ mod persistence {
     mod v2_group_directory;
     /// Chat V2 ordinary-member durable outbox; independent of the founder `v2_text` journal.
     pub(in crate::store) mod v2_member_outbox;
+    pub(in crate::store) mod v2_member_transport;
+    pub(in crate::store) mod v2_shared_history;
     pub(in crate::store) mod v2_text;
     pub(in crate::store) use cold_source_read::v2_genesis_activation;
     pub use cold_source_read::RetainedBootstrapSourceData;
+    pub(in crate::store) use cold_source_read::RetainedPromotedGenesisSdk;
     pub(super) use cold_source_read::{
         GenesisCurrentOwnerRef, GenesisSourceDataRef, OriginalBootstrapReadObservation,
         V2TextOwnedCurrent, V2TextOwnerRef, V2TextSourceNegativeObserver,
@@ -5725,6 +5775,13 @@ pub struct ServerStore {
         Option<critical_namespaces::governance_layout::V2GovernanceLayoutPolicy>,
     governance_layout:
         std::sync::Mutex<Option<critical_namespaces::governance_layout::MountedGovernanceLayout>>,
+    joined_pin_selection:
+        std::sync::Mutex<Option<persistence::governance_layout::joined::ColdJoinedSelection>>,
+    joined_pin_index:
+        std::sync::Mutex<Option<persistence::governance_layout::joined::SelectedPinIndex>>,
+    shared_history_mount: std::sync::Mutex<
+        Option<persistence::governance_layout::joined::shared_history::SelectedSharedHistory>,
+    >,
     // Namespace5 marker + held member-outbox parent, installed only by the concrete configured
     // handler. Its presence is mount DATA, never a member-source or save permission.
     member_outbox_layout: std::sync::Mutex<
@@ -5900,7 +5957,11 @@ impl ServerStore {
     ) -> Result<Self, AppError> {
         let dir = dir.as_ref().to_path_buf();
         // Keep every existing opener's exclusion-before-KDF ordering unchanged.
-        let session = acquire_vault_session(&dir)?;
+        let session = if policies.requires_existing_joined_vault() {
+            VaultSessionGuard::acquire_existing(&dir)?
+        } else {
+            acquire_vault_session(&dir)?
+        };
         Self::open_catalog_in_session(dir, passphrase, rng, policies, session)
     }
 
@@ -5937,6 +5998,7 @@ impl ServerStore {
         policies: governance_open::CatalogPolicies,
         session: VaultSessionGuard,
     ) -> Result<Self, AppError> {
+        let joined = policies.requires_existing_joined_vault();
         let governance_open::CatalogPolicies {
             catalog_read_pool,
             pending_join_policy,
@@ -5951,8 +6013,21 @@ impl ServerStore {
                 .is_some_and(|policy| policy.native_registry.is_some()),
         )?;
         owner_evidence::operations::refuse_orphaned_intent_before_vault_creation(&dir)?;
-        let (keys, format) = open_or_create_vault_classified(&dir, passphrase, rng)?.into_parts();
-        fs::create_dir_all(dir.join("servers")).map_err(|e| AppError::Io(e.to_string()))?;
+        let (keys, format) = if joined {
+            let servers = fs::symlink_metadata(dir.join("servers"))
+                .map_err(|e| AppError::Io(e.to_string()))?;
+            if !servers.is_dir() {
+                return Err(critical_namespaces::refused());
+            }
+            session
+                .open_existing_critical(&dir, passphrase)?
+                .into_parts()
+        } else {
+            let keys_and_format =
+                open_or_create_vault_classified(&dir, passphrase, rng)?.into_parts();
+            fs::create_dir_all(dir.join("servers")).map_err(|e| AppError::Io(e.to_string()))?;
+            keys_and_format
+        };
         let store = Self {
             catalog_read_pool,
             pending_join_policy,
@@ -5960,6 +6035,9 @@ impl ServerStore {
             current_layout_policy,
             governance_layout_policy,
             governance_layout: Default::default(),
+            joined_pin_selection: Default::default(),
+            joined_pin_index: Default::default(),
+            shared_history_mount: Default::default(),
             member_outbox_layout: Default::default(),
             member_outbox_mount: Default::default(),
             current_layout: Default::default(),

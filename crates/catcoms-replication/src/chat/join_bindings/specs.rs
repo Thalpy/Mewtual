@@ -141,6 +141,11 @@ pub struct WelcomeBindingSpecData {
     pub sealed_routing_transfer: [u8; 32],
 }
 impl WelcomeBindingSpecData {
+    /// Decode the exact bounded preimage kept by the private Welcome journal.
+    pub fn decode_signing_bytes_data(bytes: &[u8]) -> Result<Self, ChatError> {
+        Self::decode_semantic(bytes)
+    }
+
     /// Pure bounded unsigned DATA for an owning caller to freeze and durably
     /// cover BEFORE its separately authorized native key edge. This is the
     /// SAME canonical preimage used by SignedWelcomeBindingData::sign_using;

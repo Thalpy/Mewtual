@@ -150,8 +150,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Drop for PreparedFreshV2TextFounder<T, 
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
-    /// Preserve the actual NativeRequired whole Host while preparing only an
-    /// unsigned original. No library fallback, key or Saved receipt is issued.
+    /// Prepare the unsigned original through the actual NativeRequired Host.
     pub(in crate::store) fn prepare_native_invite_intent_data(
         &mut self,
         layout: &V2CurrentLayoutStore,
@@ -168,6 +167,139 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
             .as_mut()
             .ok_or_else(refused)?
             .prepare_native_invite_intent_data(layout, request, routing_plan, keys, rng)
+    }
+
+    pub(in crate::store) fn save_native_invite_data(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        request: catcoms_sync::owner_v2::V2FounderInviteRequestData,
+        routing_plan: &[u8],
+        keys: &mut super::founder::NativeFounderKeys,
+        rng: &mut impl CryptoRngCore,
+        negative: &catcoms_rt::RequestCancellation,
+    ) -> Result<crate::store::NativeTextSavedInvite, AppError> {
+        if !self.is_ready_data() {
+            return Err(refused());
+        }
+        self.host
+            .as_mut()
+            .ok_or_else(refused)?
+            .save_native_invite_data(layout, request, routing_plan, keys, rng, negative)
+    }
+
+    pub(in crate::store) fn inspect_native_invite_data(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        request: catcoms_sync::owner_v2::V2FounderInviteRequestData,
+        routing_plan: &[u8],
+        keys: &super::founder::NativeFounderKeys,
+        negative: &catcoms_rt::RequestCancellation,
+    ) -> Result<crate::store::NativeTextInviteRecovery, AppError> {
+        if !self.is_ready_data() {
+            return Err(refused());
+        }
+        self.host
+            .as_mut()
+            .ok_or_else(refused)?
+            .inspect_native_invite_data(layout, request, routing_plan, keys, negative)
+    }
+
+    pub(in crate::store) fn require_received_join_request(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        incoming: &catcoms_sync::V2JoinRequestPacketData<'_>,
+        routing_plan: &[u8],
+        keys: &super::founder::NativeFounderKeys,
+        negative: &catcoms_rt::RequestCancellation,
+    ) -> Result<(), AppError> {
+        if !self.is_ready_data() {
+            return Err(refused());
+        }
+        self.host
+            .as_mut()
+            .ok_or_else(refused)?
+            .require_received_join_request(layout, incoming, routing_plan, keys, negative)
+    }
+
+    pub(in crate::store) fn handle_received_join_request(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        incoming: &catcoms_sync::V2JoinRequestPacketData<'_>,
+        routing_plan: &[u8],
+        signing: (
+            &super::founder::NativeFounderKeys,
+            [catcoms_rt::NativeChatPreparedKeyCut; 3],
+        ),
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+        negative: &catcoms_rt::RequestCancellation,
+    ) -> Result<crate::store::NativeTextSavedJoinResponse, AppError> {
+        if !self.is_ready_data() {
+            return Err(refused());
+        }
+        self.host
+            .as_mut()
+            .ok_or_else(refused)?
+            .handle_received_join_request(layout, incoming, routing_plan, signing, rng, negative)
+    }
+
+    pub(in crate::store) fn encode_selected_member_add(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        request: &catcoms_sync::V2MemberAddRequestData,
+        keys: &super::founder::NativeFounderKeys,
+        caller: &catcoms_rt::RequestCancellation,
+    ) -> Result<Vec<u8>, AppError> {
+        if !self.is_ready_data() {
+            return Err(refused());
+        }
+        self.host
+            .as_mut()
+            .ok_or_else(refused)?
+            .encode_selected_member_add(layout, request, keys, caller)
+    }
+
+    pub(in crate::store) fn remove_governed_member_native(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        target: catcoms_replication::chat::owner_header::OwnerBodyId,
+        keys: &super::founder::NativeFounderKeys,
+        cuts: (
+            &mut catcoms_rt::NativeChatPreparedKeyCut,
+            &mut catcoms_rt::NativeChatPreparedKeyCut,
+            &mut catcoms_rt::NativeChatKeyEnds,
+        ),
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+        negative: &catcoms_rt::RequestCancellation,
+    ) -> Result<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64), AppError> {
+        if !self.is_ready_data() {
+            return Err(refused());
+        }
+        self.host
+            .as_mut()
+            .ok_or_else(refused)?
+            .remove_governed_member_native(layout, target, keys, cuts, rng, negative)
+    }
+
+    pub(in crate::store) fn governed_roster_native(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        keys: &super::founder::NativeFounderKeys,
+        negative: &catcoms_rt::RequestCancellation,
+    ) -> Result<crate::store::NativeTextRoster, AppError> {
+        if !self.is_ready_data() {
+            return Err(refused());
+        }
+        self.host
+            .as_mut()
+            .ok_or_else(refused)?
+            .governed_roster_native(layout, keys, negative)
+    }
+
+    #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(in crate::store) fn host_for_governed_add_test(
+        &mut self,
+    ) -> &mut crate::store::PreparedV2TextHost<T, R> {
+        self.host.as_deref_mut().expect("promoted fixture host")
     }
     /// Additional driver/Box/refusal storage only. Existing creator, source,
     /// source-read, restored SDK and Current fees remain independently live.
@@ -418,6 +550,53 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
             .prepare_member_history_with_access(layout, read, negative, rng, access)
     }
 
+    pub(in crate::store) fn run_founder_member_receive(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        channel: u128,
+        operation: crate::store::persistence::v2_member_transport::FounderReceiveOperation<'_>,
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+        access: FounderAccess<'_>,
+    ) -> Result<
+        crate::store::persistence::v2_member_transport::FounderReceiveOutcome,
+        V2MemberSaveRefusal,
+    > {
+        access
+            .require(&self.origin)
+            .map_err(|_| V2MemberSaveRefusal::Unavailable)?;
+        if !self.is_ready_data() {
+            return Err(V2MemberSaveRefusal::Unavailable);
+        }
+        self.host
+            .as_mut()
+            .ok_or(V2MemberSaveRefusal::Unavailable)?
+            .run_founder_member_receive(layout, channel, operation, caller, rng, access)
+    }
+
+    pub(in crate::store) fn run_founder_member_debt(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        operation: crate::store::persistence::v2_member_transport::FounderDebtOperation,
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+        access: FounderAccess<'_>,
+    ) -> Result<
+        crate::store::persistence::v2_member_transport::FounderDebtOutcome,
+        V2MemberSaveRefusal,
+    > {
+        access
+            .require(&self.origin)
+            .map_err(|_| V2MemberSaveRefusal::Unavailable)?;
+        if !self.is_ready_data() {
+            return Err(V2MemberSaveRefusal::Unavailable);
+        }
+        self.host
+            .as_mut()
+            .ok_or(V2MemberSaveRefusal::Unavailable)?
+            .run_founder_member_debt(layout, operation, caller, rng, access)
+    }
+
     /// No IO/wait is added at the existing finite final edge. The actual
     /// native factory must still authenticate and retain its supplied custody.
     pub fn admit_member_save(
@@ -464,6 +643,26 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
             Some(host) => host.cancel_and_drain_admitted_promotion(),
             None => Ok(()),
         }
+    }
+
+    pub(in crate::store) fn discard_add_for_closed_source(
+        &mut self,
+        closed: &catcoms_rt::NativeChatKeyDrain,
+    ) -> Result<(), AppError> {
+        if let Some(host) = &mut self.host {
+            host.discard_add_for_closed_source(closed)?;
+        }
+        Ok(())
+    }
+
+    pub(in crate::store) fn retire_add_for_closed_ui(
+        &mut self,
+        closed: &[Option<&catcoms_rt::NativeChatKeyDrain>],
+    ) -> Result<(), AppError> {
+        if let Some(host) = &mut self.host {
+            host.retire_add_for_closed_ui(closed)?;
+        }
+        Ok(())
     }
 
     /// Test only: retain a genuine member-save source End while the whole

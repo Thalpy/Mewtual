@@ -112,6 +112,14 @@ impl LocalChatScope {
         self.label.as_ref()
     }
 
+    pub(crate) fn genesis_attachment_negative(&self) -> Result<RequestCancellation, SyncError> {
+        self.reservation
+            .as_ref()
+            .filter(|_| self.genesis_attachment_live())
+            .map(|source| source.observer.clone())
+            .ok_or(SyncError::ChatScopeUnavailable)
+    }
+
     pub(crate) fn observe_private_initialization(
         &self,
     ) -> Result<OriginalInitializationObservation, SyncError> {

@@ -178,7 +178,7 @@ pub(super) enum CleanupProof<'a> {
     WalkNewRoot(&'a [u8; 32]),
 }
 
-fn require_selected(ns: &Namespace, current: &SelectedHead) -> Result<(), AppError> {
+pub(super) fn require_selected(ns: &Namespace, current: &SelectedHead) -> Result<(), AppError> {
     let now = read_bounded(&ns.head(), HEAD_FILE_CAP, false)?;
     if now.as_slice() != current.file.as_slice() {
         return Err(refused());
@@ -742,9 +742,7 @@ impl PreparedMemberAppend {
         owner: MemberOutbox,
         admission: MemberOutboxSaveAdmission,
     ) -> Result<AdmittedMemberAppend, Box<RefusedMemberAppendAdmission>> {
-        let facts = self.admission_facts();
-        let current = matches!(&owner.state, OwnerState::Clean(head) if head.id == facts.parent);
-        if admission.facts != facts || owner.context.id != facts.context || !current {
+        if !self.matches_admission(&owner, &admission) {
             return Err(Box::new(RefusedMemberAppendAdmission {
                 owner,
                 prepared: self,
@@ -752,15 +750,48 @@ impl PreparedMemberAppend {
                 refusal: MemberOutboxRefusal::Stale,
             }));
         }
+        Ok(self.into_admitted(owner, admission))
+    }
+
+    /// The host's final edge already holds this paid box. A refusal returns
+    /// that allocation and every owner without allocating a replacement.
+    #[expect(
+        clippy::result_large_err,
+        reason = "A final-edge refusal returns the original prepared box, owner and physical lease without allocating."
+    )]
+    pub(in crate::store) fn admit_boxed(
+        self: Box<Self>,
+        owner: MemberOutbox,
+        admission: MemberOutboxSaveAdmission,
+    ) -> Result<AdmittedMemberAppend, (MemberOutbox, Box<Self>, MemberOutboxSaveAdmission)> {
+        if !self.matches_admission(&owner, &admission) {
+            return Err((owner, self, admission));
+        }
+        Ok((*self).into_admitted(owner, admission))
+    }
+
+    fn matches_admission(
+        &self,
+        owner: &MemberOutbox,
+        admission: &MemberOutboxSaveAdmission,
+    ) -> bool {
+        admission.facts == self.admission_facts() && self.admissible_by(owner)
+    }
+
+    fn into_admitted(
+        self,
+        owner: MemberOutbox,
+        admission: MemberOutboxSaveAdmission,
+    ) -> AdmittedMemberAppend {
         let MemberOutboxSaveAdmission { lease, .. } = admission;
-        Ok(AdmittedMemberAppend {
+        AdmittedMemberAppend {
             transition: self.transition,
             receipt: self.receipt,
             original: self.original,
             payment: self.payment,
             owner,
             lease,
-        })
+        }
     }
 }
 

@@ -20,6 +20,93 @@ test("actual App native seal failure keeps composer and exact intent without any
 const token="04".repeat(32);
 const retained={version:4,drafts:{"7:9":"original"},readMarks:{},nativeTextIntents:{[token]:{kind:"create",token,server:7,channel:"9",expectedContext:context,text:"original"}}};
 const saved=(args:Record<string,unknown>)=>({backend:"text-v2",disposition:"saved-local",retry_token:args.retryToken,message_id:row.action,ordinal:"0"});
+test("confirmed removal retires only the original conversation before native dispatch", async () => {
+  const app = pendingManagerApp({});
+  await app.hydrate();
+  app.nativeConversation(7, "9", context);
+  app.type("keep this draft");
+  const gate = deferred();
+  app.holdSave(gate.promise);
+  const send = app.send();
+  await settle();
+  assert.equal(app.state().writes.length, 1);
+  const otherContext = "05".repeat(32);
+  app.receiveMembership({ server: 7, context: otherContext, removed: true });
+  assert.equal(app.nativeRemoved(7, context), false);
+
+  app.receiveMembership({ server: 7, context, removed: true });
+  app.receiveMembership({ server: 7, context, removed: false });
+  gate.resolve();
+  assert.equal(await send, "uncertain");
+  assert.equal(app.state().draft, "keep this draft");
+  await app.nativeRetry();
+  app.syncRetry();
+  assert.deepEqual(app.retryTimers(), []);
+  assert.equal(await app.send(), "refused");
+  assert.equal(app.state().submissions.length, 0);
+  const [retainedToken] = Object.keys(app.state().sealed.nativeTextIntents);
+  assert.equal(app.state().sealed.nativeTextIntents[retainedToken].expectedContext, context);
+
+  app.nativeConversation(7, "9", otherContext);
+  app.type("different conversation");
+  app.answer(async args => saved(args));
+  assert.equal(await app.send(), "sent");
+  assert.equal(app.state().submissions[0].args.expectedContext, otherContext);
+  assert.deepEqual(Object.keys(app.state().sealed.nativeTextIntents), [retainedToken]);
+  app.done();
+});
+test("native App seals only a mutation for its displayed revision and discards retired reads", async () => {
+  const app = pendingManagerApp({});
+  await app.hydrate();
+  app.nativeConversation(7, "9", context);
+  const history = { backend: "text-v2", scope: "own-saved-originals", next: "1", end_exclusive: "1", items: [row] };
+  const revision = "09".repeat(32);
+  const visible = { backend: "text-v2", scope: "own-message-revision", action: row.action, scanning: false,
+    item: { revision, text: "Current text", status: "pending" } };
+  app.nativeHistory(history);
+  app.nativeOwnHistory({ ...visible, scanning: true, item: null }, visible);
+  await app.nativeRefresh();
+  assert.equal(app.nativeOwn().messages[row.action].item.revision, revision);
+  assert.deepEqual(app.nativeOwn().calls, [0, 1].map(() => ({ server: 7, channel: "9", expectedContext: context, ownAction: row.action })));
+  await app.nativeChange(row.action, row.action, "stale edit");
+  assert.equal(app.state().submissions.length, 0);
+  app.answer(async args => saved(args));
+  const late = deferred<unknown>();
+  app.nativeHistory(history);
+  app.nativeOwnHistory(late.promise);
+  const mutation = app.nativeChange(row.action, revision, "Next edit");
+  await settle();
+  const submit = app.state().submissions[0];
+  assert.equal(submit.command, "edit_message");
+  assert.equal(submit.args.expectedRevision, revision);
+  assert.equal(submit.sealed.nativeTextIntents[submit.args.retryToken].expectedRevision, revision);
+  app.retireFoundUiForReauth();
+  late.resolve(visible);
+  await mutation;
+  assert.deepEqual(app.nativeOwn().messages, {});
+  app.done();
+});
+test("native composer and automatic retry carry the same sealed reply parent", async () => {
+  const app = pendingManagerApp({});
+  await app.hydrate();
+  app.nativeConversation(7, "9", context);
+  app.type("a reply");
+  app.reply(row.action);
+  app.answer(async args => ({ backend: "text-v2", disposition: "uncertain", retry_token: args.retryToken }));
+  assert.equal(await app.send(), "uncertain");
+  const first = app.state().submissions[0];
+  const retryToken = String(first.args.retryToken);
+  assert.equal(first.args.replyTo, row.action);
+  assert.equal(first.sealed.nativeTextIntents[retryToken].replyTo, row.action);
+  app.type("a reply");
+  app.answer(async args => saved(args));
+  await app.nativeRetry();
+  const next = app.state();
+  assert.equal(next.draft, "a reply", "the identical new plain draft is independent");
+  assert.deepEqual(next.submissions[1].args, first.args);
+  assert.deepEqual(next.nativeTextIntents, {});
+  app.done();
+});
 test("actual native scheduler retries retained custody without a gesture and retires its restored composer",async()=>{
  const app=pendingManagerApp(retained);await app.hydrate();app.nativeConversation(7,"9",context);app.answer(async args=>saved(args));
  app.syncRetry();assert.deepEqual(app.retryTimers(),[5000]);app.fireRetry();await settle();await settle();
@@ -50,6 +137,127 @@ test("actual native history distinguishes a failed read and empty filtered progr
  assert.equal(app.state().nativeHistoryLoaded,false);assert.match(app.state().nativeHistoryError!,/could not be loaded/);
  app.nativeHistory(...Array.from({length:16},(_,i)=>({backend:"text-v2",scope:"own-saved-originals",next:String(i+1),end_exclusive:"1000",items:[]})));
  await app.nativeRefresh();assert.equal(app.state().nativeHistoryLoaded,true);assert.equal(app.state().nativeCursor?.next,"16");assert.equal(app.state().nativeCursor?.end,"1000");assert.deepEqual(app.state().nativeOriginals,[]);app.done();
+});
+
+test("received text is fetched for the exact installed view and discarded after retirement", async () => {
+  const app = pendingManagerApp({});
+  await app.hydrate();
+  app.nativeConversation(7, "9", context);
+  const notice = { server: 7, channel: "9", context, action: row.action };
+  await app.receiveNotice({ ...notice, context: "aa".repeat(32) });
+  assert.equal(app.state().nativeHistoryCalls.length, 0);
+  const received = { action: row.action, text: "Remote original", certainty: "provisional" };
+  const reply = { backend: "text-v2", scope: "received-live", item: received };
+  app.nativeHistory(reply);
+  await app.receiveNotice(notice);
+  assert.deepEqual(app.state().nativeHistoryCalls[0], {
+    server: 7, channel: "9", expectedContext: context, receivedAction: row.action,
+  });
+  assert.deepEqual(app.received(), [received]);
+  assert.deepEqual(app.state().nativeOriginals, []);
+
+  const previousView = deferred<unknown>();
+  app.nativeHistory(previousView.promise);
+  const previous = app.receiveNotice(notice);
+  await settle();
+  await app.receiveNotice({ ...notice, action: null });
+  previousView.resolve(reply);
+  await previous;
+  assert.deepEqual(app.received(), []);
+
+  const pending = deferred<unknown>();
+  app.nativeHistory(pending.promise);
+  const read = app.receiveNotice(notice);
+  await settle();
+  app.retireFoundUiForReauth();
+  pending.resolve(reply);
+  await read;
+  assert.deepEqual(app.received(), []);
+  app.done();
+});
+
+test("received invalidations survive a Busy read and other actions wait for the same lane", async () => {
+  const app = pendingManagerApp({});
+  await app.hydrate();
+  app.nativeConversation(7, "9", context);
+  const notice = { server: 7, channel: "9", context, action: row.action };
+  const other = "93".repeat(32);
+  const reply = (action: string, text: string) => ({ backend: "text-v2", scope: "received-live", item: { action, text, certainty: "provisional" } });
+  app.nativeHistory(reply(row.action, "Original"));
+  await app.receiveNotice(notice);
+
+  const blocked = deferred<unknown>();
+  app.nativeHistory(blocked.promise, reply(other, "Second"), { backend: "text-v2", scope: "received-live", item: null });
+  const changed = app.receiveNotice(notice);
+  await settle();
+  const queued = app.receiveNotice({ ...notice, action: other });
+  await app.receiveNotice(notice);
+  assert.deepEqual(app.received(), []);
+  assert.deepEqual(app.state().nativeHistoryCalls.map((call: { receivedAction: string }) => call.receivedAction), [row.action, row.action]);
+  blocked.reject(new Error("Chat history is busy. Try again."));
+  await Promise.all([changed, queued]);
+  assert.deepEqual(app.state().nativeHistoryCalls.map((call: { receivedAction: string }) => call.receivedAction), [row.action, row.action, other, row.action]);
+  assert.deepEqual(app.received().map((item: { text: string }) => item.text), ["Second"]);
+  app.done();
+});
+
+test("joining with an approved recovery preview starts history after the join releases Busy", async () => {
+  const app = pendingManagerApp({});
+  await app.hydrate();
+  app.setNativeJoin("original invitation", "127.0.0.1",
+    { approved_host_required: true, expires_at_ms: 1 },
+    { backend: "text-v2", server: 7, context, channel: "9", name: "Joined group", display_name: "Catte", is_dm: false },
+  );
+  await app.nativeJoin();
+  assert.deepEqual(app.nativeJoinCalls().map((call: { command: string }) => call.command), ["preview_invite"]);
+  assert.equal(app.state().nativeHistoryCalls.length, 0);
+  app.nativeHistory(new Error("Chat history is busy. Try again."));
+  await app.nativeJoin();
+  assert.deepEqual(app.nativeJoinCalls().map((call: { command: string }) => call.command), ["preview_invite", "join_server"]);
+  assert.equal(app.nativeJoinCalls()[1].args.approvedHost, "127.0.0.1");
+  assert.equal(app.state().activeServerId, 7);
+  assert.deepEqual(app.state().nativeHistoryCalls.map((call: { expectedContext: string }) => call.expectedContext), [context, context]);
+  assert.equal(app.state().nativeHistoryLoaded, true);
+  app.done();
+});
+
+test("real App reads saved received bodies and suppresses them after a live change", async () => {
+  const app = pendingManagerApp({});
+  await app.hydrate();
+  app.nativeConversation(7, "9", context);
+  const index = { backend: "text-v2", scope: "received-archive-index", available: true, ids: [row.action], more: false };
+  const item = { action: row.action, text: "Received before restart", certainty: "provisional" };
+  const saved = { backend: "text-v2", scope: "received-archive", item };
+  app.nativeHistory(index, saved);
+  await app.nativeArchiveRefresh();
+  assert.deepEqual(app.archive().items, [item]);
+  assert.deepEqual(app.state().nativeHistoryCalls, [
+    { server: 7, channel: "9", expectedContext: context, archiveAfter: null, limit: 8 },
+    { server: 7, channel: "9", expectedContext: context, archivedAction: row.action },
+  ]);
+
+  const pending = deferred<unknown>();
+  app.nativeHistory(index, pending.promise, { backend: "text-v2", scope: "received-live", item: null });
+  const read = app.nativeArchiveRefresh();
+  await settle();
+  await app.receiveNotice({ server: 7, channel: "9", context, action: row.action });
+  pending.resolve(saved);
+  await read;
+  assert.deepEqual(app.archive().items, []);
+  app.nativeHistory(index, new Error("A received change is waiting to be saved."));
+  await app.nativeArchiveRefresh();
+  assert.deepEqual(app.archive().items, []);
+  assert.match(app.archive().note, /could not be loaded/);
+
+  const retired = deferred<unknown>();
+  app.nativeHistory(index, retired.promise);
+  const old = app.nativeArchiveRefresh();
+  await settle();
+  app.retireFoundUiForReauth();
+  retired.resolve(saved);
+  await old;
+  assert.equal(app.archive(), null);
+  app.done();
 });
 
 test("a slow initial history read excludes the real automatic scheduler and manual send until it retires",async()=>{

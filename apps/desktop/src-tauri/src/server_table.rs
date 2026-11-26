@@ -4,12 +4,52 @@
 //! of native guard scopes. Native founding must supply a real Root selection.
 use super::*;
 use catcoms_app::store::{
-    CriticalCatalogReadPool, NativeTextRuntimeSelection, NativeTextVaultAuthenticationCheck,
-    NativeUiInvocationBudget, NativeUiInvocationMetadata,
+    CriticalCatalogReadPool, NativeTextJoinedMemberLedger, NativeTextJoinedRowSelection,
+    NativeTextRuntimeSelection, NativeTextVaultAuthenticationCheck, NativeUiInvocationBudget,
+    NativeUiInvocationMetadata,
 };
+use catcoms_replication::chat::ActionId;
+use tokio::sync::OwnedMutexGuard;
 
 pub(super) const NATIVE_ROWS: usize = 2;
-pub(super) type NativeSelection = NativeTextRuntimeSelection<catcoms_net::MeshService, OsCryptoRng>;
+type FounderSelection = NativeTextRuntimeSelection<catcoms_net::MeshService, OsCryptoRng>;
+
+#[derive(Clone)]
+pub(super) enum NativeSelection {
+    Founder(FounderSelection),
+    Joined(NativeTextJoinedRowSelection),
+}
+
+impl NativeSelection {
+    pub(super) fn founder(&self) -> Option<&FounderSelection> {
+        match self {
+            Self::Founder(original) => Some(original),
+            Self::Joined(_) => None,
+        }
+    }
+
+    pub(super) fn id_data(&self) -> u64 {
+        match self {
+            Self::Founder(original) => original.id_data(),
+            Self::Joined(original) => original.id_data(),
+        }
+    }
+
+    pub(super) fn same_original(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Founder(a), Self::Founder(b)) => a.same_original(b),
+            (Self::Joined(a), Self::Joined(b)) => a.same_original(b),
+            _ => false,
+        }
+    }
+
+    fn close_original_cached(&self) {
+        match self {
+            Self::Founder(original) => original.close_original_cached(),
+            Self::Joined(original) => original.close_original_cached(),
+        }
+    }
+}
 
 enum Row {
     Legacy(Box<ServerEntry>),
@@ -46,11 +86,112 @@ pub(super) struct NativeRowData {
     pub(super) display_name: String,
     pub(super) is_dm: bool,
     pub(super) channel: u128,
+    pub(super) member_work: Arc<NativeMemberWork>,
     retiring: bool,
     // LAST: actual dedicated native row payment follows all retained DATA.
     _credit: NativeUiInvocationMetadata,
 }
+
+/// Serialize the original native row's local reads and writes. A waiter holds
+/// no UI guard or Core loan, and network effects never retain this permit.
+pub(super) struct NativeMemberWork {
+    pub(super) publication_wake: tokio::sync::Notify,
+    pub(super) joined_worker_generation: AtomicU64,
+    pub(super) received: StdMutex<Option<Box<NativeTextJoinedMemberLedger>>>,
+    archive_changes: StdMutex<ArchiveChanges>,
+    local: Arc<tokio::sync::Mutex<()>>,
+}
+
+const MAX_UNSETTLED_ARCHIVE_CHANGES: usize = 8;
+const MAX_NATIVE_NAME_BYTES: usize = 256;
+
+#[derive(Default)]
+struct ArchiveChanges {
+    unsettled: [Option<(ActionId, ActionId)>; MAX_UNSETTLED_ARCHIVE_CHANGES],
+    overflow: bool,
+}
+
+impl NativeMemberWork {
+    fn new() -> Self {
+        Self {
+            publication_wake: tokio::sync::Notify::new(),
+            joined_worker_generation: AtomicU64::new(0),
+            received: StdMutex::new(None),
+            archive_changes: StdMutex::new(ArchiveChanges::default()),
+            local: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
+    pub(super) async fn foreground(
+        &self,
+        mut scope: RequestCancellation,
+    ) -> Option<OwnedMutexGuard<()>> {
+        tokio::select! {
+            biased;
+            _ = scope.cancelled() => None,
+            guard = self.local.clone().lock_owned() => Some(guard),
+        }
+    }
+
+    pub(super) fn try_background(&self) -> Option<OwnedMutexGuard<()>> {
+        self.local.clone().try_lock_owned().ok()
+    }
+
+    /// The same local permit covers applying the live change, attempting the
+    /// archive write, and publishing any visible archive body.
+    pub(super) fn note_archive_change(&self, action: ActionId, target: ActionId, selected: bool) {
+        let Ok(mut changes) = self.archive_changes.lock() else {
+            return;
+        };
+        if let Some(existing) = changes
+            .unsettled
+            .iter_mut()
+            .find(|item| item.as_ref().is_some_and(|(pending, _)| *pending == action))
+        {
+            if selected {
+                *existing = None;
+            }
+        } else if !selected {
+            if let Some(empty) = changes.unsettled.iter_mut().find(|item| item.is_none()) {
+                *empty = Some((action, target));
+            } else {
+                changes.overflow = true;
+            }
+        }
+    }
+
+    pub(super) fn unsettled_archive_changes(
+        &self,
+        target: ActionId,
+    ) -> Option<[Option<ActionId>; MAX_UNSETTLED_ARCHIVE_CHANGES]> {
+        let changes = self.archive_changes.lock().ok()?;
+        if changes.overflow {
+            return None;
+        }
+        Some(changes.unsettled.map(|entry| {
+            entry
+                .filter(|(_, pending_target)| *pending_target == target)
+                .map(|(action, _)| action)
+        }))
+    }
+}
+
 impl PreparedNativeRow {
+    pub(super) fn is_for_recovered_vault(
+        &self,
+        vault: &catcoms_app::store::NativeTextVault,
+    ) -> bool {
+        let original = match &self.data.selection {
+            NativeSelection::Founder(original) => {
+                original.is_recovered_from_original_vault_cached(vault)
+            }
+            NativeSelection::Joined(original) => {
+                original.is_current_cached() && original.is_from_original_vault_cached(vault)
+            }
+        };
+        original && self.data.target.is_for_original_vault(vault)
+    }
+
     /// Called with already paid/frozen fields outside guards. No renderer DATA
     /// can construct selection or target; native must still authenticate their
     /// exact original relationship at final installation.
@@ -62,6 +203,7 @@ impl PreparedNativeRow {
             return Err("Invalid native server details.".into());
         }
         let (name, display_name) = bounded_native_names(spec.name, spec.display_name)?;
+        let member_work = Arc::new(NativeMemberWork::new());
         let data = NativeRowData {
             selection: spec.selection,
             files: keep_session::EntryOwner::new(),
@@ -72,6 +214,7 @@ impl PreparedNativeRow {
             display_name,
             is_dm: spec.is_dm,
             channel: spec.channel,
+            member_work,
             retiring: false,
             _credit: credit,
         };
@@ -84,7 +227,11 @@ impl PreparedNativeRow {
 /// Copy only bounded borrowed DATA, never a caller's unbounded String capacity.
 /// This constructor work occurs after payment and outside all native guards.
 fn bounded_native_names(name: &str, display: &str) -> Result<(String, String), String> {
-    if name.is_empty() || name.len() > 256 || display.is_empty() || display.len() > 256 {
+    if name.is_empty()
+        || name.len() > MAX_NATIVE_NAME_BYTES
+        || display.is_empty()
+        || display.len() > MAX_NATIVE_NAME_BYTES
+    {
         return Err("Invalid native server details.".into());
     }
     Ok((name.to_owned(), display.to_owned()))
@@ -348,8 +495,14 @@ impl ServerTable {
 // This invoices actual layout/buckets plus transient metadata overlap; it is
 // not a whole-process RSS or IPC/WebView serialization bound.
 const _: () = assert!(
-    2 * std::mem::size_of::<NativeRowData>() + 2 * std::mem::size_of::<Row>() + 4 * 256 + 1024
-        <= 4096
+    2 * std::mem::size_of::<NativeRowData>()
+        + 2 * std::mem::size_of::<Row>()
+        + 4 * MAX_NATIVE_NAME_BYTES
+        + 1024
+        + 2 * (std::mem::size_of::<NativeMemberWork>()
+            + std::mem::size_of::<tokio::sync::Mutex<()>>()
+            + 64)
+        <= NativeUiInvocationBudget::metadata_bytes()
 );
 
 // Fixture construction is intentionally unavailable in production. Existing

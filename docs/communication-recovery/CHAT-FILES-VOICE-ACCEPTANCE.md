@@ -1,6 +1,248 @@
 # Chat, files and voice implementation evidence
 
-## Durable unsigned invitation intent (20 November; execution pending)
+## Native joined text and ordinary member transport (22 November 2026)
+
+Windows and Linux exercised native Join, local joined text save with the founder
+offline, exact receipt recovery and new authoring after restarting the registered
+joined source. [Native commands CI](https://github.com/Thalpy/Mewtual/actions/runs/45079122432)
+and [joined source CI](https://github.com/Thalpy/Mewtual/actions/runs/45078038029).
+
+At `e12d345f` the mounted outbox and original driver queue checks passed on both
+platforms. Cancellation, no peers and corrupt storage preserved publication debt.
+At `9439557a` both platforms also verified provisional projection, exact receive
+dependencies, duplicate originals and wrong-view refusal.
+[Publication CI](https://github.com/Thalpy/Mewtual/actions/runs/45080872913) and
+[receiver CI](https://github.com/Thalpy/Mewtual/actions/runs/45081739366).
+
+At `2a0dd213` both platforms passed the mounted TCP relay regression, exact
+projection and durable submission checkpoint. Both also passed the focused
+desktop join and send checks. The earlier relay fixture reached the intended
+dial refusal because it supplied no terminal peer ID. The corrected fixture
+uses the original reserved actor's public peer ID.
+[Mounted TCP and history CI](https://github.com/Thalpy/Mewtual/actions/runs/45084623807)
+and [desktop CI](https://github.com/Thalpy/Mewtual/actions/runs/45084622145).
+
+The desktop still needs to drive shared peer catch-up and persist received
+history. Later governed membership changes, broader cold startup and physical
+acceptance remain open. Chat V2 remains disabled. The full suite is scheduled
+for Wednesday, 25 November 2026.
+
+## Governed Add fence checkpoint (22 November 2026)
+
+The focused invitation workflow passed on Linux and Windows at `89637e3e`.
+It verified exact governing Header and Welcome signature retention, fence
+framing and held-file identity, and the actual pinned `3d3bce63` predecessor.
+The Windows regression also verified that a warm member verifier refuses
+new signing under either founder WAL name.
+[Focused CI](https://github.com/Thalpy/Mewtual/actions/runs/45018943766).
+
+The warm writer and member-reconciliation checkpoint at `adebedd0` passed
+the native invitation cohort on both platforms, including durable fence
+coverage through the original governed Current. Linux completed the full
+focused workflow. The new revision superseded the Windows run during its
+repeat of the pinned predecessor step. The earlier source-pinned Windows
+predecessor result remains recorded above.
+[Writer CI](https://github.com/Thalpy/Mewtual/actions/runs/45020822704).
+
+At `7e088461` the new exact outcome, large-file prefix, SDK entry and SDK
+candidate accounting checks passed on both platforms, along with the native
+invitation cohort. The replacement run superseded both jobs during the repeat
+of the pinned predecessor step.
+[Outcome and accounting CI](https://github.com/Thalpy/Mewtual/actions/runs/45023926239).
+
+At `03e1dc6d`, the native fixture used the original runtime to execute MLS Add,
+cover the Outcome and Header attempt and Raw, and independently reopen the
+exact bytes. Both platforms passed the partial-Add and original Source
+retirement cases as well as the native invitation cohort.
+[Header and Source CI](https://github.com/Thalpy/Mewtual/actions/runs/45026146810).
+
+At `e9a80c30`, Linux and Windows passed the App checks for governing history,
+KeyPackage validation, and Source retirement. The focused desktop workflow
+passed all four original-runtime lock and retirement cases on both platforms.
+[App CI](https://github.com/Thalpy/Mewtual/actions/runs/45028313884) ·
+[Desktop lock CI](https://github.com/Thalpy/Mewtual/actions/runs/45028313513).
+
+At `f08b7282`, Linux and Windows passed the native invitation cohort through
+actual Host SDK execution and Header signing. Linux also passed the pinned
+predecessor check.
+[Warm Host CI](https://github.com/Thalpy/Mewtual/actions/runs/45029874030).
+
+At `55d3350c`, both platforms passed the focused Add persistence checks. The
+native fixture covered and independently recovered the complete Welcome
+response and the original signed JoinRequest. It also checked stale absence
+observations through the actual original Current.
+[Add persistence CI](https://github.com/Thalpy/Mewtual/actions/runs/45032672855).
+
+At `7d512cb3`, Linux and Windows passed the archive and Head2 selector
+checks. The native fixture covered the immutable archive and staged Head2
+under the original Current. The old head remained selected at this revision.
+[Archive and Head2 CI](https://github.com/Thalpy/Mewtual/actions/runs/45033964346).
+
+At `89c6514f`, Linux and Windows passed the complete focused Add
+persistence workflow. The actual native founder job selected Head2 and
+returned the original Welcome. The integration tests also resumed after
+cancellation immediately after the durable head save, verified the selected
+archive independently, and restored its closed MLS graph. Replacing the
+held Head2 file with an equal-byte copy failed the recovery reproof.
+[Native Add and recovery CI](https://github.com/Thalpy/Mewtual/actions/runs/45036371225).
+
+At `e0ff1033`, Linux and Windows passed the focused governed Add workflow.
+The suite covered exact JoinRequest custody, signed first-Add delivery,
+independent restoration of the joined MLS graph, and founder authoring after
+the selected Add. [Governed Add CI](https://github.com/Thalpy/Mewtual/actions/runs/45040362601).
+
+At `7aff1956`, Linux and Windows passed all six focused joined storage cases.
+They covered the namespace 6 declaration and cold reopen, the original pin
+index, warm selection of the first private JoinRequest, and cold replay of
+that same request and pin insertion. [Joined storage CI](https://github.com/Thalpy/Mewtual/actions/runs/45043452277).
+
+At `7fa87585`, Windows and Linux passed the real TCP exchange between the
+mounted founder and an independent joiner vault. The founder completed the
+first Add from the original request received by the native ingress, and the
+joiner retained and reopened the exact signed delivery and private result.
+The focused transport checks also covered header-first size limits and
+retirement of the original listener. [Two-vault and transport CI](https://github.com/Thalpy/Mewtual/actions/runs/45049624283).
+
+At `67c6ca68`, Windows and Linux passed the focused native desktop test
+through the gated router. It sent the real signed request over TCP, confirmed
+the native founder refused it during lock, and received the byte-identical
+saved Welcome after re-unlock. [Desktop dispatcher CI](https://github.com/Thalpy/Mewtual/actions/runs/45050190682).
+
+At `201e8692`, both platforms built the actual `e0ff1033` reader. It opened
+the head-generated governed control, refused both joined-pin fixtures and left
+their bytes and identities unchanged. The current joined reader then opened
+both. [Pinned joined-pin predecessor CI](https://github.com/Thalpy/Mewtual/actions/runs/45053208398).
+
+At `2ba4de26`, Linux and Windows passed the two connected TCP fixtures,
+including the original warm graph paired with its selected Core prefix and
+one closed runtime. The same matrix passed the transport limits and receiver
+retirement cases. [Warm joined runtime CI](https://github.com/Thalpy/Mewtual/actions/runs/45054233586).
+
+At `2752dd43`, Windows and Linux passed all four focused desktop cases. These
+exercise an authenticated idle cold reopen, refusal of unowned directories,
+invitation mode isolation, and exact Welcome replay after a UI lock. The
+connected founder case also checks valid and malformed invite previews and
+refuses an original preview queued before lock. [Native joined-vault and invitation CI](https://github.com/Thalpy/Mewtual/actions/runs/45058968071).
+
+At `0058ccf1`, Windows and Linux passed both selected-history page cases,
+including verification of a proof read through pages produced by actual Core
+selection. [Selected-history page CI](https://github.com/Thalpy/Mewtual/actions/runs/45058635166).
+Both platforms also passed the focused joined-storage matrix at that revision,
+including the same-mount startup handoff, replacement refusals, original
+Welcome replay, and connected two-vault cases. [Joined storage CI](https://github.com/Thalpy/Mewtual/actions/runs/45058685095).
+
+At `154726ef`, both platforms passed joined storage checks that prepared the
+exact covered request from an independently accepted invite anchor, retained
+the first governing proof across restart, and preserved the original inputs
+when a foreign prefix claimed the joined runtime.
+[Accepted request and proof CI](https://github.com/Thalpy/Mewtual/actions/runs/45060639850).
+
+At `f385da6b`, Windows and Linux passed three connected two-vault cases using
+an explicitly approved IP and the invite's signed original peer identity and
+TCP port. A cold Pending vault contacted the founder again and recovered its
+original Welcome with SDK entry still closed. Both platforms also passed the
+native dial permit refund after cancellation.
+[Approved direct contact CI](https://github.com/Thalpy/Mewtual/actions/runs/45061846794).
+
+At `5db5b997`, both platforms passed the gated native desktop tests and the
+native workspace build. The desktop test minted the first invitation twice
+and compared the complete returned packet before using it in the connected
+founder and independent joiner exchange.
+[Native invitation IPC CI](https://github.com/Thalpy/Mewtual/actions/runs/45064000366).
+
+At `6d948251`, both platforms passed the joined-storage matrix after it added
+the missing Pending regression. A cold opener refused the already selected
+pin while the original Pending was parked. Restoring the original file
+recovered the exact selected pin and request.
+[Selected Pending CI](https://github.com/Thalpy/Mewtual/actions/runs/45063296093).
+
+At `90628093`, Windows and Linux passed the mounted two-vault checks and the
+eleven whole-source retirement cases. The founder observed the same original
+authenticated joiner peer on both attempts. The mounted joiner refused a
+revoked Welcome, reused the covered request and TCP actor, paired the exact
+closed node, then waited for the original actor to drain during retirement.
+[Mounted join and TCP retirement CI](https://github.com/Thalpy/Mewtual/actions/runs/45066705889).
+
+At `4efaa7aa`, Windows and Linux passed the native joiner key-admission
+fixture and mounted connected cases. The actual prepared Welcome refused a
+foreign source, the founder's separate response-signing cut and the external
+join route before the original joiner source entered and retained its graph.
+[Native joiner key CI](https://github.com/Thalpy/Mewtual/actions/runs/45068953329).
+
+## Invitation and join branch CI (22 November 2026)
+
+Both hosted workflows passed on Linux and Windows at
+`3d3bce638fe6736f9073bd07be1cf89465766b83` on `feat/chat-v2-invite-signing`.
+The invitation workflow passed 15 binding cases, three JoinRequest cases,
+one exact response-budget case, one real MLS Add/Welcome case, four journal
+controls, 15 native invitation cases and three packet cases on each OS. The
+real MLS case used test Host selection. Windows also passed the ordinary
+save and retirement preservation fixture, and Linux passed the Store raw
+filesystem gate. No local tests ran.
+[Invitation workflow](https://github.com/Thalpy/Mewtual/actions/runs/44932774906).
+
+The joined-source workflow passed all exact-count regressions, including the
+360 nonignored native registry cases, and its pinned predecessor checks on
+both OSes. Root formatting and affected protocol crate strict Clippy passed
+on both OSes. The Linux frontend test, type and build steps passed.
+[Joined-source workflow](https://github.com/Thalpy/Mewtual/actions/runs/44932774546).
+
+Production still requires the Root-covered Add and Welcome release, joined
+pin and Source installation, shared transport and projection, and operational
+restart recovery. Chat V2 remains disabled.
+
+## Retained V2 request and private Welcome candidate (20 November)
+
+Four hosted regression cases are prepared for exact packet and provider
+retention, changed representations and the real MLS Add/Welcome round trip
+against a verified Core prefix. The round trip uses test Host selection.
+The native founder also checks that the incoming signed Invite matches its
+actual journal. Its hosted regression refuses a missing Raw record and an
+altered package. Native admission, durable pin and Add coverage, transport and installation
+remain open. No local tests ran.
+[Protocol contract](CHAT-V2-PRODUCTION-JOIN.md#retained-join-request-and-private-welcome-candidate).
+
+PR #142's focused invitation lane passed on both platforms at its original
+head. The broader PR lane stopped on ignored unsigned encoder results and a
+stale registry fixture inventory. The branch handles those encoder results
+and recounts the affected source partition using the hosted inventory plus
+the six new native invitation cases. The new changes need their own CI.
+[Focused invitation run](https://github.com/Thalpy/Mewtual/actions/runs/44758557685)
+and [broader joined-source run](https://github.com/Thalpy/Mewtual/actions/runs/44758557503).
+
+## Invitation journal recovery reader (20 November, execution pending)
+
+The original native job can inspect the fixed journal without a signing-slot
+loan or a new member verifier. It verifies attempt and signature lineage and
+checks the original files again after authentication. The hosted native
+cohort now has 14 cases, including held or missing Raw, torn and wrong-phase
+records, and equal-byte replacement after authentication. The recovery
+regressions use the actual mounted native job. Cold operational mount and
+restart are still unverified. No local tests ran.
+[Recovery contract](CHAT-V2-INVITE-ISSUER.md#read-only-journal-recovery).
+
+## Warm founder invitation packet (20 November, execution pending)
+
+The warm native save returns a verified packet with the original binding,
+policy and routing reservation. The packet has zero certified contacts.
+Three hosted packet regressions cover framing, same-ID signature substitution,
+bound bodies and coherently signed foreign policy and transport data. The
+warm native retry fixture also compares exact packet bytes across retries.
+No local tests ran. [Packet contract](CHAT-V2-INVITE-ISSUER.md#invitation-packet).
+
+## Warm invitation signing (20 November, execution pending)
+
+The original warm native job covers its immutable KeyAttempt before entering
+the dedicated invitation key. It verifies and covers the same returned
+signature before returning a local receipt. The two signing records have a
+separate quota and bind the exact original intent. The focused hosted workflow
+now expects 12 native invitation cases, including the new attempt/Raw partial
+write, foreign-state refusal and late-cancellation regressions. The Windows
+retirement fixture covers preservation of all three journal files. The new
+cases await execution. Chat V2 remains off.
+[Issuer contract and remaining work](CHAT-V2-INVITE-ISSUER.md).
+
+## Durable unsigned invitation intent (20 November, previous checkpoint)
 
 The native invitation preparation now covers one immutable unsigned intent in
 its separate `text.pages/invite.intent.v1` family. The exact token/settings/plan

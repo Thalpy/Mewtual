@@ -81,12 +81,60 @@ fn settle_at_join(node: &Node, fence: &V2JoinedSourceFence) {
 }
 
 #[test]
+fn selected_eviction_orders_against_the_original_save_admission() {
+    let mut founder = founder(0xd251);
+    let (member, fence, _) = join(&mut founder, 0xd252, 0x91);
+    settle_at_join(&member, &fence);
+    let before = (member.epoch(), member.group.epoch_authenticator_id());
+    let publication = fence.observe_publication(&OWN).unwrap();
+    let saving = fence.admit_final(&OWN).unwrap();
+    assert!(matches!(
+        fence.prepare_selected_eviction(OWN, before, before.0 + 1),
+        Err(V2JoinedFenceRefusal::Busy)
+    ));
+    assert!(publication.is_current_cached());
+    drop(saving);
+    let eviction = fence
+        .prepare_selected_eviction(OWN, before, before.0 + 1)
+        .unwrap();
+    assert!(matches!(
+        fence.admit_final(&OWN),
+        Err(V2JoinedFenceRefusal::Busy)
+    ));
+    eviction.finish();
+    assert_eq!(
+        fence.observe_data().unwrap().terminal,
+        Some(V2JoinedFenceTerminal::Removed)
+    );
+    assert!(matches!(
+        fence.admit_final(&OWN),
+        Err(V2JoinedFenceRefusal::Closed)
+    ));
+    assert!(!publication.is_current_cached());
+}
+
+#[test]
 fn stale_join_and_same_epoch_mismatch_cannot_replace_a_consumed_newer_selection() {
     let mut f = founder(0xd1f1);
     let (mut b, fence, _) = join(&mut f, 0xd1f2, 0x81);
     let epoch = b.epoch();
     let join_authenticator = b.group.epoch_authenticator_id();
     settle_at_join(&b, &fence);
+    let original = fence.observe_publication(&OWN).unwrap();
+    let save = fence.admit_final(&OWN).unwrap();
+    assert!(
+        original.is_current_cached(),
+        "an unchanged save must not retire the mesh"
+    );
+    drop(save);
+    let unchanged = b.v2_fence_begin_merge();
+    assert!(!original.is_current_cached());
+    b.v2_fence_end_merge(unchanged, V2MergeResult::Observed(None));
+    assert!(fence.observe_publication(&OWN).unwrap().is_current_cached());
+    assert!(
+        !original.is_current_cached(),
+        "a no-op cannot renew an old driver observation"
+    );
     assert_eq!(
         fence.install_selected(epoch, join_authenticator, [0; 32]),
         Err(V2JoinedFenceRefusal::Unknown)

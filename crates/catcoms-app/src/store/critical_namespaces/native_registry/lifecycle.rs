@@ -11,11 +11,15 @@ mod codec;
 mod data;
 pub(super) mod founder;
 mod inspection;
+pub(super) mod joined;
 mod metadata;
 mod migration;
-mod network;
+pub(super) mod network;
 pub(super) mod preparation;
-pub(in crate::store) use preparation::{verify_governance_native, VerifiedGovernanceNative};
+pub(in crate::store) use preparation::{
+    verify_governance_native, verify_joined_pin_parent, verify_shared_history_parent,
+    VerifiedGovernanceNative,
+};
 
 /// Finish only the actual constructor-private native opening observation.
 /// Caller keeps any new declaration witness overlapping these same files
@@ -29,7 +33,7 @@ pub(in crate::store::critical_namespaces) fn finish_governance_opening(
         .and_then(|p| p.native_registry.as_ref())
     {
         Some(super::preparation::NativeRegistryHandler::GovernanceOpening(handler)) => {
-            handler.finish_cold(store)
+            handler.finish_cold(store).map(drop)
         }
         _ => Err(refused()),
     }
@@ -39,7 +43,10 @@ pub(in crate::store::critical_namespaces) fn finish_governance_opening(
 /// installed. A newly declared4 uses its separate retained declaration instead.
 pub(in crate::store::critical_namespaces) fn finish_governed_cold_observation(
     store: &crate::store::ServerStore,
-) -> Result<(), AppError> {
+) -> Result<
+    Vec<std::sync::Arc<crate::store::persistence::native_registry::network::NetworkDependency>>,
+    AppError,
+> {
     match store
         .current_layout_policy
         .as_ref()

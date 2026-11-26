@@ -423,7 +423,7 @@ fn lifecycle3_cell_cleanup_repeats_barrier_and_never_reports_visible_unlink_as_c
             fs::write(&stage, &bytes).unwrap();
             let inventory =
                 UpgradeInventory::capture(store, handler.debit(), handler.pool()).unwrap();
-            let proof = wal::classify(store, &inventory).unwrap();
+            let proof = wal::classify(store, &inventory, None).unwrap();
             let mut io = IndexStageCleanup::prepare(store, inventory, proof).unwrap();
             cuts::arm_fault(cut);
             assert!(io.run(store).is_err());

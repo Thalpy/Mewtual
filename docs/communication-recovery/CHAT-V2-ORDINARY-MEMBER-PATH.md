@@ -1,13 +1,12 @@
 # Ordinary member text without the founder online
 
-Integration checkpoint, 11 November. The founder-as-ordinary-member signing vertical
-and independent outbox storage engine compile and pass focused tests. Production save,
-joined-member sources and native routing remain open; Chat V2 stays disabled.
-
-The signing boundary below is tested for the founder acting as an ordinary member,
-plus the Sync seams for a joined member's `ChannelSync`. See
-[CHAT-V2-ORDINARY-MEMBER-SIGNER](CHAT-V2-ORDINARY-MEMBER-SIGNER.md). Nonfounder App
-orchestration still waits for the joined-member source.
+Native founder and joined-member text saves use the same durable outbox. The joined
+member can save and recover the original local receipt with the founder offline, then
+author a new message after restarting with the same registered source. Focused Windows
+and Linux CI covers both paths. Chat V2 stays disabled pending peer delivery, shared
+projection and the remaining acceptance gates.
+[Joined storage and cold authoring CI](https://github.com/Thalpy/Mewtual/actions/runs/45078038029)
+[Native join and local save CI](https://github.com/Thalpy/Mewtual/actions/runs/45077351739)
 
 ## Two independent paths
 
@@ -89,6 +88,158 @@ Publication reads bounded debt pages and reseals original bytes under a separate
 admitted current envelope. Persist any mutated sender state before export. Record local
 submission completion through its own durable checkpoint; a crash may resend the same
 signed original. A transport submission is not a peer durability receipt or certification.
+The general member wire envelope uses a domain-separated channel exporter under the
+selected group, Profile, governing Header, epoch and channel. It wraps the exact signed
+action and claimed Admission in authenticated padding. Exporting this key leaves the MLS
+application sender ratchet unchanged. Receivers still need the original selected Core
+prefix to validate the claimed Admission before projection. The joined runtime derives the
+blinded topic from the distinct MLS metadata exporter and checks the actual selected
+verifier and received topic before opening the envelope. The mounted row can subscribe on
+its original native mesh and open bounded frames from that same live registration. The
+driver reports receive pressure so a caller can recover missing originals. The receiver can import into an
+original channel ledger with exact dependencies. The resulting effect is provisional and
+requires the receiver's actual view and current sender Admission. An original opened by
+one source cannot be applied through another source with equal cryptographic bytes.
+The receiver resolves parents and targets from that ledger's Valid originals. Missing
+dependencies return their exact IDs without importing the child or making it visible.
+The mounted sources can exchange one sealed original per dependency request over an
+existing authenticated TCP connection. The request binds both peers, the selected MLS
+channel and its one ActionId. The exact encrypted request binds the reply. An unavailable
+reply describes only that provider's selected source. It cannot clear another member's
+history or justify importing a child with missing parents.
+Frame-triggered recovery can request a signed direct dependency on the exact original
+TCP carrier. When an authenticated reply itself needs a signed parent or target, the
+joined receiver can follow that edge on the same carrier while the reply and its
+ancestors are still current. Explicit standalone requests supply no follow-up route.
+The desktop attaches a provider to the original joined row after Join or authenticated
+reopen. The founder attaches one on its original actor after the first Add, including
+after cold reopen. Each incoming request captures that same installed row again and
+can read only an exact original in its own selected outbox and Admission.
+That row also attaches an exact native gossip listener. It can attempt up to four
+dependency recoveries per frame through selected local storage or the original carrier,
+with one network request in flight. For each requested ActionId, local replay uses up to
+eight lookups in the exact row's outbox and selected archive to recover signed parents
+and targets. Unresolved originals stay outside the ledger.
+The receiver retries its subscription while the row remains installed.
+The mounted joined row can prepare a paid channel ledger and apply frames from its own
+receiver. A final native callback checks the original receiving scope and the prepared
+Core view before revealing a body. The ledger holds up to 64 originals or 1 MiB of
+canonical action bytes. Durable replay and catch-up must address pressure at this limit.
+An exact Valid original can be prepared as encrypted action chunks and a manifest
+bound to the local vault, Profile, initial tenure and channel. The manifest preserves
+the action's original Admission and signed bytes across transport epochs. Native
+storage must select the manifest before cold replay can treat it as saved history.
+Semantic replay restores dependency knowledge only after the original signature and
+governing Admission verify. A retired author's dependency also needs the exact frozen
+Admission from the same selected prefix. Replay issues no provisional projection.
+A reopened joined row can already replay an exact original from its own outbox by ActionId.
+The history disk implementation verifies a complete WAL, keeps the original file
+identities through the barriers and selects the exact manifest under a keyed ActionId
+locator. Recovery completes the same bytes after a torn bundle or selector. Native
+retries retain the presealed WAL and its original file so they can write the missing
+suffix. Cold recovery preserves a partial WAL it cannot authenticate. The versioned
+catalog declaration binds the exact Current, joined pin and native registry descriptors
+and leaves every earlier namespace entry byte-identical. Earlier catalog grammars
+refuse it. Its encrypted restart seed preserves both catalog frames and the exact
+history root marker. Seed validation also requires the original governance and outbox
+markers, joined pin index and native registry leaves.
+The empty joined layout can stage and select these physical files under the existing declaration claim.
+Native startup reopens an existing joined layout and retains the original marker when the
+vault has a selected archive declaration. On that layout, the joined receiver can archive each exact
+verified original and use saved originals for semantic dependency replay. The mounted archive
+supports a single registered channel and enforces 2,048 records and 256 MiB of live file bytes
+plus one bounded WAL. The startup claim becomes visible to earlier readers only after its
+separate staged file is complete and durable. A partial first stage leaves the joined layout
+readable. A complete declaration seed can finish exact torn output and retire its claim after
+a power cut. Fresh desktop vaults select the archive on the same owning session before
+exposing native rows. Migration of populated vaults remains open. The disk owner checks a bounded
+physical inventory against separate record and byte limits before admitting a new WAL.
+The quota check charges partially written files at their final size. At capacity,
+existing originals and idempotent retries remain readable and new writes are refused.
+The native reader can page exact archived Create IDs or find actions for a single
+Create in byte order under the held directory. New encrypted selectors bind the
+target found in the signed original. The reader opens the full bundle to derive
+the target from an older selector. Both versions require the same physical bundle
+inventory, and an unsettled WAL refuses the page. Each candidate still needs its
+full selected bundle and governing replay before a message body can be shown.
+For one archived Create, the joined source opens its exact selected actions
+and resolves their required originals within a paid 64-action, 1 MiB ledger.
+The source checks current governing Admission and real signatures again. The
+projection remains provisional and is invalidated by an intervening archive
+write or retirement of the governing or native view. An incomplete target or
+dependency set refuses projection.
+The mounted joined source prepares one exact debt item for its original mesh and releases
+the metadata slot before awaiting the driver. The caller, original Core Admission and
+selected MLS fence must still authorize it at the driver's submission boundary. A real
+`Submitted` result produces a receipt that a fresh capture of the same registered row can
+checkpoint. A successful desktop joined send or exact saved retry resolves the local receipt,
+then wakes the single worker for that installed row. The worker retries unchanged debt after
+interruption, polls for debt after an authenticated reopen and stops when the row retires.
+Foreground reads and saves share the row's local work permit with publication preparation
+and checkpointing. Transport submission runs after that permit is released.
+The main renderer receives an action ID notification and reads the exact live projection
+through a fresh authenticated invocation. Provisional bodies are labelled separately from
+local receipts. **Saved received messages** pages the selected joined archive after
+restart. For each of at most eight Create IDs, a separate native invocation enters the
+guarded projection before returning a body. A live update in the active view retires the
+older saved body and cancels a pending archive read. The renderer labels a partial page
+when any individual original cannot be replayed. Recovery beyond the live worker's
+bounded direct dependency window remains open.
+The native row serializes live application, archive selection and body publication.
+A failed archive write for a live mutation holds that target out of archive replies
+for the installed row. The mounted Store can resume the held WAL before replay.
+An exact selected retry clears its entry. A fresh archive projection can also clear
+it when its authenticated target action set contains that exact mutation. This
+bounded in-session state stays with the row through receiver reattachment.
+Durable protection after unsettled mutations and a process or vault restart
+still needs a selected negative record.
+
+The installed founder Sync node can now prepare and open ordinary encrypted frames on
+the joined member's selected topic after the first Add. Its exact Core Admission is
+captured during the original Core and MLS installation. An equal replay from a
+different verifier, a changed selection, or a retired founder source refuses the
+transport operation. The mounted founder source now reads its exact outbox debt,
+rechecks the original held governing Head, and releases the runtime loan before
+the mesh wait. Only a submission acknowledged by the original driver can
+checkpoint that debt on a fresh capture of the same row. The desktop worker
+wakes after the saved receipt and the first governed Join. It shares the row's
+local work permit with saves, history, and the founder's Join handler and releases
+it before awaiting the driver. The founder attaches one receiver to the original
+actor after the Add. It verifies each signed original under its current governing
+view and holds a paid live ledger for that subscription. The main window reads
+that projection under the same native publication guard as a joined row.
+For an authenticated incoming action that names at most four missing direct
+dependencies, the founder can look up those exact IDs in its own saved outbox.
+An ID absent there can be read from the same channel's selected received
+archive. It uses the same eight-lookup limit across the frame's whole local
+causal slice, including the saved parents of archived replies. The current
+Core verifier replays each matching original for dependency validation.
+The founder saves exact received originals in the mounted
+history namespace and can read their projection after its live receiver
+retires. Both desktop roles use the same bounded archive replay and recheck
+the archive selection and active Core view before returning a body.
+The native founder can reopen a selected first Add after authenticated startup.
+The registered joined row can reconnect using an explicit retry of the same
+invitation and approved IP. A joined member can request the founder's own saved
+original on that connection. The founder can likewise recover a missing direct
+dependency from the frame's original connected carrier and retry the signed child.
+An authenticated reply can lead to another missing signed ancestor on that carrier.
+The founder attempts up to four recoveries per frame, one in flight at a time. Each
+reply and archive write requires the same live subscription and selected founder state.
+
+The desktop reply composer seals the exact target ActionId with the existing
+Create token and body. Native checks the original durable receipt first. A
+new reply resolves its Create parent from the selected local outbox or
+received archive in the same channel and checks the exact signature and
+Admission through Core. A changed target conflicts with an already saved
+token. A missing parent leaves the request unsigned.
+The native Edit and Delete commands author only against an exact Create and
+the selected revision in the member's own outbox. The desktop displays the
+selected text and carries that revision through edit and delete confirmation.
+It loads up to eight recent messages with each history batch and offers to
+load the remaining messages individually. An incomplete revision read exposes
+no text. An exact retry recovers its signed original and receipt after later
+changes, including deletion.
 Original audit chunks and request receipts remain retained after scheduling debt clears.
 Removal changes active view, never deletes the audit. Unproven late removed actions stay
 Held pending the separately authorized moderation path; ordinary concurrent edits resolve

@@ -1,29 +1,140 @@
-name: Chat V2 invitation intent
+name: Chat V2 invitation journal
 
 on:
   pull_request:
     paths:
       - '.github/workflows/chat-v2-invite-intent.yml'
       - '.github/scripts/check-chat-v2-invite-intent.py'
+      - '.github/scripts/check-chat-v2-joined-predecessor.py'
       - '.github/scripts/check-chat-v2-member-save.py'
+      - '.github/predecessor/governed_add_fence_control.rs'
+      - '.github/predecessor/governed_add_fence_owner.rs'
+      - '.github/predecessor/joined_pin_gate.rs'
+      - 'crates/catcoms-app/src/store/native_text_invite.rs'
+      - 'crates/catcoms-app/src/store.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/joined_pin.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/joined_pin/**'
+      - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/governed.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/governed/**'
+      - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/join.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/join/**'
+      - 'crates/catcoms-app/src/store/critical_namespaces/governance_layout/**'
+      - 'crates/catcoms-app/src/store/persistence/governance_layout/**'
+      - 'crates/catcoms-app/src/store/critical_namespaces/pending_join_codec.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/pending_join/producer.rs'
+      - 'crates/catcoms-app/src/store/native_text_invite/**'
+      - 'crates/catcoms-app/src/store/persistence/v2_text/control.rs'
+      - 'crates/catcoms-app/src/store/persistence/v2_text/control/**'
+      - 'crates/catcoms-app/src/store/persistence/v2_text/io.rs'
+      - 'crates/catcoms-app/src/store/persistence/v2_text/io/**'
+      - 'crates/catcoms-app/src/store/persistence/v2_text/mod.rs'
+      - 'crates/catcoms-app/src/store/persistence/v2_text/capture/founder_anchor.rs'
+      - 'crates/catcoms-app/src/store/persistence/v2_text/transaction/recovery/source.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/current_layout/text/query/io.rs'
+      - 'scripts/check-store-raw-fs.sh'
+      - 'crates/catcoms-app/src/store/persistence/v2_member_outbox/production.rs'
+      - 'crates/catcoms-app/src/store/persistence/v2_member_transport.rs'
+      - 'crates/catcoms-app/src/store/persistence/v2_shared_history.rs'
+      - 'crates/catcoms-app/src/store/persistence/v2_shared_history/**'
+      - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/tests/text_group_guard/host/member.rs'
+      - 'crates/catcoms-net/src/seeded_identity.rs'
+      - 'crates/catcoms-net/src/bytes_codec_tests.rs'
+      - 'crates/catcoms-net/src/lib.rs'
+      - 'crates/catcoms-net/src/native_chat_members.rs'
+      - 'crates/catcoms-mls/src/group/text_current_add/**'
+      - 'vendor/openmls/src/group/mls_group/processing.rs'
+      - 'vendor/openmls/src/group/mls_group/commit_builder/private_text_add.rs'
+      - 'crates/catcoms-net/src/native_chat_member_dependencies.rs'
+      - 'crates/catcoms-net/src/publication/**'
+      - 'crates/catcoms-sync/src/owner_v2/member.rs'
+      - 'crates/catcoms-sync/src/owner_v2/member_envelope.rs'
+      - 'crates/catcoms-sync/src/owner_v2/member_dependencies.rs'
+      - 'crates/catcoms-sync/src/owner_v2/joined_fence.rs'
+      - 'crates/catcoms-replication/src/chat/projection_admission/v2_general/ordinary.rs'
+      - 'crates/catcoms-replication/src/chat/ledger.rs'
+      - 'crates/catcoms-rt/src/transport.rs'
+      - 'crates/catcoms-mls/src/policy.rs'
+      - 'crates/catcoms-mls/src/group.rs'
+      - 'crates/catcoms-mls/src/group/text_current_add/**'
+      - 'crates/catcoms-mls/src/group/text_current_add.rs'
+      - 'crates/catcoms-mls/src/persist/text_current_add.rs'
+      - 'crates/catcoms-mls/src/device/text_add_package.rs'
+      - 'crates/catcoms-mls/src/device/text_add_package/**'
+      - 'crates/catcoms-sync/src/prepared_direct_join.rs'
+      - 'crates/catcoms-sync/src/prepared_direct_join/v2.rs'
+      - 'crates/catcoms-sync/src/prepared_direct_join/v2/**'
+      - 'crates/catcoms-sync/src/lib.rs'
+      - 'crates/catcoms-sync/src/owner_v2/founder/bootstrap_source/genesis_seed.rs'
+      - 'crates/catcoms-sync/src/owner_v2/founder/bootstrap_source/genesis_seed/governance.rs'
+      - 'crates/catcoms-sync/src/owner_v2/founder/bootstrap_source/genesis_seed/governance/**'
+      - 'crates/catcoms-replication/src/chat/projection_admission/v2_general.rs'
       - 'crates/catcoms-app/src/store/critical_namespaces/archive_bootstrap/founder_warm.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/archive_bootstrap/founder_native.rs'
+      - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/owner.rs'
+      - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current.rs'
+      - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/settlement.rs'
+      - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/text.rs'
+      - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host.rs'
+      - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/governed_add.rs'
+      - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/governed_add/**'
+      - 'crates/catcoms-sync/src/owner_v2/founder/bootstrap_source/genesis_seed/invite/**'
+      - 'crates/catcoms-sync/src/owner_v2/founder/bootstrap_source/genesis_seed/invite.rs'
+      - 'crates/catcoms-rt/src/native_chat_key.rs'
+      - 'crates/catcoms-net/src/native_chat_join.rs'
+      - 'crates/catcoms-net/src/event_dispatch.rs'
       - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/upgrade_source/owning/physical.rs'
       - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/invite/**'
       - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/invite.rs'
       - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/member.rs'
+      - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/member/receive.rs'
+      - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/member/receive/**'
+      - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/member_save.rs'
       - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/invite.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/member.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/member/connected.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/member/receiving.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/network.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/selection.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/member/tests.rs'
       - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/member/tests/invite.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/network/tests.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/retirement.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/retirement/**'
+      - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/ui_add_retirement.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/native_ui.rs'
+      - 'crates/catcoms-app/src/store/critical_namespaces/native_registry/operational/sources/member/tests/admission.rs'
       - 'crates/catcoms-replication/src/chat/join_bindings/**'
       - 'crates/catcoms-replication/src/chat/join_bindings.rs'
+      - 'crates/catcoms-replication/src/chat/cold_selected_history.rs'
+      - 'crates/catcoms-replication/src/chat/projection_admission/v2_general/tests/selected_history.rs'
+      - 'crates/catcoms-replication/src/chat/owner_state/transition/removal_prepare.rs'
       - 'crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/tests/text_group_guard/query/workspace/retain_admission/intent_admission/raw_admission/accepted_admission/retirement/worker.rs'
   workflow_dispatch:
+    inputs:
+      scope:
+        description: Focused invitation, governed Add, joined storage, direct contact, member delivery, selected history, or predecessor checks
+        type: choice
+        default: invitation
+        options:
+          - invitation
+          - governed-add
+          - joined-storage
+          - joined-predecessor
+          - selected-history
+          - native-contact
+          - cold-founder
+          - joined-member
+          - member-history
+          - mounted-governing
+          - peer-relay
+          - remove-sdk
 
 permissions:
   contents: read
 
 concurrency:
-  group: chat-v2-invite-intent-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: chat-v2-invite-intent-${{ github.event.pull_request.number || github.ref }}-${{ inputs.scope || 'invitation' }}
+  cancel-in-progress: ${{ inputs.scope != 'joined-storage' }}
 
 env:
   CARGO_BUILD_JOBS: 1
@@ -33,6 +144,7 @@ env:
 
 jobs:
   invitation:
+    if: inputs.scope != 'joined-storage' && inputs.scope != 'joined-predecessor' && inputs.scope != 'selected-history' && inputs.scope != 'native-contact' && inputs.scope != 'cold-founder' && inputs.scope != 'joined-member' && inputs.scope != 'member-history' && inputs.scope != 'mounted-governing' && inputs.scope != 'peer-relay' && inputs.scope != 'remove-sdk'
     name: Invitation intent (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
@@ -50,21 +162,242 @@ jobs:
         with:
           python-version: '3.12'
       - name: Check original join binding codecs
+        if: inputs.scope != 'governed-add'
         run: python .github/scripts/check-chat-v2-invite-intent.py bindings
+      - name: Check governing selected-history page and proof geometry
+        if: inputs.scope != 'governed-add'
+        run: python .github/scripts/check-chat-v2-invite-intent.py selected-history
+      - name: Check the retained V2 JoinRequest and private KeyPackage
+        if: inputs.scope != 'governed-add'
+        run: python .github/scripts/check-chat-v2-invite-intent.py join-request
+      - name: Check the sealed pending JoinRequest and original joined pin
+        run: python .github/scripts/check-chat-v2-invite-intent.py joined-pending
+      - name: Check the original-clock KeyPackage preflight before Add work
+        if: inputs.scope != 'governed-add'
+        run: python .github/scripts/check-chat-v2-invite-intent.py add-package-preflight
+      - name: Check exact V2 join response frame accounting
+        if: inputs.scope != 'governed-add'
+        run: python .github/scripts/check-chat-v2-invite-intent.py join-response
+      - name: Check the cached governing Header after native lock
+        if: inputs.scope != 'governed-add'
+        run: python .github/scripts/check-chat-v2-invite-intent.py governed-header
+      - name: Check interrupted governing Header signing
+        if: inputs.scope != 'governed-add'
+        run: python .github/scripts/check-chat-v2-invite-intent.py interrupted-header
+      - name: Check real MLS Add, exact Welcome, and sealed joined recovery
+        run: python .github/scripts/check-chat-v2-invite-intent.py join-welcome
+      - name: Check that whole-Source shutdown drains the original partial Add
+        if: inputs.scope != 'governed-add'
+        run: python .github/scripts/check-chat-v2-invite-intent.py add-source-close
+      - name: Check that UI retirement resumes only the original admitted partial Add
+        if: inputs.scope != 'governed-add'
+        run: python .github/scripts/check-chat-v2-invite-intent.py add-ui-lock
       - name: Check invitation journal format and physical-prefix controls
+        if: inputs.scope != 'governed-add'
         run: python .github/scripts/check-chat-v2-invite-intent.py journal
-      - name: Check actual native invitation ownership and durable retries
-        run: python .github/scripts/check-chat-v2-invite-intent.py native
-      - name: Check actual predecessor save and physical retirement preservation
+      - name: Check the governed Add fence and old WAL refusal
+        run: python .github/scripts/check-chat-v2-invite-intent.py add-fence
+      - name: Check durable custody of the original signed JoinRequest
+        run: python .github/scripts/check-chat-v2-invite-intent.py add-request-record
+      - name: Check SDK entry binding to the exact covered fence
+        run: python .github/scripts/check-chat-v2-invite-intent.py add-sdk-entry
+      - name: Check the governed Add SDK candidate debit
+        run: python .github/scripts/check-chat-v2-invite-intent.py add-sdk-budget
+      - name: Check the sealed outcome and original SDK entry binding
+        run: python .github/scripts/check-chat-v2-invite-intent.py add-outcome
+      - name: Check the governing Header attempt and raw signature bindings
+        run: python .github/scripts/check-chat-v2-invite-intent.py add-header-signing
+      - name: Check the Welcome intent bound to the original governing record
+        run: python .github/scripts/check-chat-v2-invite-intent.py add-welcome-intent
+      - name: Check the separate Welcome key-attempt and Raw records
+        run: python .github/scripts/check-chat-v2-invite-intent.py add-welcome-signing
+      - name: Check that the private response binds the original Raw and both payloads
+        run: python .github/scripts/check-chat-v2-invite-intent.py add-response
+      - name: Check immutable archive coverage of the exact Add journal
+        run: python .github/scripts/check-chat-v2-invite-intent.py add-archive
+      - name: Check the Head2 selector and legacy readers
+        run: python .github/scripts/check-chat-v2-invite-intent.py add-head2
+      - name: Check joined pin, declaration seed, and original file custody
+        run: python .github/scripts/check-chat-v2-invite-intent.py joined-pin
+      - name: Check the original native Source retirement barriers
+        run: python .github/scripts/check-chat-v2-invite-intent.py source-retirement
+      - name: Check the existing authenticated scratch controls
+        run: python .github/scripts/check-chat-v2-invite-intent.py control-scratch
+      - name: Check that an initialized member lane refuses a WAL or stage
         if: runner.os == 'Windows'
+        run: python .github/scripts/check-chat-v2-invite-intent.py warm-member-fence
+      - name: Check native invitation ownership, signing and durable retries
+        run: python .github/scripts/check-chat-v2-invite-intent.py native
+      - name: Check invitation packet framing and bound bodies
+        if: inputs.scope != 'governed-add'
+        run: python .github/scripts/check-chat-v2-invite-intent.py packet
+      - name: Check actual predecessor save and physical retirement preservation
+        if: runner.os == 'Windows' && inputs.scope != 'governed-add'
         run: python .github/scripts/check-chat-v2-invite-intent.py predecessor
       - name: Check storage mutation boundaries
         if: runner.os == 'Linux'
         shell: bash
         run: bash scripts/check-store-raw-fs.sh
+      - name: Check the pinned predecessor against the original governed Add fence
+        if: inputs.scope != 'governed-add'
+        run: python .github/scripts/check-chat-v2-invite-intent.py add-fence-predecessor
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: chat-v2-invite-intent-${{ matrix.os }}
+          path: logs/chat-v2-invite-intent/
+          if-no-files-found: error
+
+  joined-storage:
+    if: github.event_name == 'pull_request' || inputs.scope == 'joined-storage' || inputs.scope == 'joined-predecessor' || inputs.scope == 'selected-history' || inputs.scope == 'native-contact' || inputs.scope == 'cold-founder' || inputs.scope == 'joined-member' || inputs.scope == 'member-history' || inputs.scope == 'mounted-governing' || inputs.scope == 'peer-relay' || inputs.scope == 'remove-sdk'
+    name: Joined pin storage (${{ matrix.os }}, ${{ inputs.scope || 'joined-member' }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record actual source
+        run: git rev-parse HEAD
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check governing selected-history page and proof geometry
+        if: inputs.scope == 'selected-history' || inputs.scope == 'joined-storage'
+        run: python .github/scripts/check-chat-v2-invite-intent.py selected-history
+      - name: Check real first and later MLS Welcome and exact Core replay
+        if: github.event_name == 'pull_request' || inputs.scope == 'joined-storage' || inputs.scope == 'selected-history'
+        run: python .github/scripts/check-chat-v2-invite-intent.py join-welcome
+      - name: Check a genuine one-member Remove on a closed surviving MLS graph
+        if: github.event_name == 'pull_request' || inputs.scope == 'remove-sdk'
+        run: python .github/scripts/check-chat-v2-invite-intent.py remove-sdk
+      - name: Check distinct governing key cuts and source drain
+        if: github.event_name == 'pull_request' || inputs.scope == 'remove-sdk'
+        run: python .github/scripts/check-chat-v2-invite-intent.py governing-key-cuts
+      - name: Check exact Remove retry after a native refusal before primitive entry
+        if: github.event_name == 'pull_request' || inputs.scope == 'remove-sdk'
+        run: python .github/scripts/check-chat-v2-invite-intent.py remove-native-retry
+      - name: Check save admission ordering against the original member eviction
+        if: github.event_name == 'pull_request' || inputs.scope == 'remove-sdk'
+        run: python .github/scripts/check-chat-v2-invite-intent.py joined-eviction-order
+      - name: Check joined pin, declaration seed, and original file custody
+        if: inputs.scope == 'joined-storage'
+        run: python .github/scripts/check-chat-v2-invite-intent.py joined-pin
+      - name: Check the connected native two-vault join
+        if: github.event_name == 'pull_request' || inputs.scope == 'joined-storage' || inputs.scope == 'native-contact' || inputs.scope == 'peer-relay'
+        run: python .github/scripts/check-chat-v2-invite-intent.py joined-native-exchange
+      - name: Check retirement of an approved native join dial
+        if: inputs.scope == 'joined-storage' || inputs.scope == 'native-contact'
+        run: python .github/scripts/check-chat-v2-invite-intent.py joined-contact
+      - name: Check mounted request, Welcome and member restart
+        if: github.event_name == 'pull_request' || inputs.scope == 'joined-storage' || inputs.scope == 'native-contact' || inputs.scope == 'cold-founder' || inputs.scope == 'joined-member'
+        run: python .github/scripts/check-chat-v2-invite-intent.py mounted-join-request
+      - name: Check three native vaults across the later Add and the founder disconnect
+        if: inputs.scope == 'mounted-governing'
+        run: python .github/scripts/check-chat-v2-invite-intent.py mounted-governing
+      - name: Reopen the founder at the supported governing epoch limit
+        if: inputs.scope == 'mounted-governing'
+        run: python .github/scripts/check-chat-v2-invite-intent.py governing-epoch-limit
+      - name: Check a selected Remove and relay it after the original founder drains
+        if: github.event_name == 'pull_request' || inputs.scope == 'mounted-governing' || inputs.scope == 'peer-relay'
+        run: python .github/scripts/check-chat-v2-invite-intent.py mounted-removal
+      - name: Check the cold founder's original source and reserved TCP listener
+        if: github.event_name == 'pull_request' || inputs.scope == 'joined-storage' || inputs.scope == 'cold-founder' || inputs.scope == 'joined-member'
+        run: python .github/scripts/check-chat-v2-invite-intent.py cold-founder-source
+      - name: Check first-Add head coverage and reject later epochs on the first selector
+        if: github.event_name == 'pull_request' || inputs.scope == 'joined-storage' || inputs.scope == 'cold-founder'
+        run: python .github/scripts/check-chat-v2-invite-intent.py governed-first-head
+      - name: Check the later Add selector and its exact predecessor archive binding
+        if: github.event_name == 'pull_request' || inputs.scope == 'selected-history'
+        run: python .github/scripts/check-chat-v2-invite-intent.py governed-later-archive
+      - name: Check the Remove archive and the exact paid predecessor fetch
+        if: github.event_name == 'pull_request' || inputs.scope == 'selected-history'
+        run: python .github/scripts/check-chat-v2-invite-intent.py governed-remove-archive
+      - name: Check encrypted joined header witnesses against their original predecessor
+        if: github.event_name == 'pull_request' || inputs.scope == 'selected-history' || inputs.scope == 'mounted-governing' || inputs.scope == 'peer-relay'
+        run: python .github/scripts/check-chat-v2-invite-intent.py joined-header-escrow
+      - name: Check legacy and later Add request records under the exact original fence
+        if: inputs.scope == 'selected-history'
+        run: python .github/scripts/check-chat-v2-invite-intent.py add-request-record
+      - name: Check authenticated Add replay and the saved invitation nonce
+        if: github.event_name == 'pull_request' || inputs.scope == 'cold-founder'
+        run: python .github/scripts/check-chat-v2-invite-intent.py governed-replay
+      - name: Check physical archive-chain discovery and file identity
+        if: github.event_name == 'pull_request' || inputs.scope == 'cold-founder'
+        run: python .github/scripts/check-chat-v2-invite-intent.py governed-archive-chain
+      - name: Check joined registry labels and historical row encodings
+        if: inputs.scope == 'joined-storage' || inputs.scope == 'native-contact'
+        run: python .github/scripts/check-chat-v2-invite-intent.py joined-registry-codec
+      - name: Check retirement of the original native source and transport
+        if: inputs.scope == 'native-contact'
+        run: python .github/scripts/check-chat-v2-invite-intent.py source-retirement
+      - name: Check that native Welcome requires the original joiner source and SDK cut
+        if: github.event_name == 'pull_request' || inputs.scope == 'native-contact' || inputs.scope == 'joined-member'
+        run: python .github/scripts/check-chat-v2-invite-intent.py native-joiner-key
+      - name: Check that final outbox admission retains the original prepared append
+        if: github.event_name == 'pull_request' || inputs.scope == 'joined-member'
+        run: python .github/scripts/check-chat-v2-invite-intent.py member-outbox-admission
+      - name: Check the original founder member-save path through the shared driver
+        if: github.event_name == 'pull_request' || inputs.scope == 'joined-member'
+        run: python .github/scripts/check-chat-v2-invite-intent.py founder-member-save
+      - name: Check the ordinary member envelope with a real MLS epoch change
+        if: github.event_name == 'pull_request' || inputs.scope == 'joined-member'
+        run: python .github/scripts/check-chat-v2-invite-intent.py member-envelope
+      - name: Check captured one-shot publication at the original driver queue
+        if: github.event_name == 'pull_request' || inputs.scope == 'joined-member'
+        run: python .github/scripts/check-chat-v2-invite-intent.py member-publication-driver
+      - name: Check ordinary receiver dependency ordering and provisional projection
+        if: github.event_name == 'pull_request' || inputs.scope == 'joined-member'
+        run: python .github/scripts/check-chat-v2-invite-intent.py member-receive-dependencies
+      - name: Check bounded native member ingress over real TCP
+        if: github.event_name == 'pull_request' || inputs.scope == 'joined-member'
+        run: python .github/scripts/check-chat-v2-invite-intent.py member-receive-native
+      - name: Check original mesh retirement across selected member transitions
+        if: github.event_name == 'pull_request' || inputs.scope == 'joined-member'
+        run: python .github/scripts/check-chat-v2-invite-intent.py member-transport-selection
+      - name: Check exact sealed received history and foreign manifest refusal
+        if: github.event_name == 'pull_request' || inputs.scope == 'joined-member' || inputs.scope == 'member-history'
+        run: python .github/scripts/check-chat-v2-invite-intent.py member-shared-history-record
+      - name: Check shared history selection, restart and original file identity
+        if: github.event_name == 'pull_request' || inputs.scope == 'joined-member' || inputs.scope == 'member-history'
+        run: python .github/scripts/check-chat-v2-invite-intent.py member-shared-history-disk
+      - name: Check exact shared history catalog declarations and older readers
+        if: github.event_name == 'pull_request' || inputs.scope == 'joined-member' || inputs.scope == 'member-history'
+        run: python .github/scripts/check-chat-v2-invite-intent.py member-shared-history-declaration
+      - name: Check shared history restart seed custody and layout binding
+        if: github.event_name == 'pull_request' || inputs.scope == 'joined-member' || inputs.scope == 'member-history'
+        run: python .github/scripts/check-chat-v2-invite-intent.py member-shared-history-seed
+      - name: Check physical history declaration staging and older-reader custody
+        if: github.event_name == 'pull_request' || inputs.scope == 'joined-member' || inputs.scope == 'member-history'
+        run: python .github/scripts/check-chat-v2-invite-intent.py member-shared-history-stage
+      - name: Check archived dependency replay and removed author visibility
+        if: github.event_name == 'pull_request' || inputs.scope == 'joined-member' || inputs.scope == 'member-history'
+        run: python .github/scripts/check-chat-v2-invite-intent.py member-shared-history-replay
+      - name: Check exact ActionId recovery after publication and restart
+        if: github.event_name == 'pull_request' || inputs.scope == 'joined-member' || inputs.scope == 'member-history'
+        run: python .github/scripts/check-chat-v2-invite-intent.py member-action-history
+      - name: Check saved revisions and tombstones across bounded reads and restart
+        if: github.event_name == 'pull_request' || inputs.scope == 'member-history'
+        run: python .github/scripts/check-chat-v2-invite-intent.py member-own-revision
+      - name: Check bounded dependency requests and follow-ups on the original TCP connection
+        if: github.event_name == 'pull_request' || inputs.scope == 'joined-member' || inputs.scope == 'native-contact'
+        run: python .github/scripts/check-chat-v2-invite-intent.py member-dependency-transport
+      - name: Check Chat V2 request and response bounds before allocation
+        if: github.event_name == 'pull_request' || inputs.scope == 'joined-storage' || inputs.scope == 'selected-history'
+        run: python .github/scripts/check-chat-v2-invite-intent.py joined-wire
+      - name: Check native JoinRequest and governing routing and retirement over TCP
+        if: github.event_name == 'pull_request' || inputs.scope == 'joined-storage' || inputs.scope == 'selected-history'
+        run: python .github/scripts/check-chat-v2-invite-intent.py joined-wire-ingress
+      - name: Check the pinned governed reader against staged and selected joined pins
+        if: inputs.scope == 'joined-predecessor'
+        run: python .github/scripts/check-chat-v2-joined-predecessor.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chat-v2-joined-storage-${{ matrix.os }}
           path: logs/chat-v2-invite-intent/
           if-no-files-found: error

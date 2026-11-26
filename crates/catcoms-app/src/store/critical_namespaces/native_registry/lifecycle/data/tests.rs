@@ -145,6 +145,7 @@ fn joined(index: &Index) -> Backend {
             initial_governing_tip: [29; 32],
             initial_current_basis: [30; 32],
             joined_epoch: 7,
+            local_display: None,
         },
     }
 }

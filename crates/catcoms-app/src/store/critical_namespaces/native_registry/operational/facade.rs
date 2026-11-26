@@ -6,6 +6,7 @@ use super::native_ui::{
 use super::*;
 pub(super) mod upgrade;
 use std::sync::atomic::{AtomicBool, AtomicU64};
+pub use upgrade::NativeTextJoinedVaultUpgrade;
 pub use upgrade::{
     NativeTextGovernanceUpgrade, NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal,
 };
@@ -37,6 +38,7 @@ pub(super) enum IndexOwner {
 /// and a present work capsule can own the final original physical files.
 pub struct NativeTextVaultAuthentication {
     work: Option<super::upgrade_source::owning::MetadataWork>,
+    can_retry_capture: bool,
     host: catcoms_rt::NativeChatUiMountObservation,
     expected: NativeUiInvocationBudget,
     // LAST: all original metadata/custody retires before this independent fee.
@@ -51,6 +53,12 @@ pub struct NativeTextVaultAuthenticationCheck {
     _credit: NativeUiInvocationMetadata,
 }
 impl NativeTextVaultAuthentication {
+    /// The canonical metadata reader is occupied. This reports only a
+    /// transient capture refusal and never checks or accepts a secret.
+    pub fn is_capture_busy_cached(&self) -> bool {
+        self.can_retry_capture && self.work.is_none() && self.host.is_open()
+    }
+
     /// Blocking KDF verification outside EVERY guard. An independently funded
     /// invocation is checked against this original host's pool BEFORE either
     /// missing-work refusal or KDF. On success the WHOLE physical work is dropped
@@ -127,6 +135,48 @@ const _: () = assert!(
 );
 
 impl NativeTextVault {
+    pub(super) fn from_recovered_joined_index(
+        index: super::upgrade_source::owning::Store,
+        (generation, authorized, requested): (Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicBool>),
+        budget: NativeUiInvocationBudget,
+    ) -> Result<Self, AppError> {
+        let ui = UiAdmissionOwner::new(generation, authorized, requested, budget)?;
+        let sources = super::source_admission::SourceAdmission::new(ui.observe_mount())?;
+        Ok(Self {
+            ui,
+            sources,
+            index: IndexOwner::Version3(index),
+        })
+    }
+
+    /// Open a previously selected joined-aware vault under fresh host admission.
+    /// The native source table may start empty only when the physical registry
+    /// and joined-pin selection both prove that there are no sources to restore.
+    pub fn open_idle_joined_from_trusted_host(
+        directory: &std::path::Path,
+        secret: &[u8],
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+        current: crate::store::V2CurrentLayoutPolicy,
+        (generation, authorized, requested): (Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicBool>),
+        budget: NativeUiInvocationBudget,
+    ) -> Result<Self, AppError> {
+        use super::super::lifecycle::preparation::{Policy, PREPARATION_FEE};
+        let policy = Policy::new(
+            CriticalCatalogReadPool::new(PREPARATION_FEE)?,
+            Policy::required_persistent_capacity(),
+        )?;
+        let ui = UiAdmissionOwner::new(generation, authorized, requested, budget)?;
+        let sources = super::source_admission::SourceAdmission::new(ui.observe_mount())?;
+        let index = super::upgrade_source::owning::Store::open_idle_joined(
+            directory, secret, rng, current, policy,
+        )?;
+        Ok(Self {
+            ui,
+            sources,
+            index: IndexOwner::Version3(index),
+        })
+    }
+
     /// Consume an original, uninstalled native index owner. This may allocate
     /// and fail; call outside guards before installation. Failure closes and
     /// destroys the consumed owner, never hands its raw Store to a legacy path.
@@ -212,12 +262,13 @@ impl NativeTextVault {
         &self,
         credit: NativeUiInvocationMetadata,
     ) -> NativeTextVaultAuthentication {
-        let work = match &self.index {
-            IndexOwner::Version3(index) => index.capture_metadata_work(),
-            IndexOwner::Version2(_) => None,
+        let (work, can_retry_capture) = match &self.index {
+            IndexOwner::Version3(index) => (index.capture_metadata_work(), true),
+            IndexOwner::Version2(_) => (None, false),
         };
         NativeTextVaultAuthentication {
             work,
+            can_retry_capture,
             host: self.ui.observe_mount(),
             expected: self.ui.invocation_budget(),
             credit,

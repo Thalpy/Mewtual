@@ -44,10 +44,12 @@ pub(in crate::store) use classify::V2TextPromotionRecoveryClassData;
 pub(in crate::store) use exact_repair::{
     CapturedV2TextPromotionSeedRepair, PreparedV2TextPromotionSeedRepair,
 };
+pub(in crate::store::persistence::v2_text) use recovery::validate_initial_outputs;
 pub(in crate::store) use recovery::V2TextPromotionRecoveryResources;
 pub(in crate::store) use scratch::{
     CapturedV2TextPromotionScratch, PreparedV2TextPromotionScratch,
 };
+pub(in crate::store::persistence::v2_text) use work::page_child;
 #[cfg(all(test, any(windows, target_os = "linux")))]
 pub(in crate::store) use work::V2TextPromotionTestCut;
 

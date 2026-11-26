@@ -77,17 +77,25 @@ function registeredCommands(source: string): string[] {
  * This is an inventory/drift guard. Native MockRuntime tests exercise real Tauri ACL/dispatch.
  */
 function manualCommands(sources: Map<string, string>): string[] {
-  const source = sources.get("admin_chat_ledger/mod.rs");
-  assert.ok(source, "the synchronous admin history router must remain visible to the audit");
-  const body = /^pub\(super\) const COMMANDS: &\[&str\] = &\[([^\]]*)\];/m.exec(source)?.[1];
-  assert.ok(body, "manual command names must remain a literal enumerable array");
-  const names = [...body.matchAll(/"([a-z][a-z0-9_]*)"/g)].map((match) => match[1]);
-  assert.match(body.replace(/"[a-z][a-z0-9_]*"/g, ""), /^[\s,]*$/, "unsupported manual command inventory syntax");
-  assert.deepEqual(names, ["get_admin_chat_ledger", "get_admin_chat_ledger_detail"], "review any new manual surface explicitly");
+  const inventory = (path: string, expected: string[]) => {
+    const source = sources.get(path);
+    assert.ok(source, `manual router must remain readable at ${path}`);
+    const body = /^pub\(super\) const COMMANDS: &\[&str\] = &\[([^\]]*)\];/m.exec(source)?.[1];
+    assert.ok(body, "manual command names must remain a literal enumerable array");
+    const names = [...body.matchAll(/"([a-z][a-z0-9_]*)"/g)].map((match) => match[1]);
+    assert.match(body.replace(/"[a-z][a-z0-9_]*"/g, ""), /^[\s,]*$/, "unsupported manual command inventory syntax");
+    assert.deepEqual(names, expected, "review any new manual surface explicitly");
+    return names;
+  };
   const bridge = sources.get("lib.rs") ?? "";
   assert.match(bridge.replace(/\s+/g, ""), /\.invoke_handler\(native_text::with_commands\(admin_chat_ledger::with_commands\(tauri::generate_handler!\[/,
     "the reviewed manual router must wrap the actual normal handler");
-  return names;
+  assert.match(sources.get("native_text.rs") ?? "", /if enabled && membership::handles\(invoke\.message\.command\(\)\) \{\s*return membership::route\(invoke, &spawn\);/,
+    "the native membership inventory must dispatch through the production router");
+  return [
+    ...inventory("admin_chat_ledger/mod.rs", ["get_admin_chat_ledger", "get_admin_chat_ledger_detail"]),
+    ...inventory("native_text/membership.rs", ["get_native_chat_members", "remove_native_chat_member", "share_native_chat_contact", "connect_native_chat_contact"]),
+  ];
 }
 
 function allRegisteredCommands(sources = nativeSources()): string[] {

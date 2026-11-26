@@ -23,6 +23,31 @@ fn bounded_control_read_rejects_missing_empty_oversize_and_replacement() {
 }
 
 #[test]
+fn governed_add_outcome_read_uses_the_prepaid_buffer_without_expanding_old_reads() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = fixed_child(temp.path(), "text.add.outcome.v2").unwrap();
+    let length = 2 * 1024 * 1024 + 41;
+    let exact = vec![31; length];
+    fs::write(&path, &exact).unwrap();
+    assert!(read_control(&path, length).is_err());
+
+    let mut short = Some(Zeroizing::new(Vec::with_capacity(length)));
+    assert!(read_control_into(&path, length, &mut short).is_err());
+    assert_eq!(short.as_ref().unwrap().capacity(), length);
+    let frame = Zeroizing::new(Vec::with_capacity(length + 1));
+    let address = frame.as_ptr();
+    let mut prepaid = Some(frame);
+    let captured = read_control_into(&path, length, &mut prepaid).unwrap();
+    assert!(prepaid.is_none());
+    assert_eq!(captured.frame.as_ptr(), address);
+    assert_eq!(captured.frame.as_slice(), exact);
+
+    fs::rename(&path, path.with_extension("held")).unwrap();
+    fs::write(&path, &exact).unwrap();
+    assert!(require_named(&path, &captured).is_err());
+}
+
+#[test]
 fn only_closed_literal_and_complete_archive_names_are_constructed() {
     let base = Path::new("original-target");
     assert!(fixed_child(base, "../head.bin").is_err());

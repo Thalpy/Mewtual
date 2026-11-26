@@ -271,7 +271,10 @@ pub(super) fn require_exact_inventory(
     }
 }
 
-pub(super) fn page_child(base: &Path, id: &[u8; 32]) -> Result<PathBuf, AppError> {
+pub(in crate::store::persistence::v2_text) fn page_child(
+    base: &Path,
+    id: &[u8; 32],
+) -> Result<PathBuf, AppError> {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut leaf = String::with_capacity(70);
     leaf.push_str("p-");

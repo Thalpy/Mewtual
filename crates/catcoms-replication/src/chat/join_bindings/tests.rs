@@ -36,6 +36,16 @@ fn unsigned_invite_preimage_decoder_is_exact_bounded_data() {
         InviteBindingSpecData::decode_signing_bytes_data(&vec![0; MAX_JOIN_BINDING_BYTES + 1])
             .is_err()
     );
+    let welcome = fixture.welcome.spec_data().signing_bytes_data().unwrap();
+    let decoded = WelcomeBindingSpecData::decode_signing_bytes_data(&welcome).unwrap();
+    assert_eq!(decoded.signing_bytes_data().unwrap(), welcome);
+    for length in 0..welcome.len() {
+        assert!(WelcomeBindingSpecData::decode_signing_bytes_data(&welcome[..length]).is_err());
+    }
+    let mut extra = welcome;
+    extra.push(0);
+    assert!(WelcomeBindingSpecData::decode_signing_bytes_data(&extra).is_err());
+    assert!(WelcomeBindingSpecData::decode_signing_bytes_data(&bytes).is_err());
 }
 fn invite(spec: InviteBindingSpecData) -> SignedInviteBindingData {
     SignedInviteBindingData::sign_using(spec, |bytes| Ok(key(2).sign(bytes))).unwrap()

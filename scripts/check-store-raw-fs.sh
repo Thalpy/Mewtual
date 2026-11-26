@@ -147,6 +147,15 @@ declare -A allowed=(
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|write_governance_layout_declaration|selected.sync_all().map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|write_governance_layout_declaration|fs::remove_file(&seed_path).map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/governance_layout.rs|install_governance_layout_marker|original.marker.sync_all().map_err(io)?;']=1
+  # Explicit joined-pin startup only. The authenticated seed identifies both whole catalogs and
+  # the actual governing/outbox/native leaves. The same stage is kept through the rename.
+  ['crates/catcoms-app/src/store/persistence/governance_layout/joined.rs|install_catalog_stage|fs::rename(stage, current)']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout/joined.rs|sync_selected_catalog|selected.sync_all()']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout/joined.rs|retire_declaration_claim|fs::remove_file(claim)']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout/joined.rs|select_joined_pin_catalog_with|value.current.sync_all().map_err(durable)?;']=1
+  # First joined-pending record selects only its exact one-insertion index successor.
+  ['crates/catcoms-app/src/store/persistence/governance_layout/joined/pending.rs|select|fs::rename(&stage_path, &index_path).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/governance_layout/joined/pending.rs|select|index.selected.0.sync_all().map_err(durable)?;']=1
   # Namespace5 (member outbox layout) declaration: the same reviewed protocol as namespace4,
   # with its own fixed seed/marker names. A zero-byte claim of the fixed seed name comes
   # first (no content, so older readers may ignore it), then the empty legacy stage fence
@@ -185,6 +194,12 @@ declare -A allowed=(
   # a distinct scratch marker verifies the original strict pre-MAIN prefix, parent and
   # absence of dependents before unlinking that one fixed stage. Actual outcomes cache
   # before barriers/late errors. Every helper File drains before its actual lease/End.
+  # Governed Add's fixed old-reader fence. Create-new only, then the exact
+  # original ciphertext prefix via the still-held File. No rename or unlink.
+  ['crates/catcoms-app/src/store/persistence/v2_text/control/governed_add/held/writer.rs|ensure_original|let file = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/control/governed_add/held/writer.rs|ensure_original|.create_new(true)']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/control/governed_add/held/writer.rs|fill_original|original.file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/control/governed_add/held/writer.rs|select_governed_head|fs::rename(stage, head_path).map_err(io)']=1
   ['crates/catcoms-app/src/store/persistence/v2_text/transaction/recovery/effect.rs|scratch_inner|fs::remove_file(&p.wal_stage_path).map_err(io::io)?;']=1
   ['crates/catcoms-app/src/store/persistence/v2_text/transaction/recovery/effect.rs|complete_authenticated_output|OpenOptions::new()']=1
   ['crates/catcoms-app/src/store/persistence/v2_text/transaction/recovery/effect.rs|complete_authenticated_output|Err(error) if error.kind() == std::io::ErrorKind::NotFound => OpenOptions::new()']=1
@@ -381,10 +396,9 @@ declare -A allowed=(
   # ensure_exact: create_new, or append ONLY the missing suffix of an existing exact prefix
   # of authenticated expected bytes (our presealed output or an authenticated WAL's frame);
   # never truncate, never adopt other content.
-  ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|ensure_exact|OpenOptions::new()']=1
-  ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|ensure_exact|Err(error) if error.kind() == std::io::ErrorKind::NotFound => OpenOptions::new()']=1
-  ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|ensure_exact|.create_new(true)']=1
-  ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|ensure_exact|file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|open_exact_write|OpenOptions::new()']=2
+  ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|open_exact_write|.create_new(true)']=1
+  ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|finish_exact_write|file.sync_all().map_err(io)?;']=1
   # rename_fixed: WAL stage -> WAL MAIN, and head stage -> head.bin (the selector CAS), each
   # after re-verifying the source's exact bytes and the parent still selected.
   ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|rename_fixed|fs::rename(from, to).map_err(io)']=1
@@ -394,14 +408,18 @@ declare -A allowed=(
   ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|remove_listed|match fs::remove_file(path) {']=1
   # create_namespace: one new `mo-<context>` directory under the separately held parent.
   ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|create_namespace|fs::create_dir(path).map_err(io)']=1
-  # Invitation intent: the unique native RuntimeLoan owns this isolated fixed
+  # Invitation journal: the unique native RuntimeLoan owns this isolated fixed
   # text.pages family and physical lease. Open existing only for verification/
   # flush; create_new once, append only its own exact prefix, never replace or
-  # delete. Head/O/H/WAL/index inventories are untouched. Quota is one 8KiB object.
+  # delete. Independent quotas bound the one 8KiB intent and two 512-byte signing
+  # files. The attempt/raw paths never adopt an existing file.
   ['crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/invite/journal.rs|lookup|let file = OpenOptions::new()']=1
   ['crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/invite/journal.rs|write_same|let file = OpenOptions::new()']=1
   ['crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/invite/journal.rs|write_same|.create_new(true)']=1
   ['crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/invite/journal.rs|sync|.sync_all()']=1
+  # Read-only Windows journal probe. OPEN_REPARSE_POINT inspects the actual
+  # name without following a link. Linux uses RDONLY/NOFOLLOW/NONBLOCK.
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/invite/journal/recovery.rs|open_readonly|OpenOptions::new()']=1
   ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/settlement.rs|settle|files.directory.1.sync_all().map_err(io)?;']=1
 )
 

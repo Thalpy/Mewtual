@@ -90,24 +90,13 @@ impl ColdV2GenesisReadResources {
         let fee = policy.pending.pool.try_reserve(COLD_CAPTURE_METADATA_FEE)?;
         source.validate_original(store)?;
         store.validate_mounted_current_layout()?;
-        let capture = &source.source().capture;
-        let key = Zeroizing::new(store.keys.db_key()?);
-        let debit = founder::open_debit_data(&key, capture.invocation, &capture.debit.frame)?;
         let resources = Self {
             body: Arc::new(ResourceBody {
                 original_read: source.source().observe_original(),
                 original_seed: source.seed().observe_original_seed_data(),
                 mount: store.registry_mount(),
                 negative: store.chat_mount.observer(),
-                expected: SavedSourceExpectationData {
-                    invocation: capture.invocation,
-                    debit_id: founder::DebitId::of(&capture.debit.frame),
-                    terminal_id: founder::IntentId::of(&capture.terminal.frame),
-                    source_id: capture.source_id,
-                    marker_id: founder::TargetMarkerId::of(&capture.origin.frame),
-                    context: capture.context.clone(),
-                    debit_display_name: debit.name,
-                },
+                expected: source.source().saved_expectation_data(store)?,
                 fee,
             }),
         };
@@ -138,7 +127,7 @@ impl ColdV2GenesisReadResources {
             .require_same_original(source.source())?;
         self.body
             .original_seed
-            .require_same_seed_data(source.seed())?;
+            .require_same_source_fields(source.seed())?;
         if self.body.negative.is_cancelled()
             || !Arc::ptr_eq(&self.body.mount, &store.registry_mount())
             || self.body.expected.context != *source.data().context

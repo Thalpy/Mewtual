@@ -22,6 +22,17 @@ pub enum V2GeneralAcceptanceSource<'a> {
 }
 redacted_debug!(V2OrdinaryDependency<'_>, V2GeneralAcceptanceSource<'_>);
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum V2OrdinaryReceiveStatus {
+    WaitingForDependencies(Vec<ActionId>),
+    Retained(ActionState),
+}
+
+struct LedgerDependencies<'a> {
+    missing: Vec<ActionId>,
+    exact: Vec<(&'a SignedAction, V2AuthenticatedAdmission)>,
+}
+
 impl V2GeneralPrefixVerifier {
     fn require_admission(&self, admission: &V2AuthenticatedAdmission) -> Result<(), ChatError> {
         if !Arc::ptr_eq(&self.identity, &admission.core.identity)
@@ -164,7 +175,221 @@ impl V2GeneralPrefixVerifier {
         dependencies: &[V2OrdinaryDependency<'_>],
         view: &ProjectionView,
     ) -> Result<ProjectionAdmissionToken, ChatError> {
-        self.verify_action_semantics(action, admission, dependencies)?;
+        self.provisional_evidence(action, admission, dependencies, view)
+            .map(|(_, token)| token)
+    }
+
+    /// Import one already opened ordinary action into the actual receiver
+    /// ledger. Exact dependencies must be provided in canonical order. A
+    /// pending action has no current effect and can be retried under the same
+    /// original view after bounded semantic work or dependency recovery.
+    pub fn project_provisional_action(
+        &self,
+        ledger: &mut ChatLedger,
+        view: &ProjectionView,
+        action: &SignedAction,
+        admission: &V2AuthenticatedAdmission,
+        dependencies: &[V2OrdinaryDependency<'_>],
+        work: usize,
+    ) -> Result<ActionState, ChatError> {
+        self.require_receiver_ledger(ledger, view, action)?;
+        let (verified, token) = self.provisional_evidence(action, admission, dependencies, view)?;
+        Self::apply_provisional(ledger, action, work, verified, token)
+    }
+
+    fn apply_provisional(
+        ledger: &mut ChatLedger,
+        action: &SignedAction,
+        work: usize,
+        verified: VerifiedAuthorityBasis,
+        token: ProjectionAdmissionToken,
+    ) -> Result<ActionState, ChatError> {
+        let state = Self::apply_verified(ledger, action, work, verified)?;
+        if state == ActionState::Valid {
+            ledger.admit_projection(&token, work)?;
+        }
+        Ok(state)
+    }
+
+    fn apply_verified(
+        ledger: &mut ChatLedger,
+        action: &SignedAction,
+        work: usize,
+        verified: VerifiedAuthorityBasis,
+    ) -> Result<ActionState, ChatError> {
+        let id = action.id();
+        match ledger.action(id) {
+            Some(original) if original == action => {}
+            Some(_) => return Err(ChatError::AuthorityConflict),
+            None => {
+                ledger.import(action.clone())?;
+            }
+        }
+        ledger.authorize(id, verified)?;
+        ledger.advance(work);
+        ledger.state(id).ok_or(ChatError::Unknown)
+    }
+
+    /// Resolve only the action's exact canonical dependencies from this
+    /// ledger's Valid signed originals and their verified governing Admission.
+    /// Missing evidence does not import a partially authorized child.
+    pub fn project_provisional_from_ledger(
+        &self,
+        ledger: &mut ChatLedger,
+        view: &ProjectionView,
+        action: &SignedAction,
+        admission: &V2AuthenticatedAdmission,
+        work: usize,
+    ) -> Result<V2OrdinaryReceiveStatus, ChatError> {
+        self.require_receiver_ledger(ledger, view, action)?;
+        let LedgerDependencies { missing, exact } =
+            self.ledger_dependencies(ledger, action, &[])?;
+        if !missing.is_empty() {
+            self.require_admission(admission)?;
+            admission.core.body.matches_action_delegation(action)?;
+            self.observe_live_member(admission.core.body.admission_id())?;
+            return Ok(V2OrdinaryReceiveStatus::WaitingForDependencies(missing));
+        }
+        let dependencies = exact
+            .iter()
+            .map(|(original, owner)| V2OrdinaryDependency::new(original, owner))
+            .collect::<Vec<_>>();
+        let (verified, token) =
+            self.provisional_evidence(action, admission, &dependencies, view)?;
+        Self::apply_provisional(ledger, action, work, verified, token)
+            .map(V2OrdinaryReceiveStatus::Retained)
+    }
+
+    /// Rebuild semantic history from exact stored originals and the verified
+    /// governing prefix. Replay restores dependency knowledge without issuing
+    /// an OPEN observation, projection token or current transport authority.
+    pub fn replay_ordinary_history_original(
+        &self,
+        ledger: &mut ChatLedger,
+        view: &ProjectionView,
+        action: &SignedAction,
+        admission: &V2AuthenticatedAdmission,
+        frozen_dependencies: &[&V2FrozenAdmission],
+        work: usize,
+    ) -> Result<V2OrdinaryReceiveStatus, ChatError> {
+        self.require_receiver_ledger(ledger, view, action)?;
+        let LedgerDependencies { missing, exact } =
+            self.ledger_dependencies(ledger, action, frozen_dependencies)?;
+        if !missing.is_empty() {
+            self.require_admission(admission)?;
+            admission.core.body.matches_action_delegation(action)?;
+            self.live()?;
+            return Ok(V2OrdinaryReceiveStatus::WaitingForDependencies(missing));
+        }
+        let dependencies = exact
+            .iter()
+            .map(|(original, owner)| V2OrdinaryDependency::new(original, owner))
+            .collect::<Vec<_>>();
+        let verified = self.verify_action_semantics(action, admission, &dependencies)?;
+        Self::apply_verified(ledger, action, work, verified).map(V2OrdinaryReceiveStatus::Retained)
+    }
+
+    fn ledger_dependencies<'a>(
+        &self,
+        ledger: &'a ChatLedger,
+        action: &SignedAction,
+        frozen_dependencies: &[&V2FrozenAdmission],
+    ) -> Result<LedgerDependencies<'a>, ChatError> {
+        let profile = self.math.profile();
+        let required = action.dependencies();
+        if frozen_dependencies.len() > required.len() {
+            return Err(ChatError::Dependency);
+        }
+        let mut missing = Vec::new();
+        let mut owners = Vec::with_capacity(required.len());
+        let mut used_frozen = 0_u128;
+        const {
+            assert!(MAX_PARENTS < u128::BITS as usize);
+        }
+        for id in required {
+            let Some(entry) = ledger.entries.get(&id) else {
+                missing.push(id);
+                continue;
+            };
+            match entry.state {
+                ActionState::Pending(_) => {
+                    missing.push(id);
+                    continue;
+                }
+                ActionState::Invalid(_) => return Err(ChatError::Dependency),
+                ActionState::Valid => {}
+            }
+            let Some(verified) = &entry.authority else {
+                return Err(ChatError::Authority);
+            };
+            let (origin, owner, tenure) = match &verified.constraint {
+                SemanticConstraint::V2OrdinaryAction {
+                    profile,
+                    admission,
+                    tenure,
+                    ..
+                }
+                | SemanticConstraint::V2FounderCreate {
+                    profile,
+                    admission,
+                    tenure,
+                    ..
+                } => (profile, admission, tenure),
+                SemanticConstraint::LegacyReusable => return Err(ChatError::Authority),
+            };
+            if *origin != profile.id() || *tenure != profile.tenure() {
+                return Err(ChatError::Scope);
+            }
+            let admission = match self.admission(*owner) {
+                Ok(current) => current,
+                Err(ChatError::Dependency) => {
+                    let (index, historical) = frozen_dependencies
+                        .iter()
+                        .enumerate()
+                        .find(|(_, frozen)| frozen.admission.core.body.admission_id() == *owner)
+                        .ok_or(ChatError::Dependency)?;
+                    self.require_admission(&historical.admission)?;
+                    used_frozen |= 1_u128 << index;
+                    historical.admission.clone()
+                }
+                Err(error) => return Err(error),
+            };
+            owners.push((&entry.action, admission));
+        }
+        if missing.is_empty() && used_frozen.count_ones() as usize != frozen_dependencies.len() {
+            return Err(ChatError::Dependency);
+        }
+        Ok(LedgerDependencies {
+            missing,
+            exact: owners,
+        })
+    }
+
+    fn require_receiver_ledger(
+        &self,
+        ledger: &ChatLedger,
+        view: &ProjectionView,
+        action: &SignedAction,
+    ) -> Result<(), ChatError> {
+        if !ledger
+            .projection
+            .current
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &view.life))
+        {
+            return Err(ChatError::Scope);
+        }
+        self.require_view(action, view)
+    }
+
+    fn provisional_evidence(
+        &self,
+        action: &SignedAction,
+        admission: &V2AuthenticatedAdmission,
+        dependencies: &[V2OrdinaryDependency<'_>],
+        view: &ProjectionView,
+    ) -> Result<(VerifiedAuthorityBasis, ProjectionAdmissionToken), ChatError> {
+        let verified = self.verify_action_semantics(action, admission, dependencies)?;
         self.require_view(action, view)?;
         if !self
             .admissions
@@ -175,7 +400,7 @@ impl V2GeneralPrefixVerifier {
             return Err(ChatError::Scope);
         }
         self.live()?;
-        Ok(ProjectionAdmissionToken {
+        let token = ProjectionAdmissionToken {
             binding: ActionBinding::of(action.id(), action),
             context: EvidenceContext::V2Ordinary {
                 profile: self.math.profile().id(),
@@ -187,7 +412,8 @@ impl V2GeneralPrefixVerifier {
             support: ProjectionSupport::GeneralOpen {
                 origin: admission.core.open_origin.clone(),
             },
-        })
+        };
+        Ok((verified, token))
     }
 
     /// Exact LOG inclusion is independent of OPEN. A frozen original removal cut may prove

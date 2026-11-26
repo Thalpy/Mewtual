@@ -90,7 +90,7 @@ fn lifecycle3_wal_classifies_exact_duplicate_short_and_actual_bad_mac_only() {
     for (bytes, decision) in samples {
         fs::write(stage(dir.path()), &bytes).unwrap();
         let inventory = UpgradeInventory::capture(store, &paid, &pool).unwrap();
-        let proof = classify(store, &inventory).unwrap();
+        let proof = classify(store, &inventory, None).unwrap();
         assert_eq!(proof.decision(), decision);
         proof.require_inventory(&inventory).unwrap();
         assert_eq!(fs::read(stage(dir.path())).unwrap(), bytes); // no classification side effect
@@ -142,7 +142,7 @@ fn lifecycle3_wal_preserves_authenticated_invalid_future_reencrypted_and_unsuppo
     for bytes in samples {
         fs::write(stage(dir.path()), &bytes).unwrap();
         let inventory = UpgradeInventory::capture(store, &paid, &pool).unwrap();
-        assert!(classify(store, &inventory).is_err());
+        assert!(classify(store, &inventory, None).is_err());
         assert_eq!(fs::read(stage(dir.path())).unwrap(), bytes);
         drop(inventory);
         fs::remove_file(stage(dir.path())).unwrap();
@@ -179,16 +179,18 @@ fn lifecycle3_wal_rename_proof_binds_this_inventory_and_rejects_two_simultaneous
         &original,
         &candidate,
         &frame,
-        Change::RefreshLegacyInvite
+        Change::RefreshLegacyInvite,
+        None,
     )
     .is_err());
-    let warm = verify_warm_metadata(store, &original, &candidate, &frame, Change::Rename).unwrap();
+    let warm =
+        verify_warm_metadata(store, &original, &candidate, &frame, Change::Rename, None).unwrap();
     assert!(!warm.has_stage());
     warm.require_inventory(&original).unwrap();
     drop(original);
     fs::write(stage(dir.path()), &frame).unwrap();
     let observed = UpgradeInventory::capture(store, &paid, &pool).unwrap();
-    let proof = classify(store, &observed).unwrap();
+    let proof = classify(store, &observed, None).unwrap();
     assert_eq!(proof.decision(), Decision::Rename);
     assert!(proof.has_stage());
     let other = UpgradeInventory::capture(store, &paid, &pool).unwrap();
@@ -206,7 +208,7 @@ fn lifecycle3_wal_rename_proof_binds_this_inventory_and_rejects_two_simultaneous
     .unwrap();
     fs::write(&catalog_stage, &current).unwrap();
     let both = UpgradeInventory::capture(store, &paid, &pool).unwrap();
-    assert!(classify(store, &both).is_err());
+    assert!(classify(store, &both, None).is_err());
     assert_eq!(fs::read(stage(dir.path())).unwrap(), frame);
     assert_eq!(fs::read(catalog_stage).unwrap(), current);
 }
@@ -237,13 +239,16 @@ fn lifecycle3_wal_refresh_proof_requires_the_actual_sealed_operation_kind() {
         panic!("refresh")
     };
     let frame = seal_plain(store, &candidate.encode_data().unwrap(), &mut rng);
-    assert!(verify_warm_metadata(store, &original, &candidate, &frame, Change::Rename).is_err());
+    assert!(
+        verify_warm_metadata(store, &original, &candidate, &frame, Change::Rename, None).is_err()
+    );
     let proof = verify_warm_metadata(
         store,
         &original,
         &candidate,
         &frame,
         Change::RefreshLegacyInvite,
+        None,
     )
     .unwrap();
     assert_eq!(proof.decision(), Decision::RefreshLegacyInvite);

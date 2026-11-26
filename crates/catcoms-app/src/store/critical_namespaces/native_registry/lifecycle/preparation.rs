@@ -204,6 +204,38 @@ pub(in crate::store::critical_namespaces::native_registry) fn authenticate_selec
     Ok((index.rows.len(), catalog))
 }
 
+pub(in crate::store::critical_namespaces::native_registry) fn require_registered_native_join(
+    store: &crate::store::ServerStore,
+    inventory: &crate::store::persistence::native_registry::lifecycle::upgrade::UpgradeInventory,
+    original: crate::store::NativeTextJoinedRegistrationData,
+) -> Result<(), AppError> {
+    observe_registered_native_join(store, inventory, original).map(|_| ())
+}
+
+pub(in crate::store::critical_namespaces::native_registry) fn observe_registered_native_join(
+    store: &crate::store::ServerStore,
+    inventory: &crate::store::persistence::native_registry::lifecycle::upgrade::UpgradeInventory,
+    original: crate::store::NativeTextJoinedRegistrationData,
+) -> Result<
+    (
+        crate::store::NativeTextJoinedRegistryRowData,
+        super::joined::LocalNames,
+    ),
+    AppError,
+> {
+    if inventory.index_stage().is_some()
+        || inventory.catalog_stage().is_some()
+        || inventory.seed().is_some()
+        || inventory.has_upgrade_outputs()
+    {
+        return Err(refused());
+    }
+    let (index, _) = decode_selected_data(store, inventory)?;
+    let row = super::joined::require_original(&index, original)?;
+    inventory.require(store)?;
+    Ok((super::joined::receipt(row), super::joined::local_names(row)))
+}
+
 /// Internal paid decoder for the retained normal3 cell/inspector. The full
 /// index stays inside the lifecycle implementation, never a public snapshot.
 /// Closed native facade projection. Keep decoded indexes inside this paid
@@ -220,6 +252,21 @@ pub(in crate::store::critical_namespaces::native_registry) fn lookup_selected_cr
         .lookup_data(invocation, request)?
         .map(super::founder::status)
         .transpose()
+}
+
+pub(in crate::store::critical_namespaces::native_registry) fn require_no_selected_native_founder(
+    store: &crate::store::ServerStore,
+    inventory: &crate::store::persistence::native_registry::lifecycle::upgrade::UpgradeInventory,
+) -> Result<(), AppError> {
+    let (index, _) = decode_selected_data(store, inventory)?;
+    if index.rows.iter().any(|row| {
+        row.backend
+            .birth()
+            .is_some_and(|birth| birth.kind == super::data::BirthKind::NativeFounder)
+    }) {
+        return Err(refused());
+    }
+    Ok(())
 }
 
 pub(super) fn decode_selected_data(
@@ -322,12 +369,81 @@ pub(in crate::store) fn verify_governance_native(
     original_catalog: &[u8],
     expected: Option<crate::store::critical_namespaces::governance_layout::codec::NativeTupleData>,
 ) -> Result<VerifiedGovernanceNative, AppError> {
+    verify_declaration_parent(
+        store,
+        inventory,
+        original_catalog,
+        expected,
+        DeclarationParent::Native,
+    )
+}
+
+pub(in crate::store) fn verify_joined_pin_parent(
+    store: &crate::store::ServerStore,
+    inventory: crate::store::persistence::native_registry::lifecycle::governed::NativeGovernanceInventory,
+    original_catalog: &[u8],
+    governance_marker: &[u8],
+) -> Result<VerifiedGovernanceNative, AppError> {
+    verify_declaration_parent(
+        store,
+        inventory,
+        original_catalog,
+        None,
+        DeclarationParent::Governed(governance_marker),
+    )
+}
+
+pub(in crate::store) fn verify_shared_history_parent(
+    store: &crate::store::ServerStore,
+    inventory: crate::store::persistence::native_registry::lifecycle::governed::NativeGovernanceInventory,
+    original_catalog: &[u8],
+    governance_marker: &[u8],
+) -> Result<VerifiedGovernanceNative, AppError> {
+    verify_declaration_parent(
+        store,
+        inventory,
+        original_catalog,
+        None,
+        DeclarationParent::Joined(governance_marker),
+    )
+}
+
+enum DeclarationParent<'a> {
+    Native,
+    Governed(&'a [u8]),
+    Joined(&'a [u8]),
+}
+
+fn verify_declaration_parent(
+    store: &crate::store::ServerStore,
+    inventory: crate::store::persistence::native_registry::lifecycle::governed::NativeGovernanceInventory,
+    original_catalog: &[u8],
+    expected: Option<crate::store::critical_namespaces::governance_layout::codec::NativeTupleData>,
+    parent: DeclarationParent<'_>,
+) -> Result<VerifiedGovernanceNative, AppError> {
     inventory.require_leaves(store)?;
     let layout = inventory.layout(store)?;
     let original = NativeCapabilityData::for_current_data(layout, &layout.encode_data()?)?;
     let key = Zeroizing::new(store.keys.db_key()?);
     let plain = Zeroizing::new(unseal(&key, &unframe(original_catalog)?)?);
-    let parsed = grammar::parse_lifecycle_native_registry_layout(&plain, &original.vault, true)?;
+    let parsed = match parent {
+        DeclarationParent::Native => {
+            grammar::parse_lifecycle_native_registry_layout(&plain, &original.vault, true)?
+        }
+        DeclarationParent::Governed(_) => {
+            grammar::parse_governed_native_registry_layout(&plain, &original.vault, true)?
+        }
+        DeclarationParent::Joined(_) => {
+            grammar::parse_joined_native_registry_layout(&plain, &original.vault, true)?
+        }
+    };
+    if let DeclarationParent::Governed(marker) | DeclarationParent::Joined(marker) = parent {
+        crate::store::critical_namespaces::governance_layout::codec::require_marker(
+            &key,
+            parsed.governance.ok_or_else(refused)?,
+            marker,
+        )?;
+    }
     if parsed.member_outbox.is_none() || parsed.count != 0 {
         return Err(refused());
     }

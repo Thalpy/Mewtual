@@ -610,6 +610,115 @@ impl V2CurrentLayoutStore {
     ) -> Result<(), AppError> {
         receiver.advance(&mut self.store, &mut self.governance, rng)
     }
+
+    /// Select namespace6 on this exclusive and still-unexposed physical owner.
+    /// The saved warm declaration precedes the parser switch on every attempt.
+    pub(in crate::store::critical_namespaces) fn advance_native_joined_pin(
+        &mut self,
+        declaration: &mut Option<
+            crate::store::persistence::governance_layout::joined::JoinedPinDeclaration,
+        >,
+        handler: super::native_registry::preparation::NativeRegistryHandler,
+        governed: Option<&mut super::governance_layout::native::Startup>,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        if !handler.uses_joined_pin_layout()
+            || self.governance.as_ref().is_none_or(|g| !g.is_live_cached())
+        {
+            return Err(refused());
+        }
+        if !self.store.uses_joined_pin_layout() {
+            let store = self.checked_store()?;
+            if declaration.is_none() {
+                if let Some(original) = governed.as_deref() {
+                    original.require_complete(store)?;
+                }
+                let prepared = store.prepare_joined_pin_declaration(rng)?;
+                if let Some(original) = governed {
+                    original.require_complete(store)?;
+                    *declaration = Some(prepared);
+                    // Retire the predecessor after the successor holds its
+                    // proved inputs, before funding any promotion overlap.
+                    *original = super::governance_layout::native::Startup::default();
+                } else {
+                    *declaration = Some(prepared);
+                }
+            }
+            declaration.as_mut().ok_or_else(refused)?.stage(store)?;
+            let current = self
+                .store
+                .current_layout_policy
+                .as_mut()
+                .ok_or_else(refused)?;
+            let governance = self
+                .store
+                .governance_layout_policy
+                .as_mut()
+                .ok_or_else(refused)?;
+            current.native_registry = Some(handler.clone());
+            governance.current.native_registry = Some(handler);
+        }
+        let declaration = declaration.as_ref().ok_or_else(refused)?;
+        let selected = self.store.select_warm_joined_pin_catalog(declaration)?;
+        self.store
+            .install_warm_joined_pin_selection(declaration, selected)
+    }
+
+    pub(in crate::store::critical_namespaces) fn advance_native_shared_history(
+        &mut self,
+        previous: &mut Option<
+            crate::store::persistence::governance_layout::joined::JoinedPinDeclaration,
+        >,
+        declaration: &mut Option<
+            crate::store::persistence::governance_layout::joined::shared_history::SharedHistoryDeclaration,
+        >,
+        handler: super::native_registry::preparation::NativeRegistryHandler,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        use super::shared_history_namespace::Opening;
+        if handler.shared_history_opening() != Opening::Required
+            || !self.store.uses_joined_pin_layout()
+            || self.governance.as_ref().is_none_or(|g| !g.is_live_cached())
+        {
+            return Err(refused());
+        }
+        if declaration.is_none() {
+            let store = self.checked_store()?;
+            let joined = previous.as_ref().ok_or_else(refused)?;
+            joined.require_promoted(store)?;
+            let prepared = store.prepare_empty_shared_history_declaration(rng)?;
+            joined.require_promoted(store)?;
+            *declaration = Some(prepared);
+            drop(previous.take());
+        }
+        let declaration = declaration.as_mut().ok_or_else(refused)?;
+        declaration.promote(&self.store)?;
+        self.store
+            .current_layout_policy
+            .as_mut()
+            .ok_or_else(refused)?
+            .native_registry = Some(handler.clone());
+        self.store
+            .governance_layout_policy
+            .as_mut()
+            .ok_or_else(refused)?
+            .current
+            .native_registry = Some(handler);
+        self.store.install_warm_shared_history(declaration)
+    }
+    pub(in crate::store::critical_namespaces) fn attach_recovered_joined_node<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
+        &mut self,
+        inputs: &mut Option<
+            crate::store::persistence::governance_layout::joined::JoinedRuntimeInputs<T, R>,
+        >,
+        output: &mut Option<catcoms_sync::ClosedV2JoinedNode<T, R>>,
+    ) -> Result<(), AppError> {
+        self.checked_store()?;
+        self.store.attach_recovered_joined_node(inputs, output)
+    }
     /// Closed owning index3 handoff only. The controller cannot extract Store
     /// or submit a callback: this concrete edge owns the catalog critical
     /// section and repeats its original physical and affine-claim proofs.

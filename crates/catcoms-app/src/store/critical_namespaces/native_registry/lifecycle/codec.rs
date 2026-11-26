@@ -45,6 +45,8 @@ fn read_birth(input: &mut Decoder<'_>) -> Result<Birth, AppError> {
         2 => BirthKind::Joined,
         3 => BirthKind::LegacyJoin,
         4 => BirthKind::NativeFounder,
+        5 => BirthKind::NativeJoined,
+        6 => BirthKind::NativeJoinedNamed,
         _ => return Err(refused()),
     };
     Ok(Birth {
@@ -66,6 +68,8 @@ fn put_birth(output: &mut Encoder, value: &Birth) -> Result<(), AppError> {
         BirthKind::Joined => 2,
         BirthKind::LegacyJoin => 3,
         BirthKind::NativeFounder => 4,
+        BirthKind::NativeJoined => 5,
+        BirthKind::NativeJoinedNamed => 6,
     });
     for field in [value.invocation, value.request, value.signer, value.network] {
         output.put_bytes(&field).map_err(|_| refused())?;
@@ -118,7 +122,7 @@ fn put_founder(output: &mut Encoder, value: &original::FounderBindingData) -> Re
     }
     Ok(())
 }
-fn read_joined(input: &mut Decoder<'_>) -> Result<JoinedBinding, AppError> {
+fn read_joined(input: &mut Decoder<'_>, kind: BirthKind) -> Result<JoinedBinding, AppError> {
     Ok(JoinedBinding {
         vault: field32(input)?,
         layout: field32(input)?,
@@ -132,6 +136,11 @@ fn read_joined(input: &mut Decoder<'_>) -> Result<JoinedBinding, AppError> {
         initial_governing_tip: field32(input)?,
         initial_current_basis: field32(input)?,
         joined_epoch: input.get_u64().map_err(|_| refused())?,
+        local_display: if kind == BirthKind::NativeJoinedNamed {
+            Some(bounded_string(input, original::MAX_NAME)?.to_owned())
+        } else {
+            None
+        },
     })
 }
 fn put_joined(output: &mut Encoder, value: &JoinedBinding) -> Result<(), AppError> {
@@ -151,6 +160,9 @@ fn put_joined(output: &mut Encoder, value: &JoinedBinding) -> Result<(), AppErro
         output.put_bytes(&field).map_err(|_| refused())?;
     }
     output.put_u64(value.joined_epoch);
+    if let Some(display) = &value.local_display {
+        output.put_str(display).map_err(|_| refused())?;
+    }
     Ok(())
 }
 
@@ -211,6 +223,10 @@ impl Index {
                         + 4
                         + binding.group.len()
                         + 8
+                        + binding
+                            .local_display
+                            .as_ref()
+                            .map_or(0, |value| 4 + value.len())
                         + if matches!(row.backend, Backend::RetiredJoined { .. }) {
                             36
                         } else {
@@ -228,6 +244,9 @@ impl Index {
                         BirthKind::Joined => birth_length(birth) + MAX_JOINED_BINDING + 36,
                         BirthKind::LegacyJoin => {
                             1 + birth_length(birth) + 4 + original::MAX_INVITE + 36
+                        }
+                        BirthKind::NativeJoined | BirthKind::NativeJoinedNamed => {
+                            return Err(refused())
                         }
                     };
                     payload.max(final_state)
@@ -433,7 +452,7 @@ impl Index {
                 }
                 5 | 6 => {
                     let birth = read_birth(&mut input)?;
-                    let binding = read_joined(&mut input)?;
+                    let binding = read_joined(&mut input, birth.kind)?;
                     if tag == 5 {
                         Backend::Joined { birth, binding }
                     } else {
@@ -494,6 +513,8 @@ mod native_birth_tests {
             (BirthKind::Joined, 2),
             (BirthKind::LegacyJoin, 3),
             (BirthKind::NativeFounder, 4),
+            (BirthKind::NativeJoined, 5),
+            (BirthKind::NativeJoinedNamed, 6),
         ] {
             let birth = Birth {
                 kind,
@@ -516,5 +537,48 @@ mod native_birth_tests {
             assert!(read_birth(&mut input).unwrap() == birth);
             input.finish().unwrap();
         }
+
+        let mut joined = JoinedBinding {
+            vault: [1; 32],
+            layout: [2; 32],
+            group: vec![3; 16],
+            signer: [4; 32],
+            source: [5; 32],
+            profile: [6; 32],
+            pin: [7; 32],
+            join_context: [8; 32],
+            own_add: [9; 32],
+            initial_governing_tip: [10; 32],
+            initial_current_basis: [11; 32],
+            joined_epoch: 1,
+            local_display: None,
+        };
+        let mut old = Encoder::with_capacity(512);
+        put_joined(&mut old, &joined).unwrap();
+        let old = old.finish();
+        let mut decoder = Decoder::new(&old);
+        assert!(read_joined(&mut decoder, BirthKind::NativeJoined).unwrap() == joined);
+        decoder.finish().unwrap();
+        assert!(read_joined(&mut Decoder::new(&old), BirthKind::NativeJoinedNamed).is_err());
+
+        joined.local_display = Some("é".repeat(original::MAX_NAME / 2));
+        let mut named = Encoder::with_capacity(1024);
+        put_joined(&mut named, &joined).unwrap();
+        let named = named.finish();
+        assert_eq!(&named[..old.len()], old.as_slice());
+        let mut decoder = Decoder::new(&named);
+        assert!(read_joined(&mut decoder, BirthKind::NativeJoinedNamed).unwrap() == joined);
+        decoder.finish().unwrap();
+        let mut decoder = Decoder::new(&named);
+        assert!(read_joined(&mut decoder, BirthKind::NativeJoined)
+            .unwrap()
+            .local_display
+            .is_none());
+        assert!(decoder.finish().is_err());
+        assert!(read_joined(
+            &mut Decoder::new(&named[..named.len() - 1]),
+            BirthKind::NativeJoinedNamed
+        )
+        .is_err());
     }
 }

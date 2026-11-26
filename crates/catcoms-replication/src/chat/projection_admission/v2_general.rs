@@ -27,7 +27,7 @@ macro_rules! redacted_debug {
 mod ordinary;
 mod selected_history;
 mod signing;
-pub use ordinary::{V2GeneralAcceptanceSource, V2OrdinaryDependency};
+pub use ordinary::{V2GeneralAcceptanceSource, V2OrdinaryDependency, V2OrdinaryReceiveStatus};
 pub use selected_history::{
     V2ArchivedHeaderRefusal, V2PreparedSelectedHistoryData, V2SelectedHistoryHashData,
     V2SelectedHistoryNodeData, V2SelectedHistoryTipData, V2SelectedParentProof,
@@ -80,6 +80,29 @@ struct AdmissionCore {
 pub struct V2AuthenticatedAdmission {
     core: Arc<AdmissionCore>,
 }
+
+/// Cached negatives of the exact verifier group and its current Admission.
+/// The owning transport still checks the concrete node and native authority.
+pub struct V2LiveMemberObservation {
+    group: Arc<GroupViewLife>,
+    admission: V2AuthenticatedAdmission,
+    selected_sequence: Arc<AtomicU64>,
+    sequence: u64,
+}
+
+impl V2LiveMemberObservation {
+    pub fn is_live_cached(&self) -> bool {
+        self.selected_sequence.load(Ordering::Acquire) == self.sequence
+            && self.group.live()
+            && self.admission.is_open_data()
+    }
+}
+impl std::fmt::Debug for V2LiveMemberObservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("V2LiveMemberObservation")
+            .finish_non_exhaustive()
+    }
+}
 impl std::fmt::Debug for V2AuthenticatedAdmission {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("V2AuthenticatedAdmission")
@@ -87,6 +110,10 @@ impl std::fmt::Debug for V2AuthenticatedAdmission {
     }
 }
 impl V2AuthenticatedAdmission {
+    pub fn same_original(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.core, &other.core)
+    }
+
     pub fn admission_data(&self) -> &AdmissionBody {
         &self.core.body
     }
@@ -279,6 +306,7 @@ pub struct V2FrozenAdmission {
 /// wall-clock, transport epoch, membership boolean or owner private key enters issuance.
 pub struct V2GeneralPrefixVerifier {
     math: ReplayMath,
+    genesis_anchor: [u8; 32],
     admissions: Vec<V2AuthenticatedAdmission>,
     known: V2KnownGoverningParent,
     identity: Arc<()>,
@@ -286,6 +314,7 @@ pub struct V2GeneralPrefixVerifier {
     origin: V2ProjectionOrigin,
     fork_close: Option<ProjectionGroupCloseCompletion>,
     candidate_live: Arc<AtomicBool>,
+    selected_sequence: Arc<AtomicU64>,
     history: Box<selected_history::HistoryFrontier>,
     archived_conflict: Option<Box<V2KnownGoverningParent>>,
 }
@@ -306,11 +335,28 @@ redacted_debug!(
 );
 
 impl V2GeneralPrefixVerifier {
+    pub fn observe_live_member(
+        &self,
+        id: crate::chat::owner_facts::OwnerFactId,
+    ) -> Result<V2LiveMemberObservation, ChatError> {
+        let admission = self.admission(id)?;
+        let original = V2LiveMemberObservation {
+            group: self.group.clone(),
+            admission,
+            selected_sequence: self.selected_sequence.clone(),
+            sequence: self.math.header().spec().sequence,
+        };
+        if !original.is_live_cached() {
+            return Err(ChatError::Scope);
+        }
+        Ok(original)
+    }
     /// Metadata ADDITIONAL to the existing complete ReplayMath1MiB invoice, ordinary action
     /// buffers/ledger slots, host observers and archive escrow. This is a named layout only,
     /// not a paid quota or a claim that the Founder/Root metadata allowance covers this type.
     pub const fn metadata_layout_bytes() -> usize {
         2 * std::mem::size_of::<Self>()
+            + 2 * (std::mem::size_of::<AtomicU64>() + 2 * std::mem::size_of::<usize>())
             + 2 * MAX_ADMISSIONS
                 * (std::mem::size_of::<V2AuthenticatedAdmission>()
                     + std::mem::size_of::<AdmissionCore>()
@@ -343,6 +389,16 @@ impl V2GeneralPrefixVerifier {
         }
         let math =
             v2_founder::verified_genesis_math(&expectation.0, profile, founder, header, image)?;
+        let genesis_anchor = crate::chat::join_bindings::GenesisAnchorBindingData {
+            group: profile.spec().group.clone(),
+            founder: profile.spec().founder,
+            profile: *profile.id().as_bytes(),
+            admission: *founder.admission_id().as_bytes(),
+            tenure: *profile.tenure().as_bytes(),
+            header: *header.id().as_bytes(),
+            state: *header.spec().state.as_bytes(),
+        }
+        .commitment_data()?;
         let identity = Arc::new(());
         let mut admissions = Vec::with_capacity(MAX_ADMISSIONS);
         admissions.push(Self::new_admission(founder, &identity, &origin));
@@ -358,6 +414,7 @@ impl V2GeneralPrefixVerifier {
         }
         Ok(Self {
             math,
+            genesis_anchor,
             admissions,
             known,
             identity,
@@ -365,6 +422,7 @@ impl V2GeneralPrefixVerifier {
             origin,
             fork_close: None,
             candidate_live: Arc::new(AtomicBool::new(false)),
+            selected_sequence: Arc::new(AtomicU64::new(header.spec().sequence)),
             history,
             archived_conflict: None,
         })
@@ -400,6 +458,15 @@ impl V2GeneralPrefixVerifier {
     /// Public mathematical planning DATA only. There is no adopting or mutable getter.
     pub fn replay_data(&self) -> &ReplayMath {
         &self.math
+    }
+    /// Compare an independently accepted genesis with this live replay.
+    /// A matching digest grants no storage, source or membership authority.
+    pub fn require_join_genesis_data(&self, anchor: [u8; 32]) -> Result<(), ChatError> {
+        self.live()?;
+        if self.genesis_anchor != anchor {
+            return Err(ChatError::Scope);
+        }
+        Ok(())
     }
     pub fn admission(
         &self,
@@ -505,6 +572,28 @@ impl V2GeneralPrefixVerifier {
             _claim: claim,
         })
     }
+    /// Check the exact candidate before the Host can enter its physical save.
+    /// Selection still repeats this check against the held live owner.
+    pub fn check_host_selection_data(
+        &self,
+        selected: &V2HostSelectionExpectation,
+        next: &V2GeneralCandidate,
+    ) -> Result<(), ChatError> {
+        self.live()?;
+        if !Arc::ptr_eq(&self.identity, &next.identity)
+            || next.parent != self.math.header().id()
+            || !selected.matches_data(next.step.next.header())
+            || next.history.old_tip_data() != self.history.tip()
+        {
+            return Err(ChatError::Scope);
+        }
+        match (&next.removed, &next.step.removal) {
+            (Some(admission), Some(cut)) if admission.core.body.id() == cut.admission => Ok(()),
+            (None, None) => Ok(()),
+            _ => Err(ChatError::Dependency),
+        }
+    }
+
     /// Consume only this exact candidate after a separate actual HOST selected-save proof.
     /// All fallible predicates precede take. Removal closes its original incarnation before
     /// return; every old owner/cut and explicit close debt returns whole for outside disposal.
@@ -515,26 +604,16 @@ impl V2GeneralPrefixVerifier {
     ) -> Result<V2GeneralRetiredData, ChatError> {
         self.live()?;
         let next = candidate.as_ref().ok_or(ChatError::Dependency)?;
-        if !Arc::ptr_eq(&self.identity, &next.identity)
-            || next.parent != self.math.header().id()
-            || !selected.matches_data(next.step.next.header())
-            || next.history.old_tip_data() != self.history.tip()
-        {
-            return Err(ChatError::Scope);
-        }
+        self.check_host_selection_data(selected, next)?;
         let closed = next.removed.as_ref().map(|a| V2AdmissionCloseCompletion {
             group: self.group.clone(),
             life: a.core.life.clone(),
             complete: false,
         });
-        let frozen_admission = match (&next.removed, &next.step.removal) {
-            (Some(admission), Some(cut)) if admission.core.body.id() == cut.admission => {
-                Some(admission.clone())
-            }
-            (None, None) => None,
-            _ => return Err(ChatError::Dependency),
-        };
+        let frozen_admission = next.removed.clone();
         self.live()?;
+        self.selected_sequence
+            .store(next.step.next.header().spec().sequence, Ordering::Release);
         let next = candidate.take().expect("checked same general candidate");
         // Every fallible predicate precedes take. Move the SAME original whole cut
         // into returned archive custody; copying only its tip would discard the

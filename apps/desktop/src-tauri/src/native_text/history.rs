@@ -1,17 +1,28 @@
-//! Finite pages of the current member's saved originals, not a shared chat
-//! projection. The Root page owns its own debit; this route separately pays
-//! native copies/serialization, then rechecks the actual installed objects.
+//! Bounded own receipts and separately guarded live and archived projections.
+//! Root owns the reads. Native pays its response copies and rechecks the
+//! installed objects before resolving an invocation.
 use super::*;
 use catcoms_app::store::{
-    NativeTextHistoryResponseCredit, NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus,
-    NativeTextMemberPreparation,
+    NativeTextHistoryResponseCredit, NativeTextJoinedMemberProjection,
+    NativeTextJoinedRowSelection, NativeTextJoinedSelectionPreparation,
+    NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus, NativeTextMemberPreparation,
+    V2MemberSaveRefusal,
 };
-use catcoms_replication::chat::{Body, SignedAction};
+use catcoms_replication::chat::{
+    ActionId, Body, GuardedProjection, ProjectionCertainty, SignedAction,
+};
 use serde::Serialize;
 use std::io::Write;
 use tauri::ipc::InvokeResponseBody;
+use tokio::sync::OwnedMutexGuard;
 
-type Preparation = NativeTextMemberPreparation<catcoms_net::MeshService, OsCryptoRng>;
+enum Preparation {
+    Founder(NativeTextMemberPreparation<catcoms_net::MeshService, OsCryptoRng>),
+    Joined(
+        NativeTextJoinedSelectionPreparation<OsCryptoRng>,
+        NativeTextJoinedRowSelection,
+    ),
+}
 const STALE: &str = "The chat session changed. Refresh this chat.";
 const BUSY: &str = "Chat history is busy. Try again.";
 // Eight maximum-size texts, even with sixfold JSON escaping, fit below this
@@ -28,9 +39,30 @@ struct Read {
     server: u64,
     channel: u128,
     context: [u8; 32],
-    start: u64,
-    end: Option<u64>,
-    maximum: usize,
+    request: ReadRequest,
+}
+#[derive(Clone, Copy)]
+enum ReadRequest {
+    Own(OwnRead),
+    Live(ActionId),
+    Archived(ArchiveRead),
+}
+#[derive(Clone, Copy)]
+enum OwnRead {
+    Originals {
+        start: u64,
+        end: Option<u64>,
+        maximum: usize,
+    },
+    Revision(ActionId),
+}
+#[derive(Clone, Copy)]
+enum ArchiveRead {
+    Page {
+        after: Option<ActionId>,
+        limit: usize,
+    },
+    Message(ActionId),
 }
 struct Invocation {
     generation: u64,
@@ -38,6 +70,7 @@ struct Invocation {
     selection: server_table::NativeSelection,
     instance: u64,
     scope: RequestCancellation,
+    member_work: Arc<server_table::NativeMemberWork>,
     read: Read,
     payment: Arc<Payment>, // LAST, including unpolled/cancelled reply futures
 }
@@ -65,6 +98,10 @@ fn parse(payload: &InvokeBody) -> Result<Read, &'static str> {
                     | "start"
                     | "endExclusive"
                     | "limit"
+                    | "ownAction"
+                    | "receivedAction"
+                    | "archivedAction"
+                    | "archiveAfter"
                     | "trace"
             )
         })
@@ -98,21 +135,81 @@ fn parse(payload: &InvokeBody) -> Result<Read, &'static str> {
     if context == [0; 32] {
         return Err("Invalid chat context.");
     }
-    let start = decimal(string("start", 20)?)?;
-    let end = match object.get("endExclusive") {
-        None | Some(serde_json::Value::Null) => None,
-        Some(serde_json::Value::String(value)) if value.len() <= 20 => Some(decimal(value)?),
-        _ => return Err("Invalid history cursor."),
+    let action_id = |encoded: &str| -> Result<ActionId, &'static str> {
+        let mut id = [0; 32];
+        hex::decode_to_slice(encoded, &mut id).map_err(|_| "Invalid message.")?;
+        Ok(ActionId::from_bytes(id))
     };
-    let maximum = object
-        .get("limit")
-        .and_then(serde_json::Value::as_u64)
-        .filter(|n| (1..=8).contains(n))
-        .ok_or("Invalid history page size.")? as usize;
-    if end.is_some_and(|end| start > end)
-        || object
-            .get("trace")
-            .is_some_and(|v| !v.is_null() && v.as_str().is_none_or(|s| s.len() > 128))
+    let limit = || {
+        object
+            .get("limit")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|n| (1..=8).contains(n))
+            .map(|n| n as usize)
+            .ok_or("Invalid history page size.")
+    };
+    let own = object.contains_key("start") || object.contains_key("endExclusive");
+    let request = match (
+        object.contains_key("receivedAction"),
+        object.contains_key("archivedAction"),
+        object.get("archiveAfter"),
+        own,
+        object.contains_key("ownAction"),
+    ) {
+        (false, false, None, false, true) if !object.contains_key("limit") => {
+            let action = string("ownAction", 64)?;
+            if action.bytes().any(|byte| byte.is_ascii_uppercase()) {
+                return Err("Invalid message.");
+            }
+            ReadRequest::Own(OwnRead::Revision(action_id(action)?))
+        }
+        (true, false, None, false, false) if !object.contains_key("limit") => {
+            ReadRequest::Live(action_id(string("receivedAction", 64)?)?)
+        }
+        (false, true, None, false, false) if !object.contains_key("limit") => {
+            ReadRequest::Archived(ArchiveRead::Message(action_id(string(
+                "archivedAction",
+                64,
+            )?)?))
+        }
+        (false, false, Some(after), false, false) => {
+            let after = match after {
+                serde_json::Value::Null => None,
+                serde_json::Value::String(value)
+                    if value.len() == 64 && !value.bytes().any(|c| c.is_ascii_uppercase()) =>
+                {
+                    Some(action_id(value)?)
+                }
+                _ => return Err("Invalid history cursor."),
+            };
+            ReadRequest::Archived(ArchiveRead::Page {
+                after,
+                limit: limit()?,
+            })
+        }
+        (false, false, None, true, false) => {
+            let start = decimal(string("start", 20)?)?;
+            let end = match object.get("endExclusive") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(value)) if value.len() <= 20 => {
+                    Some(decimal(value)?)
+                }
+                _ => return Err("Invalid history cursor."),
+            };
+            if end.is_some_and(|end| start > end) {
+                return Err("Invalid history cursor.");
+            }
+            ReadRequest::Own(OwnRead::Originals {
+                start,
+                end,
+                maximum: limit()?,
+            })
+        }
+        _ => return Err("Invalid history request."),
+    };
+    if object
+        .get("trace")
+        .is_some_and(|v| !v.is_null() && v.as_str().is_none_or(|s| s.len() > 128))
     {
         return Err("Invalid history request.");
     }
@@ -120,9 +217,7 @@ fn parse(payload: &InvokeBody) -> Result<Read, &'static str> {
         server,
         channel,
         context,
-        start,
-        end,
-        maximum,
+        request,
     })
 }
 pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task)) -> bool {
@@ -161,7 +256,7 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
         });
         let read = parse(invoke.message.payload())?;
         let account = keep_session::current(&state, generation).ok_or(STALE)?;
-        let (selection, instance, scope) = {
+        let (selection, instance, scope, member_work) = {
             let table = state.servers.try_lock().map_err(|_| BUSY)?;
             let row = table.native(&read.server).ok_or(STALE)?;
             if row.data().request != read.context
@@ -174,6 +269,7 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
                 row.data().selection.clone(),
                 row.data().instance,
                 row.scope(account).ok_or(STALE)?,
+                row.data().member_work.clone(),
             )
         };
         Ok(Invocation {
@@ -182,6 +278,7 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
             selection,
             instance,
             scope,
+            member_work,
             read,
             payment,
         })
@@ -198,8 +295,16 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
     spawn(Box::pin(async move {
         // Owning result is outside ALL final guards. Resolver unwind must not
         // destroy the paid Root page or its invoice while those guards exist.
-        let mut result = execute(&app.state::<AppState>(), &invocation).await;
         let state = app.state::<AppState>();
+        let mut result = match invocation.read.request {
+            ReadRequest::Live(action) => execute_received(&state, &invocation, action)
+                .await
+                .map(Response::Received),
+            ReadRequest::Own(read) => execute(&state, &invocation, read)
+                .await
+                .map(Response::Saved),
+            ReadRequest::Archived(read) => execute_archive(&state, &invocation, read).await,
+        };
         #[cfg(test)]
         {
             let edge = state.native_text.text_reply_edge.lock().unwrap().clone();
@@ -214,7 +319,11 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
             resolver.reject(STALE);
         } else {
             match &mut result {
-                Ok(output) => {
+                Ok(Response::Saved(output)) => {
+                    resolver.resolve(InvokeResponseBody::Json(output.body.take().unwrap()))
+                }
+                Ok(Response::Received(output)) => output.resolve(resolver),
+                Ok(Response::ArchivePage(output)) => {
                     resolver.resolve(InvokeResponseBody::Json(output.body.take().unwrap()))
                 }
                 Err(error) => resolver.reject(&*error),
@@ -244,16 +353,21 @@ fn current(
         })
 }
 async fn capture(state: &AppState, call: &Invocation) -> Result<Preparation, String> {
-    let mut budget = Some(
-        state
-            .native_text
-            .sources
-            .policy()
-            .prepare_member()
-            .map_err(|_| BUSY)?,
-    );
+    let mut budget = if call.selection.founder().is_some() {
+        Some(
+            state
+                .native_text
+                .sources
+                .policy()
+                .prepare_member()
+                .map_err(|_| BUSY)?,
+        )
+    } else {
+        None
+    };
     let mut ui = Some(founding::ui_capture(state, call.generation, &call.target).await?);
-    let mut output = None;
+    let mut founder = None;
+    let mut joined = None;
     let result = {
         let _commit = require_ui_session_generation(state, call.generation).await?;
         let store = state.store.lock().await;
@@ -261,51 +375,297 @@ async fn capture(state: &AppState, call: &Invocation) -> Result<Preparation, Str
         if !current(state, call, &store, &table) {
             Err(STALE)
         } else {
-            state.native_text.sources.capture_member(
-                &store,
-                &mut ui,
-                &call.selection,
-                &mut budget,
-                &mut output,
-            )
+            match &call.selection {
+                server_table::NativeSelection::Founder(_) => state
+                    .native_text
+                    .sources
+                    .capture_member(&store, &mut ui, &call.selection, &mut budget, &mut founder),
+                server_table::NativeSelection::Joined(selection) => state
+                    .native_text
+                    .sources
+                    .capture_joined_member(&store, &mut ui, selection, &mut joined),
+            }
         }
     };
     result.map_err(str::to_owned)?;
-    Ok(output.take().unwrap())
+    match (&call.selection, founder, joined) {
+        (server_table::NativeSelection::Founder(_), Some(original), _) => {
+            Ok(Preparation::Founder(original))
+        }
+        (server_table::NativeSelection::Joined(row), _, Some(original)) => {
+            Ok(Preparation::Joined(original, row.clone()))
+        }
+        _ => Err(STALE.to_owned()),
+    }
 }
 struct Work {
     preparation: Preparation,
     scope: RequestCancellation,
-    read: Read,
+    read: OwnRead,
+    channel: u128,
+    local: OwnedMutexGuard<()>,
     #[cfg(test)]
     watch: Option<Arc<DropWatch>>,
     payment: Arc<Payment>, // LAST during unrun/unwind/returned response
 }
 struct Output {
-    _page: NativeTextMemberHistoryPage,
+    _page: Option<NativeTextMemberHistoryPage>,
     body: Option<String>,
+    _local: Option<OwnedMutexGuard<()>>,
     #[cfg(test)]
     _notice: Option<DropNotice>, // actual page/body have dropped, credit is live
     _payment: Arc<Payment>,
 }
+
+enum Response {
+    Saved(Output),
+    Received(ReceivedOutput),
+    ArchivePage(ArchivePageOutput),
+}
+
+struct ArchivePageOutput {
+    body: Option<String>,
+    _payment: Arc<Payment>,
+}
+
+struct ReceivedOutput {
+    scope: &'static str,
+    projection: Option<NativeTextJoinedMemberProjection>,
+    _archive_permit: Option<OwnedMutexGuard<()>>,
+    _payment: Arc<Payment>,
+}
+
+impl ReceivedOutput {
+    fn resolve<R: tauri::Runtime>(&self, resolver: tauri::ipc::InvokeResolver<R>) {
+        let Some(projection) = &self.projection else {
+            resolver.resolve(InvokeResponseBody::Json(received_body(self.scope, None)));
+            return;
+        };
+        let mut resolver = Some(resolver);
+        let _ = projection.with_publication(|result| {
+            resolver
+                .take()
+                .unwrap()
+                .resolve(InvokeResponseBody::Json(received_body(
+                    self.scope,
+                    Some(result),
+                )));
+        });
+        if let Some(resolver) = resolver {
+            resolver.reject(STALE);
+        }
+    }
+}
+
+fn received_body(scope: &'static str, projection: Option<&GuardedProjection>) -> String {
+    let item = match projection {
+        Some(GuardedProjection::Visible {
+            create,
+            text,
+            certainty,
+            ..
+        }) => serde_json::json!({
+            "action": hex::encode(create.as_bytes()),
+            "text": text,
+            "certainty": match certainty {
+                ProjectionCertainty::Proven => "proven",
+                ProjectionCertainty::Provisional => "provisional",
+            }
+        }),
+        _ => serde_json::Value::Null,
+    };
+    serde_json::json!({"backend":"text-v2","scope":scope,"item":item}).to_string()
+}
+
+async fn execute_received(
+    state: &AppState,
+    call: &Invocation,
+    action: ActionId,
+) -> Result<ReceivedOutput, String> {
+    let local = call.member_work.clone();
+    let guard = local.foreground(call.scope.clone()).await.ok_or(STALE)?;
+    let founder = if call.selection.founder().is_some() {
+        let Preparation::Founder(original) = capture(state, call).await? else {
+            return Err(STALE.to_owned());
+        };
+        Some(original)
+    } else {
+        None
+    };
+    let channel = call.read.channel;
+    let scope = call.scope.clone();
+    let payment = call.payment.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = guard;
+        let projection = if let Some(original) = founder {
+            original
+                .read_founder_member_projection(channel, action, &scope)
+                .map_err(|failure| match failure {
+                    V2MemberSaveRefusal::Busy => BUSY.to_owned(),
+                    _ => STALE.to_owned(),
+                })?
+        } else {
+            let slot = local.received.lock().map_err(|_| STALE.to_owned())?;
+            slot.as_ref()
+                .map(|ledger| ledger.read_message_projection(action))
+                .transpose()
+                .map_err(|_| STALE.to_owned())?
+                .flatten()
+        };
+        Ok(ReceivedOutput {
+            scope: "received-live",
+            projection,
+            _archive_permit: None,
+            _payment: payment,
+        })
+    })
+    .await
+    .map_err(|_| STALE.to_owned())?
+}
+
+async fn execute_archive(
+    state: &AppState,
+    call: &Invocation,
+    read: ArchiveRead,
+) -> Result<Response, String> {
+    let channel = call.read.channel;
+    let scope = call.scope.clone();
+    let payment = call.payment.clone();
+    let local = call.member_work.clone();
+    let permit = local.foreground(scope.clone()).await.ok_or(STALE)?;
+    let original = capture(state, call).await?;
+    tauri::async_runtime::spawn_blocking(move || match read {
+        ArchiveRead::Page { after, limit } => {
+            let page = match original {
+                Preparation::Founder(original) => {
+                    original.archived_founder_action_page(channel, after, limit, &scope)
+                }
+                Preparation::Joined(original, row) => {
+                    original.archived_action_page(&row, channel, after, limit, &scope)
+                }
+            }
+            .map_err(|_| "Saved received messages could not be read. Try again.")?;
+            let ids = page.as_ref().map_or_else(Vec::new, |page| {
+                page.actions()
+                    .iter()
+                    .map(|id| hex::encode(id.as_bytes()))
+                    .collect()
+            });
+            let body = serde_json::json!({
+                "backend": "text-v2",
+                "scope": "received-archive-index",
+                "available": page.is_some(),
+                "ids": ids,
+                "more": page.as_ref().is_some_and(|page| page.has_more()),
+            })
+            .to_string();
+            Ok(Response::ArchivePage(ArchivePageOutput {
+                body: Some(body),
+                _payment: payment,
+            }))
+        }
+        ArchiveRead::Message(action) => {
+            const INCOMPLETE: &str = "A received change is waiting to be saved.";
+            let unsettled = local.unsettled_archive_changes(action).ok_or(INCOMPLETE)?;
+            let projection = match original {
+                Preparation::Founder(original) => {
+                    original.archived_founder_message_projection(channel, action, &scope)
+                }
+                Preparation::Joined(original, row) => original.archived_message_projection(
+                    &row,
+                    channel,
+                    action,
+                    scope,
+                    &mut OsCryptoRng,
+                ),
+            }
+            .map_err(|_| "Saved received messages could not be read. Try again.")?;
+            // Opening the target may finish its original in-process WAL. Only
+            // the exact actions in the replayed archive can settle that debt.
+            if unsettled.iter().flatten().any(|change| {
+                !projection
+                    .as_ref()
+                    .is_some_and(|original| original.archived_includes(*change))
+            }) {
+                return Err(INCOMPLETE.into());
+            }
+            for change in unsettled.into_iter().flatten() {
+                local.note_archive_change(change, action, true);
+            }
+            Ok(Response::Received(ReceivedOutput {
+                scope: "received-archive",
+                projection,
+                _archive_permit: Some(permit),
+                _payment: payment,
+            }))
+        }
+    })
+    .await
+    .map_err(|_| STALE.to_owned())?
+}
 impl Work {
     fn run(self) -> Result<Output, String> {
-        let page = self
-            .preparation
-            .finish()
-            .map_err(|_| STALE)?
-            .prepare_member_history(
-                self.read.start,
-                self.read.end,
-                self.read.maximum,
+        let page = match (self.preparation, self.read) {
+            (
+                Preparation::Founder(original),
+                OwnRead::Originals {
+                    start,
+                    end,
+                    maximum,
+                },
+            ) => original
+                .finish()
+                .map_err(|_| STALE)?
+                .prepare_member_history(start, end, maximum, &self.scope),
+            (
+                Preparation::Joined(original, row),
+                OwnRead::Originals {
+                    start,
+                    end,
+                    maximum,
+                },
+            ) => original.prepare_member_history(
+                &row,
+                start,
+                end,
+                maximum,
                 &self.scope,
-            )
-            .map_err(|_| "Chat history could not be read. Try again.")?;
+                &mut OsCryptoRng,
+            ),
+            (Preparation::Founder(original), OwnRead::Revision(target)) => original
+                .finish()
+                .map_err(|_| STALE)?
+                .prepare_own_message_revision(self.channel, target, &self.scope),
+            (Preparation::Joined(original, row), OwnRead::Revision(target)) => original
+                .prepare_own_message_revision(
+                    &row,
+                    self.channel,
+                    target,
+                    &self.scope,
+                    &mut OsCryptoRng,
+                ),
+        };
         // Consuming the Root job restores its runtime before any native await.
-        let body = serialize_page(&page, self.read.channel, SERIALIZED_LIMIT)?;
+        let (page, body, local) = match self.read {
+            OwnRead::Originals { .. } => {
+                let page = page.map_err(|_| "Chat history could not be read. Try again.")?;
+                let body = serialize_page(&page, self.channel, SERIALIZED_LIMIT)?;
+                (Some(page), body, None)
+            }
+            OwnRead::Revision(target) => {
+                let page = match page {
+                    Ok(page) => Some(page),
+                    Err(V2MemberSaveRefusal::Busy) => None,
+                    Err(_) => return Err("The saved message could not be read. Try again.".into()),
+                };
+                let body = serialize_revision(page.as_ref(), target)?;
+                (page, body, Some(self.local))
+            }
+        };
         Ok(Output {
             _page: page,
             body: Some(body),
+            _local: local,
             #[cfg(test)]
             _notice: self.watch.map(|watch| DropNotice {
                 watch,
@@ -315,11 +675,31 @@ impl Work {
         })
     }
 }
-async fn execute(state: &AppState, call: &Invocation) -> Result<Output, String> {
+async fn execute(state: &AppState, call: &Invocation, read: OwnRead) -> Result<Output, String> {
+    let local = call
+        .member_work
+        .foreground(call.scope.clone())
+        .await
+        .ok_or(STALE)?;
+    let preparation = capture(state, call).await?;
+    #[cfg(test)]
+    {
+        let edge = state
+            .native_text
+            .history_capture_edge
+            .lock()
+            .unwrap()
+            .clone();
+        if let Some(edge) = edge {
+            edge.wait_once().await;
+        }
+    }
     let work = Work {
-        preparation: capture(state, call).await?,
+        preparation,
         scope: call.scope.clone(),
-        read: call.read,
+        read,
+        channel: call.read.channel,
+        local,
         #[cfg(test)]
         watch: state.native_text.history_drop_watch.lock().unwrap().clone(),
         payment: call.payment.clone(),
@@ -386,6 +766,13 @@ struct Record<'a> {
     status: &'static str,
     body: BodyData<'a>,
 }
+fn status_data(status: NativeTextMemberHistoryStatus) -> &'static str {
+    match status {
+        NativeTextMemberHistoryStatus::Pending => "pending",
+        NativeTextMemberHistoryStatus::Submitted => "submitted",
+        NativeTextMemberHistoryStatus::Held => "held",
+    }
+}
 fn record<'a>(
     action: &'a SignedAction,
     ordinal: u64,
@@ -413,13 +800,57 @@ fn record<'a>(
         signer: hex::encode(action.signer()),
         channel: action.spec().realm.channel().to_string(),
         presented_ms: action.spec().presented_ms.to_string(),
-        status: match status {
-            NativeTextMemberHistoryStatus::Pending => "pending",
-            NativeTextMemberHistoryStatus::Submitted => "submitted",
-            NativeTextMemberHistoryStatus::Held => "held",
-        },
+        status: status_data(status),
         body,
     }
+}
+
+#[derive(Serialize)]
+struct SelectedOwnMessage<'a> {
+    backend: &'static str,
+    scope: &'static str,
+    action: String,
+    scanning: bool,
+    item: Option<OwnMessageRevision<'a>>,
+}
+
+#[derive(Serialize)]
+struct OwnMessageRevision<'a> {
+    revision: String,
+    text: &'a str,
+    status: &'static str,
+}
+
+fn serialize_revision(
+    page: Option<&NativeTextMemberHistoryPage>,
+    target: ActionId,
+) -> Result<String, String> {
+    let selected = page.and_then(|page| page.items().next());
+    let item = if let Some(item) = &selected {
+        let action = item.action();
+        let text = match &action.spec().body {
+            Body::Create { text, .. } if action.id() == target => text,
+            Body::Edit { create, text } if *create == target => text,
+            _ => return Err(STALE.into()),
+        };
+        Some(OwnMessageRevision {
+            revision: hex::encode(action.id().as_bytes()),
+            text,
+            status: status_data(item.status()),
+        })
+    } else {
+        None
+    };
+    encode(
+        &SelectedOwnMessage {
+            backend: "text-v2",
+            scope: "own-message-revision",
+            action: hex::encode(target.as_bytes()),
+            scanning: page.is_none(),
+            item,
+        },
+        6 * catcoms_replication::chat::MAX_TEXT_BYTES + 1024,
+    )
 }
 #[derive(Serialize)]
 struct Page<'a> {

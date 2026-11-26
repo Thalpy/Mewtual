@@ -1,14 +1,10 @@
 # Chat V2 ordinary-member durable outbox
 
-Storage integration checkpoint, 15 November. The storage engine in
-`crates/catcoms-app/src/store/persistence/v2_member_outbox/` passed all 38 focused
-cases, including six new bounded-history regressions. Namespace5 provisions the
-real parent directory and the founder-as-member host supplies production save
-admission. The native-aware retained-runtime save/read adapters are under
-validation. **Production activation is incomplete**: the checked native command
-factory, joined-member source, transport and UI integration remain open. The
-existing dead-code allowance still covers the unused publication half and must
-be removed when its real wiring is complete. HANDOVER records broader gates.
+Namespace5 provisions the outbox parent directory. Native founder and joined sources
+use the same durable save and history engine. The original joined source can prepare
+one publication attempt and checkpoint its local driver acknowledgement. The desktop
+still needs to schedule publication and process received originals before activation.
+HANDOVER records broader gates.
 
 The bounded history reader includes settled entries that publication debt omits.
 Each page contains at most eight exact originals, with an independent 5 MiB
@@ -353,6 +349,24 @@ submitted items, so a failed earlier item is never skipped, and records a durabl
 and its exact entries: a stale batch (front moved) or a foreign one (other context) is
 refused. A lost checkpoint reply may cause the same signed original to be submitted again;
 local submission is not peer receipt, durability confirmation or certification.
+The native checkpoint checks both the original publication scope and the
+current row. If the original scope retires after the driver acknowledges a
+submission, the debt stays pending and a fresh attempt can settle it. The
+durable writer checks cancellation again after preparing the checkpoint and
+before entering its first file effect.
+
+The mounted joined source reads at most one item per attempt without creating an absent
+namespace. The ordinary envelope uses a read-only MLS exporter. The original native
+scope, Core Admission and selected MLS fence are checked at the original driver's queue
+handoff. `Duplicate`, revocation and transport errors leave the debt open. A real
+`Submitted` result can be checkpointed through a fresh capture of the same registered row.
+
+The mounted source can look up an exact local dependency by ActionId after its debt
+has settled. The action, ordinal and request-token indices must name the same immutable
+original. The mounted catch-up source checks the channel and Admission before returning
+the sealed original. A request binds its exact connected endpoints and selected MLS
+scope. A reply binds the exact request and can reveal only that ActionId. Desktop retry
+and dependency scheduling remain open.
 
 After removal and rejoin under A2, A1's receipts stay readable (attributed to A1), A1's
 unsent entries are settled as `Held` (kept in the audit for the separately authorised

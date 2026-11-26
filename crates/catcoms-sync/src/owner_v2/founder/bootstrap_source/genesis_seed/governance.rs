@@ -4,6 +4,10 @@
 //! The original genesis provenance never changes. Only an exact completed MLS
 //! candidate may replace the SDK pair, and its actual installed fingerprint is
 //! kept separately. In particular an epoch comparison cannot renew Fresh.
+catcoms_rt::redacted_debug! {
+    V2FounderAddSigning<'_>;
+}
+
 use super::*;
 use crate::owner_v2::V2MemberSignRefusal;
 use catcoms_mls::group::text_current_add::{
@@ -15,12 +19,25 @@ use catcoms_replication::chat::owner_profile::{AdmissionOrigin, AdmissionSpec};
 use catcoms_replication::chat::owner_state::transition::{
     ReplayMath, UnsignedAdmissionStepData, UNSIGNED_ADMISSION_DATA_INVOICE,
 };
+use catcoms_replication::chat::V2AuthenticatedAdmission;
 use catcoms_rt::{
     NativeChatKeyEnds, NativeChatKeyPurpose, NativeChatPreparedKeyCut, NativeChatSourceObservation,
 };
 
 mod request;
 use request::FrozenAddRequest;
+mod installation;
+pub use installation::{PreparedV2FounderAddInstall, RetiredV2FounderAddInstall};
+mod invite;
+mod member_transport;
+mod recover;
+pub use recover::PreparedV2FounderRecoveredAdd;
+mod removal;
+use removal::PendingRemoval;
+pub use removal::{
+    PreparedV2FounderRemoveInstall, RetiredV2FounderRemoveInstall, V2FounderRemoveOutcomeData,
+    V2FounderRemoveSigning,
+};
 mod welcome;
 pub use request::{V2FounderAddRequestData, MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES};
 use welcome::PreparedWelcome;
@@ -49,6 +66,87 @@ pub struct V2InstalledFounderAddData {
     pub state: OwnerStateCommitment,
 }
 
+/// The actual completed SDK output and unsigned governing data from one Add.
+/// The provider snapshot is secret and must be sealed by an independently
+/// funded Root transaction. This loan cannot select, save or install anything.
+pub struct V2FounderAddOutcomeData<'a> {
+    result: CompletedTextCurrentAddData<'a>,
+    admission: &'a AdmissionBody,
+    unsigned: &'a UnsignedAdmissionStepData,
+    request: &'a FrozenAddRequest,
+}
+
+impl<'a> V2FounderAddOutcomeData<'a> {
+    pub fn result_data(&self) -> &CompletedTextCurrentAddData<'a> {
+        &self.result
+    }
+
+    pub fn admission_data(&self) -> &'a AdmissionBody {
+        self.admission
+    }
+
+    pub fn unsigned_data(&self) -> &'a UnsignedAdmissionStepData {
+        self.unsigned
+    }
+
+    pub fn require_request_data(
+        &self,
+        request: V2FounderAddRequestData<'_>,
+    ) -> Result<(), SyncError> {
+        self.request.require_same(request)
+    }
+}
+
+impl<T, R> UnboundV2GenesisNode<T, R> {
+    /// Outside writers with separate package verification credit. This uses
+    /// the original source clock and performs no private candidate work.
+    pub fn preflight_first_add_package_data(
+        &self,
+        request: V2FounderAddRequestData<'_>,
+        limits: catcoms_mls::persist::text_current_add::TextCurrentAddLimits,
+    ) -> Result<(), SyncError> {
+        ordinary_create::source(self).map_err(|_| unavailable())?;
+        self.check_add_package(request, limits)?;
+        ordinary_create::source(self).map_err(|_| unavailable())
+    }
+
+    fn check_add_package(
+        &self,
+        request: V2FounderAddRequestData<'_>,
+        limits: catcoms_mls::persist::text_current_add::TextCurrentAddLimits,
+    ) -> Result<(), SyncError> {
+        let seed = &self.seed.body;
+        drop(request.verify_seed(seed)?);
+        let now = self._parts.body._clock.now_ms();
+        if request.invite.expired_at_data(now) {
+            return Err(unavailable());
+        }
+        let signed = request.request.spec_data();
+        let packet = TextCurrentAddRequestData::from_untrusted_data(
+            request.key_package,
+            signed.joiner,
+            request.invite.spec_data().nonce,
+            signed.key_package_reference,
+            now,
+        )
+        .with_expected_credential_data(signed.credential);
+        catcoms_mls::group::text_current_add::check_private_text_add_package(
+            &seed.device,
+            &seed.group,
+            packet,
+            limits,
+        )
+        .map_err(|_| unavailable())
+    }
+}
+
+impl std::fmt::Debug for V2FounderAddOutcomeData<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("V2FounderAddOutcomeData")
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Prepared,
@@ -73,6 +171,8 @@ struct PendingAdd {
     header: Option<SignedOwnerHeader>,
     raw: Option<[u8; 64]>,
     welcome: Option<PreparedWelcome>,
+    retired_core: Option<catcoms_replication::chat::V2GeneralRetiredData>,
+    retired_sdk: Option<catcoms_mls::group::text_current_add::RetiredTextCurrentAdd>,
     phase: Phase,
     original: NativeChatSourceObservation,
     sdk_cut: Option<NativeChatPreparedKeyCut>,
@@ -93,13 +193,66 @@ struct PendingAdd {
     ends: NativeChatKeyEnds,
 }
 
+/// Disjoint loan of the original Add signing state and its retained native
+/// custody. Root can hold the actual seed/Current proof while using this loan.
+pub struct V2FounderAddSigning<'a> {
+    seed: &'a UnboundV2GenesisSeed,
+    negative: V2FounderGovernanceNegative<'a>,
+    pending: &'a mut PendingAdd,
+}
+
+impl V2FounderAddSigning<'_> {
+    pub fn sign_header_native(&mut self) -> Result<(), SyncError> {
+        let p = &mut *self.pending;
+        if p.raw.is_some() {
+            return Ok(());
+        }
+        self.negative.require_live_data()?;
+        let unsigned = p.unsigned.as_ref().ok_or_else(unavailable)?;
+        if p.phase != Phase::Complete {
+            return Err(unavailable());
+        }
+        let signer = self.seed.body.context.spec_data().signer;
+        if !self.seed.body.device.retained_ed25519_key_matches(&signer) {
+            return Err(unavailable());
+        }
+        p.header_native.enter(
+            p.header_cut.as_mut().ok_or_else(unavailable)?,
+            &p.original,
+            NativeChatKeyPurpose::GoverningHeader,
+            &mut p.ends,
+        )?;
+        p.phase = Phase::HeaderEntered;
+        #[cfg(test)]
+        test_cut(TestCut::HeaderEntered);
+        let raw = self
+            .seed
+            .body
+            .device
+            .sign_retained_ed25519_bounded(
+                &signer,
+                unsigned.signing_bytes_data(),
+                catcoms_replication::chat::owner_header::MAX_HEADER_SEMANTIC_BYTES,
+            )
+            .map_err(|_| unavailable())?;
+        p.raw = Some(raw);
+        p.phase = Phase::Raw;
+        #[cfg(test)]
+        test_cut(TestCut::RawCached);
+        Ok(())
+    }
+}
+
 /// SAME complete original node and private candidate slot. There is no SDK,
 /// runtime, transport, mutable seed getter, or conversion back to genesis.
 /// The real host independently retains all source/metadata fees and must own
 /// its original journal, Core verifier, Current and native final admission.
 pub struct PreparedV2FounderGovernanceNode<T, R> {
     pending: Option<Box<PendingAdd>>,
+    removal: Option<Box<PendingRemoval>>,
     installed: Option<V2InstalledFounderAddData>,
+    installed_invites: [Option<[u8; 16]>; crate::MAX_V2_GOVERNING_JOIN_STEPS],
+    member: Option<V2AuthenticatedAdmission>,
     node: UnboundV2GenesisNode<T, R>,
 }
 
@@ -108,6 +261,7 @@ pub struct PreparedV2FounderGovernanceNode<T, R> {
 /// host's Core replay/verifier payment. Reserve BEFORE constructing the wrapper
 /// or beginning an operation. It is neither an allocation/RSS cap nor a fee.
 pub const FOUNDER_GOVERNANCE_DATA_BYTES: usize = UNSIGNED_ADMISSION_DATA_INVOICE
+    + removal::METADATA_BYTES
     + 8 * MAX_HEADER_BYTES
     + 4 * MAX_ADMISSION_BYTES
     + 16 * MAX_GROUP_ID_BYTES
@@ -116,6 +270,9 @@ pub const FOUNDER_GOVERNANCE_DATA_BYTES: usize = UNSIGNED_ADMISSION_DATA_INVOICE
     + 2 * catcoms_mls::group::text_current_add::MAX_TEXT_ADD_ROUTING_PLAIN_BYTES
     + 4 * std::mem::size_of::<PendingAdd>()
     + 4 * std::mem::size_of::<V2InstalledFounderAddData>()
+    + 4 * std::mem::size_of::<V2FounderAddOutcomeData<'static>>()
+    + 4 * std::mem::size_of::<V2FounderAddSigning<'static>>()
+    + 4 * std::mem::size_of::<PreparedV2FounderAddInstall<'static>>()
     + 4 * std::mem::size_of::<RetiredV2FounderAddNativeCustody>()
     + 4 * std::mem::size_of::<PreparedV2FounderGovernanceNode<(), ()>>()
     + 4 * std::mem::size_of::<(
@@ -132,25 +289,108 @@ impl<T, R> UnboundV2GenesisNode<T, R> {
     /// decoded genesis DATA cannot become a live governor through this method.
     /// Refusal returns the unchanged whole node; success only moves fields.
     pub fn prepare_governance_data(self) -> Result<PreparedV2FounderGovernanceNode<T, R>, Self> {
-        if ordinary_create::source(&self).is_err()
-            || self._parts.body.warm.is_none()
-            || self._parts.body.fresh.is_none()
-        {
+        if !self.is_governance_ready_data() {
             return Err(self);
         }
         Ok(PreparedV2FounderGovernanceNode {
             pending: None,
+            removal: None,
             installed: None,
+            installed_invites: [None; crate::MAX_V2_GOVERNING_JOIN_STEPS],
+            member: None,
             node: self,
         })
+    }
+
+    /// Future Root can supply its actual paid owner slots. Prove the original
+    /// warm node and the empty destination before taking anything, then cache
+    /// its governed owner with only infallible moves. Both slots survive a
+    /// refusal unchanged, including when the destination is already occupied.
+    pub fn prepare_governance_into_data(
+        original: &mut Option<Self>,
+        destination: &mut Option<PreparedV2FounderGovernanceNode<T, R>>,
+    ) -> Result<(), SyncError> {
+        if destination.is_some()
+            || !original
+                .as_ref()
+                .is_some_and(Self::is_governance_ready_data)
+        {
+            return Err(unavailable());
+        }
+        let node = original.take().expect("validated original warm node");
+        *destination = Some(PreparedV2FounderGovernanceNode {
+            pending: None,
+            removal: None,
+            installed: None,
+            installed_invites: [None; crate::MAX_V2_GOVERNING_JOIN_STEPS],
+            member: None,
+            node,
+        });
+        Ok(())
+    }
+
+    fn is_governance_ready_data(&self) -> bool {
+        self._parts.body.warm.is_some()
+            && self._parts.body.fresh.is_some()
+            && ordinary_create::source(self).is_ok()
     }
 }
 
 impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
+    pub fn preflight_first_add_package_data(
+        &self,
+        request: V2FounderAddRequestData<'_>,
+        limits: catcoms_mls::persist::text_current_add::TextCurrentAddLimits,
+    ) -> Result<(), SyncError> {
+        if self.installed.is_some() {
+            return Err(unavailable());
+        }
+        self.node.preflight_first_add_package_data(request, limits)
+    }
+
+    /// Verify a subsequent package against this installed MLS parent and the
+    /// matching replay before a host reserves the next governing operation.
+    pub fn preflight_subsequent_add_package_data(
+        &self,
+        replay: &ReplayMath,
+        request: V2FounderAddRequestData<'_>,
+        limits: catcoms_mls::persist::text_current_add::TextCurrentAddLimits,
+    ) -> Result<(), SyncError> {
+        self.require_sdk_current_data()?;
+        let installed = self.installed.ok_or_else(unavailable)?;
+        if self.pending.is_some()
+            || self.removal.is_some()
+            || self
+                .available_invite_slot(request.invite.spec_data().nonce)
+                .is_none()
+            || replay.profile() != &self.node.seed.body.genesis.profile
+            || replay.header().id() != installed.header
+            || replay.header().spec().state != installed.state
+            || replay.mls_epoch_data() != installed.epoch
+        {
+            return Err(unavailable());
+        }
+        self.node.check_add_package(request, limits)?;
+        self.require_sdk_current_data()
+    }
+
+    fn available_invite_slot(&self, nonce: [u8; 16]) -> Option<usize> {
+        if self.installed_invites.contains(&Some(nonce)) {
+            return None;
+        }
+        self.installed_invites.iter().position(Option::is_none)
+    }
+
     /// Original immutable provenance, always the initial pin/source context.
     /// These historical labels do not describe the installed live SDK epoch.
     pub fn genesis_data(&self) -> V2GenesisSeedData<'_> {
         self.node.data()
+    }
+
+    /// Borrow the same retained original for Root's existing source check.
+    /// The caller still proves the covering parent and live Current separately.
+    pub fn borrow_genesis_seed_data(&self) -> &UnboundV2GenesisSeed {
+        self.node.borrow_genesis_seed_data()
     }
 
     pub fn installed_add_data(&self) -> Option<V2InstalledFounderAddData> {
@@ -209,6 +449,10 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
         welcome_cut: NativeChatPreparedKeyCut,
     ) -> Result<(), V2FounderAddPreparationRefusal> {
         if self.pending.is_some()
+            || self.removal.is_some()
+            || self
+                .available_invite_slot(request.invite.spec_data().nonce)
+                .is_none()
             || !admission.supports_routing_data()
             || sdk_cut
                 .require_never_entered_data(&original, NativeChatKeyPurpose::AddSdk)
@@ -260,6 +504,8 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
             header: None,
             raw: None,
             welcome: None,
+            retired_core: None,
+            retired_sdk: None,
             phase: Phase::Prepared,
             original,
             sdk_cut: Some(sdk_cut),
@@ -450,56 +696,61 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
         ))
     }
 
+    /// Borrow the exact jointly prepared outcome for the durable record.
+    /// The signed Header can only follow that record, so this works before
+    /// signing and continues to lend the same original bytes afterwards.
+    pub fn outcome_data(&self) -> Result<V2FounderAddOutcomeData<'_>, SyncError> {
+        let result = self.completed_add_data()?;
+        let (admission, unsigned) = self.unsigned_admission_data()?;
+        let request = &self.pending.as_ref().ok_or_else(unavailable)?.request;
+        Ok(V2FounderAddOutcomeData {
+            result,
+            admission,
+            unsigned,
+            request,
+        })
+    }
+
     /// Final primitive only, after Root's genuine saved-outcome/current/Core
     /// proofs. Cache raw64 IMMEDIATELY; an unwind after entry with no cached raw
     /// stays terminal. A cached signature is historical DATA, not permission.
     pub fn sign_admission_native(&mut self) -> Result<(), SyncError> {
-        if self.pending.as_ref().is_some_and(|p| p.raw.is_some()) {
-            return Ok(());
-        }
-        // Full SDK checks belong in the preceding host preflight, outside its
-        // final writers. Here only stable lifetime/retained-key checks run.
-        self.stable_negative().require_live_data()?;
-        let p = self.pending.as_mut().ok_or_else(unavailable)?;
-        let unsigned = p.unsigned.as_ref().ok_or_else(unavailable)?;
-        if p.phase != Phase::Complete {
-            return Err(unavailable());
-        }
-        let signer = self.node.seed.body.context.spec_data().signer;
-        if !self
-            .node
-            .seed
-            .body
-            .device
-            .retained_ed25519_key_matches(&signer)
-        {
-            return Err(unavailable());
-        }
-        p.header_native.enter(
-            p.header_cut.as_mut().ok_or_else(unavailable)?,
-            &p.original,
-            NativeChatKeyPurpose::GoverningHeader,
-            &mut p.ends,
-        )?;
-        p.phase = Phase::HeaderEntered;
-        #[cfg(test)]
-        test_cut(TestCut::HeaderEntered);
-        let raw = self
-            .node
-            .seed
-            .body
-            .device
-            .sign_retained_ed25519_bounded(
-                &signer,
-                unsigned.signing_bytes_data(),
-                catcoms_replication::chat::owner_header::MAX_HEADER_SEMANTIC_BYTES,
-            )
-            .map_err(|_| unavailable())?;
-        p.raw = Some(raw);
-        p.phase = Phase::Raw;
-        #[cfg(test)]
-        test_cut(TestCut::RawCached);
-        Ok(())
+        self.signing_parts_data()?.1.sign_header_native()
+    }
+
+    /// Root can use the seed loan for its original Current while the second
+    /// loan retains only this operation's fixed native signing state.
+    pub fn signing_parts_data(
+        &mut self,
+    ) -> Result<(V2GenesisSourceFields<'_>, V2FounderAddSigning<'_>), SyncError> {
+        let seed = &self.node.seed;
+        let negative = V2FounderGovernanceNegative {
+            source: seed.body.source,
+            context: &seed.body.context,
+            scope: &seed.body.metadata.scope,
+            parts: StableParts {
+                warm: self.node._parts.body.warm.as_ref(),
+                fresh: self.node._parts.body.fresh.as_ref(),
+            },
+        };
+        let pending = self.pending.as_deref_mut().ok_or_else(unavailable)?;
+        Ok((
+            seed.source_fields(),
+            V2FounderAddSigning {
+                seed,
+                negative,
+                pending,
+            },
+        ))
+    }
+
+    /// Borrow the exact cached key result for Root's RawHeader record. This
+    /// remains available after a lost reply, before or after materialization.
+    pub fn raw_admission_signature_data(&self) -> Result<&[u8; 64], SyncError> {
+        self.pending
+            .as_ref()
+            .and_then(|p| p.raw.as_ref())
+            .ok_or_else(unavailable)
     }
 
     /// Deterministic materialization outside writers. It never calls the key,
@@ -535,7 +786,7 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
     /// Add cannot race a new message, but original member results owned by Root
     /// remain untouched. Root must reconcile them BEFORE preparing the Add.
     pub fn ordinary_member_signer_data(&self) -> Result<[u8; 32], V2MemberSignRefusal> {
-        if self.pending.is_some() {
+        if self.pending.is_some() || self.removal.is_some() {
             return Err(V2MemberSignRefusal::Source);
         }
         self.require_sdk_current_data()
@@ -554,6 +805,7 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
         ends: &mut NativeChatKeyEnds,
     ) -> Result<catcoms_replication::chat::V2OrdinarySigningGuard<'a>, V2MemberSignRefusal> {
         if self.pending.is_some()
+            || self.removal.is_some()
             || self.stable_negative().require_live_data().is_err()
             || guard.signer_data() != &self.node.seed.body.context.spec_data().signer
         {

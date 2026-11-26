@@ -155,8 +155,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextCreationPreparation<T, R> {
             work.require_native_founder_configuration()
                 .map_err(|_| Error::Unavailable)?;
             if work
-                .lookup_creation(request.invocation, request.digest)
-                .map_err(|_| Error::Storage)?
+                .lookup_native_creation(request.invocation, request.digest)?
                 .is_some()
             {
                 return Err(Error::ExistingRequiresRestore);
@@ -184,6 +183,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextCreationPreparation<T, R> {
                             request: Some(request),
                             device_started: false,
                             driver: None,
+                            recovered_founder: None,
                             device: None,
                             transport: None,
                             rng: Some(inputs.rng),

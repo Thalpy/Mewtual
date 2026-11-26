@@ -446,18 +446,28 @@ impl NativeColdTail {
     pub(in crate::store::critical_namespaces) fn finish(
         &self,
         store: &ServerStore,
-    ) -> Result<(), AppError> {
+        joined: crate::store::persistence::governance_layout::joined::JoinedPinOpening,
+    ) -> Result<
+        Vec<std::sync::Arc<crate::store::persistence::native_registry::network::NetworkDependency>>,
+        AppError,
+    > {
+        use crate::store::persistence::governance_layout::joined::JoinedPinOpening;
         match self {
             Self::Observed => {
-                super::native_registry::lifecycle::finish_governed_cold_observation(store)
+                let networks =
+                    super::native_registry::lifecycle::finish_governed_cold_observation(store)?;
+                store.finish_joined_pin_selection(joined)?;
+                Ok(networks)
             }
+            Self::Declared { .. } if joined != JoinedPinOpening::Any => Err(refused()),
             Self::Declared { declaration, fee } => {
                 let policy = store
                     .governance_layout_policy
                     .as_ref()
                     .ok_or_else(refused)?;
                 fee.validate(&policy.current.archive.pending.pool, codec::DECLARATION_FEE)?;
-                store.require_native_governance_selection(declaration)
+                store.require_native_governance_selection(declaration)?;
+                Ok(Vec::new())
             }
         }
     }

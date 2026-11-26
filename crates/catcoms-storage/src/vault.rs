@@ -13,7 +13,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -412,6 +412,49 @@ impl std::fmt::Debug for VaultSessionGuard {
     }
 }
 impl VaultSessionGuard {
+    /// Acquire the original existing lifetime lock for a configured cold mount.
+    /// A missing or foreign lock name is a refusal before opening any keys.
+    pub fn acquire_existing(dir: &Path) -> Result<Self, StorageError> {
+        let path = dir.join(VAULT_SESSION_LOCK_FILE);
+        let lock = lock_existing(&path)?;
+        Ok(Self {
+            lock: Arc::new(lock),
+        })
+    }
+
+    /// Authenticate a preexisting critical wrapper under this original
+    /// lifetime session and the existing short wrapper transaction lock.
+    pub fn open_existing_critical(
+        &self,
+        dir: &Path,
+        passphrase: &[u8],
+    ) -> Result<OpenedVault, StorageError> {
+        validate_existing_vault_secret_shape(passphrase)?;
+        let lifetime = dir.join(VAULT_SESSION_LOCK_FILE);
+        require_original_leaf(&lifetime, &self.lock)?;
+        let transaction = dir.join(VAULT_LOCK_FILE);
+        let lock = lock_existing(&transaction)?;
+        let path = dir.join(VAULT_FILE);
+        let mut file = crate::kept::open_existing_regular(&path, false).map_err(vault_io)?;
+        let raw = read_vault_wrapper_file(&mut file)?;
+        if vault_version(&raw)? != VAULT_VERSION_CRITICAL_NAMESPACES {
+            return Err(StorageError::Malformed);
+        }
+        let keys = KeyHierarchy::new(decode_and_unseal(&raw, passphrase)?);
+        sync_managed_directory(dir).map_err(vault_io)?;
+        file.rewind().map_err(vault_io)?;
+        if read_vault_wrapper_file(&mut file)? != raw {
+            return Err(StorageError::Malformed);
+        }
+        require_original_leaf(&path, &file)?;
+        require_original_leaf(&transaction, &lock)?;
+        require_original_leaf(&lifetime, &self.lock)?;
+        Ok(OpenedVault {
+            keys,
+            format: VaultFormat::CriticalNamespaces,
+        })
+    }
+
     /// Fresh-only negative restriction under this already-held lifetime lock.
     /// Inspect at most two entries and allow only this exact lock object. A
     /// missing wrapper must never cause new keys beside old encrypted data.
@@ -651,6 +694,10 @@ fn decode_and_unseal(bytes: &[u8], passphrase: &[u8]) -> Result<Dek, StorageErro
 /// forward compatibility (a future format must introduce a new exact version/shape deliberately).
 fn read_vault_wrapper(path: &Path) -> Result<[u8; VAULT_ENCODED_LEN], StorageError> {
     let mut file = File::open(path).map_err(|e| StorageError::Io(e.to_string()))?;
+    read_vault_wrapper_file(&mut file)
+}
+
+fn read_vault_wrapper_file(file: &mut File) -> Result<[u8; VAULT_ENCODED_LEN], StorageError> {
     let metadata = file
         .metadata()
         .map_err(|e| StorageError::Io(e.to_string()))?;
@@ -715,6 +762,28 @@ fn lock_vault(dir: &Path) -> Result<File, StorageError> {
     try_lock_file(&dir.join(VAULT_LOCK_FILE))
 }
 
+fn vault_io(error: std::io::Error) -> StorageError {
+    StorageError::Io(error.to_string())
+}
+
+fn require_original_leaf(path: &Path, file: &File) -> Result<(), StorageError> {
+    let id = crate::kept::session_id(file).map_err(vault_io)?;
+    if !matches!(
+        crate::kept::session_at(path, id),
+        crate::kept::SessionAt::Ours
+    ) {
+        return Err(StorageError::Malformed);
+    }
+    Ok(())
+}
+
+fn lock_existing(path: &Path) -> Result<File, StorageError> {
+    let lock = crate::kept::open_existing_regular(path, true).map_err(vault_io)?;
+    let lock = try_exclusive(lock)?;
+    require_original_leaf(path, &lock)?;
+    Ok(lock)
+}
+
 pub(crate) fn try_lock_file(path: &Path) -> Result<File, StorageError> {
     let lock = OpenOptions::new()
         .create(true)
@@ -723,6 +792,10 @@ pub(crate) fn try_lock_file(path: &Path) -> Result<File, StorageError> {
         .write(true)
         .open(path)
         .map_err(|error| StorageError::Io(error.to_string()))?;
+    try_exclusive(lock)
+}
+
+fn try_exclusive(lock: File) -> Result<File, StorageError> {
     match lock.try_lock() {
         Ok(()) => {}
         Err(std::fs::TryLockError::WouldBlock) => return Err(StorageError::VaultBusy),

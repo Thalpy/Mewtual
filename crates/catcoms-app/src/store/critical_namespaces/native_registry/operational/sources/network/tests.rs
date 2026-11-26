@@ -447,11 +447,18 @@ pub(super) fn transport_construction() {
     TRANSPORT_CALLS.with(|calls| calls.set(calls.get() + 1));
 }
 fn mesh_inputs(seed: u64) -> NativeTextCreationInputs<rand_chacha::ChaCha20Rng> {
+    mesh_inputs_with_clock(seed, Box::new(catcoms_rt::ManualClock::new(100)))
+}
+
+fn mesh_inputs_with_clock(
+    seed: u64,
+    clock: Box<dyn catcoms_rt::Clock + Send>,
+) -> NativeTextCreationInputs<rand_chacha::ChaCha20Rng> {
     use rand_core::SeedableRng;
     NativeTextCreationInputs::new(
         rand_chacha::ChaCha20Rng::seed_from_u64(seed),
         rand_chacha::ChaCha20Rng::seed_from_u64(seed + 1),
-        Box::new(catcoms_rt::ManualClock::new(100)),
+        clock,
     )
 }
 
@@ -461,7 +468,23 @@ pub(in super::super) fn prepared_mesh_founder(
     budget: &crate::store::NativeUiInvocationBudget,
     seed: u64,
 ) -> NativeTextSources<catcoms_net::MeshService, rand_chacha::ChaCha20Rng> {
-    let owner = prepared_mesh_pending(vault, budget, seed);
+    prepared_mesh_founder_with_clock(
+        vault,
+        budget,
+        seed,
+        Box::new(catcoms_rt::ManualClock::new(100)),
+    )
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+pub(in super::super) fn prepared_mesh_founder_with_clock(
+    vault: &NativeTextVault,
+    budget: &crate::store::NativeUiInvocationBudget,
+    seed: u64,
+    clock: Box<dyn catcoms_rt::Clock + Send>,
+) -> NativeTextSources<catcoms_net::MeshService, rand_chacha::ChaCha20Rng> {
+    let owner =
+        prepared_mesh_pending_with_inputs(vault, budget, mesh_inputs_with_clock(seed, clock));
     owner
         .prepare_creation(command(vault, budget), request(1, "Original"), inputs())
         .unwrap()
@@ -481,6 +504,15 @@ fn prepared_mesh_pending(
     budget: &crate::store::NativeUiInvocationBudget,
     seed: u64,
 ) -> NativeTextSources<catcoms_net::MeshService, rand_chacha::ChaCha20Rng> {
+    prepared_mesh_pending_with_inputs(vault, budget, mesh_inputs(seed))
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn prepared_mesh_pending_with_inputs(
+    vault: &NativeTextVault,
+    budget: &crate::store::NativeUiInvocationBudget,
+    initial_inputs: NativeTextCreationInputs<rand_chacha::ChaCha20Rng>,
+) -> NativeTextSources<catcoms_net::MeshService, rand_chacha::ChaCha20Rng> {
     let owner = vault
         .capture_native_sources(
             super::super::tests::policy()
@@ -493,7 +525,7 @@ fn prepared_mesh_pending(
         .prepare_creation(
             command(vault, budget),
             request(1, "Original"),
-            mesh_inputs(seed),
+            initial_inputs,
         )
         .unwrap()
         .prepare_device()

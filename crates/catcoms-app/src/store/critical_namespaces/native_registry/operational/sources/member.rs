@@ -2,17 +2,28 @@
 //! finite work drops all book/Entry issuer pins before its runtime writer/IO.
 use super::*;
 use crate::store::{V2MemberSaveOutcome, V2MemberSaveRefusal, V2MemberSignRequest};
-use catcoms_rt::RequestCancellation;
+use catcoms_rt::{NativeChatPreparedKeyCut, RequestCancellation};
 mod history;
 pub use history::{
     NativeTextMemberHistoryItem, NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus,
 };
 use std::sync::Weak;
 mod admission;
+mod connected;
+mod publication;
+mod receiving;
 pub use admission::{
     NativeTextMemberAdmissionFailure, NativeTextMemberFinalPreparation, NativeTextMemberSaveJob,
 };
+pub use publication::{
+    NativeTextFounderMemberPublication, NativeTextFounderMemberPublicationReceipt,
+};
+pub use receiving::{
+    NativeTextFounderDependencyProvider, NativeTextFounderMemberIngressPreparation,
+    NativeTextFounderMemberReceiver,
+};
 type MemberKeys<T, R> = (Arc<RuntimeCell<T, R>>, NativeFounderKeys);
+type JoinKeys<T, R> = (MemberKeys<T, R>, [NativeChatPreparedKeyCut; 3]);
 
 /// Independent per-invocation payment. Configuration is not a source selector
 /// or native credential; the exact policy account is checked again at capture.
@@ -124,6 +135,16 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
     /// Finish outside ALL native/Root guards. Fresh covered-row lookup precedes
     /// taking an Entry pin; every such pin leaves before the runtime writer.
     fn prepare_keys(&self) -> Result<MemberKeys<T, R>, V2MemberSaveRefusal> {
+        self.prepare_using_issuer(NativeFounderKeys::prepare)
+    }
+
+    fn prepare_using_issuer<K>(
+        &self,
+        prepare: impl FnOnce(
+            &NativeChatSourceOwner,
+            &catcoms_rt::NativeChatUiCommand,
+        ) -> Result<K, AppError>,
+    ) -> Result<(Arc<RuntimeCell<T, R>>, K), V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Error;
         self.require_current()?;
         self.budget
@@ -135,8 +156,12 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
             .work
             .as_ref()
             .unwrap()
-            .lookup_creation(self.row.original.invocation, self.row.original.request)
-            .map_err(|_| Error::Failed)?;
+            .lookup_native_creation(self.row.original.invocation, self.row.original.request)
+            .map_err(|refusal| match refusal {
+                NativeTextCreationRefusal::Busy => Error::Busy,
+                NativeTextCreationRefusal::Unavailable => Error::Unavailable,
+                _ => Error::Failed,
+            })?;
         if actual != Some(self.row.original.status) {
             return Err(Error::Stale);
         }
@@ -154,8 +179,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
                 .cloned()
                 .ok_or(Error::Unavailable)?
         }; // original book/guard leave before issuer preparation
-        let keys =
-            NativeFounderKeys::prepare(&selected.owner, &self.command.as_ref().unwrap().ui.command);
+        let keys = prepare(&selected.owner, &self.command.as_ref().unwrap().ui.command);
         let cell = selected.runtime.clone();
         drop(selected); // no issuer enters either runtime writer or SDK/IO
         let keys = keys.map_err(|_| Error::Unavailable)?;
@@ -165,9 +189,155 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
 
     /// Borrow the genuine whole runtime only after original lookup and issuer
     /// preparation have completed outside all native and Root guards.
-    pub fn finish(mut self) -> Result<NativeTextMemberJob<T, R>, V2MemberSaveRefusal> {
+    pub fn finish(self) -> Result<NativeTextMemberJob<T, R>, V2MemberSaveRefusal> {
+        let prepared = self.prepare_keys()?;
+        self.finish_prepared(prepared)
+    }
+
+    /// Run an incoming join on this exact native founder runtime. The
+    /// caller owns the request bytes and invokes this job outside UI guards.
+    pub fn accept_join_request(
+        self,
+        bytes: &[u8],
+        negative: &RequestCancellation,
+    ) -> Result<crate::store::NativeTextSavedJoinResponse, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Error;
-        let (cell, keys) = self.prepare_keys()?;
+        if negative.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let packet =
+            catcoms_sync::V2JoinRequestPacketData::decode(bytes).map_err(|_| Error::Failed)?;
+        let (keys, cuts) = self.prepare_join_keys()?;
+        self.finish_prepared(keys)?
+            .run_join_request(&packet, cuts, negative)
+    }
+
+    /// Remove an exact selected admission on this original founder row. The
+    /// caller supplies the admitted incarnation, never a replacement signer.
+    pub fn remove_governed_admission(
+        self,
+        target: catcoms_replication::chat::owner_header::OwnerBodyId,
+        negative: &RequestCancellation,
+    ) -> Result<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64), V2MemberSaveRefusal>
+    {
+        use V2MemberSaveRefusal as Error;
+        if negative.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let (cell, (keys, mut sdk, mut header)) =
+            self.prepare_using_issuer(|source, command| {
+                use catcoms_rt::NativeChatKeyPurpose as Purpose;
+                let cut = |purpose| source.prepare_cut(command, purpose).map_err(|_| refused());
+                Ok((
+                    NativeFounderKeys::prepare(source, command)?,
+                    cut(Purpose::RemoveSdk)?,
+                    cut(Purpose::RemovalHeader)?,
+                ))
+            })?;
+        let mut job = self.finish_prepared((cell, keys))?;
+        let mut ends = catcoms_rt::NativeChatKeyEnds::new();
+        job.inner
+            .require_current()
+            .map_err(|_| Error::Unavailable)?;
+        let inner = &mut job.inner;
+        let body = inner.loan.body.as_mut().ok_or(Error::Unavailable)?;
+        let driver = body.driver.as_mut().ok_or(Error::Unavailable)?;
+        let result = body.work.remove_governed_member_native(
+            driver,
+            target,
+            &inner.keys,
+            (&mut sdk, &mut header, &mut ends),
+            body.rng.as_mut().ok_or(Error::Unavailable)?,
+            negative,
+        );
+        inner.loan.recorded = true;
+        if negative.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        inner.require_current().map_err(|_| Error::Unavailable)?;
+        result.map_err(|error| match error {
+            AppError::Io(_) => Error::Busy,
+            _ => Error::Failed,
+        })
+    }
+
+    pub fn governed_roster(
+        self,
+        negative: &RequestCancellation,
+    ) -> Result<crate::store::NativeTextRoster, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Error;
+        if negative.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let mut job = self.finish()?;
+        job.inner
+            .require_current()
+            .map_err(|_| Error::Unavailable)?;
+        let inner = &mut job.inner;
+        let body = inner.loan.body.as_mut().ok_or(Error::Unavailable)?;
+        let result = if let Some(founder) = body.recovered_founder.as_mut() {
+            founder.governed_roster(negative)
+        } else {
+            let driver = body.driver.as_mut().ok_or(Error::Unavailable)?;
+            body.work
+                .governed_roster_native(driver, &inner.keys, negative)
+        };
+        inner.loan.recorded = true;
+        if negative.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        inner.require_current().map_err(|_| Error::Unavailable)?;
+        result.map_err(|_| Error::Failed)
+    }
+
+    /// Recheck the selected physical files before returning the original founding receipt.
+    pub fn verify_recovered_founder(
+        self,
+        caller: &RequestCancellation,
+    ) -> Result<(), V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Error;
+        if caller.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let mut job = self.finish()?;
+        let inner = &mut job.inner;
+        inner.require_current().map_err(|_| Error::Unavailable)?;
+        let result = inner
+            .loan
+            .body
+            .as_mut()
+            .and_then(|body| body.recovered_founder.as_mut())
+            .ok_or(Error::Unavailable)?
+            .require_recovered_checkpoint(caller);
+        inner.loan.recorded = true;
+        if caller.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        inner.require_current().map_err(|_| Error::Unavailable)?;
+        result.map(drop).map_err(|_| Error::Unavailable)
+    }
+
+    fn prepare_join_keys(&self) -> Result<JoinKeys<T, R>, V2MemberSaveRefusal> {
+        use catcoms_rt::NativeChatKeyPurpose as Purpose;
+        let (cell, (keys, cuts)) = self.prepare_using_issuer(|source, command| {
+            let cut = |purpose| source.prepare_cut(command, purpose).map_err(|_| refused());
+            Ok((
+                NativeFounderKeys::prepare(source, command)?,
+                [
+                    cut(Purpose::AddSdk)?,
+                    cut(Purpose::GoverningHeader)?,
+                    cut(Purpose::JoinWelcome)?,
+                ],
+            ))
+        })?;
+        Ok(((cell, keys), cuts))
+    }
+
+    fn finish_prepared(
+        mut self,
+        (cell, keys): MemberKeys<T, R>,
+    ) -> Result<NativeTextMemberJob<T, R>, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Error;
         let body = {
             let mut state = cell.state.try_lock().map_err(|_| Error::Busy)?;
             if state.retiring || !self.scope.is_open() {
@@ -193,15 +363,17 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
                 command: self.command.take().unwrap(),
             },
         };
-        if job
-            .inner
-            .loan
-            .body
-            .as_ref()
-            .unwrap()
-            .driver
-            .as_ref()
-            .is_none_or(|driver| !driver.is_ready_data())
+        let body = job.inner.loan.body.as_ref().unwrap();
+        let ready = match (&body.driver, &body.recovered_founder) {
+            (Some(driver), None) => !self.row.original.recovered_founder && driver.is_ready_data(),
+            (None, Some(_)) => self.row.original.recovered_founder,
+            _ => false,
+        };
+        if !ready
+            || !body
+                .selection
+                .as_ref()
+                .is_some_and(|row| self.row.same_original(row))
         {
             return Err(Error::Unavailable);
         }
@@ -231,15 +403,34 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberJob<T, R> {
             .body
             .as_mut()
             .ok_or(V2MemberSaveRefusal::Unavailable)?;
-        let result = body.work.prepare_native_member(
-            body.driver
+        let rng = body.rng.as_mut().ok_or(V2MemberSaveRefusal::Unavailable)?;
+        let result = if let Some(founder) = body.recovered_founder.as_mut() {
+            let clock = body
+                .clock
+                .as_deref()
+                .ok_or(V2MemberSaveRefusal::Unavailable)?;
+            let draws = body
+                .group_rng
                 .as_mut()
-                .ok_or(V2MemberSaveRefusal::Unavailable)?,
-            request,
-            negative,
-            body.rng.as_mut().ok_or(V2MemberSaveRefusal::Unavailable)?,
-            &mut inner.keys,
-        );
+                .ok_or(V2MemberSaveRefusal::Unavailable)?;
+            founder.prepare_member_save_with_keys(
+                request,
+                inner.keys.member_entry(),
+                negative,
+                (clock, draws),
+                rng,
+            )
+        } else {
+            body.work.prepare_native_member(
+                body.driver
+                    .as_mut()
+                    .ok_or(V2MemberSaveRefusal::Unavailable)?,
+                request,
+                negative,
+                rng,
+                &mut inner.keys,
+            )
+        };
         #[cfg(all(test, any(windows, target_os = "linux")))]
         tests::after_prepare();
         // The actual driver retains all known outcomes before this late check.

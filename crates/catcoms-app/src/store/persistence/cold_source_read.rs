@@ -10,10 +10,13 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::sync::Weak;
 mod genesis_seed;
+pub(in crate::store) use genesis_seed::RetainedPromotedGenesisSdk;
 pub(in crate::store) use genesis_seed::{
-    OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
+    prepare_joined_member_history, prepare_recovered_founder_history, JoinedMemberLane,
+    JoinedMemberSource, OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
     PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
-    PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis,
+    PreparedV2UnsignedOriginalCustody, RecoveredMemberLane, RecoveredMemberSource,
+    V2AdvancedAppendBasis,
 };
 #[cfg(all(test, windows))]
 pub(in crate::store) use genesis_seed::{
@@ -163,6 +166,28 @@ impl RetainedBootstrapSourceData {
             &self.capture.target,
             &self.capture.target_directory,
             self.capture.target_id,
+        )
+    }
+
+    pub(in crate::store) fn saved_expectation_data(
+        &self,
+        store: &ServerStore,
+    ) -> Result<critical_namespaces::archive_current_codec::SavedSourceExpectationData, AppError>
+    {
+        self.require_original_negative(store)?;
+        let capture = &self.capture;
+        let key = Zeroizing::new(store.keys.db_key()?);
+        let debit = founder::open_debit_data(&key, capture.invocation, &capture.debit.frame)?;
+        Ok(
+            critical_namespaces::archive_current_codec::SavedSourceExpectationData {
+                invocation: capture.invocation,
+                debit_id: founder::DebitId::of(&capture.debit.frame),
+                terminal_id: founder::IntentId::of(&capture.terminal.frame),
+                source_id: capture.source_id,
+                marker_id: founder::TargetMarkerId::of(&capture.origin.frame),
+                context: capture.context.clone(),
+                debit_display_name: debit.name,
+            },
         )
     }
 

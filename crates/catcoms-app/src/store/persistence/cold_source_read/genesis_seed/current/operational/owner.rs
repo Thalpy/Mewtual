@@ -20,6 +20,8 @@ use crate::store::persistence::{
 use crate::store::ServerStore;
 use crate::AppError;
 
+mod removal;
+
 /// No decoded role or caller-selected constructor can create this core. Each variant owns
 /// the SAME source/node/T/R/Clock/Scope/writer and its existing independent resource fees.
 enum OwnedCurrent<T, R> {
@@ -117,6 +119,278 @@ impl<T, R> V2TextOwnedCurrent<T, R> {
 }
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurrent<T, R> {
+    pub(super) fn select_governed_dependency_access(
+        &self,
+        store: &ServerStore,
+        verifier: &catcoms_replication::chat::V2GeneralPrefixVerifier,
+        channel: u128,
+    ) -> Result<catcoms_sync::owner_v2::V2FounderMemberDependencyAccess<'_>, AppError> {
+        match &self.core {
+            OwnedCurrent::Warm(current) => {
+                current.select_governed_dependency_access(store, verifier, channel)
+            }
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
+    pub(super) fn prepare_governed_member_subscription(
+        &self,
+        store: &ServerStore,
+        verifier: &catcoms_replication::chat::V2GeneralPrefixVerifier,
+        channel: u128,
+    ) -> Result<
+        (
+            catcoms_rt::Topic,
+            catcoms_sync::owner_v2::V2MemberPublicationObservation,
+        ),
+        AppError,
+    > {
+        match &self.core {
+            OwnedCurrent::Warm(current) => {
+                current.prepare_governed_member_subscription(store, verifier, channel)
+            }
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
+    pub(super) fn open_governed_member_frame(
+        &self,
+        store: &ServerStore,
+        verifier: &catcoms_replication::chat::V2GeneralPrefixVerifier,
+        channel: u128,
+        topic: &catcoms_rt::Topic,
+        wire: &[u8],
+    ) -> Result<catcoms_sync::owner_v2::SelectedV2MemberEnvelope, AppError> {
+        match &self.core {
+            OwnedCurrent::Warm(current) => {
+                current.open_governed_member_frame(store, verifier, channel, topic, wire)
+            }
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
+    pub(super) fn prepare_governed_member_submission(
+        &mut self,
+        store: &ServerStore,
+        verifier: &catcoms_replication::chat::V2GeneralPrefixVerifier,
+        item: &crate::store::persistence::v2_member_outbox::MemberDebtItem,
+    ) -> Result<catcoms_sync::owner_v2::PreparedV2MemberSubmission, AppError> {
+        match &mut self.core {
+            OwnedCurrent::Warm(current) => {
+                current.prepare_governed_member_submission(store, verifier, item)
+            }
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
+    pub(super) fn derive_governed_core_selection(
+        &self,
+        store: &ServerStore,
+        verifier: &mut catcoms_replication::chat::V2GeneralPrefixVerifier,
+    ) -> Result<catcoms_replication::chat::V2GeneralCandidate, AppError> {
+        match &self.core {
+            OwnedCurrent::Warm(current) => current.derive_governed_core_selection(store, verifier),
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
+    pub(super) fn take_retired_governed_install(
+        &mut self,
+    ) -> Result<catcoms_sync::owner_v2::RetiredV2FounderAddInstall, AppError> {
+        match &mut self.core {
+            OwnedCurrent::Warm(current) => current.take_retired_governed_install(),
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
+    pub(super) fn borrow_governed_install_parts(
+        &mut self,
+        store: &ServerStore,
+    ) -> Result<
+        (
+            V2TextOwnerRef<'_>,
+            catcoms_sync::owner_v2::PreparedV2FounderAddInstall<'_>,
+        ),
+        AppError,
+    > {
+        match &mut self.core {
+            OwnedCurrent::Warm(current) => {
+                let (original, install) = current.borrow_governed_install_parts(store)?;
+                Ok((V2TextOwnerRef { original }, install))
+            }
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
+    pub(super) fn materialize_governed_response(
+        &mut self,
+        store: &ServerStore,
+    ) -> Result<(), AppError> {
+        match &mut self.core {
+            OwnedCurrent::Warm(current) => current.materialize_governed_response(store),
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
+    pub(super) fn governed_response_data(
+        &self,
+        store: &ServerStore,
+    ) -> Result<catcoms_sync::V2JoinResponseData<'_>, AppError> {
+        match &self.core {
+            OwnedCurrent::Warm(current) => current.governed_response_data(store),
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
+    pub(super) fn cached_governed_welcome_raw(
+        &self,
+        store: &ServerStore,
+    ) -> Result<Option<[u8; 64]>, AppError> {
+        match &self.core {
+            OwnedCurrent::Warm(current) => current.cached_governed_welcome_raw(store),
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
+    pub(super) fn freeze_governed_welcome(
+        &mut self,
+        store: &ServerStore,
+    ) -> Result<Vec<u8>, AppError> {
+        match &mut self.core {
+            OwnedCurrent::Warm(current) => current.freeze_governed_welcome(store),
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
+    pub(super) fn materialize_governed_header(
+        &mut self,
+        store: &ServerStore,
+    ) -> Result<catcoms_replication::chat::owner_header::SignedOwnerHeader, AppError> {
+        match &mut self.core {
+            OwnedCurrent::Warm(current) => current.materialize_governed_header(store),
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
+    pub(super) fn cached_governed_header_raw(
+        &self,
+        store: &ServerStore,
+    ) -> Result<Option<[u8; 64]>, AppError> {
+        match &self.core {
+            OwnedCurrent::Warm(current) => current.cached_governed_header_raw(store),
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
+    pub(super) fn borrow_governed_signing_parts(
+        &mut self,
+    ) -> Result<
+        (
+            V2TextOwnerRef<'_>,
+            catcoms_sync::owner_v2::V2FounderAddSigning<'_>,
+        ),
+        AppError,
+    > {
+        match &mut self.core {
+            OwnedCurrent::Warm(current) => {
+                let (original, signing) = current.borrow_governed_signing_parts()?;
+                Ok((V2TextOwnerRef { original }, signing))
+            }
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
+    pub(super) fn prepare_governed_sdk(
+        &mut self,
+        store: &ServerStore,
+        request: catcoms_sync::owner_v2::V2FounderAddRequestData<'_>,
+        original: catcoms_rt::NativeChatSourceObservation,
+        admission: &mut Option<catcoms_mls::persist::text_current_add::TextCurrentAddAdmission>,
+        cuts: [catcoms_rt::NativeChatPreparedKeyCut; 3],
+    ) -> Result<(), AppError> {
+        match &mut self.core {
+            OwnedCurrent::Warm(current) => {
+                current.prepare_governed_sdk(store, request, original, admission, cuts)
+            }
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
+    pub(super) fn run_governed_sdk(
+        &mut self,
+        store: &ServerStore,
+        request: catcoms_sync::owner_v2::V2FounderAddRequestData<'_>,
+        replay: &catcoms_replication::chat::owner_state::transition::ReplayMath,
+    ) -> Result<(), AppError> {
+        match &mut self.core {
+            OwnedCurrent::Warm(current) => current.run_governed_sdk(store, request, replay),
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
+    pub(super) fn preflight_add_package_data(
+        &self,
+        store: &ServerStore,
+        request: catcoms_sync::owner_v2::V2FounderAddRequestData<'_>,
+        limits: catcoms_mls::persist::text_current_add::TextCurrentAddLimits,
+        selected: Option<&catcoms_replication::chat::owner_state::transition::ReplayMath>,
+    ) -> Result<(), AppError> {
+        match &self.core {
+            OwnedCurrent::Warm(current) => {
+                current.preflight_add_package_data(store, request, limits, selected)
+            }
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
+    pub(super) fn governed_fetch_verifier(
+        &self,
+        store: &ServerStore,
+        verifier: &catcoms_replication::chat::V2GeneralPrefixVerifier,
+    ) -> Result<[u8; 32], AppError> {
+        match &self.core {
+            OwnedCurrent::Warm(current) => current.governed_fetch_verifier(store, verifier),
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
+    pub(super) fn retire_add_for_closed_ui(
+        &mut self,
+        closed: &[Option<&catcoms_rt::NativeChatKeyDrain>],
+    ) -> Result<(), AppError> {
+        match &mut self.core {
+            OwnedCurrent::Warm(current) => current.retire_add_for_closed_ui(closed),
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Ok(()),
+        }
+    }
+
+    pub(super) fn discard_add_for_closed_source(
+        &mut self,
+        closed: &catcoms_rt::NativeChatKeyDrain,
+    ) -> Result<(), AppError> {
+        match &mut self.core {
+            OwnedCurrent::Warm(current) => current.discard_add_for_closed_source(closed),
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Ok(()),
+        }
+    }
+
+    pub(super) fn governed_outcome_data(
+        &self,
+        store: &ServerStore,
+    ) -> Result<catcoms_sync::owner_v2::V2FounderAddOutcomeData<'_>, AppError> {
+        match &self.core {
+            OwnedCurrent::Warm(current) => current.governed_outcome_data(store),
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
+    pub(super) fn prepare_governed_node(&mut self, store: &ServerStore) -> Result<(), AppError> {
+        match &mut self.core {
+            OwnedCurrent::Warm(current) => current.prepare_governed_text_node(store),
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
     /// Only the real warm whole owner can prepare an invite. Cold/Repaired
     /// metadata never supplies a new signer or starts another original draw.
     pub(super) fn prepare_invite_data(
@@ -125,10 +399,41 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurr
         request: catcoms_sync::owner_v2::V2FounderInviteRequestData,
         native: &catcoms_rt::NativeChatSourceObservation,
         slot: &mut Option<catcoms_sync::owner_v2::PreparedV2FounderInviteData>,
+        selected: Option<&catcoms_replication::chat::V2GeneralPrefixVerifier>,
     ) -> Result<(), AppError> {
         match &mut self.core {
             OwnedCurrent::Warm(current) => {
-                current.prepare_text_invite_data(store, request, native, slot)
+                current.prepare_text_invite_data(store, request, native, slot, selected)
+            }
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
+    pub(super) fn preflight_invite_signing(
+        &self,
+        store: &ServerStore,
+        original: &catcoms_sync::owner_v2::PreparedV2FounderInviteData,
+        selected: Option<&catcoms_replication::chat::V2GeneralPrefixVerifier>,
+    ) -> Result<(), AppError> {
+        match &self.core {
+            OwnedCurrent::Warm(current) => {
+                current.preflight_text_invite_signing(store, original, selected)
+            }
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
+    pub(super) fn sign_invite(
+        &self,
+        store: &ServerStore,
+        original: &mut catcoms_sync::owner_v2::PreparedV2FounderInviteData,
+        cut: &mut catcoms_rt::NativeChatPreparedKeyCut,
+        ends: &mut catcoms_rt::NativeChatKeyEnds,
+        selected: Option<&catcoms_replication::chat::V2GeneralPrefixVerifier>,
+    ) -> Result<(), AppError> {
+        match &self.core {
+            OwnedCurrent::Warm(current) => {
+                current.sign_text_invite(store, original, cut, ends, selected)
             }
             OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
         }

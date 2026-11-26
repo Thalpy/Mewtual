@@ -233,17 +233,35 @@ pub(super) fn charged_bytes(bytes: Bytes, credit: Arc<Credit>) -> Bytes {
 pub(super) struct IngressAuthority {
     lease: ConnectionLease,
     terminal: watch::Receiver<bool>,
+    service: Option<Arc<dyn RequestAuthority>>,
 }
 impl IngressAuthority {
-    pub(super) fn new(lease: ConnectionLease) -> (Arc<Self>, watch::Sender<bool>) {
+    pub(super) fn new(
+        lease: ConnectionLease,
+        service: Option<Arc<dyn RequestAuthority>>,
+    ) -> (Arc<Self>, watch::Sender<bool>) {
         let (owner, terminal) = watch::channel(false);
-        (Arc::new(Self { lease, terminal }), owner)
+        (
+            Arc::new(Self {
+                lease,
+                terminal,
+                service,
+            }),
+            owner,
+        )
     }
 }
 #[async_trait]
 impl RequestAuthority for IngressAuthority {
     fn authorized(&self) -> bool {
-        self.lease.is_live() && !*self.terminal.borrow() && self.terminal.has_changed().is_ok()
+        let terminated = *self.terminal.borrow();
+        self.lease.is_live()
+            && !terminated
+            && self.terminal.has_changed().is_ok()
+            && self
+                .service
+                .as_ref()
+                .is_none_or(|service| service.authorized())
     }
     async fn revoked(&self) {
         let mut terminal = self.terminal.clone();
@@ -253,6 +271,13 @@ impl RequestAuthority for IngressAuthority {
         tokio::select! {
             _ = self.lease.revoked() => {},
             _ = async { while !*terminal.borrow_and_update() { if terminal.changed().await.is_err() { return; } } } => {},
+            _ = async {
+                if let Some(service) = &self.service {
+                    service.revoked().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {},
         }
     }
 }
@@ -612,7 +637,7 @@ mod tests {
         let ingress = lease(&owners, peer);
         let initial = budget.charge_request(7, peer, Some(5)).unwrap();
         let data = charged_bytes(Bytes::from_static(b"request"), initial.clone());
-        let (authority, terminal) = IngressAuthority::new(ingress);
+        let (authority, terminal) = IngressAuthority::new(ingress, None);
         let (responder, receiver) =
             Responder::channel_owned(initial.clone(), authority.clone(), budget.clone());
         let reply_lifetime = responder.cancellation_authority();
@@ -649,7 +674,7 @@ mod tests {
             let owners = connection_leases::Owners::default();
             let peer = PeerId::from_u64(1);
             let initial = budget.charge_request(0, peer, Some(5)).unwrap();
-            let (authority, terminal) = IngressAuthority::new(lease(&owners, peer));
+            let (authority, terminal) = IngressAuthority::new(lease(&owners, peer), None);
             let (responder, receiver) =
                 Responder::channel_owned(initial.clone(), authority, budget.clone());
             let pressure = if retire {

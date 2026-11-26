@@ -150,6 +150,13 @@ pub(in crate::store) struct CatalogReadReservation {
     drop_notice: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 impl CatalogReadReservation {
+    pub(in crate::store) fn reserve_more(&self, bytes: usize) -> Result<Self, AppError> {
+        CriticalCatalogReadPool {
+            inner: self.original.clone(),
+        }
+        .try_reserve(bytes)
+    }
+
     /// Observe this EXACT reservation's destruction; unrelated payments cannot satisfy the
     /// assertion. The preallocated flag supplies no credit, lease, pool or authority.
     #[cfg(test)]

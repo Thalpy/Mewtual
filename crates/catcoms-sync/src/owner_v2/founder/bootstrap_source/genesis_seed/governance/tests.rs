@@ -15,14 +15,12 @@ use catcoms_replication::chat::V2HostSelectionExpectation;
 use catcoms_rt::{
     ManualClock, MemNetwork, NativeChatSourceOwner, NativeChatUiBinding, NativeChatUiSessionOwner,
 };
-use openmls_memory_storage::owner_restore::TextAddOperationLimits;
 use rand_chacha::ChaCha20Rng;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::SeqCst};
 
 type Node = PreparedV2FounderGovernanceNode<MemNetwork, ChaCha20Rng>;
 const NOW: u64 = 1_800_000_000_000;
 const RAW: usize = 2 * 1024 * 1024;
-const WORK: usize = 2 * 1024 * 1024 * 1024 - 1;
 
 mod native_stage;
 mod signed_request;
@@ -85,27 +83,7 @@ impl Native {
 struct Fee(Arc<AtomicUsize>);
 impl TextCurrentAddReservation for Fee {
     fn limits(&self) -> TextCurrentAddLimits {
-        TextCurrentAddLimits {
-            max_snapshot_bytes: 4 * RAW,
-            max_provider_backing_bytes: RAW,
-            max_provider_payload_bytes: 8 * RAW,
-            prepare_work: WORK,
-            package_typed_bytes: RAW,
-            package_work: WORK,
-            restore_typed_bytes: RAW,
-            restore_work: WORK,
-            operation: TextAddOperationLimits {
-                max_typed_bytes: RAW,
-                max_serialized_bytes: 16 * RAW,
-                max_provider_bytes: 16 * RAW,
-                max_work: WORK,
-            },
-            sdk_typed_bytes: 32 * RAW,
-            sdk_work: WORK,
-            output_bytes: 4 * RAW,
-            routing_typed_bytes: catcoms_mls::group::text_current_add::TEXT_ADD_ROUTING_TYPED_BYTES,
-            routing_work: catcoms_mls::group::text_current_add::TEXT_ADD_ROUTING_WORK,
-        }
+        TextCurrentAddLimits::governed_text_v2()
     }
 }
 impl Drop for Fee {
@@ -287,6 +265,8 @@ fn install_for_test(
     verifier: &mut catcoms_replication::chat::V2GeneralPrefixVerifier,
 ) -> (Retired, catcoms_replication::chat::V2GeneralRetiredData) {
     node.require_sdk_current_data().unwrap();
+    let nonce = node.pending.as_ref().unwrap().request.invite_nonce();
+    let invite_slot = node.available_invite_slot(nonce).unwrap();
     let p = node.pending.as_mut().unwrap();
     assert!(p.phase == Phase::Materialized);
     let result = p.cell.as_ref().unwrap().completed_result_data().unwrap();
@@ -330,6 +310,7 @@ fn install_for_test(
         .unwrap();
     let sdk_retired = mls.install();
     node.installed = Some(installed);
+    node.installed_invites[invite_slot] = Some(nonce);
     let pending = node.pending.take().unwrap();
     (
         Retired {
@@ -400,12 +381,14 @@ fn raw_header_survives_late_lock_and_exact_retry_never_reenters_key() {
     node.execute_add_data_native(request.data()).unwrap();
     node.prepare_admission_data(g.verifier.replay_data())
         .unwrap();
+    assert!(node.raw_admission_signature_data().is_err());
     let generation = native.generation.clone();
     hook(TestCut::RawCached, move || {
         generation.store(8, SeqCst);
     });
     node.sign_admission_native().unwrap();
-    let raw = node.pending.as_ref().unwrap().raw.unwrap();
+    let raw = *node.raw_admission_signature_data().unwrap();
+    assert!(node.signed_admission_data().is_err());
     // Would panic if this retry reached the original private key entry again.
     hook(TestCut::HeaderEntered, || {
         panic!("cached raw must bypass the key")
@@ -414,9 +397,11 @@ fn raw_header_survives_late_lock_and_exact_retry_never_reenters_key() {
     TEST_CUT.with(|slot| {
         slot.borrow_mut().take();
     });
-    assert_eq!(node.pending.as_ref().unwrap().raw, Some(raw));
+    assert_eq!(node.raw_admission_signature_data().unwrap(), &raw);
     node.materialize_admission_data().unwrap();
-    assert!(node.signed_admission_data().unwrap().verify());
+    let signed = node.signed_admission_data().unwrap();
+    assert!(signed.verify());
+    assert_eq!(signed.signature(), &raw);
     assert!(node.require_sdk_current_data().is_ok()); // Native lock is a distinct negative.
     assert!(node
         .pending
@@ -451,7 +436,7 @@ fn panic_after_header_entry_does_not_repeat_key_or_lose_completed_sdk_result() {
     }))
     .is_err());
     assert!(node.sign_admission_native().is_err());
-    assert!(node.pending.as_ref().unwrap().raw.is_none());
+    assert!(node.raw_admission_signature_data().is_err());
     assert!(node.materialize_admission_data().is_err());
     assert_eq!(node.completed_add_data().unwrap().after_epoch_data(), 1);
     drop(node);

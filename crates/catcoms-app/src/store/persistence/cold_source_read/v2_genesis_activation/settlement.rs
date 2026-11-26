@@ -452,7 +452,7 @@ impl SettlementBody {
         self.original_read
             .require_same_original(owner.source().source())?;
         self.original_sdk
-            .require_same_seed_data(owner.source().seed())?;
+            .require_same_source_fields(owner.source().seed())?;
         self.task.require_same_original(owner.task())?;
         owner.require_original_negative(store, &self.writer)
     }

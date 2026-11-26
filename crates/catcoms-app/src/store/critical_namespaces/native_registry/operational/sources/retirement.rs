@@ -14,6 +14,7 @@ const MAX_PREPARATIONS: usize = 2;
 /// negative observer may retain the collection, an issuer or Physical here.
 pub(super) struct Control {
     captured: AtomicBool,
+    ui_add_pass: AtomicBool,
     preparations: AtomicUsize,
     _payment: CatalogReadReservation,
 }
@@ -21,9 +22,16 @@ impl Control {
     pub(super) fn new(payment: CatalogReadReservation) -> Self {
         Self {
             captured: AtomicBool::new(false),
+            ui_add_pass: AtomicBool::new(false),
             preparations: AtomicUsize::new(0),
             _payment: payment,
         }
+    }
+    pub(super) fn try_begin_ui_add_pass(&self) -> Option<UiAddPass<'_>> {
+        self.ui_add_pass
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| UiAddPass(&self.ui_add_pass))
     }
     pub(super) fn enter_preparation(self: &Arc<Self>) -> Option<PreparationEnd> {
         self.preparations
@@ -42,6 +50,13 @@ impl Control {
     }
 }
 
+pub(super) struct UiAddPass<'a>(&'a AtomicBool);
+impl Drop for UiAddPass<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Admission and closure share one packed atomic: no delayed increment can
 /// arrive behind CLOSED+zero. LAST after actual preparation custody leaves.
 pub(super) struct PreparationEnd(Arc<Control>);
@@ -56,6 +71,8 @@ pub(super) fn invoice<T: MeshTransport, R: CryptoRngCore>() -> usize {
     2 * std::mem::size_of::<NativeTextSourceRetirement<T, R>>()
         + 2 * std::mem::size_of::<NativeTextSourceRetirementPreparation<T, R>>()
         + std::mem::size_of::<Control>()
+        + ui_add_retirement::invoice::<T, R>()
+        + join::invoice::<R>()
         // The Weak book can outlive Sources. Its real allocation header and
         // Mutex/Vec metadata stay covered by the capture's Control fee tail.
         + std::mem::size_of::<SourceBook<T, R>>() + 2 * std::mem::size_of::<usize>()
@@ -67,11 +84,12 @@ enum TcpDisposition {
     // or missing retirement metadata is UNKNOWN, never this negative proof.
     NotPrepared,
     Tracked(catcoms_net::NativeTcpDrain),
+    RecoveredDrained,
 }
 impl TcpDisposition {
     fn drained(&self) -> bool {
         match self {
-            Self::NotPrepared => true,
+            Self::NotPrepared | Self::RecoveredDrained => true,
             Self::Tracked(original) => original.is_drained(),
         }
     }
@@ -122,6 +140,8 @@ impl Drop for CaptureAck {
 /// Never capture, run or destroy this value while holding native/Root writers.
 pub struct NativeTextSourceRetirement<T: MeshTransport, R: CryptoRngCore> {
     rows: [Option<Row<T, R>>; MAX_SOURCES],
+    mounted_join: Arc<join::MountedJoin<R>>,
+    joined_tcp: Arc<super::super::join_tcp::Transport>,
     // LAST: another worker cannot enter until all old cell/key pins are gone.
     _ack: CaptureAck,
 }
@@ -132,6 +152,8 @@ pub struct NativeTextSourceRetirementPreparation<T: MeshTransport, R: CryptoRngC
     book: Weak<SourceBook<T, R>>,
     #[cfg(test)]
     weak_drop_order: Option<WeakDropOrder>,
+    mounted_join: Weak<join::MountedJoin<R>>,
+    joined_tcp: Weak<super::super::join_tcp::Transport>,
     // Slot acknowledgement follows real Weak/cell work. Busy has no slot but
     // still owns the unconditional fee-only tail below.
     ack: Option<CaptureAck>,
@@ -202,6 +224,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSources<T, R> {
     pub fn capture_retirement(&self) -> NativeTextSourceRetirementPreparation<T, R> {
         self.scope.close_first();
         self.retirement.close_preparations();
+        self.pending_join.close_keys();
         let ack = self
             .retirement
             .captured
@@ -212,6 +235,8 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSources<T, R> {
             book: Arc::downgrade(&self.entries),
             #[cfg(test)]
             weak_drop_order: None,
+            mounted_join: Arc::downgrade(&self.mounted_join),
+            joined_tcp: Arc::downgrade(&self.joined_tcp),
             ack,
             _control: self.retirement.clone(),
         }
@@ -231,6 +256,8 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSourceRetirementPreparation<T
         }
         let mut rows = std::array::from_fn(|_| None);
         let book = self.book.upgrade().ok_or(Error::Unknown)?;
+        let mounted_join = self.mounted_join.upgrade().ok_or(Error::Unknown)?;
+        let joined_tcp = self.joined_tcp.upgrade().ok_or(Error::Unknown)?;
         {
             let entries = book.try_lock().map_err(|_| Error::Busy)?;
             for original in entries.iter() {
@@ -247,7 +274,12 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSourceRetirementPreparation<T
                     // Only successful, infallible handoff takes the slot from self. On
                     // every earlier error self drops Weak first, then slot/control last.
         let ack = self.ack.take().expect("original retirement capture slot");
-        Ok(NativeTextSourceRetirement { rows, _ack: ack })
+        Ok(NativeTextSourceRetirement {
+            rows,
+            mounted_join,
+            joined_tcp,
+            _ack: ack,
+        })
     }
 }
 
@@ -265,6 +297,18 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSourceRetirement<T, R> {
                 pending = true;
             }
         }
+        if !pending {
+            use NativeTextSourceRetirementRefusal as Error;
+            let closed = match self.mounted_join.try_lock() {
+                Ok(mut slot) => slot.take(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    return Ok(NativeTextSourceRetirementStatus::Pending)
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => return Err(Error::Unknown),
+            };
+            drop(closed);
+            pending = !self.joined_tcp.try_retire()?;
+        }
         Ok(if pending {
             NativeTextSourceRetirementStatus::Pending
         } else {
@@ -278,7 +322,6 @@ impl<T: MeshTransport, R: CryptoRngCore> Row<T, R> {
         use NativeTextSourceRetirementRefusal as Error;
         // This negative remains distinct from worker presence and body Drop.
         // It must be closed even if no key primitive was ever entered.
-        let keys_drained = self.keys.is_drained();
         let body = {
             let mut state = match self.cell.state.try_lock() {
                 Ok(state) => state,
@@ -289,7 +332,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Row<T, R> {
             if state.poisoned {
                 return Err(Error::Unknown);
             }
-            if !keys_drained || state.running {
+            if state.running {
                 return Ok(false);
             }
             if state.retirement.destroyed != Destruction::NotDestroyed {
@@ -299,7 +342,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Row<T, R> {
                 {
                     return Err(Error::Unknown);
                 }
-                return Ok(state.retirement.complete());
+                return Ok(self.keys.is_drained() && state.retirement.complete());
             }
             // A missing body without its actual destruction envelope is never
             // success, even if an old task failed and every counter is idle.
@@ -313,19 +356,44 @@ impl<T: MeshTransport, R: CryptoRngCore> Row<T, R> {
             recorded: true,
         };
         if let Some(driver) = loan.body.as_mut().and_then(|body| body.driver.as_mut()) {
+            // This exclusive idle body can itself own key Ends. It must dispose
+            // of the original pending Add after Source closure, before key wait.
+            driver
+                .discard_add_for_closed_source(&self.keys)
+                .map_err(|_| Error::Unknown)?;
+        }
+        if !self.keys.is_drained() {
+            return Ok(false);
+        }
+        if let Some(driver) = loan.body.as_mut().and_then(|body| body.driver.as_mut()) {
             // Whole driver closes owner, projection and member domains. In
             // particular an admitted member save End still keeps this Busy.
             if driver.close_and_drain().is_err() {
                 return Ok(false); // exact mutated driver restored by Loan Drop
             }
         }
+        let recovered = loan
+            .body
+            .as_mut()
+            .and_then(|body| body.recovered_founder.as_mut());
+        let recovered_drained = if let Some(founder) = recovered {
+            if !founder.try_retire()? {
+                return Ok(false);
+            }
+            true
+        } else {
+            false
+        };
         let body = loan.body.take().expect("original retirement loan");
-        let tcp = body
-            .network
-            .as_ref()
-            .and_then(|network| network.observe_tcp())
-            .map(TcpDisposition::Tracked)
-            .unwrap_or(TcpDisposition::NotPrepared);
+        let tcp = if recovered_drained {
+            TcpDisposition::RecoveredDrained
+        } else {
+            body.network
+                .as_ref()
+                .and_then(|network| network.observe_tcp())
+                .map(TcpDisposition::Tracked)
+                .unwrap_or(TcpDisposition::NotPrepared)
+        };
         // Arm the destruction envelope BEFORE acquiring its metadata writer.
         // Field order proves every actual Runtime field Drop has completed
         // before acknowledgment, including a destructor unwinding that Drop.

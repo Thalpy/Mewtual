@@ -4,9 +4,12 @@
 mod founder;
 #[cfg(not(target_arch = "wasm32"))]
 pub use founder::{
-    PreparedV2FounderGovernanceNode, PreparedV2FounderInviteData, RetiredV2FounderAddNativeCustody,
-    V2FounderAddNativeStage, V2FounderAddPreparationRefusal, V2FounderAddRequestData,
-    V2FounderGovernanceNegative, V2FounderInviteRequestData, V2InstalledFounderAddData,
+    PreparedV2FounderAddInstall, PreparedV2FounderGovernanceNode, PreparedV2FounderInviteData,
+    PreparedV2FounderRecoveredAdd, PreparedV2FounderRemoveInstall, RetiredV2FounderAddInstall,
+    RetiredV2FounderAddNativeCustody, RetiredV2FounderRemoveInstall, V2FounderAddNativeStage,
+    V2FounderAddOutcomeData, V2FounderAddPreparationRefusal, V2FounderAddRequestData,
+    V2FounderAddSigning, V2FounderGovernanceNegative, V2FounderInviteRequestData,
+    V2FounderRemoveOutcomeData, V2FounderRemoveSigning, V2InstalledFounderAddData,
     FOUNDER_GOVERNANCE_DATA_BYTES, FOUNDER_INVITE_DATA_BYTES, MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES,
     MAX_FOUNDER_INVITE_LIFETIME_MS,
 };
@@ -19,6 +22,8 @@ mod joined_source;
 // Ordinary-member signing seams (founder genesis node and joined ChannelSync). No owner
 // certification, Append lane, export or publication is reachable through them.
 mod member;
+mod member_dependencies;
+mod member_envelope;
 pub use founder::{
     open_bootstrap_source_data, prepare_v2_genesis_seed, prepare_v2_genesis_seed_native_warm,
     ArchiveSourceRefusal, BootstrapSourceContextData, BootstrapSourceContextSpec,
@@ -30,8 +35,8 @@ pub use founder::{
     PreparedV2CreateData, RetainedFounderSigning, ReturnedV2GenesisAttach, UnboundV2GenesisNode,
     UnboundV2GenesisSeed, V2AppendDataView, V2AppendPlanObservation, V2CreateDataView,
     V2CreatePacketId, V2CreateRefusal, V2CreateRequest, V2GenesisRuntimeParts,
-    V2GenesisRuntimeRefusal, V2GenesisSeedData, V2GenesisSeedLimits, V2UnsignedAppendDataView,
-    APPEND_DATA_BUFFER_BYTES, BOOTSTRAP_SOURCE_NESTED_DATA_INVOICE,
+    V2GenesisRuntimeRefusal, V2GenesisSeedData, V2GenesisSeedLimits, V2GenesisSourceFields,
+    V2UnsignedAppendDataView, APPEND_DATA_BUFFER_BYTES, BOOTSTRAP_SOURCE_NESTED_DATA_INVOICE,
     BOOTSTRAP_SOURCE_OPEN_BUFFER_BYTES, BOOTSTRAP_SOURCE_SEAL_BUFFER_BYTES,
     CREATE_DATA_BUFFER_BYTES, FOUNDER_PRIVATE_INVOICE, GENESIS_ARCHIVE_PRIVATE_INVOICE,
     MAX_BOOTSTRAP_SOURCE_FRAME_BYTES, MAX_BOOTSTRAP_SOURCE_PLAIN_BYTES, MAX_CREATE_ACTION_BYTES,
@@ -40,7 +45,7 @@ pub use founder::{
 };
 #[cfg(test)]
 pub(crate) use joined_fence::faults as joined_fence_faults;
-pub(crate) use joined_fence::{JoinedFenceNode, V2MergeResult};
+pub(crate) use joined_fence::{JoinedFenceNode, V2JoinedPublicationFence, V2MergeResult};
 pub use joined_fence::{
     V2AppliedTransition, V2JoinedFenceAdmission, V2JoinedFenceObservation, V2JoinedFenceRefusal,
     V2JoinedFenceTerminal, V2JoinedSourceFence, V2TransitionDelta, V2_JOINED_TRANSITION_CAPACITY,
@@ -48,3 +53,16 @@ pub use joined_fence::{
 pub(crate) use joined_source::JoinFactsSlot;
 pub use joined_source::V2JoinFacts;
 pub use member::{V2MemberDraftInputs, V2MemberSignRefusal};
+pub use member_dependencies::{
+    OpenedV2MemberDependencyRequest, PreparedV2MemberDependencyRequest,
+    V2FounderMemberDependencyAccess, V2MemberDependencyRoute, MAX_V2_DEPENDENCY_REPLY_BYTES,
+    MAX_V2_DEPENDENCY_REQUEST_BYTES,
+};
+pub(crate) use member_envelope::MemberTransportFence;
+pub use member_envelope::{
+    open_v2_member_envelope_data, seal_v2_member_envelope_data, v2_member_envelope_topic_data,
+    OpenedV2MemberEnvelopeData, PreparedV2MemberSubmission, SelectedV2MemberEnvelope,
+    V2MemberEnvelopeScopeData, V2MemberPublicationObservation, MAX_V2_MEMBER_TRANSPORT_BYTES,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const V2_JOIN_ROUTING_DOMAIN: &[u8] = b"mewtual/chat/join-routing-plain/v2\0";

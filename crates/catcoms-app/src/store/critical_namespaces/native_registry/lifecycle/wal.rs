@@ -5,17 +5,22 @@ use super::{
     data::{Backend, BirthKind, Change, Index},
     preparation, *,
 };
+use crate::store::persistence::governance_layout::joined::{
+    ColdJoinedSelection, JoinedRegistrationDependency,
+};
 use crate::store::persistence::native_registry::lifecycle::upgrade::{
     FirstTornInventoryWitness, UpgradeInventory,
 };
 use crate::store::{unframe, ServerStore};
 use catcoms_crypto::unseal;
+use std::sync::Arc;
 use zeroize::Zeroizing;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::store) enum Decision {
     FounderBirth,
     FounderActivate,
+    RegisterNativeJoined,
     Rename,
     RefreshLegacyInvite,
     Duplicate,
@@ -29,7 +34,11 @@ impl Decision {
     pub(in crate::store) fn is_commit(self) -> bool {
         matches!(
             self,
-            Self::FounderBirth | Self::FounderActivate | Self::Rename | Self::RefreshLegacyInvite
+            Self::FounderBirth
+                | Self::FounderActivate
+                | Self::RegisterNativeJoined
+                | Self::Rename
+                | Self::RefreshLegacyInvite
         )
     }
 }
@@ -60,6 +69,7 @@ fn supported_decision(
             Ok(Decision::FounderActivate)
         }
         Change::Rename => Ok(Decision::Rename),
+        Change::RegisterNativeJoined => Ok(Decision::RegisterNativeJoined),
         Change::RefreshLegacyInvite => Ok(Decision::RefreshLegacyInvite),
         _ => Err(refused()),
     }
@@ -76,14 +86,24 @@ pub(in crate::store) struct VerifiedWal {
     network: Option<
         std::sync::Arc<crate::store::persistence::native_registry::network::NetworkDependency>,
     >,
+    joined: Option<Arc<JoinedRegistrationDependency>>,
 }
 impl VerifiedWal {
+    pub(super) fn retained_network(
+        &self,
+    ) -> Option<Arc<crate::store::persistence::native_registry::network::NetworkDependency>> {
+        self.network.clone()
+    }
+
     pub(in crate::store) fn take_network(
         &mut self,
     ) -> Option<
         std::sync::Arc<crate::store::persistence::native_registry::network::NetworkDependency>,
     > {
         self.network.take()
+    }
+    pub(in crate::store) fn take_joined(&mut self) -> Option<Arc<JoinedRegistrationDependency>> {
+        self.joined.take()
     }
     pub(in crate::store) fn decision(&self) -> Decision {
         self.decision
@@ -157,6 +177,7 @@ fn proof(inventory: &UpgradeInventory, candidate: &[u8], decision: Decision) -> 
         candidate: *blake3::hash(candidate).as_bytes(),
         decision,
         network: None,
+        joined: None,
     }
 }
 
@@ -166,11 +187,13 @@ fn proof(inventory: &UpgradeInventory, candidate: &[u8], decision: Decision) -> 
 pub(super) fn classify(
     store: &ServerStore,
     inventory: &UpgradeInventory,
+    joined: Option<&ColdJoinedSelection>,
 ) -> Result<VerifiedWal, AppError> {
     require_normal_inventory(store, inventory)?;
     let (selected, _) = preparation::decode_selected_data(store, inventory)?;
     let stage = inventory.index_stage().ok_or_else(refused)?;
     let mut network = None;
+    let mut joined_dependency = None;
     let decision = if stage == inventory.index() {
         Decision::Duplicate
     } else if stage.len() < 40 {
@@ -184,6 +207,17 @@ pub(super) fn classify(
                     &next,
                     *blake3::hash(inventory.index()).as_bytes(),
                 )?;
+                if decision == Decision::RegisterNativeJoined {
+                    if !native_handler(store)?.uses_joined_pin_layout() {
+                        return Err(refused());
+                    }
+                    let original = joined
+                        .ok_or_else(refused)?
+                        .capture_registration_dependency(store)?;
+                    super::joined::require_original(&next, original.data())?;
+                    original.require(store)?;
+                    joined_dependency = Some(original);
+                }
                 if selected.rows.iter().chain(&next.rows).any(|row| {
                     row.backend
                         .birth()
@@ -204,6 +238,7 @@ pub(super) fn classify(
     inventory.require(store)?;
     let mut proof = proof(inventory, stage, decision);
     proof.network = network;
+    proof.joined = joined_dependency;
     Ok(proof)
 }
 
@@ -231,6 +266,7 @@ pub(super) fn verify_warm_metadata(
     candidate: &Index,
     bytes: &[u8],
     expected: Change,
+    joined: Option<&Arc<JoinedRegistrationDependency>>,
 ) -> Result<VerifiedWal, AppError> {
     require_normal_inventory(store, inventory)?;
     if inventory.index_stage().is_some() {
@@ -244,7 +280,7 @@ pub(super) fn verify_warm_metadata(
         return Err(refused());
     }
     inventory.require(store)?;
-    Ok(proof(
+    let mut proof = proof(
         inventory,
         bytes,
         supported_decision(
@@ -252,7 +288,19 @@ pub(super) fn verify_warm_metadata(
             &sealed,
             *blake3::hash(inventory.index()).as_bytes(),
         )?,
-    ))
+    );
+    match (proof.decision, joined) {
+        (Decision::RegisterNativeJoined, Some(original))
+            if native_handler(store)?.uses_joined_pin_layout() =>
+        {
+            super::joined::require_original(&sealed, original.data())?;
+            original.require(store)?;
+            proof.joined = Some(original.clone());
+        }
+        (Decision::RegisterNativeJoined, _) | (_, Some(_)) => return Err(refused()),
+        _ => (),
+    }
+    Ok(proof)
 }
 
 #[cfg(test)]

@@ -20,6 +20,38 @@ pub struct SeededTransportIdentityData {
 }
 
 impl SeededTransportIdentityData {
+    /// Check an untrusted wire tuple using the seed builder's canonical public
+    /// representation. This does not produce a seed-derived identity receipt.
+    pub fn check_public_binding_data(
+        bytes: &[u8; 36],
+        peer: &[u8],
+        commitment: &[u8],
+    ) -> Result<bool, NetError> {
+        Ok(Self::authenticated_peer_data(bytes, peer, commitment)?.is_some())
+    }
+
+    /// Derive the routing ID only from a complete canonical transport binding.
+    pub fn authenticated_peer_data(
+        bytes: &[u8; 36],
+        peer: &[u8],
+        commitment: &[u8],
+    ) -> Result<Option<PeerId>, NetError> {
+        let invalid = || NetError::Build("invalid seeded public-key encoding".into());
+        let public =
+            libp2p::identity::PublicKey::try_decode_protobuf(bytes).map_err(|_| invalid())?;
+        let canonical_peer = public.to_peer_id();
+        if public.encode_protobuf().as_slice() != bytes || public.try_into_ed25519().is_err() {
+            return Err(invalid());
+        }
+        if canonical_peer.to_string().as_bytes() == peer
+            && transport_key_commitment(bytes).as_slice() == commitment
+        {
+            Ok(Some(phase0_peer_id(&canonical_peer)))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Canonical full libp2p protobuf Ed25519 public key, including its type tag.
     pub fn public_key_data(&self) -> &[u8; 36] {
         &self.public_key
@@ -39,12 +71,16 @@ impl SeededTransportIdentityData {
     /// Routes, listener selection and peer-record sequence reservations are
     /// intentionally absent: they may change without rotating this identity.
     pub fn commitment_data(&self) -> [u8; 32] {
-        let mut digest = blake3::Hasher::new();
-        digest.update(b"Mewtual native transport identity ed25519 protobuf v1\0");
-        digest.update(&(self.public_key.len() as u64).to_be_bytes());
-        digest.update(&self.public_key);
-        *digest.finalize().as_bytes()
+        transport_key_commitment(&self.public_key)
     }
+}
+
+fn transport_key_commitment(public_key: &[u8; 36]) -> [u8; 32] {
+    let mut digest = blake3::Hasher::new();
+    digest.update(b"Mewtual native transport identity ed25519 protobuf v1\0");
+    digest.update(&(public_key.len() as u64).to_be_bytes());
+    digest.update(public_key);
+    *digest.finalize().as_bytes()
 }
 
 /// Derive bounded public DATA with no socket, task, RNG, SDK or disk effects.

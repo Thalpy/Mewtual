@@ -49,9 +49,13 @@ use super::member_save::{V2MemberSaveSource, V2MemberSaveSourceEnd};
 use super::projection::{BoundV2TextFounderAnchor, V2TextProjectionDomain};
 use super::*;
 use crate::store::critical_namespaces::read_pool::CatalogReadReservation;
-use crate::store::persistence::v2_member_outbox::{MemberOutboxContextId, MemberSignedOriginal};
+use crate::store::persistence::v2_member_outbox::{
+    canonical_member_parents, member_outbox_key, MemberDebtClass, MemberOutboxContextId,
+    MemberSignedOriginal,
+};
+use crate::store::persistence::v2_member_transport::{FounderDebtOperation, FounderDebtOutcome};
 use crate::store::persistence::v2_text::{PreparedV2TextParentCapture, V2TextFounderAnchorData};
-use crate::store::ServerStore;
+use crate::store::{NativeTextJoinedRowSelection, ServerStore};
 use catcoms_replication::chat::owner_facts::OwnerFactId;
 use catcoms_replication::chat::owner_state::transition::REPLAY_MATH_PRIVATE_INVOICE;
 use catcoms_replication::chat::{
@@ -60,9 +64,17 @@ use catcoms_replication::chat::{
     V2AuthenticatedAdmission, V2GeneralPrefixVerifier, V2OrdinaryDependency, V2OrdinarySigningPlan,
     MAX_ACTION_BYTES, MAX_GROUP_ID_BYTES, MAX_PARENTS, MAX_TEXT_BYTES,
 };
-use catcoms_rt::{CryptoRngCore, MeshTransport};
-use catcoms_sync::owner_v2::V2MemberDraftInputs;
+use catcoms_rt::{
+    CryptoRngCore, MeshTransport, NativeChatKeyEnds, NativeChatPreparedKeyCut,
+    NativeChatSourceObservation, RequestCancellation,
+};
+use catcoms_sync::owner_v2::{V2MemberDraftInputs, MAX_V2_MEMBER_TRANSPORT_BYTES};
+use catcoms_sync::{ClosedV2JoinedNode, PreparedV2JoinedPrefix};
 use std::collections::VecDeque;
+mod receive;
+mod recovered;
+use receive::FounderReceivedLedger;
+pub(in crate::store) use recovered::{RecoveredMemberLane, RecoveredMemberSource};
 
 /// Bounded live channel views per lane. Refuse beyond it; a view with a live Plan is never
 /// evicted (that would revoke the Plan's channel lifetime under an in-flight request).
@@ -75,6 +87,121 @@ const MAX_FINISHED_TOKENS: usize = 64;
 /// admitted original can always be abandoned/forgotten. Normal saved traffic consumes no
 /// permanent slot; restart-safe negative retirement needs a future durable record.
 const MAX_UNSAVED_RETIREMENTS: usize = 64;
+const FOUNDER_TRANSPORT_FEE: usize = 5 * MAX_V2_MEMBER_TRANSPORT_BYTES + 4096;
+
+impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
+    pub(in crate::store) fn run_founder_member_debt(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        operation: FounderDebtOperation,
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+        access: FounderAccess<'_>,
+    ) -> Result<FounderDebtOutcome, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        access
+            .require(&self.origin)
+            .map_err(|_| Refusal::Unavailable)?;
+        if caller.is_cancelled() {
+            return Err(Refusal::Cancelled);
+        }
+        let Some(governed) = self
+            .governed_add
+            .as_deref_mut()
+            .filter(|add| add.installed.is_some())
+        else {
+            return match operation {
+                FounderDebtOperation::Prepare => Ok(FounderDebtOutcome::Idle),
+                FounderDebtOperation::Checkpoint(_) => Err(Refusal::Stale),
+            };
+        };
+        let store = layout.checked_store().map_err(|_| Refusal::Unavailable)?;
+        let lane = self.member.as_deref().ok_or(Refusal::Unavailable)?;
+        lane.validate_accounts(store)
+            .map_err(|_| Refusal::Unavailable)?;
+        let verifier = lane.verifier.as_ref().ok_or(Refusal::Unavailable)?;
+        check_governed_member(&self.owner, governed, &lane.domain, verifier, store)
+            .map_err(|_| Refusal::Stale)?;
+        let fee = store
+            .archive_bootstrap_policy
+            .as_ref()
+            .ok_or(Refusal::Unavailable)?
+            .pending
+            .pool
+            .try_reserve(FOUNDER_TRANSPORT_FEE)
+            .map_err(|_| Refusal::Busy)?;
+        let mount = store
+            .member_outbox_mount()
+            .map_err(|_| Refusal::Unavailable)?;
+        let context = super::member_save::member_outbox_context(
+            &self
+                .owner
+                .borrow_current()
+                .map_err(|_| Refusal::Unavailable)?,
+            mount.capability().current_layout_data(),
+        )
+        .map_err(|_| Refusal::Unavailable)?;
+        if lane.outbox_context().is_some_and(|id| id != context.id()) {
+            return Err(Refusal::Stale);
+        }
+        let key = member_outbox_key(store).map_err(|_| Refusal::Unavailable)?;
+        match operation {
+            FounderDebtOperation::Prepare => {
+                let Some(batch) = mount
+                    .read_publication_debt(store, context, &key, lane.admission, rng)
+                    .map_err(|_| Refusal::Failed)?
+                else {
+                    return Ok(FounderDebtOutcome::Idle);
+                };
+                let item = &batch.items()[0];
+                if item.class() != MemberDebtClass::Publishable {
+                    return Err(Refusal::Stale);
+                }
+                let submission = self
+                    .owner
+                    .prepare_governed_member_submission(store, verifier, item)
+                    .map_err(|_| Refusal::Failed)?;
+                check_governed_member(&self.owner, governed, &lane.domain, verifier, store)
+                    .map_err(|_| Refusal::Stale)?;
+                if caller.is_cancelled() || !submission.is_current_cached() {
+                    return Err(Refusal::Cancelled);
+                }
+                Ok(FounderDebtOutcome::Prepared {
+                    submission,
+                    batch,
+                    fee,
+                })
+            }
+            FounderDebtOperation::Checkpoint(batch) => {
+                if caller.is_cancelled() {
+                    return Err(Refusal::Cancelled);
+                }
+                mount
+                    .checkpoint_publication_debt(store, context, &key, batch, rng, || {
+                        !caller.is_cancelled()
+                    })
+                    .map(|saved| FounderDebtOutcome::Checkpointed(saved.front))
+                    .map_err(|_| Refusal::Failed)
+            }
+        }
+    }
+}
+
+fn check_governed_member<T: MeshTransport, R: CryptoRngCore>(
+    owner: &V2TextOwnedCurrent<T, R>,
+    governed: &mut super::governed_add::PendingGovernedAdd,
+    domain: &V2TextProjectionDomain,
+    verifier: &V2GeneralPrefixVerifier,
+    store: &ServerStore,
+) -> Result<(), AppError> {
+    let original = owner.borrow_current()?;
+    let resources = governed.parent.resources().clone();
+    store.with_v2_text_current(&original, |admission| {
+        let guard = store.lock_v2_text_current_group(admission, &resources)?;
+        domain.require_current_source(admission)?;
+        governed.require_selected_member_head(&guard, verifier.replay_data())
+    })
+}
 
 const MEMBER_CHANNEL_LAYOUT_BYTES: usize = std::mem::size_of::<MemberChannel>() + 4 * 1024;
 
@@ -126,6 +253,9 @@ pub struct V2MemberSignRequest<'a> {
     /// The exact required dependency set (parents plus Edit/Delete/Join target), in any
     /// order. Caller-owned DATA loans: Core verifies every signature, delegation and that each
     /// names a CURRENT Admission of this verifier. Unused extras or a missing one refuse.
+    /// Native replies can load their exact Create from the original outbox or selected
+    /// received archive. Native Edit and Delete can load their Create and one explicit
+    /// original revision from the original local outbox when this slice is empty.
     pub dependencies: &'a [V2MemberDependency<'a>],
 }
 
@@ -145,31 +275,6 @@ impl std::fmt::Debug for V2MemberDependency<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("V2MemberDependency").finish_non_exhaustive()
     }
-}
-
-/// The ONE parent canonicalisation for a member request: sort and dedup, refuse more than
-/// MAX_PARENTS (bounded as supplied, before dedup), and a Create must name exactly its reply
-/// target. The member-save driver digests its pre-signing outbox lookup over exactly this
-/// list, after funding that lookup, so the lookup and the signed spec agree. Parents are the
-/// request's explicit persisted list, never fresh tips sampled during a retry.
-pub(super) fn canonical_member_parents(
-    body: &Body,
-    parents: &[ActionId],
-) -> Result<Vec<ActionId>, AppError> {
-    if parents.len() > MAX_PARENTS {
-        return Err(refused());
-    }
-    let mut canonical = parents.to_vec();
-    canonical.sort();
-    canonical.dedup();
-    if let Body::Create { reply_to, .. } = body {
-        if canonical.as_slice() != reply_to.as_slice() {
-            return Err(refused());
-        }
-    }
-    // Exact capacity: ActionDraft refuses spare parent backing above MAX_PARENTS.
-    canonical.shrink_to_fit();
-    Ok(canonical)
 }
 
 /// Allocation-free set equality of a stored canonical list and a fresh request's list.
@@ -350,6 +455,91 @@ impl PendingMemberRequest {
             .pool;
         self.fee.validate(pool, V2_MEMBER_REQUEST_BYTES)
     }
+
+    fn prepare_draft(
+        &mut self,
+        group: &[u8],
+        signer: [u8; 32],
+        own: &V2AuthenticatedAdmission,
+    ) -> Result<(), AppError> {
+        if own.admission_data().spec().subject != signer {
+            return Err(refused());
+        }
+        let (presented_ms, nonce) = self.inputs.drawn_data().ok_or_else(refused)?;
+        let realm = Realm::new(group, self.channel).map_err(|_| refused())?;
+        let labels = own
+            .admission_data()
+            .ordinary_labels(&realm)
+            .map_err(|_| refused())?;
+        let spec = ActionSpec {
+            realm,
+            basis: labels.basis,
+            grant: labels.grant,
+            nonce,
+            presented_ms,
+            parents: self.parents.clone(),
+            body: self.body.clone(),
+        };
+        self.draft = Some(ActionDraft::new(spec, signer).map_err(|_| refused())?);
+        Ok(())
+    }
+
+    fn sign_and_complete(
+        &mut self,
+        sign: impl FnOnce(
+            &V2MemberDraftInputs,
+            &ActionDraft,
+            &mut V2OrdinarySigningPlan,
+        ) -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
+        let result = if self.has_cached_raw() {
+            Ok(())
+        } else {
+            sign(
+                &self.inputs,
+                self.draft.as_ref().ok_or_else(refused)?,
+                self.plan.as_mut().ok_or_else(refused)?,
+            )
+        };
+        self.complete_cached();
+        result?;
+        if matches!(self.signed, SignedState::Pending) {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
+    fn prepare_plan(
+        &mut self,
+        verifier: &V2GeneralPrefixVerifier,
+        own: &V2AuthenticatedAdmission,
+        dependencies: &[V2MemberDependency<'_>],
+        view: &ProjectionView,
+    ) -> Result<(), AppError> {
+        let draft = self.draft.as_ref().ok_or_else(refused)?;
+        // Resolve each dependency's Admission in this verifier before Core
+        // checks the real signature, delegation and exact minimal set.
+        let mut resolved = Vec::with_capacity(dependencies.len());
+        for dependency in dependencies {
+            resolved.push((
+                dependency.action,
+                verifier
+                    .admission(dependency.admission)
+                    .map_err(|_| refused())?,
+            ));
+        }
+        resolved.sort_by_cached_key(|(action, _)| action.id());
+        let dependencies: Vec<_> = resolved
+            .iter()
+            .map(|(action, admission)| V2OrdinaryDependency::new(action, admission))
+            .collect();
+        let plan = verifier
+            .prepare_ordinary_signing_plan(draft, own, &dependencies, view)
+            .map_err(|_| refused())?;
+        self.original = Some(plan.observe_original());
+        self.plan = Some(plan);
+        Ok(())
+    }
 }
 
 /// One channel's ledger bound to THIS lane's own group view. The ledger stays empty here
@@ -365,10 +555,9 @@ struct MemberChannel {
 /// then channel views, then the verifier (whose Drop closes this lane's own group), then the
 /// anchor/capture, the save-source lifecycle, the member-role domain, and the lane fee LAST.
 pub(super) struct V2MemberLane {
-    request: Option<Box<PendingMemberRequest>>,
-    finished: VecDeque<[u8; 32]>,
-    retired_unsaved: Vec<[u8; 32]>,
+    requests: MemberRequests,
     channels: Vec<MemberChannel>,
+    received: Option<FounderReceivedLedger>,
     verifier: Option<V2GeneralPrefixVerifier>,
     bound: Option<BoundV2TextFounderAnchor>,
     anchor: Option<V2TextFounderAnchorData>,
@@ -387,7 +576,230 @@ pub(super) struct V2MemberLane {
     fee: CatalogReadReservation,
 }
 
+/// Request custody for a single ordinary-member source. It retains the exact
+/// signed original or its loan and never obtains a key, a new Source or IO.
+pub(super) struct MemberRequests {
+    request: Option<Box<PendingMemberRequest>>,
+    finished: VecDeque<[u8; 32]>,
+    retired_unsaved: Vec<[u8; 32]>,
+}
+
+fn member_channel_view<'a>(
+    channels: &'a mut Vec<MemberChannel>,
+    group: &[u8],
+    channel: u128,
+    projection: &catcoms_replication::chat::ProjectionGroupView,
+) -> Result<&'a ProjectionView, AppError> {
+    if let Some(index) = channels.iter().position(|view| view.channel == channel) {
+        return Ok(&channels[index].view);
+    }
+    if channels.len() >= MAX_MEMBER_CHANNELS {
+        return Err(refused());
+    }
+    let realm = Realm::new(group, channel).map_err(|_| refused())?;
+    let mut ledger = ChatLedger::new(
+        realm,
+        LedgerLimits {
+            max_actions: 1,
+            max_action_bytes: MAX_ACTION_BYTES,
+        },
+    )
+    .map_err(|_| refused())?;
+    let mut view = ledger
+        .begin_projection_view_in(projection)
+        .map_err(|_| refused())?;
+    if !view.try_ready() {
+        return Err(refused());
+    }
+    channels.push(MemberChannel {
+        view,
+        _ledger: ledger,
+        channel,
+    });
+    Ok(&channels.last().ok_or_else(refused)?.view)
+}
+
+/// The joined member uses the same request and save-source custody as the
+/// founder. Its verifier and SDK stay in their original selected owners.
+pub(in crate::store) struct JoinedMemberLane {
+    pub(super) requests: MemberRequests,
+    channels: Vec<MemberChannel>,
+    save_source: V2MemberSaveSource,
+    row: NativeTextJoinedRowSelection,
+    fee: CatalogReadReservation,
+}
+
+/// A warm node loan and its checked selected Core prefix. Root retains the
+/// surrounding physical and native admission through work on this borrow.
+pub(in crate::store) struct JoinedMemberSource<'a, T: MeshTransport, R: CryptoRngCore> {
+    pub(in crate::store) node: &'a mut ClosedV2JoinedNode<T, R>,
+    pub(in crate::store) prefix: &'a PreparedV2JoinedPrefix,
+    pub(in crate::store) view: &'a catcoms_replication::chat::ProjectionGroupView,
+    pub(in crate::store) native: &'a NativeChatSourceObservation,
+    pub(in crate::store) cut: &'a mut NativeChatPreparedKeyCut,
+    pub(in crate::store) ends: &'a mut NativeChatKeyEnds,
+}
+
+impl JoinedMemberLane {
+    pub(in crate::store) fn require_quiescent_for_add(&self) -> Result<(), AppError> {
+        if self.requests.request.is_some() {
+            return Err(refused());
+        }
+        self.save_source.require_open_idle()
+    }
+
+    pub(in crate::store) fn new(
+        store: &ServerStore,
+        row: NativeTextJoinedRowSelection,
+    ) -> Result<Self, AppError> {
+        if !row.is_current_cached() {
+            return Err(refused());
+        }
+        let pool = &store
+            .archive_bootstrap_policy
+            .as_ref()
+            .ok_or_else(refused)?
+            .pending
+            .pool;
+        let fee = pool.try_reserve(V2_MEMBER_LANE_BYTES)?;
+        fee.validate(pool, V2_MEMBER_LANE_BYTES)?;
+        let save_source = V2MemberSaveSource::prepare_joined(pool, row.clone())?;
+        Ok(Self {
+            requests: MemberRequests::new(),
+            channels: Vec::with_capacity(MAX_MEMBER_CHANNELS),
+            save_source,
+            row,
+            fee,
+        })
+    }
+
+    pub(super) fn outbox_context(&self) -> MemberOutboxContextId {
+        MemberOutboxContextId::from_bytes(self.row.member_outbox_context_id_data())
+    }
+
+    pub(super) fn require_original_row(
+        &self,
+        row: &NativeTextJoinedRowSelection,
+    ) -> Result<(), AppError> {
+        if !self.row.same_original(row) || !self.row.is_current_cached() {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
+    pub(super) fn require_retained_original(
+        &self,
+        token: [u8; 32],
+        original: &MemberSignedOriginal,
+    ) -> Result<(), AppError> {
+        if !self.row.is_current_cached() {
+            return Err(refused());
+        }
+        self.requests
+            .require_lent(token, original.action().id(), original.admission())?;
+        Ok(())
+    }
+
+    pub(super) fn admit_save_source<T: MeshTransport, R: CryptoRngCore>(
+        &self,
+        facts: crate::store::persistence::v2_member_outbox::MemberAppendAdmissionFacts,
+        node: &ClosedV2JoinedNode<T, R>,
+    ) -> Result<V2MemberSaveSourceEnd, AppError> {
+        if facts.context != self.outbox_context() || !self.row.is_current_cached() {
+            return Err(refused());
+        }
+        let pending =
+            self.requests
+                .require_lent(*facts.token.as_bytes(), facts.action, facts.admission)?;
+        let plan = pending.plan.as_ref().ok_or_else(refused)?;
+        let _fence = node.admit_member_save(plan).map_err(|_| refused())?;
+        self.save_source.issue()
+    }
+
+    pub(super) fn retry_request<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        store: &ServerStore,
+        request: &V2MemberSignRequest<'_>,
+        source: &mut JoinedMemberSource<'_, T, R>,
+    ) -> Result<(), AppError> {
+        let pool = &store
+            .archive_bootstrap_policy
+            .as_ref()
+            .ok_or_else(refused)?
+            .pending
+            .pool;
+        self.fee.validate(pool, V2_MEMBER_LANE_BYTES)?;
+        if !self.row.is_current_cached() {
+            return Err(refused());
+        }
+        if self.requests.retry_completed(request)? {
+            return Ok(());
+        }
+        self.requests.ensure_pending(store, request)?;
+        let pending = self.requests.request.as_deref_mut().ok_or_else(refused)?;
+        pending.validate_accounts(store)?;
+        let verifier = source
+            .prefix
+            .selected_member_verifier()
+            .map_err(|_| refused())?;
+        let own = verifier
+            .admission(source.prefix.own_admission_data())
+            .map_err(|_| refused())?;
+        let group = &source.prefix.initial_profile_data().spec().group;
+        if pending.draft.is_none() && pending.inputs.drawn_data().is_none() {
+            source
+                .node
+                .draw_member_draft_inputs(&mut pending.inputs)
+                .map_err(|_| refused())?;
+        }
+        if pending.draft.is_none() {
+            let signer = source.node.member_signer_data().map_err(|_| refused())?;
+            pending.prepare_draft(group, signer, &own)?;
+        }
+        if pending.plan.is_none() {
+            let view =
+                member_channel_view(&mut self.channels, group, pending.channel, source.view)?;
+            pending.prepare_plan(verifier, &own, request.dependencies, view)?;
+        }
+        pending.sign_and_complete(|inputs, draft, plan| {
+            source
+                .node
+                .sign_member_action_native(
+                    inputs,
+                    draft,
+                    plan,
+                    source.native,
+                    source.cut,
+                    source.ends,
+                )
+                .map(drop)
+                .map_err(|_| refused())
+        })
+    }
+}
+
 impl V2MemberLane {
+    pub(super) fn governed_add_verifier(
+        &mut self,
+    ) -> Result<&mut V2GeneralPrefixVerifier, AppError> {
+        self.require_quiescent_for_add()?;
+        self.verifier.as_mut().ok_or_else(refused)
+    }
+
+    pub(super) fn governed_add_replay(
+        &self,
+    ) -> Result<&catcoms_replication::chat::owner_state::transition::ReplayMath, AppError> {
+        self.require_quiescent_for_add()?;
+        Ok(self.verifier.as_ref().ok_or_else(refused)?.replay_data())
+    }
+
+    pub(super) fn require_quiescent_for_add(&self) -> Result<(), AppError> {
+        if self.requests.request.is_some() {
+            return Err(refused());
+        }
+        self.save_source.require_open_idle()
+    }
+
     /// Reuse this lane's one verifier and actual selected G1 parent. No second
     /// prefix/domain is constructed for the invite producer. This phase does
     /// not sign or perform IO writes; key admission requires its later journal.
@@ -395,8 +807,9 @@ impl V2MemberLane {
         &mut self,
         store: &ServerStore,
         owner: &V2TextOwnerRef<'_>,
+        governed: Option<&mut super::governed_add::PendingGovernedAdd>,
     ) -> Result<(), AppError> {
-        self.with_invite_parent(store, owner, |_| Ok(()))
+        self.with_invite_parent(store, owner, governed, |_, _| Ok(()))
     }
     /// The isolated invitation journal stays under the same actual Current4
     /// and selected G1 proof. It mutates no Head/O/H/WAL/index object and never
@@ -405,8 +818,10 @@ impl V2MemberLane {
         &mut self,
         store: &ServerStore,
         owner: &V2TextOwnerRef<'_>,
+        governed: Option<&mut super::governed_add::PendingGovernedAdd>,
         work: impl FnOnce(
             &crate::store::critical_namespaces::current_layout::V2TextCurrentGroupGuard<'_, '_>,
+            Option<&V2GeneralPrefixVerifier>,
         ) -> Result<U, AppError>,
     ) -> Result<U, AppError> {
         self.validate_accounts(store)?;
@@ -416,7 +831,23 @@ impl V2MemberLane {
         let original = owner.source().data();
         if !admission.is_open_data()
             || admission.admission_data().spec().subject != original.context.spec_data().signer
-            || verifier.replay_data().mls_epoch_data() != 0
+        {
+            return Err(refused());
+        }
+        if let Some(governed) = governed {
+            self.require_quiescent_for_add()?;
+            let resources = governed.parent.resources().clone();
+            return store.with_v2_text_current(owner, |current| {
+                let guard = store.lock_v2_text_current_group(current, &resources)?;
+                self.domain.require_current_source(current)?;
+                governed.require_selected_member_head(&guard, verifier.replay_data())?;
+                let result = work(&guard, Some(verifier))?;
+                governed.require_selected_member_head(&guard, verifier.replay_data())?;
+                self.domain.require_current_source(current)?;
+                Ok(result)
+            });
+        }
+        if verifier.replay_data().mls_epoch_data() != 0
             || verifier.replay_data().header().id() != original.header.id()
         {
             return Err(refused());
@@ -426,14 +857,18 @@ impl V2MemberLane {
         store.with_v2_text_current(owner, |current| {
             let guard = store.lock_v2_text_current_group(current, &resources)?;
             self.domain.require_current_source(current)?;
-            selected.validate_under_current_guard(&guard)?;
             guard.require_governed_native_invite_parent()?;
-            let result = work(&guard)?;
-            selected.validate_under_current_guard(&guard)?;
+            selected.validate_idle_genesis_member_under_current_guard(&guard)?;
+            let result = work(&guard, None)?;
             guard.require_governed_native_invite_parent()?;
+            selected.validate_idle_genesis_member_under_current_guard(&guard)?;
             self.domain.require_current_source(current)?;
             Ok(result)
         })
+    }
+
+    pub(super) fn selected_invite_verifier(&self) -> Result<&V2GeneralPrefixVerifier, AppError> {
+        self.verifier.as_ref().ok_or_else(refused)
     }
     fn prepare(
         store: &ServerStore,
@@ -464,10 +899,9 @@ impl V2MemberLane {
         let mut group = Vec::with_capacity(group_ref.len());
         group.extend_from_slice(group_ref);
         Ok(Self {
-            request: None,
-            finished: VecDeque::with_capacity(MAX_FINISHED_TOKENS),
-            retired_unsaved: Vec::with_capacity(MAX_UNSAVED_RETIREMENTS),
+            requests: MemberRequests::new(),
             channels: Vec::with_capacity(MAX_MEMBER_CHANNELS),
+            received: None,
             verifier: None,
             bound: None,
             anchor: None,
@@ -490,7 +924,7 @@ impl V2MemberLane {
             .pool;
         self.fee.validate(pool, V2_MEMBER_LANE_BYTES)?;
         self.domain.validate_accounts(store)?;
-        if let Some(request) = self.request.as_deref() {
+        if let Some(request) = self.requests.request.as_deref() {
             request.validate_accounts(store)?;
         }
         Ok(())
@@ -552,16 +986,7 @@ impl V2MemberLane {
         if self.outbox_context != Some(context) {
             return Err(refused());
         }
-        let pending = self
-            .request
-            .as_deref()
-            .filter(|pending| pending.token == token)
-            .ok_or_else(refused)?;
-        if !matches!(pending.signed, SignedState::Lent(lent) if lent == action)
-            || pending.historical_admission() != Some(admission)
-        {
-            return Err(refused());
-        }
+        self.requests.require_lent(token, action, admission)?;
         self.domain.validate_negative()?;
         // The serialized lifecycle re-checks the same negative under its own lock.
         self.save_source.issue()
@@ -581,24 +1006,7 @@ impl V2MemberLane {
         saved: ActionId,
         spec: Option<&ActionSpec>,
     ) -> Result<Option<bool>, AppError> {
-        let Some(pending) = self
-            .request
-            .as_deref_mut()
-            .filter(|pending| pending.token == token)
-        else {
-            return Ok(None);
-        };
-        pending.complete_cached();
-        if !matches!(pending.signed, SignedState::Lent(_)) {
-            let spec = spec.ok_or_else(refused)?;
-            if pending.channel != spec.realm.channel()
-                || pending.body != spec.body
-                || pending.parents != spec.parents
-            {
-                return Err(refused());
-            }
-        }
-        self.finish(token, FinishMode::SavedHit(saved)).map(Some)
+        self.requests.reconcile_saved(token, saved, spec)
     }
 
     /// Whether this lane's member source can still admit anything: the member domain's
@@ -622,15 +1030,13 @@ impl V2MemberLane {
         signer: [u8; 32],
     ) -> Result<(), AppError> {
         let action = original.action();
-        if let Some(pending) = self.request.as_deref() {
+        if let Some(pending) = self.requests.request.as_deref() {
             return match pending.signed {
                 SignedState::Lent(lent) if pending.token == token && lent == action.id() => Ok(()),
                 _ => Err(refused()),
             };
         }
-        if self.finished.contains(&token)
-            || self.retired_unsaved.contains(&token)
-            || self.retired_unsaved.len() == MAX_UNSAVED_RETIREMENTS
+        if !self.requests.may_start(token)
             || action.signer() != &signer
             || action.spec().realm.group() != self.group.as_slice()
             || original.admission() != self.admission
@@ -639,7 +1045,7 @@ impl V2MemberLane {
             return Err(refused());
         }
         self.validate_accounts(store)?;
-        self.request = Some(Box::new(PendingMemberRequest::adopt(
+        self.requests.request = Some(Box::new(PendingMemberRequest::adopt(
             store, token, original,
         )?));
         Ok(())
@@ -713,53 +1119,33 @@ impl V2MemberLane {
         Ok(self.channels.len() - 1)
     }
 
-    /// Pure DATA completion plus exact-retry classification, with no positive gate.
-    /// `Ok(true)`: this same request already holds (or lent) its completed original.
-    fn retry_completed(&mut self, request: &V2MemberSignRequest<'_>) -> Result<bool, AppError> {
-        // Every call, including retries of an existing request, bounds the borrowed input
-        // before any comparison, copy or dependency resolution.
-        require_request_shape(request)?;
-        let Some(pending) = self.request.as_deref_mut() else {
-            if self.finished.contains(&request.token)
-                || self.retired_unsaved.contains(&request.token)
-                || self.retired_unsaved.len() == MAX_UNSAVED_RETIREMENTS
-            {
-                return Err(refused());
-            }
-            return Ok(false);
-        };
-        pending.complete_cached();
-        if pending.token != request.token {
-            // One pending request per lane: a different token waits for this one to finish.
-            return Err(refused());
-        }
-        pending.require_same_request(request)?;
-        Ok(!matches!(pending.signed, SignedState::Pending))
-    }
-
     fn retry_request<T: MeshTransport, R: CryptoRngCore>(
         &mut self,
         store: &ServerStore,
         owner: &mut V2TextOwnedCurrent<T, R>,
+        governed_add: Option<&mut super::governed_add::PendingGovernedAdd>,
         request: &V2MemberSignRequest<'_>,
         mut access: FounderAccess<'_>,
     ) -> Result<(), AppError> {
-        if self.retry_completed(request)? {
+        if self.requests.retry_completed(request)? {
             return Ok(());
         }
         self.validate_accounts(store)?;
-        if self.request.is_none() {
-            self.request = Some(Box::new(PendingMemberRequest::prepare(store, request)?));
-        }
+        self.requests.ensure_pending(store, request)?;
         {
             let owner_ref = owner.borrow_current()?;
             self.retry_verifier(store, &owner_ref)?;
         }
-        let channel = self.request.as_deref().ok_or_else(refused)?.channel;
+        let channel = self
+            .requests
+            .request
+            .as_deref()
+            .ok_or_else(refused)?
+            .channel;
         let channel_index = self.ensure_channel(channel)?;
 
         let Self {
-            request: slot,
+            requests,
             channels,
             verifier,
             capture,
@@ -768,7 +1154,7 @@ impl V2MemberLane {
             admission,
             ..
         } = self;
-        let pending = slot.as_deref_mut().ok_or_else(refused)?;
+        let pending = requests.request.as_deref_mut().ok_or_else(refused)?;
         let verifier = verifier.as_ref().ok_or_else(refused)?;
 
         // ONE Clock read and ONE nonce through the original node's own seams. No owner loan
@@ -779,66 +1165,28 @@ impl V2MemberLane {
                 .map_err(|_| refused())?;
         }
         if pending.draft.is_none() {
-            let (presented_ms, nonce) = pending.inputs.drawn_data().ok_or_else(refused)?;
             let signer = owner
                 .ordinary_member_signer_data(store)
                 .map_err(|_| refused())?;
             let own = verifier.admission(*admission).map_err(|_| refused())?;
-            if own.admission_data().spec().subject != signer {
-                return Err(refused());
-            }
-            let realm = Realm::new(group, pending.channel).map_err(|_| refused())?;
-            let labels = own
-                .admission_data()
-                .ordinary_labels(&realm)
-                .map_err(|_| refused())?;
-            let spec = ActionSpec {
-                realm,
-                basis: labels.basis,
-                grant: labels.grant,
-                nonce,
-                presented_ms,
-                parents: pending.parents.clone(),
-                body: pending.body.clone(),
-            };
-            pending.draft = Some(ActionDraft::new(spec, signer).map_err(|_| refused())?);
+            pending.prepare_draft(group, signer, &own)?;
         }
         if pending.plan.is_none() {
-            let draft = pending.draft.as_ref().ok_or_else(refused)?;
             let own = verifier.admission(*admission).map_err(|_| refused())?;
-            // Resolve every dependency's Admission in THIS verifier; Core checks each real
-            // signature/delegation and the exact minimal set. Order = Core's sorted set.
-            let mut resolved: Vec<(&SignedAction, V2AuthenticatedAdmission)> =
-                Vec::with_capacity(request.dependencies.len());
-            for dependency in request.dependencies {
-                resolved.push((
-                    dependency.action,
-                    verifier
-                        .admission(dependency.admission)
-                        .map_err(|_| refused())?,
-                ));
-            }
-            // `SignedAction::id` re-encodes and hashes; compute each key once.
-            resolved.sort_by_cached_key(|(action, _)| action.id());
-            let dependencies: Vec<V2OrdinaryDependency<'_>> = resolved
-                .iter()
-                .map(|(action, admission)| V2OrdinaryDependency::new(action, admission))
-                .collect();
-            let plan = verifier
-                .prepare_ordinary_signing_plan(
-                    draft,
-                    &own,
-                    &dependencies,
-                    &channels[channel_index].view,
-                )
-                .map_err(|_| refused())?;
-            pending.original = Some(plan.observe_original());
-            pending.plan = Some(plan);
+            pending.prepare_plan(
+                verifier,
+                &own,
+                request.dependencies,
+                &channels[channel_index].view,
+            )?;
         }
 
         if !pending.has_cached_raw() {
-            let selected = capture.selected_data().ok_or_else(refused)?;
-            let resources = capture.resources().clone();
+            let installed = governed_add.filter(|add| add.installed.is_some());
+            let resources = installed
+                .as_ref()
+                .map_or_else(|| capture.resources(), |add| add.parent.resources())
+                .clone();
             let shared: &V2TextOwnedCurrent<T, R> = owner;
             let owner_ref = shared.borrow_current()?;
             let PendingMemberRequest {
@@ -854,9 +1202,14 @@ impl V2MemberLane {
             let result = store.with_v2_text_current(&owner_ref, |admission| {
                 let guard = store.lock_v2_text_current_group(admission, &resources)?;
                 domain.require_current_source(admission)?;
-                // IO-bearing proof that the SAME generation-1 O is still selected, and the
-                // node's full (SDK-consulting) source check: both BEFORE Core admission.
-                selected.validate_under_current_guard(&guard)?;
+                if let Some(installed) = installed {
+                    installed.require_selected_member_head(&guard, verifier.replay_data())?;
+                } else {
+                    capture
+                        .selected_data()
+                        .ok_or_else(refused)?
+                        .validate_idle_genesis_member_under_current_guard(&guard)?;
+                }
                 let signer = shared
                     .ordinary_member_signer_data(store)
                     .map_err(|_| refused())?;
@@ -894,8 +1247,98 @@ impl V2MemberLane {
         }
         Ok(())
     }
+}
 
-    fn take_signed(&mut self, token: [u8; 32]) -> Result<MemberSignedOriginal, AppError> {
+impl MemberRequests {
+    fn new() -> Self {
+        Self {
+            request: None,
+            finished: VecDeque::with_capacity(MAX_FINISHED_TOKENS),
+            retired_unsaved: Vec::with_capacity(MAX_UNSAVED_RETIREMENTS),
+        }
+    }
+
+    fn may_start(&self, token: [u8; 32]) -> bool {
+        !self.finished.contains(&token)
+            && !self.retired_unsaved.contains(&token)
+            && self.retired_unsaved.len() < MAX_UNSAVED_RETIREMENTS
+    }
+
+    fn ensure_pending(
+        &mut self,
+        store: &ServerStore,
+        request: &V2MemberSignRequest<'_>,
+    ) -> Result<(), AppError> {
+        if self.request.is_none() {
+            self.request = Some(Box::new(PendingMemberRequest::prepare(store, request)?));
+        }
+        Ok(())
+    }
+
+    /// Pure DATA completion and exact retry. Bounds every call before reading
+    /// retained data. An occupied slot belongs to its one original request.
+    fn retry_completed(&mut self, request: &V2MemberSignRequest<'_>) -> Result<bool, AppError> {
+        require_request_shape(request)?;
+        let Some(pending) = self.request.as_deref_mut() else {
+            return self
+                .may_start(request.token)
+                .then_some(false)
+                .ok_or_else(refused);
+        };
+        pending.complete_cached();
+        pending.require_same_request(request)?;
+        Ok(!matches!(pending.signed, SignedState::Pending))
+    }
+
+    fn require_lent(
+        &self,
+        token: [u8; 32],
+        action: ActionId,
+        admission: OwnerFactId,
+    ) -> Result<&PendingMemberRequest, AppError> {
+        let pending = self
+            .request
+            .as_deref()
+            .filter(|pending| pending.token == token)
+            .ok_or_else(refused)?;
+        if !matches!(pending.signed, SignedState::Lent(lent) if lent == action)
+            || pending.historical_admission() != Some(admission)
+        {
+            return Err(refused());
+        }
+        Ok(pending)
+    }
+
+    pub(super) fn reconcile_saved(
+        &mut self,
+        token: [u8; 32],
+        saved: ActionId,
+        spec: Option<&ActionSpec>,
+    ) -> Result<Option<bool>, AppError> {
+        let Some(pending) = self
+            .request
+            .as_deref_mut()
+            .filter(|pending| pending.token == token)
+        else {
+            return Ok(None);
+        };
+        pending.complete_cached();
+        if !matches!(pending.signed, SignedState::Lent(_)) {
+            let spec = spec.ok_or_else(refused)?;
+            if pending.channel != spec.realm.channel()
+                || pending.body != spec.body
+                || pending.parents != spec.parents
+            {
+                return Err(refused());
+            }
+        }
+        self.finish(token, FinishMode::SavedHit(saved)).map(Some)
+    }
+
+    pub(super) fn take_signed(
+        &mut self,
+        token: [u8; 32],
+    ) -> Result<MemberSignedOriginal, AppError> {
         let pending = self
             .request
             .as_deref_mut()
@@ -920,7 +1363,7 @@ impl V2MemberLane {
         clippy::result_large_err,
         reason = "A refused restore returns the same signed original and its payment instead of allocating or destroying it."
     )]
-    fn restore_signed(
+    pub(super) fn restore_signed(
         &mut self,
         token: [u8; 32],
         value: MemberSignedOriginal,
@@ -957,7 +1400,7 @@ impl V2MemberLane {
     /// Retire the request and its fee. Unsaved negatives are permanent for this lane;
     /// saved tokens rely on exact durable lookup once their positive cache entry expires.
     /// Returns, for `Saved`, whether the outbox's saved original is the one this lane lent.
-    fn finish(&mut self, token: [u8; 32], mode: FinishMode) -> Result<bool, AppError> {
+    pub(super) fn finish(&mut self, token: [u8; 32], mode: FinishMode) -> Result<bool, AppError> {
         let pending = self
             .request
             .as_deref_mut()
@@ -997,7 +1440,7 @@ impl V2MemberLane {
 
 /// How a request leaves the lane. Never serialized.
 #[derive(Clone, Copy)]
-enum FinishMode {
+pub(super) enum FinishMode {
     /// The outbox reported SavedLocal/AlreadySaved; the receipt's ActionId.
     Saved(ActionId),
     /// An exact authoritative outbox hit for this token (any lane state); the stored ActionId.
@@ -1017,7 +1460,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
     /// Refuses (never authors) when: the host has not completed its empty promotion, founder
     /// Create state exists on this host, another token is pending, the token was abandoned
     /// or forgotten (or remains in the positive saved cache), negative-retirement capacity
-    /// is exhausted, the selected O is no longer generation 1, or the source/lock
+    /// is exhausted, the original selected head cannot be reproved, or the source/lock
     /// closed. A completed original stays retrievable after lock (historical DATA).
     #[cfg(all(test, windows))]
     pub(in crate::store) fn retry_sign_member_request(
@@ -1038,7 +1481,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         require_request_shape(&request)?;
         // Pure DATA completion and exact retry BEFORE any positive gate.
         if let Some(lane) = self.member.as_deref_mut() {
-            if lane.retry_completed(&request)? {
+            if lane.requests.retry_completed(&request)? {
                 return Ok(());
             }
         }
@@ -1052,7 +1495,13 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         }
         let store = layout.checked_store()?;
         if let Some(lane) = self.member.as_deref_mut() {
-            return lane.retry_request(store, &mut self.owner, &request, access);
+            return lane.retry_request(
+                store,
+                &mut self.owner,
+                self.governed_add.as_deref_mut(),
+                &request,
+                access,
+            );
         }
         // A NEW lane is installed only once its anchor is bound and its verifier exists. If
         // it fails earlier (for example the anchor refuses beside a crash-left founder WAL),
@@ -1064,7 +1513,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
             let observer = self.observer.as_ref().ok_or_else(refused)?;
             V2MemberLane::prepare(store, &owner, observer)?
         };
-        let result = lane.retry_request(store, &mut self.owner, &request, access);
+        let result = lane.retry_request(store, &mut self.owner, None, &request, access);
         if lane.verifier.is_some() {
             self.member = Some(Box::new(lane));
         }
@@ -1080,6 +1529,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         self.member
             .as_deref_mut()
             .ok_or_else(refused)?
+            .requests
             .take_signed(token)
     }
 
@@ -1095,7 +1545,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         value: MemberSignedOriginal,
     ) -> Result<(), (MemberSignedOriginal, AppError)> {
         match self.member.as_deref_mut() {
-            Some(lane) => lane.restore_signed(token, value),
+            Some(lane) => lane.requests.restore_signed(token, value),
             None => Err((value, refused())),
         }
     }
@@ -1115,6 +1565,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         self.member
             .as_deref_mut()
             .ok_or_else(refused)?
+            .requests
             .finish(token, FinishMode::Saved(saved_action))
     }
 
@@ -1141,6 +1592,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         self.member
             .as_deref_mut()
             .ok_or_else(refused)?
+            .requests
             .finish(token, FinishMode::Abandon)
             .map(|_| ())
     }
@@ -1155,6 +1607,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         self.member
             .as_deref_mut()
             .ok_or_else(refused)?
+            .requests
             .finish(token, FinishMode::ForgetLent)
             .map(|_| ())
     }

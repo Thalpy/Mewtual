@@ -20,25 +20,43 @@ pub mod protocol_rng;
 pub mod rng;
 pub mod transport;
 
+/// Implements Debug for opaque values without formatting any of their fields.
+#[macro_export]
+macro_rules! redacted_debug {
+    ($($( [$($generics:tt)+] )? $name:ident $(< $($arguments:tt),+ >)?;)+) => {
+        $(
+            impl $(<$($generics)+>)? ::core::fmt::Debug for $name $(<$($arguments),+>)? {
+                fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                    f.debug_struct(stringify!($name)).finish_non_exhaustive()
+                }
+            }
+        )+
+    };
+}
+
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use mem::{Hub, MemNetwork};
 pub use native_chat_key::{
-    NativeChatKeyDrain, NativeChatKeyEnds, NativeChatKeyPurpose, NativeChatKeyRefusal,
-    NativeChatPreparedKeyCut, NativeChatSdkRestoreEnds, NativeChatSourceClose,
-    NativeChatSourceObservation, NativeChatSourceOwner, NativeChatUiBinding, NativeChatUiCommand,
-    NativeChatUiCurrentCheck, NativeChatUiMountObservation, NativeChatUiSessionOwner,
-    NativeChatUiSessionPreparation, NativeChatWarmSdkReopenCut,
+    NativeChatKeyCurrentCheck, NativeChatKeyDrain, NativeChatKeyEnds, NativeChatKeyPurpose,
+    NativeChatKeyRefusal, NativeChatPreparedKeyCut, NativeChatSdkRestoreEnds,
+    NativeChatSourceClose, NativeChatSourceObservation, NativeChatSourceOwner, NativeChatUiBinding,
+    NativeChatUiCommand, NativeChatUiCurrentCheck, NativeChatUiMountObservation,
+    NativeChatUiSessionOwner, NativeChatUiSessionPreparation, NativeChatWarmSdkReopenCut,
     NATIVE_CHAT_UI_FIXED_METADATA_BYTES,
 };
 pub use protocol_rng::SeededProtocolRng;
 pub use rng::{CryptoRng, CryptoRngCore, OsCryptoRng, RngCore};
 pub use transport::{
-    BoxedDialPermit, ConnectionDirection, ConnectionFamily, ConnectionLease, ConnectionPath,
-    ConnectionTransport, DialPermit, DialSubmission, DiscoveredPeer, MeshTransport,
-    PeerConnectionSnapshot, PeerId, ProtocolId, PublishOnceError, PublishSubmission,
-    RendezvousRegistration, RequestAuthority, RequestCancellation, RequestKeepalive, Responder,
-    ResponderReply, ResponderRx, ResponseBudget, SharedRequestKeepalive, Topic, TransportError,
-    TransportEvent, FILE_BRIDGE_KIND, FILE_SERVICE_REQUEST_MAX_BYTES,
+    AuthorizedMeshPublication, BoxedDialPermit, ConnectionDirection, ConnectionFamily,
+    ConnectionLease, ConnectionPath, ConnectionTransport, DialPermit, DialSubmission,
+    DiscoveredPeer, MeshTransport, PeerConnectionSnapshot, PeerId, ProtocolId, PublishOnceError,
+    PublishSubmission, RendezvousRegistration, RequestAuthority, RequestCancellation,
+    RequestKeepalive, Responder, ResponderReply, ResponderRx, ResponseBudget,
+    SharedRequestKeepalive, Topic, TransportError, TransportEvent, CHAT_V2_DEPENDENCY_KIND,
+    CHAT_V2_DEPENDENCY_REQUEST_MAX_BYTES, CHAT_V2_DEPENDENCY_RESPONSE_MAX_BYTES,
+    CHAT_V2_GOVERNING_KIND, CHAT_V2_GOVERNING_REQUEST_MAX_BYTES,
+    CHAT_V2_GOVERNING_RESPONSE_MAX_BYTES, CHAT_V2_JOIN_KIND, CHAT_V2_JOIN_REQUEST_MAX_BYTES,
+    CHAT_V2_JOIN_RESPONSE_MAX_BYTES, FILE_BRIDGE_KIND, FILE_SERVICE_REQUEST_MAX_BYTES,
     FILE_SERVICE_RESPONSE_MAX_BYTES, FILE_SOURCE_KIND, MAX_CONNECTED_PEER_SNAPSHOT,
     MAX_CONNECTION_PATH_SNAPSHOT, MAX_PEER_DIAL_BATCH, MAX_PUBLISH_ONCE_BYTES,
     MAX_PUBLISH_ONCE_TOPIC_BYTES, MAX_REQUEST_RESPONSE_FRAME_BYTES, REQUEST_TIMEOUT,

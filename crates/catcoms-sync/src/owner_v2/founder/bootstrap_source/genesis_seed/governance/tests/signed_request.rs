@@ -64,9 +64,20 @@ fn expired_actual_package_refuses_with_a_still_valid_signed_invite() {
     let mut node = original.prepare_governance_data().unwrap();
     let native = Native::new();
     let request = Request::with_package_times(&node, 63, NOW / 1000 - 3600, NOW / 1000 - 60);
+    let valid = Request::new(&node, 69);
+    let limits = TextCurrentAddLimits::governed_text_v2();
+    assert!(!request.invite.expired_at_data(NOW));
+    assert!(node
+        .preflight_first_add_package_data(request.data(), limits)
+        .is_err());
+    assert!(node.pending.is_none());
+    assert!(node
+        .preflight_first_add_package_data(valid.data(), limits)
+        .is_ok());
+    assert!(node.pending.is_none());
+    assert_eq!(node.node.seed.body.group.epoch(), 0);
     let count = Arc::new(AtomicUsize::new(0));
     begin(&mut node, &native, &count, request.data());
-    assert!(!request.invite.expired_at_data(NOW));
     assert!(node.execute_add_data_native(request.data()).is_err());
     let p = node.pending.as_ref().unwrap();
     assert!(p.phase == Phase::SdkEntered && p.cell.is_none());

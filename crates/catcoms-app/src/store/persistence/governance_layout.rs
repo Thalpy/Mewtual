@@ -13,6 +13,8 @@ use catcoms_storage::kept::{session_at, session_id, SessionAt, SessionId};
 use std::io::{Seek, SeekFrom};
 use std::sync::Arc;
 
+pub(in crate::store) mod joined;
+
 fn io(error: impl std::fmt::Display) -> AppError {
     AppError::Io(error.to_string())
 }

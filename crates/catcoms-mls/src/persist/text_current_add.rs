@@ -35,6 +35,36 @@ pub struct TextCurrentAddLimits {
     pub routing_work: usize,
 }
 impl TextCurrentAddLimits {
+    /// Fixed candidate inventory for the native governed text Add. The
+    /// actual Add still checks the tree-specific lower bound before entry.
+    pub const fn governed_text_v2() -> Self {
+        use crate::group::text_current_add::{TEXT_ADD_ROUTING_TYPED_BYTES, TEXT_ADD_ROUTING_WORK};
+
+        const MIB: usize = 1024 * 1024;
+        const WORK: usize = 2 * 1024 * MIB - 1;
+        Self {
+            max_snapshot_bytes: 8 * MIB,
+            max_provider_backing_bytes: 2 * MIB,
+            max_provider_payload_bytes: 16 * MIB,
+            prepare_work: WORK,
+            package_typed_bytes: 2 * MIB,
+            package_work: WORK,
+            restore_typed_bytes: 2 * MIB,
+            restore_work: WORK,
+            operation: TextAddOperationLimits {
+                max_typed_bytes: 2 * MIB,
+                max_serialized_bytes: 32 * MIB,
+                max_provider_bytes: 32 * MIB,
+                max_work: WORK,
+            },
+            sdk_typed_bytes: 64 * MIB,
+            sdk_work: WORK,
+            output_bytes: 8 * MIB,
+            routing_typed_bytes: TEXT_ADD_ROUTING_TYPED_BYTES,
+            routing_work: TEXT_ADD_ROUTING_WORK,
+        }
+    }
+
     /// Buffer inventory only. The concrete Resource<G>/Cell/move layouts below
     /// are additional; this number is neither a fee object nor SDK authority.
     pub fn buffer_reservation_bytes(&self) -> Option<usize> {
@@ -144,7 +174,9 @@ impl TextCurrentAddAdmission {
                 >(),
             )?
             .checked_add(crate::group::text_current_add::installation_metadata_layout_bytes()?)?
-            .checked_add(crate::group::text_current_add::completed_result_metadata_layout_bytes()?)
+            .checked_add(crate::group::text_current_add::completed_result_metadata_layout_bytes()?)?
+            .checked_add(crate::group::text_current_add::received_add_metadata_layout_bytes())?
+            .checked_add(crate::group::text_current_add::remove_metadata_layout_bytes())
     }
     pub fn new<G: TextCurrentAddReservation>(reservation: G) -> Result<Self, MlsError> {
         // Compile-time SDK profile DATA, not a caller switch. Refuse before

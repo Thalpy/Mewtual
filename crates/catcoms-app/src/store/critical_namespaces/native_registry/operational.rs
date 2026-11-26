@@ -12,7 +12,15 @@ mod cell;
 pub(super) mod data;
 mod facade;
 mod governed;
-pub use governed::NativeTextGovernedStorage;
+mod join_tcp;
+pub use governed::{
+    NativeTextColdFounderGoverningRequest, NativeTextColdFounderGoverningRequests,
+    NativeTextColdFounderJoinRequest, NativeTextColdFounderJoinRequests,
+    NativeTextColdFounderMemberIngress, NativeTextColdFounderMemberReceiver,
+    NativeTextColdFounderPublication, NativeTextColdFounderPublicationReceipt,
+    NativeTextColdFounderSource, NativeTextGovernedStorage, NativeTextJoinedRuntime,
+    NativeTextJoinedStorage,
+};
 mod history_response;
 pub use history_response::{NativeTextHistoryResponseBudget, NativeTextHistoryResponseCredit};
 mod interlock;
@@ -25,19 +33,35 @@ mod sources;
 pub use sources::{
     NativeTextCreationBudget, NativeTextCreationInputs, NativeTextCreationJob,
     NativeTextCreationPreparation, NativeTextCreationProgress, NativeTextCreationRefusal,
-    NativeTextCreationRequest, NativeTextCreationSettings, NativeTextMemberAdmissionFailure,
-    NativeTextMemberBudget, NativeTextMemberFinalPreparation, NativeTextMemberHistoryItem,
-    NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus, NativeTextMemberJob,
-    NativeTextMemberPreparation, NativeTextMemberSaveJob, NativeTextRuntimeSelection,
-    NativeTextSourceBudget, NativeTextSourceCommand, NativeTextSourcePolicy,
-    NativeTextSourcePreparation, NativeTextSourceRetirement, NativeTextSourceRetirementPreparation,
+    NativeTextCreationRequest, NativeTextCreationSettings, NativeTextFounderDependencyProvider,
+    NativeTextFounderMemberIngressPreparation, NativeTextFounderMemberPublication,
+    NativeTextFounderMemberPublicationReceipt, NativeTextFounderMemberReceiver,
+    NativeTextInvitePublication, NativeTextJoinedArchivedActions, NativeTextJoinedDelivery,
+    NativeTextJoinedDependencyAttachRefusal, NativeTextJoinedDependencyExchange,
+    NativeTextJoinedDependencyProvider, NativeTextJoinedDependencyResponse,
+    NativeTextJoinedExchange, NativeTextJoinedGoverningExchange, NativeTextJoinedGoverningIncoming,
+    NativeTextJoinedGoverningProvider, NativeTextJoinedGoverningResponse,
+    NativeTextJoinedInstallation, NativeTextJoinedMemberFinalPreparation,
+    NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberLedger,
+    NativeTextJoinedMemberProjection, NativeTextJoinedMemberPublication,
+    NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
+    NativeTextJoinedMemberSaveJob, NativeTextJoinedReceivedOriginal, NativeTextJoinedReconnect,
+    NativeTextJoinedRequestPreparation, NativeTextJoinedRowSelection,
+    NativeTextJoinedSelectionPreparation, NativeTextMemberAdmissionFailure, NativeTextMemberBudget,
+    NativeTextMemberFinalPreparation, NativeTextMemberHistoryItem, NativeTextMemberHistoryPage,
+    NativeTextMemberHistoryStatus, NativeTextMemberJob, NativeTextMemberPreparation,
+    NativeTextMemberSaveJob, NativeTextRuntimeSelection, NativeTextSourceBudget,
+    NativeTextSourceCommand, NativeTextSourcePolicy, NativeTextSourcePreparation,
+    NativeTextSourceRetirement, NativeTextSourceRetirementPreparation,
     NativeTextSourceRetirementRefusal, NativeTextSourceRetirementStatus, NativeTextSources,
+    NativeTextUiAddRetirement,
 };
 mod ui_state;
 mod work_retirement;
 pub use work_retirement::{NativeTextWorkRetirement, NativeTextWorkRetirementPreparation};
 mod upgrade;
 pub(in crate::store::critical_namespaces) mod upgrade_source;
+pub use facade::NativeTextJoinedVaultUpgrade;
 pub use facade::{
     NativeTextGovernanceUpgrade, NativeTextVault, NativeTextVaultAuthentication,
     NativeTextVaultAuthenticationCheck, NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal,

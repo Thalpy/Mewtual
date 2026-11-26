@@ -6,7 +6,7 @@
 //! channel. No sockets, no real time; N nodes run inside one test.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -14,9 +14,10 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::transport::{
-    ConnectionLease, DialSubmission, MeshTransport, PeerConnectionSnapshot, PeerId, ProtocolId,
-    PublishOnceError, PublishSubmission, RequestCancellation, Responder, Topic, TransportError,
-    TransportEvent, MAX_CONNECTED_PEER_SNAPSHOT, MAX_PEER_DIAL_BATCH, MAX_PUBLISH_ONCE_BYTES,
+    AuthorizedMeshPublication, ConnectionLease, DialSubmission, MeshTransport,
+    PeerConnectionSnapshot, PeerId, ProtocolId, PublishOnceError, PublishSubmission,
+    RequestCancellation, Responder, Topic, TransportError, TransportEvent,
+    MAX_CONNECTED_PEER_SNAPSHOT, MAX_PEER_DIAL_BATCH, MAX_PUBLISH_ONCE_BYTES,
     MAX_PUBLISH_ONCE_TOPIC_BYTES,
 };
 
@@ -233,41 +234,7 @@ impl MeshTransport for MemNetwork {
         topic: Topic,
         data: Bytes,
     ) -> Result<PublishSubmission, PublishOnceError> {
-        if !self.registration.lease.is_live() {
-            return Err(PublishOnceError::Closed);
-        }
-        if data.len() > MAX_PUBLISH_ONCE_BYTES
-            || topic.as_bytes().len() > MAX_PUBLISH_ONCE_TOPIC_BYTES
-        {
-            return Err(PublishOnceError::TooLarge);
-        }
-        // No await or deferred worker: cancellation before this future is polled does nothing;
-        // once polled, the whole attempt is synchronous. Compact slices so a tiny test event
-        // cannot retain an arbitrarily large backing allocation. This deterministic test broker
-        // does not model libp2p's duplicate cache or its bounded per-peer handler queues.
-        let topic = Topic::new(Bytes::copy_from_slice(topic.as_bytes()));
-        let data = Bytes::copy_from_slice(&data);
-        let mut submitted = false;
-        for peer in self.hub.subscribers(&topic) {
-            if peer != self.local {
-                submitted |= self
-                    .hub
-                    .deliver(
-                        peer,
-                        TransportEvent::Gossip {
-                            topic: topic.clone(),
-                            from: self.local,
-                            data: data.clone(),
-                        },
-                    )
-                    .is_ok();
-            }
-        }
-        if submitted {
-            Ok(PublishSubmission::Submitted)
-        } else {
-            Err(PublishOnceError::NoPeers)
-        }
+        publish_once(&self.hub, self.local, &self.registration, topic, data)
     }
 
     async fn publish_once_authorized(
@@ -279,8 +246,15 @@ impl MeshTransport for MemNetwork {
         if authority.is_cancelled() {
             return Err(PublishOnceError::Revoked);
         }
-        // Hub publication completes synchronously when polled; there is no queued lower owner.
-        self.publish_once(topic, data).await
+        publish_once(&self.hub, self.local, &self.registration, topic, data)
+    }
+
+    fn capture_authorized_publication(&self) -> Option<Box<dyn AuthorizedMeshPublication>> {
+        Some(Box::new(Outbound {
+            hub: Arc::downgrade(&self.hub),
+            local: self.local,
+            registration: Arc::downgrade(&self.registration),
+        }))
     }
 
     async fn request(
@@ -427,6 +401,71 @@ impl MeshTransport for MemNetwork {
     async fn next_event(&self) -> Option<TransportEvent> {
         let mut guard = self.rx.lock().await;
         guard.recv().await
+    }
+}
+
+struct Outbound {
+    hub: Weak<Hub>,
+    local: PeerId,
+    registration: Weak<Registration>,
+}
+
+#[async_trait]
+impl AuthorizedMeshPublication for Outbound {
+    async fn submit(
+        &self,
+        topic: Topic,
+        data: Bytes,
+        authority: RequestCancellation,
+    ) -> Result<PublishSubmission, PublishOnceError> {
+        let hub = self.hub.upgrade().ok_or(PublishOnceError::Closed)?;
+        let registration = self
+            .registration
+            .upgrade()
+            .ok_or(PublishOnceError::Closed)?;
+        if authority.is_cancelled() {
+            return Err(PublishOnceError::Revoked);
+        }
+        publish_once(&hub, self.local, &registration, topic, data)
+    }
+}
+
+fn publish_once(
+    hub: &Hub,
+    local: PeerId,
+    registration: &Registration,
+    topic: Topic,
+    data: Bytes,
+) -> Result<PublishSubmission, PublishOnceError> {
+    if !registration.lease.is_live() {
+        return Err(PublishOnceError::Closed);
+    }
+    if data.len() > MAX_PUBLISH_ONCE_BYTES || topic.as_bytes().len() > MAX_PUBLISH_ONCE_TOPIC_BYTES
+    {
+        return Err(PublishOnceError::TooLarge);
+    }
+    // This test broker submits synchronously and compacts sliced backing allocations.
+    let topic = Topic::new(Bytes::copy_from_slice(topic.as_bytes()));
+    let data = Bytes::copy_from_slice(&data);
+    let mut submitted = false;
+    for peer in hub.subscribers(&topic) {
+        if peer != local {
+            submitted |= hub
+                .deliver(
+                    peer,
+                    TransportEvent::Gossip {
+                        topic: topic.clone(),
+                        from: local,
+                        data: data.clone(),
+                    },
+                )
+                .is_ok();
+        }
+    }
+    if submitted {
+        Ok(PublishSubmission::Submitted)
+    } else {
+        Err(PublishOnceError::NoPeers)
     }
 }
 

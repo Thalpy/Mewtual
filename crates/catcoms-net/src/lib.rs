@@ -87,9 +87,12 @@ use catcoms_rt::{
     Clock, ConnectionDirection, ConnectionFamily, ConnectionPath, ConnectionTransport,
     CryptoRngCore, DiscoveredPeer, MeshTransport, OsCryptoRng, PeerConnectionSnapshot, PeerId,
     ProtocolId, RendezvousRegistration, RequestCancellation, Responder, SharedRequestKeepalive,
-    SystemClock, Topic, TransportError, TransportEvent, FILE_BRIDGE_KIND,
-    FILE_SERVICE_REQUEST_MAX_BYTES, FILE_SERVICE_RESPONSE_MAX_BYTES, FILE_SOURCE_KIND,
-    MAX_PEER_DIAL_BATCH,
+    SystemClock, Topic, TransportError, TransportEvent, CHAT_V2_DEPENDENCY_KIND,
+    CHAT_V2_DEPENDENCY_REQUEST_MAX_BYTES, CHAT_V2_DEPENDENCY_RESPONSE_MAX_BYTES,
+    CHAT_V2_GOVERNING_KIND, CHAT_V2_GOVERNING_REQUEST_MAX_BYTES,
+    CHAT_V2_GOVERNING_RESPONSE_MAX_BYTES, CHAT_V2_JOIN_KIND, CHAT_V2_JOIN_REQUEST_MAX_BYTES,
+    CHAT_V2_JOIN_RESPONSE_MAX_BYTES, FILE_BRIDGE_KIND, FILE_SERVICE_REQUEST_MAX_BYTES,
+    FILE_SERVICE_RESPONSE_MAX_BYTES, FILE_SOURCE_KIND, MAX_PEER_DIAL_BATCH,
 };
 use futures::stream::FuturesUnordered;
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, StreamExt};
@@ -118,6 +121,21 @@ use tokio::task::JoinHandle;
 
 mod connection_leases;
 mod event_dispatch;
+mod native_chat_join;
+pub use native_chat_join::{
+    NativeChatIngressAttachRefusal, NativeChatJoinIngress, NativeChatJoinRequests,
+};
+mod native_chat_members;
+pub use native_chat_members::{
+    NativeChatMemberFrame, NativeChatMemberFrameObservation, NativeChatMemberGossip,
+    NativeChatMemberGossipError, NativeChatMemberGossipEvent, NativeChatMemberIngress,
+};
+mod native_chat_member_dependencies;
+pub use native_chat_member_dependencies::{
+    NativeChatMemberDependencies, NativeChatMemberDependencyExchange,
+    NativeChatMemberDependencyIncoming, NativeChatMemberDependencyObservation,
+    NativeChatMemberDependencyRequests,
+};
 mod publication;
 
 /// Max request/response frame size.
@@ -430,13 +448,27 @@ impl BytesCodec {
     fn begin_request(&mut self, kind: Option<u8>) -> usize {
         // Always reset, including empty/legacy requests. Value-only clone state cannot narrow
         // another concurrent stream, and reusing a codec cannot inherit its preceding class.
-        if matches!(kind, Some(FILE_BRIDGE_KIND | FILE_SOURCE_KIND)) {
-            self.response_max = FILE_SERVICE_RESPONSE_MAX_BYTES;
-            FILE_SERVICE_REQUEST_MAX_BYTES
-        } else {
-            self.response_max = MAX_FRAME;
-            MAX_FRAME
-        }
+        let (request, response) = match kind {
+            Some(FILE_BRIDGE_KIND | FILE_SOURCE_KIND) => (
+                FILE_SERVICE_REQUEST_MAX_BYTES,
+                FILE_SERVICE_RESPONSE_MAX_BYTES,
+            ),
+            Some(CHAT_V2_JOIN_KIND) => (
+                CHAT_V2_JOIN_REQUEST_MAX_BYTES,
+                CHAT_V2_JOIN_RESPONSE_MAX_BYTES,
+            ),
+            Some(CHAT_V2_DEPENDENCY_KIND) => (
+                CHAT_V2_DEPENDENCY_REQUEST_MAX_BYTES,
+                CHAT_V2_DEPENDENCY_RESPONSE_MAX_BYTES,
+            ),
+            Some(CHAT_V2_GOVERNING_KIND) => (
+                CHAT_V2_GOVERNING_REQUEST_MAX_BYTES,
+                CHAT_V2_GOVERNING_RESPONSE_MAX_BYTES,
+            ),
+            _ => (MAX_FRAME, MAX_FRAME),
+        };
+        self.response_max = response;
+        request
     }
 }
 
@@ -807,6 +839,23 @@ fn to_peer(p: &libp2p::PeerId) -> PeerId {
 /// layer above the transport addresses it.
 pub fn phase0_peer_id(p: &libp2p::PeerId) -> PeerId {
     to_peer(p)
+}
+
+/// A candidate direct TCP route for one canonical inline Ed25519 peer.
+/// The caller must authorize the destination before passing it to transport.
+pub fn native_chat_direct_tcp_route(
+    peer: &[u8; 38],
+    host: std::net::IpAddr,
+    port: u16,
+) -> Option<(PeerId, String)> {
+    let public = libp2p::identity::PublicKey::try_decode_protobuf(peer.get(2..)?).ok()?;
+    let id = public.to_peer_id();
+    if port == 0 || id.to_bytes().as_slice() != peer || public.try_into_ed25519().is_err() {
+        return None;
+    }
+    let family = if host.is_ipv4() { "ip4" } else { "ip6" };
+    let address = format!("/{family}/{host}/tcp/{port}/p2p/{id}");
+    Some((phase0_peer_id(&id), address))
 }
 
 /// The **target** peer of a multiaddr: the last `/p2p/<id>` component. For a relay
@@ -1319,6 +1368,10 @@ enum Command {
     },
     Subscribe(Topic),
     Unsubscribe(Topic),
+    OpenNativeChatMemberGossip {
+        registration: native_chat_members::Registration,
+        reply: oneshot::Sender<Result<(), NativeChatMemberGossipError>>,
+    },
     Publish(Topic, Bytes),
     /// Separate from legacy retrying publication. Owns its capacity until the driver handles it,
     /// even when its waiting caller disappears. Never enters `pending_publish`.
@@ -3623,6 +3676,10 @@ struct Actor {
     enable_port_mapping: bool,
     cmd_rx: mpsc::Receiver<Command>,
     event_tx: mpsc::Sender<TransportEvent>,
+    native_chat_join: Option<Arc<native_chat_join::Slot>>,
+    native_chat_dependencies: Option<Arc<native_chat_join::Slot>>,
+    native_chat_governing: Option<Arc<native_chat_join::Slot>>,
+    native_member_gossip: Option<native_chat_members::Registration>,
     delivery: event_dispatch::Dispatcher,
     delivery_budget: Arc<event_dispatch::Budget>,
     inbound_req: HashMap<InboundRequestId, InboundRequest>,
@@ -3842,7 +3899,17 @@ impl Actor {
             {
                 break;
             }
+            let member_gossip = self
+                .native_member_gossip
+                .as_ref()
+                .map(|r| r.original.clone());
             tokio::select! {
+                _ = async {
+                    match member_gossip {
+                        Some(original) => original.retired().await,
+                        None => std::future::pending().await,
+                    }
+                } => self.retire_native_member_gossip(),
                 maybe_cmd = self.cmd_rx.recv() => {
                     match maybe_cmd {
                         Some(cmd) => {
@@ -4299,6 +4366,49 @@ impl Actor {
         )
     }
 
+    fn retire_native_member_gossip(&mut self) {
+        if let Some(original) = self.native_member_gossip.take() {
+            self.swarm
+                .behaviour_mut()
+                .gossipsub
+                .unsubscribe(&to_ident(&original.topic));
+        }
+    }
+
+    fn open_native_member_gossip(
+        &mut self,
+        registration: native_chat_members::Registration,
+        reply: oneshot::Sender<Result<(), NativeChatMemberGossipError>>,
+    ) {
+        use NativeChatMemberGossipError as Error;
+        if self.native_stop.is_none() {
+            let _ = reply.send(Err(Error::Closed));
+            return;
+        }
+        if reply.is_closed() || !registration.original.is_current_cached() {
+            let _ = reply.send(Err(Error::Revoked));
+            return;
+        }
+        if self.native_member_gossip.is_some() {
+            let _ = reply.send(Err(Error::Busy));
+            return;
+        }
+        if !matches!(
+            self.swarm
+                .behaviour_mut()
+                .gossipsub
+                .subscribe(&to_ident(&registration.topic)),
+            Ok(true)
+        ) {
+            let _ = reply.send(Err(Error::Subscribe));
+            return;
+        }
+        self.native_member_gossip = Some(registration);
+        if reply.send(Ok(())).is_err() {
+            self.retire_native_member_gossip();
+        }
+    }
+
     fn handle_command(&mut self, cmd: Command) {
         match cmd {
             #[cfg(test)]
@@ -4321,6 +4431,13 @@ impl Actor {
                     .subscribe(&to_ident(&topic));
             }
             Command::Unsubscribe(topic) => {
+                if self
+                    .native_member_gossip
+                    .as_ref()
+                    .is_some_and(|registered| registered.topic == topic)
+                {
+                    return;
+                }
                 tracing::debug!(topic = %hex::encode(topic.as_bytes()), "unsubscribe");
                 let _ = self
                     .swarm
@@ -4328,6 +4445,10 @@ impl Actor {
                     .gossipsub
                     .unsubscribe(&to_ident(&topic));
             }
+            Command::OpenNativeChatMemberGossip {
+                registration,
+                reply,
+            } => self.open_native_member_gossip(registration, reply),
             Command::Publish(topic, data) => {
                 self.publish_or_hold(topic, data, PublishAttempt::First);
             }
@@ -5283,6 +5404,17 @@ impl Actor {
                 let topic = from_topic_hash(&message.topic);
                 tracing::trace!(bytes = message.data.len(), "gossip received");
                 let carrier = to_peer(&propagation_source);
+                if let Some(registered) = self
+                    .native_member_gossip
+                    .as_ref()
+                    .filter(|r| r.topic == topic)
+                {
+                    let connection =
+                        connection_leases::current(&self.connection_leases.table, carrier)
+                            .map(|connection| (carrier, connection));
+                    registered.deliver(from, message.data, connection, &self.delivery_budget);
+                    return;
+                }
                 if let (Some(ingress), Some(credit)) = (
                     connection_leases::current(&self.connection_leases.table, carrier),
                     self.delivery_budget.charge(message.data.len(), None),
@@ -5322,35 +5454,49 @@ impl Actor {
                     else {
                         return;
                     };
-                    let Some(credit) = self.delivery_budget.charge_request(
-                        request.len(),
-                        from,
-                        request.first().copied(),
-                    ) else {
+                    let kind = request.first().copied();
+                    let dedicated = match kind {
+                        Some(CHAT_V2_JOIN_KIND) => Some(self.native_chat_join.as_deref()),
+                        Some(CHAT_V2_DEPENDENCY_KIND) => {
+                            Some(self.native_chat_dependencies.as_deref())
+                        }
+                        Some(CHAT_V2_GOVERNING_KIND) => Some(self.native_chat_governing.as_deref()),
+                        _ => None,
+                    };
+                    let (native_slot, service) = if let Some(dedicated) = dedicated {
+                        let Some((permit, authority)) =
+                            dedicated.and_then(native_chat_join::try_reserve)
+                        else {
+                            return;
+                        };
+                        (Some(permit), Some(authority))
+                    } else {
+                        (None, None)
+                    };
+                    let Some(credit) =
+                        self.delivery_budget
+                            .charge_request(request.len(), from, kind)
+                    else {
                         tracing::trace!(?from, kind = ?request.first(), bytes = request.len(),
                             "inbound request refused before application delivery");
                         return;
                     };
                     let (authority, terminal) =
-                        event_dispatch::IngressAuthority::new(ingress.clone());
+                        event_dispatch::IngressAuthority::new(ingress.clone(), service);
                     let (responder, rx) = Responder::channel_owned(
                         credit.clone(),
                         authority.clone(),
                         self.delivery_budget.clone(),
                     );
-                    if !self.delivery.queue(
-                        TransportEvent::Request {
-                            from,
-                            proto: ProtocolId(RR_PROTOCOL),
-                            data: event_dispatch::charged_bytes(
-                                Bytes::from(request),
-                                credit.clone(),
-                            ),
-                            responder,
-                        },
+                    let event = TransportEvent::Request {
                         from,
-                        ingress,
-                    ) {
+                        proto: ProtocolId(RR_PROTOCOL),
+                        data: event_dispatch::charged_bytes(Bytes::from(request), credit.clone()),
+                        responder,
+                    };
+                    if let Some(permit) = native_slot {
+                        drop(permit.send(event));
+                    } else if !self.delivery.queue(event, from, ingress) {
                         return;
                     }
                     self.inbound_req.insert(
@@ -5706,6 +5852,11 @@ pub struct MeshService {
     /// cancellation until the queued command is drained. No unbounded admission waiters.
     publish_once_slots: Arc<Semaphore>,
     event_rx: Mutex<mpsc::Receiver<TransportEvent>>,
+    native_chat_join: Option<NativeChatJoinIngress>,
+    native_chat_dependencies: Option<NativeChatJoinIngress>,
+    native_chat_governing: Option<NativeChatJoinIngress>,
+    native_chat_dependency_outbound: Option<Arc<Semaphore>>,
+    native_member_gossip_slot: Option<Arc<Semaphore>>,
     #[cfg(test)]
     test_event_tx: mpsc::Sender<TransportEvent>,
     #[cfg(test)]
@@ -5730,6 +5881,78 @@ pub struct MeshService {
     upgrade_rx: Mutex<mpsc::Receiver<PeerId>>,
     discovered_rx: Mutex<mpsc::UnboundedReceiver<Discovered>>,
     registered_rx: Mutex<mpsc::UnboundedReceiver<Registered>>,
+}
+
+/// Bounded dial access to the original actor with no ownership of its
+/// transport or event receiver. The caller still supplies a revocable permit.
+#[derive(Clone, Debug)]
+pub struct MeshConnectionDial {
+    commands: mpsc::WeakSender<Command>,
+    snapshots: watch::Receiver<Vec<PeerConnectionSnapshot>>,
+    leases: std::sync::Weak<std::sync::Mutex<HashMap<PeerId, catcoms_rt::ConnectionLease>>>,
+}
+
+impl MeshConnectionDial {
+    pub fn connection_lease(&self, peer: PeerId) -> Option<catcoms_rt::ConnectionLease> {
+        let leases = self.leases.upgrade()?;
+        connection_leases::current(&leases, peer)
+    }
+
+    pub async fn dial_permit(
+        &self,
+        permit: catcoms_rt::BoxedDialPermit,
+    ) -> Result<catcoms_rt::DialSubmission, TransportError> {
+        let commands = self.commands.upgrade().ok_or(TransportError::Closed)?;
+        let response = queue_dial_permit(&commands, permit).await?;
+        drop(commands);
+        response.await.map_err(|_| TransportError::Closed)
+    }
+
+    pub async fn wait_for_peer_connected(
+        &self,
+        peer: PeerId,
+    ) -> Result<PeerConnectionSnapshot, TransportError> {
+        wait_for_connected(self.snapshots.clone(), std::slice::from_ref(&peer)).await
+    }
+}
+
+async fn queue_dial_permit(
+    commands: &mpsc::Sender<Command>,
+    permit: catcoms_rt::BoxedDialPermit,
+) -> Result<oneshot::Receiver<catcoms_rt::DialSubmission>, TransportError> {
+    let addr = permit
+        .address()
+        .parse::<Multiaddr>()
+        .map_err(|_| TransportError::InvalidDialBatch)?;
+    let (reply, response) = oneshot::channel();
+    commands
+        .send(Command::Dial {
+            addr,
+            permit: Some(permit),
+            reply: Some(reply),
+        })
+        .await
+        .map_err(|_| TransportError::Closed)?;
+    Ok(response)
+}
+
+async fn wait_for_connected(
+    mut snapshots: watch::Receiver<Vec<PeerConnectionSnapshot>>,
+    wanted: &[PeerId],
+) -> Result<PeerConnectionSnapshot, TransportError> {
+    loop {
+        let current = current_connection_snapshot(&mut snapshots)?;
+        if let Some(connected) = current
+            .into_iter()
+            .find(|entry| wanted.contains(&entry.peer))
+        {
+            return Ok(connected);
+        }
+        snapshots
+            .changed()
+            .await
+            .map_err(|_| TransportError::Closed)?;
+    }
 }
 
 // `Command` holds a oneshot sender; keep it out of `Debug`.
@@ -5764,6 +5987,26 @@ impl MeshService {
         let local = to_peer(swarm.local_peer_id());
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(256);
+        let join_slot = native
+            .as_ref()
+            .map(|_| Arc::new(native_chat_join::Slot::default()));
+        let native_chat_join = join_slot
+            .as_ref()
+            .map(|slot| NativeChatJoinIngress(Arc::downgrade(slot)));
+        let dependency_slot = native
+            .as_ref()
+            .map(|_| Arc::new(native_chat_join::Slot::default()));
+        let native_chat_dependencies = dependency_slot
+            .as_ref()
+            .map(|slot| NativeChatJoinIngress(Arc::downgrade(slot)));
+        let governing_slot = native
+            .as_ref()
+            .map(|_| Arc::new(native_chat_join::Slot::default()));
+        let native_chat_governing = governing_slot
+            .as_ref()
+            .map(|slot| NativeChatJoinIngress(Arc::downgrade(slot)));
+        let native_chat_dependency_outbound = native.as_ref().map(|_| Arc::new(Semaphore::new(1)));
+        let native_member_gossip_slot = native.as_ref().map(|_| Arc::new(Semaphore::new(1)));
         #[cfg(test)]
         let test_event_tx = event_tx.clone();
         #[cfg(test)]
@@ -5801,6 +6044,10 @@ impl MeshService {
             enable_port_mapping,
             cmd_rx,
             event_tx,
+            native_chat_join: join_slot,
+            native_chat_dependencies: dependency_slot,
+            native_chat_governing: governing_slot,
+            native_member_gossip: None,
             delivery: event_dispatch::Dispatcher::default(),
             delivery_budget: delivery_budget.clone(),
             inbound_req: HashMap::new(),
@@ -5873,6 +6120,11 @@ impl MeshService {
             cmd_tx,
             publish_once_slots: Arc::new(Semaphore::new(publication::MAX_IN_FLIGHT)),
             event_rx: Mutex::new(event_rx),
+            native_chat_join,
+            native_chat_dependencies,
+            native_chat_governing,
+            native_chat_dependency_outbound,
+            native_member_gossip_slot,
             #[cfg(test)]
             test_event_tx,
             #[cfg(test)]
@@ -5895,6 +6147,36 @@ impl MeshService {
         }
     }
 
+    /// Observe the original native-only JoinRequest lane. Ordinary transports
+    /// have no lane and drop this request kind before application delivery.
+    pub fn native_chat_join_ingress(&self) -> Option<NativeChatJoinIngress> {
+        self.native_chat_join.clone()
+    }
+
+    /// Observe the original native actor's dedicated governing request queue.
+    pub fn native_chat_governing_ingress(&self) -> Option<NativeChatJoinIngress> {
+        self.native_chat_governing.clone()
+    }
+
+    /// Capture one addressed dependency lane of this original native mesh.
+    pub fn native_chat_member_dependencies(&self) -> Option<NativeChatMemberDependencies> {
+        Some(NativeChatMemberDependencies {
+            ingress: self.native_chat_dependencies.clone()?,
+            commands: self.cmd_tx.downgrade(),
+            connections: Arc::downgrade(&self.connection_leases),
+            outbound: Arc::downgrade(self.native_chat_dependency_outbound.as_ref()?),
+            local: self.local,
+        })
+    }
+
+    /// Capture only the original native actor's bounded ordinary gossip lane.
+    pub fn native_chat_member_ingress(&self) -> Option<NativeChatMemberIngress> {
+        Some(NativeChatMemberIngress {
+            commands: self.cmd_tx.downgrade(),
+            slot: Arc::downgrade(self.native_member_gossip_slot.as_ref()?),
+        })
+    }
+
     /// Read the current connected-peer/path table without consuming the ordered transport event
     /// stream. The actor publishes an empty replacement on disconnect, so this is present-time
     /// state rather than historical evidence.
@@ -5912,20 +6194,7 @@ impl MeshService {
         &self,
         wanted: &[PeerId],
     ) -> Result<PeerConnectionSnapshot, TransportError> {
-        let mut snapshots = self.connection_snapshot_rx.clone();
-        loop {
-            let current = current_connection_snapshot(&mut snapshots)?;
-            let connected = current
-                .into_iter()
-                .find(|entry| wanted.contains(&entry.peer));
-            if let Some(connected) = connected {
-                return Ok(connected);
-            }
-            snapshots
-                .changed()
-                .await
-                .map_err(|_| TransportError::Closed)?;
-        }
+        wait_for_connected(self.connection_snapshot_rx.clone(), wanted).await
     }
 
     /// Convenience form of [`MeshService::wait_for_any_connected`] for one peer.
@@ -6094,20 +6363,18 @@ impl MeshService {
         &self,
         permit: catcoms_rt::BoxedDialPermit,
     ) -> Result<catcoms_rt::DialSubmission, TransportError> {
-        let addr = permit
-            .address()
-            .parse::<Multiaddr>()
-            .map_err(|_| TransportError::InvalidDialBatch)?;
-        let (reply, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(Command::Dial {
-                addr,
-                permit: Some(permit),
-                reply: Some(reply),
-            })
+        queue_dial_permit(&self.cmd_tx, permit)
+            .await?
             .await
-            .map_err(|_| TransportError::Closed)?;
-        rx.await.map_err(|_| TransportError::Closed)
+            .map_err(|_| TransportError::Closed)
+    }
+
+    pub fn capture_connection_dial(&self) -> MeshConnectionDial {
+        MeshConnectionDial {
+            commands: self.cmd_tx.downgrade(),
+            snapshots: self.connection_snapshot_rx.clone(),
+            leases: Arc::downgrade(&self.connection_leases),
+        }
     }
 
     /// Submit one bounded direct-route batch whose terminal identity must match `peer`.
@@ -6558,6 +6825,15 @@ impl MeshTransport for MeshService {
             Some(authority),
         )
         .await
+    }
+
+    fn capture_authorized_publication(
+        &self,
+    ) -> Option<Box<dyn catcoms_rt::AuthorizedMeshPublication>> {
+        Some(Box::new(publication::Outbound {
+            commands: self.cmd_tx.downgrade(),
+            slots: self.publish_once_slots.clone(),
+        }))
     }
 
     async fn request(

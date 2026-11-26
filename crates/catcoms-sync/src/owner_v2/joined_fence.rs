@@ -37,7 +37,7 @@
 //! short lock; nodes without join facts pay nothing.
 use crate::*;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, TryLockError};
 
 /// Finalized transitions retained until the joined source consumes them.
@@ -225,9 +225,24 @@ impl FenceState {
 
 struct FenceInner {
     closed: AtomicBool,
+    // Advanced BEFORE any selected-state change, merge, or contest. Driver
+    // observers cannot reopen when a temporary contest or no-op merge ends.
+    publication_generation: AtomicU64,
     state: Mutex<FenceState>,
 }
 impl FenceInner {
+    fn retire_publications(&self) {
+        if self
+            .publication_generation
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                value.checked_add(1)
+            })
+            .is_err()
+        {
+            self.closed.store(true, Ordering::Release);
+        }
+    }
+
     fn lock(&self) -> Result<MutexGuard<'_, FenceState>, V2JoinedFenceRefusal> {
         match self.state.lock() {
             Ok(state) => Ok(state),
@@ -307,6 +322,20 @@ impl V2MergeResult {
 pub struct V2JoinedSourceFence {
     inner: Arc<FenceInner>,
 }
+
+/// The original finalized MLS selection observed when an envelope was sealed.
+/// It can refuse an attempt and cannot install or renew the Source.
+pub(crate) struct V2JoinedPublicationFence {
+    inner: Arc<FenceInner>,
+    generation: u64,
+}
+
+impl V2JoinedPublicationFence {
+    pub(crate) fn is_current_cached(&self) -> bool {
+        self.inner.publication_generation.load(Ordering::Acquire) == self.generation
+            && !self.inner.closed.load(Ordering::Acquire)
+    }
+}
 impl std::fmt::Debug for V2JoinedSourceFence {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("V2JoinedSourceFence")
@@ -333,7 +362,100 @@ impl std::fmt::Debug for V2JoinedFenceAdmission<'_> {
     }
 }
 
+/// The selected SDK swap and Core advance share this fence order with save
+/// admission. The Sync owner holds both actual graphs through settlement.
+pub(crate) struct V2JoinedMembershipSettlement<'a> {
+    _unwind: CloseOnUnwind<'a>,
+    state: MutexGuard<'a, FenceState>,
+    inner: &'a FenceInner,
+    next: Selected,
+}
+
+impl V2JoinedMembershipSettlement<'_> {
+    pub(crate) fn finish(mut self) {
+        self.inner.retire_publications();
+        self.state.settled = (self.next.epoch, self.next.authenticator);
+        self.state.selected = Some(self.next);
+    }
+}
+
+pub(crate) struct V2JoinedEvictionSettlement<'a> {
+    _unwind: CloseOnUnwind<'a>,
+    state: MutexGuard<'a, FenceState>,
+    inner: &'a FenceInner,
+}
+
+impl V2JoinedEvictionSettlement<'_> {
+    pub(crate) fn finish(mut self) {
+        self.inner.retire_publications();
+        self.state
+            .terminate(&self.inner.closed, V2JoinedFenceTerminal::Removed);
+    }
+}
+
 impl V2JoinedSourceFence {
+    pub(crate) fn prepare_selected_membership(
+        &self,
+        own: [u8; 32],
+        before: (u64, [u8; 32]),
+        after: (u64, [u8; 32]),
+    ) -> Result<V2JoinedMembershipSettlement<'_>, V2JoinedFenceRefusal> {
+        let state = self.require_membership_parent(own, before, after.0)?;
+        Ok(V2JoinedMembershipSettlement {
+            _unwind: CloseOnUnwind(&self.inner.closed),
+            state,
+            inner: &self.inner,
+            next: Selected {
+                epoch: after.0,
+                authenticator: after.1,
+                own,
+            },
+        })
+    }
+
+    pub(crate) fn prepare_selected_eviction(
+        &self,
+        own: [u8; 32],
+        before: (u64, [u8; 32]),
+        removed_epoch: u64,
+    ) -> Result<V2JoinedEvictionSettlement<'_>, V2JoinedFenceRefusal> {
+        let state = self.require_membership_parent(own, before, removed_epoch)?;
+        Ok(V2JoinedEvictionSettlement {
+            _unwind: CloseOnUnwind(&self.inner.closed),
+            state,
+            inner: &self.inner,
+        })
+    }
+
+    fn require_membership_parent(
+        &self,
+        own: [u8; 32],
+        before: (u64, [u8; 32]),
+        after_epoch: u64,
+    ) -> Result<MutexGuard<'_, FenceState>, V2JoinedFenceRefusal> {
+        let state = self.inner.try_lock()?;
+        state.authorized(&self.inner.closed, &own)?;
+        if state.settled != before
+            || before.0.checked_add(1) != Some(after_epoch)
+            || !state.transitions.is_empty()
+        {
+            return Err(V2JoinedFenceRefusal::Unknown);
+        }
+        Ok(state)
+    }
+
+    pub(crate) fn observe_publication(
+        &self,
+        own: &[u8; 32],
+    ) -> Result<V2JoinedPublicationFence, V2JoinedFenceRefusal> {
+        let state = self.inner.try_lock()?;
+        state.authorized(&self.inner.closed, own)?;
+        Ok(V2JoinedPublicationFence {
+            inner: self.inner.clone(),
+            generation: self.inner.publication_generation.load(Ordering::Acquire),
+        })
+    }
+
     /// Monotone negative for Core origins and the save-source lifecycle: one atomic load, no
     /// lock, allocation or callback. `false` can be stale immediately; only `admit_final`
     /// orders an admission.
@@ -433,6 +555,7 @@ impl V2JoinedSourceFence {
         {
             state.transitions.pop_front();
         }
+        self.inner.retire_publications();
         state.selected = Some(selected);
         Ok(())
     }
@@ -487,6 +610,7 @@ impl JoinedFenceNode {
         let state = (group.epoch(), group.epoch_authenticator_id());
         Self(Some(Arc::new(FenceInner {
             closed: AtomicBool::new(false),
+            publication_generation: AtomicU64::new(0),
             state: Mutex::new(FenceState {
                 settled: state,
                 join: state,
@@ -558,6 +682,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         };
         if let Ok(mut state) = inner.lock() {
             let _unwind = CloseOnUnwind(&inner.closed);
+            inner.retire_publications();
             state.merging = true;
         }
         Some(bracket)
@@ -652,7 +777,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         };
         if let Ok(mut state) = inner.lock() {
             let _unwind = CloseOnUnwind(&inner.closed);
-            state.contested = self.pending.is_some();
+            let contested = self.pending.is_some();
+            if contested && !state.contested {
+                inner.retire_publications();
+            }
+            state.contested = contested;
         }
     }
 
@@ -664,6 +793,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         };
         if let Ok(mut state) = inner.lock() {
             let _unwind = CloseOnUnwind(&inner.closed);
+            inner.retire_publications();
             state.contested = false;
             state.merging = true;
         }

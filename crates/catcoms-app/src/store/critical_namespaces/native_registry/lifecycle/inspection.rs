@@ -1,11 +1,16 @@
 //! Paid pre-cleaner version3 selection. Never pass an old tuple to a version3
 //! owner merely because an attributable first claim could be removed.
 use super::{admission::Handler, preparation, *};
+use crate::store::persistence::governance_layout::joined::{
+    ColdJoinedSelection, JoinedRegistrationDependency,
+};
 use crate::store::persistence::native_registry::lifecycle::upgrade::{
     index::{IndexCommitIo, IndexStageCleanup},
     FirstTornIo, UpgradeInventory, UpgradeIo,
 };
+use crate::store::persistence::native_registry::network::NetworkDependency;
 use crate::store::ServerStore;
+use std::sync::Arc;
 use zeroize::Zeroizing;
 
 /// Continuously held across the COMMON Current/JOIN opener, not a cached ready
@@ -13,8 +18,8 @@ use zeroize::Zeroizing;
 /// drops its Store before the evidence's last handler clone retires.
 pub(super) struct Observation {
     evidence: Evidence,
-    networks:
-        Vec<std::sync::Arc<crate::store::persistence::native_registry::network::NetworkDependency>>,
+    networks: Vec<Arc<NetworkDependency>>,
+    joined: Option<std::sync::Arc<JoinedRegistrationDependency>>,
     _session: catcoms_storage::VaultPhysicalWorkLease,
 }
 enum Evidence {
@@ -36,7 +41,11 @@ enum Evidence {
 }
 
 impl Handler {
-    pub(in crate::store) fn inspect_storage(&self, store: &ServerStore) -> Result<(), AppError> {
+    pub(in crate::store) fn inspect_storage(
+        &self,
+        store: &ServerStore,
+        joined: Option<&ColdJoinedSelection>,
+    ) -> Result<(), AppError> {
         self.require()?;
         let inventory = UpgradeInventory::capture(store, self.debit(), self.pool())?;
         let layout = inventory.authenticate_expected(store)?;
@@ -57,6 +66,7 @@ impl Handler {
                             output: Box::new(output),
                         },
                         networks: Vec::new(),
+                        joined: None,
                         _session: store._session.retain_for_physical_work(),
                     });
                 }
@@ -73,14 +83,27 @@ impl Handler {
             return Err(refused());
         }
         let (selected, _) = preparation::decode_selected_data(store, &inventory)?;
-        let networks = super::network::capture_selected(store, &selected, self)?;
+        let joined_dependency = if super::joined::has_native_row(&selected) {
+            if !self.uses_joined_pin_layout() {
+                return Err(refused());
+            }
+            let dependency = joined
+                .ok_or_else(refused)?
+                .capture_registration_dependency(store)?;
+            super::joined::require_original(&selected, dependency.data())?;
+            Some(dependency)
+        } else {
+            None
+        };
+        let mut networks = super::network::capture_selected(store, &selected, self)?;
         drop(selected);
         if inventory.index_stage().is_some() {
             // Normal3 WAL is mutually exclusive with JOIN/upgrade debt. Keep
             // THIS inventory through effect and final exposure, never recapture
             // equal-looking objects after repair or drop its required Stage.
-            let proof = super::wal::classify(store, &inventory)?;
+            let proof = super::wal::classify(store, &inventory, joined)?;
             let evidence = if proof.decision().is_commit() {
+                networks.extend(proof.retained_network());
                 let frame = Zeroizing::new(inventory.index_stage().ok_or_else(refused)?.to_vec());
                 let mut io = IndexCommitIo::recover(store, inventory, proof, &frame)?;
                 io.commit(store, &frame)?;
@@ -98,6 +121,7 @@ impl Handler {
             return self.retain_observation(Observation {
                 evidence,
                 networks,
+                joined: joined_dependency,
                 _session: store._session.retain_for_physical_work(),
             });
         }
@@ -108,6 +132,7 @@ impl Handler {
                 catalog,
             },
             networks,
+            joined: joined_dependency,
             _session: store._session.retain_for_physical_work(),
         })
     }
@@ -131,17 +156,20 @@ impl Handler {
     pub(in crate::store::critical_namespaces::native_registry) fn finish_cold(
         &self,
         store: &ServerStore,
-    ) -> Result<(), AppError> {
-        let observation = {
+    ) -> Result<Vec<Arc<NetworkDependency>>, AppError> {
+        let mut observation = {
             self.cold
                 .try_lock()
                 .map_err(|_| refused())?
                 .take()
                 .ok_or_else(refused)?
         };
-        let result = (|| {
+        (|| {
             for network in &observation.networks {
                 network.require(store)?;
+            }
+            if let Some(joined) = &observation.joined {
+                joined.require(store)?;
             }
             match &observation.evidence {
                 Evidence::Selected { inventory, catalog } => {
@@ -151,9 +179,10 @@ impl Handler {
                 Evidence::IndexCommitted { io, frame } => io.require_complete(store, frame),
                 Evidence::IndexCleaned { io } => io.require_complete(store),
             }
-        })();
+        })()?;
+        let networks = std::mem::take(&mut observation.networks);
         drop(observation); // No cell/catalog/Current guard; files then session.
-        result
+        Ok(networks)
     }
 }
 

@@ -12,10 +12,11 @@ import re
 import sys
 
 REPO = Path(__file__).resolve().parents[2]
+REGISTRY_NORMAL_COUNT = 383
 COHORTS = (
     ("core-read-accessors", "catcoms-replication", "v2_general::tests::read_accessors", 3),
     ("joined-facts", "catcoms-sync", "owner_v2::joined_source::tests", 4),
-    ("joined-fence", "catcoms-sync", "owner_v2::joined_fence::tests", 18),
+    ("joined-fence", "catcoms-sync", "owner_v2::joined_fence::tests", 19),
     # The eleven operation cases include both new V1 exclusion tests and the genuine
     # preexisting success controls, so they are not counted/run again as a separate cohort.
     ("owner-operations", "catcoms-sync", "owner_evidence::initial_tail::operation::tests", 11),
@@ -33,15 +34,15 @@ COHORTS = (
     ("native-network-identity", "catcoms-net", "seeded_transport_identity_data", 3),
     ("bounded-local-recovery", "catcoms-replication", "doc::saved_local_recovery::tests", 6),
     ("existing-local-recovery", "catcoms-replication", "doc::saved_local_chat_tests", 5),
-    ("selected-history-ordering", "catcoms-replication", "v2_general::tests::selected_history", 12),
+    ("selected-history-ordering", "catcoms-replication", "v2_general::tests::selected_history", 13),
     ("fresh-founder-mount", "catcoms-app", "current_layout::tests::fresh_founder", 1),
     ("fresh-founder-driver", "catcoms-app", "founder::plan::source::warm::tests", 11 if sys.platform in ("win32", "linux") else 4),
     # Includes original physical custody and actual private native founder/SDK
     # production. Synthetic UI captures still prove no checked Tauri caller,
     # installed backend, joined source or operational cold SDK restore.
-    # Compiled inventory354 includes the
-    # same four explicit compatibility fixture producers, never normal tests.
-    ("native-registry-physical", "catcoms-app", "critical_namespaces::native_registry::", 350),
+    # The compiled inventory also includes six explicit compatibility
+    # fixture producers, which are never counted as normal tests.
+    ("native-registry-physical", "catcoms-app", "critical_namespaces::native_registry::", REGISTRY_NORMAL_COUNT),
     ("current-cached-mount", "catcoms-app", "current_cached_mount_check_never_constructs_a_revocation_observer", 1),
     ("native-registry-directory", "catcoms-app", "native_registry_directory_capture", 1),
     ("native-registry-join-refusal", "catcoms-app", "native_registry_preparation_refuses_real", 1),
@@ -54,13 +55,15 @@ COHORTS = (
 
 
 # These are artifact producers, not skipped acceptance regressions. Their real
-# --ignored --exact executions remain mandatory in the index3/Native4 gates.
+# executions remain mandatory in the index3, Native4 and joined-pin gates.
 # The broad normal cohort must stay zero-ignored.
 FIXTURE_PREFIX = "store::critical_namespaces::native_registry::lifecycle::cell::tests::compatibility::"
 FIXTURE_TESTS = tuple(FIXTURE_PREFIX + suffix for suffix in (
     "generate_native3_fixtures", "verify_native3_predecessor_fixtures",
 )) + tuple("store::critical_namespaces::native_registry::operational::sources::network::tests::compatibility::" + suffix
-           for suffix in ("generate_native4_fixtures", "verify_native4_predecessor_fixtures"))
+           for suffix in ("generate_native4_fixtures", "verify_native4_predecessor_fixtures")
+           ) + tuple("store::critical_namespaces::native_registry::operational::facade::upgrade::governance_tests::" + suffix
+                     for suffix in ("joined_pin_write_predecessor_fixtures", "joined_pin_verify_predecessor_fixtures"))
 # The shared runner retains at most two matches PER pattern. Use one pattern
 # per skip string so an extra matching name always becomes a rejected second
 # match, even when a different ordinary test vanished and total count is equal.
@@ -69,19 +72,19 @@ INVENTORY_MATCHES = tuple(re.compile(r"^(.*" + re.escape(name) + r".*): test$")
 INVENTORY_COUNT = re.compile(r"^(\d+) tests, (\d+) benchmarks$")
 INVENTORY_NAME = re.compile(r"^([A-Za-z0-9_:]{1,512}): test$")
 REGISTRY_PREFIX = "store::critical_namespaces::native_registry::"
-# The Windows lane continuously passed cases but exceeded the single350-case
+# The Windows lane continuously passed cases but exceeded the original batch
 # batch deadline. Keep that same1800s bound for each smaller module partition;
 # actual --list sets below prove no omission, overlap or selector broadening.
 REGISTRY_PARTITIONS = (
     ("capability", "capability::", (), 2),
     ("data", "data::", (), 11),
-    ("lifecycle", "lifecycle::", (), 67),
+    ("lifecycle", "lifecycle::", (), 69),
     ("preparation", "preparation::", (), 39),
     ("operational-cell", "operational::cell::", (), 49),
-    ("operational-facade", "operational::facade::", (), 24),
-    ("operational-sources", "operational::sources::", (), 87),
+    ("operational-facade", "operational::facade::", (), 34),
+    ("operational-sources", "operational::sources::", (), 107),
     ("operational-rest", "operational::", (
-        "operational::cell::", "operational::facade::", "operational::sources::"), 71),
+        "operational::cell::", "operational::facade::", "operational::sources::"), 72),
 )
 
 
@@ -104,8 +107,8 @@ def validate_partitions(normal: frozenset[str], partitions: list) -> None:
         if (label != expected_label or len(names) != expected or names != selected or seen.intersection(names)):
             raise RuntimeError("native registry partition overlaps or its selector drifted")
         seen.update(names)
-    if seen != normal or len(seen) != 350:
-        raise RuntimeError("native registry partitions do not cover all350 normal tests")
+    if seen != normal or len(seen) != REGISTRY_NORMAL_COUNT:
+        raise RuntimeError("native registry partitions do not cover the complete normal inventory")
 
 
 def validate_inventory(matches: list, counts: list, expected: int) -> None:
@@ -117,7 +120,7 @@ def validate_inventory(matches: list, counts: list, expected: int) -> None:
 def inventory_self_test() -> None:
     good = [[(name,)] for name in FIXTURE_TESTS]
     validate_inventory(good, [("223", "0")], 223)
-    validate_inventory(good, [("4", "0")], 4)
+    validate_inventory(good, [(str(len(FIXTURE_TESTS)), "0")], len(FIXTURE_TESTS))
     for names, counts in (
         (good[:1], [("223", "0")]),
         ([good[0] + good[0], *good[1:]], [("223", "0")]),

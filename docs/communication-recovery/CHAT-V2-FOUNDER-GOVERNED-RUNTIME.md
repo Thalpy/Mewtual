@@ -1,10 +1,73 @@
 # Whole founder node: governed Add continuation
 
-Status: library ownership increment, not a reachable native Add command. Chat
-V2 remains OFF and incomplete. Root's covering save, original Current receiver,
-lock cleanup and real production installation remain to be implemented.
+The native runtime supports the first governed Add, the original signed
+Welcome, and ordinary founder and joined-member messages. Chat V2 remains OFF
+pending the remaining membership, reconnect, and end-to-end acceptance work.
 
 ## Implemented boundary
+
+The native cold opener can recover the selected founder's original bootstrap
+source and reserve the same TCP identity and port. The original network file
+stays held through registry inspection and startup, including recovery of a
+covered activation stage. Equal-byte replacements of that file or the held
+bootstrap source refuse. The bounded actor binds the signed address without
+dialing. The first Add restore checks the original registry pin and promotion
+seed, authenticates the exact selected signed Add from its archive, and
+restores an independently paid closed MLS graph from the selected snapshot.
+The original pin also anchors the Core replay of genesis and the first Add.
+Selection rechecks the held files and confirms that the restored MLS epoch,
+governing Header, and both active Admissions agree. Desktop startup publishes
+the recovered first-Add founder row only after authenticating that vault and
+pairing the row with the recovered native Source.
+The bound cold actor can serve the original covered Welcome on its original
+join ingress. It accepts the exact stored signed JoinRequest and rebuilds
+the public proof from the checked genesis and Add. The transport response
+uses the existing signed Welcome and enrolled KeyPackage and remains tied to
+the original request waiter until the lower queue sends it.
+The same reopened owner can read its saved received archive from the
+original vault. Archive replay uses the selected Core Admission and the
+founder's exact own outbox dependencies under a separately paid view.
+The recovered graph also seals the exact outstanding founder outbox original
+for its reserved mesh. Only acceptance by that driver yields a receipt that
+can advance the same outbox. Revocation, duplicate submission, and a mesh
+with no peers leave the original pending.
+An exact retry of a previously saved request resolves the original action and
+ordinal before transport starts. A changed body under the same request token
+returns a conflict, including after publication is checkpointed.
+
+The same restored graph can open a bounded ordinary-member subscription on
+the original TCP actor. The live receiver uses the selected Core, validates
+each signed original, and can replay up to four exact direct dependencies from
+the founder's outbox. Live and archived receive use the same authorization and
+archive seal as the warm founder. A retired subscription revokes live body
+access, while already covered history can still be opened under a fresh scope.
+
+The restored SDK can sign one ordinary action under an authenticated native
+MemberAction cut and the original live Core Admission. A different key
+purpose or a second Source with the same UI generation refuses. The request's
+timestamp and nonce remain bound to the SDK instance that drew them.
+
+New ordinary actions from the authenticated recovered founder pass through
+the shared two-phase outbox. The sign step rechecks the held founder files
+before entering the native key. Cancelling final admission leaves the original
+presealed action ready for the next authorized attempt. The saved receipt is
+resolved from the same outbox used by the founder before restart.
+
+The recovered founder can enter the original native Source book after vault
+authentication. Its row is paired with the selected physical vault and its
+reserved mesh. Preparing a key still requires a current admitted UI command
+from that vault. Source retirement drains the original save work and TCP actor.
+The desktop uses the same ordinary IPC and workers for the reopened founder.
+Its display name comes from the original sealed bootstrap debit. The recovered
+request responder returns only the exact covered Welcome.
+An outbox driver receipt retains its original cancellation scope. A new
+caller cannot checkpoint debt using an acknowledgement from a retired scope.
+
+Before the first Add, cold recovery can prove the original promoted genesis
+through the held pin, promotion seed, operational head, archive and directory
+page. An equal-byte replacement of a held head or any partial Add journal
+refuses. The independently paid epoch-zero SDK restores from the original
+sealed source and rechecks this proof before returning its closed graph.
 
 The stage-lifetime continuation is under validation. Native key drainage is
 being separated from retained CLOSED snapshot DATA: an actual completed Cell
@@ -202,18 +265,144 @@ Before freezing the Add parent it must wait for the exact existing unsigned,
 raw, lent or unresolved member request to finish through normal authenticated
 retry/save. Zero issued save Ends alone does not establish an empty lane.
 
+The warm native received-request check now verifies this negative on the
+original Host after matching the signed journal. It checks the lane request,
+actual save counters and the mounted outbox's exact context, including any
+unreconciled saved receipt. Busy state refuses without consuming custody.
+The regression saves and reconciles the same original member request before
+the Add preflight can succeed again. The future reservation writer must repeat
+the check at its covering edge.
+
+Sync can move the original warm node directly between Root's paid slots.
+It checks the source and destination first, then caches the governed owner
+without a fallible operation between the two moves. A refused or occupied
+destination leaves both owners in place. The new owner can lend the original
+genesis seed for Root's existing association check without exposing the SDK.
+
+App can reserve the native Add candidate's complete buffer and SDK metadata
+inventory from the mounted shared pool before committing a reservation. The
+SDK admission carries the real debit until its candidate ownership drains.
+The outcome codec shares the same snapshot cap. The SDK still checks the
+actual tree at entry. Root must acquire this payment before making durable
+progress on an Add request.
+
 An original physical Current guard must cover the exact request and parent,
 then the SAME SDK outcome, unsigned preimage, raw Header, governing history and
 response before selecting head2. A decoder or namespace4 descriptor cannot
 mint `SavedGovernedAdd`. The immutable dependency graph is:
 
-`Outcome` → `RawHeader` → governing record → `WelcomeIntent` → `RawWelcome`
+`Outcome` → `HeaderAttempt` → `RawHeader` → governing record → `WelcomeIntent` → `WelcomeAttempt` → `RawWelcome`
 → exact response → `Archive2` → `Head2`.
+
+The founder owner lends its exact cached RawHeader and RawWelcome signatures
+before materialization, including after a lost reply or a late native lock.
+The response view is available after materialization and borrows both bodies
+from the same completed MLS Cell. These loans give Root the original bytes
+for the immutable records. Saving and response release still require their
+own covering checks.
 
 The private snapshot encoding is noncanonical. Freeze the original Cell bytes
 once; equal epochs/authenticators do not authorize substituting another Cell
 or a later encoding. Keep archive1/head1 strict and introduce an explicit,
 separately invoiced format family rather than increasing their old caps.
+
+The outcome codec binds the exact SDK-entry ciphertext and seals the original
+completed snapshot, Commit, Welcome, GroupInfo and routing transfer together
+with the unsigned governing bytes. Sync lends these values from one operation
+before Header signing. The outcome has its own field caps and memory payment.
+Its decoder checks framing and lineage. The warm reservation writer retains
+that exact sealed frame for `text.add.outcome.v2`. It creates the file only
+once, checks the held file's prefix in bounded chunks, and covers the file and
+directory before rechecking the original Entry and Current. An orphan outcome
+blocks a reservation-only recovery classification. The native Host covers
+this record before entering Header signing. An independent reader prepays its
+own bounded buffer, authenticates the exact Entry and Outcome outside Current,
+then checks the same named file or observed absence under fresh Current. Its
+result is historical data. Recovery must verify the governing record and restored
+SDK state before selection.
+
+`text.add.header-attempt.v2` commits the exact sealed outcome and records
+possible Header key entry. `text.add.raw-header.v2` commits that same outcome
+and the exact attempt file. The independent reader verifies the recovered
+signature over the original outcome's signing bytes with the current founder
+key. An attempt with no Raw remains possible entry. A later Raw invalidates
+an earlier absence observation. Neither state authorizes a reader to sign.
+
+The native Host covers `text.add.welcome-intent.v2` against the exact signed
+governing record and checks the original request, MLS Welcome and sealed
+routing transfer. `text.add.welcome-attempt.v2` binds that exact sealed intent
+with a dedicated signing domain. The Host verifies the cached native
+signature against the same intent and signer before covering
+`text.add.raw-welcome.v2` against the original attempt. Each advance rechecks
+the original Current. The read-only recovery path checks the exact request,
+governing record, and Outcome before authenticating the Welcome intent. It
+classifies possible key entry separately from a verified cached signature.
+Fresh Current rechecks the held files and observed absences.
+
+After RawWelcome coverage the Host materializes the original response and
+covers `text.add.response.v2`. It links the exact RawWelcome ciphertext to
+the original signature, SDK Welcome, and sealed routing bytes. The reader
+reserves its own buffer and compares the recovered packet with the verified
+Welcome intent, signature and Outcome. Head2 selection and response release
+still require separate proofs.
+
+The immutable governed Add archive stores the exact encrypted request,
+Outcome, signing journal and response together. It links the prior selected
+Head and archive to the governing Header, state and completed SDK fingerprint.
+The Host covers it under the original Current before returning its file ID.
+This format leaves the ordinary archive caps unchanged and keeps the original
+records available after later retirement of the fixed Add journal.
+The archive also retains the exact old Head and archive frames. An
+independent recovery reader checks the original source context, both parent
+frames, every sealed Add record, and the signed request and response. It
+reproves the same selected Head2 and archive files under fresh Current before
+returning historical data. The bounded provider loader independently verifies
+the restored group's epoch, authenticator, founder device and exact active
+roster. Reinstalling a recovered SDK graph and its replayed Core state remains
+a separate recovery step.
+
+The first-Add selector requires the original generation-one head and epoch-one
+outcome. Journal authentication separately checks the Add's before-epoch and
+signed successor against the authenticated parent's Core replay.
+
+A subsequent Add has a version-three archive and Head. The archive retains
+the exact encrypted predecessor Head and names its immutable archive by ID.
+The previous archive stays in its own file. The new selector checks the same
+context, consecutive generation and epoch, and exact predecessor ciphertext.
+The replay verifier advances only after checking the complete signed journal
+and records the consumed nonce from that journal. It checks the exact
+predecessor Head and archive before advancing again. Cold recovery follows
+the named files back to the pinned first Add, then replays their signed
+journals forward. It rechecks the original file identities and archive digests
+before retaining the prefix, and matches the selected Header and state to the
+restored SDK. Physical staging and selection need their own writer admission.
+
+The Host stages `text.add.head-stage.v2` against that exact archive. The
+selector uses the established Head envelope with a new version. Prior
+readers recognize its MAC and refuse to interpret it as their operational
+head. Staging preserves the original selection. The Host's install path then
+checks the original Core candidate and SDK pair, replaces `head.bin`, and
+reproves the exact covered files. A late request cancellation leaves the
+original candidates available. An exact warm retry recognizes the same
+selected file and finishes installation without a second rename.
+
+`text.add.governing.v2` binds the exact Raw Header to the signed Admission
+and state image. The reader checks the existing public history encoding and
+compares every governing body with the original Outcome. It rejects a record
+without its Raw parent and rechecks the original file before handing back
+historical data. A later operation must still select this governing prefix.
+
+The warm Host freezes `text.add.welcome-intent.v2` from the original request,
+covered governing Header, Admission, and exact SDK Welcome and routing bodies.
+The file binds the exact governing ciphertext. The Welcome signing attempt,
+Raw, response coverage and final selection remain separate phases.
+
+The native regression runs one real Add on the original warm runtime with all
+three cuts issued by its actual native source. It covers and independently reads
+the original snapshot, checks that an earlier absence expires when a file appears,
+and verifies that malformed bytes stay in place on refusal. The test retires its closed native
+key custody through whole-Source retirement. Production still needs the owning dispatcher
+and recovery lifecycle before this path can handle incoming requests.
 
 Final installation must preflight the exclusive SDK pair outside writers,
 then validate the real covering receipt/Current/native source through stable
@@ -222,29 +411,32 @@ owner before the infallible MLS swap, then cache both MLS retired custody and
 installed evidence immediately. No hook, Result, IO or owning destructor may
 intervene in that successful tail. Dispose retired owners outside writers.
 
+Sync now preflights the exclusive install while lending the immutable fields
+of the same seed. App's Current check uses those fields with its original
+writer, source and payment. A Core refusal keeps the original MLS candidate
+intact. Successful Core selection caches its retired owner before the MLS
+swap, and Sync keeps both retired owners for disposal outside the guards.
+
 ### Lock and close cycle
 
-An idle Runtime-held candidate retains real native Ends. UI lock currently
-waits those counters while retaining canonical Sources and Runtime bodies.
-Connecting the new owner without cancellation cleanup would deadlock lock,
-unlock and full close. Whole-Source retirement has the analogous keys-before-
-Runtime cycle. There is no reachable Add owner today, so this is an integration
-requirement, not a current lock regression.
+Whole-Source retirement now loans an idle original runtime after its Source
+admission closes. It matches the actual permanently closed counter, retires
+the governed operation, and drops its private SDK candidate before the key
+Ends that operation owns. Outstanding external Ends still delay destruction of
+the whole runtime. The original durable records remain for recovery.
 
-Add a bounded capture of the ORIGINAL Runtime cells beside the original native
-retirement Job. After generation closure, it must borrow only idle runtimes,
-reconcile actual admitted work and dispose eligible cancelled Add custody
-outside every writer BEFORE waiting for key drainage. Do not use whole-Source
-`capture_retirement` for UI locking; it permanently closes Source scope.
-The capture must also cover Prepared and in-flight preparation: the frozen
-secret routing plaintext exists before AddSdk entry, when key Ends can still
-be zero. Zero counters alone cannot decide that no cleanup owner is needed.
+UI lock uses a separate cleanup pass that retains the live Source. Its
+coalesced job keeps a bounded capture of the original runtime collection
+alongside the exact closed UI counters. Before waiting on those counters,
+it borrows each idle runtime and retires only custody from that batch. An
+already-admitted partial SDK operation continues on its original Cell and
+End. The same capture survives an unpolled task or lost waiter. Busy runtime
+loans return before the next pass, including when zero Ends exist.
 
-Retain cleanup custody and retry progress on the SAME Job/Runtime across lost
-waiters, unpolled tasks and panics. Never replace the original mount/drain with
-an empty one. Active disk/SDK work and ambiguous durable debt must remain
-owned. Do not drop an End merely to make lock appear complete while retaining
-its covered secret candidate. Define a legal cleanup outcome for every phase.
+Terminal SDK failure still needs an owning recovery decision using the
+original durable Entry and any downstream files. UI lock preserves the
+existing candidate when that proof is unavailable. Production must reconcile
+admitted writes before retiring the operation that owns them.
 
 ### Old-reader fence
 
@@ -252,8 +444,78 @@ The reviewed group-work fence is a complete unsupported-version frame under
 the OLD WAL KDF/tag at `text.wal.stage.v1`, held continuously through SDK work
 until covered head2 itself makes old owning readers refuse. Old owning
 promotion/workspace/recovery paths preserve and refuse its authentic MAC.
-Historical metadata/DATA readers are not universally blocked. Actual held-file
-covering checks and pinned predecessor acceptance are still outstanding.
+Historical metadata readers may still open. The warm writer has its own
+fixed-name creation and covering barriers. The Host retains one paid
+reservation, its exact request, selected parent and SDK debit before the
+first write. It reauthenticates and rechecks the original signed invite journal
+on exact retries. The production dispatcher still has to drive this owner
+through the later phases.
+
+The Host's SDK phase covers the exact Entry before calling the original Node
+and saves its cached outcome before signing. Its Header phase borrows the
+same original seed and a disjoint pending signing slot, so it can hold the
+actual Current through the covered attempt and key entry. Exact retries use
+the cached signature for Raw coverage.
+
+The fence codec uses the existing outer WAL tag and key with logical version 2
+and a separate governed Add role. Its four fixed-width commitments cover the
+original storage context, the exact selected Head ciphertext, the invitation
+ID, and the complete authenticated JoinRequest wire frame. That last digest
+includes both signed bindings and the exact KeyPackage. The ordinary WAL
+decoder still requires version 1. Seed and WAL scratch checks share the existing
+known-key MAC test, with their separate size caps. A successful MAC alone
+creates neither a held file nor a reservation receipt. The codec regressions
+compare the old envelope decoder and the new parser and exercise exact request,
+parent and context replacement, torn frames and authenticated wrong roles.
+
+Before SDK Entry the writer covers `text.add.request.v2`. It contains the
+exact signed request and KeyPackage wire frame, sealed to the original fence
+ciphertext. A fresh reader can match the reservation to the selected parent
+and recover the signed request without asking the peer to resend it. Older
+reservations without these bytes remain observable for refusal and recovery
+classification. Their original operation still needs separately verified input.
+
+A separate read owner reserves its buffers and physical lease before Current.
+It captures the fixed stage under the governed parent, authenticates outside
+writers, then rechecks the same file handle, exact bytes, named directory and
+original Current. The file test covers both in-place mutation and replacement
+with identical bytes. The reader does not create or repair a fence.
+
+The warm writer freezes one ciphertext and records the actual create-new file
+before its first write. It continues a partial prefix only through that held
+file. It refuses an equal preexisting file or a missing created file. File and
+directory barriers precede a fresh Current and same-file check. A covered
+frame is never rewritten on retry. The writer cannot clear a reservation or
+enter the SDK. Cold abort and entry-marker recovery need their own typed path.
+The native regression opens the actual original Current and covers the same
+file twice after the earlier member request has settled.
+
+The SDK-entry record has a separate key and tag and commits the complete
+encrypted fence. Resealing identical reservation labels produces a different
+binding. The record represents possible SDK entry once durably covered and
+cannot grant a fresh attempt. The warm writer covers it through its own held
+file before verifying the same original fence and Current again. The native
+fixture covers both records across the governed-node handoff. Production SDK
+dispatch and cold startup integration remain open.
+
+The read owner distinguishes a reservation with a proven absent SDK-entry
+record from one with a complete authenticated record. It repeats the exact
+file or absence check under fresh Current after authentication. A malformed,
+torn or foreign entry refuses. This status alone grants no cleanup or restart
+permission. The native fixture verifies both results through independent reads.
+
+Genesis member signing now reproves both founder WAL absences at the key
+edge, even if its verifier is already warm. The invitation journal writer
+repeats the same absence checks. The existing final member-save edge is
+IO-free. Before covering a fence, the Add owner still has to exclude pending
+requests and detached member saves under their actual ownership boundaries.
+
+Focused CI gives the old binary at `3d3bce63` the exact fixture emitted by
+the new codec. The predecessor must authenticate the MAC, refuse the new WAL
+version and still open an ordinary V1 frame. Its Windows member owner must
+also preserve the stage and selected head before first signing, then sign
+the same request after that test fixture removes the stage. The separate
+current-branch regression covers an already-initialized member verifier.
 
 ## Evidence and limits
 

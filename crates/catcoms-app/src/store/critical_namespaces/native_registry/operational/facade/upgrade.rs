@@ -1,9 +1,16 @@
 //! Owning native factory continuation. The genuine index2 owner moves through
 //! its existing paid upgrade and becomes selected3 before any Source or SDK is
 //! created. Errors retain this SAME original; no alternate opener is attempted.
+catcoms_rt::redacted_debug! {
+    NativeTextJoinedVaultUpgrade;
+}
+
 use super::super::upgrade_source::{self, owning};
 use super::*;
 use crate::store::critical_namespaces::native_registry::lifecycle::preparation;
+use crate::store::persistence::governance_layout::joined::{
+    shared_history::SharedHistoryDeclaration, JoinedPinDeclaration,
+};
 use catcoms_rt::CryptoRngCore;
 
 #[cfg(test)]
@@ -49,6 +56,37 @@ impl std::fmt::Debug for NativeTextGovernanceUpgrade {
     }
 }
 impl NativeTextGovernanceUpgrade {
+    /// Continue this original unexposed mount into joined-aware native
+    /// storage. Only the exact completed governed receiver can enter.
+    pub fn prepare_joined_vault(self) -> Result<NativeTextJoinedVaultUpgrade, Self> {
+        let Some(Phase::Selected3(index)) = self
+            .original
+            .as_ref()
+            .and_then(|original| original.phase.as_ref())
+        else {
+            return Err(self);
+        };
+        if !self.receiver.is_complete()
+            || !index.native_row_count_data().is_ok_and(|count| count == 0)
+            || index.require_governance_completion(&self.receiver).is_err()
+        {
+            return Err(self);
+        }
+        let invoice = 2 * std::mem::size_of::<NativeTextJoinedVaultUpgrade>() + 4096;
+        let Ok(metadata) =
+            CriticalCatalogReadPool::new(invoice).and_then(|pool| pool.try_reserve(invoice))
+        else {
+            return Err(self);
+        };
+        Ok(NativeTextJoinedVaultUpgrade {
+            joined: None,
+            history: None,
+            complete: false,
+            original: self,
+            _metadata: metadata,
+        })
+    }
+
     /// Advance this original declaration outside native writers. Any refusal
     /// keeps its cached outputs, files, payments and close owners in this value;
     /// retry it rather than reopening or preparing a replacement declaration.
@@ -84,6 +122,96 @@ impl NativeTextGovernanceUpgrade {
         };
         // All fallible index/marker work and final ORIGINAL witness checks
         // precede this move. Do not call ordinary into_vault and repeat IO.
+        Ok(original.take_ready_vault())
+    }
+}
+
+/// Constructor-only handoff over the same keystore, physical vault, native
+/// index and UI admission. The governed facade has never been exposed.
+pub struct NativeTextJoinedVaultUpgrade {
+    joined: Option<JoinedPinDeclaration>,
+    history: Option<SharedHistoryDeclaration>,
+    complete: bool,
+    original: NativeTextGovernanceUpgrade,
+    _metadata: CatalogReadReservation,
+}
+
+impl NativeTextJoinedVaultUpgrade {
+    /// Finish the original declaration outside all native guards.
+    pub fn retry(&mut self, rng: &mut impl CryptoRngCore) -> Result<(), AppError> {
+        if !self.complete {
+            let Some(Phase::Selected3(index)) = self
+                .original
+                .original
+                .as_mut()
+                .and_then(|original| original.phase.as_mut())
+            else {
+                return Err(refused());
+            };
+            index.advance_joined_pin_layout(
+                &mut self.joined,
+                Some(&mut self.original.receiver),
+                rng,
+            )?;
+            self.complete = true;
+        }
+        self.require_complete()
+    }
+
+    /// Fresh desktop vaults select their archive before making any native
+    /// row available. Both declarations keep the same owning vault session.
+    pub fn retry_with_shared_history(
+        &mut self,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        if self.history.is_none() {
+            self.retry(rng)?;
+        }
+        let Some(Phase::Selected3(index)) = self
+            .original
+            .original
+            .as_mut()
+            .and_then(|original| original.phase.as_mut())
+        else {
+            return Err(refused());
+        };
+        index.advance_shared_history_layout(&mut self.joined, &mut self.history, rng)?;
+        self.require_complete()
+    }
+
+    fn require_complete(&self) -> Result<(), AppError> {
+        if !self.complete {
+            return Err(refused());
+        }
+        let Some(Phase::Selected3(index)) = self
+            .original
+            .original
+            .as_ref()
+            .and_then(|original| original.phase.as_ref())
+        else {
+            return Err(refused());
+        };
+        if index.native_row_count_data()? != 0 {
+            return Err(refused());
+        }
+        if let Some(history) = &self.history {
+            return index.require_shared_history_layout(history);
+        }
+        index.require_joined_pin_layout(self.joined.as_ref().ok_or_else(refused)?)
+    }
+
+    /// Reprove the held new catalog and move the same native owner.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The original upgrade and its paid reservations return intact on refusal."
+    )]
+    pub fn into_vault(mut self) -> Result<NativeTextVault, Self> {
+        if self.require_complete().is_err() {
+            return Err(self);
+        }
+        let Some(original) = self.original.original.take() else {
+            return Err(self);
+        };
         Ok(original.take_ready_vault())
     }
 }
@@ -518,6 +646,7 @@ pub(in crate::store::critical_namespaces::native_registry) mod tests {
         let prepared = f
             .vault
             .prepare_native_authentication(foreign.prepare().unwrap());
+        assert!(!prepared.is_capture_busy_cached());
         assert!(
             prepared.work.is_some(),
             "the original prepaid capture remains separate from later fee validation"
@@ -534,6 +663,7 @@ pub(in crate::store::critical_namespaces::native_registry) mod tests {
         let prepared = f
             .vault
             .prepare_native_authentication(f.budget.prepare().unwrap());
+        assert!(prepared.is_capture_busy_cached());
         assert_eq!(
             f.pool.charged_for_test(),
             baseline + super::super::super::native_ui::INVOCATION_BYTES,

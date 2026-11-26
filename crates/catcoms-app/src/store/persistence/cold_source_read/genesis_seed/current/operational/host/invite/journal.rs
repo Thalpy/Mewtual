@@ -1,15 +1,18 @@
 //! One immutable, covered unsigned intent inside the original text.pages.
 //!
-//! This initial closed profile has ONE persistent object/8KiB quota. It never
-//! replaces, retires or deletes it. A torn/unknown object blocks further work;
+//! One persistent intent is retained per selected parent. A torn or unknown
+//! object blocks further work on that parent;
 //! only the same warm owner may finish its own exact partially written frame.
-//! There is no key-attempt state, signature, SavedInvite or cold signer adopter.
+//! The signing stages use separate immutable files under the same held directory.
 use super::*;
+use crate::store::critical_namespaces::current_layout::V2TextCurrentGroupGuard;
+use crate::store::persistence::v2_text::TextHeadIdData;
 use catcoms_crypto::{seal, unseal};
 use catcoms_replication::chat::join_bindings::InviteBindingSpecData;
 use catcoms_storage::kept::{session_at, session_id, SessionAt, SessionId};
 use catcoms_storage::VaultPhysicalWorkLease;
 use catcoms_wire::{Decoder, Encoder};
+use std::borrow::Cow;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -19,11 +22,50 @@ const NAME: &str = "invite.intent.v1";
 const TAG: &[u8] = b"mewtual/private-chat/invite-intent/v1\0";
 const KEY_DOMAIN: &str = "mewtual/private-chat/invite-intent-key/v1";
 const CONTEXT_DOMAIN: &[u8] = b"mewtual/private-chat/invite-context/v1\0";
+const SELECTED_CONTEXT_DOMAIN: &str = "mewtual/private-chat/invite-context-selected/v2";
+const MAX_NAME: usize = "invite.attempt.v2.".len() + 64;
 const OBJECTS: u32 = 1;
 const BYTES: u32 = 8192;
 const MAX_PLAIN: usize = 4096;
 const MAX_FRAME: usize = MAX_PLAIN + 40;
 const MAX_PATH: usize = 32 * 1024 + 256;
+mod recovery;
+mod signing;
+pub(super) use recovery::InviteRecoveryRead;
+pub(super) use signing::{InviteSigningJournal, SIGNING_JOURNAL_BYTES};
+
+type Pages = (PathBuf, File, SessionId);
+
+struct InviteJournalNames {
+    intent: Cow<'static, str>,
+    attempt: Cow<'static, str>,
+    raw: Cow<'static, str>,
+}
+
+impl InviteJournalNames {
+    fn for_parent(parent: Option<TextHeadIdData>) -> Self {
+        if let Some(parent) = parent {
+            let suffix = hex::encode(parent.as_bytes());
+            Self {
+                intent: format!("invite.intent.v2.{suffix}").into(),
+                attempt: format!("invite.attempt.v2.{suffix}").into(),
+                raw: format!("invite.raw.v2.{suffix}").into(),
+            }
+        } else {
+            Self {
+                intent: NAME.into(),
+                attempt: signing::ATTEMPT.into(),
+                raw: signing::RAW.into(),
+            }
+        }
+    }
+}
+
+impl Default for InviteJournalNames {
+    fn default() -> Self {
+        Self::for_parent(None)
+    }
+}
 
 #[cfg(test)]
 std::thread_local! {
@@ -62,18 +104,72 @@ impl Intent {
 /// Files drain before the original vault's physical-work lease.
 #[derive(Default)]
 pub(super) struct InviteIntentJournal {
-    pages: Option<(PathBuf, File, SessionId)>,
-    path: Option<PathBuf>,
+    pages: Option<Pages>,
     context: Option<[u8; 32]>,
-    file: Option<(File, SessionId)>,
-    frame: Option<Zeroizing<Vec<u8>>>,
+    object: JournalFile,
+    parent: Option<TextHeadIdData>,
+    names: InviteJournalNames,
     intent: Option<Intent>,
     observed_absent: bool,
     observed_present: bool,
-    create_entered: bool,
     loaded: bool,
     covered: bool,
     _lease: Option<VaultPhysicalWorkLease>,
+}
+
+#[derive(Default)]
+struct JournalFile {
+    file: Option<(File, SessionId)>,
+    frame: Option<Zeroizing<Vec<u8>>>,
+    create_entered: bool,
+}
+
+fn require_pages((path, file, id): &Pages) -> Result<(), AppError> {
+    crate::store::persistence::v2_genesis_activation::require_directory_name(path, file, *id)
+}
+
+fn original_context(guard: &V2TextCurrentGroupGuard<'_, '_>) -> Result<[u8; 32], AppError> {
+    let (expected, genesis, nonce) = guard.original_genesis_context_data()?;
+    let encoded =
+        crate::store::critical_namespaces::archive_bootstrap::founder_codec::encode_context(
+            &expected.context,
+        )?;
+    let mut h = blake3::Hasher::new();
+    h.update(CONTEXT_DOMAIN);
+    h.update(&(encoded.len() as u64).to_be_bytes());
+    h.update(&encoded);
+    h.update(blake3::hash(genesis).as_bytes());
+    h.update(&nonce);
+    h.update(blake3::hash(guard.original_pin_data().2).as_bytes());
+    Ok(*h.finalize().as_bytes())
+}
+
+fn bound_context(
+    guard: &V2TextCurrentGroupGuard<'_, '_>,
+    parent: Option<TextHeadIdData>,
+) -> Result<[u8; 32], AppError> {
+    let genesis = original_context(guard)?;
+    if let Some(parent) = parent {
+        let mut hash = blake3::Hasher::new_derive_key(SELECTED_CONTEXT_DOMAIN);
+        hash.update(&genesis);
+        hash.update(parent.as_bytes());
+        Ok(*hash.finalize().as_bytes())
+    } else {
+        Ok(genesis)
+    }
+}
+
+fn open_pages(guard: &V2TextCurrentGroupGuard<'_, '_>) -> Result<Pages, AppError> {
+    let (target, _, _) = guard.target_directory_data();
+    if target.as_os_str().len() + 1 + "text.pages".len() + 1 + MAX_NAME > MAX_PATH {
+        return Err(refused());
+    }
+    let pages = target.join("text.pages");
+    let file = crate::store::persistence::open_archive_directory(&pages)?;
+    let id = session_id(&file).map_err(io)?;
+    let pages = (pages, file, id);
+    require_pages(&pages)?;
+    Ok(pages)
 }
 
 fn io(error: impl std::fmt::Display) -> AppError {
@@ -153,48 +249,36 @@ fn decode(plain: &[u8], context: [u8; 32]) -> Result<Intent, AppError> {
 }
 
 impl InviteIntentJournal {
+    pub(super) fn for_parent(parent: Option<TextHeadIdData>) -> Self {
+        Self {
+            parent,
+            names: InviteJournalNames::for_parent(parent),
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn parent_data(&self) -> Option<TextHeadIdData> {
+        self.parent
+    }
+
     fn bind(
         &mut self,
         guard: &crate::store::critical_namespaces::current_layout::V2TextCurrentGroupGuard<'_, '_>,
     ) -> Result<(), AppError> {
-        let (expected, genesis, nonce) = guard.original_genesis_context_data()?;
-        let encoded =
-            crate::store::critical_namespaces::archive_bootstrap::founder_codec::encode_context(
-                &expected.context,
-            )?;
-        let mut h = blake3::Hasher::new();
-        h.update(CONTEXT_DOMAIN);
-        h.update(&(encoded.len() as u64).to_be_bytes());
-        h.update(&encoded);
-        h.update(blake3::hash(genesis).as_bytes());
-        h.update(&nonce);
-        h.update(blake3::hash(guard.original_pin_data().2).as_bytes());
-        let context = *h.finalize().as_bytes();
+        let context = bound_context(guard, self.parent)?;
         if self.context.is_some_and(|original| original != context) {
             return Err(refused());
         }
         if self.pages.is_none() {
-            let (target, _, _) = guard.target_directory_data();
-            if target.as_os_str().len() + 1 + "text.pages".len() + 1 + NAME.len() > MAX_PATH {
-                return Err(refused());
-            }
-            let pages = target.join("text.pages");
             let lease = guard.store()._session.retain_for_physical_work();
-            let file = crate::store::persistence::open_archive_directory(&pages)?;
-            let id = session_id(&file).map_err(io)?;
-            crate::store::persistence::v2_genesis_activation::require_directory_name(
-                &pages, &file, id,
-            )?;
-            self.path = Some(pages.join(NAME));
-            self.pages = Some((pages, file, id));
+            self.pages = Some(open_pages(guard)?);
             self.context = Some(context);
             self._lease = Some(lease);
         }
-        self.require_pages()
+        require_pages(self.pages()?)
     }
-    fn require_pages(&self) -> Result<(), AppError> {
-        let (path, file, id) = self.pages.as_ref().ok_or_else(refused)?;
-        crate::store::persistence::v2_genesis_activation::require_directory_name(path, file, *id)
+    fn pages(&self) -> Result<&Pages, AppError> {
+        self.pages.as_ref().ok_or_else(refused)
     }
     fn key(store: &crate::store::ServerStore) -> Result<Zeroizing<[u8; 32]>, AppError> {
         let key = Zeroizing::new(store.keys.db_key()?);
@@ -211,28 +295,24 @@ impl InviteIntentJournal {
         route: &[u8],
     ) -> Result<Option<([u8; 32], u64)>, AppError> {
         self.bind(guard)?;
-        if self.intent.is_some() {
-            self.intent.as_ref().unwrap().result(request, route)?;
+        if let Some(intent) = &self.intent {
+            let result = intent.result(request, route)?;
             if !self.covered && !self.loaded {
                 return Ok(None);
             }
-            self.sync()?;
+            self.object
+                .sync(self.pages.as_ref().ok_or_else(refused)?, &self.names.intent)?;
             self.covered = true;
-            return self
-                .intent
-                .as_ref()
-                .unwrap()
-                .result(request, route)
-                .map(Some);
+            return Ok(Some(result));
         }
         if self.observed_absent {
             return Ok(None);
         }
-        let path = self.path.as_ref().ok_or_else(refused)?;
-        match fs::symlink_metadata(path) {
+        let path = self.pages()?.0.join(&*self.names.intent);
+        match fs::symlink_metadata(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound && !self.observed_present => {
                 self.observed_absent = true;
-                self.require_pages()?;
+                require_pages(self.pages()?)?;
                 return Ok(None);
             }
             Ok(metadata) => {
@@ -250,22 +330,23 @@ impl InviteIntentJournal {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
-            .open(path)
+            .open(&path)
             .map_err(io)?;
         let id = session_id(&file).map_err(io)?;
-        named(path, &file, id)?;
+        named(&path, &file, id)?;
         let mut file = file;
         let frame = read(&mut file)?;
-        named(path, &file, id)?;
+        named(&path, &file, id)?;
         let key = Self::key(guard.store())?;
         let plain = Zeroizing::new(unseal(&key, &crate::store::unframe(&frame)?)?);
         let intent = decode(&plain, self.context.ok_or_else(refused)?)?;
         intent.result(request, route)?;
-        self.file = Some((file, id));
-        self.frame = Some(frame);
+        self.object.file = Some((file, id));
+        self.object.frame = Some(frame);
         self.intent = Some(intent);
         self.loaded = true;
-        self.sync()?;
+        self.object
+            .sync(self.pages.as_ref().ok_or_else(refused)?, &self.names.intent)?;
         self.covered = true;
         Ok(Some(self.intent.as_ref().unwrap().result(request, route)?))
     }
@@ -284,21 +365,22 @@ impl InviteIntentJournal {
                 return Err(refused());
             }
             let mut e = Encoder::with_capacity(MAX_PLAIN);
-            e.put_bytes(TAG);
+            e.put_bytes(TAG).map_err(|_| refused())?;
             e.put_u16(1);
             e.put_u32(OBJECTS);
             e.put_u32(BYTES);
-            e.put_bytes(&self.context.ok_or_else(refused)?);
-            e.put_bytes(&request.token);
+            e.put_bytes(&self.context.ok_or_else(refused)?)
+                .map_err(|_| refused())?;
+            e.put_bytes(&request.token).map_err(|_| refused())?;
             e.put_u64(request.lifetime_ms);
-            e.put_bytes(route);
-            e.put_bytes(preimage);
+            e.put_bytes(route).map_err(|_| refused())?;
+            e.put_bytes(preimage).map_err(|_| refused())?;
             let plain = Zeroizing::new(e.finish());
             let intent = decode(&plain, self.context.ok_or_else(refused)?)?;
             intent.result(request, route)?;
             let key = Self::key(store)?;
             let sealed = seal(&key, &plain, rng)?;
-            self.frame = Some(Zeroizing::new(crate::store::frame(&sealed)));
+            self.object.frame = Some(Zeroizing::new(crate::store::frame(&sealed)));
             self.intent = Some(intent);
         }
         let intent = self.intent.as_ref().ok_or_else(refused)?;
@@ -323,14 +405,36 @@ impl InviteIntentJournal {
         if intent.preimage != preimage {
             return Err(refused());
         }
-        self.write_same()?;
-        self.sync()?;
+        self.object
+            .cover(self.pages.as_ref().ok_or_else(refused)?, &self.names.intent)?;
         self.covered = true;
         Ok(result)
     }
-    fn write_same(&mut self) -> Result<(), AppError> {
-        self.require_pages()?;
-        let path = self.path.as_ref().ok_or_else(refused)?;
+
+    fn require_original(&mut self) -> Result<(), AppError> {
+        if !self.covered || self.loaded || !self.object.create_entered {
+            return Err(refused());
+        }
+        self.object
+            .require_exact(self.pages.as_ref().ok_or_else(refused)?, &self.names.intent)
+    }
+}
+
+impl JournalFile {
+    fn commitment(&self) -> Result<[u8; 32], AppError> {
+        let frame = self.frame.as_ref().ok_or_else(refused)?;
+        Ok(*blake3::hash(frame).as_bytes())
+    }
+
+    fn cover(&mut self, pages: &Pages, name: &str) -> Result<(), AppError> {
+        self.write_same(pages, name)?;
+        self.sync(pages, name)
+    }
+
+    fn write_same(&mut self, pages: &Pages, name: &str) -> Result<(), AppError> {
+        let frame = self.frame.as_ref().ok_or_else(refused)?;
+        require_pages(pages)?;
+        let path = pages.0.join(name);
         if self.file.is_none() {
             if self.create_entered {
                 return Err(refused());
@@ -340,16 +444,15 @@ impl InviteIntentJournal {
                 .read(true)
                 .write(true)
                 .create_new(true)
-                .open(path)
+                .open(&path)
                 .map_err(io)?;
             let id = session_id(&file).map_err(io)?;
             self.file = Some((file, id));
         }
         let (file, id) = self.file.as_mut().ok_or_else(refused)?;
-        named(path, file, *id)?;
-        let frame = self.frame.as_ref().ok_or_else(refused)?;
-        let present = read(file)?;
-        if present.len() > frame.len() || frame[..present.len()] != present[..] {
+        named(&path, file, *id)?;
+        let present = read_capped(file, frame.len())?;
+        if !frame.starts_with(&present) {
             return Err(refused());
         }
         file.seek(SeekFrom::End(0)).map_err(io)?;
@@ -360,39 +463,43 @@ impl InviteIntentJournal {
             return Err(refused());
         }
         file.write_all(&frame[present.len()..]).map_err(io)?;
-        named(path, file, *id)?;
-        self.require_pages()
+        named(&path, file, *id)?;
+        require_pages(pages)
     }
-    fn require_exact(&mut self) -> Result<(), AppError> {
-        self.require_pages()?;
-        let path = self.path.as_ref().ok_or_else(refused)?;
+    fn require_exact(&mut self, pages: &Pages, name: &str) -> Result<(), AppError> {
+        require_pages(pages)?;
+        let path = pages.0.join(name);
         let (file, id) = self.file.as_mut().ok_or_else(refused)?;
-        named(path, file, *id)?;
-        if read(file)?.as_slice() != self.frame.as_deref().ok_or_else(refused)?.as_slice() {
+        named(&path, file, *id)?;
+        let frame = self.frame.as_deref().ok_or_else(refused)?;
+        if read_capped(file, frame.len())?.as_slice() != frame.as_slice() {
             return Err(refused());
         }
-        named(path, file, *id)?;
-        self.require_pages()
+        named(&path, file, *id)?;
+        require_pages(pages)
     }
-    fn sync(&mut self) -> Result<(), AppError> {
-        self.require_exact()?;
+    fn sync(&mut self, pages: &Pages, name: &str) -> Result<(), AppError> {
+        self.require_exact(pages, name)?;
         self.file
             .as_ref()
             .ok_or_else(refused)?
             .0
             .sync_all()
             .map_err(io)?;
-        let (pages, _, _) = self.pages.as_ref().ok_or_else(refused)?;
-        crate::store::persistence::sync_directory(pages).map_err(io)?;
-        self.require_exact()
+        crate::store::persistence::sync_directory(&pages.0).map_err(io)?;
+        self.require_exact(pages, name)
     }
 }
 
 /// A single capped buffer and EOF probe. Empty is permitted only so the SAME
 /// warm writer can finish its own prefix; lookup rejects it before this read.
 fn read(file: &mut File) -> Result<Zeroizing<Vec<u8>>, AppError> {
+    read_capped(file, MAX_FRAME)
+}
+
+fn read_capped(file: &mut File, maximum: usize) -> Result<Zeroizing<Vec<u8>>, AppError> {
     let metadata = file.metadata().map_err(io)?;
-    if !regular(&metadata) || metadata.len() > MAX_FRAME as u64 {
+    if !regular(&metadata) || metadata.len() > maximum as u64 {
         return Err(refused());
     }
     let length = metadata.len() as usize;

@@ -70,6 +70,11 @@ pub(in crate::store) struct IndexCommitIo {
     network: Option<
         std::sync::Arc<crate::store::persistence::native_registry::network::NetworkDependency>,
     >,
+    joined: Option<
+        std::sync::Arc<
+            crate::store::persistence::governance_layout::joined::JoinedRegistrationDependency,
+        >,
+    >,
     #[cfg(test)]
     retirement: Option<RetirementObservation>,
 }
@@ -98,6 +103,7 @@ impl IndexCommitIo {
             complete: false,
             candidate: proof.candidate(),
             network: proof.take_network(),
+            joined: proof.take_joined(),
             #[cfg(test)]
             retirement: None,
         })
@@ -137,6 +143,7 @@ impl IndexCommitIo {
             complete: false,
             candidate: proof.candidate(),
             network: proof.take_network(),
+            joined: proof.take_joined(),
             #[cfg(test)]
             retirement: None,
         })
@@ -169,9 +176,29 @@ impl IndexCommitIo {
             _ => Err(denied()),
         }
     }
-    fn require_network(&self, store: &ServerStore) -> Result<(), AppError> {
+    pub(in crate::store) fn require_joined_identity(
+        &self,
+        expected: Option<
+            &std::sync::Arc<
+                crate::store::persistence::governance_layout::joined::JoinedRegistrationDependency,
+            >,
+        >,
+    ) -> Result<(), AppError> {
+        match (&self.joined, expected) {
+            (None, None) => Ok(()),
+            (Some(original), Some(expected)) if std::sync::Arc::ptr_eq(original, expected) => {
+                Ok(())
+            }
+            _ => Err(denied()),
+        }
+    }
+
+    fn require_dependencies(&self, store: &ServerStore) -> Result<(), AppError> {
         if let Some(network) = &self.network {
             network.require(store)?;
+        }
+        if let Some(joined) = &self.joined {
+            joined.require(store)?;
         }
         Ok(())
     }
@@ -183,7 +210,7 @@ impl IndexCommitIo {
             return Err(denied());
         }
         self.original.require(store)?;
-        self.require_network(store)?;
+        self.require_dependencies(store)?;
         require_static(&self.original, store)
     }
     pub(in crate::store) fn commit(
@@ -198,7 +225,7 @@ impl IndexCommitIo {
             return Err(denied());
         }
         require_static(&self.original, store)?;
-        self.require_network(store)?;
+        self.require_dependencies(store)?;
         let stage = path(store, true, native::INDEX_STAGE_NAME)?;
         let selected = path(store, true, native::INDEX_NAME)?;
         if !self.promoted {
@@ -225,7 +252,7 @@ impl IndexCommitIo {
             held(&stage, self.stage.as_ref().ok_or_else(denied)?)?;
             self.original.base.require_directories(store)?;
             self.original.expected_current.require(store)?;
-            self.require_network(store)?;
+            self.require_dependencies(store)?;
             fs::rename(&stage, &selected).map_err(io)?;
             self.promoted = true; // Visible progress precedes fallible barriers.
             trip(Fault::IndexRename)?;
@@ -238,7 +265,7 @@ impl IndexCommitIo {
         exact(&selected, output, candidate)?;
         absent(&stage)?;
         trip(Fault::Index3Covered)?;
-        self.require_network(store)?;
+        self.require_dependencies(store)?;
         self.complete = true;
         Ok(())
     }
@@ -258,7 +285,7 @@ impl IndexCommitIo {
             candidate,
         )?;
         absent(&path(store, true, native::INDEX_STAGE_NAME)?)?;
-        self.require_network(store)?;
+        self.require_dependencies(store)?;
         self.original.expected_current.require(store)
     }
     #[cfg(test)]

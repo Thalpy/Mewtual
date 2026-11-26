@@ -1,5 +1,9 @@
 //! Closed initial V2 DATA/resource reconstruction. No legacy synchronizer, runnable scheduler,
 //! Fresh decoder, SDK getter, Current receipt or positive publication capability is exposed.
+catcoms_rt::redacted_debug! {
+    V2GenesisSourceFields<'_>;
+}
+
 use super::*;
 use crate::{
     chat_scope::{OriginalFounderObservation, VerifiedFreshChatAdmission},
@@ -27,8 +31,11 @@ mod invite;
 mod ordinary_member;
 #[cfg(not(target_arch = "wasm32"))]
 pub use governance::{
-    PreparedV2FounderGovernanceNode, RetiredV2FounderAddNativeCustody, V2FounderAddNativeStage,
-    V2FounderAddPreparationRefusal, V2FounderAddRequestData, V2FounderGovernanceNegative,
+    PreparedV2FounderAddInstall, PreparedV2FounderGovernanceNode, PreparedV2FounderRecoveredAdd,
+    PreparedV2FounderRemoveInstall, RetiredV2FounderAddInstall, RetiredV2FounderAddNativeCustody,
+    RetiredV2FounderRemoveInstall, V2FounderAddNativeStage, V2FounderAddOutcomeData,
+    V2FounderAddPreparationRefusal, V2FounderAddRequestData, V2FounderAddSigning,
+    V2FounderGovernanceNegative, V2FounderRemoveOutcomeData, V2FounderRemoveSigning,
     V2InstalledFounderAddData, FOUNDER_GOVERNANCE_DATA_BYTES, MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES,
 };
 #[cfg(not(target_arch = "wasm32"))]
@@ -127,11 +134,30 @@ impl std::fmt::Debug for OriginalV2GenesisSeedObservation {
 impl OriginalV2GenesisSeedObservation {
     /// No allocation, SDK/codec operation, caller callback, lock or ownership reconstruction.
     pub fn require_same_seed_data(&self, seed: &UnboundV2GenesisSeed) -> Result<(), SyncError> {
+        self.require_same_source_fields(seed.source_fields())
+    }
+
+    /// The exact same process-local seed identity, with no SDK pair borrow.
+    pub fn require_same_source_fields(
+        &self,
+        fields: V2GenesisSourceFields<'_>,
+    ) -> Result<(), SyncError> {
         match self.identity.upgrade() {
-            Some(original) if Arc::ptr_eq(&original, &seed.body.identity) => Ok(()),
+            Some(original) if Arc::ptr_eq(&original, fields.identity) => Ok(()),
             _ => Err(unavailable()),
         }
     }
+}
+
+/// A borrow of the original metadata and identity fields. Host source proof
+/// can hold the same identity while the original SDK pair is exclusively loaned.
+#[derive(Clone, Copy)]
+pub struct V2GenesisSourceFields<'a> {
+    source: BootstrapSourceId,
+    context: &'a BootstrapSourceContextData,
+    genesis: &'a codec::VerifiedGenesisData,
+    metadata: &'a GenesisMetadata,
+    identity: &'a Arc<()>,
 }
 
 /// Borrowed verified public/label DATA. Neither this view nor its fields certify a saved root,
@@ -158,10 +184,26 @@ impl std::fmt::Debug for V2GenesisSeedData<'_> {
     }
 }
 impl SeedBody {
-    fn data(&self) -> V2GenesisSeedData<'_> {
-        V2GenesisSeedData {
+    fn source_fields(&self) -> V2GenesisSourceFields<'_> {
+        V2GenesisSourceFields {
             source: self.source,
             context: &self.context,
+            genesis: &self.genesis,
+            metadata: &self.metadata,
+            identity: &self.identity,
+        }
+    }
+
+    fn data(&self) -> V2GenesisSeedData<'_> {
+        self.source_fields().data()
+    }
+}
+
+impl<'a> V2GenesisSourceFields<'a> {
+    pub fn data(self) -> V2GenesisSeedData<'a> {
+        V2GenesisSeedData {
+            source: self.source,
+            context: self.context,
             profile: &self.genesis.profile,
             admission: &self.genesis.admission,
             header: &self.genesis.header,
@@ -181,6 +223,29 @@ impl SeedBody {
             durable_version: self.metadata.durable_version,
             pending_version: self.metadata.pending_version,
         }
+    }
+
+    pub fn observe_original_seed_data(self) -> OriginalV2GenesisSeedObservation {
+        OriginalV2GenesisSeedObservation {
+            identity: Arc::downgrade(self.identity),
+        }
+    }
+
+    pub fn check_opened_source_data(
+        self,
+        source: &OpenedBootstrapSourceData,
+    ) -> Result<(), SyncError> {
+        if self.source != source.id
+            || self.context != source.view_data().context
+            || self.genesis.profile != source.genesis.profile
+            || self.genesis.admission != source.genesis.admission
+            || self.genesis.header != source.genesis.header
+            || self.genesis.image != source.genesis.image
+            || self.genesis.frontier != source.genesis.frontier
+        {
+            return Err(unavailable());
+        }
+        Ok(())
     }
 }
 
@@ -374,12 +439,14 @@ fn prepare_genesis_seed(
 impl UnboundV2GenesisSeed {
     /// Weak immutable original identity, not a positive graph/resource or Current capability.
     pub fn observe_original_seed_data(&self) -> OriginalV2GenesisSeedObservation {
-        OriginalV2GenesisSeedObservation {
-            identity: Arc::downgrade(&self.body.identity),
-        }
+        self.source_fields().observe_original_seed_data()
     }
     pub fn data(&self) -> V2GenesisSeedData<'_> {
         self.body.data()
+    }
+
+    pub fn source_fields(&self) -> V2GenesisSourceFields<'_> {
+        self.body.source_fields()
     }
 
     /// Allocation-free NEGATIVE DATA consistency against the exact opaque opened source.
@@ -393,17 +460,7 @@ impl UnboundV2GenesisSeed {
         &self,
         source: &OpenedBootstrapSourceData,
     ) -> Result<(), SyncError> {
-        if self.body.source != source.id
-            || self.body.context != *source.view_data().context
-            || self.body.genesis.profile != source.genesis.profile
-            || self.body.genesis.admission != source.genesis.admission
-            || self.body.genesis.header != source.genesis.header
-            || self.body.genesis.image != source.genesis.image
-            || self.body.genesis.frontier != source.genesis.frontier
-        {
-            return Err(unavailable());
-        }
-        Ok(())
+        self.source_fields().check_opened_source_data(source)
     }
 
     /// Negative/DATA attachment only, never publication. The actual host still checks its

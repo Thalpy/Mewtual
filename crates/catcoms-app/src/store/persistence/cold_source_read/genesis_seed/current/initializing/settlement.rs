@@ -90,7 +90,7 @@ impl<T, R> UnexposedRepairedV2GenesisCurrent<T, R> {
             .ok_or_else(critical_namespaces::refused)?;
         let owner = GenesisCurrentOwnerRef {
             source: GenesisSourceDataRef {
-                seed: node.borrow_genesis_seed_data(),
+                seed: node.borrow_genesis_seed_data().source_fields(),
                 resources,
             },
             task,

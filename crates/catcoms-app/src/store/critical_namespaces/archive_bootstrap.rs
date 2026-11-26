@@ -158,7 +158,7 @@ impl ServerStore {
             .current_layout_policy
             .as_ref()
             .and_then(|p| p.native_registry.as_ref())
-            .filter(|h| h.is_governed())
+            .filter(|h| h.is_governed() || h.uses_joined_pin_layout())
         {
             if self.governance_layout_policy.as_ref().is_none_or(|p|p.family != super::governance_namespace_codec::GovernanceCatalogFamily::NativeLifecycle) {
                 return Err(refused());

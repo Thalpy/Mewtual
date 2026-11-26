@@ -11,6 +11,8 @@ const MAX_KEY_PACKAGE_BYTES: usize = 32 * 1024;
 
 mod network_exchange;
 mod sealed_source;
+#[cfg(not(target_arch = "wasm32"))]
+mod v2;
 pub use network_exchange::{
     BoundOriginalJoinNetwork, OriginalJoinArmData, OriginalJoinNetworkContext,
     OriginalJoinNetworkStatus, OriginalJoinNetworkSubmission, OriginalJoinSavedArm,
@@ -18,6 +20,25 @@ pub use network_exchange::{
     ReturnedOriginalJoinContinuation, ReturnedOriginalJoinSubmission, SealedOriginalJoinInput,
 };
 pub use sealed_source::{RecoveredDirectJoinSource, SealedDirectJoinSource};
+#[cfg(not(target_arch = "wasm32"))]
+pub use v2::{
+    ClosedV2JoinedNode, CompletedV2JoinCandidate, NativeV2JoinKeyEntry, PreparedV2JoinRequest,
+    PreparedV2JoinedAdd, PreparedV2JoinedEviction, PreparedV2JoinedMembership,
+    PreparedV2JoinedPrefix, RecoveredV2JoinedOutcome, RecoveredV2PendingJoinSource,
+    RetiredV2JoinedAdd, RetiredV2JoinedEviction, SealedV2JoinedOutcome, SealedV2PendingJoinSource,
+    V2AdmissionStepData, V2FirstAddProofData, V2FirstJoinDeliveryData, V2JoinRequestPacketData,
+    V2JoinResponseData, V2JoinResponsePacketData, V2JoinedRuntimeInputs, V2MemberAddFrameData,
+    V2MemberAddRequestData, V2MemberContactData, V2MemberTransitionFrameData,
+    V2PendingJoinContextData, MAX_V2_FIRST_ADD_PROOF_BYTES, MAX_V2_FIRST_JOIN_DELIVERY_BYTES,
+    MAX_V2_JOIN_REQUEST_PACKET_BYTES, MAX_V2_JOIN_RESPONSE_PACKET_BYTES,
+    MAX_V2_MEMBER_ADD_FRAME_BYTES, MAX_V2_MEMBER_TRANSITION_FRAME_BYTES, V2_MEMBER_CONTACT_BYTES,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use v2::{
+    V2GoverningJoinDeliveryData, V2GoverningJoinPrefixData, V2GoverningJoinStepData,
+    V2JoinDeliveryData, MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES, MAX_V2_GOVERNING_JOIN_PREFIX_BYTES,
+    MAX_V2_GOVERNING_JOIN_STEPS,
+};
 
 /// Exact inert request labels for a local sealed-journal binding. No field can admit a device,
 /// reopen an admission or finish a join; the original actual source and mounted capture remain

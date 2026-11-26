@@ -34,15 +34,14 @@
 //! mount and the native session authority. The parent comes only from the namespace5 mount
 //! ([`MemberOutboxParentDirectory::from_mount`]).
 //!
-//! The dead-code allowance below remains for the publication half only: debt batches,
-//! submission marks and checkpoints are consumed by transport, which is not wired yet. Remove
-//! it when transport consumes them.
+//! Native joined sources use the original publication debt and checkpoint engine.
+//! Some diagnostic and recovery seams still have only focused test callers.
 #![allow(dead_code)]
 
 mod data;
 mod engine;
 mod frames;
-mod fs;
+pub(super) mod fs;
 mod production;
 mod transaction;
 mod trie;
@@ -50,12 +49,12 @@ mod trie;
 #[cfg(test)]
 mod tests;
 
-// Consumed by the primary's member-source/native integration, which is not yet wired.
+// Consumed by the mounted member sources and their recovery fixtures.
 #[allow(unused_imports)]
 pub(in crate::store) use data::{
-    MemberHeadId, MemberOutboxContextData, MemberOutboxContextId, MemberOutboxContextSpec,
-    MemberReceiptData, MemberRequestData, MemberRequestDigest, MemberRequestToken,
-    MemberSignedOriginal,
+    canonical_member_parents, MemberHeadId, MemberOutboxContextData, MemberOutboxContextId,
+    MemberOutboxContextSpec, MemberReceiptData, MemberRequestData, MemberRequestDigest,
+    MemberRequestToken, MemberSignedOriginal,
 };
 pub(in crate::store) use engine::history::{
     MemberHistoryItem, MemberHistoryPage, MemberHistoryRead, MEMBER_HISTORY_MAX_ITEMS,
@@ -83,6 +82,7 @@ pub(in crate::store) use transaction::{
     member_outbox_call_at_for_test, member_outbox_crash_at_for_test, member_outbox_disarm_for_test,
     MemberOutboxTestCut,
 };
+
 #[allow(unused_imports)]
 pub(in crate::store) use transaction::{
     AdmittedMemberAppend, AdmittedMemberCommit, MemberAppendAdmissionFacts, MemberAppendOutcome,

@@ -173,7 +173,8 @@ fn no_row_birth_keeps_same_owner_read_sdk_task_and_refunds_old_capture_before_in
     task.require_same_original(&current.task).unwrap();
     read.require_same_original(&current.resources.source)
         .unwrap();
-    sdk.require_same_seed_data(current.source().seed()).unwrap();
+    sdk.require_same_source_fields(current.source().seed())
+        .unwrap();
     assert_eq!(std::fs::read(&f.seed).unwrap(), f.original);
     assert!(f.pin.exists() && f.head.exists() && !f.stage.exists());
     drop(f.preparation);

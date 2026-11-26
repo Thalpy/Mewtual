@@ -42,6 +42,10 @@ pub(super) struct Reservation {
     status: Option<crate::store::NativeCreationStatusData>,
     active: Option<crate::store::NativeCreationStatusData>,
     actual_peer: Option<String>,
+    pub(super) join_ingress: Option<catcoms_net::NativeChatJoinIngress>,
+    pub(super) governing_ingress: Option<catcoms_net::NativeChatJoinIngress>,
+    pub(super) member_ingress: Option<catcoms_net::NativeChatMemberIngress>,
+    pub(super) dependency_lane: Option<catcoms_net::NativeChatMemberDependencies>,
     factory_started: bool,
     tcp: Option<catcoms_net::NativeTcpPreparation>,
     transport_build: TransportBuild,
@@ -85,26 +89,12 @@ impl Reservation {
         {
             return Err(refused());
         }
-        let mut plan = Encoder::with_capacity(1024);
-        plan.put_bytes(b"mewtual/chat/native-invite-routing-plan/v2\0")
-            .map_err(|_| refused())?;
-        plan.put_u16(2);
-        for bytes in [
+        crate::store::native_text_invite::encode_reservation(
             binding.group_data(),
-            public.public_key_data().as_slice(),
-            public.peer_id_data().as_bytes(),
-            public.commitment_data().as_slice(),
-        ] {
-            plan.put_bytes(bytes).map_err(|_| refused())?;
-        }
-        plan.put_u16(1); // TCP reservation; this is not a verified dial address
-        plan.put_u16(self.port);
-        plan.put_u32(0); // no certified public contact addresses
-        let plan = plan.finish();
-        if plan.len() > 1024 || plan.capacity() > 1024 {
-            return Err(refused());
-        }
-        Ok(plan)
+            public,
+            self.port,
+        )
+        .map_err(|_| refused())
     }
     /// Negative-only observation of this original preparation. No transport,
     /// constructor or passive physical custody is exposed to cleanup.
@@ -127,6 +117,10 @@ impl Reservation {
             status: None,
             active: None,
             actual_peer: None,
+            join_ingress: None,
+            governing_ingress: None,
+            member_ingress: None,
+            dependency_lane: None,
             factory_started: false,
             tcp: None,
             transport_build: TransportBuild::Fresh,
@@ -193,8 +187,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextCreationJob<T, R> {
                 .is_none_or(|driver| !driver.is_ready_data())
             || body
                 .work
-                .lookup_creation(request.invocation, request.digest)
-                .map_err(|_| Error::Storage)?
+                .lookup_native_creation(request.invocation, request.digest)?
                 != Some(active)
         {
             return Err(Error::Unavailable);
@@ -338,11 +331,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextCreationJob<T, R> {
         let pending = network.pending.as_ref().ok_or(Error::Unavailable)?;
         let rng = body.rng.as_mut().ok_or(Error::Unavailable)?;
         if network.status.is_none() {
-            network.status = Some(
-                body.work
-                    .birth_native_network(pending, rng)
-                    .map_err(|_| Error::Storage)?,
-            );
+            network.status = Some(body.work.birth_native_network(pending, rng)?);
         }
         let status = network.status.unwrap();
         if status.identity != network.identity
@@ -525,15 +514,11 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextCreationJob<T, R> {
                 pin: *binding.pin_data(),
             },
         };
-        network.active = Some(
-            body.work
-                .activate_native_founder(
-                    &request,
-                    network.activation.as_ref().unwrap(),
-                    body.rng.as_mut().ok_or(Error::Unavailable)?,
-                )
-                .map_err(|_| Error::Storage)?,
-        );
+        network.active = Some(body.work.activate_native_founder(
+            &request,
+            network.activation.as_ref().unwrap(),
+            body.rng.as_mut().ok_or(Error::Unavailable)?,
+        )?);
         let active = network.active.unwrap();
         if active.id != request.id
             || active.identity != network.identity
@@ -683,6 +668,10 @@ impl<R: CryptoRngCore> NativeTextCreationJob<catcoms_net::MeshService, R> {
                     return Err(Error::Storage);
                 }
             };
+            network.join_ingress = transport.native_chat_join_ingress();
+            network.governing_ingress = transport.native_chat_governing_ingress();
+            network.member_ingress = transport.native_chat_member_ingress();
+            network.dependency_lane = transport.native_chat_member_dependencies();
             body.transport = Some(transport); // cache before every late check
             network.actual_peer = Some(actual.to_string());
         }

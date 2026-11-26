@@ -11,9 +11,17 @@ use catcoms_mls::persist::{
 };
 use catcoms_sync::owner_v2::{
     prepare_v2_genesis_seed, FounderSnapshotLimits, OriginalV2GenesisSeedObservation,
-    UnboundV2GenesisSeed, V2GenesisSeedData, V2GenesisSeedLimits, V2_GENESIS_SEED_METADATA_BYTES,
+    UnboundV2GenesisSeed, V2GenesisSeedData, V2GenesisSeedLimits, V2GenesisSourceFields,
+    V2_GENESIS_SEED_METADATA_BYTES,
 };
 pub(in crate::store) use current::settlement::GenesisCurrentOwnerRef;
+pub(in crate::store) use current::{
+    prepare_joined_member_history, prepare_recovered_founder_history, JoinedMemberLane,
+    JoinedMemberSource, OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
+    PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
+    PreparedV2UnsignedOriginalCustody, RecoveredMemberLane, RecoveredMemberSource,
+    V2AdvancedAppendBasis,
+};
 pub use current::{
     MemberSaveJob, MemberSaveJobReport, MemberSaveNativeAdmission, PreparedColdV2GenesisCurrent,
     PreparedColdV2GenesisInitializing, PreparedColdV2GenesisPreInitializing,
@@ -21,11 +29,6 @@ pub use current::{
     UnexposedColdV2GenesisCurrent, UnexposedRepairedV2GenesisCurrent, UnexposedV2GenesisCurrent,
     V2MemberDependency, V2MemberSaveOutcome, V2MemberSaveRefusal, V2MemberSignRequest,
     V2TextHostPolicy,
-};
-pub(in crate::store) use current::{
-    OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
-    PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
-    PreparedV2UnsignedOriginalCustody, V2AdvancedAppendBasis,
 };
 #[cfg(all(test, windows))]
 pub(in crate::store) use current::{PreparedV2TextSourceObserver, V2_TEXT_SOURCE_OBSERVER_BYTES};
@@ -156,6 +159,23 @@ pub struct RetainedBootstrapGenesisSeed {
     seed: UnboundV2GenesisSeed,
     resources: BootstrapGenesisResources,
 }
+
+/// The closed genesis graph under a held promoted head. No Current, Source
+/// command, group attachment, or signing permission follows from this read.
+pub(in crate::store) struct RetainedPromotedGenesisSdk {
+    seed: UnboundV2GenesisSeed,
+    _metadata: critical_namespaces::read_pool::CatalogReadReservation,
+}
+
+impl RetainedPromotedGenesisSdk {
+    pub(in crate::store) fn require_source(
+        &self,
+        source: &RetainedBootstrapSourceData,
+    ) -> Result<catcoms_replication::chat::owner_header::OwnerHeaderId, AppError> {
+        self.seed.check_opened_source_data(source.data())?;
+        Ok(self.seed.data().header.id())
+    }
+}
 /// The SAME supporting ownership moves with the graph into its node. Its private constructor
 /// captures both exact original read and SDK-seed identities, not just equal source labels.
 struct BootstrapGenesisResources {
@@ -166,16 +186,16 @@ struct BootstrapGenesisResources {
     _metadata_fee: critical_namespaces::read_pool::CatalogReadReservation,
 }
 
-/// Borrow BOTH the actual immutable closed seed and its original supporting payments. Only
+/// Borrow the actual immutable seed fields and the original supporting payments. Only
 /// real paid owners in this module construct this view; no raw labels/adopter/trait can do so.
 /// Later Node ownership uses the identical view for final checks AFTER pairing callbacks.
 #[derive(Clone, Copy)]
 pub(in crate::store) struct GenesisSourceDataRef<'owner> {
-    seed: &'owner UnboundV2GenesisSeed,
+    seed: V2GenesisSourceFields<'owner>,
     resources: &'owner BootstrapGenesisResources,
 }
 impl<'owner> GenesisSourceDataRef<'owner> {
-    pub(in crate::store) fn seed(&self) -> &'owner UnboundV2GenesisSeed {
+    pub(in crate::store) fn seed(&self) -> V2GenesisSourceFields<'owner> {
         self.seed
     }
     pub(in crate::store) fn data(&self) -> V2GenesisSeedData<'owner> {
@@ -190,7 +210,7 @@ impl<'owner> GenesisSourceDataRef<'owner> {
     ) -> Result<(), AppError> {
         self.resources
             .original_seed
-            .require_same_seed_data(self.seed)?;
+            .require_same_source_fields(self.seed)?;
         self.resources
             .original_read
             .require_same_original(self.source())?;
@@ -211,7 +231,7 @@ impl RetainedBootstrapGenesisSeed {
     /// Borrowed DATA only; the opaque seed has no run/Server/SDK getter. Rust borrowing keeps
     /// this capsule's separate non-SDK fees alive through every use of this reference.
     pub fn seed(&self) -> &UnboundV2GenesisSeed {
-        self.borrow_source_data().seed()
+        &self.seed
     }
     pub fn data(&self) -> V2GenesisSeedData<'_> {
         self.borrow_source_data().data()
@@ -236,7 +256,7 @@ impl RetainedBootstrapGenesisSeed {
         &self,
     ) -> crate::store::persistence::GenesisSourceDataRef<'_> {
         GenesisSourceDataRef {
-            seed: &self.seed,
+            seed: self.seed.source_fields(),
             resources: &self.resources,
         }
     }
@@ -288,6 +308,70 @@ impl ServerStore {
         )
     }
 
+    fn prepare_seed_restore_resources(
+        &self,
+        budget: GenesisSeedBudget,
+    ) -> Result<
+        (
+            critical_namespaces::read_pool::CatalogReadReservation,
+            OwnerSdkRestoreAdmission,
+            V2GenesisSeedLimits,
+        ),
+        GenesisSeedRefusal,
+    > {
+        let pool = &self
+            .archive_bootstrap_policy
+            .as_ref()
+            .ok_or(GenesisSeedRefusal::SourceUnavailable)?
+            .pending
+            .pool;
+        let metadata_bytes = budget
+            .metadata_bytes()
+            .map_err(|_| GenesisSeedRefusal::CapacityUnavailable)?;
+        // Declare this independent fee BEFORE the SDK/seed locals. All partial graphs
+        // drain first on every refusal, without any host writer being held.
+        let metadata = pool
+            .try_reserve(metadata_bytes)
+            .map_err(|_| GenesisSeedRefusal::CapacityUnavailable)?;
+        let graph = pool
+            .try_reserve(budget.sdk.max_typed_bytes)
+            .map_err(|_| GenesisSeedRefusal::CapacityUnavailable)?;
+        let sdk = OwnerSdkRestoreAdmission::new(GraphReservation {
+            limits: budget.sdk,
+            _fee: graph,
+        })
+        .map_err(|_| GenesisSeedRefusal::SeedUnavailable)?;
+        let limits = budget
+            .seed_limits()
+            .map_err(|_| GenesisSeedRefusal::SeedUnavailable)?;
+        Ok((metadata, sdk, limits))
+    }
+
+    pub(in crate::store) fn restore_promoted_genesis_sdk(
+        &self,
+        original: &mut crate::store::persistence::v2_text::HeldColdFounderGenesis,
+        source: &RetainedBootstrapSourceData,
+        budget: GenesisSeedBudget,
+    ) -> Result<RetainedPromotedGenesisSdk, AppError> {
+        use critical_namespaces::refused;
+        let selected = original.require_current(self, source)?;
+        let (metadata, sdk, limits) = self
+            .prepare_seed_restore_resources(budget)
+            .map_err(|_| refused())?;
+        original.require_current(self, source)?;
+        let seed = prepare_v2_genesis_seed(source.data(), limits, sdk)?;
+        seed.check_opened_source_data(source.data())?;
+        if seed.data().header.id() != selected
+            || original.require_current(self, source)? != selected
+        {
+            return Err(refused());
+        }
+        Ok(RetainedPromotedGenesisSdk {
+            seed,
+            _metadata: metadata,
+        })
+    }
+
     fn prepare_genesis_seed_with_entry(
         &self,
         source: RetainedBootstrapSourceData,
@@ -298,31 +382,8 @@ impl ServerStore {
             source
                 .validate_original(self)
                 .map_err(|_| GenesisSeedRefusal::SourceUnavailable)?;
-            let pool = &self
-                .archive_bootstrap_policy
-                .as_ref()
-                .ok_or(GenesisSeedRefusal::SourceUnavailable)?
-                .pending
-                .pool;
-            let metadata_bytes = budget
-                .metadata_bytes()
-                .map_err(|_| GenesisSeedRefusal::CapacityUnavailable)?;
-            // Declare this independent fee BEFORE the SDK/seed locals. All partial graphs
-            // drain first on every refusal, without any host writer being held.
-            let metadata = pool
-                .try_reserve(metadata_bytes)
-                .map_err(|_| GenesisSeedRefusal::CapacityUnavailable)?;
-            let graph = pool
-                .try_reserve(budget.sdk.max_typed_bytes)
-                .map_err(|_| GenesisSeedRefusal::CapacityUnavailable)?;
-            let sdk = OwnerSdkRestoreAdmission::new(GraphReservation {
-                limits: budget.sdk,
-                _fee: graph,
-            })
-            .map_err(|_| GenesisSeedRefusal::SeedUnavailable)?;
-            let limits = budget
-                .seed_limits()
-                .map_err(|_| GenesisSeedRefusal::SeedUnavailable)?;
+            // Keep the original metadata charge before the independently paid SDK graph.
+            let (metadata, sdk, limits) = self.prepare_seed_restore_resources(budget)?;
             #[cfg(test)]
             let hook = self
                 .genesis_before_sdk

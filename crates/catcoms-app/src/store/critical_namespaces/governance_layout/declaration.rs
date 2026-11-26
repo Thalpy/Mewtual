@@ -8,9 +8,10 @@ fn summary(
     raw: &[u8],
 ) -> Result<pending_join_codec::Summary, AppError> {
     let plain = Zeroizing::new(unseal(key, &unframe(raw)?)?);
-    let parsed = if store.governance_layout_policy.as_ref().is_some_and(|p| {
-        p.family == governance_namespace_codec::GovernanceCatalogFamily::NativeLifecycle
-    }) {
+    let parsed = if !store.uses_joined_pin_layout()
+        && store.governance_layout_policy.as_ref().is_some_and(|p| {
+            p.family == governance_namespace_codec::GovernanceCatalogFamily::NativeLifecycle
+        }) {
         pending_join_codec::parse_native_governance_family(
             &plain,
             &store.chat_vault_domain()?,
@@ -23,6 +24,33 @@ fn summary(
 }
 
 impl ServerStore {
+    pub(in crate::store) fn parse_joined_pin_catalog(
+        &self,
+        plain: &[u8],
+    ) -> Result<archive_current_namespace_codec::CurrentLayoutData, AppError> {
+        Ok(self.parse_joined_catalog_descriptors(plain)?.0)
+    }
+
+    pub(in crate::store) fn parse_joined_catalog_descriptors<'a>(
+        &self,
+        plain: &'a [u8],
+    ) -> Result<
+        (
+            archive_current_namespace_codec::CurrentLayoutData,
+            Option<&'a [u8]>,
+        ),
+        AppError,
+    > {
+        if !self.uses_joined_pin_layout() {
+            return Err(refused());
+        }
+        let parsed = self.parse_configured_join_catalog(plain)?;
+        Ok((
+            parsed.current_layout.ok_or_else(refused)?,
+            parsed.shared_history_payload,
+        ))
+    }
+
     pub(in crate::store) fn prepare_governance_layout_declaration(
         &self,
         fee: &CatalogReadReservation,
@@ -168,6 +196,11 @@ impl ServerStore {
         if actual != VaultFormat::CriticalNamespaces {
             return Err(refused());
         }
+        let joined = if self.uses_joined_pin_layout() {
+            Some(self.select_joined_pin_catalog()?)
+        } else {
+            None
+        };
         // An in-progress namespace5 declaration owns the catalog stage slot, which the
         // governance inspector would refuse. With the concrete member handler configured,
         // finish it, abandon a first seed that never authenticated, or preserve and refuse it
@@ -192,11 +225,14 @@ impl ServerStore {
             // Seed4 repair/abort finished above. Hold native3's actual final
             // catalog and leaves through the COMMON Current/JOIN opener; its
             // one observation is consumed only by open_native afterward.
-            self.inspect_and_repair_native_registry_declaration()?;
+            self.inspect_and_repair_native_registry_with_joined(joined.as_ref())?;
         }
         self.open_current_layout_catalog_gate(actual, passphrase, rng)?;
         if let Some(captured) = captured {
             self.install_governance_layout_marker(captured)?;
+        }
+        if let Some(joined) = joined {
+            self.retain_joined_pin_selection(joined)?;
         }
         Ok(())
     }

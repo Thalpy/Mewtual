@@ -9,6 +9,7 @@ use catcoms_replication::chat::join_bindings::{
     GenesisAnchorBindingData, InviteBindingSpecData, JoinPayloadKindData, SignedInviteBindingData,
     MAX_JOIN_BINDING_BYTES,
 };
+use catcoms_replication::chat::owner_header::OwnerHeaderId;
 use catcoms_rt::{
     NativeChatKeyEnds, NativeChatKeyPurpose, NativeChatKeyRefusal, NativeChatPreparedKeyCut,
     NativeChatSourceObservation,
@@ -63,12 +64,14 @@ enum Key {
 /// after source revocation and never a permission to publish or run Add.
 pub struct PreparedV2FounderInviteData {
     request: V2FounderInviteRequestData,
+    installed_parent: Option<(u64, OwnerHeaderId)>,
     original: OriginalV2GenesisSeedObservation,
     native: NativeChatSourceObservation,
     draw: Draw,
     expires_at_ms: Option<u64>,
     nonce: Option<[u8; 16]>,
     spec: Option<InviteBindingSpecData>,
+    policy_bytes: Option<Vec<u8>>,
     bytes: Option<Vec<u8>>,
     key: Key,
     attempts: u64,
@@ -85,7 +88,7 @@ impl std::fmt::Debug for PreparedV2FounderInviteData {
 /// payment, immutable journal quotas, SDK memory and native metadata custody.
 /// Reserve before the plan/spec/preimage allocations; retain through output.
 pub const FOUNDER_INVITE_DATA_BYTES: usize = 4 * std::mem::size_of::<PreparedV2FounderInviteData>()
-    + 8 * MAX_JOIN_BINDING_BYTES
+    + 12 * MAX_JOIN_BINDING_BYTES
     + 4 * MAX_GROUP_ID_BYTES
     + 16 * 1024;
 
@@ -102,6 +105,11 @@ impl PreparedV2FounderInviteData {
             self.spec.as_ref().ok_or_else(unavailable)?,
             self.bytes.as_deref().ok_or_else(unavailable)?,
         ))
+    }
+
+    /// The exact original policy envelope committed by the invitation.
+    pub fn policy_bytes_data(&self) -> Result<&[u8], SyncError> {
+        self.policy_bytes.as_deref().ok_or_else(unavailable)
     }
 
     /// Retained signature for the original covering journal, not a Saved proof.
@@ -152,10 +160,21 @@ impl<T, R> UnboundV2GenesisNode<T, R> {
         &self,
         prepared: &PreparedV2FounderInviteData,
     ) -> Result<(), SyncError> {
-        prepared.original.require_same_seed_data(&self.seed)?;
+        self.require_invite_intent_parent(prepared, None)?;
         self.require_invite_source()?;
         prepared.unsigned_data()?;
         Ok(())
+    }
+
+    pub(super) fn require_invite_intent_parent(
+        &self,
+        prepared: &PreparedV2FounderInviteData,
+        expected: Option<(u64, OwnerHeaderId)>,
+    ) -> Result<(), SyncError> {
+        if prepared.installed_parent != expected {
+            return Err(unavailable());
+        }
+        prepared.original.require_same_seed_data(&self.seed)
     }
 
     /// Stable original-lifetime negatives only. The full SDK graph, roster and
@@ -194,7 +213,17 @@ impl<T, R> UnboundV2GenesisNode<T, R> {
         cut: &mut NativeChatPreparedKeyCut,
         ends: &mut NativeChatKeyEnds,
     ) -> Result<(), SyncError> {
-        prepared.original.require_same_seed_data(&self.seed)?;
+        self.sign_invite_for_parent(prepared, None, cut, ends)
+    }
+
+    pub(super) fn sign_invite_for_parent(
+        &self,
+        prepared: &mut PreparedV2FounderInviteData,
+        installed_parent: Option<(u64, OwnerHeaderId)>,
+        cut: &mut NativeChatPreparedKeyCut,
+        ends: &mut NativeChatKeyEnds,
+    ) -> Result<(), SyncError> {
+        self.require_invite_intent_parent(prepared, installed_parent)?;
         if prepared.raw.is_some() {
             return Ok(());
         }
@@ -255,9 +284,19 @@ impl<T: MeshTransport, R: CryptoRngCore> UnboundV2GenesisNode<T, R> {
         native: &NativeChatSourceObservation,
         slot: &mut Option<PreparedV2FounderInviteData>,
     ) -> Result<(), SyncError> {
+        self.prepare_invite_for_parent(request, native, slot, None)
+    }
+
+    pub(super) fn prepare_invite_for_parent(
+        &mut self,
+        request: V2FounderInviteRequestData,
+        native: &NativeChatSourceObservation,
+        slot: &mut Option<PreparedV2FounderInviteData>,
+        installed_parent: Option<(u64, OwnerHeaderId)>,
+    ) -> Result<(), SyncError> {
         request.validate()?;
         if let Some(p) = slot.as_ref() {
-            p.original.require_same_seed_data(&self.seed)?;
+            self.require_invite_intent_parent(p, installed_parent)?;
             if p.request != request || !p.native.same_original(native) {
                 return Err(unavailable());
             }
@@ -265,16 +304,22 @@ impl<T: MeshTransport, R: CryptoRngCore> UnboundV2GenesisNode<T, R> {
                 return Ok(()); // frozen historical DATA; no authority or fresh draw
             }
         }
-        self.require_invite_source()?;
+        if installed_parent.is_none() {
+            self.require_invite_source()?;
+        } else {
+            self.require_invite_stable_negative()?;
+        }
         if slot.is_none() {
             *slot = Some(PreparedV2FounderInviteData {
                 request,
+                installed_parent,
                 original: self.seed.observe_original_seed_data(),
                 native: native.clone(),
                 draw: Draw::Captured,
                 expires_at_ms: None,
                 nonce: None,
                 spec: None,
+                policy_bytes: None,
                 bytes: None,
                 key: Key::Unstarted,
                 attempts: 0,
@@ -309,7 +354,11 @@ impl<T: MeshTransport, R: CryptoRngCore> UnboundV2GenesisNode<T, R> {
         if p.spec.is_none() {
             let s = &self.seed.body;
             let g = &s.genesis;
-            p.spec = Some(InviteBindingSpecData {
+            let policy_bytes = s.metadata.policy.as_ref().ok_or_else(unavailable)?.encode();
+            if policy_bytes.is_empty() || policy_bytes.capacity() > MAX_JOIN_BINDING_BYTES {
+                return Err(unavailable());
+            }
+            let spec = InviteBindingSpecData {
                 anchor: GenesisAnchorBindingData {
                     group: g.profile.spec().group.clone(),
                     founder: g.profile.spec().founder,
@@ -323,10 +372,12 @@ impl<T: MeshTransport, R: CryptoRngCore> UnboundV2GenesisNode<T, R> {
                 nonce: p.nonce.ok_or_else(unavailable)?,
                 expires_at_ms: p.expires_at_ms.ok_or_else(unavailable)?,
                 policy: JoinPayloadKindData::Policy
-                    .commitment_data(&s.metadata.policy.as_ref().ok_or_else(unavailable)?.encode())
+                    .commitment_data(&policy_bytes)
                     .map_err(|_| unavailable())?,
                 public_routing_plan: request.public_routing_plan,
-            });
+            };
+            p.policy_bytes = Some(policy_bytes);
+            p.spec = Some(spec);
         }
         p.bytes = Some(
             p.spec
@@ -337,7 +388,11 @@ impl<T: MeshTransport, R: CryptoRngCore> UnboundV2GenesisNode<T, R> {
         );
         #[cfg(test)]
         test_cut(TestCut::Prepared);
-        self.require_invite_source()?;
+        if installed_parent.is_none() {
+            self.require_invite_source()?;
+        } else {
+            self.require_invite_stable_negative()?;
+        }
         Ok(())
     }
 }

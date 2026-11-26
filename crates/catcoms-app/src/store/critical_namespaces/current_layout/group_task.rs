@@ -63,7 +63,7 @@ impl OriginalGroupSource {
     ) -> Result<(), AppError> {
         source.require_original_negative(store)?;
         self.read.require_same_original(source.source())?;
-        self.sdk.require_same_seed_data(source.seed())?;
+        self.sdk.require_same_source_fields(source.seed())?;
         let data = source.data();
         if self.negative.is_cancelled()
             || !Arc::ptr_eq(&self.mount, &store.registry_mount())

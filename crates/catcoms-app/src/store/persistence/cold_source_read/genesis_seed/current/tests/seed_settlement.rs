@@ -387,6 +387,8 @@ fn saved_metadata_keeps_only_paid_controls_after_exact_source_read_refund() {
     let original_read = current.resources.source.observe_original();
     let original_sdk = current
         .node
+        .as_ref()
+        .expect("warm Current still owns the genesis node")
         .borrow_genesis_seed_data()
         .observe_original_seed_data();
     let before = f.pool.charged_for_test();

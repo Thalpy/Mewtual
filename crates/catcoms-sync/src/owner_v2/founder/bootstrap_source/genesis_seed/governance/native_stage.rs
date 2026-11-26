@@ -97,6 +97,23 @@ impl NativeStageAdmission {
         debug_assert!(self.eligible());
         self.state = AdmissionState::Unstarted; // attempts are never reset
     }
+
+    /// Reopen only a locally refused native edge. Its owning operation must
+    /// still retain the original request, source and unentered primitive.
+    pub(super) fn retry_local_refusal(
+        &mut self,
+        cut: &NativeChatPreparedKeyCut,
+        source: &NativeChatSourceObservation,
+        purpose: NativeChatKeyPurpose,
+    ) -> Result<(), SyncError> {
+        if self.state == AdmissionState::KnownLocalRefusal {
+            cut.require_never_entered_data(source, purpose)
+                .map_err(|_| unavailable())?;
+            cut.preflight(source, purpose).map_err(|_| unavailable())?;
+            self.reauthorize();
+        }
+        Ok(())
+    }
     #[cfg(test)]
     pub(super) fn attempts_for_test(&self) -> u64 {
         self.attempts
@@ -139,6 +156,42 @@ impl std::fmt::Debug for RetiredV2FounderAddNativeCustody {
 }
 
 impl<T, R: CryptoRngCore> PreparedV2FounderGovernanceNode<T, R> {
+    /// UI lock keeps the Source and the original request alive. Only retire
+    /// custody from the actual closed generation's batch. A partial Cell
+    /// first finishes that same admitted SDK unit outside writers.
+    pub fn retire_add_for_closed_ui(
+        &mut self,
+        closed: &[Option<&catcoms_rt::NativeChatKeyDrain>],
+    ) -> Result<Option<RetiredV2FounderAddNativeCustody>, SyncError> {
+        let Some(pending) = self.pending.as_ref() else {
+            return Ok(None);
+        };
+        let cuts = [&pending.sdk_cut, &pending.header_cut, &pending.welcome_cut];
+        if !cuts
+            .into_iter()
+            .filter_map(Option::as_ref)
+            .any(|cut| cut.belongs_to_closed_ui(closed))
+        {
+            return Ok(None);
+        }
+        if !cuts
+            .into_iter()
+            .filter_map(Option::as_ref)
+            .all(|cut| cut.belongs_to_closed_ui(closed))
+            || !pending.ends.all_ui_counters_closed_in(closed)
+        {
+            return Err(unavailable());
+        }
+        let phase = pending.phase;
+        if phase == Phase::Prepared {
+            return self.retire_unstarted_add_native_data().map(Some);
+        }
+        if phase == Phase::SdkEntered && self.completed_add_data().is_err() {
+            self.finish_admitted_add_data_native()?;
+        }
+        self.retire_closed_add_native_data().map(Some)
+    }
+
     /// Complete ONLY the SAME already-admitted finite SDK unit from its frozen
     /// inputs/time and retained RNG. It neither constructs another Cell nor
     /// enters a new native cut. A real retained source End is mandatory even
@@ -174,7 +227,27 @@ impl<T, R: CryptoRngCore> PreparedV2FounderGovernanceNode<T, R> {
 }
 
 impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
-    /// Move finite native custody only AFTER the actual Cell is fully closed.
+    /// Permanent Source shutdown only. The owning runtime must first finish
+    /// admitting/dispatching its finite disk work. Dispose the entire pending
+    /// operation before waiting on the actual Ends retained by that operation.
+    /// Its durable controls remain available to independent recovery.
+    pub fn discard_add_for_closed_source(
+        &mut self,
+        closed: &catcoms_rt::NativeChatKeyDrain,
+    ) -> Result<(), SyncError> {
+        let Some(operation) = self.pending.as_ref() else {
+            return Ok(());
+        };
+        closed
+            .require_closed_source(&operation.original)
+            .map_err(|_| unavailable())?;
+        self.node.seed.body.metadata.scope.retire();
+        drop(self.pending.take());
+        Ok(())
+    }
+
+    /// Move finite native custody after the Cell has fully closed or the
+    /// successful installation has cached both returned retired owners.
     /// Partial resumable SDK work must keep its original End; there is no
     /// inference from phase alone or another UI generation. The closed Cell
     /// remains historical DATA, while SDK continuation is permanently fenced.
@@ -186,11 +259,13 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
         &mut self,
     ) -> Result<RetiredV2FounderAddNativeCustody, SyncError> {
         let p = self.pending.as_mut().ok_or_else(unavailable)?;
-        p.cell
-            .as_ref()
-            .ok_or_else(unavailable)?
-            .completed_result_data()
-            .map_err(|_| unavailable())?;
+        if p.retired_sdk.is_none() || p.retired_core.is_none() {
+            p.cell
+                .as_ref()
+                .ok_or_else(unavailable)?
+                .completed_result_data()
+                .map_err(|_| unavailable())?;
+        }
         if p.phase == Phase::SdkEntered {
             // A lost Sync return may leave phase behind the actual Cell.
             p.phase = Phase::Complete;

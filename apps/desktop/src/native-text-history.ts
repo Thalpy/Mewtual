@@ -7,6 +7,10 @@ export type NativeOriginal = {
     | { kind: "delete" | "join"; create: string };
 };
 export type NativeOriginalPage = { backend: "text-v2"; scope: "own-saved-originals"; next: string; end_exclusive: string; items: NativeOriginal[] };
+export type NativeReceivedTarget = { server: number; channel: string; context: string; action: string | null };
+export type NativeReceived = { action: string; text: string; certainty: "provisional" | "proven" };
+export type NativeOwnRevision = { revision: string; text: string; status: NativeOriginal["status"] };
+export type NativeOwnMessage = { scanning: boolean; item: NativeOwnRevision | null };
 const fail = (): never => { throw new Error("Saved messages could not be read. Try again."); };
 const object = (value: unknown): Record<string, unknown> => { if (!value || typeof value !== "object" || Array.isArray(value)) return fail(); return value as Record<string, unknown>; };
 function fields(value: Record<string, unknown>, expected: string[]) { if (Object.keys(value).length !== expected.length || expected.some(key => !Object.hasOwn(value, key))) fail(); }
@@ -18,6 +22,117 @@ function text(value: unknown): string {
   for(let i=0;i<value.length;i++){const unit=value.charCodeAt(i);if(unit>=0xd800&&unit<=0xdbff){const next=value.charCodeAt(++i);if(!(next>=0xdc00&&next<=0xdfff))return fail();}else if(unit>=0xdc00&&unit<=0xdfff)return fail();}
   if(encoder.encode(value).length>65536)return fail();
   return value;
+}
+
+export function decodeNativeReceivedNotice(value: unknown): NativeReceivedTarget {
+  const notice = object(value);
+  fields(notice, ["server", "channel", "context", "action"]);
+  if (typeof notice.server !== "number" || !Number.isSafeInteger(notice.server) || notice.server < 1) return fail();
+  return {
+    server: notice.server,
+    channel: decimal(notice.channel, 128),
+    context: hex(notice.context),
+    action: notice.action === null ? null : hex(notice.action),
+  };
+}
+
+export function decodeNativeReceived(
+  value: unknown,
+  expectedAction: string,
+  scope: "received-live" | "received-archive" = "received-live",
+): NativeReceived | null {
+  const root = object(value);
+  fields(root, ["backend", "scope", "item"]);
+  if (root.backend !== "text-v2" || root.scope !== scope) return fail();
+  if (root.item === null) return null;
+  const row = object(root.item);
+  fields(row, ["action", "text", "certainty"]);
+  const action = hex(row.action);
+  if (action !== expectedAction || (row.certainty !== "provisional" && row.certainty !== "proven")) return fail();
+  const body = text(row.text);
+  if (!body) return fail();
+  return { action, text: body, certainty: row.certainty };
+}
+
+type NativeHistoryTarget = { server: number; channel: string; context: string };
+type NativeInvoke = (command: string, args: Record<string, unknown>) => Promise<unknown>;
+
+export function decodeNativeOwnMessage(value: unknown, target: string): NativeOwnMessage {
+  const result = object(value);
+  fields(result, ["backend", "scope", "action", "scanning", "item"]);
+  if (result.backend !== "text-v2" || result.scope !== "own-message-revision"
+    || hex(result.action) !== target || typeof result.scanning !== "boolean") return fail();
+  if (result.item === null) return { scanning: result.scanning, item: null };
+  if (result.scanning) return fail();
+  const item = object(result.item);
+  fields(item, ["revision", "text", "status"]);
+  const status = item.status;
+  if (status !== "pending" && status !== "submitted" && status !== "held") return fail();
+  return { scanning: false, item: { revision: hex(item.revision), text: text(item.text), status } };
+}
+
+export async function readNativeOwnMessage(
+  invoke: NativeInvoke,
+  target: NativeHistoryTarget,
+  action: string,
+  current: () => boolean,
+): Promise<NativeOwnMessage | null> {
+  const address = { server: target.server, channel: target.channel, expectedContext: target.context, ownAction: action };
+  for (let step = 0; step < 16; step++) {
+    if (!current()) return null;
+    const raw = await invoke("get_message_page", address);
+    if (!current()) return null;
+    const result = decodeNativeOwnMessage(raw, action);
+    if (!result.scanning) return result;
+  }
+  return { scanning: true, item: null };
+}
+
+/** Fetch one bounded page, resolving each body under its own native guard. */
+export async function readNativeReceivedArchive(
+  invoke: NativeInvoke,
+  target: NativeHistoryTarget,
+  current: () => boolean,
+  after: string | null,
+): Promise<{ available: boolean; ids: string[]; more: boolean; items: NativeReceived[]; incomplete: boolean } | null> {
+  if (!current()) return null;
+  const address = { server: target.server, channel: target.channel, expectedContext: target.context };
+  const raw = await invoke("get_message_page", { ...address, archiveAfter: after, limit: 8 });
+  if (!current()) return null;
+  const root = object(raw);
+  fields(root, ["backend", "scope", "available", "ids", "more"]);
+  if (root.backend !== "text-v2" || root.scope !== "received-archive-index"
+    || typeof root.available !== "boolean" || typeof root.more !== "boolean"
+    || !Array.isArray(root.ids) || root.ids.length > 8
+    || (!root.available && root.ids.length > 0) || (root.more && root.ids.length !== 8)) return fail();
+  const ids = root.ids.map(hex);
+  let previous = after;
+  for (const id of ids) {
+    if (previous !== null && previous >= id) return fail();
+    previous = id;
+  }
+  const items: NativeReceived[] = [];
+  let incomplete = false;
+  for (const id of ids) {
+    if (!current()) return null;
+    try {
+      const raw = await invoke("get_message_page", { ...address, archivedAction: id });
+      if (!current()) return null;
+      const item = decodeNativeReceived(raw, id, "received-archive");
+      if (item) items.push(item);
+    } catch {
+      if (!current()) return null;
+      incomplete = true;
+    }
+  }
+  return { available: root.available, ids, more: root.more, items, incomplete };
+}
+
+export function updateNativeReceived(rows: NativeReceived[], action: string, item: NativeReceived | null): NativeReceived[] {
+  const index = rows.findIndex(row => row.action === action);
+  if (index < 0) return item ? [...rows, item].slice(-64) : rows;
+  if (!item) return rows.filter(row => row.action !== action);
+  return rows.map((row, at) => at === index ? item : row);
 }
 export function decodeNativeOriginalPage(value: unknown, start: string, end: string | null, channel: string): NativeOriginalPage {
   const root = object(value); fields(root, ["backend", "scope", "next", "end_exclusive", "items"]);
@@ -45,8 +160,8 @@ export function decodeNativeOriginalPage(value: unknown, start: string, end: str
 /** At most16 native requests/128 originals per batch. Empty channel pages keep
  * advancing the original context cursor; a finite first end is reused exactly. */
 export async function readNativeOriginals(
-  invoke: (command: string, args: Record<string, unknown>) => Promise<unknown>,
-  target: { server: number; channel: string; context: string }, current: () => boolean,
+  invoke: NativeInvoke,
+  target: NativeHistoryTarget, current: () => boolean,
   cursor: { next: string; end: string } | null = null,
 ): Promise<{ items: NativeOriginal[]; next: string; end: string } | null> {
   let next = cursor?.next ?? "0", end: string | null = cursor?.end ?? null;

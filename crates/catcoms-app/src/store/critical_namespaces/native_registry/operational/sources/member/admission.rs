@@ -57,7 +57,23 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
         if token == [0; 32] {
             return Err(V2MemberSaveRefusal::Stale);
         }
-        let (cell, keys) = self.prepare_keys()?;
+        let (cell, mut keys) = self.prepare_keys()?;
+        if self.row.original.recovered_founder {
+            let body = borrow_runtime(&cell, &self.scope)?;
+            let mut loan = RuntimeLoan {
+                body: Some(body),
+                cell: cell.clone(),
+                recorded: true,
+            };
+            let founder = loan
+                .body
+                .as_mut()
+                .and_then(|body| body.recovered_founder.as_mut())
+                .ok_or(V2MemberSaveRefusal::Unavailable)?;
+            let (_owner, signal) = tokio::sync::watch::channel(false);
+            let caller = RequestCancellation::new(signal, None);
+            founder.require_member_save_admission(keys.member_entry().1, &caller)?;
+        }
         drop(cell); // only Weak survives the native commit await
         let failure_frame = Box::new(NativeTextMemberAdmissionFailure {
             native: None,
@@ -203,6 +219,12 @@ fn admit<T: MeshTransport, R: CryptoRngCore>(
         Some(body) => body,
         None => return Err((native, V2MemberSaveRefusal::Unavailable)),
     };
+    if let Some(founder) = body.recovered_founder.as_ref() {
+        let result =
+            founder.admit_restored_member_save::<R>(token, runtime.keys.member_entry().1, native);
+        runtime.loan.recorded = true;
+        return result;
+    }
     let driver = match body.driver.as_mut() {
         Some(driver) => driver,
         None => return Err((native, V2MemberSaveRefusal::Unavailable)),

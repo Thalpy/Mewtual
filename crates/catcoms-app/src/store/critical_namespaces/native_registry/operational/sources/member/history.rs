@@ -3,7 +3,7 @@ use super::*;
 use crate::store::persistence::v2_member_outbox::{
     DispositionCode, MemberEntryStatus, MemberHistoryItem, MemberHistoryPage, MemberHistoryRead,
 };
-use catcoms_replication::chat::SignedAction;
+use catcoms_replication::chat::{ActionId, SignedAction};
 
 /// Local outbox disposition only. Submitted says bytes reached local transport,
 /// never that another member received, accepted or durably saved them.
@@ -30,6 +30,11 @@ impl std::fmt::Debug for NativeTextMemberHistoryItem<'_> {
     }
 }
 impl NativeTextMemberHistoryPage {
+    pub(in crate::store::critical_namespaces::native_registry) fn from_original(
+        inner: MemberHistoryPage,
+    ) -> Self {
+        Self { inner }
+    }
     pub fn next(&self) -> u64 {
         self.inner.next()
     }
@@ -80,10 +85,34 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberJob<T, R> {
     /// are checked before/after work; the real native caller still gates reply
     /// delivery against its exact original UI generation.
     pub fn prepare_member_history(
-        mut self,
+        self,
         start: u64,
         end_exclusive: Option<u64>,
         maximum: usize,
+        negative: &RequestCancellation,
+    ) -> Result<NativeTextMemberHistoryPage, V2MemberSaveRefusal> {
+        self.prepare_history(
+            MemberHistoryRead::Originals {
+                start,
+                end: end_exclusive,
+                maximum,
+            },
+            negative,
+        )
+    }
+
+    pub fn prepare_own_message_revision(
+        self,
+        channel: u128,
+        target: ActionId,
+        negative: &RequestCancellation,
+    ) -> Result<NativeTextMemberHistoryPage, V2MemberSaveRefusal> {
+        self.prepare_history(MemberHistoryRead::OwnRevision { channel, target }, negative)
+    }
+
+    fn prepare_history(
+        mut self,
+        request: MemberHistoryRead,
         negative: &RequestCancellation,
     ) -> Result<NativeTextMemberHistoryPage, V2MemberSaveRefusal> {
         if negative.is_cancelled() {
@@ -98,19 +127,20 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberJob<T, R> {
             .body
             .as_mut()
             .ok_or(V2MemberSaveRefusal::Unavailable)?;
-        let result = body.work.prepare_native_member_history(
-            body.driver
-                .as_mut()
-                .ok_or(V2MemberSaveRefusal::Unavailable)?,
-            MemberHistoryRead {
-                start,
-                end: end_exclusive,
-                maximum,
-            },
-            negative,
-            body.rng.as_mut().ok_or(V2MemberSaveRefusal::Unavailable)?,
-            &mut self.inner.keys,
-        );
+        let rng = body.rng.as_mut().ok_or(V2MemberSaveRefusal::Unavailable)?;
+        let result = if let Some(founder) = body.recovered_founder.as_mut() {
+            founder.read_own_history(request, negative, rng)
+        } else {
+            body.work.prepare_native_member_history(
+                body.driver
+                    .as_mut()
+                    .ok_or(V2MemberSaveRefusal::Unavailable)?,
+                request,
+                negative,
+                rng,
+                &mut self.inner.keys,
+            )
+        };
         #[cfg(all(test, any(windows, target_os = "linux")))]
         super::tests::after_history();
         self.inner.loan.recorded = true; // known return, never new signing authority
@@ -120,7 +150,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberJob<T, R> {
         self.inner
             .require_current()
             .map_err(|_| V2MemberSaveRefusal::Cancelled)?;
-        result.map(|inner| NativeTextMemberHistoryPage { inner })
+        result.map(NativeTextMemberHistoryPage::from_original)
         // Consuming self restores the whole runtime BEFORE the paid page leaves.
     }
 }

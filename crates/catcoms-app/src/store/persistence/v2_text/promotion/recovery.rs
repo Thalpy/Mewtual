@@ -575,54 +575,77 @@ fn verify_seed_payload(
             image: public.state,
         },
     )?;
-    let head_plain = open_control_data(
+    let head = validate_initial_outputs(
         &key,
+        &seed,
+        &genesis_codec::GenesisPublicData {
+            profile: public.profile,
+            admission: public.admission,
+            header: public.header,
+            image: public.state,
+        },
+        public.context.spec_data().manifest,
+    )?;
+    let TextRootData::Present(directory_ref) = head.directory else {
+        return Err(refused());
+    };
+    if head.archive.as_bytes() != &plan.archive_id || directory_ref.page != plan.directory_id {
+        return Err(refused());
+    }
+    plan.policy
+        .require_initial_capacity(head.live_bytes, head.live_objects)
+}
+
+pub(in crate::store::persistence::v2_text) fn validate_initial_outputs(
+    key: &[u8; 32],
+    seed: &seed::ParsedPromotionSeedData<'_>,
+    public: &genesis_codec::GenesisPublicData<'_>,
+    manifest: PrivateChatPageId,
+) -> Result<TextHeadData, AppError> {
+    let head_plain = open_control_data(
+        key,
         TextControlKindData::Head.id_data(seed.head_frame),
         seed.head_frame,
     )?;
     let head = TextHeadData::decode_data(&head_plain)?;
     let archive_id = TextControlKindData::Archive.id_data(seed.archive_frame);
-    if head.context != *plan.context
+    if head.context != seed.context
         || head.generation != 1
         || head.selection_attempt != 1
-        || head.previous != TextParentData::Genesis(plan.context.spec_data().genesis_parent)
+        || head.previous != TextParentData::Genesis(seed.context.spec_data().genesis_parent)
         || head.pending != TextPendingData::None
         || head.tokens != TextRootData::Empty
         || head.publications != TextRootData::Empty
         || head.queue_front != 0
         || head.queue_next != 0
         || head.archive.as_bytes() != archive_id.as_bytes()
-        || archive_id.as_bytes() != &plan.archive_id
     {
         return Err(refused());
     }
     let archive_plain = open_control_data(
-        &key,
+        key,
         TextControlIdData::from_data(TextControlKindData::Archive, *head.archive.as_bytes()),
         seed.archive_frame,
     )?;
     let archive = TextArchiveData::decode_data(&archive_plain)?;
     let a = archive.spec_data();
-    if a.context != plan.context.id_data()?
+    if a.context != seed.context.id_data()?
         || a.operation != TextArchiveOperationData::Genesis
         || a.previous.is_some()
         || a.manifest_sequence != 1
-        || a.manifest != public.context.spec_data().manifest
+        || a.manifest != manifest
         || a.header.encode() != public.header.encode()
-        || a.image != public.state
+        || a.image != public.image
     {
         return Err(refused());
     }
     let TextRootData::Present(directory_ref) = head.directory else {
         return Err(refused());
     };
-    if directory_ref.page != plan.directory_id {
-        return Err(refused());
-    }
-    let directory_plain = open_private_chat_page(&key, directory_ref.page, seed.directory_frame)?;
+    let directory_plain = open_private_chat_page(key, directory_ref.page, seed.directory_frame)?;
     let directory =
         NodeFrame::decode(&directory_plain, NodePlacementData::Root).map_err(|_| refused())?;
-    let c = plan.context.spec_data();
+    let c = seed.context.spec_data();
     if directory.context()
         != (IndexContextData {
             vault: c.layout.vault,
@@ -651,7 +674,7 @@ fn verify_seed_payload(
         .empty_hash(),
         own_tip_header: public.header.id(),
         tip_body: public.admission.id(),
-        prefix_manifest: public.context.spec_data().manifest,
+        prefix_manifest: manifest,
         prefix_sequence: 1,
         prefix_head: head.archive,
     };
@@ -662,8 +685,7 @@ fn verify_seed_payload(
     {
         return Err(refused());
     }
-    plan.policy
-        .require_initial_capacity(head.live_bytes, head.live_objects)
+    Ok(head)
 }
 
 impl std::fmt::Debug for RecoveryPlan {

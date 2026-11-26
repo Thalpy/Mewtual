@@ -47,7 +47,7 @@ pub struct Advance {
 pub(super) struct Entry {
     pub(super) action: SignedAction,
     pub(super) state: ActionState,
-    authority: Option<VerifiedAuthorityBasis>,
+    pub(super) authority: Option<VerifiedAuthorityBasis>,
     // At most one constant-size normalized approval for this already imported action. There
     // is no unknown-action cache or unbounded collection of equivalent proof representations.
     delete_approval: Option<VerifiedDeleteApproval>,
@@ -130,6 +130,26 @@ impl ChatLedger {
     pub fn state(&self, id: ActionId) -> Option<ActionState> {
         self.entries.get(&id).map(|entry| entry.state)
     }
+
+    /// Check the exact retained original and its verified ordinary Admission
+    /// for an archive handoff. Historical Valid supplies no current effect.
+    pub fn matches_valid_ordinary_original(
+        &self,
+        original: &SignedAction,
+        admission: owner_facts::OwnerFactId,
+    ) -> bool {
+        self.entries.get(&original.id()).is_some_and(|entry| {
+            entry.state == ActionState::Valid
+                && &entry.action == original
+                && entry.authority.as_ref().is_some_and(|basis| {
+                    matches!(&basis.constraint,
+                        authority::SemanticConstraint::V2OrdinaryAction { admission: verified, .. }
+                        if *verified == admission
+                    )
+                })
+        })
+    }
+
     pub fn retained_action_bytes(&self) -> usize {
         self.bytes
     }

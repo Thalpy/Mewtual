@@ -98,17 +98,18 @@ fn invoke(window: &tauri::WebviewWindow<MockRuntime>, generation: &str, secret: 
     );
     rx
 }
-async fn run(queue: &Queue) {
-    let task = queue
+#[track_caller]
+fn run(queue: &Queue) -> Task {
+    queue
         .lock()
         .unwrap()
         .pop()
-        .expect("actual router scheduled one task");
-    task.await;
+        .expect("actual router scheduled one task")
 }
 fn success(reply: tauri::ipc::InvokeResponse) {
-    let tauri::ipc::InvokeResponse::Ok(body) = reply else {
-        panic!("actual unlock refused");
+    let body = match reply {
+        tauri::ipc::InvokeResponse::Ok(body) => body,
+        tauri::ipc::InvokeResponse::Err(error) => panic!("actual unlock refused: {}", error.0),
     };
     let restored = body.deserialize::<serde_json::Value>().unwrap();
     assert_eq!(restored["backend"], "text-v2");
@@ -144,6 +145,27 @@ fn found_value(reply: tauri::ipc::InvokeResponse) -> serde_json::Value {
         tauri::ipc::InvokeResponse::Ok(body) => body.deserialize().unwrap(),
         tauri::ipc::InvokeResponse::Err(error) => panic!("native founding refused: {error:?}"),
     }
+}
+
+async fn hold_vault_metadata(
+    state: &AppState,
+) -> catcoms_app::store::NativeTextVaultAuthentication {
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let preparation = {
+                let store = state.store.lock().await;
+                let vault = store.as_ref().unwrap().as_text_v2().unwrap();
+                vault.prepare_native_authentication(state.native_text.ui_budget.prepare().unwrap())
+            };
+            if !preparation.is_capture_busy_cached() {
+                break preparation;
+            }
+            drop(preparation);
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the original vault's metadata slot became available")
 }
 
 fn resume_request(window: &tauri::WebviewWindow<MockRuntime>) -> Reply {
@@ -603,6 +625,29 @@ fn native_history_request(
 ) -> Reply {
     native_history_request_with_reply(window, found, start, end, limit, false)
 }
+
+fn native_received_request(
+    window: &tauri::WebviewWindow<MockRuntime>,
+    found: &serde_json::Value,
+) -> Reply {
+    let mut request = request(window, "1", SECRET);
+    request.cmd = "get_message_page".into();
+    request.body = InvokeBody::Json(serde_json::json!({
+        "server": found["server"],
+        "channel": found["channel"],
+        "expectedContext": found["context"],
+        "receivedAction": hex::encode([249; 32]),
+    }));
+    let (tx, rx) = oneshot::channel();
+    let view: &tauri::Webview<MockRuntime> = window.as_ref();
+    view.clone().on_message(
+        request,
+        Box::new(move |_, _, result, _, _| {
+            let _ = tx.send(result);
+        }),
+    );
+    rx
+}
 fn native_history_request_with_reply(
     window: &tauri::WebviewWindow<MockRuntime>,
     found: &serde_json::Value,
@@ -730,13 +775,20 @@ async fn native_text_history_real_resolver_unwind_and_lost_observers_release_ori
     let path = root.path().join("vault");
     let (app, main, queue) = app(path.clone(), None, true);
     unlock_current(&app, &main, &queue).await;
+    let state = app.state::<AppState>();
+    let workers = AdmissionBarrier::new();
+    *state.native_text.founder_workers_edge.lock().unwrap() = Some(workers.clone());
     let found = found_request(&main, 1, "History");
     run(&queue).await;
     let found = found_value(found.await.unwrap());
+    // The drop probe checks the shared mutexes. Park the founder's unrelated
+    // connected workers so their independent traffic cannot trip that probe.
+    timeout(Duration::from_secs(5), workers.arrived.notified())
+        .await
+        .expect("the original founder workers are parked before taking the shared guards");
     let saved = native_send_request(&main, &found, 4, "Original");
     run(&queue).await;
     found_value(saved.await.unwrap());
-    let state = app.state::<AppState>();
     let watch = Arc::new(history::DropWatch {
         commit: state.ui_session_commit.clone(),
         store: state.store.clone(),
@@ -776,6 +828,7 @@ async fn native_text_history_real_resolver_unwind_and_lost_observers_release_ori
     );
     *state.native_text.history_drop_watch.lock().unwrap() = None;
     let close = register_vault_close(&state).await.unwrap();
+    workers.release.notify_one();
     timeout(
         Duration::from_secs(60),
         sources::close_server_rows(&state, &SystemClock),
@@ -935,6 +988,142 @@ fn native_send_request(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_mutations_preserve_exact_originals_and_the_observed_revision() {
+    let directory = tempfile::tempdir().unwrap();
+    let (app, window, queue) = app(directory.path().join("vault"), None, true);
+    unlock_current(&app, &window, &queue).await;
+    let found = found_request(&window, 1, "Native revisions");
+    run(&queue).await;
+    let found = found_value(found.await.unwrap());
+    let create = native_send_request(&window, &found, 31, "original text");
+    run(&queue).await;
+    let create = found_value(create.await.unwrap());
+    let target = &create["message_id"];
+    let view = |action: &serde_json::Value| {
+        invite_command(
+            &window,
+            "get_message_page",
+            serde_json::json!({
+                "server":found["server"], "channel":found["channel"], "expectedContext":found["context"],
+                "ownAction":action,
+            }),
+        )
+    };
+    let original = view(target);
+    run(&queue).await;
+    let original = found_value(original.await.unwrap());
+    assert_eq!(original["scope"], "own-message-revision");
+    assert_eq!(original["item"]["text"], "original text");
+    assert_eq!(&original["item"]["revision"], target);
+    let mutate = |command: &str,
+                  token: u8,
+                  message: &serde_json::Value,
+                  revision: &serde_json::Value,
+                  text: Option<&str>| {
+        let mut body = serde_json::json!({
+            "server":found["server"], "channel":found["channel"], "expectedContext":found["context"],
+            "retryToken":hex::encode([token;32]), "messageId":message, "expectedRevision":revision,
+        });
+        if let Some(text) = text {
+            body["text"] = text.into();
+        }
+        invite_command(&window, command, body)
+    };
+    let first = mutate("edit_message", 32, target, target, Some("first edit"));
+    run(&queue).await;
+    let first = found_value(first.await.unwrap());
+    assert_eq!(first["disposition"], "saved-local");
+    assert_ne!(first["message_id"], *target);
+    let unrelated = native_send_request(&window, &found, 33, "unrelated message");
+    run(&queue).await;
+    let unrelated = found_value(unrelated.await.unwrap());
+    let invalid = mutate(
+        "edit_message",
+        34,
+        target,
+        &unrelated["message_id"],
+        Some("second edit"),
+    );
+    run(&queue).await;
+    refused(invalid.await.unwrap());
+    let second = mutate(
+        "edit_message",
+        34,
+        target,
+        &first["message_id"],
+        Some("second edit"),
+    );
+    run(&queue).await;
+    let second = found_value(second.await.unwrap());
+    assert_eq!(second["disposition"], "saved-local");
+    let read = view(target);
+    run(&queue).await;
+    let read = found_value(read.await.unwrap());
+    assert_eq!(&read["action"], target);
+    assert_eq!(read["item"]["revision"], second["message_id"]);
+    assert_eq!(read["item"]["text"], "second edit");
+    let indirect = view(&second["message_id"]);
+    run(&queue).await;
+    assert!(found_value(indirect.await.unwrap())["item"].is_null());
+    let crossed = invite_command(
+        &window,
+        "get_message_page",
+        serde_json::json!({
+            "server":found["server"], "channel":found["channel"], "expectedContext":found["context"],
+            "ownAction":target, "receivedAction":target,
+        }),
+    );
+    refused(crossed.await.unwrap());
+    let retry = mutate(
+        "edit_message",
+        34,
+        target,
+        &first["message_id"],
+        Some("second edit"),
+    );
+    run(&queue).await;
+    assert_eq!(found_value(retry.await.unwrap()), second);
+    let stale = mutate("edit_message", 34, target, target, Some("second edit"));
+    run(&queue).await;
+    refused(stale.await.unwrap());
+    let stale = mutate("delete_message", 35, target, &first["message_id"], None);
+    run(&queue).await;
+    refused(stale.await.unwrap());
+    let removed = mutate("delete_message", 35, target, &second["message_id"], None);
+    run(&queue).await;
+    let removed = found_value(removed.await.unwrap());
+    assert_eq!(removed["disposition"], "saved-local");
+    let read = view(target);
+    run(&queue).await;
+    let read = found_value(read.await.unwrap());
+    assert_eq!(read["scanning"], false);
+    assert!(read["item"].is_null());
+    let after_delete = mutate(
+        "edit_message",
+        36,
+        target,
+        &removed["message_id"],
+        Some("resurrected text"),
+    );
+    run(&queue).await;
+    refused(after_delete.await.unwrap());
+    let retry = mutate("delete_message", 35, target, &second["message_id"], None);
+    run(&queue).await;
+    assert_eq!(found_value(retry.await.unwrap()), removed);
+    let audit = native_history_request(&window, &found, "0", None, 8);
+    run(&queue).await;
+    let audit = found_value(audit.await.unwrap());
+    assert_eq!(audit["end_exclusive"], "5");
+    assert_eq!(audit["items"][0]["body"]["text"], "original text");
+    assert_eq!(audit["items"][3]["body"]["text"], "second edit");
+    assert_eq!(audit["items"][4]["action"], removed["message_id"]);
+    assert_eq!(
+        audit["items"][4]["body"],
+        serde_json::json!({"kind":"delete","create":target})
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_text_found_router_installs_two_original_rows_retries_and_releases_real_files() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("vault");
@@ -968,15 +1157,33 @@ async fn native_text_found_router_installs_two_original_rows_retries_and_release
     let conflict = found_request(&main, 1, "Changed");
     run(&queue).await;
     refused(conflict.await.unwrap());
+    let occupied = hold_vault_metadata(&state).await;
+    let busy = Arc::new(Notify::new());
+    *state.native_text.found_setup_busy.lock().unwrap() = Some(busy.clone());
     let second = found_request(&main, 2, "Second");
-    run(&queue).await;
+    let second_task = tokio::spawn(run(&queue));
+    timeout(Duration::from_secs(5), busy.notified())
+        .await
+        .expect("the second Found reached the busy original metadata slot");
+    drop(occupied);
+    second_task.await.unwrap();
     let second = found_value(second.await.unwrap());
+    *state.native_text.found_setup_busy.lock().unwrap() = None;
     assert_ne!(second["server"], first["server"]);
     assert_eq!(state.servers.lock().await.native_iter().count(), 2);
     // Both rows must really sign/save using the production funded two-context
     // mount. Installing two UI rows alone establishes no such capacity.
+    let occupied = hold_vault_metadata(&state).await;
     let post = native_send_request(&main, &first, 9, "First native message");
-    run(&queue).await;
+    let post_task = tokio::spawn(run(&queue));
+    timeout(
+        Duration::from_secs(5),
+        state.native_text.send_preparation_busy.notified(),
+    )
+    .await
+    .expect("native send retries the original metadata lookup");
+    drop(occupied);
+    post_task.await.unwrap();
     let post = found_value(post.await.unwrap());
     assert_eq!(post["disposition"], "saved-local");
     assert_eq!(post["ordinal"], "0");
@@ -1005,6 +1212,1798 @@ async fn native_text_found_router_installs_two_original_rows_retries_and_release
     // A retained paid selector cannot retain the SDK or actual Physical owner.
     catcoms_storage::acquire_vault_session(&path).unwrap();
     drop(close);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_connected_join_keeps_legacy_invitation_handlers_outside_native_mode() {
+    for enabled in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("vault");
+        let (_app, main, queue) = self::app(path.clone(), None, enabled);
+        for command in [
+            "join_server",
+            "preview_invite",
+            "get_invite",
+            "mint_invite_fresh",
+            "send_dm_invite",
+        ] {
+            let (send, reply) = oneshot::channel();
+            let mut request = request(&main, "1", SECRET);
+            request.cmd = command.into();
+            request.body = InvokeBody::Json(serde_json::json!({}));
+            let view: &tauri::Webview<MockRuntime> = main.as_ref();
+            view.clone().on_message(
+                request,
+                Box::new(move |_, _, result, _, _| {
+                    let _ = send.send(result);
+                }),
+            );
+            let tauri::ipc::InvokeResponse::Err(error) = reply.await.unwrap() else {
+                panic!("invitation IPC reached a worker");
+            };
+            let expected = if enabled
+                && matches!(
+                    command,
+                    "join_server" | "preview_invite" | "mint_invite_fresh"
+                ) {
+                listing::STALE
+            } else if enabled {
+                "Invitations are unavailable in this Chat V2 checkpoint."
+            } else {
+                "existing backend"
+            };
+            assert_eq!(error.0, serde_json::json!(expected), "{command}");
+            assert!(queue.lock().unwrap().is_empty());
+        }
+        assert!(!path.exists());
+    }
+}
+
+fn preview_request(window: &tauri::WebviewWindow<MockRuntime>, hex: String) -> Reply {
+    invite_command(
+        window,
+        "preview_invite",
+        serde_json::json!({ "inviteHex": hex }),
+    )
+}
+
+fn invite_command(
+    window: &tauri::WebviewWindow<MockRuntime>,
+    command: &str,
+    body: serde_json::Value,
+) -> Reply {
+    let (send, reply) = oneshot::channel();
+    let mut invocation = request(window, "1", SECRET);
+    invocation.cmd = command.into();
+    invocation.body = InvokeBody::Json(body);
+    let view: &tauri::Webview<MockRuntime> = window.as_ref();
+    view.clone().on_message(
+        invocation,
+        Box::new(move |_, _, result, _, _| {
+            let _ = send.send(result);
+        }),
+    );
+    reply
+}
+
+async fn command_value_after_busy(
+    window: &tauri::WebviewWindow<MockRuntime>,
+    queue: &Queue,
+    command: &str,
+    busy: &str,
+    input: serde_json::Value,
+) -> serde_json::Value {
+    // A transient admission refusal can precede scheduling or come from the
+    // worker. Every retry uses the same original request data.
+    let retry_until = SystemClock.monotonic_ms().saturating_add(5_000);
+    loop {
+        let reply = invite_command(window, command, input.clone());
+        let pending = queue.lock().unwrap().pop();
+        if let Some(work) = pending {
+            work.await;
+        }
+        match reply.await.unwrap() {
+            tauri::ipc::InvokeResponse::Ok(body) => return body.deserialize().unwrap(),
+            tauri::ipc::InvokeResponse::Err(error)
+                if error.0.as_str() == Some(busy) && SystemClock.monotonic_ms() < retry_until =>
+            {
+                SystemClock.sleep(Duration::from_millis(25)).await;
+            }
+            tauri::ipc::InvokeResponse::Err(error) => panic!("{command} refused: {error:?}"),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_membership_dispatch_uses_the_original_founder_row() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("vault");
+    let (app, main, queue) = app(path.clone(), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let found = found_request(&main, 5, "Roster source");
+    run(&queue).await;
+    let found = found_value(found.await.unwrap());
+    let request =
+        serde_json::json!({ "server": found["server"], "expectedContext": found["context"] });
+    let legacy = invite_command(
+        &main,
+        "get_members",
+        serde_json::json!({ "server": found["server"] }),
+    );
+    let tauri::ipc::InvokeResponse::Err(error) = legacy.await.unwrap() else {
+        panic!("legacy membership uses the existing backend");
+    };
+    assert_eq!(error.0, serde_json::json!("existing backend"));
+    refused(
+        invite_command(
+            &main,
+            "get_native_chat_members",
+            serde_json::json!({
+                "server": found["server"], "expectedContext": "73".repeat(32),
+            }),
+        )
+        .await
+        .unwrap(),
+    );
+    let other =
+        tauri::WebviewWindowBuilder::new(&app, "unregistered-membership", Default::default())
+            .build()
+            .unwrap();
+    refused(
+        invite_command(&other, "get_native_chat_members", request.clone())
+            .await
+            .unwrap(),
+    );
+    assert!(queue.lock().unwrap().is_empty());
+    let roster = command_value_after_busy(
+        &main,
+        &queue,
+        "get_native_chat_members",
+        membership::BUSY,
+        request.clone(),
+    )
+    .await;
+    let [original] = roster["members"].as_array().unwrap().as_slice() else {
+        panic!("selected genesis has one original founder");
+    };
+    assert_eq!(original["founder"], true);
+    assert_eq!(original["you"], true);
+    assert_eq!(roster["canRemove"], false);
+    assert_eq!(original["admission"].as_str().unwrap().len(), 64);
+    let saved = native_send_request(&main, &found, 45, "Saved before the first Add");
+    run(&queue).await;
+    let saved = found_value(saved.await.unwrap());
+
+    let stale = invite_command(&main, "get_native_chat_members", request.clone());
+    let worker = run(&queue);
+    let state = app.state::<AppState>();
+    let _close = register_vault_close(&state).await.unwrap();
+    worker.await;
+    refused(stale.await.unwrap());
+    sources::close_server_rows(&state, &SystemClock)
+        .await
+        .unwrap();
+    drop(_close);
+    drop(state);
+    drop((other, main, app));
+
+    let (reopened, window, cold_queue) = self::app(path, None, true);
+    unlock_current(&reopened, &window, &cold_queue).await;
+    let conflicting = invite_command(
+        &window,
+        "found_server",
+        serde_json::json!({
+            "requestId": found["context"], "displayName": "Founder", "serverName": "Roster source",
+            "advertise": "127.0.0.1:46955", "relay": "", "rendezvous": "", "isDm": false,
+        }),
+    );
+    run(&cold_queue).await;
+    refused(conflicting.await.unwrap());
+    let exact = found_request(&window, 5, "Roster source");
+    run(&cold_queue).await;
+    assert_eq!(found_value(exact.await.unwrap()), found);
+    let restored = command_value_after_busy(
+        &window,
+        &cold_queue,
+        "get_native_chat_members",
+        membership::BUSY,
+        request.clone(),
+    )
+    .await;
+    assert_eq!(restored, roster);
+    let resumed = resume_request(&window);
+    run(&cold_queue).await;
+    let resumed = found_value(resumed.await.unwrap());
+    let [cold] = resumed["servers"].as_array().unwrap().as_slice() else {
+        panic!("the original founder is installed after cold unlock");
+    };
+    assert_eq!(cold["server"], found["server"]);
+    assert_eq!(cold["context"], found["context"]);
+    assert_eq!(cold["channel"], found["channel"]);
+    let state = reopened.state::<AppState>();
+    let server = cold["server"].as_u64().unwrap();
+    let request_digest = {
+        let table = state.servers.lock().await;
+        let row = table.native(&server).unwrap();
+        row.data().selection.founder().unwrap().request_data()
+    };
+    let mut wrong = cold.clone();
+    wrong["context"] = serde_json::json!(hex::encode(request_digest));
+    assert_ne!(wrong["context"], cold["context"]);
+    let refused_history = native_history_request(&window, &wrong, "0", None, 1);
+    refused(refused_history.await.unwrap());
+    assert!(cold_queue.lock().unwrap().is_empty());
+    let local = joined_work(&state, server).await;
+    let account =
+        keep_session::current(&state, state.ui_session_generation.load(Ordering::SeqCst)).unwrap();
+    let foreground = local.foreground(account).await.unwrap();
+    let page = native_history_request(&window, cold, "0", None, 1);
+    let work = cold_queue.lock().unwrap().pop();
+    drop(foreground);
+    if let Some(work) = work {
+        work.await;
+    }
+    let page = found_value(page.await.unwrap());
+    assert_eq!(page["items"][0]["action"], saved["message_id"]);
+    assert_eq!(
+        page["items"][0]["body"]["text"],
+        "Saved before the first Add"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_founder_frame_capture_survives_transient_row_contention() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, window, queue) = app(root.path().join("vault"), None, true);
+    unlock_current(&app, &window, &queue).await;
+    let found = found_request(&window, 1, "Original receiver");
+    run(&queue).await;
+    let found = found_value(found.await.unwrap());
+    let state = app.state::<AppState>();
+    let generation = state.ui_session_generation.load(Ordering::SeqCst);
+    let table = state.servers.lock().await;
+    let row = table.native(&found["server"].as_u64().unwrap()).unwrap();
+    let source = connected::Source::for_row(
+        generation,
+        &state.native_text.ui_state.original_target().unwrap(),
+        row,
+        keep_session::current(&state, generation).unwrap(),
+        &mut Some(state.native_text.ui_budget.prepare().unwrap()),
+    )
+    .unwrap();
+
+    let mut capture = Box::pin(receiving::capture_founder_frame(&state, &source));
+    pending_once(capture.as_mut()).await;
+    drop(table);
+    let (permit, prepared) = timeout(Duration::from_secs(5), capture)
+        .await
+        .expect("capture retained the original receiver while the table was busy")
+        .unwrap();
+    let caller = source.negative();
+    let roster = tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        prepared.governed_roster(&caller)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(roster.members().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_membership_selected_eviction_notifies_the_original_joined_row() {
+    use tauri::Listener;
+
+    let root = tempfile::tempdir().unwrap();
+    let (founder, main, founder_queue) = app(root.path().join("founder"), None, true);
+    let (member, window, member_queue) = app(root.path().join("member"), None, true);
+    unlock_current(&founder, &main, &founder_queue).await;
+    unlock_current(&member, &window, &member_queue).await;
+    let found = found_request(&main, 1, "Founder group");
+    run(&founder_queue).await;
+    let found = found_value(found.await.unwrap());
+    let invite = invite_command(
+        &main,
+        "mint_invite_fresh",
+        serde_json::json!({"server": found["server"], "expectedContext": found["context"]}),
+    );
+    run(&founder_queue).await;
+    let invite = found_value(invite.await.unwrap());
+    let (notice, selected_add) = oneshot::channel();
+    founder.once_any("chat-v2-membership", move |event| {
+        let notice_data: serde_json::Value = serde_json::from_str(event.payload()).unwrap();
+        let _ = notice.send(notice_data);
+    });
+    let joined = invite_command(
+        &window,
+        "join_server",
+        serde_json::json!({
+            "inviteHex": invite, "approvedHost": "127.0.0.1", "displayName": "Member",
+            "serverName": "Joined group", "isDm": false, "allowSwitchboards": false,
+        }),
+    );
+    timeout(Duration::from_secs(45), run(&member_queue))
+        .await
+        .expect("the member joins over the founder's original TCP listener");
+    let joined = found_value(joined.await.unwrap());
+    assert_eq!(
+        timeout(Duration::from_secs(10), selected_add)
+            .await
+            .unwrap()
+            .unwrap(),
+        serde_json::json!({"server": found["server"], "context": found["context"], "removed": false}),
+    );
+
+    let roster = command_value_after_busy(
+        &main,
+        &founder_queue,
+        "get_native_chat_members",
+        membership::BUSY,
+        serde_json::json!({"server": found["server"], "expectedContext": found["context"]}),
+    )
+    .await;
+    let admission = roster["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["founder"] == false)
+        .expect("the selected roster names the joined admission");
+
+    let (notice, selected_eviction) = oneshot::channel();
+    member.once_any("chat-v2-membership", move |event| {
+        let notice_data: serde_json::Value = serde_json::from_str(event.payload()).unwrap();
+        let _ = notice.send(notice_data);
+    });
+    let removal = command_value_after_busy(
+        &main,
+        &founder_queue,
+        "remove_native_chat_member",
+        membership::BUSY,
+        serde_json::json!({
+            "server": found["server"], "expectedContext": found["context"],
+            "expectedAdmission": admission["admission"],
+        }),
+    )
+    .await;
+    assert!(removal.is_null());
+    let selected_eviction = timeout(Duration::from_secs(40), selected_eviction)
+        .await
+        .expect("closing the joined worker must preserve the selected eviction notice")
+        .unwrap();
+    assert_eq!(
+        selected_eviction,
+        serde_json::json!({
+            "server": joined["server"], "context": joined["context"], "removed": true,
+        })
+    );
+    let send = native_send_request(&window, &joined, 45, "Removed admission cannot send");
+    let pending = member_queue.lock().unwrap().pop();
+    if let Some(work) = pending {
+        work.await;
+    }
+    refused(send.await.unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_joined_dependency_provider_reopens_after_selected_add() {
+    use catcoms_replication::chat::ActionId;
+    use tauri::Listener;
+
+    let root = tempfile::tempdir().unwrap();
+    let (founder, main, founder_queue) = app(root.path().join("founder"), None, true);
+    let (member, member_window, member_queue) = app(root.path().join("member"), None, true);
+    let (newcomer, new_window, new_queue) = app(root.path().join("newcomer"), None, true);
+    unlock_current(&founder, &main, &founder_queue).await;
+    unlock_current(&member, &member_window, &member_queue).await;
+    unlock_current(&newcomer, &new_window, &new_queue).await;
+    let found = found_request(&main, 1, "Original room");
+    run(&founder_queue).await;
+    let found = found_value(found.await.unwrap());
+    let mint = || {
+        invite_command(
+            &main,
+            "mint_invite_fresh",
+            serde_json::json!({"server": found["server"], "expectedContext": found["context"]}),
+        )
+    };
+    let join = |window: &tauri::WebviewWindow<MockRuntime>, invite: &serde_json::Value, name| {
+        invite_command(
+            window,
+            "join_server",
+            serde_json::json!({
+                "inviteHex": invite, "approvedHost": "127.0.0.1", "displayName": name,
+                "serverName": "Original room", "isDm": false, "allowSwitchboards": false,
+            }),
+        )
+    };
+    let invite = mint();
+    run(&founder_queue).await;
+    let invite = found_value(invite.await.unwrap());
+    let joined = join(&member_window, &invite, "Existing member");
+    timeout(Duration::from_secs(45), run(&member_queue))
+        .await
+        .unwrap();
+    let joined = found_value(joined.await.unwrap());
+    let member_id = joined["server"].as_u64().unwrap();
+    let member_state = member.state::<AppState>();
+    let workers = assert_joined_connected_workers(&member_state, member_id).await;
+    let member_generation = member_state.ui_session_generation.load(Ordering::SeqCst);
+    let reopen = AdmissionBarrier::new();
+    *member_state
+        .native_text
+        .join_dependency_reopen_edge
+        .lock()
+        .unwrap() = Some(reopen.clone());
+
+    let (notice, selected_add) = oneshot::channel();
+    member.once_any("chat-v2-membership", move |event| {
+        let _ = notice.send(serde_json::from_str::<serde_json::Value>(event.payload()).unwrap());
+    });
+    let next_invite = mint();
+    run(&founder_queue).await;
+    let next_invite = found_value(next_invite.await.unwrap());
+    assert_ne!(next_invite, invite);
+    let new_state = newcomer.state::<AppState>();
+    let startup = AdmissionBarrier::new();
+    *new_state.native_text.join_startup_edge.lock().unwrap() = Some(startup.clone());
+    let new_row = join(&new_window, &next_invite, "New member");
+    let new_task = tokio::spawn(run(&new_queue));
+    let new_row = found_value(
+        timeout(Duration::from_secs(45), new_row)
+            .await
+            .unwrap()
+            .unwrap(),
+    );
+    timeout(Duration::from_secs(5), startup.arrived.notified())
+        .await
+        .unwrap();
+    let notice = timeout(Duration::from_secs(45), selected_add)
+        .await
+        .expect("the running desktop applies the successor Add automatically")
+        .unwrap();
+    assert_eq!(
+        notice,
+        serde_json::json!({
+            "server": joined["server"], "context": joined["context"], "removed": false,
+        })
+    );
+    timeout(Duration::from_secs(5), reopen.arrived.notified())
+        .await
+        .expect("the old dependency provider retired after the selected Add");
+    let (original, _, _, _) =
+        capture_joined_worker(&member_state, member_id, member_generation).await;
+    let (transport, release_transport) = BlockingIoBarrier::new();
+    let held = transport.clone();
+    let holder = tokio::task::spawn_blocking(move || {
+        original.hold_dependency_transport_for_test(|| held.wait_once())
+    });
+    timeout(Duration::from_secs(5), transport.arrived.notified())
+        .await
+        .expect("the original TCP transport capture mutex is held");
+    reopen.release.notify_one();
+    timeout(
+        Duration::from_secs(5),
+        member_state
+            .native_text
+            .join_dependency_transport_busy
+            .notified(),
+    )
+    .await
+    .expect("provider replacement reached the contended TCP capture");
+    drop(release_transport);
+    assert_eq!(holder.await.unwrap(), Some(()));
+
+    let contact = command_value_after_busy(
+        &member_window,
+        &member_queue,
+        "share_native_chat_contact",
+        membership::BUSY,
+        serde_json::json!({"server": joined["server"], "expectedContext": joined["context"]}),
+    )
+    .await;
+    let raw = hex::decode(contact.as_str().unwrap()).unwrap();
+    let signed = catcoms_sync::V2MemberContactData::decode(&raw).unwrap();
+    let peer = PeerId::new(*blake3::hash(signed.address_data().0).as_bytes());
+    let connect = command_value_after_busy(
+        &new_window,
+        &new_queue,
+        "connect_native_chat_contact",
+        membership::BUSY,
+        serde_json::json!({"server": new_row["server"], "expectedContext": new_row["context"],
+            "contact": contact, "approvedHost": "127.0.0.1"}),
+    )
+    .await;
+    assert!(connect.is_null());
+
+    let founder_state = founder.state::<AppState>();
+    let close = register_vault_close(&founder_state).await.unwrap();
+    sources::close_server_rows(&founder_state, &SystemClock)
+        .await
+        .unwrap();
+    drop(close);
+    let saved = command_value_after_busy(
+        &member_window,
+        &member_queue,
+        "send_message",
+        sending::BUSY,
+        serde_json::json!({"server": joined["server"], "channel": joined["channel"],
+            "expectedContext": joined["context"], "retryToken": hex::encode([91; 32]),
+            "text": "Parent after the Add", "replyTo": null}),
+    )
+    .await;
+    assert_eq!(saved["disposition"], "saved-local");
+    let parent = saved["message_id"].as_str().unwrap();
+    let reply = command_value_after_busy(
+        &member_window,
+        &member_queue,
+        "send_message",
+        sending::BUSY,
+        serde_json::json!({"server": joined["server"], "channel": joined["channel"],
+            "expectedContext": joined["context"], "retryToken": hex::encode([92; 32]),
+            "text": "Reply after the Add", "replyTo": parent}),
+    )
+    .await;
+    assert_eq!(reply["disposition"], "saved-local");
+    let missing = invite_command(
+        &new_window,
+        "get_message_page",
+        serde_json::json!({"server": new_row["server"], "channel": new_row["channel"],
+            "expectedContext": new_row["context"], "archivedAction": parent}),
+    );
+    run(&new_queue).await;
+    assert!(found_value(missing.await.unwrap())["item"].is_null());
+
+    // Keep C's gossip receiver parked, so only its real dependency exchange
+    // can recover the parent's signed original from B on the direct TCP link.
+    let action = ActionId::from_bytes(membership::decode_exact_hex(parent).unwrap());
+    let id = new_row["server"].as_u64().unwrap();
+    let generation = new_state.ui_session_generation.load(Ordering::SeqCst);
+    let recovered = timeout(Duration::from_secs(30), async {
+        loop {
+            let (prepared, selection, channel, scope) =
+                capture_joined_worker(&new_state, id, generation).await;
+            if let Ok(exchange) = prepared.prepare_dependency_exchange(
+                &selection,
+                channel,
+                peer,
+                action,
+                scope,
+                &mut OsCryptoRng,
+            ) {
+                if let Ok(Ok(response)) = timeout(Duration::from_secs(3), exchange.receive()).await
+                {
+                    let (prepared, current, _, scope) =
+                        capture_joined_worker(&new_state, id, generation).await;
+                    if let Ok(Some(original)) =
+                        prepared.open_dependency_response(&current, response, &scope)
+                    {
+                        break original.action_id_data();
+                    }
+                }
+            }
+            SystemClock.sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the joined worker serves the dependency after the TCP capture mutex is released");
+    assert_eq!(recovered, action);
+    assert_eq!(
+        member_state.ui_session_generation.load(Ordering::SeqCst),
+        member_generation
+    );
+    assert!(Arc::ptr_eq(
+        &workers.upgrade().unwrap(),
+        &joined_work(&member_state, member_id).await
+    ));
+    startup.release.notify_one();
+    timeout(Duration::from_secs(15), new_task)
+        .await
+        .unwrap()
+        .unwrap();
+    for state in [&member_state, &new_state] {
+        let _close = register_vault_close(state).await.unwrap();
+        sources::close_server_rows(state, &SystemClock)
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_expired_preview_reproves_the_original_pending_after_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("joiner");
+    let (founder, main, founder_queue) = app(root.path().join("founder"), None, true);
+    let (joiner, window, queue) = app(path.clone(), None, true);
+    unlock_current(&founder, &main, &founder_queue).await;
+    unlock_current(&joiner, &window, &queue).await;
+    let found = found_request(&main, 1, "Founder");
+    run(&founder_queue).await;
+    let found = found_value(found.await.unwrap());
+    let minted = invite_command(
+        &main,
+        "mint_invite_fresh",
+        serde_json::json!({"server": found["server"], "expectedContext": found["context"]}),
+    );
+    run(&founder_queue).await;
+    let code = found_value(minted.await.unwrap())
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let wire = hex::decode(&code).unwrap();
+    let invite = catcoms_app::store::NativeTextInvitePacketData::decode(&wire).unwrap();
+    let expires = invite.binding().spec_data().expires_at_ms;
+
+    let state = joiner.state::<AppState>();
+    state
+        .native_text
+        .invite_preview_now
+        .store(expires, Ordering::SeqCst);
+    let fresh = preview_request(&window, code.clone());
+    run(&queue).await;
+    refused(fresh.await.unwrap());
+    let generation = state.ui_session_generation.load(Ordering::SeqCst);
+    let target = state.native_text.ui_state.original_target().unwrap();
+    let caller = keep_session::current(&state, generation).unwrap();
+    let preparation = joining::capture_once(&state, generation, &target, |sources, command| {
+        sources.capture_join_request(command)
+    })
+    .await
+    .unwrap();
+    let token = joining::request_token(&invite);
+    preparation
+        .cover(
+            &invite,
+            &invite.binding().spec_data().anchor,
+            token,
+            expires - 1,
+            &caller,
+            &mut OsCryptoRng,
+        )
+        .unwrap();
+    let pending = path.join("chat-critical-namespaces.joined-pending.bin");
+    let original = std::fs::read(&pending).unwrap();
+    let occupied = {
+        let store = state.store.lock().await;
+        let vault = store.as_ref().unwrap().as_text_v2().unwrap();
+        vault.prepare_native_authentication(state.native_text.ui_budget.prepare().unwrap())
+    };
+    assert!(!occupied.is_capture_busy_cached());
+    let warm = preview_request(&window, code.clone());
+    let release = async {
+        SystemClock.sleep(Duration::from_millis(100)).await;
+        drop(occupied);
+    };
+    tokio::join!(run(&queue), release);
+    let warm = found_value(warm.await.unwrap());
+    assert_eq!(warm["expires_at_ms"], expires);
+
+    let close = register_vault_close(&state).await.unwrap();
+    sources::close_server_rows(&state, &SystemClock)
+        .await
+        .unwrap();
+    drop((close, caller, target, state));
+    drop((window, joiner));
+    let (reopened, window, queue) = app(path, None, true);
+    unlock_current(&reopened, &window, &queue).await;
+    let state = reopened.state::<AppState>();
+    state
+        .native_text
+        .invite_preview_now
+        .store(expires, Ordering::SeqCst);
+    let cold = preview_request(&window, code);
+    run(&queue).await;
+    assert_eq!(found_value(cold.await.unwrap()), warm);
+    let generation = state.ui_session_generation.load(Ordering::SeqCst);
+    let target = state.native_text.ui_state.original_target().unwrap();
+    let caller = keep_session::current(&state, generation).unwrap();
+    let preparation = joining::capture_once(&state, generation, &target, |sources, command| {
+        sources.capture_joined_selection(command)
+    })
+    .await
+    .unwrap();
+    let mut wrong_token = token;
+    wrong_token[0] ^= 1;
+    assert!(preparation
+        .require_recovery_invite(&invite, wrong_token, &caller)
+        .is_err());
+    assert_eq!(std::fs::read(pending).unwrap(), original);
+    assert!(state.servers.lock().await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_connected_join_retries_original_welcome_after_authenticated_unlock() {
+    use catcoms_rt::{MeshTransport, ProtocolId, TransportError, CHAT_V2_JOIN_KIND};
+    use catcoms_sync::{DirectJoinLimits, PreparedV2JoinRequest};
+
+    fn read_field<'a>(wire: &mut &'a [u8]) -> &'a [u8] {
+        let bytes = *wire;
+        let size = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+        let (field, rest) = bytes[4..].split_at(size);
+        *wire = rest;
+        field
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("vault");
+    let (app, main, queue) = app(path.clone(), None, true);
+    unlock_current(&app, &main, &queue).await;
+    assert!(path
+        .join("chat-critical-namespaces.joined-pin.index")
+        .is_file());
+    let found = found_request(&main, 1, "Connected founder");
+    run(&queue).await;
+    let found = found_value(found.await.unwrap());
+    let id = found["server"].as_u64().unwrap();
+    let state = app.state::<AppState>();
+    let mint = || {
+        invite_command(
+            &main,
+            "mint_invite_fresh",
+            serde_json::json!({ "server": id, "expectedContext": found["context"] }),
+        )
+    };
+    for arguments in [
+        serde_json::json!({ "server": id }),
+        serde_json::json!({ "server": id, "expectedContext": "fe".repeat(32) }),
+    ] {
+        let wrong = invite_command(&main, "mint_invite_fresh", arguments);
+        refused(wrong.await.unwrap());
+    }
+    assert!(queue.lock().unwrap().is_empty());
+    let first = mint();
+    run(&queue).await;
+    let original_code = found_value(first.await.unwrap());
+    let retry = mint();
+    run(&queue).await;
+    assert_eq!(found_value(retry.await.unwrap()), original_code);
+    let hex = original_code.as_str().unwrap().to_owned();
+    let packet = hex::decode(&hex).unwrap();
+    let invite = catcoms_app::store::NativeTextInvitePacketData::decode(&packet).unwrap();
+    let expires = invite.binding().spec_data().expires_at_ms;
+    let preview = preview_request(&main, hex.clone());
+    run(&queue).await;
+    assert_eq!(
+        found_value(preview.await.unwrap()),
+        serde_json::json!({
+            "direct_routes": 0, "rendezvous_routes": 0, "switchboards": 0,
+            "expires_at_ms": expires, "communication_mode": "peer_to_peer",
+            "approved_host_required": true
+        })
+    );
+    state
+        .native_text
+        .invite_preview_now
+        .store(expires, Ordering::SeqCst);
+    // Even this founder's exact code has no covered join in this vault.
+    let expired = preview_request(&main, hex.clone());
+    run(&queue).await;
+    let tauri::ipc::InvokeResponse::Err(error) = expired.await.unwrap() else {
+        panic!("an expired invite cannot start a new join");
+    };
+    assert_eq!(
+        error.0,
+        serde_json::json!("This Chat V2 invite has expired.")
+    );
+    state
+        .native_text
+        .invite_preview_now
+        .store(0, Ordering::SeqCst);
+    let trailing = preview_request(&main, format!("{hex}00"));
+    run(&queue).await;
+    refused(trailing.await.unwrap());
+    let too_large = preview_request(
+        &main,
+        "00".repeat(catcoms_app::store::MAX_NATIVE_TEXT_INVITE_PACKET_BYTES + 1),
+    );
+    refused(too_large.await.unwrap());
+    assert!(queue.lock().unwrap().is_empty());
+    let request = PreparedV2JoinRequest::prepare(
+        catcoms_mls::MlsDevice::generate().unwrap(),
+        &invite.binding().spec_data().anchor,
+        invite.binding(),
+        [72; 32],
+        expires - 1,
+        DirectJoinLimits::new(512 * 1024, 512 * 1024, 64 * 1024).unwrap(),
+    )
+    .unwrap();
+    let mut wire = vec![CHAT_V2_JOIN_KIND];
+    wire.extend_from_slice(request.request_bytes_data());
+    let wire = bytes::Bytes::from(wire);
+
+    // The in-process test knows this exact original node listens on loopback.
+    // Read the already authenticated reservation solely to address that fixture.
+    let mut route = invite.reservation_bytes();
+    read_field(&mut route);
+    route = &route[2..];
+    read_field(&mut route);
+    read_field(&mut route);
+    let peer = std::str::from_utf8(read_field(&mut route)).unwrap();
+    read_field(&mut route);
+    let port = u16::from_be_bytes(route[2..4].try_into().unwrap());
+    let (client, _) = catcoms_net::MeshService::new_tcp(None, &[]).unwrap();
+    client
+        .dial(
+            format!("/ip4/127.0.0.1/tcp/{port}/p2p/{peer}")
+                .parse()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let peer = invite.connected_peer_data();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        client.wait_for_peer_connected(peer),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let send = || client.request_connected(peer, ProtocolId("/catcoms/rr/1"), wire.clone());
+    let original = send().await.unwrap();
+    request
+        .validate_first_join_delivery_data(&original)
+        .unwrap();
+
+    let stale_preview = preview_request(&main, hex);
+    let locked = snapshot_request(&main, None);
+    run(&queue).await;
+    assert!(snapshot_result(locked.await.unwrap())["continuity_error"].is_null());
+    run(&queue).await;
+    refused(stale_preview.await.unwrap());
+    refused(mint().await.unwrap());
+    assert!(matches!(send().await, Err(TransportError::NoResponse)));
+    let occupied = hold_vault_metadata(&state).await;
+    let release = async {
+        SystemClock.sleep(Duration::from_millis(100)).await;
+        drop(occupied);
+    };
+    tokio::join!(unlock_current(&app, &main, &queue), release);
+    assert_eq!(send().await.unwrap(), original);
+
+    let close = register_vault_close(&state).await.unwrap();
+    sources::close_server_rows(&state, &SystemClock)
+        .await
+        .unwrap();
+    drop(close);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_connected_join_gated_route_publishes_one_original_joined_row() {
+    let root = tempfile::tempdir().unwrap();
+    let (founder, founder_window, founder_queue) = app(root.path().join("founder"), None, true);
+    let joiner_path = root.path().join("joiner");
+    let (joiner, joiner_window, joiner_queue) = app(joiner_path.clone(), None, true);
+    unlock_current(&founder, &founder_window, &founder_queue).await;
+    unlock_current(&joiner, &joiner_window, &joiner_queue).await;
+    let found = found_request(&founder_window, 1, "Founder group");
+    run(&founder_queue).await;
+    let found = found_value(found.await.unwrap());
+    let listing = resume_request(&founder_window);
+    run(&founder_queue).await;
+    let listing = found_value(listing.await.unwrap());
+    let [warm_founder] = listing["servers"].as_array().unwrap().as_slice() else {
+        panic!("expected the original founder row");
+    };
+    assert_eq!(warm_founder["name"], "Founder group");
+    assert_eq!(warm_founder["display_name"], "Founder");
+    let minted = invite_command(
+        &founder_window,
+        "mint_invite_fresh",
+        serde_json::json!({ "server": found["server"], "expectedContext": found["context"] }),
+    );
+    run(&founder_queue).await;
+    let code = found_value(minted.await.unwrap());
+    let preview = preview_request(&joiner_window, code.as_str().unwrap().to_owned());
+    run(&joiner_queue).await;
+    let preview = found_value(preview.await.unwrap());
+    assert_eq!(preview["approved_host_required"], true);
+    assert_eq!(preview["direct_routes"], 0);
+    let join = |host, display| {
+        invite_command(
+            &joiner_window,
+            "join_server",
+            serde_json::json!({
+                "inviteHex": code, "approvedHost": host, "displayName": display,
+                "serverName": "My joined group", "isDm": false, "allowSwitchboards": false,
+            }),
+        )
+    };
+    refused(join("localhost", "Member").await.unwrap());
+    refused(join("0.0.0.0", "Member").await.unwrap());
+    assert!(joiner_queue.lock().unwrap().is_empty());
+    let joiner_state = joiner.state::<AppState>();
+    let occupied = {
+        let store = joiner_state.store.lock().await;
+        let vault = store.as_ref().unwrap().as_text_v2().unwrap();
+        vault.prepare_native_authentication(joiner_state.native_text.ui_budget.prepare().unwrap())
+    };
+    assert!(!occupied.is_capture_busy_cached());
+    let startup = AdmissionBarrier::new();
+    let history = AdmissionBarrier::new();
+    *joiner_state.native_text.join_startup_edge.lock().unwrap() = Some(startup.clone());
+    *joiner_state
+        .native_text
+        .history_capture_edge
+        .lock()
+        .unwrap() = Some(history.clone());
+    let original = join("127.0.0.1", "Member");
+    let join_task = tokio::spawn(joiner_queue.lock().unwrap().pop().unwrap());
+    let initial_response = tokio::time::timeout(Duration::from_secs(30), async {
+        let release = async {
+            SystemClock.sleep(Duration::from_millis(100)).await;
+            drop(occupied);
+        };
+        tokio::join!(original, release).0.unwrap()
+    })
+    .await
+    .expect("the native Join completes over the founder TCP actor");
+    assert!(
+        matches!(initial_response, tauri::ipc::InvokeResponse::Ok(_)),
+        "initial native join after metadata capture release"
+    );
+    let original = found_value(initial_response);
+    assert_eq!(original["backend"], "text-v2");
+    assert_eq!(original["name"], "My joined group");
+    assert_eq!(original["display_name"], "Member");
+    assert_eq!(original["channel"], found["channel"]);
+    timeout(Duration::from_secs(5), startup.arrived.notified())
+        .await
+        .expect("Join published before starting the original row workers");
+    let first_history = native_history_request(&joiner_window, &original, "0", None, 8);
+    let history_task = tokio::spawn(joiner_queue.lock().unwrap().pop().unwrap());
+    timeout(Duration::from_secs(5), history.arrived.notified())
+        .await
+        .expect("first history read holds the original metadata slot");
+    startup.release.notify_one();
+    timeout(
+        Duration::from_secs(5),
+        joiner_state.native_text.join_startup_busy.notified(),
+    )
+    .await
+    .expect("startup observed the same metadata slot busy while history was paused");
+    {
+        let _table = joiner_state.servers.lock().await;
+        timeout(
+            Duration::from_secs(5),
+            joiner_state.native_text.join_startup_table_busy.notified(),
+        )
+        .await
+        .expect("startup retries a contended row lookup before attaching workers");
+    }
+    let id = original["server"].as_u64().unwrap();
+    let generation = joiner_state.ui_session_generation.load(Ordering::SeqCst);
+    let (original_ingress, _, _, _) = capture_joined_worker(&joiner_state, id, generation).await;
+    let (ingress, release_ingress) = BlockingIoBarrier::new();
+    let held = ingress.clone();
+    let holder = tokio::task::spawn_blocking(move || {
+        original_ingress.hold_dependency_ingress_for_test(|| held.wait_once())
+    });
+    timeout(Duration::from_secs(5), ingress.arrived.notified())
+        .await
+        .expect("the original network ingress mutex is held");
+    history.release.notify_one();
+    timeout(
+        Duration::from_secs(5),
+        joiner_state
+            .native_text
+            .join_dependency_ingress_busy
+            .notified(),
+    )
+    .await
+    .expect("startup reached the actual contended dependency ingress");
+    drop(release_ingress);
+    assert_eq!(holder.await.unwrap(), Some(()));
+    timeout(Duration::from_secs(15), history_task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        found_value(first_history.await.unwrap())["items"],
+        serde_json::json!([])
+    );
+    timeout(Duration::from_secs(15), join_task)
+        .await
+        .expect("the original Join starts its workers after history drains")
+        .unwrap();
+    let state = joiner.state::<AppState>();
+    let instance = state
+        .servers
+        .lock()
+        .await
+        .native(&id)
+        .unwrap()
+        .data()
+        .instance;
+    let original_publication = assert_joined_connected_workers(&state, id).await;
+    let probe = native_received_request(&joiner_window, &original);
+    run(&joiner_queue).await;
+    assert_eq!(
+        found_value(probe.await.unwrap()),
+        serde_json::json!({"backend":"text-v2","scope":"received-live","item":null})
+    );
+    let archive_request = |row: &serde_json::Value, payload: serde_json::Value| {
+        let mut body = payload;
+        body["server"] = row["server"].clone();
+        body["channel"] = row["channel"].clone();
+        body["expectedContext"] = row["context"].clone();
+        body
+    };
+    let empty_archive = serde_json::json!({
+        "backend":"text-v2","scope":"received-archive-index","available":true,"ids":[],"more":false,
+    });
+    let probe = invite_command(
+        &joiner_window,
+        "get_message_page",
+        archive_request(
+            &original,
+            serde_json::json!({"archiveAfter":null,"limit":8}),
+        ),
+    );
+    run(&joiner_queue).await;
+    assert_eq!(found_value(probe.await.unwrap()), empty_archive);
+    let missing = hex::encode([249; 32]);
+    let probe = invite_command(
+        &joiner_window,
+        "get_message_page",
+        archive_request(&original, serde_json::json!({"archivedAction":missing})),
+    );
+    run(&joiner_queue).await;
+    assert_eq!(
+        found_value(probe.await.unwrap()),
+        serde_json::json!({"backend":"text-v2","scope":"received-archive","item":null})
+    );
+    let work = joined_work(&state, id).await;
+    let scope =
+        keep_session::current(&state, state.ui_session_generation.load(Ordering::SeqCst)).unwrap();
+    let target = catcoms_replication::chat::ActionId::from_bytes([249; 32]);
+    let edit = catcoms_replication::chat::ActionId::from_bytes([248; 32]);
+    let delete = catcoms_replication::chat::ActionId::from_bytes([247; 32]);
+    {
+        let _permit = work.foreground(scope.clone()).await.unwrap();
+        work.note_archive_change(edit, target, false);
+        work.note_archive_change(delete, target, false);
+        work.note_archive_change(edit, target, true);
+    }
+    let probe = invite_command(
+        &joiner_window,
+        "get_message_page",
+        archive_request(&original, serde_json::json!({"archivedAction":missing})),
+    );
+    run(&joiner_queue).await;
+    refused(probe.await.unwrap());
+    {
+        let _permit = work.foreground(scope).await.unwrap();
+        work.note_archive_change(delete, target, true);
+    }
+    drop(work);
+    let probe = invite_command(
+        &joiner_window,
+        "get_message_page",
+        archive_request(&original, serde_json::json!({"archivedAction":missing})),
+    );
+    run(&joiner_queue).await;
+    assert_eq!(
+        found_value(probe.await.unwrap()),
+        serde_json::json!({"backend":"text-v2","scope":"received-archive","item":null})
+    );
+    let probe = invite_command(
+        &joiner_window,
+        "get_message_page",
+        archive_request(
+            &original,
+            serde_json::json!({"archiveAfter":null,"limit":8,"archivedAction":missing}),
+        ),
+    );
+    refused(probe.await.unwrap());
+    assert!(joiner_queue.lock().unwrap().is_empty());
+
+    let founder_text = "Founder message on the installed native mesh";
+    let sent = native_send_request(&founder_window, &found, 21, founder_text);
+    run(&founder_queue).await;
+    let sent = found_value(sent.await.unwrap());
+    assert_eq!(sent["disposition"], "saved-local");
+    let founder_action = sent["message_id"].as_str().unwrap();
+    let mut raw = [0; 32];
+    hex::decode_to_slice(founder_action, &mut raw).unwrap();
+    let action = catcoms_replication::chat::ActionId::from_bytes(raw);
+    {
+        let work = joined_work(&state, id).await;
+        timeout(Duration::from_secs(15), async {
+            loop {
+                let guarded = work.received.try_lock().ok().and_then(|slot| {
+                    slot.as_ref()?.read_message_projection(action).ok().flatten()
+                });
+                if let Some(guarded) = guarded {
+                    assert!(guarded.with_publication(|projection| matches!(
+                        projection, catcoms_replication::chat::GuardedProjection::Visible { text, .. }
+                        if text == founder_text
+                    )).unwrap());
+                    break;
+                }
+                SystemClock.sleep(Duration::from_millis(20)).await;
+            }
+        }).await.expect("the automatic founder worker sent exact saved text to the joined receiver");
+    }
+
+    let member_text = "Joined message on the founder's installed receiver";
+    let send = native_send_request(&joiner_window, &original, 20, member_text);
+    run(&joiner_queue).await;
+    let send = found_value(send.await.unwrap());
+    let member_action = send["message_id"].as_str().unwrap();
+    assert_eq!(send["ordinal"], "0");
+    timeout(Duration::from_secs(18), async {
+        loop {
+            let received = invite_command(&founder_window, "get_message_page",
+                archive_request(&found, serde_json::json!({"receivedAction":member_action})));
+            let task = founder_queue.lock().unwrap().pop();
+            if let Some(task) = task { task.await; }
+            if let tauri::ipc::InvokeResponse::Ok(body) = received.await.unwrap() {
+                let body: serde_json::Value = body.deserialize().unwrap();
+                if !body["item"].is_null() {
+                    assert_eq!(body, serde_json::json!({
+                        "backend":"text-v2","scope":"received-live",
+                        "item":{"action":member_action,"text":member_text,"certainty":"provisional"},
+                    }));
+                    break;
+                }
+            }
+            SystemClock.sleep(Duration::from_millis(35)).await;
+        }
+        loop {
+            let page = native_history_request(&joiner_window, &original, "0", None, 8);
+            let task = joiner_queue.lock().unwrap().pop();
+            if let Some(task) = task { task.await; }
+            if let tauri::ipc::InvokeResponse::Ok(body) = page.await.unwrap() {
+                let body: serde_json::Value = body.deserialize().unwrap();
+                if body["items"][0]["status"] == "submitted" {
+                    assert_eq!(body["items"][0]["action"], member_action);
+                    break;
+                }
+            }
+            SystemClock.sleep(Duration::from_millis(35)).await;
+        }
+    }).await.expect("the native founder received the member's original over TCP and the joined outbox checkpointed");
+
+    let page = invite_command(
+        &founder_window,
+        "get_message_page",
+        archive_request(&found, serde_json::json!({"archiveAfter":null,"limit":8})),
+    );
+    run(&founder_queue).await;
+    assert_eq!(
+        found_value(page.await.unwrap()),
+        serde_json::json!({
+            "backend":"text-v2","scope":"received-archive-index","available":true,
+            "ids":[member_action],"more":false,
+        })
+    );
+    let archived = invite_command(
+        &founder_window,
+        "get_message_page",
+        archive_request(&found, serde_json::json!({"archivedAction":member_action})),
+    );
+    run(&founder_queue).await;
+    assert_eq!(
+        found_value(archived.await.unwrap()),
+        serde_json::json!({
+            "backend":"text-v2","scope":"received-archive",
+            "item":{"action":member_action,"text":member_text,"certainty":"provisional"},
+        })
+    );
+
+    // The saved native row can be reported after the actual founder retires.
+    let locked = snapshot_request(&founder_window, None);
+    run(&founder_queue).await;
+    assert!(snapshot_result(locked.await.unwrap())["continuity_error"].is_null());
+    let retry = join("127.0.0.1", "Member");
+    run(&joiner_queue).await;
+    assert_eq!(found_value(retry.await.unwrap()), original);
+    let changed = join("127.0.0.1", "Changed member");
+    run(&joiner_queue).await;
+    refused(changed.await.unwrap());
+    assert_eq!(
+        state
+            .servers
+            .lock()
+            .await
+            .native(&id)
+            .unwrap()
+            .data()
+            .instance,
+        instance
+    );
+    let listed = resume_request(&joiner_window);
+    run(&joiner_queue).await;
+    let listed = found_value(listed.await.unwrap());
+    assert_eq!(
+        listed["servers"].as_array().unwrap(),
+        std::slice::from_ref(&original)
+    );
+    let local = joined_work(&state, id)
+        .await
+        .foreground(
+            keep_session::current(&state, state.ui_session_generation.load(Ordering::SeqCst))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let empty = native_history_request(&joiner_window, &original, "0", None, 8);
+    let pending = run(&joiner_queue);
+    tokio::pin!(pending);
+    assert!(timeout(Duration::from_millis(15), &mut pending)
+        .await
+        .is_err());
+    drop(local);
+    pending.await;
+    let empty = found_value(empty.await.unwrap());
+    assert_eq!(empty["end_exclusive"], "1");
+    assert_eq!(empty["items"][0]["action"], member_action);
+    let send = native_send_request(&joiner_window, &original, 9, "Joined message");
+    run(&joiner_queue).await;
+    let saved = found_value(send.await.unwrap());
+    assert_eq!(saved["disposition"], "saved-local");
+    assert!(saved["message_id"]
+        .as_str()
+        .is_some_and(|id| id.len() == 64));
+    let history = native_history_request(&joiner_window, &original, "0", None, 8);
+    run(&joiner_queue).await;
+    let history = found_value(history.await.unwrap());
+    assert_eq!(history["scope"], "own-saved-originals");
+    assert_eq!(history["end_exclusive"], "2");
+    assert_eq!(history["items"][1]["action"], saved["message_id"]);
+    assert_eq!(history["items"][1]["body"]["text"], "Joined message");
+    let locked = snapshot_request(&joiner_window, None);
+    run(&joiner_queue).await;
+    assert!(snapshot_result(locked.await.unwrap())["continuity_error"].is_null());
+
+    let saved_pins =
+        std::fs::read(joiner_path.join("chat-critical-namespaces.joined-pin.index")).unwrap();
+    let close = register_vault_close(&state).await.unwrap();
+    sources::close_server_rows(&state, &SystemClock)
+        .await
+        .unwrap();
+    assert_joined_publication_stopped(original_publication).await;
+    drop(close);
+    drop(joiner);
+    let (reopened, window, queue) = app(joiner_path.clone(), None, true);
+    let wrong = invoke(&window, "1", "different secret");
+    run(&queue).await;
+    refused(wrong.await.unwrap());
+    let state = reopened.state::<AppState>();
+    assert!(state.store.lock().await.is_none());
+    assert!(state.servers.lock().await.native(&id).is_none());
+    let unlocked = invoke(&window, "1", SECRET);
+    run(&queue).await;
+    let restored = found_value(unlocked.await.unwrap());
+    let restored = restored["servers"].as_array().unwrap();
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0], original);
+    let code_text = code.as_str().unwrap();
+    let wire = hex::decode(code_text).unwrap();
+    let invite = catcoms_app::store::NativeTextInvitePacketData::decode(&wire).unwrap();
+    let expires = invite.binding().spec_data().expires_at_ms;
+    state
+        .native_text
+        .invite_preview_now
+        .store(expires, Ordering::SeqCst);
+    let expired = preview_request(&window, code_text.to_owned());
+    run(&queue).await;
+    let preview = found_value(expired.await.unwrap());
+    assert_eq!(preview["expires_at_ms"], expires);
+    assert_eq!(preview["approved_host_required"], true);
+    let recovered_publication = assert_joined_connected_workers(&state, id).await;
+    let retry = native_send_request(&window, &restored[0], 9, "Joined message");
+    run(&queue).await;
+    assert_eq!(found_value(retry.await.unwrap()), saved);
+    let page = native_history_request(&window, &restored[0], "0", Some("2"), 8);
+    run(&queue).await;
+    assert_eq!(found_value(page.await.unwrap()), history);
+    let changed = native_send_request(&window, &restored[0], 9, "Changed joined message");
+    run(&queue).await;
+    refused(changed.await.unwrap());
+
+    let founder_state = founder.state::<AppState>();
+    let close = register_vault_close(&founder_state).await.unwrap();
+    sources::close_server_rows(&founder_state, &SystemClock)
+        .await
+        .unwrap();
+    drop(close);
+    drop(founder_window);
+    drop(founder);
+
+    let fresh = invite_command(
+        &window,
+        "send_message",
+        archive_request(
+            &restored[0],
+            serde_json::json!({
+                "retryToken":hex::encode([10;32]),
+                "text":"Message after restart", "replyTo":member_action,
+            }),
+        ),
+    );
+    run(&queue).await;
+    let fresh = found_value(fresh.await.unwrap());
+    assert_eq!(fresh["disposition"], "saved-local");
+    assert_eq!(fresh["ordinal"], "2");
+    assert_ne!(fresh["message_id"], saved["message_id"]);
+    let fixed_page = native_history_request(&window, &restored[0], "0", Some("2"), 8);
+    run(&queue).await;
+    assert_eq!(found_value(fixed_page.await.unwrap()), history);
+    let probe = invite_command(
+        &window,
+        "get_message_page",
+        archive_request(
+            &restored[0],
+            serde_json::json!({"archiveAfter":null,"limit":8}),
+        ),
+    );
+    run(&queue).await;
+    assert_eq!(
+        found_value(probe.await.unwrap()),
+        serde_json::json!({
+            "backend":"text-v2","scope":"received-archive-index","available":true,"ids":[founder_action],"more":false,
+        })
+    );
+    let probe = invite_command(
+        &window,
+        "get_message_page",
+        archive_request(
+            &restored[0],
+            serde_json::json!({"archivedAction":founder_action}),
+        ),
+    );
+    run(&queue).await;
+    assert_eq!(
+        found_value(probe.await.unwrap()),
+        serde_json::json!({
+            "backend":"text-v2","scope":"received-archive",
+            "item":{"action":founder_action,"text":founder_text,"certainty":"provisional"},
+        })
+    );
+    assert_eq!(
+        std::fs::read(joiner_path.join("chat-critical-namespaces.joined-pin.index")).unwrap(),
+        saved_pins
+    );
+    let (reopened_founder, founder_window, founder_queue) =
+        app(root.path().join("founder"), None, true);
+    let wrong = invoke(&founder_window, "1", "different secret");
+    run(&founder_queue).await;
+    refused(wrong.await.unwrap());
+    let state = reopened_founder.state::<AppState>();
+    assert!(state.store.lock().await.is_none());
+    assert!(state.servers.lock().await.native_iter().next().is_none());
+    let unlock = invoke(&founder_window, "1", SECRET);
+    run(&founder_queue).await;
+    let restored = found_value(unlock.await.unwrap());
+    let rows = restored["servers"].as_array().unwrap();
+    let [founder_row] = rows.as_slice() else {
+        panic!("expected the restored founder row");
+    };
+    for field in ["server", "name", "display_name", "channel", "backend"] {
+        assert_eq!(
+            founder_row[field], warm_founder[field],
+            "restored founder {field}"
+        );
+    }
+    let probe = invite_command(
+        &founder_window,
+        "get_message_page",
+        archive_request(
+            founder_row,
+            serde_json::json!({ "archivedAction": member_action }),
+        ),
+    );
+    run(&founder_queue).await;
+    let archived = found_value(probe.await.unwrap());
+    assert_eq!(archived["item"]["action"], member_action);
+    assert_eq!(archived["item"]["text"], member_text);
+    let page = native_history_request(&founder_window, founder_row, "0", None, 8);
+    run(&founder_queue).await;
+    let own = found_value(page.await.unwrap());
+    assert_eq!(own["items"][0]["action"], founder_action);
+    assert_eq!(own["items"][0]["body"]["text"], founder_text);
+    let retry = native_send_request(&founder_window, founder_row, 21, founder_text);
+    run(&founder_queue).await;
+    assert_eq!(
+        found_value(retry.await.unwrap())["message_id"],
+        founder_action
+    );
+    let reply_to = |target: &str| {
+        invite_command(
+            &founder_window,
+            "send_message",
+            archive_request(
+                founder_row,
+                serde_json::json!({
+                    "retryToken":hex::encode([22;32]),
+                    "text":"Founder message after restart", "replyTo":target,
+                }),
+            ),
+        )
+    };
+    let missing_parent = "ab".repeat(32);
+    let unavailable = reply_to(&missing_parent);
+    run(&founder_queue).await;
+    refused(unavailable.await.unwrap());
+    let send = reply_to(member_action);
+    run(&founder_queue).await;
+    let saved = found_value(send.await.unwrap());
+    assert_eq!(saved["disposition"], "saved-local");
+    assert_ne!(saved["message_id"], founder_action);
+    let retry = reply_to(member_action);
+    run(&founder_queue).await;
+    assert_eq!(found_value(retry.await.unwrap()), saved);
+    let changed = reply_to(founder_action);
+    run(&founder_queue).await;
+    refused(changed.await.unwrap());
+    let page = native_history_request(&founder_window, founder_row, "0", None, 8);
+    run(&founder_queue).await;
+    let originals = found_value(page.await.unwrap());
+    assert_eq!(originals["items"][1]["action"], saved["message_id"]);
+    assert_eq!(originals["items"][1]["body"]["reply_to"], member_action);
+
+    timeout(
+        Duration::from_secs(15),
+        state.native_text.founder_ingress_ready.notified(),
+    )
+    .await
+    .expect("the cold founder has subscribed on its original mesh");
+    let occupied = hold_vault_metadata(&state).await;
+    let reconnect = invite_command(
+        &window,
+        "join_server",
+        serde_json::json!({
+            "inviteHex":code, "approvedHost":"127.0.0.1", "displayName":"Member",
+            "serverName":"New group", "isDm":false, "allowSwitchboards":false,
+        }),
+    );
+    run(&queue).await;
+    let reconnect_response = reconnect.await.unwrap();
+    assert!(
+        matches!(reconnect_response, tauri::ipc::InvokeResponse::Ok(_)),
+        "original joined row reconnect after restart"
+    );
+    assert_eq!(found_value(reconnect_response), original);
+    timeout(
+        Duration::from_secs(20),
+        state.native_text.founder_receive_busy.notified(),
+    )
+    .await
+    .expect("a reconnected member frame reached the held founder metadata slot");
+    drop(occupied);
+    for (window, queue, row, action, expected) in [
+        (
+            &window,
+            &queue,
+            &original,
+            &saved["message_id"],
+            "Founder message after restart",
+        ),
+        (
+            &founder_window,
+            &founder_queue,
+            founder_row,
+            &fresh["message_id"],
+            "Message after restart",
+        ),
+    ] {
+        let received = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let probe = invite_command(
+                    window,
+                    "get_message_page",
+                    archive_request(row, serde_json::json!({"archivedAction":action})),
+                );
+                run(queue).await;
+                if let tauri::ipc::InvokeResponse::Ok(body) = probe.await.unwrap() {
+                    let value = body.deserialize::<serde_json::Value>().unwrap();
+                    if &value["item"]["action"] == action {
+                        break value;
+                    }
+                }
+                SystemClock.sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!("the offline original was not received after reconnect: {expected}")
+        });
+        assert_eq!(received["item"]["text"], expected);
+    }
+    assert_eq!(
+        std::fs::read(joiner_path.join("chat-critical-namespaces.joined-pin.index")).unwrap(),
+        saved_pins,
+    );
+
+    let joined_state = reopened.state::<AppState>();
+    let packet = hex::decode(code.as_str().unwrap()).unwrap();
+    let peer = catcoms_app::store::NativeTextInvitePacketData::decode(&packet)
+        .unwrap()
+        .connected_peer_data();
+    let founder_generation = state.ui_session_generation.load(Ordering::SeqCst);
+    let source = {
+        let target = state.native_text.ui_state.original_target().unwrap();
+        let account = keep_session::current(&state, founder_generation).unwrap();
+        let mut paid = Some(state.native_text.ui_budget.prepare().unwrap());
+        let table = state.servers.lock().await;
+        let founder_id = founder_row["server"].as_u64().unwrap();
+        connected::Source::for_row(
+            founder_generation,
+            &target,
+            table.native(&founder_id).unwrap(),
+            account,
+            &mut paid,
+        )
+        .unwrap()
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let permit = source
+                .member_work()
+                .foreground(source.negative())
+                .await
+                .unwrap();
+            if let Some(preparation) = source.capture(&state).await {
+                let scope = source.negative();
+                let channel = source.channel();
+                let attached = tauri::async_runtime::spawn_blocking(move || {
+                    let _permit = permit;
+                    preparation.attach_founder_dependency_provider(channel, scope)
+                })
+                .await
+                .unwrap();
+                if matches!(attached, Err(catcoms_app::store::V2MemberSaveRefusal::Busy)) {
+                    break;
+                }
+                drop(attached);
+            } else {
+                drop(permit);
+            }
+            SystemClock.sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the resumed native founder's dependency receiver owns the original lane");
+    drop(source);
+    let founder_saved = action;
+    let joined_generation = joined_state.ui_session_generation.load(Ordering::SeqCst);
+    let joined_work = joined_work(&joined_state, id).await;
+    let joined_session = keep_session::current(&joined_state, joined_generation).unwrap();
+    let mut last_refusal = String::new();
+    let recovered_parent = tokio::time::timeout(Duration::from_secs(28), async {
+        loop {
+            let guard = joined_work
+                .foreground(joined_session.clone())
+                .await
+                .unwrap();
+            let (prepare, selection, channel, scope) =
+                capture_joined_worker(&joined_state, id, joined_generation).await;
+            let exchange = prepare.prepare_dependency_exchange(
+                &selection,
+                channel,
+                peer,
+                founder_saved,
+                scope,
+                &mut OsCryptoRng,
+            );
+            drop(guard);
+            match exchange {
+                Ok(exchange) => {
+                    match tokio::time::timeout(Duration::from_secs(8), exchange.receive()).await {
+                        Ok(Ok(reply)) => {
+                            let _guard = joined_work
+                                .foreground(joined_session.clone())
+                                .await
+                                .unwrap();
+                            let (prepare, selection, _, scope) =
+                                capture_joined_worker(&joined_state, id, joined_generation).await;
+                            let original = prepare
+                                .open_dependency_response(&selection, reply, &scope)
+                                .unwrap()
+                                .expect("the cold founder has its exact original outbox receipt");
+                            assert_eq!(original.action_id_data(), founder_saved);
+                            break;
+                        }
+                        Ok(Err(error)) => last_refusal = format!("transport reported {error:?}"),
+                        Err(_) => last_refusal = "transport timed out".into(),
+                    }
+                }
+                Err(error) => last_refusal = format!("preparation reported {error:?}"),
+            }
+            SystemClock.sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    assert!(
+        recovered_parent.is_ok(),
+        "the cold founder's native worker did not answer: {last_refusal}"
+    );
+    drop(joined_work);
+    let close = register_vault_close(&joined_state).await.unwrap();
+    sources::close_server_rows(&joined_state, &SystemClock)
+        .await
+        .unwrap();
+    assert_joined_publication_stopped(recovered_publication).await;
+    drop(close);
+    let close = register_vault_close(&state).await.unwrap();
+    sources::close_server_rows(&state, &SystemClock)
+        .await
+        .unwrap();
+    drop(close);
+}
+
+async fn assert_joined_connected_workers(
+    state: &AppState,
+    id: u64,
+) -> std::sync::Weak<server_table::NativeMemberWork> {
+    let generation = state.ui_session_generation.load(Ordering::SeqCst);
+    let work = joined_work(state, id).await;
+    let _local = work
+        .foreground(keep_session::current(state, generation).unwrap())
+        .await
+        .unwrap();
+    assert!(Arc::strong_count(&work) >= 3);
+    let (preparation, selection, _, scope) = capture_joined_worker(state, id, generation).await;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        preparation.attach_dependency_provider_checked(&selection, scope)
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        result,
+        Err(catcoms_app::store::NativeTextJoinedDependencyAttachRefusal::Occupied)
+    ));
+    let (preparation, selection, channel, scope) =
+        capture_joined_worker(state, id, generation).await;
+    let listener = tauri::async_runtime::spawn_blocking(move || {
+        preparation.prepare_member_ingress(&selection, channel, scope)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        listener.open().await,
+        Err(catcoms_net::NativeChatMemberGossipError::Busy)
+    ));
+    Arc::downgrade(&work)
+}
+
+async fn capture_joined_worker(
+    state: &AppState,
+    id: u64,
+    generation: u64,
+) -> (
+    catcoms_app::store::NativeTextJoinedSelectionPreparation<OsCryptoRng>,
+    catcoms_app::store::NativeTextJoinedRowSelection,
+    u128,
+    catcoms_rt::RequestCancellation,
+) {
+    let target = state.native_text.ui_state.original_target().unwrap();
+    let mut ui = Some(
+        founding::ui_capture(state, generation, &target)
+            .await
+            .unwrap(),
+    );
+    let mut preparation = None;
+    let (selection, channel, scope) = {
+        let _commit = require_ui_session_generation(state, generation)
+            .await
+            .unwrap();
+        let store = state.store.lock().await;
+        let table = state.servers.lock().await;
+        let original = table.native(&id).unwrap();
+        let server_table::NativeSelection::Joined(selection) = &original.data().selection else {
+            panic!("the registered row must still be the original joined source");
+        };
+        let scope = original
+            .scope(keep_session::current(state, generation).unwrap())
+            .unwrap();
+        state
+            .native_text
+            .sources
+            .capture_joined_member(&store, &mut ui, selection, &mut preparation)
+            .unwrap();
+        (selection.clone(), original.data().channel, scope)
+    };
+    (preparation.unwrap(), selection, channel, scope)
+}
+
+async fn joined_work(state: &AppState, id: u64) -> Arc<server_table::NativeMemberWork> {
+    state
+        .servers
+        .lock()
+        .await
+        .native(&id)
+        .unwrap()
+        .data()
+        .member_work
+        .clone()
+}
+
+async fn assert_joined_publication_stopped(
+    original: std::sync::Weak<server_table::NativeMemberWork>,
+) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while original.strong_count() != 0 {
+            SystemClock.sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the publication worker should release the original closed row");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_connected_join_cold_idle_unlock_requires_the_existing_vault() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("vault");
+    let (first, main, queue) = app(path.clone(), None, true);
+    unlock_current(&first, &main, &queue).await;
+    let pin_path = path.join("chat-critical-namespaces.joined-pin.index");
+    let vault_path = path.join("vault.bin");
+    let original = std::fs::read(&vault_path).unwrap();
+    let pin = std::fs::read(&pin_path).unwrap();
+    let identities = [&vault_path, &pin_path].map(|file| {
+        catcoms_storage::kept::session_id(&std::fs::File::open(file).unwrap()).unwrap()
+    });
+
+    let (second, main, queue) = app(path.clone(), None, true);
+    let contender = invoke(&main, "1", SECRET);
+    run(&queue).await;
+    refused(contender.await.unwrap());
+    {
+        let state = first.state::<AppState>();
+        let close = register_vault_close(&state).await.unwrap();
+        sources::close_server_rows(&state, &SystemClock)
+            .await
+            .unwrap();
+        drop(close);
+    }
+    drop(first);
+
+    let wrong = invoke(&main, "1", "a different secret");
+    run(&queue).await;
+    refused(wrong.await.unwrap());
+    let state = second.state::<AppState>();
+    assert_locked(&state).await;
+    assert!(state.store.lock().await.is_none());
+    unlock_current(&second, &main, &queue).await;
+    for (file, identity) in [&vault_path, &pin_path].into_iter().zip(identities) {
+        assert!(matches!(
+            catcoms_storage::kept::session_at(file, identity),
+            catcoms_storage::kept::SessionAt::Ours
+        ));
+    }
+    assert_eq!(std::fs::read(&vault_path).unwrap(), original);
+    assert_eq!(std::fs::read(&pin_path).unwrap(), pin);
+
+    let founded = found_request(&main, 1, "Founded after restart");
+    run(&queue).await;
+    let founded = found_value(founded.await.unwrap());
+    assert!(founded["server"].is_u64());
+    let close = register_vault_close(&state).await.unwrap();
+    sources::close_server_rows(&state, &SystemClock)
+        .await
+        .unwrap();
+    drop(close);
+    let (third, main, queue) = app(path, None, true);
+    unlock_current(&third, &main, &queue).await;
+    let row = resume_request(&main);
+    run(&queue).await;
+    let row = found_value(row.await.unwrap());
+    let [reopened] = row["servers"].as_array().unwrap().as_slice() else {
+        panic!("expected the original founder created after the first reopen");
+    };
+    assert_eq!(reopened["server"], founded["server"]);
+    assert_eq!(reopened["context"], founded["context"]);
+    assert_eq!(reopened["channel"], founded["channel"]);
+    for (file, identity) in [&vault_path, &pin_path].into_iter().zip(identities) {
+        assert!(matches!(
+            catcoms_storage::kept::session_at(file, identity),
+            catcoms_storage::kept::SessionAt::Ours
+        ));
+    }
+    assert_eq!(std::fs::read(&vault_path).unwrap(), original);
+    assert_eq!(std::fs::read(&pin_path).unwrap(), pin);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1220,6 +3219,7 @@ async fn native_text_sources_real_boot_envelope_unpolled_and_unwind_drop_files_b
                 ),
                 state.native_text.ui_budget.clone(),
                 state.native_text.sources.policy(),
+                boot::NativeRowBudget::capture(&state).await,
             )
             .unwrap();
         assert!(matches!(
@@ -1736,7 +3736,8 @@ async fn native_text_lost_reply_keeps_mount_and_foreign_wrapper_cannot_unlock_it
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn native_text_existing_directory_is_preserved_and_never_tried_as_another_format() {
+async fn native_text_connected_join_existing_directory_is_preserved_and_never_tried_as_another_format(
+) {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("vault");
     std::fs::create_dir(&path).unwrap();
@@ -1751,6 +3752,7 @@ async fn native_text_existing_directory_is_preserved_and_never_tried_as_another_
         assert_locked(&state).await;
         assert!(state.store.lock().await.is_none());
         assert!(!path.join("vault.bin").exists());
+        assert_eq!(std::fs::read_dir(&path).unwrap().count(), 1);
         assert_eq!(
             std::fs::read(path.join("unknown")).unwrap(),
             b"preserve exactly"
@@ -3258,15 +5260,45 @@ async fn native_snapshot_foreign_origin_loss_can_be_acknowledged_without_writing
         .ui_state
         .install_target(other_state.native_text.ui_state.original_target().unwrap())
         .unwrap();
+    let blocked = close_request(&main, None, None);
+    run(&queue).await;
+    let blocked = snapshot_result(blocked.await.unwrap());
+    assert_eq!(blocked["deferred"], true);
+    assert_eq!(blocked["continuity_discardable"], false);
+    assert!(blocked["continuity_revision"].is_null());
+    assert_eq!(
+        blocked["history_error"],
+        "The original vault changed while closing."
+    );
+    drop(queue.lock().unwrap().pop());
+    assert!(old.await.is_err());
+
+    // Issue the revision through an actual IO failure on the original mount
+    // after its key drain succeeds. Preserve the previously saved ciphertext.
+    let foreign = state.store.lock().await.replace(original).unwrap();
+    let foreign_target = state
+        .native_text
+        .ui_state
+        .install_target(original_target.clone())
+        .unwrap();
+    let snapshot_path = path_a.join("ui-state.bin");
+    let parked = path_a.join("saved-ui-before-close.bin");
+    std::fs::rename(&snapshot_path, &parked).unwrap();
+    std::fs::create_dir(&snapshot_path).unwrap();
     let close = close_request(&main, None, None);
     run(&queue).await;
     let close = snapshot_result(close.await.unwrap());
     assert_eq!(close["deferred"], true);
     assert_eq!(close["continuity_discardable"], true);
     assert!(close["continuity_error"].is_string());
-    drop(queue.lock().unwrap().pop());
-    assert!(old.await.is_err());
-    let acknowledged = close_request(&main, None, close["continuity_revision"].as_str());
+    assert!(close["history_error"].is_null());
+    let revision = close["continuity_revision"].as_str().unwrap();
+    std::fs::remove_dir(&snapshot_path).unwrap();
+    std::fs::rename(&parked, &snapshot_path).unwrap();
+
+    let original = state.store.lock().await.replace(foreign).unwrap();
+    drop(state.native_text.ui_state.install_target(foreign_target));
+    let acknowledged = close_request(&main, None, Some(revision));
     run(&queue).await;
     let acknowledged = snapshot_result(acknowledged.await.unwrap());
     // The former snapshot-only close could finish here. With canonical
@@ -3282,7 +5314,7 @@ async fn native_snapshot_foreign_origin_loss_can_be_acknowledged_without_writing
             .native_text
             .ui_state
             .snapshots
-            .close_decision(close["continuity_revision"].as_str())
+            .close_decision(Some(revision))
             .acknowledged
     );
     assert!(state.native_text.sources.retains_original(&original));
@@ -3292,7 +5324,7 @@ async fn native_snapshot_foreign_origin_loss_can_be_acknowledged_without_writing
         assert!(!state.native_text.sources.retains_original(foreign));
         assert!(other_state.native_text.sources.retains_original(foreign));
     }
-    assert!(state.native_text.sources.is_closing_cached());
+    assert!(state.session_lock_requested.load(Ordering::SeqCst));
     assert_eq!(
         std::fs::read(path_a.join("ui-state.bin")).unwrap(),
         before_a
@@ -3305,7 +5337,7 @@ async fn native_snapshot_foreign_origin_loss_can_be_acknowledged_without_writing
     *other_state.store.lock().await = Some(foreign);
     drop(state.native_text.ui_state.install_target(original_target));
     // The same acknowledged close can now retire the actual original pair.
-    let retry = close_request(&main, None, close["continuity_revision"].as_str());
+    let retry = close_request(&main, None, Some(revision));
     run(&queue).await;
     let retried = snapshot_result(retry.await.unwrap());
     assert_eq!(retried["deferred"], false);

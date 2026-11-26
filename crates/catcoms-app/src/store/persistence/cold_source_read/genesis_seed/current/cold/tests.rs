@@ -241,7 +241,7 @@ fn complete_cold_owner_binds_and_moves_the_same_original_seed_once() {
         .require_same_original(prepared.graph.source().unwrap().source())
         .unwrap();
     original_sdk
-        .require_same_seed_data(prepared.graph.source().unwrap().seed())
+        .require_same_source_fields(prepared.graph.source().unwrap().seed())
         .unwrap();
     let current = prepared.take_current(&layout).unwrap().unwrap();
     assert_eq!(current.data().source, original_source);

@@ -29,6 +29,13 @@ pub(in crate::store) struct NetworkDependency {
     // LAST: exact files, bounded bytes and controls precede their real payer.
     _payment: Arc<dyn Send + Sync>,
 }
+
+pub(in crate::store) struct NativeFounderNetworkReservation {
+    pub(in crate::store) seed: Zeroizing<[u8; 32]>,
+    pub(in crate::store) peer: catcoms_rt::PeerId,
+    pub(in crate::store) port: u16,
+}
+
 impl NetworkDependency {
     pub(super) fn from_original(
         expected: NetworkExpected,
@@ -96,6 +103,14 @@ impl NetworkDependency {
         self.servers.require(&path(store, false, "servers")?)?;
         self.vault.require(&path(store, false, "")?)
     }
+
+    pub(in crate::store) fn restore_reservation(
+        &self,
+        store: &ServerStore,
+    ) -> Result<NativeFounderNetworkReservation, AppError> {
+        self.require(store)?;
+        open_frame(store, self.expected, self.output.raw())
+    }
 }
 
 pub(in crate::store) fn validate_frame(
@@ -103,6 +118,14 @@ pub(in crate::store) fn validate_frame(
     expected: NetworkExpected,
     frame: &[u8],
 ) -> Result<(), AppError> {
+    open_frame(store, expected, frame).map(drop)
+}
+
+fn open_frame(
+    store: &ServerStore,
+    expected: NetworkExpected,
+    frame: &[u8],
+) -> Result<NativeFounderNetworkReservation, AppError> {
     if !(40..=MAX_FRAME).contains(&frame.len()) {
         return Err(denied());
     }
@@ -142,10 +165,10 @@ pub(in crate::store) fn validate_frame(
             .map_err(|_| denied())?,
     );
     let actual = catcoms_net::seeded_transport_identity_data(&seed).map_err(|_| denied())?;
+    let port = input.get_u16().map_err(|_| denied())?;
     if actual.public_key_data().as_slice() != public
         || actual.commitment_data() != expected.network
-        || input.get_u16().map_err(|_| denied())?
-            != crate::store::ServerNet::derived_port_for_seed(&seed)
+        || port != crate::store::ServerNet::derived_port_for_seed(&seed)
         || input.get_u64().map_err(|_| denied())? != 65_536
     {
         return Err(denied());
@@ -155,5 +178,10 @@ pub(in crate::store) fn validate_frame(
             return Err(denied());
         }
     }
-    input.finish().map_err(|_| denied())
+    input.finish().map_err(|_| denied())?;
+    Ok(NativeFounderNetworkReservation {
+        seed,
+        peer: actual.phase0_peer_data(),
+        port,
+    })
 }

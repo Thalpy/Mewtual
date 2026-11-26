@@ -3,14 +3,15 @@
 //! then leaves all native guards before Root storage/key/runtime work.
 use super::*;
 use catcoms_app::store::{
-    NativeTextCreationBudget, NativeTextCreationInputs, NativeTextCreationPreparation,
-    NativeTextCreationRequest, NativeTextCreationSettings, NativeTextUiObservation,
-    NativeUiInvocationMetadata,
+    NativeTextCreationBudget, NativeTextCreationInputs, NativeTextCreationJob,
+    NativeTextCreationPreparation, NativeTextCreationRefusal, NativeTextCreationRequest,
+    NativeTextCreationSettings, NativeTextUiObservation, NativeUiInvocationMetadata,
 };
 use tauri::ipc::InvokeResponseBody;
 
 type Preparation = NativeTextCreationPreparation<catcoms_net::MeshService, OsCryptoRng>;
 type CreationBudget = NativeTextCreationBudget<catcoms_net::MeshService, OsCryptoRng>;
+type CreationJob = NativeTextCreationJob<catcoms_net::MeshService, OsCryptoRng>;
 const BUSY: &str = "Chat setup is busy. Retry with the same request.";
 const SUPERSEDED: &str = "Chat setup was interrupted. Retry with the same request.";
 
@@ -54,6 +55,7 @@ struct Output {
     body: Option<String>,
     selection: server_table::NativeSelection,
     instance: u64,
+    start_connected: bool,
 }
 
 fn parse(payload: &InvokeBody) -> Result<Intent, &'static str> {
@@ -186,6 +188,10 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
         // Paid invocation and all owning results precede final commit in Drop
         // order, including an actual resolver panic or a lost IPC observer.
         let mut result = execute(&state, &captured).await;
+        if result.as_ref().is_ok_and(|output| output.start_connected) {
+            super::connected::start_current(&app, &state, captured.generation, &captured.target)
+                .await;
+        }
         #[cfg(test)]
         {
             let edge = state.native_text.text_reply_edge.lock().unwrap().clone();
@@ -319,34 +325,71 @@ async fn capture(state: &AppState, invocation: &Invocation) -> Result<Preparatio
     Ok(output.take().unwrap())
 }
 
-async fn execute(state: &AppState, invocation: &Invocation) -> Result<Output, String> {
-    // Each consuming call restores the SAME whole runtime before another UI
-    // acquisition. Root caches exact primitive results across later refusals.
-    for stage in 0..6 {
+async fn run_setup_step<T: Send + 'static>(
+    state: &AppState,
+    invocation: &Invocation,
+    _name: &'static str,
+    run: impl Fn(CreationJob) -> Result<T, NativeTextCreationRefusal> + Copy + Send + 'static,
+) -> Result<T, String> {
+    let deadline = SystemClock.monotonic_ms().saturating_add(2_000);
+    loop {
         let preparation = capture(state, invocation).await?;
-        tauri::async_runtime::spawn_blocking(move || {
-            let job = preparation.finish()?;
-            match stage {
-                0 => job.prepare_device(),
-                1 => job.prepare_network(),
-                2 => job.cover_pending_network(),
-                3 => job.prepare_transport(),
-                4 => job.prepare_founder(),
-                _ => job.cover_founder_activation(),
-            }
-        })
-        .await
-        .map_err(|_| SUPERSEDED)?
-        .map_err(|error| {
-            format!("Server setup did not finish ({error:?}). Retry with the same request.")
-        })?;
-    }
-    let preparation = capture(state, invocation).await?;
-    let selection =
-        tauri::async_runtime::spawn_blocking(move || preparation.finish()?.select_stored_runtime())
+        let result = tauri::async_runtime::spawn_blocking(move || run(preparation.finish()?))
             .await
-            .map_err(|_| SUPERSEDED)?
             .map_err(|_| SUPERSEDED)?;
+        match result {
+            Ok(value) => return Ok(value),
+            Err(NativeTextCreationRefusal::Busy) => {
+                if SystemClock.monotonic_ms() >= deadline {
+                    return Err(BUSY.to_owned());
+                }
+                #[cfg(test)]
+                if let Some(probe) = state.native_text.found_setup_busy.lock().unwrap().as_ref() {
+                    probe.notify_one();
+                }
+                // The completed job returned its original runtime and all guards.
+                SystemClock.sleep(Duration::from_millis(25)).await;
+            }
+            Err(error) => {
+                #[cfg(test)]
+                eprintln!("Native founder {_name} failed: {error:?}");
+                return Err(format!(
+                    "Server setup did not finish ({error:?}). Retry with the same request."
+                ));
+            }
+        }
+    }
+}
+
+async fn execute(state: &AppState, invocation: &Invocation) -> Result<Output, String> {
+    if let Some(receipt) = recovered_receipt(state, invocation).await? {
+        return Ok(receipt);
+    }
+    // Each consuming call restores the same whole runtime before acquisition.
+    // Only explicit contention retries the current step, with its original data.
+    let steps: [(_, fn(CreationJob) -> _); 6] = [
+        ("device preparation", CreationJob::prepare_device),
+        ("network preparation", CreationJob::prepare_network),
+        ("pending network save", CreationJob::cover_pending_network),
+        ("transport preparation", CreationJob::prepare_transport),
+        ("founder preparation", CreationJob::prepare_founder),
+        ("activation save", CreationJob::cover_founder_activation),
+    ];
+    for (name, step) in steps {
+        run_setup_step(state, invocation, name, step).await?;
+    }
+    let founder = run_setup_step(
+        state,
+        invocation,
+        "stored row selection",
+        CreationJob::select_stored_runtime,
+    )
+    .await?;
+    let context = founder.context_data();
+    if context != invocation.intent.request {
+        return Err(SUPERSEDED.into());
+    }
+    let selection = server_table::NativeSelection::Founder(founder);
     let row_policy = { state.servers.lock().await.native_budget() };
     let credit = row_policy.prepare().map_err(|_| BUSY)?;
     let instance = state.next_server_instance.fetch_add(1, Ordering::Relaxed);
@@ -356,7 +399,7 @@ async fn execute(state: &AppState, invocation: &Invocation) -> Result<Output, St
             selection: selection.clone(),
             instance,
             target: invocation.target.clone(),
-            request: invocation.intent.request,
+            request: context,
             name: &invocation.intent.name,
             display_name: &invocation.intent.display_name,
             is_dm: invocation.intent.is_dm,
@@ -366,10 +409,7 @@ async fn execute(state: &AppState, invocation: &Invocation) -> Result<Output, St
     )?);
     let id = selection.id_data();
     // Freeze and serialize bounded DATA outside final publication guards.
-    let response = serde_json::json!({"backend":"text-v2", "server":id,
-        "context":hex::encode(invocation.intent.request),
-        "channel":channel_id("general").to_string(), "channels":[{"id":channel_id("general").to_string(),"name":"general"}],
-        "is_dm":invocation.intent.is_dm, "storage_warning":null}).to_string();
+    let response = receipt_body(id, context, channel_id("general"), invocation.intent.is_dm);
     #[cfg(test)]
     {
         let edge = state
@@ -400,7 +440,7 @@ async fn execute(state: &AppState, invocation: &Invocation) -> Result<Output, St
             }
             if let Some(existing) = table.native(&id) {
                 let previous = existing.data();
-                if previous.request != invocation.intent.request
+                if previous.request != context
                     || !previous.selection.same_original(&selection)
                     || previous.name != invocation.intent.name
                     || previous.display_name != invocation.intent.display_name
@@ -424,7 +464,98 @@ async fn execute(state: &AppState, invocation: &Invocation) -> Result<Output, St
         body: Some(response),
         selection,
         instance: installed_instance,
+        start_connected: true,
     })
+}
+
+async fn recovered_receipt(
+    state: &AppState,
+    invocation: &Invocation,
+) -> Result<Option<Output>, String> {
+    let request = invocation.intent.root_request()?;
+    let mut payment = state.native_text.ui_budget.prepare().ok();
+    let evidence =
+        {
+            let _commit = require_ui_session_generation(state, invocation.generation).await?;
+            let store = state.store.lock().await;
+            let vault = store
+                .as_ref()
+                .and_then(MountedVault::as_text_v2)
+                .filter(|vault| invocation.target.is_for_original_vault(vault))
+                .ok_or(SUPERSEDED)?;
+            if state.native_text.sources.is_closing_cached() {
+                return Err(SUPERSEDED.into());
+            }
+            let table = state.servers.lock().await;
+            let Some(row) = table.native_iter().map(|(_, row)| row).find(|row| {
+                row.data().request == invocation.intent.request
+                    && row.data().selection.founder().is_some_and(|original| {
+                        original.is_recovered_from_original_vault_cached(vault)
+                    })
+            }) else {
+                return Ok(None);
+            };
+            let data = row.data();
+            let original = data.selection.founder().ok_or(SUPERSEDED)?;
+            if !row.matches(&data.selection, data.instance, &invocation.target)
+                || !original.matches_creation_request_data(&request)
+                || invocation.intent.name != data.name
+                || invocation.intent.display_name != data.display_name
+                || invocation.intent.is_dm != data.is_dm
+            {
+                return Err("The server request no longer matches its original row.".into());
+            }
+            let account = keep_session::current(state, invocation.generation).ok_or(SUPERSEDED)?;
+            let source = super::connected::Source::for_row(
+                invocation.generation,
+                &invocation.target,
+                row,
+                account,
+                &mut payment,
+            )
+            .ok_or(BUSY)?;
+            (
+                source,
+                data.selection.clone(),
+                data.instance,
+                data.channel,
+                data.is_dm,
+            )
+        };
+    let (source, selection, instance, channel, is_dm) = evidence;
+    let caller = source.negative();
+    let local = source
+        .member_work()
+        .foreground(caller.clone())
+        .await
+        .ok_or(SUPERSEDED)?;
+    let prepared = source.capture(state).await.ok_or(SUPERSEDED)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _local = local;
+        prepared.verify_recovered_founder(&caller)
+    })
+    .await
+    .map_err(|_| SUPERSEDED)?
+    .map_err(|_| SUPERSEDED)?;
+    Ok(Some(Output {
+        body: Some(receipt_body(
+            selection.id_data(),
+            invocation.intent.request,
+            channel,
+            is_dm,
+        )),
+        selection,
+        instance,
+        start_connected: false,
+    }))
+}
+
+fn receipt_body(server: u64, context: [u8; 32], channel: u128, is_dm: bool) -> String {
+    let channel = channel.to_string();
+    serde_json::json!({"backend":"text-v2", "server":server, "context":hex::encode(context),
+        "channel":channel, "channels":[{"id":channel,"name":"general"}],
+        "is_dm":is_dm, "storage_warning":null})
+    .to_string()
 }
 
 const _: () =

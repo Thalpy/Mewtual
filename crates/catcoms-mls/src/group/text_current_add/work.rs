@@ -291,7 +291,7 @@ impl PreparedTextCurrentAdd {
     }
 }
 
-fn encode(message: &MlsMessageOut, remaining: &mut usize) -> Result<Vec<u8>, MlsError> {
+pub(super) fn encode(message: &MlsMessageOut, remaining: &mut usize) -> Result<Vec<u8>, MlsError> {
     use tls_codec::Size as _;
     // The pinned codec writes one exact-length Vec. Debit before entering it;
     // a true codec error is terminal, so it cannot repeat paid allocation work.

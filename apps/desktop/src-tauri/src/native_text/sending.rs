@@ -1,19 +1,48 @@
-//! Plain native Create: retain the exact original from signing through actual
-//! encrypted local IO. A local save does not establish transport or receipt.
+//! Native ordinary actions retain the exact original from signing through actual
+//! encrypted local IO. The local receipt precedes any joined outbox attempt.
 use super::*;
 use catcoms_app::store::{
-    MemberSaveJobReport, MemberSaveNativeAdmission, NativeTextMemberFinalPreparation,
+    MemberSaveJobReport, MemberSaveNativeAdmission, NativeTextJoinedMemberFinalPreparation,
+    NativeTextJoinedMemberSaveJob, NativeTextJoinedRowSelection,
+    NativeTextJoinedSelectionPreparation, NativeTextMemberFinalPreparation,
     NativeTextMemberPreparation, NativeTextMemberSaveJob, NativeUiInvocationMetadata,
     V2MemberSaveOutcome, V2MemberSaveRefusal, V2MemberSignRequest,
 };
-use catcoms_replication::chat::Body;
+use catcoms_replication::chat::{ActionId, Body};
 use tauri::ipc::InvokeResponseBody;
 use tokio::sync::OwnedMutexGuard;
 
-type Preparation = NativeTextMemberPreparation<catcoms_net::MeshService, OsCryptoRng>;
-type FinalPreparation = NativeTextMemberFinalPreparation<catcoms_net::MeshService, OsCryptoRng>;
-type SaveJob = NativeTextMemberSaveJob<catcoms_net::MeshService, OsCryptoRng>;
-const BUSY: &str = "Chat is busy. Retry with the same message.";
+type FounderPreparation = NativeTextMemberPreparation<catcoms_net::MeshService, OsCryptoRng>;
+type FounderFinal = NativeTextMemberFinalPreparation<catcoms_net::MeshService, OsCryptoRng>;
+type FounderJob = NativeTextMemberSaveJob<catcoms_net::MeshService, OsCryptoRng>;
+
+enum Preparation {
+    Founder(FounderPreparation),
+    Joined(
+        NativeTextJoinedSelectionPreparation<OsCryptoRng>,
+        NativeTextJoinedRowSelection,
+    ),
+}
+
+enum FinalPreparation {
+    Founder(FounderFinal),
+    Joined(Option<NativeTextJoinedMemberFinalPreparation<OsCryptoRng>>),
+}
+
+enum SaveJob {
+    Founder(FounderJob),
+    Joined(NativeTextJoinedMemberSaveJob<OsCryptoRng>),
+}
+
+impl SaveJob {
+    fn run(self) -> MemberSaveJobReport {
+        match self {
+            Self::Founder(job) => job.run(),
+            Self::Joined(job) => job.run(),
+        }
+    }
+}
+pub(super) const BUSY: &str = "Chat is busy. Retry with the same message.";
 const STALE: &str = "The chat session changed. Retry with the same message.";
 const TEXT_LIMIT: usize = 8 * 1024;
 
@@ -26,7 +55,8 @@ struct Intent {
     channel: u128,
     token: [u8; 32],
     context: [u8; 32],
-    text: String,
+    body: Body,
+    parent: Option<ActionId>,
 }
 struct Invocation {
     generation: u64,
@@ -35,26 +65,33 @@ struct Invocation {
     instance: u64,
     scope: RequestCancellation,
     persist: Arc<Mutex<()>>,
+    member_work: Arc<server_table::NativeMemberWork>,
     intent: Intent,
     payment: Arc<Payment>, // LAST through every blocking worker/result
 }
-fn parse(payload: &InvokeBody) -> Result<Intent, &'static str> {
+#[derive(Clone, Copy)]
+enum Kind {
+    Create,
+    Edit,
+    Delete,
+}
+
+fn parse(payload: &InvokeBody, kind: Kind) -> Result<Intent, &'static str> {
     let InvokeBody::Json(value) = payload else {
         return Err("Invalid message request.");
     };
     let object = value.as_object().ok_or("Invalid message request.")?;
-    if object.len() > 7
+    let specific: &[&str] = match kind {
+        Kind::Create => &["text", "replyTo"],
+        Kind::Edit => &["text", "messageId", "expectedRevision"],
+        Kind::Delete => &["messageId", "expectedRevision"],
+    };
+    if object.len() > 8
         || object.keys().any(|key| {
             !matches!(
                 key.as_str(),
-                "server"
-                    | "channel"
-                    | "text"
-                    | "replyTo"
-                    | "retryToken"
-                    | "expectedContext"
-                    | "trace"
-            )
+                "server" | "channel" | "retryToken" | "expectedContext" | "trace"
+            ) && !specific.contains(&key.as_str())
         })
     {
         return Err("Invalid message request.");
@@ -73,14 +110,13 @@ fn parse(payload: &InvokeBody) -> Result<Intent, &'static str> {
     let channel = field("channel", 39)?
         .parse()
         .map_err(|_| "Invalid channel.")?;
-    let text = field("text", TEXT_LIMIT)?;
-    if text.is_empty()
-        || object
-            .get("replyTo")
-            .is_some_and(|v| !v.is_null() && v.as_str() != Some(""))
-    {
-        return Err("This chat currently supports plain messages only.");
-    }
+    let text = || {
+        let text = field("text", TEXT_LIMIT)?;
+        if text.is_empty() {
+            return Err("Enter a message.");
+        }
+        Ok(text.to_owned())
+    };
     let decode = |value: &str| {
         if value.len() != 64 {
             return Err("Keep the original message token and chat context.");
@@ -95,22 +131,63 @@ fn parse(payload: &InvokeBody) -> Result<Intent, &'static str> {
     };
     let token = decode(field("retryToken", 64)?)?;
     let context = decode(field("expectedContext", 64)?)?;
+    let decode_action = |value: &str| {
+        decode(value)
+            .map(ActionId::from_bytes)
+            .map_err(|_| "Invalid message action.")
+    };
     if object
         .get("trace")
         .is_some_and(|v| !v.is_null() && v.as_str().is_none_or(|s| s.len() > 128))
     {
         return Err("Invalid message request.");
     }
+    let (body, parent) = match kind {
+        Kind::Create => {
+            let reply_to = match object.get("replyTo") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(value)) if value.is_empty() => None,
+                Some(serde_json::Value::String(value)) => Some(decode_action(value)?),
+                _ => return Err("Invalid reply target."),
+            };
+            (
+                Body::Create {
+                    text: text()?,
+                    reply_to,
+                },
+                reply_to,
+            )
+        }
+        Kind::Edit | Kind::Delete => {
+            let create = decode_action(field("messageId", 64)?)?;
+            let revision = decode_action(field("expectedRevision", 64)?)?;
+            let body = match kind {
+                Kind::Edit => Body::Edit {
+                    create,
+                    text: text()?,
+                },
+                _ => Body::Delete { create },
+            };
+            (body, Some(revision))
+        }
+    };
     Ok(Intent {
         server,
         channel,
         token,
         context,
-        text: text.to_owned(),
+        body,
+        parent,
     })
 }
 
 pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task)) -> bool {
+    let kind = match invoke.message.command() {
+        "send_message" => Kind::Create,
+        "edit_message" => Kind::Edit,
+        "delete_message" => Kind::Delete,
+        _ => return false,
+    };
     if invoke.acl.is_none()
         || invoke.message.webview_ref().label() != "main"
         || invoke.message.webview_ref().window().label() != "main"
@@ -144,9 +221,9 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
             _permit: permit,
             _credits: credits,
         });
-        let intent = parse(invoke.message.payload())?;
+        let intent = parse(invoke.message.payload(), kind)?;
         let account = keep_session::current(&state, generation).ok_or(STALE)?;
-        let (selection, instance, scope) = {
+        let (selection, instance, scope, member_work) = {
             // BEFORE scheduling: delayed work cannot select a replacement row.
             let table = state.servers.try_lock().map_err(|_| BUSY)?;
             let row = table.native(&intent.server).ok_or(STALE)?;
@@ -161,6 +238,7 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
                 data.selection.clone(),
                 data.instance,
                 row.scope(account).ok_or(STALE)?,
+                data.member_work.clone(),
             )
         };
         // This helper takes a mutex and may allocate. Never call it after final
@@ -173,6 +251,7 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
             instance,
             scope,
             persist,
+            member_work,
             intent,
             payment,
         })
@@ -196,35 +275,48 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
                 edge.wait_once().await;
             }
         }
-        let _commit = state.ui_session_commit.lock().await;
-        // Cancellation/cached target liveness cannot identify a still-live
-        // original parked outside a replaced Store/table. Repeat the actual
-        // installed-object checks through the real resolver call.
-        let store = state.store.lock().await;
-        let table = state.servers.lock().await;
-        let original_mount = store
-            .as_ref()
-            .and_then(MountedVault::as_text_v2)
-            .is_some_and(|vault| captured.target.is_for_original_vault(vault));
-        let original_row = table.native(&captured.intent.server).is_some_and(|row| {
-            row.matches(&captured.selection, captured.instance, &captured.target)
-                && row.data().request == captured.intent.context
-                && row.data().channel == captured.intent.channel
-        });
-        if state.ui_session_generation.load(Ordering::SeqCst) != captured.generation
-            || ui_session_closed(&state)
-            || !captured.target.is_live_cached()
-            || captured.scope.is_cancelled()
-            || state.native_text.sources.is_closing_cached()
-            || !original_mount
-            || !original_row
-        {
-            resolver.reject(STALE);
-        } else {
-            match result {
-                Ok(body) => resolver.resolve(InvokeResponseBody::Json(body)),
-                Err(error) => resolver.reject(error),
+        let wake = {
+            let _commit = state.ui_session_commit.lock().await;
+            // A parked original can stay live after the Store/table has been
+            // replaced. Reprove the installed objects through the resolver.
+            let store = state.store.lock().await;
+            let table = state.servers.lock().await;
+            let original_mount = store
+                .as_ref()
+                .and_then(MountedVault::as_text_v2)
+                .is_some_and(|vault| captured.target.is_for_original_vault(vault));
+            let original_row = table.native(&captured.intent.server).filter(|row| {
+                row.matches(&captured.selection, captured.instance, &captured.target)
+                    && row.data().request == captured.intent.context
+                    && row.data().channel == captured.intent.channel
+            });
+            if state.ui_session_generation.load(Ordering::SeqCst) != captured.generation
+                || ui_session_closed(&state)
+                || !captured.target.is_live_cached()
+                || captured.scope.is_cancelled()
+                || state.native_text.sources.is_closing_cached()
+                || !original_mount
+                || original_row.is_none()
+            {
+                resolver.reject(STALE);
+                None
+            } else {
+                match result {
+                    Ok(reply) => {
+                        resolver.resolve(InvokeResponseBody::Json(reply.body));
+                        original_row
+                            .filter(|_| reply.saved_local)
+                            .map(|row| row.data().member_work.clone())
+                    }
+                    Err(error) => {
+                        resolver.reject(error);
+                        None
+                    }
+                }
             }
+        };
+        if let Some(work) = wake {
+            work.publication_wake.notify_one();
         }
     }));
     true
@@ -232,10 +324,15 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
 
 async fn capture(state: &AppState, invocation: &Invocation) -> Result<Preparation, String> {
     let policy = state.native_text.sources.policy();
-    let mut budget = Some(policy.prepare_member().map_err(|_| BUSY)?);
+    let mut budget = if invocation.selection.founder().is_some() {
+        Some(policy.prepare_member().map_err(|_| BUSY)?)
+    } else {
+        None
+    };
     let mut ui =
         Some(founding::ui_capture(state, invocation.generation, &invocation.target).await?);
-    let mut output = None;
+    let mut founder = None;
+    let mut joined = None;
     let result = {
         let _commit = require_ui_session_generation(state, invocation.generation).await?;
         let store = state.store.lock().await;
@@ -256,17 +353,33 @@ async fn capture(state: &AppState, invocation: &Invocation) -> Result<Preparatio
             {
                 return Err(STALE);
             }
-            state.native_text.sources.capture_member(
-                &store,
-                &mut ui,
-                &invocation.selection,
-                &mut budget,
-                &mut output,
-            )
+            match &invocation.selection {
+                server_table::NativeSelection::Founder(_) => {
+                    state.native_text.sources.capture_member(
+                        &store,
+                        &mut ui,
+                        &invocation.selection,
+                        &mut budget,
+                        &mut founder,
+                    )
+                }
+                server_table::NativeSelection::Joined(selection) => state
+                    .native_text
+                    .sources
+                    .capture_joined_member(&store, &mut ui, selection, &mut joined),
+            }
         })()
     };
     result.map_err(str::to_owned)?;
-    Ok(output.take().unwrap())
+    match (&invocation.selection, founder, joined) {
+        (server_table::NativeSelection::Founder(_), Some(original), _) => {
+            Ok(Preparation::Founder(original))
+        }
+        (server_table::NativeSelection::Joined(row), _, Some(original)) => {
+            Ok(Preparation::Joined(original, row.clone()))
+        }
+        _ => Err(STALE.to_owned()),
+    }
 }
 
 /// Fee/permit tail survives actual blocking execution even if the async/IPC
@@ -293,54 +406,103 @@ impl<T> Worker<T> {
 // Field order covers both an unrun queue item and unwind during real signing.
 struct PrepareWork<P> {
     preparation: P,
-    text: InputText,
+    input: ActionInput,
     scope: RequestCancellation,
     token: [u8; 32],
     channel: u128,
     _payment: Arc<Payment>,
 }
-struct InputText {
-    value: String,
+struct ActionInput {
+    body: Body,
+    parent: Option<ActionId>,
     #[cfg(test)]
     _notice: Option<tests::PaymentNotice>,
 }
 impl PrepareWork<Preparation> {
     fn run(self) -> Result<V2MemberSaveOutcome, V2MemberSaveRefusal> {
-        let body = Body::Create {
-            text: self.text.value,
-            reply_to: None,
+        let request = V2MemberSignRequest {
+            token: self.token,
+            channel: self.channel,
+            body: &self.input.body,
+            parents: self.input.parent.as_slice(),
+            dependencies: &[],
         };
-        self.preparation.finish()?.prepare_member_save(
-            V2MemberSignRequest {
-                token: self.token,
-                channel: self.channel,
-                body: &body,
-                parents: &[],
-                dependencies: &[],
-            },
-            &self.scope,
-        )
+        match self.preparation {
+            Preparation::Founder(original) => {
+                original.finish()?.prepare_member_save(request, &self.scope)
+            }
+            Preparation::Joined(original, row) => {
+                if original.is_capture_busy_cached() {
+                    return Err(V2MemberSaveRefusal::Busy);
+                }
+                original.prepare_member_save(&row, request, &self.scope, &mut OsCryptoRng)
+            }
+        }
     }
 }
 
-async fn prepare(state: &AppState, invocation: &Invocation) -> Result<V2MemberSaveOutcome, String> {
-    let preparation = capture(state, invocation).await?;
-    let work = PrepareWork {
-        preparation,
-        text: InputText {
-            value: invocation.intent.text.clone(),
-            #[cfg(test)]
-            _notice: None,
+async fn retry_preparation<T, F>(
+    invocation: &Invocation,
+    #[cfg(test)] state: &AppState,
+    attempt: impl Fn() -> F,
+) -> Result<T, String>
+where
+    F: Future<Output = Result<Result<T, V2MemberSaveRefusal>, String>> + Send,
+{
+    let deadline = SystemClock.monotonic_ms().saturating_add(2_000);
+    let mut scope = invocation.scope.clone();
+    loop {
+        match attempt().await? {
+            Err(V2MemberSaveRefusal::Busy) if SystemClock.monotonic_ms() < deadline => {
+                #[cfg(test)]
+                state.native_text.send_preparation_busy.notify_one();
+                // The failed preparation is gone before waiting. The command
+                // still owns its original row, action and retry token.
+                tokio::select! {
+                    biased;
+                    _ = scope.cancelled() => return Err(STALE.into()),
+                    _ = SystemClock.sleep(Duration::from_millis(25)) => {},
+                }
+            }
+            result => return result.map_err(refusal),
+        }
+    }
+}
+
+async fn prepare(
+    state: &AppState,
+    invocation: &Invocation,
+    local: Arc<OwnedMutexGuard<()>>,
+) -> Result<V2MemberSaveOutcome, String> {
+    retry_preparation(
+        invocation,
+        #[cfg(test)]
+        state,
+        || async {
+            let preparation = capture(state, invocation).await?;
+            let work = PrepareWork {
+                preparation,
+                input: ActionInput {
+                    body: invocation.intent.body.clone(),
+                    parent: invocation.intent.parent,
+                    #[cfg(test)]
+                    _notice: None,
+                },
+                scope: invocation.scope.clone(),
+                token: invocation.intent.token,
+                channel: invocation.intent.channel,
+                _payment: invocation.payment.clone(),
+            };
+            let local = local.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let _local = local;
+                work.run()
+            })
+            .await
+            .map_err(|_| STALE.to_owned())
         },
-        scope: invocation.scope.clone(),
-        token: invocation.intent.token,
-        channel: invocation.intent.channel,
-        _payment: invocation.payment.clone(),
-    };
-    tauri::async_runtime::spawn_blocking(move || work.run())
-        .await
-        .map_err(|_| STALE)?
-        .map_err(refusal)
+    )
+    .await
 }
 fn refusal(reason: V2MemberSaveRefusal) -> String {
     match reason {
@@ -366,18 +528,23 @@ struct Attempt {
     _payment: Arc<Payment>,
 }
 struct Admitted {
-    job: Option<
-        Result<
-            SaveJob,
-            Box<
-                catcoms_app::store::NativeTextMemberAdmissionFailure<
-                    catcoms_net::MeshService,
-                    OsCryptoRng,
-                >,
+    job: Option<Result<SaveJob, SaveAdmissionRefusal>>,
+    _payment: Arc<Payment>,
+}
+enum SaveAdmissionRefusal {
+    Founder(
+        Box<
+            catcoms_app::store::NativeTextMemberAdmissionFailure<
+                catcoms_net::MeshService,
+                OsCryptoRng,
             >,
         >,
-    >,
-    _payment: Arc<Payment>,
+    ),
+    Joined {
+        reason: V2MemberSaveRefusal,
+        _native: MemberSaveNativeAdmission,
+        _original: Option<NativeTextJoinedMemberFinalPreparation<OsCryptoRng>>,
+    },
 }
 fn admit(
     state: &AppState,
@@ -437,7 +604,30 @@ fn admit(
             attempt.custody.take().unwrap(),
             invocation.scope.clone(),
         );
-        admitted.job = Some(attempt.preparation.take().unwrap().try_admit(native));
+        admitted.job = Some(
+            if let Some(FinalPreparation::Joined(original)) = attempt.preparation.as_mut() {
+                match NativeTextJoinedMemberFinalPreparation::try_admit_member_save(
+                    original,
+                    &invocation.scope,
+                    native,
+                ) {
+                    Ok(job) => Ok(SaveJob::Joined(job)),
+                    Err((native, reason)) => Err(SaveAdmissionRefusal::Joined {
+                        reason,
+                        _native: native,
+                        _original: original.take(),
+                    }),
+                }
+            } else {
+                let Some(FinalPreparation::Founder(founder)) = attempt.preparation.take() else {
+                    unreachable!("checked founder final preparation")
+                };
+                founder
+                    .try_admit(native)
+                    .map(SaveJob::Founder)
+                    .map_err(SaveAdmissionRefusal::Founder)
+            },
+        );
         Ok(())
     })(); // Store/table guards have left before either whole owning result.
     drop(attempt); // native guards BEFORE any unentered Source preparation
@@ -448,27 +638,65 @@ fn admit(
             _payment: invocation.payment.clone(),
         }),
         Err(failure) => {
-            let reason = failure.refusal();
+            let reason = match &failure {
+                SaveAdmissionRefusal::Founder(original) => original.refusal(),
+                SaveAdmissionRefusal::Joined { reason, .. } => *reason,
+            };
             drop(failure);
             Err(refusal(reason))
         }
     }
 }
-async fn execute(state: &AppState, invocation: &Invocation) -> Result<String, String> {
-    let mut outcome = prepare(state, invocation).await?;
+struct Reply {
+    body: String,
+    saved_local: bool,
+}
+
+async fn execute(state: &AppState, invocation: &Invocation) -> Result<Reply, String> {
+    let local = Arc::new(
+        invocation
+            .member_work
+            .foreground(invocation.scope.clone())
+            .await
+            .ok_or(STALE)?,
+    );
+    let mut outcome = prepare(state, invocation, local.clone()).await?;
     if outcome == V2MemberSaveOutcome::Ready {
-        let preparation = capture(state, invocation).await?;
         let token = invocation.intent.token;
-        let worker = Worker {
-            value: preparation,
-            _payment: invocation.payment.clone(),
-        };
-        let prepared = tauri::async_runtime::spawn_blocking(move || {
-            worker.map(|value| value.finish_admission(token))
-        })
-        .await
-        .map_err(|_| STALE)?;
-        let preparation = prepared.value.map_err(refusal)?;
+        let preparation = retry_preparation(
+            invocation,
+            #[cfg(test)]
+            state,
+            || async {
+                let preparation = capture(state, invocation).await?;
+                let scope = invocation.scope.clone();
+                let worker = Worker {
+                    value: preparation,
+                    _payment: invocation.payment.clone(),
+                };
+                let local = local.clone();
+                let prepared = tauri::async_runtime::spawn_blocking(move || {
+                    let _local = local;
+                    worker.map(|value| match value {
+                        Preparation::Founder(original) => original
+                            .finish_admission(token)
+                            .map(FinalPreparation::Founder),
+                        Preparation::Joined(original, row) => {
+                            if original.is_capture_busy_cached() {
+                                return Err(V2MemberSaveRefusal::Busy);
+                            }
+                            original
+                                .finish_member_admission(row, token, &scope)
+                                .map(|ready| FinalPreparation::Joined(Some(ready)))
+                        }
+                    })
+                })
+                .await
+                .map_err(|_| STALE.to_owned())?;
+                Ok(prepared.value)
+            },
+        )
+        .await?;
         #[cfg(test)]
         {
             let edge = state.native_text.send_final_edge.lock().unwrap().clone();
@@ -481,7 +709,9 @@ async fn execute(state: &AppState, invocation: &Invocation) -> Result<String, St
         let job = admit(state, invocation, preparation)?;
         #[cfg(test)]
         let io_edge = state.native_text.send_io_edge.lock().unwrap().clone();
+        let local_during_save = local.clone();
         let report = tauri::async_runtime::spawn_blocking(move || {
+            let _local = local_during_save;
             #[cfg(test)]
             if let Some(edge) = io_edge {
                 edge.wait_once();
@@ -491,16 +721,23 @@ async fn execute(state: &AppState, invocation: &Invocation) -> Result<String, St
         .await
         .map_err(|_| STALE)?;
         if report == MemberSaveJobReport::Uncertain {
-            return Ok(serde_json::json!({"backend":"text-v2","disposition":"uncertain","retry_token":hex::encode(token)}).to_string());
+            return Ok(Reply {
+                body: serde_json::json!({"backend":"text-v2","disposition":"uncertain","retry_token":hex::encode(token)}).to_string(),
+                saved_local: false,
+            });
         }
-        outcome = prepare(state, invocation).await?; // recover exact receipt without re-signing
+        outcome = prepare(state, invocation, local).await?; // exact saved receipt
     }
     match outcome {
-        V2MemberSaveOutcome::Saved{action,ordinal}=>Ok(serde_json::json!({"backend":"text-v2","disposition":"saved-local",
-            "message_id":hex::encode(action.as_bytes()),"ordinal":ordinal.to_string(),"retry_token":hex::encode(invocation.intent.token)}).to_string()),
+        V2MemberSaveOutcome::Saved{action,ordinal}=>Ok(Reply {
+            body: serde_json::json!({"backend":"text-v2","disposition":"saved-local",
+                "message_id":hex::encode(action.as_bytes()),"ordinal":ordinal.to_string(),"retry_token":hex::encode(invocation.intent.token)}).to_string(),
+            saved_local: true,
+        }),
         V2MemberSaveOutcome::Ready=>Err("The message outcome is still being checked. Retry with the same message token.".into()),
     }
 }
+
 const _: () = assert!(
     std::mem::size_of::<Invocation>() + std::mem::size_of::<Attempt>() + 3 * TEXT_LIMIT + 4096
         <= 8 * 4096
@@ -554,8 +791,12 @@ mod tests {
             let (_sender, signal) = watch::channel(false);
             let work = PrepareWork {
                 preparation: notice(),
-                text: InputText {
-                    value: "paid plaintext".into(),
+                input: ActionInput {
+                    body: Body::Create {
+                        text: "paid plaintext".into(),
+                        reply_to: None,
+                    },
+                    parent: None,
                     _notice: Some(notice()),
                 },
                 scope: RequestCancellation::new(signal, None),
@@ -610,25 +851,58 @@ mod tests {
         }
     }
     #[test]
-    fn native_text_send_parser_requires_exact_token_context_and_plain_bounded_body() {
+    fn native_text_send_parser_requires_exact_token_context_and_bounded_reply() {
         let base = serde_json::json!({"server":1,"channel":"7","text":"hello","replyTo":null,
             "retryToken":"01".repeat(32),"expectedContext":"02".repeat(32)});
-        let accepted = parse(&InvokeBody::Json(base.clone())).unwrap();
+        let accepted = parse(&InvokeBody::Json(base.clone()), Kind::Create).unwrap();
         assert_eq!(accepted.token, [1; 32]);
         assert_eq!(accepted.context, [2; 32]);
+        assert!(accepted.parent.is_none());
+        let mut reply = base.clone();
+        reply["replyTo"] = serde_json::json!("03".repeat(32));
+        assert_eq!(
+            parse(&InvokeBody::Json(reply), Kind::Create)
+                .unwrap()
+                .parent,
+            Some(ActionId::from_bytes([3; 32])),
+        );
         for (key, value) in [
             ("retryToken", serde_json::json!("01".repeat(16))),
             ("expectedContext", serde_json::json!("00".repeat(32))),
             ("channel", serde_json::json!("x")),
             ("text", serde_json::json!("x".repeat(TEXT_LIMIT + 1))),
             ("text", serde_json::json!("")),
-            ("replyTo", serde_json::json!("01".repeat(32))),
+            ("replyTo", serde_json::json!("00".repeat(32))),
+            ("replyTo", serde_json::json!("01".repeat(33))),
+            ("replyTo", serde_json::json!([1])),
             ("trace", serde_json::json!("x".repeat(129))),
             ("protocol", serde_json::json!("legacy")),
         ] {
             let mut changed = base.clone();
             changed[key] = value;
-            assert!(parse(&InvokeBody::Json(changed)).is_err(), "{key}");
+            assert!(
+                parse(&InvokeBody::Json(changed), Kind::Create).is_err(),
+                "{key}"
+            );
         }
+        let mut edit = base;
+        edit.as_object_mut().unwrap().remove("replyTo");
+        edit["messageId"] = serde_json::json!("04".repeat(32));
+        edit["expectedRevision"] = serde_json::json!("05".repeat(32));
+        let parsed = parse(&InvokeBody::Json(edit.clone()), Kind::Edit).unwrap();
+        assert!(
+            matches!(parsed.body, Body::Edit { create, .. } if create == ActionId::from_bytes([4; 32]))
+        );
+        assert_eq!(parsed.parent, Some(ActionId::from_bytes([5; 32])));
+        assert!(parse(&InvokeBody::Json(edit.clone()), Kind::Delete).is_err());
+        edit.as_object_mut().unwrap().remove("text");
+        assert!(matches!(
+            parse(&InvokeBody::Json(edit.clone()), Kind::Delete)
+                .unwrap()
+                .body,
+            Body::Delete { .. }
+        ));
+        edit.as_object_mut().unwrap().remove("expectedRevision");
+        assert!(parse(&InvokeBody::Json(edit), Kind::Delete).is_err());
     }
 }

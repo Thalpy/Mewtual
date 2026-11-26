@@ -33,6 +33,7 @@ pub(in crate::store) mod current_group;
 pub(in crate::store) mod current_layout;
 pub(in crate::store) mod governance_layout;
 pub(in crate::store) mod governance_namespace_codec;
+pub(in crate::store) mod joined_pin;
 // Namespace5: the ordinary-member outbox layout. Its descriptor codec is DATA only; the
 // configured handler in `member_outbox_layout` is the only physical interpreter.
 pub(in crate::store) mod member_outbox_layout;
@@ -59,35 +60,69 @@ pub use current_layout::{
 pub use governance_layout::{
     PreparedV2GovernanceLayoutStore, V2GovernanceLayoutPolicy, V2GovernanceLayoutStore,
 };
+pub use joined_pin::pending::NativeTextJoinedRegistrationData;
 pub use member_outbox_layout::V2MemberOutboxPolicy;
+pub use native_registry::NativeTextFounderDependencyProvider;
+pub use native_registry::NativeTextInvitePublication;
+pub use native_registry::NativeTextJoinedReconnect;
+pub use native_registry::NativeTextJoinedRegistryRowData;
+pub use native_registry::NativeTextJoinedRequestPreparation;
+pub use native_registry::NativeTextJoinedRowSelection;
+pub use native_registry::NativeTextJoinedRuntime;
+pub use native_registry::NativeTextJoinedVaultUpgrade;
 pub use native_registry::{
     NativeCreationStateData, NativeCreationStatusData, NativeIndexPolicy, NativeIndexStore,
     NativeIndexUpgrade, NativeRegistryInstallation, NativeRegistryPolicy,
     NativeRegistryPreparationPolicy, NativeRegistryStore, NativeTextCreationBudget,
     NativeTextCreationInputs, NativeTextCreationJob, NativeTextCreationPreparation,
     NativeTextCreationProgress, NativeTextCreationRefusal, NativeTextCreationRequest,
-    NativeTextCreationSettings, NativeTextGovernanceUpgrade, NativeTextGovernedStorage,
-    NativeTextHistoryResponseBudget, NativeTextHistoryResponseCredit,
+    NativeTextCreationSettings, NativeTextFounderMemberIngressPreparation,
+    NativeTextFounderMemberPublication, NativeTextFounderMemberPublicationReceipt,
+    NativeTextFounderMemberReceiver, NativeTextGovernanceUpgrade, NativeTextGovernedStorage,
+    NativeTextHistoryResponseBudget, NativeTextHistoryResponseCredit, NativeTextJoinedStorage,
     NativeTextMemberAdmissionFailure, NativeTextMemberBudget, NativeTextMemberFinalPreparation,
     NativeTextMemberHistoryItem, NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus,
     NativeTextMemberJob, NativeTextMemberPreparation, NativeTextMemberSaveJob,
     NativeTextRuntimeSelection, NativeTextSourceBudget, NativeTextSourceCommand,
     NativeTextSourcePolicy, NativeTextSourcePreparation, NativeTextSourceRetirement,
     NativeTextSourceRetirementPreparation, NativeTextSourceRetirementRefusal,
-    NativeTextSourceRetirementStatus, NativeTextSources, NativeTextUiCandidate,
-    NativeTextUiGarbage, NativeTextUiObservation, NativeTextUiPreparation, NativeTextUiRetirement,
-    NativeTextUiRetirementBatch, NativeTextUiRetirementDrain, NativeTextUiRetirementState,
-    NativeTextVault, NativeTextVaultAuthentication, NativeTextVaultAuthenticationCheck,
-    NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal, NativeTextWorkRetirement,
-    NativeTextWorkRetirementPreparation, NativeUiInvocationBudget, NativeUiInvocationMetadata,
-    NativeUiStateBudget, NativeUiStateCredit, NativeUiStatePreparation, NativeUiStateRead,
-    NativeUiStateSaved, PreparedNativeRegistryMigration,
+    NativeTextSourceRetirementStatus, NativeTextSources, NativeTextUiAddRetirement,
+    NativeTextUiCandidate, NativeTextUiGarbage, NativeTextUiObservation, NativeTextUiPreparation,
+    NativeTextUiRetirement, NativeTextUiRetirementBatch, NativeTextUiRetirementDrain,
+    NativeTextUiRetirementState, NativeTextVault, NativeTextVaultAuthentication,
+    NativeTextVaultAuthenticationCheck, NativeTextVaultUpgrade, NativeTextVaultUpgradeRefusal,
+    NativeTextWorkRetirement, NativeTextWorkRetirementPreparation, NativeUiInvocationBudget,
+    NativeUiInvocationMetadata, NativeUiStateBudget, NativeUiStateCredit, NativeUiStatePreparation,
+    NativeUiStateRead, NativeUiStateSaved, PreparedNativeRegistryMigration,
 };
+pub use native_registry::{
+    NativeTextColdFounderGoverningRequest, NativeTextColdFounderGoverningRequests,
+    NativeTextColdFounderJoinRequest, NativeTextColdFounderJoinRequests,
+    NativeTextColdFounderMemberIngress, NativeTextColdFounderMemberReceiver,
+    NativeTextColdFounderPublication, NativeTextColdFounderPublicationReceipt,
+    NativeTextColdFounderSource,
+};
+pub use native_registry::{
+    NativeTextJoinedArchivedActions, NativeTextJoinedDependencyAttachRefusal,
+    NativeTextJoinedDependencyExchange, NativeTextJoinedDependencyProvider,
+    NativeTextJoinedDependencyResponse, NativeTextJoinedGoverningExchange,
+    NativeTextJoinedGoverningIncoming, NativeTextJoinedGoverningProvider,
+    NativeTextJoinedGoverningResponse, NativeTextJoinedMemberIngressPreparation,
+    NativeTextJoinedMemberLedger, NativeTextJoinedMemberProjection,
+    NativeTextJoinedMemberPublication, NativeTextJoinedMemberPublicationReceipt,
+    NativeTextJoinedMemberReceiver, NativeTextJoinedReceivedOriginal,
+    NativeTextJoinedSelectionPreparation,
+};
+pub use native_registry::{
+    NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,
+};
+pub use native_registry::{NativeTextJoinedMemberFinalPreparation, NativeTextJoinedMemberSaveJob};
 pub(super) mod read_pool;
 pub use read_pool::CriticalCatalogReadPool;
 use read_pool::{CatalogReadReservation, EMPTY_READ_FEE};
 pub(in crate::store) mod pending_join;
 pub(in crate::store) mod pending_join_codec;
+pub(in crate::store) mod shared_history_namespace;
 pub use pending_join::{
     ActivatedCheckpointJoin, CheckpointJoinExecutionPolicy, CheckpointJoinNetwork,
     CheckpointJoinSubmissionStatus, JournalledCheckpointJoinPreparation, PendingJoinCatalogPolicy,

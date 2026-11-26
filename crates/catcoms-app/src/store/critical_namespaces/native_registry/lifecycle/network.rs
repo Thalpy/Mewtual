@@ -8,6 +8,57 @@ use crate::store::persistence::native_registry::network::{NetworkDependency, Net
 use crate::store::ServerStore;
 use std::sync::Arc;
 
+pub(in crate::store::critical_namespaces::native_registry) struct ColdFounderSelection {
+    pub(in crate::store::critical_namespaces::native_registry) status:
+        crate::store::NativeCreationStatusData,
+    pub(in crate::store::critical_namespaces::native_registry) name: String,
+    pub(in crate::store::critical_namespaces::native_registry) invocation: [u8; 32],
+    pub(in crate::store::critical_namespaces::native_registry) request: [u8; 32],
+    pub(in crate::store::critical_namespaces::native_registry) binding:
+        super::super::data::FounderBindingData,
+    pub(in crate::store::critical_namespaces::native_registry) network: Arc<NetworkDependency>,
+}
+
+pub(in crate::store::critical_namespaces::native_registry) fn selected_cold_founder(
+    store: &ServerStore,
+    inventory: &crate::store::persistence::native_registry::lifecycle::upgrade::UpgradeInventory,
+    networks: &[Arc<NetworkDependency>],
+) -> Result<Option<ColdFounderSelection>, AppError> {
+    let (index, _) = super::preparation::decode_selected_data(store, inventory)?;
+    let [row] = index.rows.as_slice() else {
+        return Err(refused());
+    };
+    let Backend::Founder { birth, binding } = &row.backend else {
+        return Ok(None);
+    };
+    if birth.kind != BirthKind::NativeFounder {
+        return Ok(None);
+    }
+    if row.is_dm
+        || binding.vault != index.capability.original.vault
+        || binding.layout != index.capability.original.root
+        || binding.signer != birth.signer
+    {
+        return Err(refused());
+    }
+    let expected = expected(&index, row)?;
+    let [network] = networks else {
+        return Err(refused());
+    };
+    if !network.matches(expected, None) {
+        return Err(refused());
+    }
+    network.require(store)?;
+    Ok(Some(ColdFounderSelection {
+        status: founder::status(row)?,
+        name: row.name.clone(),
+        invocation: birth.invocation,
+        request: birth.request,
+        binding: binding.clone(),
+        network: network.clone(),
+    }))
+}
+
 fn expected(index: &Index, row: &Row) -> Result<NetworkExpected, AppError> {
     let birth = row.backend.birth().ok_or_else(refused)?;
     if birth.kind != BirthKind::NativeFounder {

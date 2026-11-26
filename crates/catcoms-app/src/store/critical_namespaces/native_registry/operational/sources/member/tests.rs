@@ -35,7 +35,14 @@ pub(super) fn after_history() {
     }
 }
 fn active(vault: &NativeTextVault, budget: &NativeUiInvocationBudget, seed: u64) -> (Owner, Row) {
-    let owner = prepared_mesh_founder(vault, budget, seed);
+    activate(prepared_mesh_founder(vault, budget, seed), vault, budget)
+}
+
+fn activate(
+    owner: Owner,
+    vault: &NativeTextVault,
+    budget: &NativeUiInvocationBudget,
+) -> (Owner, Row) {
     owner
         .prepare_creation(command(vault, budget), request(1, "Original"), inputs())
         .unwrap()

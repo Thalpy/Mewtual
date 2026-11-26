@@ -16,9 +16,29 @@ use std::sync::Mutex;
 use zeroize::Zeroizing;
 mod capture;
 mod invite;
+pub use invite::NativeTextInvitePublication;
+mod join;
+pub use join::{
+    NativeTextJoinedArchivedActions, NativeTextJoinedDelivery,
+    NativeTextJoinedDependencyAttachRefusal, NativeTextJoinedDependencyExchange,
+    NativeTextJoinedDependencyProvider, NativeTextJoinedDependencyResponse,
+    NativeTextJoinedExchange, NativeTextJoinedGoverningExchange, NativeTextJoinedGoverningIncoming,
+    NativeTextJoinedGoverningProvider, NativeTextJoinedGoverningResponse,
+    NativeTextJoinedInstallation, NativeTextJoinedMemberFinalPreparation,
+    NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberLedger,
+    NativeTextJoinedMemberProjection, NativeTextJoinedMemberPublication,
+    NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
+    NativeTextJoinedMemberSaveJob, NativeTextJoinedReceivedOriginal, NativeTextJoinedReconnect,
+    NativeTextJoinedRequestPreparation, NativeTextJoinedRowSelection,
+    NativeTextJoinedSelectionPreparation,
+};
 mod member;
 mod network;
+mod recovered_founder;
+pub use member::NativeTextFounderDependencyProvider;
 pub use member::{
+    NativeTextFounderMemberIngressPreparation, NativeTextFounderMemberPublication,
+    NativeTextFounderMemberPublicationReceipt, NativeTextFounderMemberReceiver,
     NativeTextMemberAdmissionFailure, NativeTextMemberBudget, NativeTextMemberFinalPreparation,
     NativeTextMemberHistoryItem, NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus,
     NativeTextMemberJob, NativeTextMemberPreparation, NativeTextMemberSaveJob,
@@ -27,10 +47,12 @@ mod selection;
 pub use capture::{NativeTextCreationBudget, NativeTextCreationPreparation};
 pub use selection::NativeTextRuntimeSelection;
 mod retirement;
+mod ui_add_retirement;
 pub use retirement::{
     NativeTextSourceRetirement, NativeTextSourceRetirementPreparation,
     NativeTextSourceRetirementRefusal, NativeTextSourceRetirementStatus,
 };
+pub use ui_add_retirement::NativeTextUiAddRetirement;
 
 const MAX_SOURCES: usize = 64;
 const CONTROL_BYTES: usize = 64 * 1024;
@@ -127,6 +149,9 @@ pub struct NativeTextSourceCommand {
 pub struct NativeTextSources<T: MeshTransport, R: CryptoRngCore> {
     scope: Arc<Scope>,
     entries: Arc<SourceBook<T, R>>,
+    mounted_join: Arc<join::MountedJoin<R>>,
+    pending_join: Arc<join::PendingJoin>,
+    joined_tcp: Arc<super::join_tcp::Transport>,
     policy: NativeTextSourcePolicy,
     // Original physical custody and control payment remain until entries leave.
     work: SourceWork,
@@ -167,6 +192,7 @@ struct Runtime<T: MeshTransport, R: CryptoRngCore> {
     request: Option<NativeTextCreationRequest>,
     device_started: bool,
     driver: Option<crate::store::PreparedFreshV2TextFounder<T, R>>,
+    recovered_founder: Option<Box<crate::store::NativeTextColdFounderSource>>,
     device: Option<catcoms_mls::MlsDevice>,
     transport: Option<T>,
     rng: Option<R>,
@@ -442,6 +468,9 @@ fn runtime_invoice<T: MeshTransport, R: CryptoRngCore>() -> Option<usize> {
         selection::invoice::<T, R>(),
         member::invoice::<T, R>(),
         8 * 1024, // finite original invite routing-plan scratch and return overlap
+        // The publication envelope moves the existing, already-paid job.
+        2 * (std::mem::size_of::<NativeTextInvitePublication<T, R>>()
+            - std::mem::size_of::<NativeTextMemberJob<T, R>>()),
         2 * std::mem::size_of::<Entry<T, R>>(),
         // Original frame + Pending copy + retained activation dependency,
         // with bounded ciphertext/plaintext validation and reread overlap.
@@ -529,6 +558,9 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSourcePreparation<T, R> {
             return Err(Box::new(self));
         }
         let entries = Arc::new(Mutex::new(Vec::with_capacity(self.budget.policy.maximum)));
+        let pending_join = Arc::new(join::PendingJoin::default());
+        let mounted_join = Arc::new(Mutex::new(None));
+        let joined_tcp = Arc::new(super::join_tcp::Transport::default());
         if self.scope.claim_once().is_err() {
             return Err(Box::new(self));
         }
@@ -543,6 +575,9 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSourcePreparation<T, R> {
         Ok(NativeTextSources {
             scope,
             entries,
+            mounted_join,
+            pending_join,
+            joined_tcp,
             policy: budget.policy,
             work: work.expect("checked original source work"),
             retirement: Arc::new(retirement::Control::new(budget.metadata)),
@@ -580,6 +615,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextSources<T, R> {
     pub fn close_admission(&self) {
         self.scope.close_first();
         self.retirement.close_preparations();
+        self.pending_join.close_keys();
         let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         for entry in entries.iter() {
             entry.owner.close();

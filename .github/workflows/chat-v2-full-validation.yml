@@ -1,19 +1,23 @@
 name: Chat V2 integration test execution
 
 on:
-  # An explicit execution lane for this integration PR while its inherited strict-lint
-  # debt prevents ordinary CI from reaching the tests. Later source PRs still use normal
-  # CI; this workflow-only filter is not an all-source validation policy after merge.
+  # Focused desktop Chat V2 coverage also runs before the separate full acceptance.
   pull_request:
     paths:
       - '.github/workflows/chat-v2-full-validation.yml'
+      - 'apps/desktop/src-tauri/src/native_text.rs'
+      - 'apps/desktop/src-tauri/src/native_text/**'
+      - 'apps/desktop/src/App.svelte'
+      - 'apps/desktop/src/native-text-*.ts'
+      - 'apps/desktop/src/native-saved-chat.test.ts'
+      - 'apps/desktop/src/pending-manager-fixture.test.ts'
   workflow_dispatch:
     inputs:
       scope:
-        description: Workspaces to execute; all is the normal validation run.
+        description: Select a focused lane or request the complete workspace tests.
         type: choice
-        options: [all, root, native, native-focused]
-        default: all
+        options: [all, root, native, native-focused, native-lock, native-join, native-mutations, native-founder-restart, native-membership, native-review]
+        default: native-membership
       run_deferred_catchup:
         description: Include the slow case at final Chat V2 acceptance (scope all or root).
         type: boolean
@@ -23,7 +27,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: chat-v2-complete-tests-${{ github.ref }}
+  group: chat-v2-validation-${{ github.ref }}-${{ inputs.scope || 'native-membership' }}
   cancel-in-progress: true
 
 env:
@@ -36,7 +40,7 @@ env:
 jobs:
   root:
     name: Root tests, slow case deferred (${{ matrix.os }})
-    if: github.event_name != 'workflow_dispatch' || (inputs.scope != 'native' && inputs.scope != 'native-focused')
+    if: github.event_name == 'workflow_dispatch' && (inputs.scope == 'all' || inputs.scope == 'root')
     runs-on: ${{ matrix.os }}
     # Both OSes have reached the old aggregate120-minute CI bound while
     # individual tests still reported progress (Linux run43547127334 included).
@@ -99,8 +103,32 @@ jobs:
           guard['validate'](''.join(summaries), code, 1)
           PY
 
+  renderer:
+    name: Focused Chat V2 renderer tests
+    if: github.event_name == 'pull_request' || inputs.scope == 'native-join' || inputs.scope == 'native-mutations' || inputs.scope == 'native-membership'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - run: npm ci
+      - name: Check Chat V2 history and session retirement
+        run: >-
+          node --experimental-strip-types --import ./scripts/test-dom.mjs
+          --import ./scripts/test-svelte.mjs --test
+          src/native-text-history.test.ts src/native-text-app.test.ts src/native-saved-chat.test.ts
+          src/native-text-driver.test.ts src/native-text-intents.test.ts src/native-text-session.test.ts
+          src/tauri-command-security.test.ts src/studio-exit-routes.test.ts
+
   native:
-    name: Native tests (${{ matrix.os }}, ${{ inputs.scope || 'all' }})
+    name: Native tests (${{ matrix.os }}, ${{ inputs.scope || 'native-membership' }})
     if: github.event_name != 'workflow_dispatch' || inputs.scope != 'root'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
@@ -127,35 +155,146 @@ jobs:
       - name: Install frontend dependencies
         run: npm --prefix apps/desktop ci
       - name: Run the complete frontend tests
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && (inputs.scope == 'all' || inputs.scope == 'native')
         run: npm --prefix apps/desktop test
       - name: Check frontend types
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && inputs.scope != 'native-lock'
         run: npm --prefix apps/desktop run check
       # Native builds consume real frontend assets; build them on both operating systems.
       - name: Build frontend assets
-        run: npm --prefix apps/desktop run build
+        id: frontend_build
+        shell: bash
+        run: |
+          mkdir -p logs/chat-v2-frontend
+          npm --prefix apps/desktop run build 2>&1 | tee logs/chat-v2-frontend/build.log
+      - uses: actions/upload-artifact@v4
+        if: failure() && steps.frontend_build.conclusion == 'failure'
+        with:
+          name: chat-v2-frontend-build-${{ matrix.os }}
+          path: logs/chat-v2-frontend/build.log
       - name: Check original native IPC and delayed-reply custody regressions
+        if: inputs.scope == 'all' || inputs.scope == 'native' || inputs.scope == 'native-focused'
         run: >-
           cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --lib -- --exact --test-threads=1
           voice_activation_tests::admitted_ipc::admitted_commands_cross_real_tauri_json_dispatch_and_recover_locked_history
           voice_handoff::commands::tests::ready_and_closed_share_one_guard_and_delayed_closed_body_remains_paid_after_collection
       - name: Run the complete native workspace
-        if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || inputs.scope != 'native-focused') }}
+        if: ${{ !cancelled() && (inputs.scope == 'all' || inputs.scope == 'native') }}
         run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --no-fail-fast
       - uses: actions/setup-python@v5
-        if: github.event_name == 'workflow_dispatch' && inputs.scope == 'native-focused'
+        if: github.event_name == 'pull_request' || (inputs.scope != 'all' && inputs.scope != 'native')
         with:
           python-version: '3.12'
       - name: Run exact native gate regressions (focused, not complete acceptance)
         if: github.event_name == 'workflow_dispatch' && inputs.scope == 'native-focused'
         run: python .github/scripts/check-chat-v2-native-gates.py
-      # Collect the separate compile gate even if a native test fails, without masking it.
-      - name: Check the native workspace
-        if: ${{ !cancelled() }}
-        run: cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - name: Check native UI retirement and original lock worker lifetimes
+        if: github.event_name == 'workflow_dispatch' && inputs.scope == 'native-lock'
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import runpy
+
+          guard = runpy.run_path('.github/scripts/check-chat-v2-member-save.py')
+          directory = Path('logs/chat-v2-native-gates')
+          directory.mkdir(parents=True, exist_ok=True)
+          command = ['cargo', 'test', '--locked', '--manifest-path',
+                     'apps/desktop/src-tauri/Cargo.toml', '--lib',
+                     'native_text_retirement_', '--', '--test-threads=1']
+          code, summaries, timed_out, _ = guard['run_logged'](
+              'native-ui-retirement', command, directory, limit=45 * 60,
+          )
+          if timed_out:
+              raise RuntimeError('native UI retirement exceeded its deadline')
+          guard['validate'](''.join(summaries), code, 4)
+          PY
+      - name: Check focused native chat dispatch and restart
+        if: github.event_name == 'pull_request' || inputs.scope == 'native-join' || inputs.scope == 'native-mutations' || inputs.scope == 'native-founder-restart' || inputs.scope == 'native-membership' || inputs.scope == 'native-review'
+        shell: bash
+        env:
+          RUST_BACKTRACE: '1'
+          CHAT_V2_NATIVE_SCOPE: ${{ inputs.scope || 'native-membership' }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import runpy
+
+          guard = runpy.run_path('.github/scripts/check-chat-v2-member-save.py')
+          directory = Path('logs/chat-v2-native-gates')
+          directory.mkdir(parents=True, exist_ok=True)
+          membership = [
+              ('native-membership-parser', 'native_text::membership::tests::native_membership_requires_the_exact_admission', 1),
+              ('native-membership-dispatch', 'native_text::tests::native_text_membership_dispatch_uses_the_original_founder_row', 1),
+          ]
+          two_row_founders = [
+              ('native-found-two-rows', 'native_text::tests::native_text_found_router_installs_two_original_rows_retries_and_releases_real_files', 1),
+              ('native-listing-two-rows', 'native_text::tests::native_listing_empty_unlock_and_two_real_rows_resume_with_exact_contexts', 1),
+          ]
+          cases = [
+              ('native-send-parser', 'native_text_send_parser_', 1),
+              ('native-mutation-dispatch', 'native_text_mutations_', 1),
+              ('native-retry-continuity', 'native_text::continuity::tests::', 3),
+          ] + membership
+          scope = os.environ['CHAT_V2_NATIVE_SCOPE']
+          if scope == 'native-membership':
+              cases = membership + two_row_founders + [
+                  ('native-join-history-startup', 'native_text::tests::native_text_connected_join_gated_route_publishes_one_original_joined_row', 1),
+                  ('native-dependency-after-add', 'native_text::tests::native_text_joined_dependency_provider_reopens_after_selected_add', 1),
+                  ('native-idle-reopen', 'native_text::tests::native_text_connected_join_cold_idle_unlock_requires_the_existing_vault', 1),
+                  ('native-eviction-notice', 'native_text::tests::native_text_membership_selected_eviction_notifies_the_original_joined_row', 1),
+                  ('native-frame-capture', 'native_text::tests::native_text_founder_frame_capture_survives_transient_row_contention', 1),
+                  ('native-invite-context', 'native_text::tests::native_text_connected_join_retries_original_welcome_after_authenticated_unlock', 1),
+                  ('native-invite-expiry', 'native_text::tests::native_text_expired_preview_reproves_the_original_pending_after_restart', 1),
+              ]
+          elif scope == 'native-join':
+              cases.insert(0, ('native-join-dispatch', 'native_text_connected_join_', 5))
+          elif scope == 'native-founder-restart':
+              cases = [(
+                  'native-founder-restart',
+                  'native_text::tests::native_text_connected_join_gated_route_publishes_one_original_joined_row',
+                  1,
+              ), (
+                  'native-founder-welcome-retry',
+                  'native_text::tests::native_text_connected_join_retries_original_welcome_after_authenticated_unlock',
+                  1,
+              )] + membership
+          elif scope == 'native-review':
+              cases = two_row_founders + [
+                  ('native-join-history-startup', 'native_text::tests::native_text_connected_join_gated_route_publishes_one_original_joined_row', 1),
+                  ('native-dependency-after-add', 'native_text::tests::native_text_joined_dependency_provider_reopens_after_selected_add', 1),
+                  ('native-snapshot-ack', 'native_text::tests::native_snapshot_foreign_origin_loss_can_be_acknowledged_without_writing_either_vault', 1),
+                  ('native-history-custody', 'native_text::tests::native_text_history_real_resolver_unwind_and_lost_observers_release_original_work_and_credits', 1),
+              ]
+          failures = []
+          for name, pattern, count in cases:
+              command = ['cargo', 'test', '--locked', '--manifest-path',
+                         'apps/desktop/src-tauri/Cargo.toml', '--lib', pattern,
+                         '--', '--test-threads=1']
+              if scope in ('native-founder-restart', 'native-membership', 'native-review'):
+                  command.append('--exact')
+              if scope == 'native-review':
+                  command.append('--nocapture')
+              code, summaries, timed_out, _ = guard['run_logged'](
+                  name, command, directory, limit=45 * 60,
+              )
+              if timed_out:
+                  failures.append(f'{name} exceeded its deadline')
+                  continue
+              try:
+                  guard['validate'](''.join(summaries), code, count)
+              except RuntimeError as error:
+                  failures.append(f'{name}: {error}')
+          if failures:
+              raise RuntimeError('\n'.join(failures))
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: chat-v2-native-gates-${{ matrix.os }}
           path: logs/chat-v2-native-gates/
+      # Collect the separate compile gate even if a native test fails, without masking it.
+      - name: Check the native workspace
+        if: ${{ !cancelled() }}
+        run: cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml

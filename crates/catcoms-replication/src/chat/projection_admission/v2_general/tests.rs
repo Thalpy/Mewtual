@@ -8,7 +8,7 @@ mod read_accessors;
 mod review_regressions;
 mod selected_history;
 mod signing;
-use crate::chat::owner_bodies::{AcceptanceSpec, AppendBody, AppendSpec, RemovalBody, RemovalSpec};
+use crate::chat::owner_bodies::{AcceptanceSpec, AppendBody, AppendSpec};
 use crate::chat::owner_header::{HeaderKind, HeaderSpec, OwnerBodyId};
 use crate::chat::owner_profile::{AdmissionOrigin, AdmissionSpec, ProfileSpec, SignedOwnerProfile};
 use crate::chat::owner_state::{
@@ -235,24 +235,15 @@ impl Fixture {
     fn remove(&mut self, admission: &V2AuthenticatedAdmission) -> V2GeneralRetiredData {
         let base = self.verifier.replay_data();
         let slot = base.slot(admission.core.body.id()).unwrap();
-        let body = RemovalBody::new(RemovalSpec {
-            group: GROUP.to_vec(),
-            subject: admission.core.body.spec().subject,
-            commit: [199; 32],
-            before_epoch: self.epoch(),
-            after_epoch: self.epoch() + 1,
-            tip_header: slot.tip_header,
-            frozen_tip: slot.frontier.tip(),
-        })
-        .unwrap();
-        let slots = base
-            .slots()
-            .filter(|s| s.image.admission != admission.core.body.id())
-            .map(|s| s.image)
-            .collect();
-        let image = self.image(HeaderKind::Removal, body.id(), self.epoch() + 1, slots);
-        let header = self.owner.header(&image);
-        self.advance(&header, ReplayBody::Removal(&body), &image)
+        let step = base
+            .prepare_removal_data(admission.core.body.id(), [199; 32])
+            .unwrap();
+        assert_eq!(step.body_data().spec().tip_header, slot.tip_header);
+        assert_eq!(step.body_data().spec().frozen_tip, slot.frontier.tip());
+        let image = step.image_data();
+        let header = self.owner.header(image);
+        assert_eq!(header.spec(), step.header_spec_data());
+        self.advance(&header, ReplayBody::Removal(step.body_data()), image)
     }
     fn append_one(
         &mut self,
@@ -394,6 +385,156 @@ fn install(
         .provisional_action(a, admission, deps, view)
         .unwrap();
     ledger.admit_projection(&token, 512).unwrap();
+}
+
+#[test]
+fn ordinary_receiver_waits_for_exact_valid_dependencies_then_projects() {
+    let mut f = Fixture::new();
+    let original = DeviceKeypair::from_seed(&[90; 32]);
+    let responder = DeviceKeypair::from_seed(&[91; 32]);
+    let first = f.add(&original, 20);
+    let second = f.add(&responder, 21);
+    let target = create(&original, &first, 1);
+    let reply = action(
+        &responder,
+        &second,
+        2,
+        Body::Create {
+            text: "ordered reply".into(),
+            reply_to: Some(target.id()),
+        },
+        vec![target.id()],
+    );
+    let (mut ledger, view) = f.ledger();
+    let receive = |ledger: &mut ChatLedger, action, admission| {
+        f.verifier
+            .project_provisional_from_ledger(ledger, &view, action, admission, 64)
+    };
+    assert_eq!(
+        receive(&mut ledger, &reply, &first),
+        Err(ChatError::Authority)
+    );
+    assert_eq!(
+        receive(&mut ledger, &reply, &second).unwrap(),
+        V2OrdinaryReceiveStatus::WaitingForDependencies(vec![target.id()])
+    );
+    assert!(ledger.action(reply.id()).is_none());
+    ledger.import(target.clone()).unwrap();
+    assert_eq!(
+        receive(&mut ledger, &reply, &second).unwrap(),
+        V2OrdinaryReceiveStatus::WaitingForDependencies(vec![target.id()])
+    );
+    assert!(ledger.action(reply.id()).is_none());
+    assert_eq!(
+        receive(&mut ledger, &target, &first).unwrap(),
+        V2OrdinaryReceiveStatus::Retained(ActionState::Valid)
+    );
+    assert_eq!(
+        receive(&mut ledger, &reply, &second).unwrap(),
+        V2OrdinaryReceiveStatus::Retained(ActionState::Valid)
+    );
+    assert!(
+        matches!(ledger.guarded_projection(reply.id(), 64).unwrap().with_publication(Clone::clone).unwrap(),
+        GuardedProjection::Visible { text, reply_to: Some(id), certainty: ProjectionCertainty::Provisional, .. }
+        if text == "ordered reply" && id == target.id())
+    );
+    assert_eq!(ledger.action(reply.id()), Some(&reply));
+    assert!(ledger.matches_valid_ordinary_original(&reply, second.core.body.admission_id()));
+    assert!(!ledger.matches_valid_ordinary_original(&reply, first.core.body.admission_id()));
+    let original_effect = f
+        .verifier
+        .observe_live_member(second.core.body.admission_id())
+        .unwrap();
+    let epoch = f.epoch();
+    drop(f.append_one(&second, &reply));
+    assert_eq!(f.epoch(), epoch);
+    assert!(!original_effect.is_live_cached());
+    assert!(second.is_open_data());
+    assert!(f
+        .verifier
+        .observe_live_member(second.core.body.admission_id())
+        .unwrap()
+        .is_live_cached());
+}
+
+#[test]
+fn ordinary_history_replay_restores_dependencies_without_publishing_removed_originals() {
+    let mut f = Fixture::new();
+    let author = DeviceKeypair::from_seed(&[92; 32]);
+    let responder = DeviceKeypair::from_seed(&[93; 32]);
+    let first = f.add(&author, 20);
+    let second = f.add(&responder, 21);
+    let target = create(&author, &first, 1);
+    let reply = action(
+        &responder,
+        &second,
+        2,
+        Body::Create {
+            text: "reply from the archive".into(),
+            reply_to: Some(target.id()),
+        },
+        vec![target.id()],
+    );
+    let mut removed = f.remove(&first);
+    let frozen = removed.take_frozen_data().unwrap();
+    assert!(removed.take_close_completion().unwrap().try_complete());
+    let (mut ledger, view) = f.ledger();
+    let replay = |ledger: &mut ChatLedger, action, admission, frozen: &[&V2FrozenAdmission]| {
+        f.verifier
+            .replay_ordinary_history_original(ledger, &view, action, admission, frozen, 64)
+    };
+    assert_eq!(
+        replay(&mut ledger, &reply, &second, &[]).unwrap(),
+        V2OrdinaryReceiveStatus::WaitingForDependencies(vec![target.id()])
+    );
+    assert!(ledger.action(reply.id()).is_none());
+    assert_eq!(
+        replay(&mut ledger, &target, &second, &[]),
+        Err(ChatError::Authority)
+    );
+    assert!(ledger.action(target.id()).is_none());
+    assert_eq!(
+        replay(&mut ledger, &target, &first, &[]).unwrap(),
+        V2OrdinaryReceiveStatus::Retained(ActionState::Valid)
+    );
+    assert_eq!(
+        replay(&mut ledger, &reply, &second, &[]),
+        Err(ChatError::Dependency)
+    );
+    let mut other = Fixture::new();
+    let equal_data = other.add(&author, 20);
+    other.add(&responder, 21);
+    assert_eq!(
+        equal_data.admission_data().admission_id(),
+        first.admission_data().admission_id()
+    );
+    let foreign_frozen = other.remove(&equal_data).take_frozen_data().unwrap();
+    assert_eq!(
+        replay(&mut ledger, &reply, &second, &[&foreign_frozen]),
+        Err(ChatError::Scope)
+    );
+    assert!(ledger.action(reply.id()).is_none());
+    assert_eq!(
+        replay(&mut ledger, &reply, &second, &[&frozen]).unwrap(),
+        V2OrdinaryReceiveStatus::Retained(ActionState::Valid)
+    );
+    for original in [&target, &reply] {
+        assert_eq!(ledger.action(original.id()), Some(original));
+        assert!(ledger
+            .guarded_projection(original.id(), 64)
+            .unwrap()
+            .with_publication(|item| matches!(item, GuardedProjection::Held { .. }))
+            .unwrap());
+    }
+    assert!(f
+        .verifier
+        .project_provisional_from_ledger(&mut ledger, &view, &target, &first, 64)
+        .is_err());
+    assert_eq!(
+        f.verifier
+            .project_provisional_from_ledger(&mut ledger, &view, &reply, &second, 64),
+        Err(ChatError::Dependency)
+    );
 }
 
 #[test]

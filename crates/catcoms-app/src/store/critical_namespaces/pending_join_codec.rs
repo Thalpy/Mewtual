@@ -100,11 +100,13 @@ pub(super) struct Parsed<'a> {
     pub(in crate::store) member_outbox:
         Option<super::member_outbox_namespace_codec::MemberOutboxCapabilityData>,
     pub(super) member_outbox_payload: Option<&'a [u8]>,
+    pub(super) joined_pin_payload: Option<&'a [u8]>,
     pub(super) native_registry_payload: Option<&'a [u8]>,
     // Captured only after the matching closed reader validates this actual
     // entry. JOIN must conserve its version as well as its descriptor bytes;
     // choosing the writer's historical default would relabel index2 as1.
     pub(super) native_registry_version: Option<u32>,
+    pub(super) shared_history_payload: Option<&'a [u8]>,
 }
 
 /// Fixed, inert classification retained after dropping a complete plaintext. Digest equality
@@ -128,7 +130,9 @@ pub(in crate::store) struct Summary {
     pub(in crate::store) member_outbox:
         Option<super::member_outbox_namespace_codec::MemberOutboxCapabilityData>,
     pub(super) member_outbox_payload_digest: Option<[u8; 32]>,
+    pub(super) joined_pin_payload_digest: Option<[u8; 32]>,
     pub(super) native_registry_payload_digest: Option<[u8; 32]>,
+    pub(super) shared_history_payload_digest: Option<[u8; 32]>,
 }
 impl Parsed<'_> {
     pub(super) fn summary(&self, framed: [u8; 32]) -> Summary {
@@ -155,8 +159,14 @@ impl Parsed<'_> {
             member_outbox_payload_digest: self
                 .member_outbox_payload
                 .map(|bytes| *blake3::hash(bytes).as_bytes()),
+            joined_pin_payload_digest: self
+                .joined_pin_payload
+                .map(|bytes| *blake3::hash(bytes).as_bytes()),
             native_registry_payload_digest: self
                 .native_registry_payload
+                .map(|bytes| *blake3::hash(bytes).as_bytes()),
+            shared_history_payload_digest: self
+                .shared_history_payload
                 .map(|bytes| *blake3::hash(bytes).as_bytes()),
         }
     }
@@ -196,7 +206,9 @@ struct SupportedLayout {
     current: bool,
     governance: bool,
     member_outbox: bool,
+    joined_pin: bool,
     native_registry: Option<u32>,
+    shared_history: bool,
 }
 impl SupportedLayout {
     const PENDING_ONLY: Self = Self {
@@ -205,7 +217,9 @@ impl SupportedLayout {
         current: false,
         governance: false,
         member_outbox: false,
+        joined_pin: false,
         native_registry: None,
+        shared_history: false,
     };
     const ARCHIVE_BOOTSTRAP: Self = Self {
         archive: true,
@@ -307,6 +321,67 @@ pub(super) fn parse_governed_native_registry_layout<'a>(
         || parsed.member_outbox.is_none()
         || parsed.native_registry_payload.is_none()
     {
+        return Err(refused());
+    }
+    Ok(parsed)
+}
+
+/// Joined-aware DATA only. Older mounted handlers keep the default refusal of
+/// namespace6. A concrete joined opener must separately select this family.
+pub(super) fn parse_joined_native_registry_layout<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+    executing: bool,
+) -> Result<Parsed<'a>, AppError> {
+    let parsed = parse_known(
+        plain,
+        domain,
+        SupportedLayout {
+            joined_pin: true,
+            ..SupportedLayout::GOVERNANCE_LAYOUT
+                .executing(executing)
+                .member_outbox(true)
+                .native_registry(Some(3))
+        },
+    )?;
+    if parsed.joined_pin_payload.is_none() || parsed.native_registry_payload.is_none() {
+        return Err(refused());
+    }
+    Ok(parsed)
+}
+
+/// Shared-history DATA grammar for the new declaration and its own future
+/// physical reader. The joined and governed owners keep their old refusal.
+pub(super) fn parse_shared_history_native_registry_layout<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+    executing: bool,
+) -> Result<Parsed<'a>, AppError> {
+    let parsed = parse_joined_history_family(plain, domain, executing)?;
+    if parsed.shared_history_payload.is_none() {
+        return Err(refused());
+    }
+    Ok(parsed)
+}
+
+pub(super) fn parse_joined_history_family<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+    executing: bool,
+) -> Result<Parsed<'a>, AppError> {
+    let parsed = parse_known(
+        plain,
+        domain,
+        SupportedLayout {
+            joined_pin: true,
+            shared_history: true,
+            ..SupportedLayout::GOVERNANCE_LAYOUT
+                .executing(executing)
+                .member_outbox(true)
+                .native_registry(Some(3))
+        },
+    )?;
+    if parsed.joined_pin_payload.is_none() || parsed.native_registry_payload.is_none() {
         return Err(refused());
     }
     Ok(parsed)
@@ -479,8 +554,10 @@ fn parse_known<'a>(
             governance_payload: None,
             member_outbox: None,
             member_outbox_payload: None,
+            joined_pin_payload: None,
             native_registry_payload: None,
             native_registry_version: None,
+            shared_history_payload: None,
         });
     }
     let mut rows = std::array::from_fn(|_| None);
@@ -494,8 +571,10 @@ fn parse_known<'a>(
     let mut governance_payload = None;
     let mut member_outbox = None;
     let mut member_outbox_payload = None;
+    let mut joined_pin_payload = None;
     let mut native_registry_payload = None;
     let mut native_registry_version = None;
+    let mut shared_history_payload = None;
     for index in 0..envelope.count {
         let entry = envelope.entry(index)?;
         match entry.id {
@@ -564,6 +643,17 @@ fn parse_known<'a>(
                 );
                 member_outbox_payload = Some(entry.payload);
             }
+            super::joined_pin::namespace::ID
+                if layout.joined_pin && entry.version == super::joined_pin::namespace::VERSION =>
+            {
+                super::joined_pin::namespace::JoinedPinNamespace::decode_data(
+                    entry.payload,
+                    current_layout.ok_or_else(refused)?,
+                    governance_payload.ok_or_else(refused)?,
+                    member_outbox_payload.ok_or_else(refused)?,
+                )?;
+                joined_pin_payload = Some(entry.payload);
+            }
             7 if layout.native_registry == Some(1) && entry.version == 1 => {
                 let expected =
                     super::native_registry::capability::NativeCapabilityData::for_current_data(
@@ -595,6 +685,19 @@ fn parse_known<'a>(
                 native_registry_payload = Some(entry.payload);
                 native_registry_version = Some(entry.version);
             }
+            super::shared_history_namespace::ID
+                if layout.shared_history
+                    && entry.version == super::shared_history_namespace::VERSION =>
+            {
+                super::shared_history_namespace::validate_descriptor(
+                    entry.payload,
+                    current_layout.ok_or_else(refused)?,
+                    current_payload.ok_or_else(refused)?,
+                    joined_pin_payload.ok_or_else(refused)?,
+                    native_registry_payload.ok_or_else(refused)?,
+                )?;
+                shared_history_payload = Some(entry.payload);
+            }
             _ => return Err(refused()),
         }
     }
@@ -613,8 +716,10 @@ fn parse_known<'a>(
         governance_payload,
         member_outbox,
         member_outbox_payload,
+        joined_pin_payload,
         native_registry_payload,
         native_registry_version,
+        shared_history_payload,
     })
 }
 
@@ -801,7 +906,10 @@ pub(super) fn encode_original_row(
 pub(super) fn successor(current: &Summary, next: &Summary) -> Result<(), AppError> {
     // Only the native declaration's exact whole-frame validator may introduce ID7.
     // JOIN cannot remove, normalize or replace it, including in a validly sealed stage.
-    if current.native_registry_payload_digest != next.native_registry_payload_digest {
+    if current.native_registry_payload_digest != next.native_registry_payload_digest
+        || current.joined_pin_payload_digest != next.joined_pin_payload_digest
+        || current.shared_history_payload_digest != next.shared_history_payload_digest
+    {
         return Err(refused());
     }
     // A namespace4 addition is NEVER inferred from Summary fields. The private

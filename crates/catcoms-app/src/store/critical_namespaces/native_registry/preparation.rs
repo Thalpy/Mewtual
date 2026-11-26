@@ -72,6 +72,23 @@ impl NativeRegistryHandler {
         domain: &[u8; 32],
         executing: bool,
     ) -> Result<super::super::pending_join_codec::Parsed<'a>, AppError> {
+        use super::super::{pending_join_codec as grammar, shared_history_namespace::Opening};
+        match self.shared_history_opening() {
+            Opening::Optional => {
+                return grammar::parse_joined_history_family(plain, domain, executing)
+            }
+            Opening::Required => {
+                return grammar::parse_shared_history_native_registry_layout(
+                    plain, domain, executing,
+                )
+            }
+            Opening::Disabled => {}
+        }
+        if self.uses_joined_pin_layout() {
+            return super::super::pending_join_codec::parse_joined_native_registry_layout(
+                plain, domain, executing,
+            );
+        }
         match self {
             Self::Migration(_) => super::super::pending_join_codec::parse_native_registry_layout(
                 plain, domain, executing, false,
@@ -107,6 +124,25 @@ impl NativeRegistryHandler {
     }
     pub(in crate::store) fn is_governed(&self) -> bool {
         matches!(self, Self::GovernedLifecycle(_))
+    }
+
+    pub(in crate::store) fn uses_joined_pin_layout(&self) -> bool {
+        match self {
+            Self::GovernedLifecycle(handler) | Self::GovernanceOpening(handler) => {
+                handler.uses_joined_pin_layout()
+            }
+            _ => false,
+        }
+    }
+    pub(in crate::store) fn shared_history_opening(
+        &self,
+    ) -> super::super::shared_history_namespace::Opening {
+        match self {
+            Self::GovernedLifecycle(handler) | Self::GovernanceOpening(handler) => {
+                handler.shared_history_opening()
+            }
+            _ => super::super::shared_history_namespace::Opening::Disabled,
+        }
     }
 }
 #[derive(Clone)]

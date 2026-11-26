@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { decodeNativeOriginalPage,readNativeOriginals } from "./native-text-history.ts";
+import { decodeNativeOriginalPage, decodeNativeOwnMessage, decodeNativeReceived, decodeNativeReceivedNotice, readNativeOriginals, readNativeOwnMessage, updateNativeReceived } from "./native-text-history.ts";
 const item={ordinal:"0",action:"01".repeat(32),signer:"02".repeat(32),channel:"9",presented_ms:"18446744073709551615",status:"pending",body:{kind:"create",text:"original",reply_to:null}};
 test("native own-history keeps lossless cursors and rejects foreign scope or malformed bodies",()=>{
  const page={backend:"text-v2",scope:"own-saved-originals",next:"1",end_exclusive:"18446744073709551615",items:[item]};
@@ -18,4 +18,43 @@ test("native history bounds each batch and discards a replaced view's late respo
  let calls=0;const result=await readNativeOriginals(async(_cmd,args)=>{calls++;return{backend:"text-v2",scope:"own-saved-originals",next:(BigInt(args.start as string)+1n).toString(),end_exclusive:"1000",items:[]};},{server:1,channel:"9",context:"03".repeat(32)},()=>true);
  assert.equal(calls,16);assert.equal(result?.next,"16");assert.equal(result?.end,"1000");
  let current=true;assert.equal(await readNativeOriginals(async()=>{current=false;return{};},{server:1,channel:"9",context:"03".repeat(32)},()=>current),null);
+});
+
+test("a live received projection binds its action and remains within the native view limit", () => {
+  const notice = { server: 7, channel: "9", context: "03".repeat(32), action: item.action };
+  assert.deepEqual(decodeNativeReceivedNotice(notice), notice);
+  assert.throws(() => decodeNativeReceivedNotice({ ...notice, text: "unsolicited plaintext" }));
+  const first = { action: item.action, text: "received", certainty: "provisional" };
+  const reply = { backend: "text-v2", scope: "received-live", item: first };
+  assert.deepEqual(decodeNativeReceived(reply, item.action), first);
+  assert.throws(() => decodeNativeReceived(reply, item.signer));
+  assert.throws(() => decodeNativeReceived({ ...reply, item: { ...first, certainty: "saved-local" } }, item.action));
+  const current = Array.from({ length: 64 }, (_, i) => ({
+    action: i.toString(16).padStart(64, "0"),
+    text: "received",
+    certainty: "provisional" as const,
+  }));
+  const inserted = updateNativeReceived(current, item.action, decodeNativeReceived(reply, item.action));
+  assert.equal(inserted.length, 64);
+  assert.deepEqual(inserted.at(-1), first);
+  assert.equal(updateNativeReceived(inserted, item.action, null).some(row => row.action === item.action), false);
+});
+
+test("own message reads bind the Create and keep partial and retired plaintext out of the UI", async () => {
+  const target = { server: 1, channel: "9", context: "03".repeat(32) };
+  const selected = { backend: "text-v2", scope: "own-message-revision", action: item.action, scanning: false,
+    item: { revision: "7a".repeat(32), text: "exact edited text", status: "submitted" } };
+  assert.deepEqual(decodeNativeOwnMessage(selected, item.action), { scanning: false, item: selected.item });
+  assert.throws(() => decodeNativeOwnMessage(selected, item.signer));
+  assert.throws(() => decodeNativeOwnMessage({ ...selected, scanning: true }, item.action));
+  let calls = 0;
+  const scanning = await readNativeOwnMessage(async (_command, args) => {
+    calls++;
+    assert.deepEqual(args, { server: 1, channel: "9", expectedContext: target.context, ownAction: item.action });
+    return { ...selected, scanning: true, item: null };
+  }, target, item.action, () => true);
+  assert.equal(calls, 16);
+  assert.deepEqual(scanning, { scanning: true, item: null });
+  let current = true;
+  assert.equal(await readNativeOwnMessage(async () => { current = false; return selected; }, target, item.action, () => current), null);
 });

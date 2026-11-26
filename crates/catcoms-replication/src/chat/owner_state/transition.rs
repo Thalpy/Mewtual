@@ -14,6 +14,8 @@ pub use append_prepare::{UnsignedAppendStepData, UNSIGNED_APPEND_DATA_INVOICE};
 mod admission_prepare;
 use admission_prepare::AdmissionChange;
 pub use admission_prepare::{UnsignedAdmissionStepData, UNSIGNED_ADMISSION_DATA_INVOICE};
+mod removal_prepare;
+pub use removal_prepare::UnsignedRemovalStepData;
 
 const MAX_SLOTS: usize = MAX_CURRENT_MEMBERS as usize;
 const MAX_NODES: usize = crate::chat::acceptance_tree::MAX_APPEND_LEAVES

@@ -28,6 +28,8 @@ use recovery::PromotionRecovery;
 mod lookup;
 use lookup::PendingTokenLookup;
 mod create;
+mod governed_add;
+mod governed_removal;
 // ORDINARY-member lane (founder-as-member vertical): general verifier + signing plan,
 // never the founder A/I/S/B certification lane. Mutually exclusive with founder Create.
 mod member;
@@ -50,7 +52,13 @@ pub(in crate::store) use member::{
 };
 // The member-save API the native consumer calls: borrowed request DATA in, advisory outcome
 // DATA and an owned admitted job out. None of these types is authority by itself.
+pub(in crate::store) use member::{
+    JoinedMemberLane, JoinedMemberSource, RecoveredMemberLane, RecoveredMemberSource,
+};
 pub use member::{V2MemberDependency, V2MemberSignRequest};
+pub(in crate::store) use member_save::{
+    prepare_joined_member_history, prepare_recovered_founder_history,
+};
 pub use member_save::{
     MemberSaveJob, MemberSaveJobReport, MemberSaveNativeAdmission, V2MemberSaveOutcome,
     V2MemberSaveRefusal,
@@ -83,9 +91,11 @@ pub struct PreparedV2TextHost<T, R> {
     // The ordinary-member lane owns its OWN member-role domain, verifier, request and fees.
     // Drops before `owner`; Drop below cancels its domain first. Exclusive with founder Create.
     member: Option<Box<member::V2MemberLane>>,
-    // Unsigned original and its isolated immutable journal only. No invite key
-    // may run until durable KeyAttempt/raw coverage and final admission exist.
+    // Retained native invitation original and its isolated immutable journal.
     invite: Option<Box<invite::PendingInvite>>,
+    // Original exact warm Add reservation and its unpublished stage custody.
+    governed_add: Option<Box<governed_add::PendingGovernedAdd>>,
+    governed_removal: Option<Box<governed_removal::PendingGovernedRemoval>>,
     resident: Option<PreparedV2TextResidentProjection>,
     capture: Option<PreparedV2TextPromotionCapture>,
     prepared: Option<PreparedV2TextPromotion>,
@@ -160,6 +170,8 @@ impl<T, R> PreparedV2TextHost<T, R> {
             projection: None,
             member: None,
             invite: None,
+            governed_add: None,
+            governed_removal: None,
             resident: None,
             capture: None,
             prepared: None,

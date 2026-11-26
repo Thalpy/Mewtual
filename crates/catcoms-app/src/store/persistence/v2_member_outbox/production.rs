@@ -27,15 +27,16 @@
 //! Authority boundary: nothing here grants membership, signing, save or publication rights.
 //! Holding a cell or an owner is custody; a save still needs the host's final edge.
 use super::data::{
-    MemberOutboxContextData, MemberOutboxContextId, MemberReceiptData, MemberRequestToken,
-    MemberSignedOriginal,
+    canonical_member_parents, MemberOutboxContextData, MemberOutboxContextId, MemberReceiptData,
+    MemberRequestData, MemberRequestToken, MemberSignedOriginal,
 };
 use super::engine::{
-    MemberOutbox, MemberOutboxError, MemberOutboxOpen, MemberOutboxParentDirectory,
-    MemberOutboxQuota, MemberOutboxRefusal, MemberOutboxRegistry, MEMBER_OUTBOX_OWNER_FEE,
-    MEMBER_OUTBOX_RECOVERY_FEE,
+    MemberDebtBatch, MemberLookup, MemberOutbox, MemberOutboxError, MemberOutboxOpen,
+    MemberOutboxParentDirectory, MemberOutboxQuota, MemberOutboxRefusal, MemberOutboxRegistry,
+    MemberSavedOriginal, MEMBER_OUTBOX_CHECKPOINT_FEE, MEMBER_OUTBOX_DEBT_FEE,
+    MEMBER_OUTBOX_LOOKUP_FEE, MEMBER_OUTBOX_OWNER_FEE, MEMBER_OUTBOX_RECOVERY_FEE,
 };
-use super::transaction::PreparedMemberAppend;
+use super::transaction::{MemberCheckpointSaved, PreparedMemberAppend};
 use crate::store::critical_namespaces::member_outbox_layout::{
     MAX_BASE_PATH, MAX_MEMBER_OUTBOX_CONTEXTS, MEMBER_OUTBOX_SLOT_FEE,
 };
@@ -46,6 +47,7 @@ use crate::store::critical_namespaces::read_pool::{
 use crate::store::critical_namespaces::refused;
 use crate::store::ServerStore;
 use crate::AppError;
+use catcoms_replication::chat::owner_facts::OwnerFactId;
 use catcoms_replication::chat::{ActionId, MAX_GROUP_ID_BYTES, MAX_PARENTS};
 use catcoms_rt::{CryptoRngCore, RequestCancellation};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
@@ -290,6 +292,27 @@ impl MemberOutboxMount {
         }
     }
 
+    /// A read-only warm Add negative. A missing slot is distinct from a busy
+    /// table. An unreconciled Saved receipt also keeps the original occupied.
+    pub(in crate::store) fn require_context_quiescent(
+        &self,
+        context: MemberOutboxContextId,
+    ) -> Result<(), AppError> {
+        let cells = self.cells.try_lock().map_err(|_| refused())?;
+        if let Some(cell) = cells.iter().find(|cell| cell.context == context) {
+            let state = cell.try_lock()?.ok_or_else(refused)?;
+            if state.custody.is_some()
+                || state
+                    .owner
+                    .as_ref()
+                    .is_some_and(MemberOutbox::needs_recovery)
+            {
+                return Err(refused());
+            }
+        }
+        Ok(())
+    }
+
     /// Open (creating it if needed) the namespace of `context`, completing or preserving any
     /// interrupted work, under this mount's registry and production parent. Pays the owner's
     /// retained metadata and the open/recovery work invoice first; holds the Store's physical
@@ -300,6 +323,17 @@ impl MemberOutboxMount {
         context: MemberOutboxContextData,
         key: &[u8; 32],
         rng: &mut dyn CryptoRngCore,
+    ) -> Result<MemberOutbox, MemberOutboxError> {
+        self.open_owner_for(store, context, key, rng, true)
+    }
+
+    fn open_owner_for(
+        &self,
+        store: &ServerStore,
+        context: MemberOutboxContextData,
+        key: &[u8; 32],
+        rng: &mut dyn CryptoRngCore,
+        create: bool,
     ) -> Result<MemberOutbox, MemberOutboxError> {
         // A logical payment shortfall is a retryable Payment refusal, never an IO failure.
         let metadata = self
@@ -315,7 +349,7 @@ impl MemberOutboxMount {
                 parent: &self.parent,
                 context,
                 quota: self.quota,
-                create: true,
+                create,
                 pool: &self.pool,
                 metadata,
                 work,
@@ -324,6 +358,179 @@ impl MemberOutboxMount {
             key,
             rng,
         )
+    }
+
+    /// Historical request lookup in the original context. It uses the same
+    /// exclusive cell and recovery as saves, without creating a namespace.
+    pub(in crate::store) fn lookup_existing(
+        &self,
+        store: &ServerStore,
+        context: MemberOutboxContextData,
+        key: &[u8; 32],
+        request: &MemberRequestData<'_>,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<Option<MemberReceiptData>, MemberOutboxError> {
+        self.require_live(store)?;
+        let id = context.id();
+        let payment = self
+            .pay(MEMBER_OUTBOX_LOOKUP_FEE)
+            .map_err(|_| MemberOutboxRefusal::Payment)?;
+        let parents = canonical_member_parents(request.body, request.parents)?;
+        let request = MemberRequestData {
+            token: request.token,
+            channel: request.channel,
+            parents: &parents,
+            body: request.body,
+        };
+        request.digest(id)?;
+        self.with_existing_outbox(store, context, key, rng, |state, _| {
+            let has_original = state
+                .custody
+                .as_ref()
+                .is_some_and(|value| value.token() == request.token);
+            match state
+                .owner
+                .as_ref()
+                .ok_or(MemberOutboxRefusal::Incomplete)?
+                .lookup(key, &request, payment)?
+            {
+                MemberLookup::Hit(hit) => Ok(Some(*hit.receipt())),
+                MemberLookup::Conflict(other) => {
+                    Err(MemberOutboxRefusal::TokenConflict(other).into())
+                }
+                MemberLookup::Absent if !has_original => Ok(None),
+                MemberLookup::Absent => Err(MemberOutboxRefusal::Incomplete.into()),
+            }
+        })
+        .map(Option::flatten)
+    }
+
+    pub(in crate::store) fn read_publication_debt(
+        &self,
+        store: &ServerStore,
+        context: MemberOutboxContextData,
+        key: &[u8; 32],
+        current: OwnerFactId,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<Option<MemberDebtBatch>, MemberOutboxError> {
+        let payment = self
+            .pay(MEMBER_OUTBOX_DEBT_FEE)
+            .map_err(|_| MemberOutboxRefusal::Payment)?;
+        let batch = self.with_existing_outbox(store, context, key, rng, |state, _| {
+            state
+                .owner
+                .as_ref()
+                .ok_or(MemberOutboxRefusal::Incomplete)?
+                .debt_batch(key, current, 1, payment)
+        })?;
+        Ok(batch.filter(|batch| !batch.items().is_empty()))
+    }
+
+    pub(in crate::store) fn lookup_existing_action(
+        &self,
+        store: &ServerStore,
+        context: MemberOutboxContextData,
+        key: &[u8; 32],
+        action: ActionId,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<Option<MemberSavedOriginal>, MemberOutboxError> {
+        let payment = self
+            .pay(MEMBER_OUTBOX_LOOKUP_FEE)
+            .map_err(|_| MemberOutboxRefusal::Payment)?;
+        self.with_existing_outbox(store, context, key, rng, |state, _| {
+            state
+                .owner
+                .as_ref()
+                .ok_or(MemberOutboxRefusal::Incomplete)?
+                .lookup_action_original(key, action, payment)
+        })
+        .map(Option::flatten)
+    }
+
+    pub(in crate::store) fn checkpoint_publication_debt(
+        &self,
+        store: &ServerStore,
+        context: MemberOutboxContextData,
+        key: &[u8; 32],
+        batch: MemberDebtBatch,
+        rng: &mut dyn CryptoRngCore,
+        is_current: impl Fn() -> bool,
+    ) -> Result<MemberCheckpointSaved, MemberOutboxError> {
+        if !is_current() {
+            return Err(MemberOutboxRefusal::Stale.into());
+        }
+        let payment = self
+            .pay(MEMBER_OUTBOX_CHECKPOINT_FEE)
+            .map_err(|_| MemberOutboxRefusal::Payment)?;
+        self.with_existing_outbox(store, context, key, rng, |state, rng| {
+            // A checkpoint changes the selected parent. Keep a parked or
+            // unresolved original's save transition and retry path intact.
+            if matches!(
+                state.custody,
+                Some(MemberOriginalCustody::Prepared(_) | MemberOriginalCustody::Unresolved { .. })
+            ) {
+                return Err(MemberOutboxRefusal::Busy.into());
+            }
+            let prepared = state
+                .owner
+                .as_ref()
+                .ok_or(MemberOutboxRefusal::Incomplete)?
+                .prepare_checkpoint(key, batch, rng, payment)
+                .map_err(|returned| returned.error)?;
+            if !is_current() {
+                return Err(MemberOutboxRefusal::Stale.into());
+            }
+            let owner = state.owner.take().ok_or(MemberOutboxRefusal::Incomplete)?;
+            let run = prepared.run(owner, store._session.retain_for_physical_work());
+            state.owner = Some(run.owner);
+            run.outcome
+        })?
+        .ok_or_else(|| MemberOutboxRefusal::Incomplete.into())
+    }
+
+    fn with_existing_outbox<T>(
+        &self,
+        store: &ServerStore,
+        context: MemberOutboxContextData,
+        key: &[u8; 32],
+        rng: &mut dyn CryptoRngCore,
+        run: impl FnOnce(
+            &mut MemberContextState,
+            &mut dyn CryptoRngCore,
+        ) -> Result<T, MemberOutboxError>,
+    ) -> Result<Option<T>, MemberOutboxError> {
+        self.require_live(store)?;
+        let id = context.id();
+        let cell = self.cell(id)?;
+        let mut state = cell.try_lock()?.ok_or(MemberOutboxRefusal::Busy)?;
+        if matches!(state.custody, Some(MemberOriginalCustody::Running { .. })) {
+            return Err(MemberOutboxRefusal::Busy.into());
+        }
+        if state.owner.is_none() {
+            match self.open_owner_for(store, context, key, rng, false) {
+                Ok(owner) => state.owner = Some(owner),
+                Err(error) if matches!(error.refusal(), Some(MemberOutboxRefusal::Absent)) => {
+                    if state.custody.is_some() {
+                        return Err(MemberOutboxRefusal::Incomplete.into());
+                    }
+                    self.require_live(store)?;
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        let owner = state
+            .owner
+            .as_mut()
+            .filter(|owner| owner.context_id() == id)
+            .ok_or(MemberOutboxRefusal::Foreign)?;
+        if owner.needs_recovery() {
+            self.recover_owner(store, owner, key, rng)?;
+        }
+        self.require_live(store)?;
+        let result = run(&mut state, rng)?;
+        self.require_live(store)?;
+        Ok(Some(result))
     }
 
     /// Re-derive an owner's state from its files after an uncertain operation.

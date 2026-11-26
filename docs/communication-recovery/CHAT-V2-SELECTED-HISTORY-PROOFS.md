@@ -57,6 +57,14 @@ frozen cut, save permission or replacement Current capability is issued.
 
 ## Resource and persistence boundaries
 
+`cold_selected_history` defines the bounded node page for one governing
+selection. It binds the vault, history context, old and new roots, original
+parent and child IDs, and the exact append-created hashes. The decoder borrows
+the packed hashes. Creation ordinals use `u128` so a valid `u64` leaf count
+cannot wrap the node position. The focused regression derives these pages from
+real Core candidates and feeds their node hashes back into the existing
+selected-tip proof verifier. Physical archive selection remains a separate step.
+
 `metadata_layout_bytes` now includes the actual `Option<Hash>` frontier layout,
 frontier boxes, candidate/retired node overlap, controls and one cached cold
 contradiction. Existing App member-lane accounting already includes that Core

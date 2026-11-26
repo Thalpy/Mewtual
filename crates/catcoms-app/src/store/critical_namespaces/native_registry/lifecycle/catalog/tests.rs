@@ -210,3 +210,124 @@ fn lifecycle3_catalog_upgrade_refuses_unknown_entries_and_every_truncated_origin
     trailing.push(0);
     assert!(upgrade_data(&trailing, &VAULT, cap).is_err());
 }
+
+fn joined_catalog() -> (Zeroizing<Vec<u8>>, NativeCapabilityData) {
+    use crate::store::critical_namespaces::{
+        governance_namespace_codec::{prepare_family_declaration_data, GovernanceCatalogFamily},
+        joined_pin::namespace as joined,
+        shared_history_namespace as history,
+    };
+    let (before, cap) = original(None, false);
+    let native = upgrade_data(&before, &VAULT, cap).unwrap();
+    let governed =
+        prepare_family_declaration_data(&native, &VAULT, GovernanceCatalogFamily::NativeLifecycle)
+            .unwrap();
+    let joined = joined::prepare_declaration(&governed, &VAULT).unwrap();
+    assert!(history::prepare_declaration(&governed, &VAULT).is_err());
+    (joined, cap)
+}
+
+#[test]
+fn shared_history_declaration_only_adds_eight_and_predecessor_refuses() {
+    use crate::store::critical_namespaces::shared_history_namespace as history;
+    let (joined, _) = joined_catalog();
+    let prior =
+        catalog_declaration::insert_entry_data(&joined, &VAULT, 1, 2, &join(2, true)).unwrap();
+    let declaration = history::prepare_declaration(&prior, &VAULT).unwrap();
+    history::verify_declaration(&prior, &declaration, &VAULT).unwrap();
+    let original = outer::parse(&prior, &VAULT, outer::MAX_ENVELOPE_PLAIN).unwrap();
+    let next = outer::parse(&declaration, &VAULT, outer::MAX_ENVELOPE_PLAIN).unwrap();
+    assert_eq!(next.count, original.count + 1);
+    assert_eq!(next.parent, Some(original.digest));
+    for index in 0..original.count {
+        let old = original.entry(index).unwrap();
+        let new = next.entry(index).unwrap();
+        assert_eq!(
+            (old.id, old.version, old.payload),
+            (new.id, new.version, new.payload)
+        );
+    }
+    let parsed =
+        grammar::parse_shared_history_native_registry_layout(&declaration, &VAULT, true).unwrap();
+    let row = &parsed.rows[0].as_ref().unwrap().metadata;
+    assert!(row.scheduling == grammar::Scheduling::Paused);
+    assert_eq!(row.execution.unwrap().spent, 1);
+    assert!(grammar::parse_joined_native_registry_layout(&declaration, &VAULT, true).is_err());
+    assert!(grammar::parse_governed_native_registry_layout(&declaration, &VAULT, true).is_err());
+    assert!(grammar::parse_shared_history_native_registry_layout(&prior, &VAULT, true).is_err());
+    assert!(
+        grammar::parse_shared_history_native_registry_layout(&declaration, &VAULT, false).is_err()
+    );
+    assert!(history::prepare_declaration(&declaration, &VAULT).is_err());
+    assert!(history::verify_declaration(&joined, &declaration, &VAULT).is_err());
+    assert!(history::verify_declaration(&prior, &declaration, &[0x99; 32]).is_err());
+
+    let descriptor = parsed.shared_history_payload.unwrap();
+    let wrong_version =
+        catalog_declaration::insert_entry_data(&prior, &VAULT, history::ID, 2, descriptor).unwrap();
+    let mut foreign = descriptor.to_vec();
+    *foreign.last_mut().unwrap() ^= 1;
+    let foreign = catalog_declaration::insert_entry_data(
+        &prior,
+        &VAULT,
+        history::ID,
+        history::VERSION,
+        &foreign,
+    )
+    .unwrap();
+    for malformed in [&wrong_version, &foreign] {
+        assert!(history::verify_declaration(&prior, malformed, &VAULT).is_err());
+        assert!(
+            grammar::parse_shared_history_native_registry_layout(malformed, &VAULT, true).is_err()
+        );
+    }
+}
+
+#[test]
+fn shared_history_seed_retains_exact_catalogs_marker_and_pin_index() {
+    use crate::store::critical_namespaces::{
+        joined_pin::declaration as joined, shared_history_namespace::declaration as history,
+    };
+    use catcoms_crypto::seal;
+    use catcoms_rt::OsCryptoRng;
+
+    let (source, cap) = joined_catalog();
+    let layout = CurrentLayoutData {
+        vault: cap.vault,
+        root: cap.root,
+    };
+    let key = [0x81; 32];
+    let native =
+        joined::DeclarationLeaves::from_frames(&[0x82; 41], &[0x83; 41], &[0x84; 41], &[0x85; 41])
+            .unwrap();
+    let leaves = history::Leaves::from_frames(native, &[0x86; 41]).unwrap();
+    let mut rng = OsCryptoRng;
+    let original = crate::store::frame(&seal(&key, &source, &mut rng).unwrap());
+    let prepared =
+        history::PreparedDeclaration::prepare(&key, &original, layout, leaves, &mut rng).unwrap();
+    let seed = history::AuthenticatedSeed::open(&key, &prepared.seed).unwrap();
+    let opened = seed.validate(&key, layout, leaves).unwrap();
+    assert_eq!(opened.original, original.as_slice());
+    assert_eq!(opened.candidate, prepared.candidate.as_slice());
+    assert_eq!(opened.marker, prepared.marker.as_slice());
+    assert!(joined::AuthenticatedSeed::open(&key, &prepared.seed).is_err());
+    assert!(
+        history::AuthenticatedSeed::open(&key, &prepared.seed[..prepared.seed.len() - 1]).is_err()
+    );
+    let changed_pin = history::Leaves::from_frames(native, &[0x87; 41]).unwrap();
+    assert!(seed.validate(&key, layout, changed_pin).is_err());
+    let foreign_layout = CurrentLayoutData {
+        root: [0x88; 32],
+        ..layout
+    };
+    assert!(seed.validate(&key, foreign_layout, leaves).is_err());
+    assert!(history::PreparedDeclaration::prepare(
+        &key,
+        &original,
+        foreign_layout,
+        leaves,
+        &mut rng
+    )
+    .is_err());
+    assert!(history::validate_marker(&key, layout, b"foreign descriptor", opened.marker).is_err());
+}

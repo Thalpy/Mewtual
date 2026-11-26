@@ -212,10 +212,10 @@
     type ModerationEvent, type ModerationState, type TimelineMessage,
   } from "./moderation";
   import { MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity } from "./ui-continuity";
-  import type { NativeTextIntents } from "./native-text-intents";
+  import type { NativeTextIntent, NativeTextIntents } from "./native-text-intents";
   import { createNativeTextDriver } from "./native-text-driver";
-  import { decodeRestoredChatSession, type NativeTextServer } from "./native-text-session";
-  import { readNativeOriginals, type NativeOriginal } from "./native-text-history";
+  import { decodeNativeMembershipNotice, decodeRestoredChatSession, type NativeTextServer } from "./native-text-session";
+  import { decodeNativeReceived, decodeNativeReceivedNotice, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, updateNativeReceived, type NativeOriginal, type NativeOwnMessage, type NativeReceived } from "./native-text-history";
   import NativeSavedChat from "./NativeSavedChat.svelte";
   import {
     captureLockContinuity, closeContinuityAcknowledgement, NativeVaultLockCoordinator, type NativeVaultCloseOutcome, type NativeVaultLockOutcome,
@@ -386,6 +386,18 @@
   let servers = $state<ServerState[]>([]);
   let chatBackend = $state<"legacy" | "text-v2" | null>(null);
   let nativeOriginals = $state.raw<NativeOriginal[]>([]);
+  let nativeOwnMessages = $state.raw<Record<string, NativeOwnMessage>>({});
+  let nativeOwnLoading = $state(false);
+  let nativeReceived = $state.raw<NativeReceived[]>([]);
+  let nativeReceivedScope = $state.raw<{ server: number; channel: string; context: string } | null>(null);
+  let nativeReceivedRevision = 0;
+  const nativeReceivedReads = new Map<string, { dirty: boolean; current: () => boolean; read: () => Promise<void> }>();
+  let nativeReceivedPump: Promise<void> | null = null;
+  let nativeArchive = $state.raw<{
+    server: number; channel: string; context: string; items: NativeReceived[];
+    after: string | null; more: boolean; loading: boolean; note: string | null;
+  } | null>(null);
+  let nativeArchiveRevision = 0;
   let nativeCursor = $state<{next:string;end:string}|null>(null);
   let nativeHistoryLoading = $state(false);
   let nativeHistoryLoaded = $state(false);
@@ -2625,12 +2637,14 @@
     typeof localStorage !== "undefined" ? (localStorage.getItem("catcoms.rendezvous") ?? "") : ""
   );
   let joinInvite = $state(""); // pasted invite (joiner)
+  let approvedJoinHost = $state("");
   type InvitePreview = {
     direct_routes: number;
     rendezvous_routes: number;
     switchboards: number;
     expires_at_ms: number;
     communication_mode: CommunicationMode;
+    approved_host_required?: boolean;
   };
   let joinPreview = $state<InvitePreview | null>(null);
   let joinPreviewCode = $state("");
@@ -2660,6 +2674,7 @@
   function resetJoinAttempt() {
     joinPreview = null;
     joinPreviewCode = "";
+    approvedJoinHost = "";
     joinSwitchboardConsent = true;
     joinSteps = [];
     joinError = "";
@@ -3612,8 +3627,8 @@
   $effect(() => {
     pendingSendRetry.update(
       !locked && uiStateReady && !windowCloseInFlight ? uiStateLoadGeneration : null,
-      chatBackend==="text-v2" ? Object.keys(nativeTextIntents).length>0 : Object.values(pendingSends).some(intent => !quarantinedPendingIntent(intent) && (intent.resolution || !intent.retryBlock)),
-      sending || (chatBackend==="text-v2" ? nativeHistoryLoading || busy || nativeRetryGeneration===uiStateLoadGeneration : retryingPendingSends || pendingManagerOpen || pendingSendResolution !== null),
+      chatBackend==="text-v2" ? Object.values(nativeTextIntents).some(nativeIntentCanRetry) : Object.values(pendingSends).some(intent => !quarantinedPendingIntent(intent) && (intent.resolution || !intent.retryBlock)),
+      sending || (chatBackend==="text-v2" ? nativeHistoryLoading || nativeOwnLoading || busy || nativeRetryGeneration===uiStateLoadGeneration : retryingPendingSends || pendingManagerOpen || pendingSendResolution !== null),
     );
   });
   onMount(() => () => pendingSendRetry.cancel());
@@ -4517,6 +4532,104 @@
       /* storage unavailable */
     }
   }
+  type NativeRosterMember = Member & { admission: string; founder: boolean };
+  type NativeRoster = { members: NativeRosterMember[]; canRemove: boolean };
+  type NativeRosterSnapshot = NativeRoster & { server: number; mount: number; failure: string; loading: boolean };
+  let nativeRoster = $state<NativeRosterSnapshot | null>(null);
+  let nativeRosterRequest = 0;
+  let removingNativeAdmission = $state("");
+  let confirmNativeRemoval = $state("");
+  let nativeContactCode = $state("");
+  let nativeContactInput = $state("");
+  let nativeContactHost = $state("");
+  let nativeContactStatus = $state("");
+  let nativeContactBusy = $state(false);
+  let nativeRemovedContexts = $state<Record<number, string>>({});
+  async function refreshNativeMembers(server: number, generation: number, mount = chatLedgerMount) {
+    if (cur?.backend !== "text-v2") return;
+    const expectedContext = cur.context;
+    const request = ++nativeRosterRequest;
+    nativeRoster = { server, mount, members: [], canRemove: false, failure: "", loading: true };
+    try {
+      const roster = await invoke<NativeRoster>("get_native_chat_members", { server, expectedContext });
+      if (request === nativeRosterRequest && membersOpen && unlockedViewCurrent(generation, server) && cur?.backend === "text-v2") {
+        nativeRoster = { ...roster, server, mount, failure: "", loading: false };
+      }
+    } catch (error) {
+      if (request === nativeRosterRequest && membersOpen && unlockedViewCurrent(generation, server) && cur?.backend === "text-v2") {
+        nativeRoster = { server, mount, members: [], canRemove: false, failure: String(error), loading: false };
+      }
+    }
+  }
+  async function removeNativeMember(member: NativeRosterMember) {
+    const server = activeServerId;
+    const generation = viewGeneration;
+    if (server === null || cur?.backend !== "text-v2" || member.founder || removingNativeAdmission) return;
+    confirmNativeRemoval = "";
+    removingNativeAdmission = member.admission;
+    try {
+      await invoke("remove_native_chat_member", { server, expectedContext: cur.context, expectedAdmission: member.admission });
+      if (membersOpen && unlockedViewCurrent(generation, server) && cur?.backend === "text-v2") await refreshNativeMembers(server, generation);
+    } catch (cause) {
+      if (unlockedViewCurrent(generation, server) && cur?.backend === "text-v2") error = String(cause);
+    } finally {
+      removingNativeAdmission = "";
+    }
+  }
+  async function useNativeContact(action: "share" | "connect") {
+    const server = activeServerId;
+    const generation = viewGeneration;
+    if (server === null || locked || nativeContactBusy || cur?.backend !== "text-v2") return;
+    const expectedContext = cur.context;
+    nativeContactStatus = "";
+    nativeContactBusy = true;
+    try {
+      if (action === "share") {
+        const code = await invoke<string>("share_native_chat_contact", { server, expectedContext });
+        if (membersOpen && unlockedViewCurrent(generation, server)) nativeContactCode = code;
+      } else {
+        await invoke("connect_native_chat_contact", {
+          server, expectedContext, contact: nativeContactInput.trim(), approvedHost: nativeContactHost.trim(),
+        });
+        if (membersOpen && unlockedViewCurrent(generation, server)) {
+          nativeContactInput = "";
+          nativeContactHost = "";
+          nativeContactStatus = "Connected to member.";
+        }
+      }
+    } catch (cause) {
+      if (membersOpen && unlockedViewCurrent(generation, server)) nativeContactStatus = String(cause);
+    } finally {
+      nativeContactBusy = false;
+    }
+  }
+  function receiveNativeMembership(payload: unknown) {
+    const notice = decodeNativeMembershipNotice(payload);
+    if (!notice || locked || uiSessionRetired || windowCloseInFlight
+      || !servers.some(row => row.id === notice.server && row.backend === "text-v2" && row.context === notice.context)) return;
+    if (notice.removed) {
+      nativeRemovedContexts[notice.server] = notice.context;
+      return;
+    }
+    if (uiStateReady && membersOpen && activeServerId === notice.server && !nativeConversationRemoved(notice.server, notice.context)) {
+      void refreshNativeMembers(notice.server, viewGeneration);
+    }
+  }
+  $effect(() => {
+    const server = activeServerId;
+    const mount = chatLedgerMount;
+    nativeContactCode = "";
+    nativeContactInput = "";
+    nativeContactHost = "";
+    nativeContactStatus = "";
+    if (membersOpen && !locked && uiStateReady && cur?.backend === "text-v2" && server !== null && !nativeSelectedRemoved) {
+      confirmNativeRemoval = "";
+      untrack(() => { void refreshNativeMembers(server, viewGeneration, mount); });
+    } else {
+      nativeRosterRequest++;
+      nativeRoster = null;
+    }
+  });
   type StorageHealth = {
     listed_files: number; referenced_chunks: number; verified_chunks: number;
     // `missing` = absent chunks of this device's own uploads (damage); `not_cached` = absent
@@ -5603,6 +5716,7 @@
   let styleWarnings = $derived(nameStyleWarnings());
 
   let cur = $derived(servers.find((s) => s.id === activeServerId) ?? null);
+  let nativeSelectedRemoved = $derived(activeServerId !== null && cur?.backend === "text-v2" && nativeConversationRemoved(activeServerId, cur.context));
   let myFp = $derived(roster.find((r) => r.you)?.fingerprint ?? "");
   // The full device identity, as the studio's native views name authors. A fingerprint is
   // display only and never compared against an author field.
@@ -6940,10 +7054,24 @@
     // Found after this synchronous redaction has retired the original owner.
     if(chatBackend==="text-v2")busy=false;
     nativeTextIntents = {};
+    nativeRemovedContexts = {};
     chatBackend = null;
     nativeOriginals = [];nativeCursor=null;nativeHistoryLoading=false;nativeHistoryRevision++;
+    nativeOwnMessages = {};nativeOwnLoading = false;
+    nativeReceived = [];
+    nativeReceivedScope = null;
+    nativeReceivedRevision++;
+    nativeReceivedReads.clear();
+    resetNativeArchive();
     nativeHistoryLoaded=false;nativeHistoryError=null;
     nativeRetryGeneration=null;
+  }
+  function nativeConversationRemoved(server: number, context: string | undefined): boolean {
+    return context !== undefined && nativeRemovedContexts[server] === context;
+  }
+  function nativeIntentCanRetry(intent: NativeTextIntent): boolean {
+    return intent.kind === "found" || (!nativeConversationRemoved(intent.server, intent.expectedContext)
+      && servers.some(row => row.id === intent.server && row.backend === "text-v2" && row.context === intent.expectedContext));
   }
   function nativeTextDriver(session:number, sealed:()=>void=()=>{}) {
     const current=()=>!uiSessionRetired && chatBackend==="text-v2" && !locked && uiStateReady && !windowCloseInFlight && session===uiStateLoadGeneration;
@@ -6952,10 +7080,13 @@
       replace:next=>{if(!current())throw new Error("The chat session changed.");nativeTextIntents=next;uiContinuityVersion=4;},
       seal:()=>queueUiStateSave(()=>{if(!current())throw new Error("The chat session changed.");return continuityJson();}),
       current,
+      mayDispatch: nativeIntentCanRetry,
       token:()=>Array.from(crypto.getRandomValues(new Uint8Array(32)),byte=>byte.toString(16).padStart(2,"0")).join(""),
       invoke:async(command,args)=>{
         if(command==="found_server")return(await invokeDebugged<unknown>("found_server",args)).value;
         if(command==="send_message")return(await invokeDebugged<unknown>("send_message",args)).value;
+        if(command==="edit_message")return(await invokeDebugged<unknown>("edit_message",args)).value;
+        if(command==="delete_message")return(await invokeDebugged<unknown>("delete_message",args)).value;
         throw new Error("Unsupported native chat request.");
       },
       sealed:()=>sealed?.(),
@@ -6968,25 +7099,26 @@
       channels:[{id:row.channel,name:"general"}],active:row.channel,unread:[],invite:"",isDm:row.is_dm};
     servers=previous?servers.map(server=>server.id===row.server?entry:server):[...servers,entry];
   }
-  function nativeDraftRetirement(server:number,channel:string,context:string,text:string) {
+  function nativeDraftRetirement(server:number,channel:string,context:string,text:string,replyTo:string|null=null) {
     const key=chatScopeKey(server,channel),revision=draftRevisions[key]??0;
     const original=activeServerId===server && cur?.active===channel ? draft : drafts[key]??"";
     return ()=>{
       if(original.trim()!==text || (draftRevisions[key]??0)!==revision || servers.find(row=>row.id===server)?.context!==context)return;
       const active=activeServerId===server && cur?.active===channel && cur?.context===context;
-      if(active && draft!==original)return;
+      if(active && (draft!==original || (replyingTo || null)!==replyTo))return;
+      if(!active && replyTo!==null)return;
       if(!active && drafts[key]!==original)return;
       drafts={...drafts,[key]:""};draftRevisions[key]=revision+1;
-      if(active)draft="";
+      if(active){draft="";replyingTo="";}
     };
   }
   async function retryNativeTextRequests() {
-    if(nativeRetryGeneration===uiStateLoadGeneration || nativeHistoryLoading || busy || sending || locked || !uiStateReady || windowCloseInFlight || chatBackend!=="text-v2" || !Object.keys(nativeTextIntents).length)return;
+    if(nativeRetryGeneration===uiStateLoadGeneration || nativeHistoryLoading || nativeOwnLoading || busy || sending || locked || !uiStateReady || windowCloseInFlight || chatBackend!=="text-v2" || !Object.keys(nativeTextIntents).length)return;
     const session=uiStateLoadGeneration;nativeRetryGeneration=session;
     try {
       for(const intent of Object.values(nativeTextIntents)) {
         if(locked || session!==uiStateLoadGeneration || windowCloseInFlight || chatBackend!=="text-v2")return;
-        if(!nativeTextIntents[intent.token])continue;
+        if(!nativeTextIntents[intent.token] || !nativeIntentCanRetry(intent))continue;
         try {
           if(intent.kind==="found") {
             // Only open a recovered first group while this original empty-view
@@ -6996,8 +7128,12 @@
             const result=await nativeTextDriver(session).found(intent);
             if(result){installNativeServer(result.server);if(route?.current()&&activeServerId===null&&!showAdd){await switchServer(result.server.server,()=>{},route);}}
           }
-          else {const row=servers.find(row=>row.id===intent.server);if(row?.backend!=="text-v2" || row.context!==intent.expectedContext)continue;
-            await nativeTextDriver(session,nativeDraftRetirement(intent.server,intent.channel,intent.expectedContext,intent.text)).send(intent.server,intent.channel,intent.expectedContext,intent.text);}
+          else {
+            const retireDraft=intent.kind==="create"
+              ? nativeDraftRetirement(intent.server,intent.channel,intent.expectedContext,intent.text,intent.replyTo??null)
+              : undefined;
+            await nativeTextDriver(session,retireDraft).retry(intent);
+          }
         }catch { /* Keep exact custody; a later scheduled retry reuses it. */ }
       }
     }finally{
@@ -7009,35 +7145,232 @@
       }
     }
   }
-  async function refreshNativeHistory(append=false) {
+  async function refreshNativeHistory(append=false, retryBusy=false) {
     const selected=cur,server=activeServerId;
-    if(selected?.backend!=="text-v2" || !selected.context || server===null || locked || !uiStateReady)return;
+    if(selected?.backend!=="text-v2" || !selected.context || server===null || locked || !uiStateReady || nativeConversationRemoved(server, selected.context))return;
     // Reads and writes share native admission. The write owner always refreshes
     // the latest selected view after retiring, so a switch need not compete for
     // that permit or lose its history when the write's original view changed.
     if(sending || busy || nativeRetryGeneration!==null)return;
-    if(nativeHistoryLoading)return;
+    if(nativeHistoryLoading || nativeOwnLoading)return;
     const session=uiStateLoadGeneration,viewToken=viewGeneration,revision=++nativeHistoryRevision,channel=selected.active,context=selected.context;
-    const current=()=>!locked && session===uiStateLoadGeneration && viewToken===viewGeneration && revision===nativeHistoryRevision && activeServerId===server && cur?.active===channel && cur?.context===context;
+    const current=()=>!locked && !uiSessionRetired && uiStateReady && !windowCloseInFlight && session===uiStateLoadGeneration && viewToken===viewGeneration && revision===nativeHistoryRevision && activeServerId===server && cur?.active===channel && cur?.context===context && !nativeConversationRemoved(server, context);
     nativeHistoryLoading=true;nativeHistoryError=null;
     try {
-      const result=await readNativeOriginals((_command,args)=>invoke<unknown>("get_message_page",args),{server,channel,context},current,append?nativeCursor:null);
+      const result=await readNativeOriginals(async (_command,args) => {
+        for (let attempt=0; current(); attempt++) {
+          try { return await invoke<unknown>("get_message_page",args); }
+          catch (failure) {
+            const message = failure instanceof Error ? failure.message : failure;
+            if (!retryBusy || attempt >= 9 || message !== "Chat history is busy. Try again.") throw failure;
+            await new Promise<void>(resolve => setTimeout(resolve, 100));
+          }
+        }
+        return null;
+      },{server,channel,context},current,append?nativeCursor:null);
       if(!result || !current())return;
       // This is a local original list. Do not populate Legacy pageTotal,
       // unread/version anchors or derive full-group absence from this subset.
       nativeOriginals=append?[...nativeOriginals,...result.items].slice(-256):result.items;
       nativeCursor={next:result.next,end:result.end};
       nativeHistoryLoaded=true;
+      const visible = new Set(nativeOriginals.filter(row => row.body.kind === "create").map(row => row.action));
+      nativeOwnMessages = append ? Object.fromEntries(Object.entries(nativeOwnMessages).filter(([action]) => visible.has(action))) : {};
+      const recent = result.items.filter(row => row.body.kind === "create").slice(-8).reverse();
+      for (const row of recent) {
+        if (!current()) return;
+        await selectNativeOwnMessage({ server, channel, context }, row.action, current);
+      }
     }catch(failure){if(current()){nativeHistoryError="Saved messages could not be loaded. Try again.";error=errorText(failure);}}
     finally{if(revision===nativeHistoryRevision)nativeHistoryLoading=false;}
   }
+
+  async function selectNativeOwnMessage(target: {server: number; channel: string; context: string}, action: string, current: () => boolean) {
+    try {
+      const result = await readNativeOwnMessage((_command, args) => invoke<unknown>("get_message_page", args), target, action, current);
+      if (result && current()) nativeOwnMessages = { ...nativeOwnMessages, [action]: result };
+    } catch {
+      if (current()) {
+        const next = { ...nativeOwnMessages };
+        delete next[action];
+        nativeOwnMessages = next;
+      }
+    }
+  }
+
+  async function refreshNativeOwnMessage(action: string) {
+    const selected = cur, server = activeServerId;
+    if (server === null || selected?.backend !== "text-v2" || !selected.context || locked || !uiStateReady
+      || uiSessionRetired || windowCloseInFlight || busy || sending || nativeHistoryLoading
+      || nativeOwnLoading || nativeRetryGeneration !== null || !nativeOriginals.some(row => row.action === action && row.body.kind === "create")) return;
+    const { active: channel, context } = selected;
+    const session = uiStateLoadGeneration, view = viewGeneration, revision = nativeHistoryRevision;
+    const current = () => !locked && !uiSessionRetired && !windowCloseInFlight && uiStateReady
+      && session === uiStateLoadGeneration && view === viewGeneration && revision === nativeHistoryRevision
+      && activeServerId === server && cur?.active === channel && cur.context === context;
+    nativeOwnLoading = true;
+    try {
+      await selectNativeOwnMessage({ server, channel, context }, action, current);
+    } finally {
+      if (revision === nativeHistoryRevision) nativeOwnLoading = false;
+    }
+  }
+
+  async function changeNativeOwnMessage(action: string, revision: string, text: string | null) {
+    const selected = cur, server = activeServerId;
+    if (server === null || selected?.backend !== "text-v2" || !selected.context || locked || !uiStateReady
+      || uiSessionRetired || windowCloseInFlight || busy || sending || nativeHistoryLoading || nativeOwnLoading
+      || nativeConversationRemoved(server, selected.context) || nativeRetryGeneration !== null || nativeOwnMessages[action]?.item?.revision !== revision) return;
+    const session = uiStateLoadGeneration, view = viewGeneration, operation = ++pendingSendNonce;
+    const target = { server, channel: selected.active, expectedContext: selected.context, messageId: action, expectedRevision: revision };
+    const data = text === null ? { ...target, kind: "delete" as const } : { ...target, kind: "edit" as const, text };
+    sending = true;
+    error = "";
+    try {
+      const result = await nativeTextDriver(session).change(data);
+      if (!locked && session === uiStateLoadGeneration && view === viewGeneration && result?.disposition === "uncertain") {
+        error = "The change is waiting to be confirmed.";
+      }
+    } catch (failure) {
+      if (!locked && session === uiStateLoadGeneration && view === viewGeneration) error = errorText(failure);
+    } finally {
+      if (pendingSendNonce === operation) {
+        sending = false;
+        if (!locked && session === uiStateLoadGeneration) await refreshNativeHistory();
+      }
+    }
+  }
+
+  async function refreshNativeReceived(payload: unknown) {
+    let target;
+    try { target = decodeNativeReceivedNotice(payload); }
+    catch { return; }
+    const { server, channel, context, action } = target;
+    const session = uiStateLoadGeneration, view = viewGeneration, revision = nativeReceivedRevision;
+    const current = () => !locked && !uiSessionRetired && uiStateReady && !windowCloseInFlight
+      && session === uiStateLoadGeneration && view === viewGeneration && activeServerId === server
+      && revision === nativeReceivedRevision
+      && cur?.backend === "text-v2" && cur.active === channel && cur.context === context
+      && !nativeConversationRemoved(server, context);
+    if (!current()) return;
+    if (action === null) {
+      nativeArchiveRevision++;
+      nativeArchive = null;
+      nativeReceivedRevision++;
+      nativeReceived = [];
+      nativeReceivedScope = null;
+      nativeReceivedReads.clear();
+      return;
+    }
+    // A live observation retires the corresponding archive body immediately.
+    // A read already in flight must not put that old body back on the screen.
+    if (nativeArchive) {
+      nativeArchiveRevision++;
+      nativeArchive = {
+        ...nativeArchive,
+        items: nativeArchive.items.filter(item => item.action !== action),
+        loading: false,
+      };
+    }
+    const earlier = nativeReceivedReads.get(action);
+    if (earlier?.current()) { earlier.dirty = true; return; }
+    if (earlier) nativeReceivedReads.delete(action);
+    if (nativeReceivedScope?.server === server && nativeReceivedScope.channel === channel && nativeReceivedScope.context === context) {
+      nativeReceived = updateNativeReceived(nativeReceived, action, null);
+    }
+    if (nativeReceivedReads.size >= 64) {
+      error = "Too many live messages arrived at once.";
+      return;
+    }
+    const work = {
+      dirty: false,
+      current,
+      async read() {
+        const raw = await invoke<unknown>("get_message_page", {
+          server, channel, expectedContext: context, receivedAction: action,
+        });
+        if (!current() || work.dirty) return;
+        const sameScope = nativeReceivedScope?.server === server && nativeReceivedScope.channel === channel
+          && nativeReceivedScope.context === context;
+        nativeReceived = updateNativeReceived(sameScope ? nativeReceived : [], action, decodeNativeReceived(raw, action));
+        nativeReceivedScope = { server, channel, context };
+      },
+    };
+    nativeReceivedReads.set(action, work);
+    nativeReceivedPump ??= Promise.resolve().then(drainNativeReceived);
+    await nativeReceivedPump;
+  }
+
+  async function drainNativeReceived() {
+    try {
+      for (const [action, work] of nativeReceivedReads) {
+        let busy = false;
+        work.dirty = false;
+        if (work.current()) {
+          try { await work.read(); }
+          catch (failure) {
+            const message = failure instanceof Error ? failure.message : failure;
+            busy = message === "Chat history is busy. Try again.";
+          }
+        }
+        if (nativeReceivedReads.get(action) !== work) continue;
+        nativeReceivedReads.delete(action);
+        if (work.current() && (busy || work.dirty)) {
+          nativeReceivedReads.set(action, work);
+          if (busy) await new Promise<void>(resolve => setTimeout(resolve, 100));
+        }
+      }
+    } finally {
+      nativeReceivedPump = null;
+    }
+  }
+
+  function resetNativeArchive() {
+    nativeArchiveRevision++;
+    nativeArchive = null;
+  }
+
+  async function refreshNativeArchive(append = false) {
+    const selected = cur, server = activeServerId;
+    if (server === null || selected?.backend !== "text-v2" || !selected.context
+      || locked || !uiStateReady || uiSessionRetired || windowCloseInFlight
+      || sending || busy || nativeHistoryLoading || nativeOwnLoading || nativeRetryGeneration !== null || nativeArchive?.loading) return;
+    const { active: channel, context } = selected;
+    const session = uiStateLoadGeneration, view = viewGeneration, revision = ++nativeArchiveRevision;
+    const current = () => !locked && !uiSessionRetired && uiStateReady && !windowCloseInFlight
+      && session === uiStateLoadGeneration && view === viewGeneration && revision === nativeArchiveRevision
+      && activeServerId === server && cur?.backend === "text-v2" && cur.active === channel && cur.context === context;
+    const base = append && nativeArchive?.server === server && nativeArchive.channel === channel && nativeArchive.context === context
+      ? nativeArchive : null;
+    const previous = { server, channel, context, items: base?.items ?? [], after: base?.after ?? null, more: base?.more ?? false };
+    nativeArchive = { ...previous, note: null, loading: true };
+    try {
+      const page = await readNativeReceivedArchive((_command, args) => invoke<unknown>("get_message_page", args),
+        { server, channel, context }, current, previous.after);
+      if (!page || !current()) return;
+      const note = !page.available ? "Saved received messages are unavailable for this group."
+        : page.incomplete ? "Some saved received messages could not be loaded."
+        : null;
+      nativeArchive = {
+        ...previous,
+        items: [...previous.items, ...page.items].slice(-64),
+        after: page.ids.at(-1) ?? previous.after,
+        more: page.more,
+        note,
+        loading: false,
+      };
+    } catch {
+      if (current()) nativeArchive = { ...previous, note: "Saved received messages could not be loaded. Try again.", loading: false };
+    }
+  }
   async function sendNativeText(text:string,server:number,channel:string):Promise<SendOutcome> {
-    const selected=cur;if(selected?.backend!=="text-v2" || !selected.context)return "refused";
+    const selected=cur;if(selected?.backend!=="text-v2" || !selected.context || nativeConversationRemoved(server, selected.context))return "refused";
     const session=uiStateLoadGeneration,context=selected.context,operation=++pendingSendNonce;
-    const retireDraft=nativeDraftRetirement(server,channel,context,text);
+    const replyTo=replyingTo || null;
+    const retireDraft=nativeDraftRetirement(server,channel,context,text,replyTo);
     sending=true;
     try {
-      const result=await nativeTextDriver(session,retireDraft).send(server,channel,context,text);
+      const result=await nativeTextDriver(session,retireDraft).send(server,channel,context,text,replyTo);
       if(!result)return "uncertain";
       if(result.disposition==="uncertain")return "uncertain";
       return "sent"; // press outcome only; UI status remains Saved here
@@ -7097,8 +7430,55 @@
     }
   }
 
+  async function joinNative() {
+    if (busy || locked || uiSessionRetired || !uiStateReady || windowCloseInFlight) return;
+    const session = uiStateLoadGeneration;
+    const generation = viewGeneration;
+    const invite = joinInvite.trim();
+    const current = () => session === uiStateLoadGeneration && sessionContinuationCurrent(generation, viewGeneration, locked);
+    if (!invite) return;
+    busy = true;
+    joinError = "";
+    let refreshHistory = false;
+    try {
+      if (joinPreviewCode !== invite || !joinPreview?.approved_host_required) {
+        const preview = await invoke<InvitePreview>("preview_invite", { inviteHex: invite });
+        if (current() && joinInvite.trim() === invite) {
+          if (!preview.approved_host_required) throw new Error("Enter a Chat V2 invitation.");
+          joinPreview = preview;
+          joinPreviewCode = invite;
+        }
+        return;
+      }
+      const approvedHost = approvedJoinHost.trim();
+      if (!approvedHost) return;
+      const route = studioExit.begin();
+      const row = await invoke<unknown>("join_server", {
+        inviteHex: invite, approvedHost, displayName: displayName.trim(),
+        isDm: false, allowSwitchboards: false, serverName: joinServerName.trim() || "New group",
+      });
+      if (!current() || joinInvite.trim() !== invite) return;
+      const restored = decodeRestoredChatSession({ backend: "text-v2", servers: [row] });
+      if (restored?.backend !== "text-v2" || restored.servers.length !== 1) throw new Error("The joined group could not be opened.");
+      installNativeServer(restored.servers[0]);
+      showAdd = false;
+      joinInvite = "";
+      joinServerName = "";
+      resetJoinAttempt();
+      if (!await switchServer(restored.servers[0].server, () => {}, route)) return;
+      refreshHistory = true;
+    } catch (failure) {
+      if (current()) joinError = errorText(failure);
+    } finally {
+      if (!locked && session === uiStateLoadGeneration) {
+        busy = false;
+        if (refreshHistory && uiStateReady && !uiSessionRetired && !windowCloseInFlight) await refreshNativeHistory(false, true);
+      }
+    }
+  }
+
   async function join() {
-    if(chatBackend==="text-v2")return;
+    if (chatBackend === "text-v2") return;
     busy = true;
     error = "";
     joinReplyReady = null;
@@ -7475,6 +7855,9 @@
     // Inline edit plaintext belongs to this view. Lock/switch/removal must drop it
     // and invalidate old admission callbacks, including after a failed first seal.
     cancelEdit();
+    resetNativeArchive();
+    nativeOwnMessages = {};
+    nativeOwnLoading = false;
     view = "chat";
     moderationSelected = new Set();
     moderationDeleteArmed = false;
@@ -7647,6 +8030,10 @@
     if(s?.backend==="text-v2") {
       dmHome=s.isDm;showNewDm=false;showAddFriend=false;notice="";
       nativeOriginals=[];nativeCursor=null;nativeHistoryLoading=false;nativeHistoryLoaded=false;nativeHistoryError=null;nativeHistoryRevision++;
+      nativeReceived = [];
+      nativeReceivedScope = null;
+      nativeReceivedRevision++;
+      nativeReceivedReads.clear();
       loadDraftFor(chanKey());committed();
       await refreshNativeHistory();
       if(viewCurrent(gen,id)){groupLoading=false;messagesLoading=false;}
@@ -8083,6 +8470,7 @@
     if (!cur) return false;
     if ((!route.current() || studioHasWork?.()) && !(await route.scope())) return false;
     if (!route.current() || windowCloseInFlight) return false;
+    if (cur.backend === "text-v2") return cur.active === id;
     saveDraftFor(chanKey()); // stash the current channel's draft before leaving it
     // Channel-scoped content, dropped before the move rather than when the read returns: the
     // group's own state (roster, files, branding) is unchanged by a channel hop and stays put.
@@ -11393,23 +11781,30 @@
   async function updateInviteFor(
     server: number,
     mintFresh = false,
+    expectedContext: string | undefined = undefined,
   ): Promise<string | undefined> {
     const generation = (inviteRefreshGeneration.get(server) ?? 0) + 1;
     inviteRefreshGeneration.set(server, generation);
+    const session = uiStateLoadGeneration;
+    const current = () => generation === (inviteRefreshGeneration.get(server) ?? 0)
+      && (expectedContext === undefined || (!locked && !uiSessionRetired && !windowCloseInFlight
+        && session === uiStateLoadGeneration
+        && servers.some(row => row.id === server && row.backend === "text-v2" && row.context === expectedContext)));
+    if (!current()) return undefined;
     try {
       // Keep both command names as static literals. Besides making the security boundary easy to
       // audit, this lets the command-ledger test prove every frontend IPC call is registered.
       const invite = (
         mintFresh
-          ? await invoke<string | null>("mint_invite_fresh", { server })
+          ? await invoke<string | null>("mint_invite_fresh", { server, ...(expectedContext === undefined ? {} : { expectedContext }) })
           : await invoke<string | null>("get_invite", { server })
       ) ?? "";
       const latest = inviteRefreshGeneration.get(server) ?? 0;
-      if (generation !== latest) return undefined;
+      if (!current()) return undefined;
       servers = withOrderedRefreshedInvite(servers, server, invite, generation, latest);
       return invite;
     } catch (e) {
-      if (generation === (inviteRefreshGeneration.get(server) ?? 0)) error = String(e);
+      if (current()) error = String(e);
       return undefined;
     }
   }
@@ -21494,7 +21889,7 @@
   // Resolves to what the press came to (`SendOutcome`), for "post now" to report; every other
   // caller ignores it.
   async function send(): Promise<SendOutcome> {
-    if(cur?.backend==="text-v2" && (nativeHistoryLoading || busy || nativeRetryGeneration===uiStateLoadGeneration))return "refused";
+    if(cur?.backend==="text-v2" && (nativeHistoryLoading || nativeOwnLoading || busy || nativeRetryGeneration===uiStateLoadGeneration))return "refused";
     const text = draft.trim();
     if (!text || !cur?.active || activeServerId === null || sending || retryingPendingSends || locked || !uiStateReady || windowCloseInFlight || pendingSendResolution !== null || pendingManagerOpen) return "refused";
     const server = activeServerId;
@@ -21941,6 +22336,22 @@
   async function generateInvite() {
     const server = activeServerId;
     if (server === null || !cur) return;
+    if (cur.backend === "text-v2") {
+      const context = cur.context;
+      const view = viewGeneration;
+      if (!context || nativeConversationRemoved(server, context)) return;
+      mintingInvite = true;
+      try {
+        const invite = await updateInviteFor(server, true, context);
+        if (invite !== undefined && unlockedViewCurrent(view, server) && cur?.context === context) {
+          copied = false;
+          inviteRevealed = server;
+        }
+      } finally {
+        mintingInvite = false;
+      }
+      return;
+    }
     mintingInvite = true;
     inviteCheck = { pct: 4, label: "Checking how people can reach you…" };
     const started = Date.now();
@@ -22944,6 +23355,8 @@
         /* locked, or an older backend: the tracker falls back to its first sighting */
       });
     const subs: Promise<UnlistenFn>[] = [
+      tauriListen<unknown>("chat-v2-received", ({ payload }) => void refreshNativeReceived(payload)),
+      tauriListen<unknown>("chat-v2-membership", ({ payload }) => receiveNativeMembership(payload)),
       appWindow.onResized(() => syncMaximized()),
       appWindow.onFocusChanged(({ payload }) => (windowFocused = payload)),
       appWindow.onCloseRequested(async (event) => {
@@ -23796,6 +24209,8 @@
     unlockAttempt++;
     viewGeneration++;
     uiStateReady=false;
+    nativeOwnMessages = {};
+    nativeOwnLoading = false;
     clearTimeout(uiStateSaveTimer);
     pendingSendRetry.cancel();
   }
@@ -27467,13 +27882,24 @@
       <p class="muted small">Loading encrypted preferences before servers can fetch shared content.</p>
     </div>
   {:else if chatBackend === "text-v2" && (servers.length === 0 || showAdd) && !showSettings}
-    <section class="start gate" aria-label="Create a local group">
+    <section class="start gate" aria-label="Find or create a group">
       {@render brandMark("your vault is ready")}
-      <h2>Create a local group</h2>
-      <p class="muted small">Messages are saved on this device. Joining and shared history are not available yet.</p>
+      <h2>Find or create a group</h2>
       <label class="field"><span>Your name</span><input bind:value={displayName} /></label>
+      <h3>Create a group</h3>
       <label class="field"><span>Group name</span><input bind:value={newServerName} placeholder="Optional" /></label>
       <button onclick={found} disabled={busy || nativeRetryGeneration !== null || !displayName.trim()}>{busy ? "Creating…" : "Create group"}</button>
+      <h3>Join with an invite</h3>
+      <label class="field"><span>Chat V2 invite</span><textarea bind:value={joinInvite} oninput={resetJoinAttempt} rows="3" disabled={busy}></textarea></label>
+      {#if joinPreview?.approved_host_required}
+        <p class="muted small">This invite expires {fmtTime(joinPreview.expires_at_ms)}. The founder can see your IP address when you connect.</p>
+        <label class="field"><span>Founder’s IP address</span><input bind:value={approvedJoinHost} maxlength="45" autocomplete="off" disabled={busy} /></label>
+        <label class="field"><span>Group name</span><input bind:value={joinServerName} placeholder="Optional" disabled={busy} /></label>
+      {/if}
+      <button onclick={joinNative} disabled={busy || !joinInvite.trim() || (!!joinPreview && (!approvedJoinHost.trim() || !displayName.trim()))}>
+        {joinPreview ? "Join directly" : "Review invite"}
+      </button>
+      {#if joinError}<p role="status">{joinError}</p>{/if}
       {#if servers.length}<button class="ghost" onclick={() => showAdd=false}>Back to saved messages</button>{/if}
       {#if error}<p role="status">{error}</p>{/if}
     </section>
@@ -28366,10 +28792,24 @@
             {/if}
           </nav>
         {/if}
-        {#if cur?.backend === "text-v2"}
-          <NativeSavedChat rows={nativeOriginals} loading={nativeHistoryLoading} loaded={nativeHistoryLoaded} failure={nativeHistoryError} more={!!nativeCursor && nativeCursor.next!==nativeCursor.end}
-            text={draft} busy={sending || nativeHistoryLoading || nativeRetryGeneration!==null} send={()=>{void send();}} refresh={()=>{void refreshNativeHistory();}} loadMore={()=>{void refreshNativeHistory(true);}}
-            change={(value)=>{draft=value;saveDraftFor(chanKey());}} />
+        {#if cur?.backend === "text-v2" && nativeSelectedRemoved}
+          <p class="muted" role="status">You were removed from this conversation.</p>
+        {:else if cur?.backend === "text-v2"}
+          {@const archive = nativeArchive !== null && nativeArchive.server === activeServerId && nativeArchive.channel === cur.active && nativeArchive.context === cur.context ? nativeArchive : null}
+          <button type="button" class="ghost small sb-members" aria-expanded={membersOpen} aria-controls="native-member-list" onclick={toggleMembers}>
+            {membersOpen ? "Hide members" : "Show members"}
+          </button>
+          {#key `${activeServerId}:${cur.active}:${cur.context}`}
+            <NativeSavedChat rows={nativeOriginals} own={nativeOwnMessages}
+              readOwn={(action) => {void refreshNativeOwnMessage(action);}}
+              mutate={(action, revision, text) => {void changeNativeOwnMessage(action, revision, text);}}
+              received={nativeReceivedScope !== null && nativeReceivedScope.server === activeServerId && nativeReceivedScope.channel === cur.active && nativeReceivedScope.context === cur.context ? nativeReceived : []}
+              loading={nativeHistoryLoading} loaded={nativeHistoryLoaded} failure={nativeHistoryError} more={!!nativeCursor && nativeCursor.next!==nativeCursor.end}
+              {archive} readArchive={(append)=>{void refreshNativeArchive(append);}}
+              text={draft} busy={sending || nativeHistoryLoading || nativeOwnLoading || nativeRetryGeneration!==null} send={()=>{void send();}} refresh={()=>{void refreshNativeHistory();}} loadMore={()=>{void refreshNativeHistory(true);}}
+              replyTo={replyingTo || null} reply={(action)=>{replyingTo=action ?? "";}}
+              change={(value)=>{draft=value;saveDraftFor(chanKey());}} />
+          {/key}
         {:else if view === "chat"}
           <!-- Header: identity on the left, the channel's description filling the middle, every
                action on the right. The member count lives in the members column, not here. -->
@@ -30219,7 +30659,46 @@
 
       <!-- Studio reserves this width for the drawing and its controls. The member-list
            preference is preserved for chat; call frame claims remain in Studio's Art tab. -->
-      {#if !dmHome && cur && cur.backend !== "text-v2" && !cur.isDm && membersOpen && view !== "studio"}
+      {#if !dmHome && cur?.backend === "text-v2" && !cur.isDm && membersOpen && !nativeSelectedRemoved}
+        {@const snapshot = nativeRoster?.server === activeServerId && nativeRoster.mount === chatLedgerMount ? nativeRoster : null}
+        <aside id="native-member-list" class="members-col" aria-label="Members">
+          <h3><span>Members{snapshot && !snapshot.loading && !snapshot.failure ? ` (${snapshot.members.length})` : ""}</span></h3>
+          {#if !snapshot || snapshot.loading}
+            <p class="muted small" role="status">Loading members…</p>
+          {:else if snapshot.failure}
+            <p class="muted small" role="status">{snapshot.failure}</p>
+          {:else}
+            <ul>
+              {#each snapshot.members as member (member.admission)}
+                <li>
+                  <span title={member.identity}>{member.fingerprint}{member.you ? " (you)" : ""}{member.founder ? " · Founder" : ""}</span>
+                  {#if snapshot.canRemove && !member.founder}
+                    {#if confirmNativeRemoval === member.admission}
+                      <button type="button" class="danger-btn small" disabled={!!removingNativeAdmission} onclick={() => void removeNativeMember(member)}>Confirm removal</button>
+                      <button type="button" class="ghost small" onclick={() => (confirmNativeRemoval = "")}>Cancel</button>
+                    {:else}
+                      <button type="button" class="ghost small" disabled={!!removingNativeAdmission} onclick={() => (confirmNativeRemoval = member.admission)}>Remove</button>
+                    {/if}
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+            {#if snapshot.members.some((member) => member.you && !member.founder)}
+              <button type="button" class="ghost small" disabled={nativeContactBusy} onclick={() => void useNativeContact("share")}>Create my contact code</button>
+              {#if nativeContactCode}
+                <label>My contact code <input type="text" value={nativeContactCode} readonly onfocus={(event) => event.currentTarget.select()} /></label>
+              {/if}
+              <form onsubmit={(event) => { event.preventDefault(); void useNativeContact("connect"); }}>
+                <label>Member contact code <input type="text" bind:value={nativeContactInput} maxlength="512" spellcheck="false" /></label>
+                <label>Approved IP address <input type="text" bind:value={nativeContactHost} maxlength="45" spellcheck="false" /></label>
+                <button type="submit" class="ghost small" disabled={nativeContactBusy || !nativeContactInput.trim() || !nativeContactHost.trim()}>Connect to member</button>
+              </form>
+              {#if nativeContactStatus}<p class="small" role="status">{nativeContactStatus}</p>{/if}
+            {/if}
+          {/if}
+          <button type="button" class="ghost small" disabled={snapshot?.loading || !!removingNativeAdmission} onclick={() => { if (activeServerId !== null) void refreshNativeMembers(activeServerId, viewGeneration); }}>Refresh members</button>
+        </aside>
+      {:else if !dmHome && cur && !cur.isDm && membersOpen && view !== "studio" && cur.backend !== "text-v2"}
         <aside class="members-col" aria-label="Members">
           <h3><span>Members · {onlineCount}/{members} claimed here</span></h3>
           {#if roster.length > 6}

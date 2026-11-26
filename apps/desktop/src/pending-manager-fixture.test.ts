@@ -7,9 +7,9 @@ import { persistenceWarning, sendAndRefresh, sendOutcome } from "./message-send.
 import { closeContinuityAcknowledgement, NativeVaultLockCoordinator } from "./window-close.ts";
 import { VideoReviewQueue } from "./video-review.ts";
 import { createNativeTextDriver } from "./native-text-driver.ts";
-import { readNativeOriginals } from "./native-text-history.ts";
+import { decodeNativeReceived, decodeNativeReceivedNotice, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, updateNativeReceived } from "./native-text-history.ts";
 import { PendingSendRetry } from "./pending-send-retry.ts";
-import { decodeRestoredChatSession } from "./native-text-session.ts";
+import { decodeNativeMembershipNotice, decodeRestoredChatSession } from "./native-text-session.ts";
 import { sessionContinuationCurrent } from "./viewscope.ts";
 
 export function deferred<T = void>() {
@@ -44,7 +44,7 @@ export function pendingManagerBackend(initial:unknown){return{sealed:JSON.string
 /** Shared test fixture for real App save queue, hydration, decisions and submit/retry. */
 export function pendingManagerApp(initial: unknown, backend=pendingManagerBackend(initial)) {
   const dependencies = { initial, backend, addPendingSend, durableStopOriginal, durableStopTerminal, retiredStopWarning, matchingPendingMutation, matchingPendingSend, samePendingIntent, pendingSendRetryBlock, resolvePendingSend, recoverQuarantinedIntent, quarantinedPendingIntent, validateMutationPayload, validateSendPayload, pendingContinuityVersion, sendRefusedUnaccepted,
-    MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity, persistenceWarning, sendAndRefresh, sendOutcome, NativeVaultLockCoordinator, closeContinuityAcknowledgement, VideoReviewQueue, createNativeTextDriver, readNativeOriginals, PendingSendRetry, decodeRestoredChatSession, sessionContinuationCurrent };
+    MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity, persistenceWarning, sendAndRefresh, sendOutcome, NativeVaultLockCoordinator, closeContinuityAcknowledgement, VideoReviewQueue, createNativeTextDriver, decodeNativeReceived, decodeNativeReceivedNotice, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, updateNativeReceived, PendingSendRetry, decodeNativeMembershipNotice, decodeRestoredChatSession, sessionContinuationCurrent };
   return new Function(...Object.keys(dependencies), `
     let locked = false, uiStateReady = false, uiStateLoadGeneration = 1, uiStateHydrationAttempt = 0, uiStateSaveTimer,uiSessionRetired=false;
     let uiStateSaveChain = Promise.resolve(), uiStateSaveFailed = false, uiStateFailureToast = 0;
@@ -52,8 +52,17 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
     let retryingPendingSends = false, pendingManagerOpen = false, sending = false;
     let chatBackend = "legacy", nativeOriginals = [], nativeCursor = null, nativeHistoryLoading = false, nativeHistoryLoaded = false, nativeHistoryError = null, nativeHistoryRevision = 0, nativeRetryGeneration = null, viewGeneration = 1;
     let nativePages = [], nativeHistoryCalls = [];
+    let nativeOwnMessages = {}, nativeOwnLoading = false, nativeOwnPages = [], nativeOwnCalls = [];
+    let nativeReceived = [], nativeReceivedScope = null, nativeReceivedRevision = 0;
+    const nativeReceivedReads = new Map();
+    let nativeReceivedPump = null;
+    let nativeArchive = null, nativeArchiveRevision = 0;
+    let nativeRemovedContexts = {}, membersOpen = false;
     let busy=false,showAdd=false,startTab="join";
     let displayName="Catte",newServerName="Group",advertise="",relay="",rendezvous="";
+    let joinInvite = "", joinPreview = null, joinPreviewCode = "", approvedJoinHost = "", joinServerName = "", joinError = "";
+    let nativeJoinReplies = [], nativeJoinCalls = [];
+    function resetJoinAttempt() { joinPreview = null; joinPreviewCode = ""; approvedJoinHost = ""; }
     const studioExit={begin(){const generation=viewGeneration;return{current:()=>generation===viewGeneration};}};
     // The navigation's dispatch decision is tested separately against the
     // actual switchServer. Here retain the real history read after selection.
@@ -100,6 +109,18 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
     const chatScopeKey = (s,c) => s + ":" + c;
     const chanKey = () => activeServerId === null || !cur?.active ? null : chatScopeKey(activeServerId,cur.active);
     const invoke = async (command, args) => {
+      if (command === "preview_invite" || command === "join_server") {
+        nativeJoinCalls.push({ command, args: structuredClone(args) });
+        const next = nativeJoinReplies.shift();
+        if (next instanceof Error) throw next;
+        return await next;
+      }
+      if (command === "get_message_page" && "ownAction" in args) {
+        nativeOwnCalls.push(structuredClone(args));
+        const next = nativeOwnPages.shift();
+        if (next instanceof Error) throw next;
+        return await (next ?? {backend:"text-v2",scope:"own-message-revision",action:args.ownAction,scanning:false,item:null});
+      }
       if(command === "get_message_page") { nativeHistoryCalls.push(structuredClone(args));const next=nativePages.shift();if(next instanceof Error)throw next;return await(next ?? {backend:"text-v2",scope:"own-saved-originals",next:"0",end_exclusive:"0",items:[]}); }
       if (command === "get_ui_state") { const captured = backend.sealed; const gate = readGates.shift(); if (gate) await gate; return captured; }
       if (command === "durable_send_context") { contextCalls++; if (contextGate) await contextGate; return "a".repeat(64); }
@@ -134,6 +155,7 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
     };
     ${production("  function queueUiStateSave(", "  function chanKey(")}
     ${production("  function resetNativeTextForLock(", "  function nativeTextDriver(")}
+    ${production("  function receiveNativeMembership(", "  $effect(")}
     ${production("  function nativeTextDriver(", "  async function found(")}
     ${production("  async function found(", "  async function join(")}
     ${production("  function restoreReloaded(", "  async function unlock(")}
@@ -171,9 +193,21 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
       conversation(server, channel) { activeServerId = server; cur = channel === null ? null : { active: channel }; draft = chanKey() ? drafts[chanKey()] ?? "" : ""; },
       nativeConversation(server,channel,context) {chatBackend="text-v2";activeServerId=server;cur={id:server,backend:"text-v2",active:channel,context};servers=[cur];draft=drafts[chanKey()]??"";},
       nativeHistory(...pages) {nativePages=pages;},
+      nativeOwnHistory(...pages) { nativeOwnPages = pages; },
+      nativeOwn() { return { messages: structuredClone(nativeOwnMessages), calls: nativeOwnCalls }; },
+      nativeChange: changeNativeOwnMessage,
       nativeRefresh: refreshNativeHistory,
+      nativeArchiveRefresh: refreshNativeArchive,
+      archive() { return structuredClone(nativeArchive); },
+      receiveNotice: refreshNativeReceived,
+      receiveMembership: receiveNativeMembership,
+      nativeRemoved: nativeConversationRemoved,
+      received() { return structuredClone(nativeReceived); },
       nativeRetry: retryNativeTextRequests,
       nativeFound: found,
+      nativeJoin: joinNative,
+      setNativeJoin(code, host, ...replies) { chatBackend = "text-v2"; joinInvite = code; approvedJoinHost = host; nativeJoinReplies = replies; },
+      nativeJoinCalls: () => nativeJoinCalls,
       dispose:retireUiSessionOnUnmount,
       debounce:scheduleUiStateSave,
       pendingDebounce:()=>saveTimers.values().next().value,

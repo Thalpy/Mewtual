@@ -17,10 +17,15 @@ pub(super) struct Selection<T: MeshTransport, R: CryptoRngCore> {
     pub(super) status: crate::store::NativeCreationStatusData,
     pub(super) invocation: [u8; 32],
     pub(super) request: [u8; 32],
-    source_close: catcoms_rt::NativeChatSourceClose,
+    pub(super) join_ingress: Option<catcoms_net::NativeChatJoinIngress>,
+    pub(super) governing_ingress: Option<catcoms_net::NativeChatJoinIngress>,
+    pub(super) member_ingress: Option<catcoms_net::NativeChatMemberIngress>,
+    pub(super) dependency_lane: Option<catcoms_net::NativeChatMemberDependencies>,
+    pub(super) source_close: catcoms_rt::NativeChatSourceClose,
+    pub(super) recovered_founder: bool,
     // LAST: actual weak RuntimeCell allocation and all copied metadata must
     // remain paid even after the whole canonical Sources/SDK has been dropped.
-    _metadata: Arc<RuntimeMetadata>,
+    pub(super) _metadata: Arc<RuntimeMetadata>,
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> Clone for NativeTextRuntimeSelection<T, R> {
@@ -51,7 +56,24 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextRuntimeSelection<T, R> {
                 status,
                 invocation: request.invocation,
                 request: request.digest,
+                join_ingress: body
+                    .network
+                    .as_ref()
+                    .and_then(|network| network.join_ingress.clone()),
+                governing_ingress: body
+                    .network
+                    .as_ref()
+                    .and_then(|network| network.governing_ingress.clone()),
+                member_ingress: body
+                    .network
+                    .as_ref()
+                    .and_then(|network| network.member_ingress.clone()),
+                dependency_lane: body
+                    .network
+                    .as_ref()
+                    .and_then(|network| network.dependency_lane.clone()),
                 source_close: body.source_close.clone(),
+                recovered_founder: false,
                 _metadata: body._metadata.clone(),
             }),
         }
@@ -60,6 +82,28 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextRuntimeSelection<T, R> {
     /// Local index DATA only, not an authenticated native server credential.
     pub fn id_data(&self) -> u64 {
         self.original.status.id
+    }
+
+    pub fn request_data(&self) -> [u8; 32] {
+        self.original.request
+    }
+
+    /// The original creation invocation identifies the same desktop context after restart.
+    pub fn context_data(&self) -> [u8; 32] {
+        self.original.invocation
+    }
+
+    /// Check whether a frozen retry names the original invocation and settings.
+    pub fn matches_creation_request_data(&self, request: &NativeTextCreationRequest) -> bool {
+        self.original.invocation == request.invocation && self.original.request == request.digest
+    }
+
+    pub fn is_recovered_from_original_vault_cached(&self, vault: &NativeTextVault) -> bool {
+        self.original.recovered_founder
+            && self.original.scope.is_open()
+            && self.original.source_close.is_open()
+            && self.original.runtime.strong_count() != 0
+            && Arc::ptr_eq(&self.original.scope, &vault.sources.observe())
     }
 
     /// Fence this exact original Source at native row retirement. SC-only and

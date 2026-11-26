@@ -11,10 +11,16 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 mod boot;
 mod boot_lifetime;
+mod connected;
 pub(super) mod continuity;
 mod founding;
 mod history;
+mod invite_mint;
+mod invite_preview;
+mod joining;
 mod listing;
+mod membership;
+mod receiving;
 pub(super) mod retirement;
 mod sending;
 pub(super) mod sources;
@@ -39,6 +45,20 @@ pub(super) struct Registry {
     listing_drop_watch: StdMutex<Option<Arc<listing::DropWatch>>>,
     #[cfg(test)]
     history_drop_watch: StdMutex<Option<Arc<history::DropWatch>>>,
+    #[cfg(test)]
+    history_capture_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
+    #[cfg(test)]
+    join_startup_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
+    #[cfg(test)]
+    join_startup_busy: tokio::sync::Notify,
+    #[cfg(test)]
+    join_startup_table_busy: tokio::sync::Notify,
+    #[cfg(test)]
+    join_dependency_ingress_busy: tokio::sync::Notify,
+    #[cfg(test)]
+    join_dependency_transport_busy: tokio::sync::Notify,
+    #[cfg(test)]
+    join_dependency_reopen_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
     pub(super) ui_state: ui_state::Controller,
     retirement: retirement::Coalescer,
     pub(super) preludes: Arc<retirement::Prelude>,
@@ -56,9 +76,21 @@ pub(super) struct Registry {
     #[cfg(test)]
     found_publication_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
     #[cfg(test)]
+    found_setup_busy: StdMutex<Option<Arc<tokio::sync::Notify>>>,
+    #[cfg(test)]
+    founder_workers_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
+    #[cfg(test)]
+    founder_ingress_ready: tokio::sync::Notify,
+    #[cfg(test)]
+    founder_receive_busy: tokio::sync::Notify,
+    #[cfg(test)]
     text_reply_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
     #[cfg(test)]
+    invite_preview_now: AtomicU64,
+    #[cfg(test)]
     send_final_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
+    #[cfg(test)]
+    send_preparation_busy: tokio::sync::Notify,
     #[cfg(test)]
     send_io_edge: StdMutex<Option<Arc<tests::BlockingIoBarrier>>>,
     #[cfg(test)]
@@ -115,6 +147,20 @@ impl Default for Registry {
             listing_drop_watch: StdMutex::new(None),
             #[cfg(test)]
             history_drop_watch: StdMutex::new(None),
+            #[cfg(test)]
+            history_capture_edge: StdMutex::new(None),
+            #[cfg(test)]
+            join_startup_edge: StdMutex::new(None),
+            #[cfg(test)]
+            join_startup_busy: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            join_startup_table_busy: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            join_dependency_ingress_busy: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            join_dependency_transport_busy: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            join_dependency_reopen_edge: StdMutex::new(None),
             ui_state,
             retirement,
             preludes,
@@ -132,9 +178,21 @@ impl Default for Registry {
             #[cfg(test)]
             found_publication_edge: StdMutex::new(None),
             #[cfg(test)]
+            found_setup_busy: StdMutex::new(None),
+            #[cfg(test)]
+            founder_workers_edge: StdMutex::new(None),
+            #[cfg(test)]
+            founder_ingress_ready: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            founder_receive_busy: tokio::sync::Notify::new(),
+            #[cfg(test)]
             text_reply_edge: StdMutex::new(None),
             #[cfg(test)]
+            invite_preview_now: AtomicU64::new(0),
+            #[cfg(test)]
             send_final_edge: StdMutex::new(None),
+            #[cfg(test)]
+            send_preparation_busy: tokio::sync::Notify::new(),
             #[cfg(test)]
             send_io_edge: StdMutex::new(None),
             #[cfg(test)]
@@ -240,6 +298,24 @@ fn router<R: tauri::Runtime>(
     spawn: impl Fn(Task) + Send + Sync + 'static,
 ) -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'static {
     move |invoke| {
+        if enabled && matches!(invoke.message.command(), "get_invite" | "send_dm_invite") {
+            invoke
+                .resolver
+                .reject("Invitations are unavailable in this Chat V2 checkpoint.");
+            return true;
+        }
+        if enabled && invoke.message.command() == "preview_invite" {
+            return invite_preview::route(invoke, &spawn);
+        }
+        if enabled && invoke.message.command() == "join_server" {
+            return joining::route(invoke, &spawn);
+        }
+        if enabled && invoke.message.command() == "mint_invite_fresh" {
+            return invite_mint::route(invoke, &spawn);
+        }
+        if enabled && membership::handles(invoke.message.command()) {
+            return membership::route(invoke, &spawn);
+        }
         if enabled
             && matches!(
                 invoke.message.command(),
@@ -254,7 +330,12 @@ fn router<R: tauri::Runtime>(
         if enabled && invoke.message.command() == "found_server" {
             return founding::route(invoke, &spawn);
         }
-        if enabled && invoke.message.command() == "send_message" {
+        if enabled
+            && matches!(
+                invoke.message.command(),
+                "send_message" | "edit_message" | "delete_message"
+            )
+        {
             return sending::route(invoke, &spawn);
         }
         if enabled && invoke.message.command() == "get_message_page" {
@@ -327,17 +408,21 @@ fn router<R: tauri::Runtime>(
             let mut notice = None;
             let mut original_error = false;
             let mut result = match execute(&state, &captured, directory, &mut notice).await {
-                Ok(authentication) => match state
-                    .native_text
-                    .listing
-                    .prepare(&state.native_text.ui_budget)
-                {
-                    Ok(payment) => {
-                        listing::snapshot(&state, captured.generation, authentication, payment)
-                            .await
+                Ok(authentication) => {
+                    connected::start_current(&app, &state, captured.generation, &authentication)
+                        .await;
+                    match state
+                        .native_text
+                        .listing
+                        .prepare(&state.native_text.ui_budget)
+                    {
+                        Ok(payment) => {
+                            listing::snapshot(&state, captured.generation, authentication, payment)
+                                .await
+                        }
+                        Err(error) => Err(error),
                     }
-                    Err(error) => Err(error),
-                },
+                }
                 Err(error) => {
                     original_error = true;
                     Err(error)
@@ -395,23 +480,40 @@ fn router<R: tauri::Runtime>(
 async fn authenticate_mounted(
     state: &AppState,
     secret: &[u8],
+    generation: u64,
 ) -> Result<Option<NativeTextVaultAuthenticationCheck>, String> {
-    // Unique payment before capture; every early return drops it only AFTER
-    // the inner Store guard. Root returns an infallible whole capsule even Busy.
-    let credit = state
-        .native_text
-        .ui_budget
-        .prepare()
-        .map_err(|_| "Vault authentication is busy. Try again.")?;
-    let work = {
-        let guard = state.store.lock().await;
-        match guard.as_ref() {
-            None => return Ok(None),
-            Some(MountedVault::TextV2(vault)) => vault.prepare_native_authentication(credit),
-            Some(MountedVault::Legacy(_)) => {
-                return Err("This vault is using the existing chat backend.".into())
-            }
+    let deadline = SystemClock.monotonic_ms().saturating_add(2_000);
+    let work = loop {
+        if state.ui_session_generation.load(Ordering::SeqCst) != generation
+            || state.native_text.sources.is_closing_cached()
+        {
+            return Err("Unlock was superseded. Try again.".into());
         }
+        let credit = state
+            .native_text
+            .ui_budget
+            .prepare()
+            .map_err(|_| "Vault authentication is busy. Try again.")?;
+        let work = {
+            let guard = state.store.lock().await;
+            match guard.as_ref() {
+                None => return Ok(None),
+                Some(MountedVault::TextV2(vault)) => vault.prepare_native_authentication(credit),
+                Some(MountedVault::Legacy(_)) => {
+                    return Err("This vault is using the existing chat backend.".into());
+                }
+            }
+        };
+        if !work.is_capture_busy_cached() {
+            break work;
+        }
+        // A connected worker can still be returning its original metadata
+        // read after the prior UI session closed. No key check has run yet.
+        drop(work);
+        if SystemClock.monotonic_ms() >= deadline {
+            return Err("Vault authentication is busy. Try again.".into());
+        }
+        SystemClock.sleep(Duration::from_millis(25)).await;
     };
     let secret = Zeroizing::new(secret.to_vec());
     tauri::async_runtime::spawn_blocking(move || work.verify(&secret))
@@ -454,7 +556,8 @@ async fn execute(
             edge.wait_once().await;
         }
     }
-    let mut authentication = authenticate_mounted(state, &captured.secret).await?;
+    let mut authentication =
+        authenticate_mounted(state, &captured.secret, captured.generation).await?;
     if authentication.is_none() {
         // Count only actual bootstrap/file custody, never the complete unlock
         // task that may later wait for close's prelude while owning vault_mount.
@@ -475,6 +578,7 @@ async fn execute(
         );
         let budget = state.native_text.ui_budget.clone();
         let source_policy = state.native_text.sources.policy();
+        let row = boot::NativeRowBudget::capture(state).await;
         // Whole original storage work, outside store/UI/operation guards. A
         // waiter disappearing does not cancel this owned native router task.
         // Construct BEFORE scheduling: an unpolled closure or panic in file
@@ -491,6 +595,7 @@ async fn execute(
                 atoms,
                 budget,
                 source_policy,
+                row,
             );
             output
         })
@@ -526,8 +631,10 @@ async fn execute(
                 && state.native_text.preludes.is_idle_cached()
             {
                 if ready.is_some() {
+                    let mut table = state.servers.lock().await;
                     if let Err(error) = state.native_text.sources.install(
                         &mut store,
+                        &mut table,
                         &mut ready,
                         &captured.lifetime,
                     ) {
@@ -563,7 +670,7 @@ async fn execute(
         // Retrying retained metadata work is NOT authentication. Even if a
         // previous correct secret created the plan, THIS caller must verify
         // its own secret against the same completed mounted keystore.
-        authentication = authenticate_mounted(state, &captured.secret).await?;
+        authentication = authenticate_mounted(state, &captured.secret, captured.generation).await?;
     }
     let authentication = Arc::new(authentication.ok_or("Vault startup did not complete.")?);
     #[cfg(test)]

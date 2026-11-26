@@ -2,15 +2,36 @@
 //! installation share one original mount. No raw Current/Store escapes this
 //! controller, and an ambiguous attempt can only be retried or closed.
 use super::*;
+
+#[derive(Clone, Copy)]
+enum ColdOpening {
+    Governed,
+    Joined,
+    IdleJoined,
+    NativeStartup,
+    #[cfg(test)]
+    SelectedSharedHistory,
+}
+use super::super::super::lifecycle::network::ColdFounderSelection;
+type RecoveredFounderInput = (
+    ColdFounderSelection,
+    crate::store::RetainedBootstrapSourceData,
+    (catcoms_rt::PeerId, u16),
+);
 use crate::store::critical_namespaces::{
     native_registry::preparation::NativeRegistryHandler, pending_join_codec as grammar,
+    shared_history_namespace::Opening,
+};
+use crate::store::persistence::governance_layout::joined::{
+    AcceptedFirstJoin, JoinedPendingIo, JoinedPinOpening,
 };
 use crate::store::persistence::native_registry::lifecycle::upgrade::{UpgradeInventory, UpgradeIo};
 use crate::store::{ServerStore, V2CurrentLayoutStore};
 use catcoms_crypto::unseal;
 mod physical;
 pub(in crate::store::critical_namespaces::native_registry) use physical::{
-    AuthenticationNegative, MetadataWork, SourceWork, UiWork, WorkDrain,
+    AuthenticationNegative, JoinedConnectionPreparation, MetadataWork, SourceWork, UiWork,
+    WorkDrain,
 };
 
 #[cfg(test)]
@@ -317,6 +338,287 @@ impl std::fmt::Debug for Store {
     }
 }
 impl Store {
+    pub(in crate::store::critical_namespaces::native_registry) fn cover_accepted_first_join(
+        &mut self,
+        pending: &mut Option<JoinedPendingIo>,
+        accepted: AcceptedFirstJoin<'_>,
+        require_caller: impl Fn() -> Result<(), AppError>,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<([u8; 32], catcoms_sync::V2PendingJoinContextData), AppError> {
+        let physical = Arc::get_mut(&mut self.physical).ok_or_else(refused)?;
+        physical.joined_pending_store()?.cover_accepted_first_join(
+            pending,
+            accepted,
+            require_caller,
+            rng,
+        )
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn prepare_joined_pending(
+        &mut self,
+        source: catcoms_sync::PreparedV2JoinRequest,
+        invite: &catcoms_replication::chat::join_bindings::SignedInviteBindingData,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<crate::store::persistence::governance_layout::joined::JoinedPendingIo, AppError>
+    {
+        let physical = Arc::get_mut(&mut self.physical).ok_or_else(refused)?;
+        physical
+            .joined_pending_store()?
+            .prepare_joined_pending(source, invite, None, rng)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn stage_joined_pending(
+        &mut self,
+        pending: &mut crate::store::persistence::governance_layout::joined::JoinedPendingIo,
+    ) -> Result<(), AppError> {
+        let physical = Arc::get_mut(&mut self.physical).ok_or_else(refused)?;
+        pending.stage(physical.joined_pending_store()?)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn install_joined_pending(
+        &mut self,
+        pending: &mut crate::store::persistence::governance_layout::joined::JoinedPendingIo,
+    ) -> Result<(), AppError> {
+        let physical = Arc::get_mut(&mut self.physical).ok_or_else(refused)?;
+        pending.install(physical.joined_pending_store()?)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn joined_request_data<'a>(
+        &self,
+        pending: &'a crate::store::persistence::governance_layout::joined::JoinedPendingIo,
+    ) -> Result<&'a [u8], AppError> {
+        self.physical.joined_request_data(pending)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn joined_exchange_resources(
+        &self,
+        byte_count: usize,
+    ) -> Result<(catcoms_rt::RequestCancellation, CatalogReadReservation), AppError> {
+        self.physical.joined_exchange_resources(byte_count)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn finish_joined_pending(
+        &mut self,
+        pending: &mut crate::store::persistence::governance_layout::joined::JoinedPendingIo,
+        delivery: &[u8],
+        rng: &mut impl CryptoRngCore,
+        negative: Option<&catcoms_rt::RequestCancellation>,
+    ) -> Result<(), AppError> {
+        let physical = Arc::get_mut(&mut self.physical).ok_or_else(refused)?;
+        pending.finish_welcome(
+            physical.joined_pending_store()?,
+            delivery,
+            rng,
+            negative,
+            None,
+        )
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn attach_joined_node<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
+        &mut self,
+        pending: &mut crate::store::persistence::governance_layout::joined::JoinedPendingIo,
+        inputs: &mut Option<
+            crate::store::persistence::governance_layout::joined::JoinedRuntimeInputs<T, R>,
+        >,
+        output: &mut Option<catcoms_sync::ClosedV2JoinedNode<T, R>>,
+    ) -> Result<(), AppError> {
+        let physical = Arc::get_mut(&mut self.physical).ok_or_else(refused)?;
+        pending.attach_warm_node(physical.joined_pending_store()?, inputs, output)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn recovered_join_outcome_data(
+        &self,
+    ) -> Result<Option<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64)>, AppError>
+    {
+        self.physical.recovered_join_outcome_data()
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn recovered_join_transport_data(
+        &self,
+    ) -> Result<Option<(catcoms_rt::PeerId, u16)>, AppError> {
+        self.physical.recovered_join_transport_data()
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn recovered_join_registration_data(
+        &self,
+    ) -> Result<Option<crate::store::NativeTextJoinedRegistrationData>, AppError> {
+        self.physical.recovered_join_registration_data()
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn recovered_founder_input(
+        &self,
+    ) -> Result<Option<RecoveredFounderInput>, AppError> {
+        let Some(original) = self.physical.recovered_cold_founder()? else {
+            return Ok(None);
+        };
+        let source = self.physical.capture_recovered_founder_source(&original)?;
+        let reservation = self.physical.recovered_founder_reservation(&original)?;
+        Ok(Some((
+            original,
+            source,
+            (reservation.peer, reservation.port),
+        )))
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn require_empty_mounted_joined_pins(
+        &self,
+    ) -> Result<(), AppError> {
+        self.physical.require_empty_mounted_joined_pins()
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn require_native_joined_without_row(
+        &self,
+    ) -> Result<(), AppError> {
+        self.physical.require_mounted_joined_without_row(true)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn require_registered_native_join(
+        &self,
+        data: crate::store::NativeTextJoinedRegistrationData,
+    ) -> Result<(), AppError> {
+        self.physical.require_registered_native_join(data)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn prepare_recovered_native_join_tcp(
+        &self,
+        data: &crate::store::NativeTextJoinedRegistrationData,
+    ) -> Result<(Zeroizing<[u8; 32]>, catcoms_net::NativeTcpPreparation), AppError> {
+        self.physical.prepare_recovered_native_join_tcp(data)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn copy_selected_governing_proof(
+        &self,
+        pending: Option<&crate::store::persistence::governance_layout::joined::JoinedPendingIo>,
+        headers: (
+            catcoms_replication::chat::owner_header::OwnerHeaderId,
+            catcoms_replication::chat::owner_header::OwnerHeaderId,
+        ),
+        output: &mut Vec<u8>,
+    ) -> Result<(), AppError> {
+        self.physical
+            .copy_selected_governing_proof(pending, headers, output)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn copy_recovered_join_request(
+        &self,
+        output: &mut Vec<u8>,
+    ) -> Result<(), AppError> {
+        self.physical.copy_recovered_join_request(output)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn validate_recovered_join_delivery(
+        &self,
+        request: &[u8],
+        delivery: &[u8],
+    ) -> Result<(), AppError> {
+        self.physical
+            .validate_recovered_join_delivery(request, delivery)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn cover_recovered_member_add<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
+        &self,
+        node: &mut catcoms_sync::ClosedV2JoinedNode<T, R>,
+        delivery: &[u8],
+        caller: &catcoms_rt::RequestCancellation,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+    ) -> Result<(), AppError> {
+        self.physical
+            .cover_recovered_member_add(node, delivery, caller, rng)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn attach_recovered_joined_node<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
+        &mut self,
+        inputs: &mut Option<
+            crate::store::persistence::governance_layout::joined::JoinedRuntimeInputs<T, R>,
+        >,
+        output: &mut Option<catcoms_sync::ClosedV2JoinedNode<T, R>>,
+    ) -> Result<(), AppError> {
+        let physical = Arc::get_mut(&mut self.physical).ok_or_else(refused)?;
+        physical.attach_recovered_joined_node(inputs, output)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn warm_join_outcome_data(
+        &self,
+        pending: &crate::store::persistence::governance_layout::joined::JoinedPendingIo,
+    ) -> Result<Option<(catcoms_replication::chat::owner_header::OwnerHeaderId, u64)>, AppError>
+    {
+        self.physical.warm_join_outcome_data(pending)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn selected_pending_join_data(
+        &self,
+    ) -> Result<Option<([u8; 32], catcoms_sync::V2PendingJoinContextData)>, AppError> {
+        self.physical.selected_pending_join_data()
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn selected_joined_pin_context_data(
+        &self,
+        anchor: &catcoms_replication::chat::join_bindings::GenesisAnchorBindingData,
+    ) -> Result<Option<catcoms_sync::V2PendingJoinContextData>, AppError> {
+        self.physical.selected_joined_pin_context_data(anchor)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn stage_joined_pin_layout(
+        &mut self,
+        declaration: &mut Option<
+            crate::store::persistence::governance_layout::joined::JoinedPinDeclaration,
+        >,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        let physical = Arc::get_mut(&mut self.physical).ok_or_else(refused)?;
+        physical.stage_joined_pin_layout(declaration, rng)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn advance_joined_pin_layout(
+        &mut self,
+        declaration: &mut Option<
+            crate::store::persistence::governance_layout::joined::JoinedPinDeclaration,
+        >,
+        governed: Option<
+            &mut crate::store::critical_namespaces::governance_layout::native::Startup,
+        >,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        let physical = Arc::get_mut(&mut self.physical).ok_or_else(refused)?;
+        physical.advance_joined_pin_layout(declaration, governed, rng)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn require_joined_pin_layout(
+        &self,
+        declaration: &crate::store::persistence::governance_layout::joined::JoinedPinDeclaration,
+    ) -> Result<(), AppError> {
+        self.physical.require_joined_pin_layout(declaration)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn advance_shared_history_layout(
+        &mut self,
+        previous: &mut Option<
+            crate::store::persistence::governance_layout::joined::JoinedPinDeclaration,
+        >,
+        declaration: &mut Option<crate::store::persistence::governance_layout::joined::shared_history::SharedHistoryDeclaration>,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        Arc::get_mut(&mut self.physical)
+            .ok_or_else(refused)?
+            .advance_shared_history_layout(previous, declaration, rng)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn require_shared_history_layout(
+        &self,
+        declaration: &crate::store::persistence::governance_layout::joined::shared_history::SharedHistoryDeclaration,
+    ) -> Result<(), AppError> {
+        self.physical.require_shared_history_layout(declaration)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn require_governance_completion(
         &self,
         receiver: &crate::store::critical_namespaces::governance_layout::native::Startup,
@@ -333,8 +635,81 @@ impl Store {
         dir: impl AsRef<std::path::Path>,
         passphrase: &[u8],
         rng: &mut impl CryptoRngCore,
+        current: crate::store::V2CurrentLayoutPolicy,
+        policy: Policy,
+    ) -> Result<Self, AppError> {
+        Self::open_governed_family(dir, passphrase, rng, current, policy, ColdOpening::Governed)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn open_joined(
+        dir: impl AsRef<std::path::Path>,
+        passphrase: &[u8],
+        rng: &mut impl CryptoRngCore,
+        current: crate::store::V2CurrentLayoutPolicy,
+        policy: Policy,
+    ) -> Result<Self, AppError> {
+        Self::open_governed_family(dir, passphrase, rng, current, policy, ColdOpening::Joined)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn open_idle_joined(
+        dir: &std::path::Path,
+        passphrase: &[u8],
+        rng: &mut impl CryptoRngCore,
+        current: crate::store::V2CurrentLayoutPolicy,
+        policy: Policy,
+    ) -> Result<Self, AppError> {
+        Self::open_governed_family(
+            dir,
+            passphrase,
+            rng,
+            current,
+            policy,
+            ColdOpening::IdleJoined,
+        )
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn open_native_startup(
+        dir: &std::path::Path,
+        passphrase: &[u8],
+        rng: &mut impl CryptoRngCore,
+        current: crate::store::V2CurrentLayoutPolicy,
+        policy: Policy,
+    ) -> Result<Self, AppError> {
+        Self::open_governed_family(
+            dir,
+            passphrase,
+            rng,
+            current,
+            policy,
+            ColdOpening::NativeStartup,
+        )
+    }
+
+    #[cfg(test)]
+    pub(in crate::store::critical_namespaces::native_registry) fn open_selected_shared_history(
+        dir: impl AsRef<std::path::Path>,
+        passphrase: &[u8],
+        rng: &mut impl CryptoRngCore,
+        current: crate::store::V2CurrentLayoutPolicy,
+        policy: Policy,
+    ) -> Result<Self, AppError> {
+        Self::open_governed_family(
+            dir,
+            passphrase,
+            rng,
+            current,
+            policy,
+            ColdOpening::SelectedSharedHistory,
+        )
+    }
+
+    fn open_governed_family(
+        dir: impl AsRef<std::path::Path>,
+        passphrase: &[u8],
+        rng: &mut impl CryptoRngCore,
         mut current: crate::store::V2CurrentLayoutPolicy,
         policy: Policy,
+        opening: ColdOpening,
     ) -> Result<Self, AppError> {
         if policy.pool.same_account(&current.archive.pending.pool)
             || current
@@ -344,7 +719,20 @@ impl Store {
         {
             return Err(refused());
         }
-        let handler = lifecycle_admission::Handler::from_reserved(&policy, policy.reserve()?)?;
+        let mut handler = lifecycle_admission::Handler::from_reserved(&policy, policy.reserve()?)?;
+        if !matches!(opening, ColdOpening::Governed) {
+            handler = handler.with_joined_pin_layout();
+        }
+        match opening {
+            #[cfg(test)]
+            ColdOpening::SelectedSharedHistory => {
+                handler = handler.with_shared_history_layout(Opening::Required)
+            }
+            ColdOpening::NativeStartup => {
+                handler = handler.with_shared_history_layout(Opening::Optional)
+            }
+            _ => {}
+        }
         let physical = physical::Physical::allocate(handler.clone());
         current.native_registry = Some(NativeRegistryHandler::GovernanceOpening(handler.clone()));
         let governance = crate::store::V2GovernanceLayoutPolicy::for_native(current)?;
@@ -363,13 +751,30 @@ impl Store {
         Arc::get_mut(&mut value.physical)
             .expect("unexposed original governed physical")
             .install(current);
-        value.row_count_data()?;
+        let count = value.row_count_data()?;
+        let joined = match (opening, count) {
+            (ColdOpening::IdleJoined, 0) => JoinedPinOpening::Idle,
+            (ColdOpening::NativeStartup, 0) => JoinedPinOpening::NativeWithoutRow,
+            (ColdOpening::NativeStartup, 1) | (ColdOpening::Governed | ColdOpening::Joined, _) => {
+                JoinedPinOpening::Any
+            }
+            #[cfg(test)]
+            (ColdOpening::SelectedSharedHistory, _) => JoinedPinOpening::Any,
+            _ => return Err(refused()),
+        };
         #[cfg(test)]
         observe_edge(Edge::BeforeColdExposure);
         // No file read follows this same-held proof. Existing4 consumes its
         // original observation; fresh4 retains its overlapping declaration.
         // On failure the destination must close before the tail is destroyed.
-        if let Err(error) = value.physical.finish_governed_cold(&tail) {
+        if let Err(error) = Arc::get_mut(&mut value.physical)
+            .ok_or_else(refused)?
+            .finish_governed_cold(
+                &tail,
+                joined,
+                matches!((opening, count), (ColdOpening::NativeStartup, 1)),
+            )
+        {
             drop(value);
             drop(tail);
             return Err(error);
