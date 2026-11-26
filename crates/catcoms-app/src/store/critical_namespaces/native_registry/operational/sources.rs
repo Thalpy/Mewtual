@@ -19,7 +19,7 @@ mod invite;
 pub use invite::NativeTextInvitePublication;
 mod join;
 pub use join::{
-    NativeTextJoinedArchivedActions, NativeTextJoinedDelivery,
+    NativeTextJoinedArchiveReplay, NativeTextJoinedArchivedActions, NativeTextJoinedDelivery,
     NativeTextJoinedDependencyAttachRefusal, NativeTextJoinedDependencyExchange,
     NativeTextJoinedDependencyProvider, NativeTextJoinedDependencyResponse,
     NativeTextJoinedExchange, NativeTextJoinedGoverningExchange, NativeTextJoinedGoverningIncoming,

@@ -103,12 +103,12 @@ pub use native_registry::{
     NativeTextColdFounderSource,
 };
 pub use native_registry::{
-    NativeTextJoinedArchivedActions, NativeTextJoinedDependencyAttachRefusal,
-    NativeTextJoinedDependencyExchange, NativeTextJoinedDependencyProvider,
-    NativeTextJoinedDependencyResponse, NativeTextJoinedGoverningExchange,
-    NativeTextJoinedGoverningIncoming, NativeTextJoinedGoverningProvider,
-    NativeTextJoinedGoverningResponse, NativeTextJoinedHistoryExchange,
-    NativeTextJoinedHistoryPage, NativeTextJoinedHistoryResponse,
+    NativeTextJoinedArchiveReplay, NativeTextJoinedArchivedActions,
+    NativeTextJoinedDependencyAttachRefusal, NativeTextJoinedDependencyExchange,
+    NativeTextJoinedDependencyProvider, NativeTextJoinedDependencyResponse,
+    NativeTextJoinedGoverningExchange, NativeTextJoinedGoverningIncoming,
+    NativeTextJoinedGoverningProvider, NativeTextJoinedGoverningResponse,
+    NativeTextJoinedHistoryExchange, NativeTextJoinedHistoryPage, NativeTextJoinedHistoryResponse,
     NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberLedger,
     NativeTextJoinedMemberProjection, NativeTextJoinedMemberPublication,
     NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,

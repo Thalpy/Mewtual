@@ -1,5 +1,18 @@
 # Mewtual; Handover
 
+## 26 November 2026 — Resume local reply-chain recovery
+
+The joined worker parks one paid original and its verified ancestor traversal
+between bounded local turns. The mounted Windows test recovered five nested
+replies over the approved TCP route. The deepest reply needed a second local
+turn, refused selection before that turn, survived a cancelled invocation,
+and reopened with its exact saved projection. A replaced approval could
+not revive the original stage. The focused App run passed 12 tests.
+
+The native scheduler and hosted acceptance still need execution. The
+continuation fits the existing 64-action and 1 MiB staging ledger. Recovery
+of missing cross-author ancestors and longer chains remains open.
+
 ## 26 November 2026 — Automatic history recovery checkpoint
 
 Joined desktop rows now schedule bounded automatic discovery and archive

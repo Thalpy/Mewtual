@@ -288,13 +288,21 @@ turn. A slice yields after four pages and retains the exact earlier cursor.
 An unavailable original keeps a rescan due while other originals and
 contacts can still progress. A failed connection, retired admission or
 replaced approval discards its old page. Each parked page retains bounded
-metadata and the original approval and lease. Only active wire exchanges
-retain the wire reservation and native invocation. Disk work holds the
+metadata and the original approval and lease. Parking a page releases its
+wire reservation and native invocation. Disk work holds the
 original row permit, which is released before waiting on the network.
 
-A fresh paid staging ledger uses one bounded local ancestor replay. A
-selected archive entry can settle work without another fetch. A new original
-settles work only after the archive returns its exact selection. Writes reserve
+Each staged original keeps its verified ledger and exact unfinished ancestor
+traversal across local batches. One row parks at most one paid original,
+including its original reply and staging charges, and gives it up to fifteen
+seconds to start each remaining cut. Work already admitted can finish.
+Other peer sweeps resume when that original settles or expires. The worker
+releases the row permit between batches and
+rechecks the original connection, approval and governing selection whenever
+it resumes. It considers up to eight ancestors per turn and 128 exact
+lookups in total. A selected archive entry can settle work without another
+fetch. A new original settles work after the archive returns its exact
+selection. Writes reserve
 one of eight exact action/target slots before touching the archive. A failed
 write postpones that target while the local row rechecks its exact selector,
 including after the original connection ends. A staged live mutation supplies
@@ -307,8 +315,9 @@ invalidates older in-flight bodies.
 
 The worker scans one approved author's outbox at a time. It can resume a
 paused slice on the same lease and safely starts again after a restart.
-An action whose chain exceeds one local replay batch still needs resumable
-dependency work. Persisted frontiers, retry without a reachable author,
+The semantic ledger still limits this traversal to 64 actions and 1 MiB.
+An absent local ancestor or a chain beyond the stage's capacity defers that
+action. Persisted frontiers, retry without a reachable author,
 bounded target lookup and normal archive paging after navigation also remain
 open. A staged mutation missing from disk can still leave a selected
 descendant waiting for that ancestor on a cold read. Acceptance must cover

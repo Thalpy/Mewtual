@@ -1,7 +1,9 @@
 //! Reconcile a joined row from its explicitly approved connected contacts.
 //! Each peer gets at most one bounded page or original exchange per turn.
 use super::*;
-use catcoms_app::store::{NativeTextJoinedDependencyExchange, NativeTextJoinedHistoryPage};
+use catcoms_app::store::{
+    NativeTextJoinedArchiveReplay, NativeTextJoinedDependencyExchange, NativeTextJoinedHistoryPage,
+};
 use catcoms_replication::chat::ActionId;
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -11,6 +13,13 @@ const REQUEST: Duration = Duration::from_secs(3);
 const PAGES_PER_SLICE: u8 = 4;
 const RETRY_MS: u64 = 5_000;
 const RESCAN_MS: u64 = 30_000;
+const REPLAY_MS: u64 = 15_000;
+
+struct ParkedOriginal {
+    action: ActionId,
+    replay: NativeTextJoinedArchiveReplay,
+    deadline: u64,
+}
 
 struct PeerSweep {
     peer: PeerId,
@@ -49,6 +58,7 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
     let mut scope = source.negative();
     let mut peers: VecDeque<PeerSweep> = VecDeque::new();
     let mut pending_cursor = 0;
+    let mut replay: Option<(PeerSweep, ParkedOriginal)> = None;
     loop {
         tokio::select! {
             biased;
@@ -58,6 +68,22 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
         let state = app.state::<AppState>();
         if let Some(target) = reconcile_archive_change(&state, source, &mut pending_cursor).await {
             source.notify_received(app, &state, Some(target)).await;
+        }
+        if let Some((mut sweep, parked)) = replay.take() {
+            let mut parked = Some(parked);
+            if let Some((covered, notice)) = resume_entry(&state, source, &mut parked).await {
+                sweep.next_entry += 1;
+                sweep.deferred |= !covered;
+                peers.push_back(sweep);
+                if let Some(target) = notice {
+                    source.notify_received(app, &state, Some(target)).await;
+                }
+            } else if let Some(parked) = parked {
+                replay = Some((sweep, parked));
+            }
+            // One paid continuation per row. It holds no native permit
+            // between turns and yields its peer as soon as replay settles.
+            continue;
         }
         let Some(candidates) = row.history_peer_candidates() else {
             continue;
@@ -73,10 +99,13 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
             continue;
         };
         let mut sweep = peers.remove(index).expect("selected due history peer");
-        if let Some(target) = turn(&state, source, &mut sweep).await {
-            source.notify_received(app, &state, Some(target)).await;
+        let mut parked = None;
+        let _ = turn(&state, source, &mut sweep, &mut parked).await;
+        if let Some(parked) = parked {
+            replay = Some((sweep, parked));
+        } else {
+            peers.push_back(sweep);
         }
-        peers.push_back(sweep);
     }
 }
 
@@ -104,7 +133,12 @@ async fn reconcile_archive_change(
     .flatten()
 }
 
-async fn turn(state: &AppState, source: &Arc<Source>, sweep: &mut PeerSweep) -> Option<ActionId> {
+async fn turn(
+    state: &AppState,
+    source: &Arc<Source>,
+    sweep: &mut PeerSweep,
+    parked: &mut Option<ParkedOriginal>,
+) -> Option<()> {
     let page = sweep.page.clone();
     if let Some(page) = &page {
         let Some(data) = page.data() else {
@@ -112,12 +146,12 @@ async fn turn(state: &AppState, source: &Arc<Source>, sweep: &mut PeerSweep) -> 
             return None;
         };
         if let Some(entry) = data.entries().get(sweep.next_entry) {
-            let (covered, notice) = fetch_entry(state, source, page.clone(), entry.action).await?;
+            let covered = fetch_entry(state, source, page.clone(), entry.action, parked).await?;
             sweep.next_entry += 1;
             // Preserve the obligation to revisit the whole frozen sweep.
             // Later IDs and other authors can progress while a parent is absent.
             sweep.deferred |= !covered;
-            return notice;
+            return None;
         }
     }
     if sweep.pages == PAGES_PER_SLICE {
@@ -167,7 +201,7 @@ async fn turn(state: &AppState, source: &Arc<Source>, sweep: &mut PeerSweep) -> 
         Err(V2MemberSaveRefusal::Busy) => {}
         Err(_) => sweep.rescan_after(RETRY_MS),
     }
-    None
+    Some(())
 }
 
 enum Fetch {
@@ -180,7 +214,8 @@ async fn fetch_entry(
     source: &Arc<Source>,
     page: Arc<NativeTextJoinedHistoryPage>,
     action: ActionId,
-) -> Option<(bool, Option<ActionId>)> {
+    parked: &mut Option<ParkedOriginal>,
+) -> Option<bool> {
     let fetch = with_row(state, source, move |original, row, _, scope| {
         if original
             .selected_discovered_target(&row, &page, action, &scope)?
@@ -194,39 +229,87 @@ async fn fetch_entry(
     })
     .await?;
     let exchange = match fetch {
-        Ok(Fetch::Covered) => return Some((true, None)),
+        Ok(Fetch::Covered) => return Some(true),
         Ok(Fetch::Request(exchange)) => exchange,
         Err(V2MemberSaveRefusal::Busy) => return None,
-        Err(_) => return Some((false, None)),
+        Err(_) => return Some(false),
     };
     let Ok(Ok(reply)) = tokio::time::timeout(REQUEST, exchange.receive()).await else {
-        return Some((false, None));
+        return Some(false);
     };
     let stage = with_row(state, source, move |original, row, _, scope| {
-        original.prepare_discovered_archive(&row, reply, scope, &mut OsCryptoRng)
+        original.prepare_discovered_archive(&row, reply, scope)
     })
     .await?;
-    let (ledger, opened) = match stage {
+    let replay = match stage {
         Ok(Some(stage)) => stage,
         Err(V2MemberSaveRefusal::Busy) => return None,
-        Ok(None) | Err(_) => return Some((false, None)),
+        Ok(None) | Err(_) => return Some(false),
     };
-    let target = opened.projection_target_data();
-    with_row(state, source, move |original, _, local, scope| {
+    *parked = Some(ParkedOriginal {
+        action,
+        replay,
+        deadline: SystemClock.monotonic_ms().saturating_add(REPLAY_MS),
+    });
+    None
+}
+
+async fn resume_entry(
+    state: &AppState,
+    source: &Arc<Source>,
+    parked: &mut Option<ParkedOriginal>,
+) -> Option<(bool, Option<ActionId>)> {
+    if SystemClock.monotonic_ms() >= parked.as_ref()?.deadline {
+        *parked = None;
+        return Some((false, None));
+    }
+    // Acquire both before moving the paid continuation. Contention must
+    // preserve it while foreground history or signing uses this row.
+    let permit = source.member_work.try_background()?;
+    let (original, _) = source.capture_joined(state).await?;
+    let mut work = parked.take()?;
+    let source = source.clone();
+    let processing = tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        if SystemClock.monotonic_ms() >= work.deadline {
+            return (work, Some((false, None)));
+        }
+        let scope = source.negative();
+        let local = source.member_work();
+        let target = work.replay.target_data();
+        let action = work.action;
+        let ready = original.advance_discovered_archive(&mut work.replay, &scope, &mut OsCryptoRng);
+        match ready {
+            Ok(false) | Err(V2MemberSaveRefusal::Busy) => return (work, None),
+            Err(_) => return (work, Some((false, None))),
+            Ok(true) => {}
+        }
+        if SystemClock.monotonic_ms() >= work.deadline {
+            return (work, Some((false, None)));
+        }
         // Reserve before any write. Even a Stale result can mean the disk
         // selected the original and the remote route then retired.
         if local.reserve_archive_change(action, target).is_none() {
-            return (false, None);
+            return (work, None);
         }
-        match original.archive_received_member(&ledger, &opened, &scope, &mut OsCryptoRng) {
-            Ok(Some(_)) => {
-                local.note_archive_change(action, target, true);
-                (true, Some(target))
-            }
-            _ => (false, Some(target)),
-        }
+        let result =
+            match original.select_discovered_archive(&work.replay, &scope, &mut OsCryptoRng) {
+                Ok(Some(_)) => {
+                    local.note_archive_change(action, target, true);
+                    (true, Some(target))
+                }
+                _ => (false, Some(target)),
+            };
+        (work, Some(result))
     })
-    .await
+    .await;
+    let Ok((work, result)) = processing else {
+        return Some((false, None));
+    };
+    if result.is_none() {
+        *parked = Some(work);
+    }
+    result
 }
 
 async fn with_row<T: Send + 'static>(
