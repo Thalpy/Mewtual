@@ -143,12 +143,18 @@ async fn turn(state: &AppState, source: &Arc<Source>, sweep: &mut PeerSweep) -> 
             return None;
         }
         Err(V2MemberSaveRefusal::Busy) => return None,
-        Err(_) => {
+        Err(failure) => {
+            #[cfg(test)]
+            eprintln!("chat history worker could not prepare page: {failure:?}");
+            let _ = failure;
             sweep.rescan_after(RETRY_MS);
             return None;
         }
     };
-    let Ok(Ok(reply)) = tokio::time::timeout(REQUEST, exchange.receive()).await else {
+    let requested = tokio::time::timeout(REQUEST, exchange.receive()).await;
+    let Ok(Ok(reply)) = requested else {
+        #[cfg(test)]
+        eprintln!("chat history worker page request stopped: {requested:?}");
         // Retain the exact earlier cursor on refused or lost replies. Slow
         // peers still yield their turn after each bounded network wait.
         sweep.due = SystemClock.monotonic_ms().saturating_add(RETRY_MS);
@@ -160,12 +166,22 @@ async fn turn(state: &AppState, source: &Arc<Source>, sweep: &mut PeerSweep) -> 
     .await?;
     match page {
         Ok(page) => {
+            #[cfg(test)]
+            eprintln!(
+                "chat history worker opened a page with {:?} entries",
+                page.data().map(|data| data.entries().len())
+            );
             sweep.page = Some(Arc::new(page));
             sweep.next_entry = 0;
             sweep.pages += 1;
         }
         Err(V2MemberSaveRefusal::Busy) => {}
-        Err(_) => sweep.rescan_after(RETRY_MS),
+        Err(failure) => {
+            #[cfg(test)]
+            eprintln!("chat history worker refused page: {failure:?}");
+            let _ = failure;
+            sweep.rescan_after(RETRY_MS);
+        }
     }
     None
 }
@@ -197,9 +213,17 @@ async fn fetch_entry(
         Ok(Fetch::Covered) => return Some((true, None)),
         Ok(Fetch::Request(exchange)) => exchange,
         Err(V2MemberSaveRefusal::Busy) => return None,
-        Err(_) => return Some((false, None)),
+        Err(failure) => {
+            #[cfg(test)]
+            eprintln!("chat history worker could not prepare exact fetch: {failure:?}");
+            let _ = failure;
+            return Some((false, None));
+        }
     };
-    let Ok(Ok(reply)) = tokio::time::timeout(REQUEST, exchange.receive()).await else {
+    let requested = tokio::time::timeout(REQUEST, exchange.receive()).await;
+    let Ok(Ok(reply)) = requested else {
+        #[cfg(test)]
+        eprintln!("chat history worker exact request stopped: {requested:?}");
         return Some((false, None));
     };
     let stage = with_row(state, source, move |original, row, _, scope| {
@@ -209,7 +233,15 @@ async fn fetch_entry(
     let (ledger, opened) = match stage {
         Ok(Some(stage)) => stage,
         Err(V2MemberSaveRefusal::Busy) => return None,
-        Ok(None) | Err(_) => return Some((false, None)),
+        other => {
+            #[cfg(test)]
+            eprintln!(
+                "chat history worker could not stage exact original: {:?}",
+                other.as_ref().err()
+            );
+            let _ = other;
+            return Some((false, None));
+        }
     };
     let target = opened.projection_target_data();
     with_row(state, source, move |original, _, local, scope| {
@@ -223,7 +255,15 @@ async fn fetch_entry(
                 local.note_archive_change(action, target, true);
                 (true, Some(target))
             }
-            _ => (false, Some(target)),
+            other => {
+                #[cfg(test)]
+                eprintln!(
+                    "chat history worker selection was incomplete: {:?}",
+                    other.as_ref().err()
+                );
+                let _ = other;
+                (false, Some(target))
+            }
         }
     })
     .await
@@ -243,8 +283,12 @@ async fn with_row<T: Send + 'static>(
 ) -> Option<T> {
     // A blocking cut retains the original row, native permit, and fees until
     // the actual work leaves, even if lock drops the async observer earlier.
-    let permit = source.member_work.try_background()?;
-    let (original, row) = source.capture_joined(state).await?;
+    let permit = source.member_work.foreground(source.negative()).await?;
+    let Some((original, row)) = source.capture_joined(state).await else {
+        #[cfg(test)]
+        eprintln!("chat history worker could not capture its original row");
+        return None;
+    };
     let source = source.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _permit = permit;

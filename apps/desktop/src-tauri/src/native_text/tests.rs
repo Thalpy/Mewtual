@@ -1827,6 +1827,54 @@ async fn native_text_joined_dependency_provider_reopens_after_selected_add() {
         membership::decode_exact_hex(deleted["message_id"].as_str().unwrap()).unwrap(),
     );
     let reply_id = reply["message_id"].as_str().unwrap();
+    // Keep the provider occupied until it has taken ownership of a real
+    // request on the known link. The same request must get its page after
+    // the local permit retires, without depending on a second network send.
+    let member_work = joined_work(&member_state, member_id).await;
+    let member_scope = keep_session::current(&member_state, member_generation).unwrap();
+    let permit = member_work.foreground(member_scope).await.unwrap();
+    let (probe, selection, channel, scope) =
+        capture_joined_worker(&new_state, id, generation).await;
+    let probe = probe
+        .prepare_history_exchange(&selection, channel, peer, scope, &mut OsCryptoRng)
+        .unwrap();
+    let (entered, waiting) = oneshot::channel();
+    *member_state
+        .native_text
+        .join_dependency_pending
+        .lock()
+        .unwrap() = Some(entered);
+    let response = tokio::spawn(probe.receive());
+    timeout(Duration::from_secs(5), waiting)
+        .await
+        .expect("the original history request reached the occupied provider")
+        .unwrap();
+    assert!(!response.is_finished());
+    drop(permit);
+    let response = timeout(Duration::from_secs(5), response)
+        .await
+        .expect("the original provider request resumed after local contention")
+        .unwrap()
+        .unwrap();
+    let (prepared, selection, _, scope) = capture_joined_worker(&new_state, id, generation).await;
+    let page = prepared
+        .open_history_response(&selection, response, &scope)
+        .unwrap();
+    assert_eq!(page.data().unwrap().entries().len(), 3);
+    drop((page, member_work));
+
+    let (archive_notice, mut notices) = tokio::sync::mpsc::channel(8);
+    let expected_context = new_row["context"].clone();
+    let expected_target = parent.to_owned();
+    let expected_reply = reply_id.to_owned();
+    let notice_listener = newcomer.listen_any("chat-v2-received", move |event| {
+        let change: serde_json::Value = serde_json::from_str(event.payload()).unwrap();
+        if change["context"] == expected_context
+            && (change["action"] == expected_target || change["action"] == expected_reply)
+        {
+            let _ = archive_notice.try_send(());
+        }
+    });
     // Let the ordinary joined workers start, but keep incoming gossip parked.
     // Only the automatic history worker can cover both targets in the archive.
     let parked_live = AdmissionBarrier::new();
@@ -1843,8 +1891,20 @@ async fn native_text_joined_dependency_provider_reopens_after_selected_add() {
     timeout(Duration::from_secs(10), parked_live.arrived.notified())
         .await
         .unwrap();
+    let newcomer_work = joined_work(&new_state, id).await;
+    let newcomer_scope = keep_session::current(&new_state, generation).unwrap();
     timeout(Duration::from_secs(45), async {
+        // Exercise the same archive invalidations used by the renderer.
+        // Tight physical reads could compete with the worker being tested.
         loop {
+            notices
+                .recv()
+                .await
+                .expect("the archive invalidation listener must stay installed");
+            let _permit = newcomer_work
+                .foreground(newcomer_scope.clone())
+                .await
+                .expect("the selected receiver must remain live");
             let (prepared, selection, channel, scope) =
                 capture_joined_worker(&new_state, id, generation).await;
             let covered = prepared
@@ -1852,14 +1912,20 @@ async fn native_text_joined_dependency_provider_reopens_after_selected_add() {
                 .ok()
                 .flatten()
                 .is_some_and(|projection| projection.archived_includes(delete));
-            if covered {
+            let reply = ActionId::from_bytes(membership::decode_exact_hex(reply_id).unwrap());
+            let (prepared, selection, channel, scope) =
+                capture_joined_worker(&new_state, id, generation).await;
+            let has_reply = prepared
+                .selected_archive_target_data(&selection, channel, reply, &scope)
+                .is_ok_and(|target| target == Some(reply));
+            if covered && has_reply {
                 break;
             }
-            SystemClock.sleep(Duration::from_millis(100)).await;
         }
     })
     .await
     .expect("the automatic worker selects the missed deletion before gossip runs");
+    newcomer.unlisten(notice_listener);
     let reply_view = command_value_after_busy(
         &new_window,
         &new_queue,
