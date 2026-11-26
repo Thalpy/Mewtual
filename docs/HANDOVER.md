@@ -1,5 +1,20 @@
 # Mewtual; Handover
 
+## 26 November 2026 — PR #143 merged, Chat V2 acceptance continues
+
+`main` at `95763d15` includes durable native invite and JoinRequest handling,
+governed Add/Welcome and Remove, joined cold startup, and signed shared chat
+with local and received history. The text switch remains off. The focused
+desktop membership workflow passed on both operating systems at PR head
+`160b7f63`. The broader joined-source checks timed out waiting for a reopened
+founder's first message on Linux and the removal fixture's first Welcome on
+Windows. [Desktop checks](https://github.com/Thalpy/Mewtual/actions/runs/45853047336)
+and [joined-source checks](https://github.com/Thalpy/Mewtual/actions/runs/45853047305).
+
+The [current completion overview](communication-recovery/CHAT-FILES-VOICE-PLAN.md)
+tracks missed-action catch-up, cold governing recovery and rejoin, archive
+migration and audit, and end-to-end acceptance. The entries below are historical.
+
 ## 22 November 2026 — Invitation and join branch CI
 
 Both focused workflows passed on Linux and Windows at `3d3bce63` on

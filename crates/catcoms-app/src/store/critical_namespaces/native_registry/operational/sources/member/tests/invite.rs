@@ -9,6 +9,7 @@ use crate::store::critical_namespaces::{
 };
 use crate::store::NativeTextInviteRecovery;
 use catcoms_rt::{Clock, SystemClock};
+use std::cell::Cell;
 use std::time::Duration;
 
 #[derive(Debug)]
@@ -395,13 +396,21 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
     };
     use rand_core::{RngCore, SeedableRng};
 
+    // The seeds determine transport identities and reserved listener ports.
+    // These cases can run together, so each needs a disjoint seed range.
+    let seed = match (recover_stage, successor) {
+        (false, None) => 0xe760,
+        (true, _) => 0xe770,
+        (false, Some(MountedSuccessor::OfflineDelivery)) => 0xe780,
+        (false, Some(MountedSuccessor::Remove)) => 0xe790,
+    };
     let founder_dir = tempfile::tempdir().unwrap();
     let (founder, founder_budget) = selected_joined(founder_dir.path());
     let (owner, row) = activate(
         prepared_mesh_founder_with_clock(
             &founder,
             &founder_budget,
-            if recover_stage { 0xe725 } else { 0xe723 },
+            seed,
             Box::new(catcoms_rt::SystemClock),
         ),
         &founder,
@@ -424,8 +433,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
         .finish()
         .unwrap();
     let capture = || original.capture_join_request(command(&vault, &budget));
-    let mut rng =
-        rand_chacha::ChaCha20Rng::seed_from_u64(if recover_stage { 0xe726 } else { 0xe724 });
+    let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(seed + 2);
     let now = saved.expires_at_ms() - 1;
     let token = [61; 32];
     let path = dir
@@ -567,7 +575,8 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
         .open_connected_join_requests(negative.clone())
         .unwrap();
     let mut covered_request = None;
-    let mut serve = async || {
+    let join_phase = Cell::new("waiting for the original request");
+    let mut serve = async || -> Result<(), String> {
         let Some(catcoms_rt::TransportEvent::Request {
             from,
             data,
@@ -576,14 +585,24 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
             ..
         }) = requests.next().await
         else {
-            panic!("expected the original mounted request");
+            return Err("the founder request stream closed".into());
         };
         assert_eq!(from, local_transport.0);
         assert_eq!(blake3::hash(&data[1..]).as_bytes(), &selected.0);
         covered_request = Some(data.clone());
-        founder_capture()
-            .serve_connected_join_request(proto, &data, responder, negative.clone())
-            .unwrap();
+        join_phase.set("covering the original request");
+        let prepared = founder_capture();
+        let scope = negative.clone();
+        // Match the native worker: durable founder writes must leave both
+        // transport actors free to poll and enforce the original deadline.
+        tokio::task::spawn_blocking(move || {
+            prepared.serve_connected_join_request(proto, &data, responder, scope)
+        })
+        .await
+        .map_err(|error| format!("the founder worker stopped: {error}"))?
+        .map_err(|error| format!("the founder refused the request: {error:?}"))?;
+        join_phase.set("waiting for the original Welcome");
+        Ok(())
     };
     let (revocation, signal) = tokio::sync::watch::channel(false);
     let revoked = capture()
@@ -604,12 +623,25 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
         .await
         .unwrap();
     let mut receive = async |original: crate::store::NativeTextJoinedExchange| {
-        let (delivery, ()) = tokio::join!(original.receive(), serve());
-        delivery.unwrap()
+        join_phase.set("waiting for the original request");
+        let receive = async {
+            original
+                .receive()
+                .await
+                .map_err(|error| format!("the joiner did not receive a Welcome: {error}"))
+        };
+        // Report the failing leg even when the other leg is still waiting.
+        tokio::try_join!(serve(), receive).map(|((), delivery)| delivery)
     };
-    let delivery = tokio::time::timeout(std::time::Duration::from_secs(10), receive(revoked))
+    let delivery = tokio::time::timeout(Duration::from_secs(10), receive(revoked))
         .await
-        .unwrap();
+        .unwrap_or_else(|_| panic!("first mounted Join timed out while {}", join_phase.get()))
+        .unwrap_or_else(|error| {
+            panic!(
+                "first mounted Join failed while {}: {error}",
+                join_phase.get()
+            )
+        });
     revocation.send(true).unwrap();
     assert!(delivery.cover(&mut rng).is_err());
     assert!(find_named(
@@ -626,9 +658,15 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
         .connect_approved_host(&invite, std::net::Ipv4Addr::LOCALHOST.into(), &scheduler)
         .await
         .unwrap();
-    let delivery = tokio::time::timeout(std::time::Duration::from_secs(10), receive(exact))
+    let delivery = tokio::time::timeout(Duration::from_secs(10), receive(exact))
         .await
-        .unwrap();
+        .unwrap_or_else(|_| panic!("exact mounted Join timed out while {}", join_phase.get()))
+        .unwrap_or_else(|error| {
+            panic!(
+                "exact mounted Join failed while {}: {error}",
+                join_phase.get()
+            )
+        });
     let covered_delivery = delivery.wire_for_test().to_vec();
 
     let mut delivery = Some(delivery);
@@ -1453,7 +1491,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
             )
             .finish()
             .unwrap();
-        let mut third_rng = rand_chacha::ChaCha20Rng::seed_from_u64(0xea51);
+        let mut third_rng = rand_chacha::ChaCha20Rng::seed_from_u64(seed + 3);
         let third_token = [0xae; 32];
         let capture_third = || third.capture_join_request(command(&third_vault, &third_budget));
         capture_third()
@@ -2090,7 +2128,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
         );
         let mut next = storage
             .bind_recovered_native_runtime(
-                rand_chacha::ChaCha20Rng::seed_from_u64(0xea50),
+                rand_chacha::ChaCha20Rng::seed_from_u64(seed + 4),
                 Box::new(catcoms_rt::SystemClock),
                 &fresh,
             )
@@ -2683,12 +2721,31 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 .open()
                 .await
                 .unwrap();
-            assert_eq!(
-                probe.dial_outcome(address.parse().unwrap()).await.unwrap(),
-                catcoms_rt::DialSubmission::Submitted,
-            );
+            let mut retirement = mounted_sources.prepare_retirement().unwrap();
+            let mut phase = "draining the previous joined transport";
             let (receipt, wire) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                while retirement.try_retire().unwrap()
+                    == crate::store::NativeTextSourceRetirementStatus::Pending
+                {
+                    tokio::task::yield_now().await;
+                }
+                phase = "connecting the probe";
+                assert_eq!(
+                    probe.dial_outcome(address.parse().unwrap()).await.unwrap(),
+                    catcoms_rt::DialSubmission::Submitted,
+                );
                 probe.wait_for_peer_connected(peer).await.unwrap();
+                // Submitted is local acceptance. Until the old route is gone,
+                // it might be the only subscribed recipient of this publish.
+                phase = "waiting for the probe to be the founder's only peer";
+                loop {
+                    let connected = original.connections_for_test().unwrap();
+                    if matches!(connected.as_slice(), [only] if only.peer == probe.local_peer()) {
+                        break;
+                    }
+                    SystemClock.sleep(Duration::from_millis(20)).await;
+                }
+                phase = "waiting for the probe's subscription";
                 let receipt = loop {
                     let debt = original
                         .prepare_member_publication(fresh.clone(), &mut founder_rng)
@@ -2699,24 +2756,32 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         Err(catcoms_sync::SyncError::Publication(
                             catcoms_rt::PublishOnceError::NoPeers,
                         )) => SystemClock.sleep(Duration::from_millis(20)).await,
-                        _ => panic!("expected the restarted founder to publish its original debt"),
+                        other => panic!(
+                            "the restarted founder did not submit its original debt: {other:?}"
+                        ),
                     }
                 };
+                phase = "waiting for the probe to receive the submitted action";
                 loop {
-                    if let Some(catcoms_rt::TransportEvent::Gossip {
-                        topic: received,
-                        from,
-                        data,
-                    }) = probe.next_event().await
-                    {
-                        assert_eq!(received, topic);
-                        assert_eq!(from, peer);
-                        break (receipt, data);
+                    match probe.next_event().await {
+                        Some(catcoms_rt::TransportEvent::Gossip {
+                            topic: received,
+                            from,
+                            data,
+                        }) => {
+                            assert_eq!(received, topic);
+                            assert_eq!(from, peer);
+                            break (receipt, data);
+                        }
+                        Some(_) => {}
+                        None => {
+                            panic!("the probe closed after the founder submitted its original debt")
+                        }
                     }
                 }
             })
             .await
-            .expect("the original founder message reached the mesh after restart");
+            .unwrap_or_else(|_| panic!("restarted founder publication timed out while {phase}"));
             assert_eq!(
                 original
                     .opened_action_for_test(channel, &topic, &wire)
