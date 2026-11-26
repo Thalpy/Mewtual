@@ -215,7 +215,7 @@
   import type { NativeTextIntent, NativeTextIntents } from "./native-text-intents";
   import { createNativeTextDriver } from "./native-text-driver";
   import { decodeNativeMembershipNotice, decodeRestoredChatSession, type NativeTextServer } from "./native-text-session";
-  import { decodeNativeReceived, decodeNativeReceivedNotice, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, updateNativeReceived, type NativeOriginal, type NativeOwnMessage, type NativeReceived } from "./native-text-history";
+  import { decodeNativeReceived, decodeNativeReceivedNotice, isNativeHistoryBusy, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, updateNativeReceived, type NativeOriginal, type NativeOwnMessage, type NativeReceived } from "./native-text-history";
   import NativeSavedChat from "./NativeSavedChat.svelte";
   import {
     captureLockContinuity, closeContinuityAcknowledgement, NativeVaultLockCoordinator, type NativeVaultCloseOutcome, type NativeVaultLockOutcome,
@@ -398,6 +398,9 @@
     after: string | null; more: boolean; loading: boolean; note: string | null;
   } | null>(null);
   let nativeArchiveRevision = 0;
+  let nativeArchiveFirstPage = $state(false);
+  let nativeArchiveReading = $state(false);
+  let nativeArchiveReadChanges: Set<string> | null = null;
   let nativeCursor = $state<{next:string;end:string}|null>(null);
   let nativeHistoryLoading = $state(false);
   let nativeHistoryLoaded = $state(false);
@@ -4609,6 +4612,10 @@
       || !servers.some(row => row.id === notice.server && row.backend === "text-v2" && row.context === notice.context)) return;
     if (notice.removed) {
       nativeRemovedContexts[notice.server] = notice.context;
+      if (activeServerId === notice.server && cur?.context === notice.context) {
+        resetNativeArchive();
+        resetNativeReceived();
+      }
       return;
     }
     if (uiStateReady && membersOpen && activeServerId === notice.server && !nativeConversationRemoved(notice.server, notice.context)) {
@@ -4630,6 +4637,7 @@
       nativeRoster = null;
     }
   });
+  $effect(() => { void loadRequestedNativeArchive(); });
   type StorageHealth = {
     listed_files: number; referenced_chunks: number; verified_chunks: number;
     // `missing` = absent chunks of this device's own uploads (damage); `not_cached` = absent
@@ -7058,10 +7066,7 @@
     chatBackend = null;
     nativeOriginals = [];nativeCursor=null;nativeHistoryLoading=false;nativeHistoryRevision++;
     nativeOwnMessages = {};nativeOwnLoading = false;
-    nativeReceived = [];
-    nativeReceivedScope = null;
-    nativeReceivedRevision++;
-    nativeReceivedReads.clear();
+    resetNativeReceived();
     resetNativeArchive();
     nativeHistoryLoaded=false;nativeHistoryError=null;
     nativeRetryGeneration=null;
@@ -7254,22 +7259,25 @@
       && !nativeConversationRemoved(server, context);
     if (!current()) return;
     if (action === null) {
-      nativeArchiveRevision++;
-      nativeArchive = null;
-      nativeReceivedRevision++;
-      nativeReceived = [];
-      nativeReceivedScope = null;
-      nativeReceivedReads.clear();
+      resetNativeReceived();
+      requestNativeArchive();
       return;
     }
-    // A live observation retires the corresponding archive body immediately.
-    // A read already in flight must not put that old body back on the screen.
     if (nativeArchive) {
-      nativeArchiveRevision++;
+      // Preserve unaffected results in the current page. The targeted read
+      // owns each changed ID and any older page body for that ID is retired.
+      const changed = nativeArchiveReadChanges;
+      if (changed && changed.size >= 64 && !changed.has(action)) {
+        nativeArchiveRevision++;
+        nativeArchiveReadChanges = null;
+        nativeArchiveFirstPage = nativeArchive.after === null;
+        nativeArchive = { ...nativeArchive, loading: false };
+      } else {
+        changed?.add(action);
+      }
       nativeArchive = {
         ...nativeArchive,
         items: nativeArchive.items.filter(item => item.action !== action),
-        loading: false,
       };
     }
     if (nativeReceivedScope?.server === server && nativeReceivedScope.channel === channel && nativeReceivedScope.context === context) {
@@ -7279,6 +7287,9 @@
     if (earlier?.current()) { earlier.dirty = true; return; }
     if (earlier) nativeReceivedReads.delete(action);
     if (nativeReceivedReads.size >= 64) {
+      // No targeted read can own this invalidation. Rescan one guarded
+      // archive page after the current reader retires.
+      requestNativeArchive();
       error = "Too many live messages arrived at once.";
       return;
     }
@@ -7289,7 +7300,7 @@
         const raw = await invoke<unknown>("get_message_page", {
           server, channel, expectedContext: context, receivedAction: action,
         });
-        if (!current() || work.dirty) return;
+        if (!current() || work.dirty || nativeReceivedReads.get(action) !== work) return;
         const sameScope = nativeReceivedScope?.server === server && nativeReceivedScope.channel === channel
           && nativeReceivedScope.context === context;
         nativeReceived = updateNativeReceived(sameScope ? nativeReceived : [], action, decodeNativeReceived(raw, action));
@@ -7325,42 +7336,93 @@
     }
   }
 
+  function resetNativeReceived() {
+    nativeReceivedRevision++;
+    nativeReceived = [];
+    nativeReceivedScope = null;
+    nativeReceivedReads.clear();
+  }
+
   function resetNativeArchive() {
     nativeArchiveRevision++;
     nativeArchive = null;
+    nativeArchiveReadChanges = null;
+    nativeArchiveFirstPage = false;
+  }
+
+  function requestNativeArchive() {
+    resetNativeArchive();
+    nativeArchiveFirstPage = true;
+  }
+
+  function loadRequestedNativeArchive() {
+    // Navigation can commit while an original send or read still owns the
+    // native work. Let that work retire before taking the first archive page.
+    if (!nativeArchiveFirstPage || locked || !uiStateReady || uiSessionRetired || windowCloseInFlight
+      || sending || busy || nativeHistoryLoading || nativeOwnLoading || nativeRetryGeneration !== null
+      || nativeArchiveReading || activeServerId === null || cur?.backend !== "text-v2" || !cur.context
+      || nativeConversationRemoved(activeServerId, cur.context)) return;
+    return untrack(() => refreshNativeArchive());
   }
 
   async function refreshNativeArchive(append = false) {
     const selected = cur, server = activeServerId;
     if (server === null || selected?.backend !== "text-v2" || !selected.context
       || locked || !uiStateReady || uiSessionRetired || windowCloseInFlight
-      || sending || busy || nativeHistoryLoading || nativeOwnLoading || nativeRetryGeneration !== null || nativeArchive?.loading) return;
+      || nativeConversationRemoved(server, selected.context)
+      || sending || busy || nativeHistoryLoading || nativeOwnLoading || nativeRetryGeneration !== null || nativeArchiveReading) return;
     const { active: channel, context } = selected;
+    if (!append) nativeArchiveFirstPage = false;
     const session = uiStateLoadGeneration, view = viewGeneration, revision = ++nativeArchiveRevision;
     const current = () => !locked && !uiSessionRetired && uiStateReady && !windowCloseInFlight
       && session === uiStateLoadGeneration && view === viewGeneration && revision === nativeArchiveRevision
-      && activeServerId === server && cur?.backend === "text-v2" && cur.active === channel && cur.context === context;
+      && activeServerId === server && cur?.backend === "text-v2" && cur.active === channel && cur.context === context
+      && !nativeConversationRemoved(server, context);
     const base = append && nativeArchive?.server === server && nativeArchive.channel === channel && nativeArchive.context === context
       ? nativeArchive : null;
     const previous = { server, channel, context, items: base?.items ?? [], after: base?.after ?? null, more: base?.more ?? false };
+    const changed = new Set<string>();
+    nativeArchiveReadChanges = changed;
+    // An invalidated page loses visible ownership immediately. Its physical
+    // read keeps the single archive slot until the original reply retires.
+    nativeArchiveReading = true;
     nativeArchive = { ...previous, note: null, loading: true };
     try {
-      const page = await readNativeReceivedArchive((_command, args) => invoke<unknown>("get_message_page", args),
-        { server, channel, context }, current, previous.after);
+      let retries = 3;
+      const page = await readNativeReceivedArchive(async (_command, args) => {
+        while (current()) {
+          try { return await invoke<unknown>("get_message_page", args); }
+          catch (failure) {
+            if (!isNativeHistoryBusy(failure) || retries-- === 0) throw failure;
+            await new Promise<void>(resolve => setTimeout(resolve, 100));
+          }
+        }
+        return null;
+      }, { server, channel, context }, current, previous.after);
       if (!page || !current()) return;
-      const note = !page.available ? "Saved received messages are unavailable for this group."
+      const covered = new Set(page.covered.filter(action => !changed.has(action)));
+      for (const action of covered) nativeReceivedReads.delete(action);
+      if (nativeReceivedScope?.server === server && nativeReceivedScope.channel === channel && nativeReceivedScope.context === context) {
+        nativeReceived = nativeReceived.filter(item => !covered.has(item.action));
+      }
+      const note = page.blocked ? "Saved received messages could not be loaded. Try again."
+        : !page.available ? "Saved received messages are unavailable for this group."
         : page.incomplete ? "Some saved received messages could not be loaded."
         : null;
       nativeArchive = {
         ...previous,
-        items: [...previous.items, ...page.items].slice(-64),
-        after: page.ids.at(-1) ?? previous.after,
-        more: page.more,
+        items: [...previous.items.filter(item => !covered.has(item.action)), ...page.items]
+          .filter(item => !changed.has(item.action)).slice(-64),
+        after: page.blocked ? previous.after : page.ids.at(-1) ?? previous.after,
+        more: page.blocked ? previous.more : page.more,
         note,
         loading: false,
       };
     } catch {
-      if (current()) nativeArchive = { ...previous, note: "Saved received messages could not be loaded. Try again.", loading: false };
+      if (current()) nativeArchive = { ...previous, items: previous.items.filter(item => !changed.has(item.action)), note: "Saved received messages could not be loaded. Try again.", loading: false };
+    } finally {
+      if (nativeArchiveReadChanges === changed) nativeArchiveReadChanges = null;
+      nativeArchiveReading = false;
     }
   }
   async function sendNativeText(text:string,server:number,channel:string):Promise<SendOutcome> {
@@ -8030,10 +8092,8 @@
     if(s?.backend==="text-v2") {
       dmHome=s.isDm;showNewDm=false;showAddFriend=false;notice="";
       nativeOriginals=[];nativeCursor=null;nativeHistoryLoading=false;nativeHistoryLoaded=false;nativeHistoryError=null;nativeHistoryRevision++;
-      nativeReceived = [];
-      nativeReceivedScope = null;
-      nativeReceivedRevision++;
-      nativeReceivedReads.clear();
+      resetNativeReceived();
+      requestNativeArchive();
       loadDraftFor(chanKey());committed();
       await refreshNativeHistory();
       if(viewCurrent(gen,id)){groupLoading=false;messagesLoading=false;}

@@ -1,5 +1,13 @@
 # Mewtual; Handover
 
+## 26 November 2026 — Open saved received history with the conversation
+
+The normal text conversation view requests one received archive page.
+Navigation or a connection reset queues the current conversation until
+existing chat work retires. Additional pages remain explicit. A guarded
+deletion clears older live bodies even if a later body is busy, and a blocked
+page preserves its previous cursor. Chat V2 remains disabled.
+
 ## 26 November 2026 — Automatic history recovery checkpoint
 
 Joined desktop rows now schedule bounded automatic discovery and archive
@@ -17,7 +25,7 @@ recovers B's original reply and deletion over real TCP. Its execution and the
 final Rust gates are separate from those earlier local results.
 
 The text switch remains off. Deep dependency chains, retry with no reachable
-approved author, normal archive paging after navigation, cross-author and relay
+approved author, cross-author and relay
 recovery, cold governing work, audit and wider acceptance remain open.
 [Ordinary member path](communication-recovery/CHAT-V2-ORDINARY-MEMBER-PATH.md#discovering-missed-originals-from-a-joined-member).
 

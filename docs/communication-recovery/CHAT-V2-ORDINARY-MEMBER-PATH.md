@@ -303,14 +303,17 @@ On authenticated absence the attempted write releases its slot. An approved
 author's next history sweep can retry it. Joined message reads prefer the
 guarded archive and fall back to the hot ledger on authenticated archive
 absence. IPC output retains the row permit until publication, and the renderer
-invalidates older in-flight bodies.
+invalidates older in-flight bodies. Normal conversation navigation and full
+invalidation request one guarded received-history page after active chat work
+finishes. One physical page read remains in flight across view changes.
+A Busy body leaves the cursor unchanged while earlier confirmed deletions
+in that page still retire their live copies.
 
 The worker scans one approved author's outbox at a time. It can resume a
 paused slice on the same lease and safely starts again after a restart.
 An action whose chain exceeds one local replay batch still needs resumable
-dependency work. Persisted frontiers, retry without a reachable author,
-bounded target lookup and normal archive paging after navigation also remain
-open. A staged mutation missing from disk can still leave a selected
+dependency work. Persisted frontiers, retry without a reachable author and
+bounded target lookup also remain open. A staged mutation missing from disk can still leave a selected
 descendant waiting for that ancestor on a cold read. Acceptance must cover
 and resolve that gap. Archive relaying and scale tests are pending.
 Chat V2 remains disabled.

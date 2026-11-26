@@ -7,7 +7,7 @@ import { persistenceWarning, sendAndRefresh, sendOutcome } from "./message-send.
 import { closeContinuityAcknowledgement, NativeVaultLockCoordinator } from "./window-close.ts";
 import { VideoReviewQueue } from "./video-review.ts";
 import { createNativeTextDriver } from "./native-text-driver.ts";
-import { decodeNativeReceived, decodeNativeReceivedNotice, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, updateNativeReceived } from "./native-text-history.ts";
+import { decodeNativeReceived, decodeNativeReceivedNotice, isNativeHistoryBusy, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, updateNativeReceived } from "./native-text-history.ts";
 import { PendingSendRetry } from "./pending-send-retry.ts";
 import { decodeNativeMembershipNotice, decodeRestoredChatSession } from "./native-text-session.ts";
 import { sessionContinuationCurrent } from "./viewscope.ts";
@@ -44,7 +44,7 @@ export function pendingManagerBackend(initial:unknown){return{sealed:JSON.string
 /** Shared test fixture for real App save queue, hydration, decisions and submit/retry. */
 export function pendingManagerApp(initial: unknown, backend=pendingManagerBackend(initial)) {
   const dependencies = { initial, backend, addPendingSend, durableStopOriginal, durableStopTerminal, retiredStopWarning, matchingPendingMutation, matchingPendingSend, samePendingIntent, pendingSendRetryBlock, resolvePendingSend, recoverQuarantinedIntent, quarantinedPendingIntent, validateMutationPayload, validateSendPayload, pendingContinuityVersion, sendRefusedUnaccepted,
-    MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity, persistenceWarning, sendAndRefresh, sendOutcome, NativeVaultLockCoordinator, closeContinuityAcknowledgement, VideoReviewQueue, createNativeTextDriver, decodeNativeReceived, decodeNativeReceivedNotice, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, updateNativeReceived, PendingSendRetry, decodeNativeMembershipNotice, decodeRestoredChatSession, sessionContinuationCurrent };
+    MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity, persistenceWarning, sendAndRefresh, sendOutcome, NativeVaultLockCoordinator, closeContinuityAcknowledgement, VideoReviewQueue, createNativeTextDriver, decodeNativeReceived, decodeNativeReceivedNotice, isNativeHistoryBusy, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, updateNativeReceived, PendingSendRetry, decodeNativeMembershipNotice, decodeRestoredChatSession, sessionContinuationCurrent };
   return new Function(...Object.keys(dependencies), `
     let locked = false, uiStateReady = false, uiStateLoadGeneration = 1, uiStateHydrationAttempt = 0, uiStateSaveTimer,uiSessionRetired=false;
     let uiStateSaveChain = Promise.resolve(), uiStateSaveFailed = false, uiStateFailureToast = 0;
@@ -56,7 +56,9 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
     let nativeReceived = [], nativeReceivedScope = null, nativeReceivedRevision = 0;
     const nativeReceivedReads = new Map();
     let nativeReceivedPump = null;
-    let nativeArchive = null, nativeArchiveRevision = 0;
+    let nativeArchive = null, nativeArchiveRevision = 0, nativeArchiveFirstPage = false, nativeArchiveReading = false, nativeArchiveReadChanges = null;
+    let nativeArchivePages = [], nativeArchiveCalls = [];
+    const untrack = read => read();
     let nativeRemovedContexts = {}, membersOpen = false;
     let busy=false,showAdd=false,startTab="join";
     let displayName="Catte",newServerName="Group",advertise="",relay="",rendezvous="";
@@ -66,7 +68,14 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
     const studioExit={begin(){const generation=viewGeneration;return{current:()=>generation===viewGeneration};}};
     // The navigation's dispatch decision is tested separately against the
     // actual switchServer. Here retain the real history read after selection.
-    async function switchServer(id,_then,route){if(route&&!route.current())return false;activeServerId=id;cur=servers.find(row=>row.id===id);await refreshNativeHistory();return true;}
+    async function switchServer(id,_then,route) {
+      if (route && !route.current()) return false;
+      activeServerId = id;
+      cur = servers.find(row => row.id === id);
+      requestNativeArchive();
+      await refreshNativeHistory();
+      return true;
+    }
     let windowCloseInFlight = false, unlocking = false, unlockAttempt = 0, closeAfterContinuityError = false, closeContinuityRevision = null;
     // This fixture is an already-known vault; lifecycle tests exercise actual gate reads.
     let vaultExists = true, vaultGateReads = 0;
@@ -120,6 +129,12 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
         const next = nativeOwnPages.shift();
         if (next instanceof Error) throw next;
         return await (next ?? {backend:"text-v2",scope:"own-message-revision",action:args.ownAction,scanning:false,item:null});
+      }
+      if (command === "get_message_page" && ("archiveAfter" in args || "archivedAction" in args)) {
+        nativeArchiveCalls.push(structuredClone(args));
+        const next = nativeArchivePages.shift();
+        if (next instanceof Error) throw next;
+        return await (next ?? {backend:"text-v2",scope:"received-archive-index",available:true,ids:[],more:false});
       }
       if(command === "get_message_page") { nativeHistoryCalls.push(structuredClone(args));const next=nativePages.shift();if(next instanceof Error)throw next;return await(next ?? {backend:"text-v2",scope:"own-saved-originals",next:"0",end_exclusive:"0",items:[]}); }
       if (command === "get_ui_state") { const captured = backend.sealed; const gate = readGates.shift(); if (gate) await gate; return captured; }
@@ -198,6 +213,10 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
       nativeChange: changeNativeOwnMessage,
       nativeRefresh: refreshNativeHistory,
       nativeArchiveRefresh: refreshNativeArchive,
+      nativeArchivePages(...pages) { nativeArchivePages = pages; },
+      nativeArchiveCalls: () => nativeArchiveCalls,
+      requestNativeArchive,
+      loadRequestedNativeArchive,
       archive() { return structuredClone(nativeArchive); },
       receiveNotice: refreshNativeReceived,
       receiveMembership: receiveNativeMembership,
