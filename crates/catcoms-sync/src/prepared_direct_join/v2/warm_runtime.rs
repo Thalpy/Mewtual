@@ -719,6 +719,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
         })
     }
 
+    /// The original runtime's clock for expiring local relay cursors.
+    pub fn member_history_time_ms(&self) -> u64 {
+        self.node.clock.monotonic_ms()
+    }
+
     pub fn prepare_member_dependency_request(
         &self,
         prefix: &PreparedV2JoinedPrefix,

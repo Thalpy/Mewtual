@@ -18,6 +18,10 @@ use catcoms_storage::{VaultPhysicalWorkLease, VaultSessionGuard};
 use std::fs::File;
 use std::sync::{Arc, Mutex, Weak};
 
+mod relay_index;
+pub(in crate::store) use relay_index::ArchiveRelayEntry;
+pub(in crate::store::persistence) use relay_index::{SharedHistoryRelayIndex, RELAY_INDEX_FEE};
+
 const SELECTOR_TAG: &[u8] = b"catcoms/private-chat-v2-shared-history-selector/v1\0";
 const SELECTOR_KEY: &[u8] = b"chat-v2/shared-history/selector";
 const LOCATOR_KEY: &[u8] = b"chat-v2/shared-history/locator";
@@ -28,7 +32,7 @@ const WAL_TAG: &[u8] = b"catcoms/private-chat-v2-shared-history-wal/v1\0";
 const WAL_NAME: &str = "history.wal";
 const WAL_BYTES: usize = 4 + WAL_TAG.len() + 2 + 4 + SELECTOR_BYTES + 4 + MAX_SHARED_HISTORY_BUNDLE;
 const _: () = assert!(WAL_BYTES <= MAX_FILE);
-const MAX_RECORDS_PER_DIRECTORY: usize = 2048;
+const MAX_RECORDS_PER_DIRECTORY: usize = MAX_SHARED_HISTORY_RECORDS;
 const MAX_ACTIONS_PER_PAGE: usize = 64;
 // Account for the full bounded native inventory, including the offending entry.
 const INVENTORY_FEE: usize = (2 * MAX_RECORDS_PER_DIRECTORY + 2) * 1024;

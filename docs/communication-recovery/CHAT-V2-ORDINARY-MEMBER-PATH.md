@@ -371,5 +371,37 @@ Admission, so the holder never becomes the author.
 The receiver still verifies ancestry and selects the archive record through
 the same path as a directly fetched original. A missing reply only describes
 this exchange. The original own-outbox request still serves the provider's
-own saved originals. Automatic discovery from a holder's archive and relay
-of proven historical actions from removed authors remain open.
+own saved originals. Relay of proven historical actions from removed authors
+remains open.
+
+### Discovering unknown originals at a joined archive holder
+
+The desktop rotates own-outbox and archive discovery among approved contacts.
+Each holder builds an index from selected archive files locally. One bounded
+initial directory inventory is followed by at most eight exact bundle reads
+per local work turn. Successful selected writes extend the index. A remote
+request uses the clean index and a bounded set of exact reads. It cannot
+finish a pending archive write or start the index build. An unreadable
+original is preserved for local retry and does not stop offers of intact
+records. A pending WAL or replaced archive directory refuses the whole page.
+
+A sweep uses a sorted snapshot of eligible IDs. Each page offers up to
+eight IDs for an exact fetch and can carry an opaque continuation. The
+holder keeps at most one paid sweep per approved peer. It pins the original
+peer connection incarnation, contact approval, channel and governing scope. An unchanged
+continuation can be retried after a lost reply. A new governing scope or
+complete disconnect followed by reconnect requires a new sweep. Overlapping
+physical connections can share one authenticated peer incarnation. An inactive
+sweep can expire.
+
+The holder checks each offered original's still-open Admission and signed
+delegation against the selected prefix. Its continuation carries no raw
+archive offset or filtered ID. A fetched signed original can reference
+earlier actions. A missing ancestor defers selection until its verified
+original is available locally through recovery. The worker revisits
+deferred pages and keeps one paid ancestor traversal per row.
+
+Automatic discovery currently requires reciprocal approved contacts on the
+installed rows. Restoring those approvals and their connections after a
+cold restart is separate work. The existing one-channel archive, limits
+and eligibility for original authors still apply.

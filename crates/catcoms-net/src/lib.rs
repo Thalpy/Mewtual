@@ -5488,6 +5488,11 @@ impl Actor {
                         authority.clone(),
                         self.delivery_budget.clone(),
                     );
+                    let responder = if kind == Some(CHAT_V2_DEPENDENCY_KIND) {
+                        responder.with_original_connection(ingress.clone())
+                    } else {
+                        responder
+                    };
                     let event = TransportEvent::Request {
                         from,
                         proto: ProtocolId(RR_PROTOCOL),

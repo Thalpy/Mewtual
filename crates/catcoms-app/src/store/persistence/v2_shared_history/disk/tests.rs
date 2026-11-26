@@ -144,6 +144,14 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
     assert!(disk
         .action_page(&KEY, creates(None, 3), &session, pay())
         .is_err());
+    assert!(SharedHistoryRelayIndex::start(
+        &disk,
+        &session,
+        pool.try_reserve(RELAY_INDEX_FEE).unwrap(),
+        &pay()
+    )
+    .is_err());
+    assert_eq!(std::fs::read(&wal_name).unwrap(), &wal[..]);
     drop(disk);
     let disk = owner();
     assert_eq!(disk.recover(&KEY, &session, pay()).unwrap(), Some(selected));
@@ -185,6 +193,25 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
     let disk = owner();
     let mut expected_actions = [expected.action, second_selected.action, selected.action];
     expected_actions.sort_unstable();
+    let scratch = pay();
+    let mut relay = SharedHistoryRelayIndex::start(
+        &disk,
+        &session,
+        pool.try_reserve(RELAY_INDEX_FEE).unwrap(),
+        &scratch,
+    )
+    .unwrap();
+    assert!(relay.entries().is_none());
+    assert!(relay.advance(&disk, &KEY, &session, &scratch).unwrap());
+    assert_eq!(
+        relay
+            .entries()
+            .unwrap()
+            .map(|entry| (entry.action, entry.admission))
+            .collect::<Vec<_>>(),
+        expected_actions.map(|action| (action, admission)),
+    );
+    drop((relay, scratch));
     let first_page = disk
         .action_page(&KEY, creates(None, 1), &session, pay())
         .unwrap();
@@ -227,7 +254,53 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
     assert!(disk
         .action_page(&KEY, creates(None, 1), &session, pay())
         .is_err());
+    let scratch = pay();
+    let offered = expected_actions.map(|action| ArchiveRelayEntry { action, admission });
+    let mut readable = Vec::new();
+    disk.visit_relay_page(
+        &KEY,
+        &session,
+        &scratch,
+        &offered,
+        || Ok(()),
+        |entry, _| {
+            readable.push(entry.action);
+            Ok(())
+        },
+    )
+    .unwrap();
+    let intact = expected_actions
+        .into_iter()
+        .filter(|action| *action != expected.action)
+        .collect::<Vec<_>>();
+    assert_eq!(readable, intact);
+    let mut relay = SharedHistoryRelayIndex::start(
+        &disk,
+        &session,
+        pool.try_reserve(RELAY_INDEX_FEE).unwrap(),
+        &scratch,
+    )
+    .unwrap();
+    assert!(relay.advance(&disk, &KEY, &session, &scratch).unwrap());
+    assert_eq!(
+        relay
+            .entries()
+            .unwrap()
+            .map(|entry| entry.action)
+            .collect::<Vec<_>>(),
+        intact
+    );
     std::fs::rename(&foreign_bundle, &expected_bundle).unwrap();
+    assert!(relay.advance(&disk, &KEY, &session, &scratch).unwrap());
+    assert_eq!(
+        relay
+            .entries()
+            .unwrap()
+            .map(|entry| entry.action)
+            .collect::<Vec<_>>(),
+        expected_actions,
+    );
+    drop((relay, scratch));
 
     let (fourth, bundle) = encode(&scope, &original(&scope, 22), admission, &mut rng);
     assert!(disk

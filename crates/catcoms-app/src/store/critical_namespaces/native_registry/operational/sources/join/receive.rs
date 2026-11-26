@@ -30,10 +30,12 @@ use catcoms_rt::Topic;
 use catcoms_sync::owner_v2::{SelectedV2MemberEnvelope, MAX_V2_MEMBER_TRANSPORT_BYTES};
 use catcoms_sync::PreparedV2JoinedPrefix;
 
+mod archive_discovery;
 mod contact;
 mod dependencies;
 mod governing;
 mod history_discovery;
+pub(super) use archive_discovery::ArchiveRelayState;
 pub use dependencies::{
     NativeTextJoinedArchiveReplay, NativeTextJoinedDependencyAttachRefusal,
     NativeTextJoinedDependencyExchange, NativeTextJoinedDependencyProvider,

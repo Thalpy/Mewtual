@@ -1628,6 +1628,71 @@ async fn native_text_joined_dependency_provider_reopens_after_selected_add() {
     let member_state = member.state::<AppState>();
     let workers = assert_joined_connected_workers(&member_state, member_id).await;
     let member_generation = member_state.ui_session_generation.load(Ordering::SeqCst);
+    let action_id = |text| ActionId::from_bytes(membership::decode_exact_hex(text).unwrap());
+    let holder_selected = async |action, expected_target, phase: &str| {
+        let work = joined_work(&member_state, member_id).await;
+        let caller = keep_session::current(&member_state, member_generation).unwrap();
+        timeout(Duration::from_secs(15), async {
+            loop {
+                let result = {
+                    let _permit = work.foreground(caller.clone()).await.unwrap();
+                    let (prepared, selection, channel, scope) =
+                        capture_joined_worker(&member_state, member_id, member_generation).await;
+                    prepared.selected_archive_target_data(&selection, channel, action, &scope)
+                };
+                if result == Ok(Some(expected_target)) {
+                    break;
+                }
+                SystemClock.sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("the holder did not select the founder {phase} before the Add"));
+    };
+    // The eventual recipient is still outside the group. Only the existing
+    // joined member can select these publisher originals before the Add.
+    let offline = command_value_after_busy(
+        &main,
+        &founder_queue,
+        "send_message",
+        sending::BUSY,
+        serde_json::json!({"server": found["server"], "channel": found["channel"],
+            "expectedContext": found["context"], "retryToken": hex::encode([81; 32]),
+            "text": "From the later offline founder", "replyTo": null}),
+    )
+    .await;
+    assert_eq!(offline["disposition"], "saved-local");
+    let offline_message = offline["message_id"].as_str().unwrap().to_owned();
+    let offline_id = action_id(&offline_message);
+    holder_selected(offline_id, offline_id, "Create").await;
+    let offline_edited = command_value_after_busy(
+        &main,
+        &founder_queue,
+        "edit_message",
+        sending::BUSY,
+        serde_json::json!({"server": found["server"], "channel": found["channel"],
+            "expectedContext": found["context"], "retryToken": hex::encode([82; 32]),
+            "messageId": offline_message, "expectedRevision": offline_message,
+            "text": "Changed by the later offline founder"}),
+    )
+    .await;
+    assert_eq!(offline_edited["disposition"], "saved-local");
+    let offline_edit = offline_edited["message_id"].as_str().unwrap();
+    let offline_edit_id = action_id(offline_edit);
+    holder_selected(offline_edit_id, offline_id, "Edit").await;
+    let offline_deleted = command_value_after_busy(
+        &main,
+        &founder_queue,
+        "delete_message",
+        sending::BUSY,
+        serde_json::json!({"server": found["server"], "channel": found["channel"],
+            "expectedContext": found["context"], "retryToken": hex::encode([83; 32]),
+            "messageId": offline_message, "expectedRevision": offline_edit}),
+    )
+    .await;
+    assert_eq!(offline_deleted["disposition"], "saved-local");
+    let offline_delete = action_id(offline_deleted["message_id"].as_str().unwrap());
+    holder_selected(offline_delete, offline_id, "Delete").await;
     let reopen = AdmissionBarrier::new();
     *member_state
         .native_text
@@ -1883,18 +1948,20 @@ async fn native_text_joined_dependency_provider_reopens_after_selected_add() {
     let expected_target = parent.to_owned();
     let expected_reply = reply_id.to_owned();
     let expected_deepest = deepest_reply.clone();
+    let expected_offline = offline_message.clone();
     let notice_listener = newcomer.listen_any("chat-v2-received", move |event| {
         let change: serde_json::Value = serde_json::from_str(event.payload()).unwrap();
         if change["context"] == expected_context
             && (change["action"] == expected_target
                 || change["action"] == expected_reply
-                || change["action"] == expected_deepest)
+                || change["action"] == expected_deepest
+                || change["action"] == expected_offline)
         {
             let _ = archive_notice.try_send(());
         }
     });
     // Let the ordinary joined workers start, but keep incoming gossip parked.
-    // Only the automatic history worker can cover both targets in the archive.
+    // Only the automatic history worker can cover these targets in the archive.
     let parked_live = AdmissionBarrier::new();
     *new_state
         .native_text
@@ -1911,14 +1978,17 @@ async fn native_text_joined_dependency_provider_reopens_after_selected_add() {
         .unwrap();
     let newcomer_work = joined_work(&new_state, id).await;
     let newcomer_scope = keep_session::current(&new_state, generation).unwrap();
+    let mut progress = (false, false, false, false);
     timeout(Duration::from_secs(45), async {
         // Exercise the same archive invalidations used by the renderer.
         // Tight physical reads could compete with the worker being tested.
         loop {
-            notices
-                .recv()
-                .await
-                .expect("the archive invalidation listener must stay installed");
+            tokio::select! {
+                notice = notices.recv() => {
+                    notice.expect("the archive invalidation listener must stay installed");
+                }
+                _ = SystemClock.sleep(Duration::from_secs(1)) => {}
+            }
             let _permit = newcomer_work
                 .foreground(newcomer_scope.clone())
                 .await
@@ -1936,15 +2006,25 @@ async fn native_text_joined_dependency_provider_reopens_after_selected_add() {
             let has_reply = prepared
                 .selected_archive_target_data(&selection, channel, reply, &scope)
                 .is_ok_and(|target| target == Some(reply));
-            if covered && has_reply {
+            let (prepared, selection, channel, scope) =
+                capture_joined_worker(&new_state, id, generation).await;
+            let has_edit = prepared.selected_archive_target_data(&selection, channel, offline_edit_id, &scope)
+                .is_ok_and(|target| target == Some(offline_id));
+            let (prepared, selection, channel, scope) =
+                capture_joined_worker(&new_state, id, generation).await;
+            let has_delete = prepared.selected_archive_target_data(&selection, channel, offline_delete, &scope)
+                .is_ok_and(|target| target == Some(offline_id));
+            progress = (covered, has_reply, has_edit, has_delete);
+            if covered && has_reply && has_edit && has_delete {
                 break;
             }
         }
     })
     .await
-    .expect(
-        "the automatic worker selects the missed deletion and nested replies before gossip runs",
-    );
+    .unwrap_or_else(|_| panic!(
+        "automatic history before gossip: own Delete {}, deepest reply {}, carried Edit {}, carried Delete {}",
+        progress.0, progress.1, progress.2, progress.3,
+    ));
     newcomer.unlisten(notice_listener);
     let reply_view = command_value_after_busy(
         &new_window,
@@ -1976,6 +2056,16 @@ async fn native_text_joined_dependency_provider_reopens_after_selected_add() {
     )
     .await;
     assert!(deleted_view["item"].is_null());
+    let carried_view = command_value_after_busy(
+        &new_window,
+        &new_queue,
+        "get_message_page",
+        history::BUSY,
+        serde_json::json!({"server": new_row["server"], "channel": new_row["channel"],
+            "expectedContext": new_row["context"], "receivedAction": offline_message}),
+    )
+    .await;
+    assert!(carried_view["item"].is_null());
     parked_live.release.notify_one();
     for state in [&member_state, &new_state] {
         let _close = register_vault_close(state).await.unwrap();

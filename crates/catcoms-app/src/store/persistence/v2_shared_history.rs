@@ -23,7 +23,9 @@ use zeroize::Zeroizing;
 
 pub(in crate::store::persistence) mod disk;
 mod replay;
-pub(in crate::store) use disk::{SharedHistoryActionPage, SharedHistoryActionQuery};
+pub(in crate::store) use disk::{
+    ArchiveRelayEntry, SharedHistoryActionPage, SharedHistoryActionQuery,
+};
 pub(in crate::store) use replay::{
     SharedHistoryMessageSelection, SharedHistoryProjectionLease, SharedHistoryReplay,
 };
@@ -51,6 +53,7 @@ pub(in crate::store) const SHARED_HISTORY_RECORD_FEE: usize = 3 * MAX_ACTION_BYT
     + (MAX_ACTION_CHUNKS + 4) * MAX_PRIVATE_CHAT_PAGE_FRAME_BYTES
     + MAX_SHARED_HISTORY_BUNDLE
     + 16 * 1024;
+pub(in crate::store) const MAX_SHARED_HISTORY_RECORDS: usize = 2048;
 
 /// Stable member history address on this vault. The current Header, epoch,
 /// receiver device and sender Admission are outside this namespace identity.

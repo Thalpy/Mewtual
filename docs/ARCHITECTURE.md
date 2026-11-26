@@ -8,6 +8,9 @@ members, stages verified originals separately from the hot ledger, and
 refreshes each target after archive selection. A distinct exact-ID exchange
 lets an approved joined holder serve an original from its selected archive
 while the author is offline and still has an open Admission.
+The desktop also sweeps a holder's archive inventory. Each holder builds its
+bounded index locally and offers eligible IDs from a snapshot over the
+original approved connection.
 [Ordinary member path](communication-recovery/CHAT-V2-ORDINARY-MEMBER-PATH.md#discovering-missed-originals-from-a-joined-member).
 
 16 November Score/voice integration candidate: this branch combines the reviewed

@@ -2,7 +2,8 @@
 //! A staged declaration stays under the predecessor-visible governance claim.
 use super::*;
 use crate::store::critical_namespaces::{
-    native_registry::verify_shared_history_parent, shared_history_namespace::declaration as history,
+    native_registry::verify_shared_history_parent, read_pool::CriticalCatalogReadPool,
+    shared_history_namespace::declaration as history,
 };
 use crate::store::persistence::v2_member_outbox::{
     fs::{bounded_entries, create_namespace, open_exact_write, HeldDirectory, WriteMode},
@@ -11,11 +12,11 @@ use crate::store::persistence::v2_member_outbox::{
 use crate::store::persistence::v2_shared_history::{
     disk::{
         PreparedSharedHistorySave, SavedSharedOriginal, SelectedHistoryRecord, SharedHistoryDisk,
-        SharedHistoryDiskQuota, DISK_FEE,
+        SharedHistoryDiskQuota, SharedHistoryRelayIndex, DISK_FEE, RELAY_INDEX_FEE,
     },
-    SharedHistoryActionPage, SharedHistoryActionQuery, SharedHistoryScope,
+    ArchiveRelayEntry, SharedHistoryActionPage, SharedHistoryActionQuery, SharedHistoryScope,
 };
-use catcoms_replication::chat::ActionId;
+use catcoms_replication::chat::{ActionId, SignedAction};
 use catcoms_storage::private_chat_page::PrivateChatPageId;
 
 pub(in crate::store) const MARKER_NAME: &str = "chat-critical-namespaces.shared-history.marker";
@@ -31,6 +32,7 @@ pub(in crate::store) struct SelectedSharedHistory {
     directory: HeldDirectory,
     pending: Option<PreparedSharedHistorySave>,
     disk: Option<SharedHistoryDisk>,
+    relay_index: Option<SharedHistoryRelayIndex>,
     mount: crate::store::chat_admission::PhysicalMountNegative,
     _fee: CatalogReadReservation,
 }
@@ -53,6 +55,7 @@ impl SelectedSharedHistory {
             directory,
             pending: None,
             disk: None,
+            relay_index: None,
             mount: store.capture_physical_mount_negative(),
             _fee: fee,
         };
@@ -147,6 +150,7 @@ impl ServerStore {
         perform: impl FnOnce(
             &SharedHistoryDisk,
             &mut Option<PreparedSharedHistorySave>,
+            &mut Option<SharedHistoryRelayIndex>,
             &[u8; 32],
             CatalogReadReservation,
         ) -> Result<T, AppError>,
@@ -177,11 +181,13 @@ impl ServerStore {
         disk.require_scope(scope)?;
         if let Some(previous) = mounted.pending.as_mut() {
             previous.commit(disk, &key)?;
+            note_relay_selection(&mut mounted.relay_index, disk, previous.relay_entry());
             mounted.pending = None;
         }
         let result = perform(
             disk,
             &mut mounted.pending,
+            &mut mounted.relay_index,
             &key,
             pool.try_reserve(DISK_FEE)?,
         )?;
@@ -197,7 +203,7 @@ impl ServerStore {
         bundle: &[u8],
         rng: &mut impl CryptoRngCore,
     ) -> Result<PrivateChatPageId, AppError> {
-        self.with_shared_history(scope, |disk, pending, key, payment| {
+        self.with_shared_history(scope, |disk, pending, relay, key, payment| {
             let prepared = disk.prepare_save(
                 key,
                 SelectedHistoryRecord { action, manifest },
@@ -208,6 +214,9 @@ impl ServerStore {
             )?;
             let original = pending.insert(prepared);
             let result = original.commit(disk, key);
+            if result.is_ok() {
+                note_relay_selection(relay, disk, original.relay_entry());
+            }
             if result.is_ok() || !original.has_wal() {
                 *pending = None;
             }
@@ -220,7 +229,7 @@ impl ServerStore {
         scope: SharedHistoryScope,
         action: ActionId,
     ) -> Result<Option<SavedSharedOriginal>, AppError> {
-        self.with_shared_history(scope, |disk, _, key, payment| {
+        self.with_shared_history(scope, |disk, _, _, key, payment| {
             disk.read(key, action, &self._session, payment)
         })
     }
@@ -232,6 +241,83 @@ impl ServerStore {
         scope: SharedHistoryScope,
         action: ActionId,
     ) -> Result<Option<SavedSharedOriginal>, AppError> {
+        self.with_selected_shared_history(scope, |disk, _, key, pool| {
+            disk.read(key, action, &self._session, pool.try_reserve(DISK_FEE)?)
+        })
+    }
+
+    /// Inventory work belongs to the local owner. At most one scan plus
+    /// eight exact bundle reads occur on the initial turn. Later turns
+    /// resume that scan while concurrent selected writes extend the index.
+    pub(in crate::store) fn advance_shared_history_relay_index(
+        &self,
+        scope: SharedHistoryScope,
+    ) -> Result<bool, AppError> {
+        self.with_shared_history(scope, |disk, _, relay, key, scratch| {
+            if relay.is_none() {
+                let payment = scratch.reserve_more(RELAY_INDEX_FEE)?;
+                *relay = Some(SharedHistoryRelayIndex::start(
+                    disk,
+                    &self._session,
+                    payment,
+                    &scratch,
+                )?);
+            }
+            relay
+                .as_mut()
+                .ok_or_else(denied)?
+                .advance(disk, key, &self._session, &scratch)
+        })
+    }
+
+    /// Visit the built index under its original selected storage. The
+    /// caller owns payment for any filtered results kept after this borrow.
+    pub(in crate::store) fn inspect_shared_history_relay_index(
+        &self,
+        scope: SharedHistoryScope,
+        mut inspect: impl FnMut(ArchiveRelayEntry),
+    ) -> Result<bool, AppError> {
+        self.with_selected_shared_history(scope, |disk, relay, _, _| {
+            disk.require_clean_relay()?;
+            let Some(entries) = relay.and_then(SharedHistoryRelayIndex::entries) else {
+                return Ok(false);
+            };
+            for entry in entries {
+                inspect(entry);
+            }
+            Ok(true)
+        })
+    }
+
+    pub(in crate::store) fn visit_selected_shared_history_relay_page(
+        &self,
+        scope: SharedHistoryScope,
+        entries: &[ArchiveRelayEntry],
+        require_current: impl Fn() -> Result<(), AppError>,
+        visit: impl FnMut(ArchiveRelayEntry, &SignedAction) -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
+        self.with_selected_shared_history(scope, |disk, _, key, pool| {
+            disk.visit_relay_page(
+                key,
+                &self._session,
+                &pool.try_reserve(DISK_FEE)?,
+                entries,
+                require_current,
+                visit,
+            )
+        })
+    }
+
+    fn with_selected_shared_history<T>(
+        &self,
+        scope: SharedHistoryScope,
+        perform: impl FnOnce(
+            &SharedHistoryDisk,
+            Option<&SharedHistoryRelayIndex>,
+            &[u8; 32],
+            &CriticalCatalogReadPool,
+        ) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
         if scope.vault != self.chat_vault_domain()? {
             return Err(denied());
         }
@@ -245,7 +331,6 @@ impl ServerStore {
         let policy = self.governance_layout_policy.as_ref().ok_or_else(denied)?;
         let pool = &policy.current.archive.pending.pool;
         let key = member_outbox_key(self)?;
-        let payment = pool.try_reserve(DISK_FEE)?;
         let unmounted;
         let disk = if let Some(disk) = &mounted.disk {
             disk
@@ -260,7 +345,7 @@ impl ServerStore {
             &unmounted
         };
         disk.require_scope(scope)?;
-        let result = disk.read(&key, action, &self._session, payment)?;
+        let result = perform(disk, mounted.relay_index.as_ref(), &key, pool)?;
         mounted.require(self)?;
         Ok(result)
     }
@@ -270,7 +355,7 @@ impl ServerStore {
         scope: SharedHistoryScope,
         query: SharedHistoryActionQuery,
     ) -> Result<SharedHistoryActionPage, AppError> {
-        self.with_shared_history(scope, |disk, _, key, payment| {
+        self.with_shared_history(scope, |disk, _, _, key, payment| {
             disk.action_page(key, query, &self._session, payment)
         })
     }
@@ -357,6 +442,21 @@ impl ServerStore {
         };
         value.require_original(self)?;
         Ok(value)
+    }
+}
+
+fn note_relay_selection(
+    index: &mut Option<SharedHistoryRelayIndex>,
+    disk: &SharedHistoryDisk,
+    entry: ArchiveRelayEntry,
+) {
+    if index
+        .as_mut()
+        .is_some_and(|index| index.note_selected(entry, disk.relay_quota()).is_err())
+    {
+        // This cache cannot prevent or turn an already selected write into a
+        // failure. Drop inconsistent metadata and let maintenance rebuild it.
+        *index = None;
     }
 }
 

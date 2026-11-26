@@ -160,6 +160,12 @@ pub struct NativeChatMemberDependencyIncoming {
 }
 
 impl NativeChatMemberDependencyIncoming {
+    /// Capture the original ingress incarnation for an application
+    /// continuation. A different live connection to this peer is ineligible.
+    pub fn observe_connection(&self) -> Option<ConnectionLease> {
+        self.responder.original_connection()
+    }
+
     pub fn current_data(&self) -> Option<(PeerId, &[u8])> {
         self.responder
             .is_current()

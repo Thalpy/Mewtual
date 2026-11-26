@@ -53,6 +53,10 @@ pub use joined_fence::{
 pub(crate) use joined_source::JoinFactsSlot;
 pub use joined_source::V2JoinFacts;
 pub use member::{V2MemberDraftInputs, V2MemberSignRefusal};
+pub use member_dependencies::archive_history::{
+    OpenedV2ArchiveHistoryRequest, PreparedV2ArchiveHistoryRequest, V2ArchiveHistoryCursor,
+    V2ArchiveHistoryPage, V2_ARCHIVE_HISTORY_PAGE_SIZE,
+};
 pub use member_dependencies::history::{
     OpenedV2MemberHistoryRequest, PreparedV2MemberHistoryRequest, V2JoinedMemberHistoryAccess,
     V2MemberHistoryCursor, V2MemberHistoryEntry, V2MemberHistoryPage, V2_MEMBER_HISTORY_PAGE_SPAN,
