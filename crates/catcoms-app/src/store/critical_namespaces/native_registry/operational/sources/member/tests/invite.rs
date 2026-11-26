@@ -2281,6 +2281,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
             };
             let deleted = save_receive(V2MemberSignRequest { ..delete }).await;
             let mut chain = Vec::new();
+            let mut returned_reply = None;
             if missed_history {
                 let mut parent = created.0;
                 for depth in 1..=5 {
@@ -2416,6 +2417,67 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     Err(V2MemberSaveRefusal::Stale),
                     "a fresh native capture cannot reuse the retired original approval",
                 );
+                drop((page, service));
+
+                // Reverse the author and recipient without bringing the
+                // founder back. C resolves the parent from its received
+                // archive, while B resolves it from its own saved outbox.
+                let body = Body::Create { text: "A reply from the other member".into(), reply_to: Some(deepest) };
+                let parents = [deepest];
+                let returned = || V2MemberSignRequest {
+                    token: [0xe2; 32], body: &body, parents: &parents, ..offline
+                };
+                assert_eq!(
+                    third_row().prepare_member_save(&third_selection, returned(), &fresh, &mut third_rng),
+                    Ok(V2MemberSaveOutcome::Ready),
+                );
+                let mut prepared = Some(third_row()
+                    .finish_member_admission(third_selection.clone(), returned().token, &fresh)
+                    .unwrap());
+                let job = NativeTextJoinedMemberFinalPreparation::try_admit_member_save(
+                    &mut prepared, &fresh, MemberSaveNativeAdmission::new((), fresh.clone()),
+                ).unwrap();
+                assert_eq!(job.run(), MemberSaveJobReport::SavedLocal);
+                let (action, ordinal) = third_row()
+                    .lookup_saved_member(&third_selection, &returned(), &fresh, &mut third_rng)
+                    .unwrap().unwrap();
+                let contact = catcoms_sync::V2MemberContactData::decode(&contact).unwrap();
+                let author = catcoms_rt::PeerId::new(*blake3::hash(contact.address_data().0).as_bytes());
+                let mut provider = third_row().attach_dependency_provider(&third_selection, fresh.clone()).unwrap();
+                let serve_return = async |provider: &mut crate::store::NativeTextJoinedDependencyProvider,
+                                          rng: &mut rand_chacha::ChaCha20Rng| {
+                    let request = provider.next().await.expect("reverse history request");
+                    third_row().serve_dependency_request(&third_selection, channel, request, fresh.clone(), rng)
+                };
+                let exchange = recovered_row().prepare_history_exchange(
+                    &selection, channel, author, fresh.clone(), &mut history_rng,
+                ).unwrap();
+                let (reply, served) = tokio::time::timeout(Duration::from_secs(10), async {
+                    tokio::join!(exchange.receive(), serve_return(&mut provider, &mut third_rng))
+                }).await.unwrap();
+                served.unwrap();
+                let page = recovered_row().open_history_response(&selection, reply.unwrap(), &fresh).unwrap();
+                assert_eq!(page.data().unwrap().entries()[0].action, action);
+                assert_eq!(page.data().unwrap().entries()[0].ordinal, ordinal);
+                let exchange = recovered_row().prepare_discovered_original(
+                    &selection, &page, action, fresh.clone(), &mut history_rng,
+                ).unwrap();
+                let (reply, served) = tokio::time::timeout(Duration::from_secs(10), async {
+                    tokio::join!(exchange.receive(), serve_return(&mut provider, &mut third_rng))
+                }).await.unwrap();
+                served.unwrap();
+                let mut stage = recovered_row().prepare_discovered_archive(
+                    &selection, reply.unwrap(), fresh.clone(),
+                ).unwrap().unwrap();
+                let signed = third_row()
+                    .read_member_dependency(&third_selection, channel, action, &fresh, &mut third_rng)
+                    .unwrap().unwrap();
+                assert_eq!(stage.original_digest_for_test(), blake3::hash(signed.original_bytes()));
+                drop(signed);
+                assert!(!recovered_row().advance_discovered_archive(&mut stage, &fresh, &mut history_rng).unwrap());
+                assert!(recovered_row().advance_discovered_archive(&mut stage, &fresh, &mut history_rng).unwrap());
+                assert!(recovered_row().select_discovered_archive(&stage, &fresh, &mut history_rng).unwrap().is_some());
+                returned_reply = Some((action, deepest));
             }
             let recipient = third_row()
                 .inspect_registration(&invite_two, third_token, &fresh)
@@ -2487,6 +2549,16 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         .unwrap(),
                     Some(identity)
                 );
+            }
+            if let Some((action, parent)) = returned_reply {
+                let projection = reopened_row().archived_message_projection(
+                    &current, channel, action, fresh.clone(), &mut history_rng,
+                ).unwrap().unwrap();
+                assert!(projection.with_publication(|view| matches!(
+                    view,
+                    GuardedProjection::Visible { create, text, reply_to: Some(deepest), .. }
+                        if *create == action && *deepest == parent && text == "A reply from the other member"
+                )).unwrap());
             }
             drop(current);
             retire(&reopened_sources).await;

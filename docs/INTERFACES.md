@@ -7,6 +7,9 @@ Pages expose at most eight IDs and keep a fixed provider-local end per sweep.
 The existing `chat-v2-received` notice invalidates that target after recovery.
 The joined `receivedAction` read keeps its schema and uses a guarded archive
 projection before falling back to the live ledger.
+Joined archive selection requires the exact signed ancestry to be durable.
+It looks in the selected shared archive before using the own outbox for
+eligible ancestors. A missing original defers the selection.
 [Request and cursor contract](communication-recovery/CHAT-V2-ORDINARY-MEMBER-PATH.md#discovering-missed-originals-from-a-joined-member).
 
 16 November Score/voice integration candidate: this branch combines the reviewed

@@ -15,6 +15,11 @@ with all its selected ancestors. The missed-history fixture also passed with
 the new selection guard. The root dependency audit and both repository
 static gates passed. Chat V2 stays disabled pending combined acceptance.
 
+The missed-history rerun also tested the return path. The receiver signed
+a reply using an archived parent, then the original author fetched the
+exact signed reply over the approved TCP connection. It resolved the
+ancestors from its own outbox and verified the reply after reopening.
+
 ## 26 November 2026 — Resume local reply-chain recovery
 
 The joined worker parks one paid original and its verified ancestor traversal
