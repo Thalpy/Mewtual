@@ -7,7 +7,10 @@ and original connection into admission and revocation. The service reads one
 paid window and excludes other channels, Admissions and Held originals.
 Replies authenticate only that request and offer no proof of global absence,
 authorization to write, or remote custody. The receiver verifies signed
-originals and dependencies before selecting an archive write.
+originals and dependencies before selecting an archive write. A parked page
+releases its old UI invocation and full wire fee. Fresh effects recheck the
+same original row and approval. Archive-first reads keep already deleted
+bodies from reappearing through delayed live notices.
 [Discovery contract](communication-recovery/CHAT-V2-ORDINARY-MEMBER-PATH.md#discovering-missed-originals-from-a-joined-member).
 
 16 November Score/voice integration candidate: this branch combines the reviewed

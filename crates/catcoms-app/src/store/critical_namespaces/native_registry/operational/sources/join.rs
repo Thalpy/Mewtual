@@ -788,6 +788,22 @@ impl NativeTextJoinedRowSelection {
             })
     }
 
+    /// Bounded candidates for the automatic history worker. Each exchange
+    /// independently verifies current admission and the actual live connection.
+    pub fn history_peer_candidates(&self) -> Option<Vec<PeerId>> {
+        if !self.is_current_cached() {
+            return Some(Vec::new());
+        }
+        let peers = self.original.governing_peers.try_lock().ok()?;
+        Some(
+            peers
+                .iter()
+                .flatten()
+                .map(|slot| slot.contact.peer)
+                .collect(),
+        )
+    }
+
     #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store::critical_namespaces::native_registry) fn replace_history_contact_for_test(
         &self,

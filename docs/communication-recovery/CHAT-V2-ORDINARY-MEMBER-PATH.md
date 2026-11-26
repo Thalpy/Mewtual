@@ -282,10 +282,38 @@ retry work. A failed archive write or unavailable ancestor leaves recovery
 pending. An archived action can change the projection only through a fresh
 guarded read.
 
-This path currently supports explicit discovery and retrieval from the
-connected author's outbox. Automatic scheduling, durable sweep progress,
-multi-peer and archive relaying, and live archive invalidation still need
-integration. Chat V2 remains disabled.
+The desktop runs one recovery worker per original joined row. It rotates
+through approved contacts and attempts at most one page or original in a
+turn. A slice yields after four pages and retains the exact earlier cursor.
+An unavailable original keeps a rescan due while other originals and
+contacts can still progress. A failed connection, retired admission or
+replaced approval discards its old page. Each parked page retains bounded
+metadata and the original approval and lease. Only active wire exchanges
+retain the wire reservation and native invocation. Disk work holds the
+original row permit, which is released before waiting on the network.
+
+A fresh paid staging ledger uses one bounded local ancestor replay. A
+selected archive entry can settle work without another fetch. A new original
+settles work only after the archive returns its exact selection. Writes reserve
+one of eight exact action/target slots before touching the archive. A failed
+write postpones that target while the local row rechecks its exact selector,
+including after the original connection ends. A staged live mutation supplies
+dependency knowledge without publishing a new body before archive selection.
+On authenticated absence the attempted write releases its slot. An approved
+author's next history sweep can retry it. Joined message reads prefer the
+guarded archive and fall back to the hot ledger on authenticated archive
+absence. IPC output retains the row permit until publication, and the renderer
+invalidates older in-flight bodies.
+
+The worker scans one approved author's outbox at a time. It can resume a
+paused slice on the same lease and safely starts again after a restart.
+An action whose chain exceeds one local replay batch still needs resumable
+dependency work. Persisted frontiers, retry without a reachable author,
+bounded target lookup and normal archive paging after navigation also remain
+open. A staged mutation missing from disk can still leave a selected
+descendant waiting for that ancestor on a cold read. Acceptance must cover
+and resolve that gap. Archive relaying and scale tests are pending.
+Chat V2 remains disabled.
 
 ## Resource and acceptance gates
 

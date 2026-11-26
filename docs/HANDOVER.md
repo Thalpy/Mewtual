@@ -1,5 +1,26 @@
 # Mewtual; Handover
 
+## 26 November 2026 — Automatic history recovery checkpoint
+
+Joined desktop rows now schedule bounded automatic discovery and archive
+recovery from explicitly approved connected authors. Parked pages release wire
+and native invocation credits. A guarded archive read takes precedence over a
+delayed live body. The joined row tracks at most eight exact attempted writes
+and reconciles selected records even after a peer disconnects. Mounted joined
+mutations enter the semantic ledger before disk selection without gaining a
+live effect.
+
+The Windows focused App cohort passed 12 tests before the final staging changes.
+The renderer suite passed 3,942 tests with a regression for an older reply
+arriving after invalidation. The desktop test parks C's live receiver while it
+recovers B's original reply and deletion over real TCP. Its execution and the
+final Rust gates are separate from those earlier local results.
+
+The text switch remains off. Deep dependency chains, retry with no reachable
+approved author, normal archive paging after navigation, cross-author and relay
+recovery, cold governing work, audit and wider acceptance remain open.
+[Ordinary member path](communication-recovery/CHAT-V2-ORDINARY-MEMBER-PATH.md#discovering-missed-originals-from-a-joined-member).
+
 ## 26 November 2026 — Connected history discovery
 
 `93caf758` adds bounded discovery of missed action IDs from the own outbox of

@@ -201,6 +201,33 @@ test("received invalidations survive a Busy read and other actions wait for the 
   app.done();
 });
 
+test("a recovered deletion supersedes an older live reply already in flight", async () => {
+  const app = pendingManagerApp({});
+  await app.hydrate();
+  app.nativeConversation(7, "9", context);
+  const notice = { server: 7, channel: "9", context, action: row.action };
+  const previous = { backend: "text-v2", scope: "received-live",
+    item: { action: row.action, text: "Before recovery", certainty: "provisional" } };
+  const deleted = { ...previous, item: null };
+  app.nativeHistory(previous);
+  await app.receiveNotice(notice);
+  assert.equal(app.received().length, 1);
+
+  const delayed = deferred<unknown>();
+  app.nativeHistory(delayed.promise, deleted);
+  const originalRead = app.receiveNotice(notice);
+  await settle();
+  await app.receiveNotice(notice);
+  assert.deepEqual(app.received(), []);
+  delayed.resolve(previous);
+  await originalRead;
+  assert.deepEqual(app.received(), []);
+  app.nativeHistory(deleted);
+  await app.receiveNotice(notice);
+  assert.deepEqual(app.received(), []);
+  app.done();
+});
+
 test("joining with an approved recovery preview starts history after the join releases Busy", async () => {
   const app = pendingManagerApp({});
   await app.hydrate();

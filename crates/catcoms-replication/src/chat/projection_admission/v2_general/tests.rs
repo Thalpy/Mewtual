@@ -458,6 +458,57 @@ fn ordinary_receiver_waits_for_exact_valid_dependencies_then_projects() {
 }
 
 #[test]
+fn staged_live_mutation_has_no_projection_until_explicit_admission() {
+    let mut fixture = Fixture::new();
+    let author = DeviceKeypair::from_seed(&[94; 32]);
+    let admission = fixture.add(&author, 20);
+    let create = create(&author, &admission, 1);
+    let delete = action(
+        &author,
+        &admission,
+        2,
+        Body::Delete {
+            create: create.id(),
+        },
+        vec![create.id()],
+    );
+    let (mut ledger, view) = fixture.ledger();
+    let verifier = &fixture.verifier;
+    verifier
+        .project_provisional_from_ledger(&mut ledger, &view, &create, &admission, 64)
+        .unwrap();
+    assert_eq!(
+        verifier
+            .stage_provisional_from_ledger(&mut ledger, &view, &delete, &admission, 64)
+            .unwrap(),
+        V2OrdinaryReceiveStatus::Retained(ActionState::Valid)
+    );
+    assert!(
+        ledger.matches_valid_ordinary_original(&delete, admission.admission_data().admission_id())
+    );
+    // If selection fails before writing a WAL, a staged mutation cannot
+    // alter the live body or require its own undo.
+    let read = |ledger: &mut ChatLedger| {
+        ledger
+            .guarded_projection(create.id(), 64)
+            .unwrap()
+            .with_publication(Clone::clone)
+            .unwrap()
+    };
+    assert!(matches!(
+        read(&mut ledger),
+        GuardedProjection::Visible { .. }
+    ));
+    verifier
+        .project_provisional_from_ledger(&mut ledger, &view, &delete, &admission, 64)
+        .unwrap();
+    assert!(matches!(
+        read(&mut ledger),
+        GuardedProjection::Deleted { .. }
+    ));
+}
+
+#[test]
 fn ordinary_history_replay_restores_dependencies_without_publishing_removed_originals() {
     let mut f = Fixture::new();
     let author = DeviceKeypair::from_seed(&[92; 32]);

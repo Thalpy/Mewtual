@@ -24,7 +24,7 @@ enum Preparation {
     ),
 }
 const STALE: &str = "The chat session changed. Refresh this chat.";
-const BUSY: &str = "Chat history is busy. Try again.";
+pub(super) const BUSY: &str = "Chat history is busy. Try again.";
 // Eight maximum-size texts, even with sixfold JSON escaping, fit below this
 // cap. Another MiB of the invoice covers bounded metadata and semantic-ID
 // scratch. IPC, WebView and allocator overhead are not claimed as bounded RSS.
@@ -484,43 +484,87 @@ async fn execute_received(
 ) -> Result<ReceivedOutput, String> {
     let local = call.member_work.clone();
     let guard = local.foreground(call.scope.clone()).await.ok_or(STALE)?;
-    let founder = if call.selection.founder().is_some() {
-        let Preparation::Founder(original) = capture(state, call).await? else {
-            return Err(STALE.to_owned());
-        };
-        Some(original)
-    } else {
-        None
-    };
+    let reader = capture(state, call).await?;
     let channel = call.read.channel;
     let scope = call.scope.clone();
     let payment = call.payment.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let _guard = guard;
-        let projection = if let Some(original) = founder {
-            original
+        let projection = match reader {
+            Preparation::Founder(original) => original
                 .read_founder_member_projection(channel, action, &scope)
                 .map_err(|failure| match failure {
                     V2MemberSaveRefusal::Busy => BUSY.to_owned(),
                     _ => STALE.to_owned(),
-                })?
-        } else {
-            let slot = local.received.lock().map_err(|_| STALE.to_owned())?;
-            slot.as_ref()
-                .map(|ledger| ledger.read_message_projection(action))
-                .transpose()
-                .map_err(|_| STALE.to_owned())?
-                .flatten()
+                })?,
+            joined @ Preparation::Joined(..) => {
+                // A recovery worker can select a mutation outside the live
+                // ledger. Even a delayed live notice must use that archive.
+                match read_archived_target(joined, channel, action, &scope, &local)? {
+                    Some(archive) => Some(archive),
+                    None => {
+                        let slot = local.received.lock().map_err(|_| STALE.to_owned())?;
+                        slot.as_ref()
+                            .map(|ledger| ledger.read_message_projection(action))
+                            .transpose()
+                            .map_err(|_| STALE.to_owned())?
+                            .flatten()
+                    }
+                }
+            }
         };
         Ok(ReceivedOutput {
             scope: "received-live",
             projection,
-            _archive_permit: None,
+            _archive_permit: Some(guard),
             _payment: payment,
         })
     })
     .await
     .map_err(|_| STALE.to_owned())?
+}
+
+fn read_archived_target(
+    original: Preparation,
+    channel: u128,
+    action: ActionId,
+    scope: &RequestCancellation,
+    local: &server_table::NativeMemberWork,
+) -> Result<Option<NativeTextJoinedMemberProjection>, String> {
+    const INCOMPLETE: &str = "A received change is waiting to be saved.";
+    let unsettled = local.unsettled_archive_changes(action).ok_or(INCOMPLETE)?;
+    let founder = matches!(&original, Preparation::Founder(_));
+    let projection = match original {
+        Preparation::Founder(original) => {
+            original.archived_founder_message_projection(channel, action, scope)
+        }
+        Preparation::Joined(original, row) => original.archived_message_projection(
+            &row,
+            channel,
+            action,
+            scope.clone(),
+            &mut OsCryptoRng,
+        ),
+    }
+    .map_err(|failure| match failure {
+        V2MemberSaveRefusal::Busy => BUSY.to_owned(),
+        _ => "Saved received messages could not be read. Try again.".to_owned(),
+    })?;
+    // Only the exact mutation in the selected archive settles a failed write.
+    if unsettled.iter().flatten().any(|change| {
+        !projection
+            .as_ref()
+            .is_some_and(|original| original.archived_includes(*change))
+    }) {
+        return Err(INCOMPLETE.into());
+    }
+    // The joined worker rechecks selection and emits invalidation independent
+    // of this IPC result, which the renderer can cancel or ignore.
+    if founder {
+        for change in unsettled.into_iter().flatten() {
+            local.note_archive_change(change, action, true);
+        }
+    }
+    Ok(projection)
 }
 
 async fn execute_archive(
@@ -565,33 +609,7 @@ async fn execute_archive(
             }))
         }
         ArchiveRead::Message(action) => {
-            const INCOMPLETE: &str = "A received change is waiting to be saved.";
-            let unsettled = local.unsettled_archive_changes(action).ok_or(INCOMPLETE)?;
-            let projection = match original {
-                Preparation::Founder(original) => {
-                    original.archived_founder_message_projection(channel, action, &scope)
-                }
-                Preparation::Joined(original, row) => original.archived_message_projection(
-                    &row,
-                    channel,
-                    action,
-                    scope,
-                    &mut OsCryptoRng,
-                ),
-            }
-            .map_err(|_| "Saved received messages could not be read. Try again.")?;
-            // Opening the target may finish its original in-process WAL. Only
-            // the exact actions in the replayed archive can settle that debt.
-            if unsettled.iter().flatten().any(|change| {
-                !projection
-                    .as_ref()
-                    .is_some_and(|original| original.archived_includes(*change))
-            }) {
-                return Err(INCOMPLETE.into());
-            }
-            for change in unsettled.into_iter().flatten() {
-                local.note_archive_change(change, action, true);
-            }
+            let projection = read_archived_target(original, channel, action, &scope, &local)?;
             Ok(Response::Received(ReceivedOutput {
                 scope: "received-archive",
                 projection,

@@ -29,13 +29,14 @@ activation still returns `UNAVAILABLE`.
 1. Resolve the mounted joined-source failures and validate the original Welcome,
    founder restart and exact debt checkpoint through both hosted platforms.
    Preserve current authority checks and deadlines.
-2. Schedule missed-action recovery automatically and refresh the shared view
-   from the verified archive. The explicit mounted recovery test discovers
-   and archives missed Create, Edit and Delete actions from an approved
-   connected author. Extend it to independent activity in both directions,
-   cross-author dependencies, relay through another member, and restarts
-   during recovery. Keep original records available to the authorized admin
-   audit. [Missed-history evidence](CHAT-FILES-VOICE-ACCEPTANCE.md#recovery-of-missed-own-outbox-originals-26-november-2026).
+2. Validate the joined desktop recovery worker and complete normal archive
+   paging. The explicit mounted test discovers and archives missed Create,
+   Edit and Delete actions from an approved connected author. The worker
+   schedules that protocol without a history view or live gossip. Add
+   resumable causal closure, recovery in both directions, cross-author and
+   relay recovery, and restart during recovery. Keep original records
+   available to the authorized admin audit.
+   [Missed-history evidence](CHAT-FILES-VOICE-ACCEPTANCE.md#recovery-of-missed-own-outbox-originals-26-november-2026).
 3. Complete cold governing work and Leave/rejoin. Preserve verified history and
    keep unproven late actions from removed members out of the ordinary view
    while retaining them for authorized review.

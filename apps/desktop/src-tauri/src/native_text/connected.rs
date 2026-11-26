@@ -1,4 +1,6 @@
 //! Native connected request dispatch for the exact mounted row.
+mod history;
+
 use super::*;
 use catcoms_app::store::{
     NativeTextFounderMemberPublication, NativeTextFounderMemberPublicationReceipt,
@@ -440,8 +442,17 @@ async fn start_dependencies<R: tauri::Runtime>(
                     serve_dependencies(app.clone(), source.clone(), provider),
                     drain_outbox(&app, &source),
                     serve_joined_governing(&app, &source),
+                    history::recover(&app, &source),
                     async {
                         if let Some((initial, payment)) = receive {
+                            #[cfg(test)]
+                            {
+                                let edge = app.state::<AppState>().native_text
+                                    .join_history_receive_edge.lock().unwrap().take();
+                                if let Some(edge) = edge {
+                                    edge.wait_once().await;
+                                }
+                            }
                             super::receiving::run(&app, &source, initial, payment).await;
                         }
                     },

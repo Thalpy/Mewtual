@@ -296,6 +296,19 @@ impl SelectedV2MemberEnvelope {
         verifier.project_provisional_from_ledger(ledger, view, self.action_data(), &admission, work)
     }
 
+    /// Supply historical dependency knowledge while the receiver selects the
+    /// original in its archive. No live projection is issued here.
+    pub fn stage_from_ledger(
+        &self,
+        verifier: &V2GeneralPrefixVerifier,
+        ledger: &mut ChatLedger,
+        view: &ProjectionView,
+        work: usize,
+    ) -> Result<V2OrdinaryReceiveStatus, ChatError> {
+        let admission = self.original_admission(verifier)?;
+        verifier.stage_provisional_from_ledger(ledger, view, self.action_data(), &admission, work)
+    }
+
     fn original_admission(
         &self,
         verifier: &V2GeneralPrefixVerifier,

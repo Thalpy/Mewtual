@@ -1795,11 +1795,92 @@ async fn native_text_joined_dependency_provider_reopens_after_selected_add() {
         &workers.upgrade().unwrap(),
         &joined_work(&member_state, member_id).await
     ));
+    let reverse_contact = command_value_after_busy(
+        &new_window,
+        &new_queue,
+        "share_native_chat_contact",
+        membership::BUSY,
+        serde_json::json!({"server": new_row["server"], "expectedContext": new_row["context"]}),
+    )
+    .await;
+    command_value_after_busy(
+        &member_window,
+        &member_queue,
+        "connect_native_chat_contact",
+        membership::BUSY,
+        serde_json::json!({"server": joined["server"], "expectedContext": joined["context"],
+            "contact": reverse_contact, "approvedHost": "127.0.0.1"}),
+    )
+    .await;
+    let deleted = command_value_after_busy(
+        &member_window,
+        &member_queue,
+        "delete_message",
+        sending::BUSY,
+        serde_json::json!({"server": joined["server"], "channel": joined["channel"],
+            "expectedContext": joined["context"], "retryToken": hex::encode([93; 32]),
+            "messageId": parent, "expectedRevision": parent}),
+    )
+    .await;
+    assert_eq!(deleted["disposition"], "saved-local");
+    let delete = ActionId::from_bytes(
+        membership::decode_exact_hex(deleted["message_id"].as_str().unwrap()).unwrap(),
+    );
+    let reply_id = reply["message_id"].as_str().unwrap();
+    // Let the ordinary joined workers start, but keep incoming gossip parked.
+    // Only the automatic history worker can cover both targets in the archive.
+    let parked_live = AdmissionBarrier::new();
+    *new_state
+        .native_text
+        .join_history_receive_edge
+        .lock()
+        .unwrap() = Some(parked_live.clone());
     startup.release.notify_one();
     timeout(Duration::from_secs(15), new_task)
         .await
         .unwrap()
         .unwrap();
+    timeout(Duration::from_secs(10), parked_live.arrived.notified())
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(45), async {
+        loop {
+            let (prepared, selection, channel, scope) =
+                capture_joined_worker(&new_state, id, generation).await;
+            let covered = prepared
+                .archived_message_projection(&selection, channel, action, scope, &mut OsCryptoRng)
+                .ok()
+                .flatten()
+                .is_some_and(|projection| projection.archived_includes(delete));
+            if covered {
+                break;
+            }
+            SystemClock.sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the automatic worker selects the missed deletion before gossip runs");
+    let reply_view = command_value_after_busy(
+        &new_window,
+        &new_queue,
+        "get_message_page",
+        history::BUSY,
+        serde_json::json!({"server": new_row["server"], "channel": new_row["channel"],
+            "expectedContext": new_row["context"], "receivedAction": reply_id}),
+    )
+    .await;
+    assert_eq!(reply_view["item"]["text"], "Reply after the Add");
+    let deleted_view = command_value_after_busy(
+        &new_window,
+        &new_queue,
+        "get_message_page",
+        history::BUSY,
+        serde_json::json!({"server": new_row["server"], "channel": new_row["channel"],
+            "expectedContext": new_row["context"], "receivedAction": parent}),
+    )
+    .await;
+    assert!(deleted_view["item"].is_null());
+    parked_live.release.notify_one();
     for state in [&member_state, &new_state] {
         let _close = register_vault_close(state).await.unwrap();
         sources::close_server_rows(state, &SystemClock)

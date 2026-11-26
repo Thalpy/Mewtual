@@ -50,6 +50,8 @@ pub(super) struct Registry {
     #[cfg(test)]
     join_startup_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
     #[cfg(test)]
+    join_history_receive_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
+    #[cfg(test)]
     join_startup_busy: tokio::sync::Notify,
     #[cfg(test)]
     join_startup_table_busy: tokio::sync::Notify,
@@ -151,6 +153,8 @@ impl Default for Registry {
             history_capture_edge: StdMutex::new(None),
             #[cfg(test)]
             join_startup_edge: StdMutex::new(None),
+            #[cfg(test)]
+            join_history_receive_edge: StdMutex::new(None),
             #[cfg(test)]
             join_startup_busy: tokio::sync::Notify::new(),
             #[cfg(test)]

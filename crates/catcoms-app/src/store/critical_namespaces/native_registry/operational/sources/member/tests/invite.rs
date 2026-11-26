@@ -2209,7 +2209,6 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
             };
             let deleted = save_receive(V2MemberSignRequest { ..delete }).await;
             if missed_history {
-                use catcoms_replication::chat::{ActionState, V2OrdinaryReceiveStatus};
                 // No subscription or publication ran while the texts were
                 // saved. The receiver only learns IDs from the approved peer.
                 let provider = local_transport.0;
@@ -2248,6 +2247,13 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     .connect(&scheduler)
                     .await
                     .unwrap();
+                let available_ui_captures = || {
+                    std::iter::from_fn(|| third_budget.prepare().ok())
+                        .collect::<Vec<_>>()
+                        .len()
+                };
+                let before_page = available_ui_captures();
+                assert!(before_page > 0);
                 let exchange = first(&mut third_rng).unwrap();
                 let (reply, served) = tokio::time::timeout(Duration::from_secs(10), async {
                     tokio::join!(exchange.receive(), serve(&mut service, &mut history_rng))
@@ -2256,6 +2262,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 let page = third_row()
                     .open_history_response(&third_selection, reply.unwrap(), &fresh)
                     .unwrap();
+                assert_eq!(available_ui_captures(), before_page, "a parked page retains no native invocation");
                 let mut discovered = Vec::new();
                 for entry in page.data().unwrap().entries() {
                     let exchange = third_row().prepare_discovered_original(
@@ -2265,33 +2272,24 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         tokio::join!(exchange.receive(), serve(&mut service, &mut history_rng))
                     }).await.unwrap();
                     served.unwrap();
-                    let original = third_row()
-                        .open_dependency_response(&third_selection, reply.unwrap(), &fresh)
+                    let (stage, original) = third_row()
+                        .prepare_discovered_archive(
+                            &third_selection, reply.unwrap(), fresh.clone(), &mut third_rng,
+                        )
                         .unwrap()
                         .unwrap();
                     let saved = recovered_row()
                         .read_member_dependency(&selection, channel, entry.action, &fresh, &mut history_rng)
                         .unwrap().unwrap();
                     assert_eq!(original.original_digest_for_test(), blake3::hash(saved.original_bytes()));
-                    let mut stage = third_row()
-                        .prepare_member_ledger(&third_selection, channel, fresh.clone()).unwrap();
-                    let valid = V2OrdinaryReceiveStatus::Retained(ActionState::Valid);
-                    let mut status = third_row().project_received_member(&mut stage, &original, &fresh).unwrap();
-                    if let V2OrdinaryReceiveStatus::WaitingForDependencies(missing) = status {
-                        for dependency in missing {
-                            assert_eq!(
-                                third_row().replay_saved_member_dependency(
-                                    &mut stage, dependency, &fresh, &mut third_rng,
-                                ).unwrap(),
-                                Some(V2OrdinaryReceiveStatus::Retained(ActionState::Valid))
-                            );
-                        }
-                        status = third_row().project_received_member(&mut stage, &original, &fresh).unwrap();
-                    }
-                    assert_eq!(status, valid);
                     assert!(third_row()
                         .archive_received_member(&stage, &original, &fresh, &mut third_rng)
                         .unwrap().is_some());
+                    assert_eq!(
+                        third_row().selected_discovered_target(&third_selection, &page, entry.action, &fresh)
+                            .unwrap(),
+                        Some(created.0),
+                    );
                     discovered.push((entry.action, entry.ordinal));
                 }
                 assert_eq!(discovered, [created, edited, deleted]);
