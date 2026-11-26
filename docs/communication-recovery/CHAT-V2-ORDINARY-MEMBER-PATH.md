@@ -245,6 +245,48 @@ Removal changes active view, never deletes the audit. Unproven late removed acti
 Held pending the separately authorized moderation path; ordinary concurrent edits resolve
 automatically without a user repair prompt.
 
+## Discovering missed originals from a joined member
+
+An explicitly approved joined contact can answer a connected request for one
+page of its own durable outbox. Both sides require the signed contact's
+Admission in the current selected prefix and the original transport lease.
+The signed contact is cached for that mounted row. Contact discovery and
+approval persistence are separate work.
+
+The page uses the bounded native dependency lane with separate request and
+reply tags and key domains. The MLS exporter binds the group, Profile,
+governing Header, epoch and channel. The request also binds the ordered
+transport peers. A reply is sealed to the exact request ciphertext. Older
+peers can still serve exact-ID dependency requests and decline discovery.
+
+A page scans at most eight consecutive provider-local outbox ordinals.
+Its first reply freezes the exclusive end. The requester derives the next
+position from the window, including when all IDs in it were filtered out.
+Appends appear in a later sweep. The provider releases IDs only for the
+requested channel and its current Admission, including submitted originals
+and ordinary edits and deletions. Held records stay local. An approved peer
+can observe the size of the scanned ordinal range. Page gaps and the end of
+a sweep describe this provider's response only.
+
+The service reads only an already installed clean owner under its paid
+history reservation. It checks the selected head before and after the read.
+Busy, missing and uncertain owners refuse. The remote request leaves
+initialization, reopening and WAL recovery to local work.
+
+Each offered ID is fetched separately over the original lease and verified
+against the current Core Admission and its signed dependencies. A bounded
+staging ledger can rehydrate required originals from the selected local
+archive, validate an action and cover its archive write. Advance past a page
+only after its offered entries have durable results or explicitly retained
+retry work. A failed archive write or unavailable ancestor leaves recovery
+pending. An archived action can change the projection only through a fresh
+guarded read.
+
+This path currently supports explicit discovery and retrieval from the
+connected author's outbox. Automatic scheduling, durable sweep progress,
+multi-peer and archive relaying, and live archive invalidation still need
+integration. Chat V2 remains disabled.
+
 ## Resource and acceptance gates
 
 Reuse the general cold Action chunk codec and private-page crypto/native hold/barrier

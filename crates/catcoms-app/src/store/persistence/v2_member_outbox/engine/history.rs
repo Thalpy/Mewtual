@@ -252,6 +252,7 @@ impl MemberOutbox {
     ) -> Result<MemberHistoryPage, MemberOutboxError> {
         require_payment(&payment, &self.pool, MEMBER_OUTBOX_HISTORY_FEE)?;
         let head = self.clean()?;
+        super::super::transaction::require_selected(&self.ns, head)?;
         let end = end_exclusive.unwrap_or(head.data.next_ordinal);
         if maximum == 0
             || maximum > MEMBER_HISTORY_MAX_ITEMS
@@ -282,6 +283,7 @@ impl MemberOutbox {
                 original,
             });
         }
+        super::super::transaction::require_selected(&self.ns, head)?;
         Ok(MemberHistoryPage {
             context: self.context.id,
             selected_head: head.id,

@@ -1,5 +1,15 @@
 # Threat model; client integrity & enforcement boundaries
 
+Chat V2 history discovery can reveal IDs and the scanned ordinal range of a
+current member's outbox to a peer with an explicitly approved signed contact
+and the current channel exporter. The native Source binds contact Admission
+and original connection into admission and revocation. The service reads one
+paid window and excludes other channels, Admissions and Held originals.
+Replies authenticate only that request and offer no proof of global absence,
+authorization to write, or remote custody. The receiver verifies signed
+originals and dependencies before selecting an archive write.
+[Discovery contract](communication-recovery/CHAT-V2-ORDINARY-MEMBER-PATH.md#discovering-missed-originals-from-a-joined-member).
+
 16 November Score/voice integration candidate: this branch combines the reviewed
 Score and voice admission history with the newer Chat/security and Studio save
 baseline. The entries below retain each branch's evidence; they do not establish

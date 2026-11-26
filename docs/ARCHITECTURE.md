@@ -1,5 +1,10 @@
 # Mewtual; Architecture
 
+The disabled Chat V2 joined source can discover missed IDs one bounded page
+at a time on an approved member's existing native connection. Discovery uses
+the peer's selected outbox and leaves fetching and admission to the existing
+exact-original path. [Ordinary member path](communication-recovery/CHAT-V2-ORDINARY-MEMBER-PATH.md#discovering-missed-originals-from-a-joined-member).
+
 16 November Score/voice integration candidate: this branch combines the reviewed
 Score and voice admission history with the newer Chat/security and Studio save
 baseline. The entries below retain each branch's evidence; they do not establish

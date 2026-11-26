@@ -29,11 +29,13 @@ activation still returns `UNAVAILABLE`.
 1. Resolve the mounted joined-source failures and validate the original Welcome,
    founder restart and exact debt checkpoint through both hosted platforms.
    Preserve current authority checks and deadlines.
-2. Connect catch-up for entirely missed actions to the shared history and
-   admin audit. Extend the founder-offline test to cover independent activity
-   during disconnection and recovery on reconnection. The mounted Windows
-   test already covers connected Edit and Delete delivery and both member
-   restarts. See [founder-offline evidence](CHAT-FILES-VOICE-ACCEPTANCE.md#founder-offline-history-across-joined-restarts-26-november-2026).
+2. Schedule missed-action recovery automatically and refresh the shared view
+   from the verified archive. The explicit mounted recovery test discovers
+   and archives missed Create, Edit and Delete actions from an approved
+   connected author. Extend it to independent activity in both directions,
+   cross-author dependencies, relay through another member, and restarts
+   during recovery. Keep original records available to the authorized admin
+   audit. [Missed-history evidence](CHAT-FILES-VOICE-ACCEPTANCE.md#recovery-of-missed-own-outbox-originals-26-november-2026).
 3. Complete cold governing work and Leave/rejoin. Preserve verified history and
    keep unproven late actions from removed members out of the ordinary view
    while retaining them for authorized review.

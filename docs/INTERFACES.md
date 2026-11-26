@@ -1,5 +1,11 @@
 # Mewtual; Interfaces & Hooks Schema
 
+Chat V2 history discovery uses the existing connected dependency class with
+its own authenticated page format. The joined-source methods prepare a page
+request, open its exact response, and fetch an offered ID on the same lease.
+Pages expose at most eight IDs and keep a fixed provider-local end per sweep.
+There is no new renderer command. [Request and cursor contract](communication-recovery/CHAT-V2-ORDINARY-MEMBER-PATH.md#discovering-missed-originals-from-a-joined-member).
+
 16 November Score/voice integration candidate: this branch combines the reviewed
 Score and voice admission history with the newer Chat/security and Studio save
 baseline. The entries below retain each branch's evidence; they do not establish

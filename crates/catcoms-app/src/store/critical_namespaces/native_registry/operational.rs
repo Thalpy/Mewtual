@@ -41,6 +41,7 @@ pub use sources::{
     NativeTextJoinedDependencyProvider, NativeTextJoinedDependencyResponse,
     NativeTextJoinedExchange, NativeTextJoinedGoverningExchange, NativeTextJoinedGoverningIncoming,
     NativeTextJoinedGoverningProvider, NativeTextJoinedGoverningResponse,
+    NativeTextJoinedHistoryExchange, NativeTextJoinedHistoryPage, NativeTextJoinedHistoryResponse,
     NativeTextJoinedInstallation, NativeTextJoinedMemberFinalPreparation,
     NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberLedger,
     NativeTextJoinedMemberProjection, NativeTextJoinedMemberPublication,

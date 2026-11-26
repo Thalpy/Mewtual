@@ -13,13 +13,13 @@ use catcoms_net::{
 };
 use catcoms_rt::TransportError;
 use catcoms_sync::owner_v2::{
-    PreparedV2MemberDependencyRequest, V2MemberDependencyRoute, V2MemberPublicationObservation,
-    MAX_V2_DEPENDENCY_REPLY_BYTES,
+    OpenedV2MemberHistoryRequest, PreparedV2MemberDependencyRequest, V2MemberDependencyRoute,
+    V2MemberPublicationObservation, MAX_V2_DEPENDENCY_REPLY_BYTES,
 };
 use join_tcp::DependencyCaptureRefusal;
 
 // Overlapping network buffers, nested sealed original and role-specific AEAD scratch.
-const REPLY_FEE: usize = OPEN_FEE + 5 * MAX_V2_DEPENDENCY_REPLY_BYTES + 16 * 1024;
+pub(super) const REPLY_FEE: usize = OPEN_FEE + 5 * MAX_V2_DEPENDENCY_REPLY_BYTES + 16 * 1024;
 const MAX_FRAME_DEPENDENCY_DEPTH: u8 = 4;
 
 /// One fixed ActionId and original live route, ready outside the metadata slot.
@@ -30,6 +30,7 @@ pub struct NativeTextJoinedDependencyExchange {
     route: V2MemberDependencyRoute,
     request: PreparedV2MemberDependencyRequest,
     frame_depth: Option<u8>,
+    approved_author: Option<OwnerBodyId>,
     signal: RequestCancellation,
     invocation: watch::Sender<bool>,
 }
@@ -44,6 +45,7 @@ pub struct NativeTextJoinedDependencyResponse {
     request: PreparedV2MemberDependencyRequest,
     observation: NativeChatMemberDependencyObservation,
     frame_depth: Option<u8>,
+    approved_author: Option<OwnerBodyId>,
     signal: RequestCancellation,
     invocation: watch::Sender<bool>,
 }
@@ -100,6 +102,7 @@ impl NativeTextJoinedDependencyExchange {
             request: self.request,
             observation,
             frame_depth: self.frame_depth,
+            approved_author: self.approved_author,
             signal: self.signal,
             invocation: self.invocation,
         })
@@ -175,7 +178,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             exchange,
             selection,
             (channel, action),
-            (None, None),
+            (None, None, None),
             caller,
             rng,
         )
@@ -216,18 +219,22 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             exchange.ok_or(Refusal::Unavailable)?,
             selection,
             (spec.realm.channel(), action),
-            (Some(depth), parent),
+            (Some(depth), parent, None),
             caller,
             rng,
         )
     }
 
-    fn prepare_dependency_on(
+    pub(super) fn prepare_dependency_on(
         self,
         exchange: NativeChatMemberDependencyExchange,
         selection: &NativeTextJoinedRowSelection,
         (channel, action): (u128, ActionId),
-        (frame_depth, parent): (Option<u8>, Option<&RequestCancellation>),
+        (frame_depth, parent, approved_author): (
+            Option<u8>,
+            Option<&RequestCancellation>,
+            Option<OwnerBodyId>,
+        ),
         caller: RequestCancellation,
         rng: &mut impl CryptoRngCore,
     ) -> Result<NativeTextJoinedDependencyExchange, V2MemberSaveRefusal> {
@@ -279,6 +286,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             route,
             request,
             frame_depth,
+            approved_author,
             signal,
             invocation,
         })
@@ -313,6 +321,13 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                     &response.wire,
                 )
                 .map_err(|_| Refusal::Failed)?;
+            if response.approved_author.is_some_and(|author| {
+                opened.as_ref().is_some_and(|original| {
+                    original.admission_data().as_bytes() != author.as_bytes()
+                })
+            }) {
+                return Err(Refusal::Stale);
+            }
             let NativeTextJoinedDependencyResponse {
                 wire,
                 observation,
@@ -416,6 +431,10 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         use V2MemberSaveRefusal as Refusal;
         if !self.dependency_lane()?.owns_request(&request) {
             return Err(Refusal::Stale);
+        }
+        let (_, wire) = request.current_data().ok_or(Refusal::Cancelled)?;
+        if OpenedV2MemberHistoryRequest::recognizes(wire) {
+            return self.serve_history_request(selection, channel, request, caller, rng);
         }
         let waiting = request.cancellation_authority();
         let (reply, observed, auth, fee) =

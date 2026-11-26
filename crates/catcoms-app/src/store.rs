@@ -110,10 +110,12 @@ pub use critical_namespaces::{
     NativeTextJoinedDependencyExchange, NativeTextJoinedDependencyProvider,
     NativeTextJoinedDependencyResponse, NativeTextJoinedGoverningExchange,
     NativeTextJoinedGoverningIncoming, NativeTextJoinedGoverningProvider,
-    NativeTextJoinedGoverningResponse, NativeTextJoinedMemberIngressPreparation,
-    NativeTextJoinedMemberLedger, NativeTextJoinedMemberProjection,
-    NativeTextJoinedMemberPublication, NativeTextJoinedMemberPublicationReceipt,
-    NativeTextJoinedMemberReceiver, NativeTextJoinedReceivedOriginal, NativeTextJoinedReconnect,
+    NativeTextJoinedGoverningResponse, NativeTextJoinedHistoryExchange,
+    NativeTextJoinedHistoryPage, NativeTextJoinedHistoryResponse,
+    NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberLedger,
+    NativeTextJoinedMemberProjection, NativeTextJoinedMemberPublication,
+    NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
+    NativeTextJoinedReceivedOriginal, NativeTextJoinedReconnect,
     NativeTextJoinedSelectionPreparation,
 };
 pub use critical_namespaces::{

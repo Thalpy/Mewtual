@@ -25,8 +25,9 @@ use crate::owner_v2::{
     open_v2_member_envelope_data, seal_v2_member_envelope_data, v2_member_envelope_topic_data,
     JoinFactsSlot, JoinedFenceNode, MemberTransportFence, OpenedV2MemberDependencyRequest,
     PreparedV2MemberDependencyRequest, PreparedV2MemberSubmission, SelectedV2MemberEnvelope,
-    V2JoinedFenceAdmission, V2JoinedSourceFence, V2MemberDependencyRoute, V2MemberDraftInputs,
-    V2MemberEnvelopeScopeData, V2MemberPublicationObservation, V2MemberSignRefusal,
+    V2JoinedFenceAdmission, V2JoinedMemberHistoryAccess, V2JoinedSourceFence,
+    V2MemberDependencyRoute, V2MemberDraftInputs, V2MemberEnvelopeScopeData,
+    V2MemberPublicationObservation, V2MemberSignRefusal,
 };
 use catcoms_replication::chat::{
     join_bindings::SignedWelcomeBindingData,
@@ -699,6 +700,21 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
             recipient: self.admission.clone(),
             recipient_id: self.admission_id,
             observation,
+        })
+    }
+
+    pub fn member_history_access(
+        &self,
+        prefix: &PreparedV2JoinedPrefix,
+        channel: u128,
+    ) -> Result<V2JoinedMemberHistoryAccess<'_>, SyncError> {
+        let scope =
+            V2MemberEnvelopeScopeData::for_selected_prefix(self.member_prefix(prefix)?, channel)?;
+        Ok(V2JoinedMemberHistoryAccess {
+            group: &self.node.group,
+            device: &self.node.device,
+            scope,
+            local: self.local_peer_data(),
         })
     }
 

@@ -1,5 +1,25 @@
 # Chat, files and voice implementation evidence
 
+## Recovery of missed own-outbox originals (26 November 2026)
+
+The Windows mounted test on `93caf758` used real loopback TCP between two
+joined members after the founder retired. The sender saved the exact Create,
+Edit and Delete before connectivity. The receiver had no subscription or IDs
+for those actions. A one-sided contact approval received no page. With both
+contacts approved, the receiver learned the ordered IDs, fetched the matching
+signed envelopes and durably archived them. Reopening the sender recovered all
+three exact saved requests. Reopening the recipient verified all three archive
+IDs and the deletion. Reapproving a replaced contact left the earlier page
+revoked on the same lease.
+
+The focused Windows App run passed 13 tests. The two wire tests exercised
+frozen ends, filtered pages, bounds, exact request binding and wrong routes.
+The compiled App inventory contained 384 ordinary native-registry tests,
+including 108 in operational sources. The exact-count script, formatting and
+both static repository gates passed. Hosted validation is pending. Automatic
+worker scheduling, cross-author dependency recovery, archive relaying and
+physical testing remain open.
+
 ## Founder-offline history across joined restarts (26 November 2026)
 
 The focused Windows run of the mounted regression in `01f74681` passed.

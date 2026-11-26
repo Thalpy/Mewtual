@@ -30,6 +30,7 @@ use super::data::{
     canonical_member_parents, MemberOutboxContextData, MemberOutboxContextId, MemberReceiptData,
     MemberRequestData, MemberRequestToken, MemberSignedOriginal,
 };
+use super::engine::history::{MemberHistoryPage, MEMBER_OUTBOX_HISTORY_FEE};
 use super::engine::{
     MemberDebtBatch, MemberLookup, MemberOutbox, MemberOutboxError, MemberOutboxOpen,
     MemberOutboxParentDirectory, MemberOutboxQuota, MemberOutboxRefusal, MemberOutboxRegistry,
@@ -403,6 +404,34 @@ impl MemberOutboxMount {
             }
         })
         .map(Option::flatten)
+    }
+
+    /// Serve hints only from an already installed clean owner. Remote reads
+    /// cannot initialize an outbox, finish an interrupted write, or take over
+    /// a local save. The same physical selection is required after the read.
+    pub(in crate::store) fn read_selected_history_page(
+        &self,
+        store: &ServerStore,
+        context: MemberOutboxContextId,
+        key: &[u8; 32],
+        range: (u64, Option<u64>),
+        maximum: usize,
+    ) -> Result<MemberHistoryPage, MemberOutboxError> {
+        self.require_live(store)?;
+        let cell = self
+            .existing_cell(context)?
+            .ok_or(MemberOutboxRefusal::Busy)?;
+        let state = cell.try_lock()?.ok_or(MemberOutboxRefusal::Busy)?;
+        let owner = state.owner.as_ref().ok_or(MemberOutboxRefusal::Busy)?;
+        if owner.context_id() != context {
+            return Err(MemberOutboxRefusal::Foreign.into());
+        }
+        let payment = self
+            .pay(MEMBER_OUTBOX_HISTORY_FEE)
+            .map_err(|_| MemberOutboxRefusal::Payment)?;
+        let page = owner.history_page(key, range.0, range.1, maximum, payment)?;
+        self.require_live(store)?;
+        Ok(page)
     }
 
     pub(in crate::store) fn read_publication_debt(
