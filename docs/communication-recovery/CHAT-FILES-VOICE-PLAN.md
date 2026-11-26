@@ -1,10 +1,9 @@
 # Chat file sharing and voice reliability plan
 
-Updated 20 November 2026. All remaining integration PRs, including the previously
-draft three-peer reproduction #73, are merged into `main` at `0685a6b6`.
-The implementation is substantial but Chat V2 is **incomplete and disabled**.
-Merging the backlog does not establish working multi-member chat or acceptance.
-See [the merged inventory and CI status](PR-BACKLOG-INTEGRATION.md) and
+Updated 26 November 2026 against `main` at `95763d15`, which includes
+the invitation and joined-member stack from PR #143. Chat V2 remains **disabled
+pending acceptance**. The [merged inventory](PR-BACKLOG-INTEGRATION.md) records
+the earlier integration backlog. See
 [the source-pinned evidence ledger](CHAT-FILES-VOICE-ACCEPTANCE.md).
 
 This document is the current completion overview followed by the original
@@ -15,50 +14,39 @@ documents apply to their named source, not automatically to current `main`.
 
 | Area | Implementation and evidence | Still required |
 | --- | --- | --- |
-| Native foundations | Typed protocol/storage boundaries, source/key custody, accounting, signed binding codecs and recovery primitives. | Production consumers and end-to-end acceptance of the combined system. |
-| Warm native local messages | Real App group creation, native saves, own-saved-original reader, sealed exact-intent retry journal and warm session restoration. | Shared message delivery and projection. The UI currently promises only **messages saved on this device**. |
-| Invitations | The warm native branch covers KeyAttempt and Raw, builds a verified packet with zero certified contacts, and inspects the authenticated journal. The focused Linux and Windows workflows passed on `3d3bce63`. | Native invitation command, certified contacts, usable publication, a cold operational caller and broader retention. |
-| MLS Add and join | Real SDK candidate and ownership handoff. Hosted CI at `3d3bce63` covers the retained V2 request, exact response framing and private Welcome processing with test Host selection. | Root-covered transaction, current native Source4 admission, durable installation, Welcome release and joined native/transport consumers. |
-| Shared chat | Original-operation and recovery machinery at library boundaries. | Real V2 transport/delivery loop, catch-up, shared projection, edits/deletes and authorized audit through the production path. |
-| Restart and membership | Durable data readers, recovery formats and warm continuity. | Scalable governing history/pins, cold operational authoring restore, usable durable Leave/Retired/rejoin and joined cold reconstruction. |
+| Invitations and joining | The desktop saves a signed invite, retains the original JoinRequest and mounts a joined row after the founder covers the MLS Add and Welcome. The node contacts an explicitly approved address. Joined startup replays the pinned governing chain and restores authoring. | Cold founder invite creation, certified contacts and crash recovery during an incomplete governing transaction. |
+| Shared chat | Founder and joined rows submit ordinary signed actions without per-message founder certification. Native receivers project and archive verified originals, resolve known dependencies and route replies, edits and deletes through the desktop. | Catch-up for actions a peer never saw, durable handling of unresolved archive writes, migration of populated vaults, and an authorized audit view for original revisions and deletions. |
+| Restart and membership | A reopened founder can restore a covered Add and its original listener. Later Add and Remove use signed governing records. The named evicted member retires its composer and preserves its old receipt context. | New founder authoring before the first Add on a cold reopen, further cold governing writes, durable Leave and rejoin, and replay across removed admissions. |
+| Scale and acceptance | The mounted fixture exercises founder-offline delivery between joined members over TCP. PR #143's focused desktop checks passed on Linux and Windows. Its broader joined-source lane found two transport timeouts. | Green joined-source and end-to-end runs, 20–50-member partitions and epoch churn, independent desktop testing, and mixed-version rollout. |
 | Voice V2 | Bounded native/browser machinery and two-peer evidence; #73's unscripted three-peer reproduction and diagnostics are now merged. | Resolve its recorded positive-test failure, complete automatic admission/rounds, production audio/lifecycle, member relay and physical acceptance. |
 
-The native text switch is still `ENABLED = false`; voice activation still returns
-`UNAVAILABLE`. Warm restoration does not establish cold signer restoration.
-Studio, Score and file-recovery integrations support the broader programme but
-do not complete Chat V2 networking.
+The native text switch is still `ENABLED = false`. The existing received archive
+covers a single registered channel with a 2,048-record and 256 MiB limit. Voice
+activation still returns `UNAVAILABLE`.
 
 ### Remaining work in dependency order
 
-1. Establish current hosted evidence and fix actual failures on `main`. Preserve
-   the three-peer reproduction's positive assertions, original deadlines and
-   bounded diagnostics. Its last recorded original-branch result failed in
-   60.67 seconds; current combined-source execution remains pending.
-2. Complete invitation issuance and the covered real MLS Add/join transaction,
-   including installation, Welcome release and native joined-source consumers.
-   Follow [invite issuance](CHAT-V2-INVITE-ISSUER.md),
-   [production join](CHAT-V2-PRODUCTION-JOIN.md),
-   [the founder continuation](CHAT-V2-FOUNDER-GOVERNED-RUNTIME.md) and
-   [Add ownership](CHAT-V2-ADD-OWNERSHIP.md).
-3. Connect original delivery/catch-up to the shared projection and edit/delete
-   audit. Prove the minimum functional scenario: A admits B and C, A stops,
-   B saves once, C receives the same signed original over permitted real
-   transport, and B/C recover history including edits/deletes after restart.
-   No per-message founder certification or test-only save may substitute.
-4. Finish durable governing history, cold authoring recovery and Leave/rejoin,
-   then run the 20–50-member, epoch/removal, partition, restart, load,
-   compatibility and missing/corrupt-archive matrix. The one explicitly deferred
-   10,000-operation catch-up cost case remains due at final acceptance.
+1. Resolve the mounted joined-source failures and validate the original Welcome,
+   founder restart and exact debt checkpoint through both hosted platforms.
+   Preserve current authority checks and deadlines.
+2. Connect catch-up for entirely missed actions to the shared history and
+   admin audit. Extend the three-peer test to cover independent activity,
+   reconnection and recovery of edits and deletions across both member restarts.
+3. Complete cold governing work and Leave/rejoin. Preserve verified history and
+   keep unproven late actions from removed members out of the ordinary view
+   while retaining them for authorized review.
+4. Run the 20–50-member, epoch/removal, partition, restart, load, compatibility
+   and missing/corrupt-archive matrix. Run the deferred 10,000-operation catch-up
+   cost case at final acceptance. Record exact source and test scope for each run.
 5. Complete voice's separate admission/round, audio/lifecycle and member-relay
    work, then combined and physical multi-device acceptance. Controlled RTC
    fixtures do not prove audible WebView/ICE behavior. Use
    [the multi-peer requirements](VOICE-MULTIPEER-ADMISSION-NEXT.md) and
    [the physical checklist](TWO-COMPUTER-ACCEPTANCE.md).
 
-No local build or test can run on the current machine. Formatting, syntax,
-source and whitespace checks are local evidence; hosted suites, strict lint,
-audits and physical checks retain their own gates. No completion percentage or
-activation approval is justified by the merged PR count.
+Contracts and known limits are maintained in
+[production join](CHAT-V2-PRODUCTION-JOIN.md) and the
+[ordinary member path](CHAT-V2-ORDINARY-MEMBER-PATH.md).
 
 ## Original programme design and acceptance criteria
 
