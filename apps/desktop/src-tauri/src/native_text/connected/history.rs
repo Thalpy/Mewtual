@@ -177,12 +177,18 @@ async fn turn(
             return None;
         }
         Err(V2MemberSaveRefusal::Busy) => return None,
-        Err(_) => {
+        Err(failure) => {
+            #[cfg(test)]
+            eprintln!("chat history worker could not prepare page: {failure:?}");
+            let _ = failure;
             sweep.rescan_after(RETRY_MS);
             return None;
         }
     };
-    let Ok(Ok(reply)) = tokio::time::timeout(REQUEST, exchange.receive()).await else {
+    let requested = tokio::time::timeout(REQUEST, exchange.receive()).await;
+    let Ok(Ok(reply)) = requested else {
+        #[cfg(test)]
+        eprintln!("chat history worker page request stopped: {requested:?}");
         // Retain the exact earlier cursor on refused or lost replies. Slow
         // peers still yield their turn after each bounded network wait.
         sweep.due = SystemClock.monotonic_ms().saturating_add(RETRY_MS);
@@ -194,12 +200,22 @@ async fn turn(
     .await?;
     match page {
         Ok(page) => {
+            #[cfg(test)]
+            eprintln!(
+                "chat history worker opened a page with {:?} entries",
+                page.data().map(|data| data.entries().len())
+            );
             sweep.page = Some(Arc::new(page));
             sweep.next_entry = 0;
             sweep.pages += 1;
         }
         Err(V2MemberSaveRefusal::Busy) => {}
-        Err(_) => sweep.rescan_after(RETRY_MS),
+        Err(failure) => {
+            #[cfg(test)]
+            eprintln!("chat history worker refused page: {failure:?}");
+            let _ = failure;
+            sweep.rescan_after(RETRY_MS);
+        }
     }
     Some(())
 }
@@ -232,9 +248,17 @@ async fn fetch_entry(
         Ok(Fetch::Covered) => return Some(true),
         Ok(Fetch::Request(exchange)) => exchange,
         Err(V2MemberSaveRefusal::Busy) => return None,
-        Err(_) => return Some(false),
+        Err(failure) => {
+            #[cfg(test)]
+            eprintln!("chat history worker could not prepare exact fetch: {failure:?}");
+            let _ = failure;
+            return Some(false);
+        }
     };
-    let Ok(Ok(reply)) = tokio::time::timeout(REQUEST, exchange.receive()).await else {
+    let requested = tokio::time::timeout(REQUEST, exchange.receive()).await;
+    let Ok(Ok(reply)) = requested else {
+        #[cfg(test)]
+        eprintln!("chat history worker exact request stopped: {requested:?}");
         return Some(false);
     };
     let stage = with_row(state, source, move |original, row, _, scope| {
@@ -244,7 +268,15 @@ async fn fetch_entry(
     let replay = match stage {
         Ok(Some(stage)) => stage,
         Err(V2MemberSaveRefusal::Busy) => return None,
-        Ok(None) | Err(_) => return Some(false),
+        other => {
+            #[cfg(test)]
+            eprintln!(
+                "chat history worker could not stage exact original: {:?}",
+                other.as_ref().err()
+            );
+            let _ = other;
+            return Some(false);
+        }
     };
     *parked = Some(ParkedOriginal {
         action,
@@ -259,14 +291,29 @@ async fn resume_entry(
     source: &Arc<Source>,
     parked: &mut Option<ParkedOriginal>,
 ) -> Option<(bool, Option<ActionId>)> {
-    if SystemClock.monotonic_ms() >= parked.as_ref()?.deadline {
+    let remaining = parked
+        .as_ref()?
+        .deadline
+        .saturating_sub(SystemClock.monotonic_ms());
+    if remaining == 0 {
         *parked = None;
         return Some((false, None));
     }
     // Acquire both before moving the paid continuation. Contention must
     // preserve it while foreground history or signing uses this row.
-    let permit = source.member_work.try_background()?;
-    let (original, _) = source.capture_joined(state).await?;
+    let admitted = tokio::time::timeout(Duration::from_millis(remaining), async {
+        let permit = source.member_work.foreground(source.negative()).await?;
+        let (original, _) = source.capture_joined(state).await?;
+        Some((permit, original))
+    })
+    .await;
+    let (permit, original) = match admitted {
+        Ok(value) => value?,
+        Err(_) => {
+            *parked = None;
+            return Some((false, None));
+        }
+    };
     let mut work = parked.take()?;
     let source = source.clone();
     let processing = tauri::async_runtime::spawn_blocking(move || {
@@ -298,7 +345,15 @@ async fn resume_entry(
                     local.note_archive_change(action, target, true);
                     (true, Some(target))
                 }
-                _ => (false, Some(target)),
+                other => {
+                    #[cfg(test)]
+                    eprintln!(
+                        "chat history worker selection was incomplete: {:?}",
+                        other.as_ref().err()
+                    );
+                    let _ = other;
+                    (false, Some(target))
+                }
             };
         (work, Some(result))
     })
@@ -326,8 +381,12 @@ async fn with_row<T: Send + 'static>(
 ) -> Option<T> {
     // A blocking cut retains the original row, native permit, and fees until
     // the actual work leaves, even if lock drops the async observer earlier.
-    let permit = source.member_work.try_background()?;
-    let (original, row) = source.capture_joined(state).await?;
+    let permit = source.member_work.foreground(source.negative()).await?;
+    let Some((original, row)) = source.capture_joined(state).await else {
+        #[cfg(test)]
+        eprintln!("chat history worker could not capture its original row");
+        return None;
+    };
     let source = source.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _permit = permit;

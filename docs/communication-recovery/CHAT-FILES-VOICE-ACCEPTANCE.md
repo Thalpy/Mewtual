@@ -1,5 +1,22 @@
 # Chat, files and voice implementation evidence
 
+## Automatic received history on the desktop (26 November 2026)
+
+PR #147's Windows native rerun passed both focused cases. A real approved
+TCP request waited on the busy provider's original row permit. After its
+release, the same request returned the three offered actions. With the
+founder stopped and the recipient's live gossip receiver parked, the desktop
+worker selected the missed reply and deletion and emitted its ordinary
+renderer invalidations. A guarded read showed the reply and omitted the
+deleted parent. The archive-debt regression also passed.
+
+Earlier runs exposed a discard at the provider's local permit. The provider
+now waits with both its native row and original request cancellations active.
+An additional test-only observation guard serializes the final archive
+assertions for the hosted rerun. Root and native suite sign-off, cross-author
+recovery, and physical acceptance remain open.
+[Automatic history pull request](https://github.com/Thalpy/Mewtual/pull/147).
+
 ## Recovery of missed own-outbox originals (26 November 2026)
 
 The Windows mounted test on `93caf758` used real loopback TCP between two
