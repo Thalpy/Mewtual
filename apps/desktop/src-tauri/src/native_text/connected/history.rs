@@ -66,9 +66,6 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
             _ = SystemClock.sleep(TURN) => {}
         }
         let state = app.state::<AppState>();
-        if let Some(target) = reconcile_archive_change(&state, source, &mut pending_cursor).await {
-            source.notify_received(app, &state, Some(target)).await;
-        }
         if let Some((mut sweep, parked)) = replay.take() {
             let mut parked = Some(parked);
             if let Some((covered, notice)) = resume_entry(&state, source, &mut parked).await {
@@ -84,6 +81,9 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
             // One paid continuation per row. It holds no native permit
             // between turns and yields its peer as soon as replay settles.
             continue;
+        }
+        if let Some(target) = reconcile_archive_change(&state, source, &mut pending_cursor).await {
+            source.notify_received(app, &state, Some(target)).await;
         }
         let Some(candidates) = row.history_peer_candidates() else {
             continue;
@@ -337,7 +337,9 @@ async fn resume_entry(
         // Reserve before any write. Even a Stale result can mean the disk
         // selected the original and the remote route then retired.
         if local.reserve_archive_change(action, target).is_none() {
-            return (work, None);
+            // Yield this exact entry so the next turn can reconcile one of
+            // the existing debts and make room for the later sweep.
+            return (work, Some((false, None)));
         }
         let result =
             match original.select_discovered_archive(&work.replay, &scope, &mut OsCryptoRng) {

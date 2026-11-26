@@ -13,6 +13,15 @@ The native scheduler and hosted acceptance still need execution. The
 continuation fits the existing 64-action and 1 MiB staging ledger. Recovery
 of missing cross-author ancestors and longer chains remains open.
 
+## 26 November 2026 — Open saved received history with the conversation
+
+The normal text conversation view requests one received archive page.
+Navigation or a connection reset queues the current conversation until
+existing chat work retires. Additional pages remain explicit. A guarded
+deletion clears older live bodies even if a later body is busy, and a blocked
+page preserves its previous cursor. All 3,947 frontend tests passed.
+Chat V2 remains disabled. [Navigation pull request](https://github.com/Thalpy/Mewtual/pull/148).
+
 ## 26 November 2026 — Automatic history recovery checkpoint
 
 Joined desktop rows now schedule bounded automatic discovery and archive
@@ -23,15 +32,15 @@ and reconciles selected records even after a peer disconnects. Mounted joined
 mutations enter the semantic ledger before disk selection without gaining a
 live effect.
 
-The Windows focused App cohort passed 12 tests before the final staging changes.
-The renderer suite passed 3,942 tests with a regression for an older reply
-arriving after invalidation. The desktop test parks C's live receiver while it
-recovers B's original reply and deletion over real TCP. Its execution and the
-final Rust gates are separate from those earlier local results.
+The focused Windows native suite passed two tests. The mounted provider
+retained an approved request while its row was busy, and the desktop
+recovered an original reply and deletion before live gossip ran. The final
+hosted and physical gates remain open.
+[Native acceptance](communication-recovery/CHAT-FILES-VOICE-ACCEPTANCE.md#automatic-received-history-on-the-desktop-26-november-2026).
 
-The text switch remains off. Deep dependency chains, retry with no reachable
-approved author, normal archive paging after navigation, cross-author and relay
-recovery, cold governing work, audit and wider acceptance remain open.
+The text switch remains off. Retry with no reachable approved author,
+cross-author and relay recovery, cold governing work, audit and wider
+acceptance remain open.
 [Ordinary member path](communication-recovery/CHAT-V2-ORDINARY-MEMBER-PATH.md#discovering-missed-originals-from-a-joined-member).
 
 ## 26 November 2026 — Connected history discovery

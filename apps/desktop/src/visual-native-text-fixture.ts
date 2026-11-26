@@ -1,12 +1,17 @@
-import type { NativeOriginal, NativeOwnRevision } from "./native-text-history.ts";
+import type { NativeOriginal, NativeOwnRevision, NativeReceived } from "./native-text-history.ts";
 
 /** Development-only IPC data for the actual Native Text App route. This models
- * local saves, never shared history or peer delivery. A new fixture owns a
+ * local saves and a recovered projection. A new fixture owns a
  * fresh journal and rows so browser interactions cannot affect another tab. */
 export function createVisualNativeTextFixture(empty = false) {
   const context = "a1".repeat(32);
   const server = { backend: "text-v2", server: 1, context, channel: "1", name: "Lantern Room", display_name: "Rowan", is_dm: false };
   const servers = empty ? [] : [server];
+  const archived: NativeReceived | null = empty ? null : {
+    action: "d3".repeat(32),
+    text: "A message recovered after reconnecting.",
+    certainty: "provisional",
+  };
   const rows: NativeOriginal[] = empty ? [] : [
     { ordinal: "0", action: "b1".repeat(32), signer: "c1".repeat(32), channel: "1", presented_ms: "1787227200000", status: "pending",
       body: { kind: "create", text: "A message saved on this device.", reply_to: null } },
@@ -35,6 +40,16 @@ export function createVisualNativeTextFixture(empty = false) {
       if (command === "get_message_page") {
         if (typeof args.ownAction === "string") {
           return result({ backend: "text-v2", scope: "own-message-revision", action: args.ownAction, scanning: false, item: revisions.get(args.ownAction) ?? null });
+        }
+        if ("archiveAfter" in args) {
+          if (args.limit !== 8 || (args.archiveAfter !== null && args.archiveAfter !== archived?.action)) {
+            throw new Error("Invalid Native Text fixture archive cursor");
+          }
+          const ids = args.archiveAfter === null && archived ? [archived.action] : [];
+          return result({ backend: "text-v2", scope: "received-archive-index", available: true, ids, more: false });
+        }
+        if ("archivedAction" in args) {
+          return result({ backend: "text-v2", scope: "received-archive", item: archived?.action === args.archivedAction ? archived : null });
         }
         const start = Number(args.start), end = args.endExclusive === null ? rows.length : Number(args.endExclusive);
         const next = Math.min(end, start + Number(args.limit));

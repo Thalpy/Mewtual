@@ -12,6 +12,7 @@
   } = $props();
   const ownRows = $derived(rows.filter(row => row.body.kind === "create"));
   const shownOwn = $derived(ownRows.filter(row => !own[row.action] || own[row.action].scanning || own[row.action].item));
+  const shownArchive = $derived(archive && (archive.items.length || archive.loading || archive.note || archive.more) ? archive : null);
   const replyText = $derived((replyTo && own[replyTo]?.item?.text)
     || received.find(row => row.action === replyTo)?.text || archive?.items.find(row => row.action === replyTo)?.text);
   let changeTarget = $state<{ action: string; revision: string; editing: boolean } | null>(null);
@@ -47,7 +48,7 @@
     {#if failure}<p role="status">{failure}</p>
     {:else if (loading || !loaded) && !shownOwn.length}<p>Loading messages…</p>
     {:else if !shownOwn.length && more}<p>More history is available.</p>
-    {:else if !shownOwn.length && !received.length && !archive && loaded}<p>Nothing saved here yet.</p>{/if}
+    {:else if !shownOwn.length && !received.length && !shownArchive && loaded}<p>Nothing saved here yet.</p>{/if}
     {#each shownOwn as row (row.action)}
       {@const view = own[row.action]?.item}
       <article>
@@ -76,18 +77,17 @@
         {/if}
       </article>
     {/each}
-    {#if archive}
-      <section aria-label="Saved received messages" aria-busy={archive.loading}>
-        {#if archive.note}<p role="status">{archive.note}</p>{/if}
-        {#each archive.items.filter(item => !rows.some(row => row.action === item.action) && !received.some(row => row.action === item.action)) as item (item.action)}
+    {#if shownArchive}
+      <section aria-label="Saved received messages" aria-busy={shownArchive.loading}>
+        {#if shownArchive.note}<p role="status">{shownArchive.note}</p>{/if}
+        {#each shownArchive.items.filter(item => !rows.some(row => row.action === item.action) && !received.some(row => row.action === item.action)) as item (item.action)}
           <article>
             <small>{item.certainty === "provisional" ? "Saved received · Provisional" : "Saved received · Verified"}</small>
             <p>{item.text}</p>
             {#if reply}<button type="button" onclick={() => reply(item.action)} disabled={busy}>Reply</button>{/if}
           </article>
         {/each}
-        {#if !archive.items.length && !archive.loading && !archive.more && !archive.note}<p>No saved received messages in this view.</p>{/if}
-        {#if archive.more && readArchive}<button onclick={() => readArchive(true)} disabled={busy || archive.loading}>Load more received messages</button>{/if}
+        {#if shownArchive.more && readArchive}<button onclick={() => readArchive(true)} disabled={busy || shownArchive.loading}>Load more received messages</button>{/if}
       </section>
     {/if}
     {#each received.filter(item => !rows.some(row => row.action === item.action)) as item (item.action)}
