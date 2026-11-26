@@ -1,5 +1,21 @@
 # Mewtual; Handover
 
+## 26 November 2026 — Connected history discovery
+
+`93caf758` adds bounded discovery of missed action IDs from the own outbox of
+an explicitly approved joined member. The Windows mounted test saved a
+Create, Edit and Delete before the two members connected. With the founder
+retired, the recipient needed only the new page to learn the IDs. It fetched
+each exact signed original, selected its archive record and verified the
+deleted projection after reopening. The same run passed 13 focused App tests.
+Adversarial review found and the branch fixed approval revival on remap and
+acceptance of a different author's response. Hosted validation remains pending.
+
+Chat V2 stays disabled. Next work is automatic scheduling, guarded archive
+refresh in the desktop and safe progress when a dependency or peer is absent.
+History from archives held by other members and historical admissions need
+their own authorization and acceptance. [Ordinary member path](communication-recovery/CHAT-V2-ORDINARY-MEMBER-PATH.md#discovering-missed-originals-from-a-joined-member).
+
 ## 26 November 2026 — PR #143 merged, Chat V2 acceptance continues
 
 `main` at `95763d15` includes durable native invite and JoinRequest handling,
