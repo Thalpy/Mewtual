@@ -1286,14 +1286,15 @@ fn invite_command(
     reply
 }
 
-async fn membership_command_value(
+async fn command_value_after_busy(
     window: &tauri::WebviewWindow<MockRuntime>,
     queue: &Queue,
     command: &str,
+    busy: &str,
     input: serde_json::Value,
 ) -> serde_json::Value {
     // A transient admission refusal can precede scheduling or come from the
-    // worker. Every retry uses the same row, context and admission data.
+    // worker. Every retry uses the same original request data.
     let retry_until = SystemClock.monotonic_ms().saturating_add(5_000);
     loop {
         let reply = invite_command(window, command, input.clone());
@@ -1304,8 +1305,7 @@ async fn membership_command_value(
         match reply.await.unwrap() {
             tauri::ipc::InvokeResponse::Ok(body) => return body.deserialize().unwrap(),
             tauri::ipc::InvokeResponse::Err(error)
-                if error.0.as_str() == Some(membership::BUSY)
-                    && SystemClock.monotonic_ms() < retry_until =>
+                if error.0.as_str() == Some(busy) && SystemClock.monotonic_ms() < retry_until =>
             {
                 SystemClock.sleep(Duration::from_millis(25)).await;
             }
@@ -1355,9 +1355,14 @@ async fn native_text_membership_dispatch_uses_the_original_founder_row() {
             .unwrap(),
     );
     assert!(queue.lock().unwrap().is_empty());
-    let roster = invite_command(&main, "get_native_chat_members", request.clone());
-    run(&queue).await;
-    let roster = found_value(roster.await.unwrap());
+    let roster = command_value_after_busy(
+        &main,
+        &queue,
+        "get_native_chat_members",
+        membership::BUSY,
+        request.clone(),
+    )
+    .await;
     let [original] = roster["members"].as_array().unwrap().as_slice() else {
         panic!("selected genesis has one original founder");
     };
@@ -1397,9 +1402,15 @@ async fn native_text_membership_dispatch_uses_the_original_founder_row() {
     let exact = found_request(&window, 5, "Roster source");
     run(&cold_queue).await;
     assert_eq!(found_value(exact.await.unwrap()), found);
-    let restored = invite_command(&window, "get_native_chat_members", request.clone());
-    run(&cold_queue).await;
-    assert_eq!(found_value(restored.await.unwrap()), roster);
+    let restored = command_value_after_busy(
+        &window,
+        &cold_queue,
+        "get_native_chat_members",
+        membership::BUSY,
+        request.clone(),
+    )
+    .await;
+    assert_eq!(restored, roster);
     let resumed = resume_request(&window);
     run(&cold_queue).await;
     let resumed = found_value(resumed.await.unwrap());
@@ -1523,10 +1534,11 @@ async fn native_text_membership_selected_eviction_notifies_the_original_joined_r
         serde_json::json!({"server": found["server"], "context": found["context"], "removed": false}),
     );
 
-    let roster = membership_command_value(
+    let roster = command_value_after_busy(
         &main,
         &founder_queue,
         "get_native_chat_members",
+        membership::BUSY,
         serde_json::json!({"server": found["server"], "expectedContext": found["context"]}),
     )
     .await;
@@ -1542,10 +1554,11 @@ async fn native_text_membership_selected_eviction_notifies_the_original_joined_r
         let notice_data: serde_json::Value = serde_json::from_str(event.payload()).unwrap();
         let _ = notice.send(notice_data);
     });
-    let removal = membership_command_value(
+    let removal = command_value_after_busy(
         &main,
         &founder_queue,
         "remove_native_chat_member",
+        membership::BUSY,
         serde_json::json!({
             "server": found["server"], "expectedContext": found["context"],
             "expectedAdmission": admission["admission"],
@@ -1680,20 +1693,22 @@ async fn native_text_joined_dependency_provider_reopens_after_selected_add() {
     drop(release_transport);
     assert_eq!(holder.await.unwrap(), Some(()));
 
-    let contact = membership_command_value(
+    let contact = command_value_after_busy(
         &member_window,
         &member_queue,
         "share_native_chat_contact",
+        membership::BUSY,
         serde_json::json!({"server": joined["server"], "expectedContext": joined["context"]}),
     )
     .await;
     let raw = hex::decode(contact.as_str().unwrap()).unwrap();
     let signed = catcoms_sync::V2MemberContactData::decode(&raw).unwrap();
     let peer = PeerId::new(*blake3::hash(signed.address_data().0).as_bytes());
-    let connect = membership_command_value(
+    let connect = command_value_after_busy(
         &new_window,
         &new_queue,
         "connect_native_chat_contact",
+        membership::BUSY,
         serde_json::json!({"server": new_row["server"], "expectedContext": new_row["context"],
             "contact": contact, "approvedHost": "127.0.0.1"}),
     )
@@ -1706,20 +1721,28 @@ async fn native_text_joined_dependency_provider_reopens_after_selected_add() {
         .await
         .unwrap();
     drop(close);
-    let saved = native_send_request(&member_window, &joined, 91, "Parent after the Add");
-    run(&member_queue).await;
-    let saved = found_value(saved.await.unwrap());
+    let saved = command_value_after_busy(
+        &member_window,
+        &member_queue,
+        "send_message",
+        sending::BUSY,
+        serde_json::json!({"server": joined["server"], "channel": joined["channel"],
+            "expectedContext": joined["context"], "retryToken": hex::encode([91; 32]),
+            "text": "Parent after the Add", "replyTo": null}),
+    )
+    .await;
     assert_eq!(saved["disposition"], "saved-local");
     let parent = saved["message_id"].as_str().unwrap();
-    let reply = invite_command(
+    let reply = command_value_after_busy(
         &member_window,
+        &member_queue,
         "send_message",
+        sending::BUSY,
         serde_json::json!({"server": joined["server"], "channel": joined["channel"],
             "expectedContext": joined["context"], "retryToken": hex::encode([92; 32]),
             "text": "Reply after the Add", "replyTo": parent}),
-    );
-    run(&member_queue).await;
-    let reply = found_value(reply.await.unwrap());
+    )
+    .await;
     assert_eq!(reply["disposition"], "saved-local");
     let missing = invite_command(
         &new_window,

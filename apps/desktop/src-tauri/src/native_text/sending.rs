@@ -42,7 +42,7 @@ impl SaveJob {
         }
     }
 }
-const BUSY: &str = "Chat is busy. Retry with the same message.";
+pub(super) const BUSY: &str = "Chat is busy. Retry with the same message.";
 const STALE: &str = "The chat session changed. Retry with the same message.";
 const TEXT_LIMIT: usize = 8 * 1024;
 
