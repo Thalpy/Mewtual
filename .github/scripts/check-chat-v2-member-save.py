@@ -255,6 +255,27 @@ def local_source_packages(worktree: Path) -> tuple[str, ...]:
     return tuple(f"{name}@{version}" for name, version in sorted(ids))
 
 
+def locked_source_identity(worktree: Path) -> dict[str, str]:
+    """Verify and record the source commit and its own committed Cargo lock."""
+    from hashlib import sha256
+
+    if git("status", "--porcelain", "--", "Cargo.lock", cwd=worktree):
+        raise RuntimeError("expected a committed dependency lock")
+    local_source_packages(worktree)
+    return {"source": git("rev-parse", "HEAD", cwd=worktree),
+            "lock_sha256": sha256((worktree / "Cargo.lock").read_bytes()).hexdigest()}
+
+
+def isolated_build_targets(head: Path, old: Path) -> tuple[dict[str, str], dict[str, str]]:
+    """Separate the source builds, including Cargo's intermediate build directory."""
+    current = Path(os.environ.get("CARGO_TARGET_DIR", str(head / "target"))).resolve()
+    old = old.resolve()
+    if old.is_relative_to(current) or current.is_relative_to(old):
+        raise RuntimeError("predecessor builds must use disjoint Cargo targets")
+    return tuple({"CARGO_TARGET_DIR": str(path), "CARGO_BUILD_BUILD_DIR": str(path)}
+                 for path in (current, old))
+
+
 def source_clean_command(worktree: Path, env: dict) -> list[str]:
     """Build a package-only command; never permit Cargo's unscoped target clean."""
     target = Path(env.get("CARGO_TARGET_DIR", str(REPO / "target")))

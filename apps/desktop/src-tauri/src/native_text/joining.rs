@@ -83,6 +83,13 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
         match result {
             Ok((selection, parked)) => {
                 if publish(&state, &invocation, selection.clone(), permit, resolver).await {
+                    #[cfg(test)]
+                    {
+                        let edge = state.native_text.join_startup_edge.lock().unwrap().clone();
+                        if let Some(edge) = edge {
+                            edge.wait_once().await;
+                        }
+                    }
                     connected::start_current(
                         &app,
                         &state,

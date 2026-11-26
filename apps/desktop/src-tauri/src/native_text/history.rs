@@ -681,8 +681,21 @@ async fn execute(state: &AppState, call: &Invocation, read: OwnRead) -> Result<O
         .foreground(call.scope.clone())
         .await
         .ok_or(STALE)?;
+    let preparation = capture(state, call).await?;
+    #[cfg(test)]
+    {
+        let edge = state
+            .native_text
+            .history_capture_edge
+            .lock()
+            .unwrap()
+            .clone();
+        if let Some(edge) = edge {
+            edge.wait_once().await;
+        }
+    }
     let work = Work {
-        preparation: capture(state, call).await?,
+        preparation,
         scope: call.scope.clone(),
         read,
         channel: call.read.channel,

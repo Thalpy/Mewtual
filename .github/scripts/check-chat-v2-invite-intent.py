@@ -99,13 +99,15 @@ def fenced_predecessor(guard: dict, directory: Path) -> None:
     results = []
 
     def execute(name: str, selector: str, count: int, cwd: Path, env: dict) -> None:
+        identity = guard["locked_source_identity"](cwd)
         code, summaries, timed_out, _ = guard["run_logged"](
             name, ["cargo", "test", "--locked", "-p", "catcoms-app", "--lib", selector,
                    "--", "--test-threads=1"], directory, cwd=cwd, env=env,
             limit=guard["PREDECESSOR_TIMEOUT_SECONDS"],
         )
-        results.append({"name": name, "source": git("rev-parse", "HEAD", cwd=cwd),
-                        "exit": code, "timed_out": timed_out})
+        results.append({"name": name, **identity, "exit": code, "timed_out": timed_out})
+        if guard["locked_source_identity"](cwd) != identity:
+            raise RuntimeError(f"{name} changed source or dependency lock during execution")
         if timed_out:
             raise RuntimeError(f"{name} exceeded its hosted compile/execution bound")
         guard["validate"]("".join(summaries), code, count)
@@ -114,9 +116,9 @@ def fenced_predecessor(guard: dict, directory: Path) -> None:
         with tempfile.TemporaryDirectory(prefix="a2-", dir=os.environ.get("RUNNER_TEMP")) as temp:
             original = Path(temp).resolve()
             fixture = original / "fence.bin"
-            env = dict(os.environ, MEWTUAL_GOVERNED_ADD_FENCE_FIXTURE=str(fixture),
-                       CARGO_TARGET_DIR=os.environ.get("CARGO_TARGET_DIR", str(REPO / "target")))
-            execute("add-fence-fixture", FENCE_CASE, 1, REPO, env)
+            head_target, old_target = guard["isolated_build_targets"](REPO, original / "t")
+            env = dict(os.environ, MEWTUAL_GOVERNED_ADD_FENCE_FIXTURE=str(fixture))
+            execute("add-fence-fixture", FENCE_CASE, 1, REPO, dict(env, **head_target))
             if not fixture.is_file() or fixture.is_symlink() or not 40 < fixture.stat().st_size <= 512:
                 raise RuntimeError("missing or invalid head-generated Add fence")
             exact = fixture.read_bytes()
@@ -138,8 +140,6 @@ def fenced_predecessor(guard: dict, directory: Path) -> None:
                 if (git("rev-parse", "HEAD", cwd=old) != FENCE_PREDECESSOR
                         or git("status", "--porcelain", "--untracked-files=all", cwd=old)):
                     raise RuntimeError("expected the pristine pinned predecessor")
-                if (old / "Cargo.lock").read_bytes() != (REPO / "Cargo.lock").read_bytes():
-                    raise RuntimeError("predecessor and head dependency locks differ")
                 harnesses = {FENCE_CONTROL: "governed_add_fence_control.rs"}
                 if sys.platform == "win32":
                     harnesses[FENCE_MEMBER] = "governed_add_fence_owner.rs"
@@ -159,17 +159,14 @@ def fenced_predecessor(guard: dict, directory: Path) -> None:
                         raise RuntimeError("predecessor changed beyond its appended test harnesses")
 
                 require_harness_only()
-                guard["clean_source"]("add-fence-clean-old", old, env, directory, results)
-                execute("add-fence-predecessor", "governed_add_old_reader_", len(harnesses), old, env)
+                # Each source builds with its committed lock and an isolated target.
+                execute("add-fence-predecessor", "governed_add_old_reader_", len(harnesses), old,
+                        dict(env, **old_target))
                 require_harness_only()
                 if fixture.read_bytes() != exact:
                     raise RuntimeError("predecessor changed the head-generated fixture")
             finally:
-                guard["retire_old_source"](
-                    remove_old,
-                    lambda: guard["clean_source"]("add-fence-clean-head", REPO, env, directory, results),
-                    results, sys.exception(),
-                )
+                remove_old()
     finally:
         (directory / "add-fence-predecessor.json").write_text(
             json.dumps(results, indent=2) + "\n", encoding="utf-8",

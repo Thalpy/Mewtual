@@ -308,8 +308,24 @@ async fn start_dependencies<R: tauri::Runtime>(
     state: &AppState,
     source: Arc<Source>,
 ) {
-    let Some((original, row)) = source.capture_joined(state).await else {
-        return;
+    let mut startup_scope = source.negative();
+    let (original, row) = loop {
+        let Some((original, row)) = source.capture_joined(state).await else {
+            return;
+        };
+        if !original.is_capture_busy_cached() {
+            break (original, row);
+        }
+        // The first history read can hold the metadata slot after Join
+        // replies. Recapture the same row and vault after that work drains.
+        drop((original, row));
+        #[cfg(test)]
+        state.native_text.join_startup_busy.notify_one();
+        tokio::select! {
+            biased;
+            _ = startup_scope.cancelled() => return,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {},
+        }
     };
     let payment = source.clone();
     let Ok(Ok(provider)) = tauri::async_runtime::spawn_blocking(move || {

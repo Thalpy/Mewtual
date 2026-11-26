@@ -45,6 +45,12 @@ pub(super) struct Registry {
     listing_drop_watch: StdMutex<Option<Arc<listing::DropWatch>>>,
     #[cfg(test)]
     history_drop_watch: StdMutex<Option<Arc<history::DropWatch>>>,
+    #[cfg(test)]
+    history_capture_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
+    #[cfg(test)]
+    join_startup_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
+    #[cfg(test)]
+    join_startup_busy: tokio::sync::Notify,
     pub(super) ui_state: ui_state::Controller,
     retirement: retirement::Coalescer,
     pub(super) preludes: Arc<retirement::Prelude>,
@@ -123,6 +129,12 @@ impl Default for Registry {
             listing_drop_watch: StdMutex::new(None),
             #[cfg(test)]
             history_drop_watch: StdMutex::new(None),
+            #[cfg(test)]
+            history_capture_edge: StdMutex::new(None),
+            #[cfg(test)]
+            join_startup_edge: StdMutex::new(None),
+            #[cfg(test)]
+            join_startup_busy: tokio::sync::Notify::new(),
             ui_state,
             retirement,
             preludes,

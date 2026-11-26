@@ -4,7 +4,6 @@ import json
 import os
 from pathlib import Path
 import runpy
-import sys
 import tempfile
 
 REPO = Path(__file__).resolve().parents[2]
@@ -42,6 +41,7 @@ def main() -> None:
     git = GUARD["git"]
 
     def execute(label: str, case: str, root: Path, env: dict, ignored: bool = False) -> None:
+        identity = GUARD["locked_source_identity"](root)
         arguments = ["--include-ignored"] if ignored else []
         command = ["cargo", "test", "--locked", "-p", "catcoms-app", "--lib", case,
                    "--", "--test-threads=1", *arguments]
@@ -49,8 +49,9 @@ def main() -> None:
             label, command, logs, cwd=root, env=env,
             limit=GUARD["PREDECESSOR_TIMEOUT_SECONDS"],
         )
-        results.append(dict(name=label, commit=git("rev-parse", "HEAD", cwd=root),
-                            exit=code, timed_out=timed_out))
+        results.append(dict(name=label, **identity, exit=code, timed_out=timed_out))
+        if GUARD["locked_source_identity"](root) != identity:
+            raise RuntimeError(f"{label} changed source or dependency lock during execution")
         if timed_out:
             raise RuntimeError(f"{label} exceeded its hosted execution bound")
         GUARD["validate"]("".join(summaries), code, 1)
@@ -59,9 +60,10 @@ def main() -> None:
         with tempfile.TemporaryDirectory(prefix="join6-", dir=os.environ.get("RUNNER_TEMP")) as temp:
             owned = Path(temp).resolve()
             fixtures, old = owned / "fixtures", owned / "p"
-            env = dict(os.environ, MEWTUAL_JOINED_PIN_FIXTURES=str(fixtures),
-                       CARGO_TARGET_DIR=os.environ.get("CARGO_TARGET_DIR", str(REPO / "target")))
-            execute("joined-pin-fixtures", "joined_pin_write_predecessor_fixtures", REPO, env, True)
+            env = dict(os.environ, MEWTUAL_JOINED_PIN_FIXTURES=str(fixtures))
+            head_target, old_target = GUARD["isolated_build_targets"](REPO, owned / "t")
+            head_env = dict(env, **head_target)
+            execute("joined-pin-fixtures", "joined_pin_write_predecessor_fixtures", REPO, head_env, True)
             before = inventory(fixtures)
             fetch = ["fetch", "--no-tags"]
             if git("rev-parse", "--is-shallow-repository") == "true":
@@ -80,8 +82,6 @@ def main() -> None:
                 if (git("rev-parse", "HEAD", cwd=old) != PREDECESSOR
                         or git("status", "--porcelain", "--untracked-files=all", cwd=old)):
                     raise RuntimeError("expected pristine pinned governed reader")
-                if (old / "Cargo.lock").read_bytes() != (REPO / "Cargo.lock").read_bytes():
-                    raise RuntimeError("predecessor and head dependency locks differ")
                 file = old / TARGET
                 exact = file.read_bytes() + b"\n" + HARNESS.read_bytes()
                 file.write_bytes(exact)
@@ -92,18 +92,14 @@ def main() -> None:
                         raise RuntimeError("predecessor changed beyond its appended test")
 
                 require_harness_only()
-                GUARD["clean_source"]("joined-pin-clean-old", old, env, logs, results)
-                execute("joined-pin-old", "joined_pin_predecessor_checks_control_and_refuses_both_new_states", old, env)
+                execute("joined-pin-old", "joined_pin_predecessor_checks_control_and_refuses_both_new_states",
+                        old, dict(env, **old_target))
                 require_harness_only()
                 if inventory(fixtures) != before:
                     raise RuntimeError("predecessor changed the head-created fixture tree")
             finally:
-                GUARD["retire_old_source"](
-                    remove_old,
-                    lambda: GUARD["clean_source"]("joined-pin-clean-head", REPO, env, logs, results),
-                    results, sys.exception(),
-                )
-            execute("joined-pin-round-trip", "joined_pin_verify_predecessor_fixtures", REPO, env, True)
+                remove_old()
+            execute("joined-pin-round-trip", "joined_pin_verify_predecessor_fixtures", REPO, head_env, True)
     finally:
         (logs / "joined-pin-predecessor.json").write_text(json.dumps(results, indent=2) + "\n", encoding="utf8")
 

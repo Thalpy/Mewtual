@@ -61,9 +61,16 @@ jobs:
           cargo test --locked -p catcoms-app --all-features --lib
           durable_chat::repair_effects_tests::automatic_repair_tracks_send_before_real_peer_receipt_without_frontend_retry
           -- --exact --nocapture --test-threads=1
-      - name: Test
-        # Collect the full workspace result even if the focused receipt regression fails.
+      - name: Mounted Chat V2 Join and Studio restart diagnostics
+        id: mounted_restart
         if: ${{ !cancelled() && (success() || steps.repair_receipt.outcome == 'failure') }}
+        run: >-
+          cargo test --locked -p catcoms-app --all-features --lib -- --nocapture --test-threads=1
+          mounted_join_request_
+          gate7_create_sound_score_restart_rotate_recover_export_through_actor_custody
+      - name: Test
+        # Keep the full workspace result after collecting independent failure output.
+        if: ${{ !cancelled() && (success() || steps.repair_receipt.outcome == 'failure' || steps.mounted_restart.outcome == 'failure') }}
         # The user deferred only this known slow cost case until final Chat V2
         # acceptance. With no positive filter, every other workspace test still
         # executes. This intermediate gate is not final unfiltered acceptance.

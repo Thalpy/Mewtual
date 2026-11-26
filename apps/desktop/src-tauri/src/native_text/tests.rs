@@ -1819,17 +1819,25 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
         vault.prepare_native_authentication(joiner_state.native_text.ui_budget.prepare().unwrap())
     };
     assert!(!occupied.is_capture_busy_cached());
+    let startup = AdmissionBarrier::new();
+    let history = AdmissionBarrier::new();
+    *joiner_state.native_text.join_startup_edge.lock().unwrap() = Some(startup.clone());
+    *joiner_state
+        .native_text
+        .history_capture_edge
+        .lock()
+        .unwrap() = Some(history.clone());
     let original = join("127.0.0.1", "Member");
-    tokio::time::timeout(Duration::from_secs(30), async {
+    let join_task = tokio::spawn(joiner_queue.lock().unwrap().pop().unwrap());
+    let initial_response = tokio::time::timeout(Duration::from_secs(30), async {
         let release = async {
             tokio::time::sleep(Duration::from_millis(100)).await;
             drop(occupied);
         };
-        tokio::join!(run(&joiner_queue), release);
+        tokio::join!(original, release).0.unwrap()
     })
     .await
     .expect("the native Join completes over the founder TCP actor");
-    let initial_response = original.await.unwrap();
     assert!(
         matches!(initial_response, tauri::ipc::InvokeResponse::Ok(_)),
         "initial native join after metadata capture release"
@@ -1839,6 +1847,34 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     assert_eq!(original["name"], "My joined group");
     assert_eq!(original["display_name"], "Member");
     assert_eq!(original["channel"], found["channel"]);
+    timeout(Duration::from_secs(5), startup.arrived.notified())
+        .await
+        .expect("Join published before starting the original row workers");
+    let first_history = native_history_request(&joiner_window, &original, "0", None, 8);
+    let history_task = tokio::spawn(joiner_queue.lock().unwrap().pop().unwrap());
+    timeout(Duration::from_secs(5), history.arrived.notified())
+        .await
+        .expect("first history read holds the original metadata slot");
+    startup.release.notify_one();
+    timeout(
+        Duration::from_secs(5),
+        joiner_state.native_text.join_startup_busy.notified(),
+    )
+    .await
+    .expect("startup observed the same metadata slot busy while history was paused");
+    history.release.notify_one();
+    timeout(Duration::from_secs(15), history_task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        found_value(first_history.await.unwrap())["items"],
+        serde_json::json!([])
+    );
+    timeout(Duration::from_secs(15), join_task)
+        .await
+        .expect("the original Join starts its workers after history drains")
+        .unwrap();
     let id = original["server"].as_u64().unwrap();
     let state = joiner.state::<AppState>();
     let instance = state

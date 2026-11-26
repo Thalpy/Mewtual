@@ -459,12 +459,19 @@ approves a numeric IP address for the founder. The native scheduler uses the
 signed port and peer identity, and the desktop publishes the closed joined node
 only after covering Welcome and selecting the registered row. The first invite
 profile carries no certified address, rendezvous, or switchboard routes.
+The first history page can take the mounted metadata slot as soon as Join
+replies. Joined worker startup retries that contention against the original
+row and stops when the row or session retires.
 
 Unknown/ambiguous remnants are preserved and refused, never cleared as debris.
 The `joined-predecessor` CI scope builds the pinned governed reader from
 `e0ff1033`. It must open the real governed control, refuse the staged and
 selected joined-pin cases without changing their files, and leave both cases
 available to the current joined-aware reader.
+The governed Add fence gate runs the current fixture producer and the pinned
+predecessor reader in separate Cargo targets with their own committed locks.
+The gate records both lock hashes and checks that the predecessor preserves the
+exact current fixture bytes.
 
 ## Founder operation and whole-node handoff
 

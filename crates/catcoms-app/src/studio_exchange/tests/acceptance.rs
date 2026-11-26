@@ -116,16 +116,36 @@ fn own_pools() {
     );
 }
 
+struct RestartFixture {
+    _hub: Arc<Hub>,
+    _watch: ServerStudioWatch,
+    a_root: tempfile::TempDir,
+    _b_root: tempfile::TempDir,
+    bob: Box<Node>,
+    b_store: Box<ServerStore>,
+    wire: Net,
+    clock: ManualClock,
+    store: Arc<Mutex<Option<ServerStore>>>,
+    epoch_id: u128,
+    saved: crate::studio::StudioView,
+    score_saved: crate::studio::StudioView,
+    score: StudioTarget,
+    expected: Composition,
+    sfx: FlipnoteOp,
+    export: FlipnoteOp,
+    pix: Vec<u8>,
+    pixa: Vec<u8>,
+}
+
 #[tokio::test]
 async fn gate7_create_sound_score_restart_rotate_recover_export_through_actor_custody() {
-    let mut p = Pair::new().await;
-    let group = p.bob.group_id();
-    let logical = target().document(&group).unwrap();
-    let pointer = catcoms_replication::registry::PointerKey::new(
-        logical.doc_type,
-        logical.logical_key.clone(),
-    )
-    .unwrap();
+    // Separate the original actor and reopened graphs on the default test stack.
+    let fixture = Box::pin(create_and_save()).await;
+    Box::pin(restart_and_recover(fixture)).await;
+}
+
+async fn create_and_save() -> RestartFixture {
+    let mut p = Box::pin(Pair::new()).await;
     let vectors: serde_json::Value = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../catcoms-replication/tests/fixtures/studio-export-v1.json"
@@ -319,13 +339,70 @@ async fn gate7_create_sound_score_restart_rotate_recover_export_through_actor_cu
     task.await.unwrap();
     drain.await.unwrap();
     drop(store.lock().await.take());
-    let mut reopened = open(p._a_root.path());
+    RestartFixture {
+        _hub: p.hub,
+        _watch: p.watch,
+        a_root: p._a_root,
+        _b_root: p.b_root,
+        bob: Box::new(p.bob),
+        b_store: Box::new(p.b_store),
+        wire: p.wire,
+        clock: p.clock,
+        store,
+        epoch_id: created.epoch_id,
+        saved,
+        score_saved,
+        score,
+        expected,
+        sfx,
+        export,
+        pix,
+        pixa,
+    }
+}
+
+async fn restart_and_recover(fixture: RestartFixture) {
+    let RestartFixture {
+        _hub,
+        _watch,
+        a_root,
+        _b_root,
+        mut bob,
+        b_store,
+        wire,
+        clock,
+        store,
+        epoch_id,
+        saved,
+        score_saved,
+        score,
+        expected,
+        sfx,
+        export,
+        pix,
+        pixa,
+    } = fixture;
+    let group = bob.group_id();
+    let logical = target().document(&group).unwrap();
+    let pointer = catcoms_replication::registry::PointerKey::new(
+        logical.doc_type,
+        logical.logical_key.clone(),
+    )
+    .unwrap();
+    let apply = |nonce, op: FlipnoteOp| StudioRequest::Apply {
+        target: target(),
+        epoch_id,
+        nonce: [nonce; 16],
+        body: op.encode().unwrap(),
+    };
+    let (pixel_cid, package_cid) = (expected.pixel, expected.package);
+    let mut reopened = open(a_root.path());
     let snapshot = reopened.load_server(SERVER).unwrap();
     let mut node = Node::restore(
         &snapshot,
-        p.wire.clone(),
+        wire.clone(),
         rng(),
-        Box::new(p.clock.clone()),
+        Box::new(clock.clone()),
         "alice",
     )
     .unwrap();
@@ -382,10 +459,10 @@ async fn gate7_create_sound_score_restart_rotate_recover_export_through_actor_cu
         .unwrap();
     let mut rotated = None;
     for _ in 0..80 {
-        p.clock.advance_ms(1000);
+        clock.advance_ms(1000);
         idle(&a, &store).await;
         let guard = store.lock().await;
-        let (current, published) = p.bob.sync.with_registry_context(|g, d, _, _| {
+        let (current, published) = bob.sync.with_registry_context(|g, d, _, _| {
             let held = guard.as_ref().unwrap();
             let current = held
                 .load_studio_epoch(SERVER, g, target(), d)
@@ -408,27 +485,25 @@ async fn gate7_create_sound_score_restart_rotate_recover_export_through_actor_cu
     }
     let rotated =
         rotated.expect("idle rotation must install AND publish the Registry pointer/owner journal");
-    assert_ne!(rotated.doc_id(), created.epoch_id);
+    assert_ne!(rotated.doc_id(), epoch_id);
     expected.assert_preserved(&rotated.projection().unwrap(), 12);
     // This cold member has no installed Studio source. Learn the ACTUAL runtime-issued seed
     // and its retained tail through both actors; prepared receipts would miss publication gaps.
-    p.bob
-        .request_channel_index_catchup(p.wire.local_peer())
+    bob.request_channel_index_catchup(wire.local_peer())
         .await
         .unwrap();
-    p.bob
-        .set_blob_store(p.b_store.blob_store(&hex::encode(&group)).unwrap());
+    bob.set_blob_store(b_store.blob_store(&hex::encode(&group)).unwrap());
     let mut verifier = Node::restore(
-        &p.bob.snapshot().unwrap(),
+        &bob.snapshot().unwrap(),
         Net::new(Hub::new().join(PeerId::from_u64(99))),
         rng(),
-        Box::new(p.clock.clone()),
+        Box::new(clock.clone()),
         "read-only verifier",
     )
     .unwrap();
-    let b_store = Arc::new(Mutex::new(Some(p.b_store)));
+    let b_store = Arc::new(Mutex::new(Some(*b_store)));
     own_pools();
-    let (b, mut events, b_task) = crate::spawn(p.bob);
+    let (b, mut events, b_task) = crate::spawn(*bob);
     let b_drain = tokio::spawn(async move {
         while let Some(e) = events.recv().await {
             assert!(!matches!(e.event, crate::AppEvent::StudioReceivePaused));
@@ -441,7 +516,7 @@ async fn gate7_create_sound_score_restart_rotate_recover_export_through_actor_cu
     }
     let mut caught_up = false;
     for _ in 0..120 {
-        p.clock.advance_ms(1000);
+        clock.advance_ms(1000);
         tokio::join!(idle(&a, &store), idle(&b, &b_store));
         let guard = b_store.lock().await;
         caught_up = verifier.sync.with_registry_context(|g, d, _, _| {
@@ -700,12 +775,12 @@ async fn gate7_create_sound_score_restart_rotate_recover_export_through_actor_cu
     drain.await.unwrap();
     // Recoveries and pins must survive a second vault open too, after the exact retries above.
     drop(store.lock().await.take());
-    let mut held = open(p._a_root.path());
+    let mut held = open(a_root.path());
     let mut restored = Node::restore(
         &held.load_server(SERVER).unwrap(),
-        p.wire,
+        wire,
         rng(),
-        Box::new(p.clock),
+        Box::new(clock),
         "alice",
     )
     .unwrap();
