@@ -382,6 +382,7 @@ async fn restart_and_recover(fixture: RestartFixture) {
         pix,
         pixa,
     } = fixture;
+    let patch = expected.recipe.id();
     let group = bob.group_id();
     let logical = target().document(&group).unwrap();
     let pointer = catcoms_replication::registry::PointerKey::new(

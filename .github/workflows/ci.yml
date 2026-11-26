@@ -64,13 +64,23 @@ jobs:
       - name: Mounted Chat V2 Join and Studio restart diagnostics
         id: mounted_restart
         if: ${{ !cancelled() && (success() || steps.repair_receipt.outcome == 'failure') }}
-        run: >-
-          cargo test --locked -p catcoms-app --all-features --lib -- --nocapture --test-threads=1
-          mounted_join_request_
-          gate7_create_sound_score_restart_rotate_recover_export_through_actor_custody
+        shell: bash
+        run: |
+          mkdir -p logs/chat-v2-mounted-restart
+          cargo test --locked -p catcoms-app --all-features --lib -- --nocapture --test-threads=1 \
+            mounted_join_request_ \
+            gate7_create_sound_score_restart_rotate_recover_export_through_actor_custody \
+            2>&1 | tee logs/chat-v2-mounted-restart/results.log
+      - name: Preserve mounted Join and Studio restart output before the workspace run
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && (steps.mounted_restart.outcome == 'success' || steps.mounted_restart.outcome == 'failure') }}
+        with:
+          name: chat-v2-mounted-restart-${{ matrix.os }}
+          path: logs/chat-v2-mounted-restart/results.log
+          if-no-files-found: error
       - name: Test
         # Keep the full workspace result after collecting independent failure output.
-        if: ${{ !cancelled() && (success() || steps.repair_receipt.outcome == 'failure' || steps.mounted_restart.outcome == 'failure') }}
+        if: ${{ !cancelled() && (steps.mounted_restart.outcome == 'success' || steps.mounted_restart.outcome == 'failure') }}
         # The user deferred only this known slow cost case until final Chat V2
         # acceptance. With no positive filter, every other workspace test still
         # executes. This intermediate gate is not final unfiltered acceptance.

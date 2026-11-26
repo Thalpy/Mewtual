@@ -346,6 +346,18 @@ async fn execute(state: &AppState, invocation: &Invocation) -> Result<Output, St
         .await
         .map_err(|_| SUPERSEDED)?
         .map_err(|error| {
+            #[cfg(test)]
+            eprintln!(
+                "Native founder {} failed: {error:?}",
+                [
+                    "device preparation",
+                    "network preparation",
+                    "pending network save",
+                    "transport preparation",
+                    "founder preparation",
+                    "founder activation save"
+                ][stage]
+            );
             format!("Server setup did not finish ({error:?}). Retry with the same request.")
         })?;
     }
