@@ -1,4 +1,5 @@
 //! Native connected request dispatch for the exact mounted row.
+mod contact_recovery;
 mod history;
 
 use super::*;
@@ -213,6 +214,10 @@ impl Source {
 
     pub(super) fn channel(&self) -> u128 {
         self.channel
+    }
+
+    pub(super) fn generation_data(&self) -> u64 {
+        self.generation
     }
 
     /// Notify the main renderer of one changed Create. Text is available only
@@ -443,6 +448,7 @@ async fn start_dependencies<R: tauri::Runtime>(
                     drain_outbox(&app, &source),
                     serve_joined_governing(&app, &source),
                     history::recover(&app, &source),
+                    contact_recovery::restore(&app, &source),
                     async {
                         if let Some((initial, payment)) = receive {
                             #[cfg(test)]

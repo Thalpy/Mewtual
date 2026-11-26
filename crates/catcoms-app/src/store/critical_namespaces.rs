@@ -64,7 +64,6 @@ pub use joined_pin::pending::NativeTextJoinedRegistrationData;
 pub use member_outbox_layout::V2MemberOutboxPolicy;
 pub use native_registry::NativeTextFounderDependencyProvider;
 pub use native_registry::NativeTextInvitePublication;
-pub use native_registry::NativeTextJoinedReconnect;
 pub use native_registry::NativeTextJoinedRegistryRowData;
 pub use native_registry::NativeTextJoinedRequestPreparation;
 pub use native_registry::NativeTextJoinedRowSelection;
@@ -114,6 +113,10 @@ pub use native_registry::{
     NativeTextJoinedMemberProjection, NativeTextJoinedMemberPublication,
     NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
     NativeTextJoinedReceivedOriginal, NativeTextJoinedSelectionPreparation,
+};
+pub use native_registry::{
+    NativeTextJoinedContactApprovalProof, NativeTextJoinedContactConsent,
+    NativeTextJoinedReconnect, NativeTextJoinedSavedContactApprovals,
 };
 pub use native_registry::{
     NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,

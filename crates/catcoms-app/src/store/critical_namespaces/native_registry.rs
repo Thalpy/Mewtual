@@ -25,7 +25,6 @@ pub(in crate::store) mod preparation;
 pub use lifecycle::joined::NativeTextJoinedRegistryRowData;
 pub use operational::NativeTextFounderDependencyProvider;
 pub use operational::NativeTextInvitePublication;
-pub use operational::NativeTextJoinedReconnect;
 pub use operational::NativeTextJoinedRequestPreparation;
 pub use operational::NativeTextJoinedRowSelection;
 pub use operational::NativeTextJoinedRuntime;
@@ -72,6 +71,10 @@ pub use operational::{
     NativeTextJoinedMemberProjection, NativeTextJoinedMemberPublication,
     NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
     NativeTextJoinedReceivedOriginal, NativeTextJoinedSelectionPreparation,
+};
+pub use operational::{
+    NativeTextJoinedContactApprovalProof, NativeTextJoinedContactConsent,
+    NativeTextJoinedReconnect, NativeTextJoinedSavedContactApprovals,
 };
 pub use operational::{
     NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,

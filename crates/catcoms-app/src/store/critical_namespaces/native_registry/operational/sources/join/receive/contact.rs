@@ -170,13 +170,16 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 (signal, mount),
                 fee,
                 self.original.end.ok_or(Refusal::Unavailable)?,
-                (
-                    selection.clone(),
-                    ApprovedMemberPeer {
+                super::super::reconnect::JoinedContactCandidate {
+                    row: selection.clone(),
+                    contact: ApprovedMemberPeer {
                         peer,
                         admission: contact.admission_data(),
                     },
-                ),
+                    digest: blake3::hash(raw),
+                    host: approved_host,
+                    restored: false,
+                },
             ),
         )
     }

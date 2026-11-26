@@ -63,7 +63,10 @@ pub use receive::{
     NativeTextJoinedReceivedOriginal,
 };
 mod reconnect;
-pub use reconnect::NativeTextJoinedReconnect;
+pub use receive::NativeTextJoinedSavedContactApprovals;
+
+catcoms_rt::redacted_debug! { NativeTextJoinedContactConsent; ScopedContactConsent; }
+pub use reconnect::{NativeTextJoinedContactApprovalProof, NativeTextJoinedReconnect};
 
 #[derive(Default)]
 pub(super) struct PendingJoin {
@@ -686,6 +689,8 @@ struct JoinedRowSelection {
     retired: AtomicBool,
     governing_peers: Mutex<[Option<InstalledMemberPeer>; MAX_APPROVED_MEMBER_PEERS]>,
     archive_relay: Mutex<receive::ArchiveRelayState>,
+    contact_approval_generation: Mutex<watch::Sender<bool>>,
+    contact_forget_generation: Mutex<watch::Sender<bool>>,
     next_governing_peer: AtomicUsize,
     keys: Arc<OnceLock<NativeChatSourceClose>>,
     _metadata: Arc<retirement::Control>,
@@ -702,6 +707,49 @@ const MAX_APPROVED_MEMBER_PEERS: usize = 16;
 struct InstalledMemberPeer {
     contact: ApprovedMemberPeer,
     live: watch::Sender<bool>,
+    restored: bool,
+}
+
+/// The original recurring approval gesture. A subsequent Forget ends
+/// this observation permanently, including while its connection is pending.
+pub struct NativeTextJoinedContactConsent {
+    row: NativeTextJoinedRowSelection,
+    signal: RequestCancellation,
+}
+
+struct ScopedContactConsent {
+    gesture: RequestCancellation,
+    caller: RequestCancellation,
+}
+
+#[async_trait::async_trait]
+impl RequestAuthority for ScopedContactConsent {
+    fn authorized(&self) -> bool {
+        !self.gesture.is_cancelled() && !self.caller.is_cancelled()
+    }
+
+    async fn revoked(&self) {
+        let (mut gesture, mut caller) = (self.gesture.clone(), self.caller.clone());
+        tokio::select! {
+            _ = gesture.cancelled() => {}
+            _ = caller.cancelled() => {}
+        }
+    }
+}
+
+impl NativeTextJoinedContactConsent {
+    fn is_current_for(&self, row: &NativeTextJoinedRowSelection) -> bool {
+        self.row.same_original(row) && row.is_current_cached() && !self.signal.is_cancelled()
+    }
+
+    fn constrain(&self, caller: RequestCancellation) -> RequestCancellation {
+        caller
+            .clone()
+            .with_authority(Arc::new(ScopedContactConsent {
+                gesture: self.signal.clone(),
+                caller,
+            }))
+    }
 }
 
 impl std::fmt::Debug for NativeTextJoinedRowSelection {
@@ -737,6 +785,14 @@ impl NativeTextJoinedRowSelection {
     }
 
     fn remember_governing_peer(&self, original: ApprovedMemberPeer) -> Result<(), AppError> {
+        self.install_governing_peer(original, false)
+    }
+
+    fn install_governing_peer(
+        &self,
+        original: ApprovedMemberPeer,
+        restored: bool,
+    ) -> Result<(), AppError> {
         if !self.is_current_cached() {
             return Err(refused());
         }
@@ -763,7 +819,89 @@ impl NativeTextJoinedRowSelection {
             peers[index] = Some(InstalledMemberPeer {
                 contact: original,
                 live,
+                restored,
             });
+        } else if !restored {
+            // An explicit connection is live consent even if the earlier
+            // connection was transparently restored from a standing record.
+            peers[index].as_mut().ok_or_else(refused)?.restored = false;
+        }
+        Ok(())
+    }
+
+    fn observe_contact_approvals(&self) -> Result<RequestCancellation, AppError> {
+        let approval = self
+            .original
+            .contact_approval_generation
+            .try_lock()
+            .map_err(|_| refused())?;
+        Ok(RequestCancellation::new(approval.subscribe(), None))
+    }
+
+    pub fn capture_contact_consent(&self) -> Result<NativeTextJoinedContactConsent, AppError> {
+        if !self.is_current_cached() {
+            return Err(refused());
+        }
+        let original = self
+            .original
+            .contact_forget_generation
+            .try_lock()
+            .map_err(|_| refused())?;
+        Ok(NativeTextJoinedContactConsent {
+            row: self.clone(),
+            signal: RequestCancellation::new(original.subscribe(), None),
+        })
+    }
+
+    fn install_restored_peer(
+        &self,
+        peer: ApprovedMemberPeer,
+        caller: &RequestCancellation,
+    ) -> Result<(), AppError> {
+        // Same order as forget. A retired snapshot cannot slip between
+        // revocation and installing its in-memory approval.
+        let _generation = self
+            .original
+            .contact_approval_generation
+            .try_lock()
+            .map_err(|_| refused())?;
+        if caller.is_cancelled() {
+            return Err(refused());
+        }
+        self.install_governing_peer(peer, true)
+    }
+
+    fn retire_contact_approvals(&self, forget: bool) -> Result<(), AppError> {
+        let mut forget_generation = if forget {
+            Some(
+                self.original
+                    .contact_forget_generation
+                    .try_lock()
+                    .map_err(|_| refused())?,
+            )
+        } else {
+            None
+        };
+        let mut generation = self
+            .original
+            .contact_approval_generation
+            .try_lock()
+            .map_err(|_| refused())?;
+        let mut peers = self
+            .original
+            .governing_peers
+            .try_lock()
+            .map_err(|_| refused())?;
+        if let Some(original) = forget_generation.as_mut() {
+            original.send_replace(true);
+            **original = watch::channel(false).0;
+        }
+        generation.send_replace(true);
+        *generation = watch::channel(false).0;
+        for peer in peers.iter_mut() {
+            if peer.as_ref().is_some_and(|slot| slot.restored) {
+                *peer = None;
+            }
         }
         Ok(())
     }
@@ -824,7 +962,10 @@ impl NativeTextJoinedRowSelection {
         lane: &catcoms_net::NativeChatMemberDependencies,
         founder: Option<PeerId>,
         selected: &ReplayMath,
-    ) -> Option<catcoms_net::NativeChatMemberDependencyExchange> {
+    ) -> Option<(
+        catcoms_net::NativeChatMemberDependencyExchange,
+        Option<RequestCancellation>,
+    )> {
         let mut peers = self.original.governing_peers.try_lock().ok()?;
         for slot in peers.iter_mut() {
             if slot
@@ -834,9 +975,12 @@ impl NativeTextJoinedRowSelection {
                 *slot = None;
             }
         }
-        let candidates = founder
-            .into_iter()
-            .chain(peers.iter().flatten().map(|slot| slot.contact.peer));
+        let candidates = founder.into_iter().map(|peer| (peer, None)).chain(
+            peers
+                .iter()
+                .flatten()
+                .map(|slot| (slot.contact.peer, Some(&slot.live))),
+        );
         let count = candidates.clone().count();
         let start = self
             .original
@@ -847,7 +991,14 @@ impl NativeTextJoinedRowSelection {
             .cycle()
             .skip(start)
             .take(count)
-            .find_map(|peer| lane.capture_request(peer))
+            .find_map(|(peer, watch)| {
+                lane.capture_request(peer).map(|exchange| {
+                    (
+                        exchange,
+                        watch.map(|watch| RequestCancellation::new(watch.subscribe(), None)),
+                    )
+                })
+            })
     }
     pub fn is_from_original_vault_cached(&self, vault: &NativeTextVault) -> bool {
         Arc::ptr_eq(&self.original.scope, &vault.sources.observe())
@@ -975,6 +1126,8 @@ impl<R: CryptoRngCore> MountedNode<R> {
                     retired: AtomicBool::new(false),
                     governing_peers: Mutex::new(std::array::from_fn(|_| None)),
                     archive_relay: Mutex::new(receive::ArchiveRelayState::default()),
+                    contact_approval_generation: Mutex::new(watch::channel(false).0),
+                    contact_forget_generation: Mutex::new(watch::channel(false).0),
                     next_governing_peer: AtomicUsize::new(0),
                     keys,
                     _metadata: control.clone(),

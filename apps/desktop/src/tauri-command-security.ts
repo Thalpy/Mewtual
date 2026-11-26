@@ -113,6 +113,7 @@ export const TAURI_COMMAND_GROUPS = {
       // Native removal binds the exact current admission. Direct contact uses a
       // member-signed offer and the numeric host explicitly approved in the UI.
       "get_native_chat_members", "remove_native_chat_member", "share_native_chat_contact", "connect_native_chat_contact",
+      "forget_native_chat_contacts",
     ],
   },
   authenticated_server_reads: {

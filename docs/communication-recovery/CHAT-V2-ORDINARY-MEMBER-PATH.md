@@ -407,7 +407,11 @@ the holder's author Admission. The worker allows eight nested parents and
 24 attempts across a 45-second chain. A refusal or exhausted chain
 defers that item while other pages and peers progress.
 
-Automatic discovery currently requires reciprocal approved contacts on the
-installed rows. Restoring those approvals and their connections after a
-cold restart is separate work. The existing one-channel archive, limits
-and eligibility for original authors still apply.
+Automatic discovery requires reciprocal approved contacts on the installed
+rows. **Remember this contact** saves that approval for this device. A
+restored row rebuilds it from the exact registered Profile, current Header,
+epoch, and member Admission. It dials a saved numeric address only when an
+earlier outbound connection to that address authenticated the expected peer.
+A passive saved contact can be approved once that peer connects. Forgetting
+saved contacts closes the restored approvals and retires pending reconnects.
+The existing archive limits and original author requirements still apply.

@@ -4545,6 +4545,7 @@
   let nativeContactCode = $state("");
   let nativeContactInput = $state("");
   let nativeContactHost = $state("");
+  let nativeContactRemember = $state(false);
   let nativeContactStatus = $state("");
   let nativeContactBusy = $state(false);
   let nativeRemovedContexts = $state<Record<number, string>>({});
@@ -4579,25 +4580,31 @@
       removingNativeAdmission = "";
     }
   }
-  async function useNativeContact(action: "share" | "connect") {
+  async function useNativeContact(action: "share" | "connect" | "forget") {
     const server = activeServerId;
     const generation = viewGeneration;
     if (server === null || locked || nativeContactBusy || cur?.backend !== "text-v2") return;
     const expectedContext = cur.context;
+    const remember = nativeContactRemember;
     nativeContactStatus = "";
     nativeContactBusy = true;
     try {
       if (action === "share") {
         const code = await invoke<string>("share_native_chat_contact", { server, expectedContext });
         if (membersOpen && unlockedViewCurrent(generation, server)) nativeContactCode = code;
+      } else if (action === "forget") {
+        await invoke("forget_native_chat_contacts", { server, expectedContext });
+        if (membersOpen && unlockedViewCurrent(generation, server)) nativeContactStatus = "Saved contacts cleared.";
       } else {
         await invoke("connect_native_chat_contact", {
           server, expectedContext, contact: nativeContactInput.trim(), approvedHost: nativeContactHost.trim(),
+          remember,
         });
         if (membersOpen && unlockedViewCurrent(generation, server)) {
           nativeContactInput = "";
           nativeContactHost = "";
-          nativeContactStatus = "Connected to member.";
+          nativeContactRemember = false;
+          nativeContactStatus = remember ? "Connected and saved." : "Connected.";
         }
       }
     } catch (cause) {
@@ -4628,6 +4635,7 @@
     nativeContactCode = "";
     nativeContactInput = "";
     nativeContactHost = "";
+    nativeContactRemember = false;
     nativeContactStatus = "";
     if (membersOpen && !locked && uiStateReady && cur?.backend === "text-v2" && server !== null && !nativeSelectedRemoved) {
       confirmNativeRemoval = "";
@@ -30751,8 +30759,10 @@
               <form onsubmit={(event) => { event.preventDefault(); void useNativeContact("connect"); }}>
                 <label>Member contact code <input type="text" bind:value={nativeContactInput} maxlength="512" spellcheck="false" /></label>
                 <label>Approved IP address <input type="text" bind:value={nativeContactHost} maxlength="45" spellcheck="false" /></label>
+                <label><input type="checkbox" bind:checked={nativeContactRemember} disabled={nativeContactBusy} /> Remember this contact</label>
                 <button type="submit" class="ghost small" disabled={nativeContactBusy || !nativeContactInput.trim() || !nativeContactHost.trim()}>Connect to member</button>
               </form>
+              <button type="button" class="ghost small" disabled={nativeContactBusy} onclick={() => void useNativeContact("forget")}>Forget saved contacts</button>
               {#if nativeContactStatus}<p class="small" role="status">{nativeContactStatus}</p>{/if}
             {/if}
           {/if}

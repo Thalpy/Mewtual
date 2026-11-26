@@ -2109,8 +2109,11 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     .unwrap().is_none());
                 let peer = local_transport.0;
                 let holder_contact = recovered_row().sign_member_contact(&selection, &fresh).unwrap();
-                third_row().prepare_member_contact(&third_selection, &holder_contact, host, fresh.clone())
-                    .unwrap().connect(&scheduler).await.unwrap();
+                let proof = third_row().prepare_member_contact(&third_selection, &holder_contact, host, fresh.clone())
+                    .unwrap().connect_for_contact_approval(&scheduler, third_selection.capture_contact_consent().unwrap()).await.unwrap();
+                third_row().remember_member_contact(
+                    &third_selection, holder_contact, proof, &fresh, &mut third_rng,
+                ).unwrap();
                 let mut provider = recovered_row().attach_dependency_provider(&selection, fresh.clone()).unwrap();
                 let serve_relay = async |provider: &mut crate::store::NativeTextJoinedDependencyProvider,
                                          rng: &mut catcoms_rt::OsCryptoRng| {
@@ -2129,8 +2132,11 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 ).await.unwrap();
                 assert_eq!(served, Err(V2MemberSaveRefusal::Stale));
                 assert!(response.is_err());
-                recovered_row().prepare_member_contact(&selection, &contact, host, fresh.clone())
-                    .unwrap().connect(&scheduler).await.unwrap();
+                let proof = recovered_row().prepare_member_contact(&selection, &contact, host, fresh.clone())
+                    .unwrap().connect_for_contact_approval(&scheduler, selection.capture_contact_consent().unwrap()).await.unwrap();
+                recovered_row().remember_member_contact(
+                    &selection, contact, proof, &fresh, &mut history_rng,
+                ).unwrap();
                 let own = third_row().prepare_dependency_exchange(
                     &third_selection, channel, peer, action, fresh.clone(), &mut third_rng,
                 ).unwrap();
@@ -2750,8 +2756,6 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 )).unwrap());
             }
             drop(current);
-            retire(&reopened_sources).await;
-            drop((reopened_sources, reopened_vault));
 
             let storage = crate::store::NativeTextJoinedStorage::open_for_native_startup(
                 third_dir.path(),
@@ -2786,6 +2790,86 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 .unwrap();
             let recipient_row = || sources.capture_joined_selection(command(&vault, &third_budget));
             let current = recipient_row().select_registered(&fresh).unwrap();
+            if !missed_history {
+                let holder = reopened_row().select_registered(&fresh).unwrap();
+                assert!(holder.history_peer_candidates().unwrap().is_empty());
+                assert!(current.history_peer_candidates().unwrap().is_empty());
+                let inbound = reopened_row().read_member_contact_approvals(&holder, &fresh).unwrap();
+                let outbound = recipient_row().read_member_contact_approvals(&current, &fresh).unwrap();
+                assert_eq!(inbound.len(), 1);
+                assert_eq!(outbound.len(), 1);
+                assert!(reopened_row().prepare_saved_member_contact(
+                    &holder, &inbound, 0, fresh.clone(),
+                ).unwrap().is_none());
+                assert!(holder.history_peer_candidates().unwrap().is_empty());
+                let scheduler = catcoms_discovery::EndpointDialScheduler::new(Default::default());
+                let restored = recipient_row().prepare_saved_member_contact(
+                    &current, &outbound, 0, fresh.clone(),
+                ).unwrap().expect("the exact outbound route was retained");
+                restored.connect(&scheduler).await.unwrap();
+                // The outbound actor can finish before the inbound actor
+                // publishes its own authenticated connection lease.
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        assert!(reopened_row().prepare_saved_member_contact(
+                            &holder, &inbound, 0, fresh.clone(),
+                        ).unwrap().is_none());
+                        if holder.history_peer_candidates().unwrap().len() == 1 {
+                            break;
+                        }
+                        SystemClock.sleep(Duration::from_millis(20)).await;
+                    }
+                }).await.expect("passive consent restores once the holder observes the inbound lease");
+                assert_eq!(current.history_peer_candidates().unwrap().as_slice(), &[local_transport.0]);
+
+                assert!((0..=256).any(|_| reopened_row()
+                    .maintain_archive_relay_catalogue(&holder, channel, &fresh).unwrap()));
+                let mut provider = reopened_row().attach_dependency_provider(&holder, fresh.clone()).unwrap();
+                let request = recipient_row().prepare_archive_history_exchange(
+                    &current, channel, local_transport.0, fresh.clone(), &mut third_rng,
+                ).unwrap();
+                let pending = async {
+                    let request = provider.next().await.unwrap();
+                    reopened_row().serve_dependency_request(&holder, channel, request, fresh.clone(), &mut history_rng)
+                };
+                let (response, served) = tokio::time::timeout(Duration::from_secs(10), async {
+                    tokio::join!(request.receive(), pending)
+                }).await.unwrap();
+                served.unwrap();
+                let page = recipient_row().open_history_response(&current, response.unwrap(), &fresh).unwrap();
+                assert!((0..8).filter_map(|index| page.action_at(index)).any(|id| Some(id) == founder_archived));
+                let exact = reopened_row().sign_member_contact(&holder, &fresh).unwrap();
+                let late = recipient_row().prepare_member_contact(&current, &exact, host, fresh.clone())
+                    .unwrap().connect_for_contact_approval(&scheduler, current.capture_contact_consent().unwrap()).await.unwrap();
+                recipient_row().forget_member_contact_approvals(&current, &fresh, &mut third_rng).unwrap();
+                assert_eq!(recipient_row().remember_member_contact(
+                    &current, exact, late, &fresh, &mut third_rng,
+                ), Err(V2MemberSaveRefusal::Stale));
+                assert!(current.history_peer_candidates().unwrap().is_empty());
+                assert!(!page.is_current_cached());
+                assert!(matches!(recipient_row().prepare_saved_member_contact(
+                    &current, &outbound, 0, fresh.clone(),
+                ), Err(V2MemberSaveRefusal::Stale)));
+                assert!(recipient_row().read_member_contact_approvals(&current, &fresh).unwrap().is_empty());
+                let file = std::fs::read_dir(third_dir.path()).unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .find(|path| path.file_name().unwrap().to_string_lossy()
+                        .starts_with("chat-v2-contact-approvals-"))
+                    .expect("the exact optional contact record");
+                let held = file.with_extension("held-contact");
+                std::fs::rename(&file, &held).unwrap();
+                std::fs::create_dir(&file).unwrap();
+                assert!(recipient_row().forget_member_contact_approvals(
+                    &current, &fresh, &mut third_rng,
+                ).is_err());
+                assert!(file.is_dir());
+                std::fs::remove_dir(&file).unwrap();
+                std::fs::rename(&held, &file).unwrap();
+                let saved = std::fs::read(&file).unwrap();
+                std::fs::write(&file, &saved[..25]).unwrap();
+                assert!(recipient_row().read_member_contact_approvals(&current, &fresh).is_err());
+                std::fs::write(&file, saved).unwrap();
+            }
             let projection = recipient_row()
                 .archived_message_projection(
                     &current,
@@ -2828,6 +2912,8 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 )).unwrap());
             }
             retire(&sources).await;
+            retire(&reopened_sources).await;
+            drop((reopened_sources, reopened_vault));
         }).await;
         return;
     }

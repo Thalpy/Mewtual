@@ -107,7 +107,8 @@ pub use critical_namespaces::{
 };
 pub use critical_namespaces::{
     NativeTextJoinedArchiveDependency, NativeTextJoinedArchiveReplay,
-    NativeTextJoinedArchivedActions, NativeTextJoinedDependencyAttachRefusal,
+    NativeTextJoinedArchivedActions, NativeTextJoinedContactApprovalProof,
+    NativeTextJoinedContactConsent, NativeTextJoinedDependencyAttachRefusal,
     NativeTextJoinedDependencyExchange, NativeTextJoinedDependencyProvider,
     NativeTextJoinedDependencyResponse, NativeTextJoinedGoverningExchange,
     NativeTextJoinedGoverningIncoming, NativeTextJoinedGoverningProvider,
@@ -117,7 +118,7 @@ pub use critical_namespaces::{
     NativeTextJoinedMemberProjection, NativeTextJoinedMemberPublication,
     NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
     NativeTextJoinedReceivedOriginal, NativeTextJoinedReconnect,
-    NativeTextJoinedSelectionPreparation,
+    NativeTextJoinedSavedContactApprovals, NativeTextJoinedSelectionPreparation,
 };
 pub use critical_namespaces::{
     NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,
@@ -658,6 +659,7 @@ mod persistence {
     mod member_outbox_layout;
     /// Strict bounded native-registry migration reads; deliberately no writer yet.
     pub(in crate::store) mod native_registry;
+    pub(in crate::store) mod v2_contact_approvals;
     mod v2_group_directory;
     /// Chat V2 ordinary-member durable outbox; independent of the founder `v2_text` journal.
     pub(in crate::store) mod v2_member_outbox;
