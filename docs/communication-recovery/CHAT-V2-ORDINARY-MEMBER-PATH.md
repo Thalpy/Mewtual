@@ -322,9 +322,18 @@ paused slice on the same lease and safely starts again after a restart.
 The semantic ledger still limits this traversal to 64 actions and 1 MiB.
 An absent local ancestor or a chain beyond the stage's capacity defers that
 action. Persisted frontiers, retry without a reachable author and bounded
-target lookup remain open. A staged mutation missing from disk can still leave a selected
-descendant waiting for that ancestor on a cold read. Acceptance must cover
-and resolve that gap. Archive relaying and scale tests are pending.
+target lookup remain open. Before selecting a new joined archive original,
+the writer checks its complete ancestry against the exact signed originals
+and Admissions in the verified ledger. It follows the same archive-first
+order as cold replay and requires the mutation's Create in the shared
+archive. An older selected record that still depends on a missing original
+waits at that boundary. New descendants can select once the missing ancestor
+is available.
+
+Final selection checks up to 63 unique local ancestors, one paid record
+at a time. This checks per-original dependency closure. Rendering all
+revisions of a message still uses the existing bounded projection work.
+Archive relaying and scale tests are pending.
 Chat V2 remains disabled.
 
 ## Resource and acceptance gates

@@ -7,7 +7,11 @@ and original connection into admission and revocation. The service reads one
 paid window and excludes other channels, Admissions and Held originals.
 Replies authenticate only that request and offer no proof of global absence,
 authorization to write, or remote custody. The receiver verifies signed
-originals and dependencies before selecting an archive write. A parked page
+originals and dependencies before selecting an archive write. The writer
+checks each reachable ancestor against its exact selected local original and
+verified Admission. This keeps a new write from relying on memory-only
+proof or extending an earlier archive with a missing dependency. The walk
+checks at most 63 paid originals separately. A parked page
 releases its old UI invocation and full wire fee. Fresh effects recheck the
 same original row and approval. Archive-first reads keep already deleted
 bodies from reappearing through delayed live notices.
