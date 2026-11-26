@@ -136,6 +136,13 @@ impl NativeTextJoinedReceivedOriginal {
         self.opened.action_data().id()
     }
 
+    #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(in crate::store::critical_namespaces::native_registry) fn original_digest_for_test(
+        &self,
+    ) -> blake3::Hash {
+        blake3::hash(self.opened.original_data())
+    }
+
     pub fn projection_target_data(&self) -> ActionId {
         let action = self.opened.action_data();
         action.spec().body.create().unwrap_or_else(|| action.id())

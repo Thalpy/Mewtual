@@ -86,23 +86,27 @@ async fn mounted_join_request_cold_recovers_the_exact_registry_stage_only_with_i
     mounted_join_fixture(true, None).await;
 }
 
-#[tokio::test]
-async fn mounted_join_request_applies_the_next_governing_add_under_its_original_row() {
-    mounted_join_fixture(false, Some(MountedSuccessor::OfflineDelivery)).await;
+#[test]
+fn mounted_join_request_applies_the_next_governing_add_under_its_original_row() {
+    run_mounted_successor(MountedSuccessor::OfflineDelivery);
 }
 
 #[test]
 fn mounted_native_remove_retires_the_exact_joined_row_and_preserves_the_survivor() {
-    // This combined debug fixture keeps three paid vaults and the cold restore
-    // on one caller thread. Give that fixture its own stack on both CI hosts.
+    run_mounted_successor(MountedSuccessor::Remove);
+}
+
+fn run_mounted_successor(successor: MountedSuccessor) {
+    // These debug fixtures exercise three paid vaults and cold restore on one
+    // caller thread. Match the removal fixture's stack for both scenarios.
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
-        .spawn(|| {
+        .spawn(move || {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap()
-                .block_on(mounted_join_fixture(false, Some(MountedSuccessor::Remove)));
+                .block_on(mounted_join_fixture(false, Some(successor)));
         })
         .unwrap()
         .join()
@@ -1981,188 +1985,339 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
         .expect("the original founder and its TCP actor drained");
         drop((founder_retirement, row, owner, founder));
 
-        let contact = third_row()
-            .sign_member_contact(&third_selection, &fresh)
-            .unwrap();
-        let host = std::net::Ipv4Addr::LOCALHOST.into();
-        let old = stale_contact.unwrap();
-        assert!(third_row()
-            .prepare_member_contact(&third_selection, &old, host, fresh.clone())
-            .is_err());
-        assert!(third_row()
-            .prepare_member_contact(&third_selection, &contact, host, fresh.clone())
-            .is_err());
-        let mut damaged = contact;
-        *damaged.last_mut().unwrap() ^= 1;
-        assert!(recovered_row()
-            .prepare_member_contact(&selection, &damaged, host, fresh.clone())
-            .is_err());
-        let (_cancel, reason) = tokio::sync::watch::channel(true);
-        let cancelled = RequestCancellation::new(reason, None);
-        assert!(recovered_row()
-            .prepare_member_contact(&selection, &contact, host, cancelled)
-            .is_err());
-        recovered_row()
-            .prepare_member_contact(&selection, &contact, host, fresh.clone())
-            .unwrap()
-            .connect(&scheduler)
-            .await
-            .unwrap();
-        use crate::store::{
-            MemberSaveJobReport, MemberSaveNativeAdmission, NativeTextJoinedMemberFinalPreparation,
-        };
-        use catcoms_net::NativeChatMemberGossipEvent;
-        let text = super::body("The existing member sent this after the founder stopped");
-        let offline = || V2MemberSignRequest {
-            token: [0xc4; 32],
-            body: &text,
-            ..request()
-        };
-        let mut third_receiver = third_row()
-            .prepare_member_ingress(&third_selection, channel, fresh.clone())
-            .unwrap()
-            .open()
-            .await
-            .unwrap();
-        let mut ledger = third_row()
-            .prepare_member_ledger(&third_selection, channel, fresh.clone())
-            .unwrap();
-        assert_eq!(
-            recovered_row().prepare_member_save(&selection, offline(), &fresh, &mut history_rng),
-            Ok(V2MemberSaveOutcome::Ready),
-        );
-        let mut final_save = Some(
+        // Keep the extra restart states off the shared fixture's stack. Cases
+        // that stop after the first Welcome never enter this future.
+        Box::pin(async move {
+            let recovered_row =
+                || mounted_sources.capture_joined_selection(command(&mounted_vault, &budget));
+            let third_row = || third.capture_joined_selection(command(&third_vault, &third_budget));
+            let contact = third_row()
+                .sign_member_contact(&third_selection, &fresh)
+                .unwrap();
+            let host = std::net::Ipv4Addr::LOCALHOST.into();
+            let old = stale_contact.unwrap();
+            assert!(third_row()
+                .prepare_member_contact(&third_selection, &old, host, fresh.clone())
+                .is_err());
+            assert!(third_row()
+                .prepare_member_contact(&third_selection, &contact, host, fresh.clone())
+                .is_err());
+            let mut damaged = contact;
+            *damaged.last_mut().unwrap() ^= 1;
+            assert!(recovered_row()
+                .prepare_member_contact(&selection, &damaged, host, fresh.clone())
+                .is_err());
+            let (_cancel, reason) = tokio::sync::watch::channel(true);
+            let cancelled = RequestCancellation::new(reason, None);
+            assert!(recovered_row()
+                .prepare_member_contact(&selection, &contact, host, cancelled)
+                .is_err());
             recovered_row()
-                .finish_member_admission(selection.clone(), offline().token, &fresh)
-                .unwrap(),
-        );
-        let job = NativeTextJoinedMemberFinalPreparation::try_admit_member_save(
-            &mut final_save,
-            &fresh,
-            MemberSaveNativeAdmission::new((), fresh.clone()),
-        )
-        .unwrap();
-        assert_eq!(job.run(), MemberSaveJobReport::SavedLocal);
-        let V2MemberSaveOutcome::Saved { action, ordinal } = recovered_row()
-            .prepare_member_save(&selection, offline(), &fresh, &mut history_rng)
-            .unwrap()
-        else {
-            panic!("the original founder-offline action was saved");
-        };
-        let send = async {
-            loop {
-                let send = recovered_row()
-                    .prepare_member_publication(&selection, fresh.clone(), &mut history_rng)
+                .prepare_member_contact(&selection, &contact, host, fresh.clone())
+                .unwrap()
+                .connect(&scheduler)
+                .await
+                .unwrap();
+            use crate::store::{
+                MemberSaveJobReport, MemberSaveNativeAdmission, NativeTextJoinedMemberFinalPreparation,
+            };
+            use catcoms_net::NativeChatMemberGossipEvent;
+            use catcoms_replication::chat::{GuardedProjection, ProjectionCertainty};
+            let text = super::body("The existing member sent this after the founder stopped");
+            let offline = V2MemberSignRequest {
+                token: [0xc4; 32],
+                body: &text,
+                ..request()
+            };
+            let mut third_receiver = third_row()
+                .prepare_member_ingress(&third_selection, channel, fresh.clone())
+                .unwrap()
+                .open()
+                .await
+                .unwrap();
+            let mut ledger = third_row()
+                .prepare_member_ledger(&third_selection, channel, fresh.clone())
+                .unwrap();
+            let mut save_receive = async |draft: V2MemberSignRequest<'_>| {
+                let work = || V2MemberSignRequest { ..draft };
+                assert_eq!(
+                    recovered_row().prepare_member_save(&selection, work(), &fresh, &mut history_rng),
+                    Ok(V2MemberSaveOutcome::Ready),
+                );
+                let mut final_save = Some(
+                    recovered_row()
+                        .finish_member_admission(selection.clone(), draft.token, &fresh)
+                        .unwrap(),
+                );
+                let job = NativeTextJoinedMemberFinalPreparation::try_admit_member_save(
+                    &mut final_save,
+                    &fresh,
+                    MemberSaveNativeAdmission::new((), fresh.clone()),
+                )
+                .unwrap();
+                assert_eq!(job.run(), MemberSaveJobReport::SavedLocal);
+                let V2MemberSaveOutcome::Saved { action, ordinal } = recovered_row()
+                    .prepare_member_save(&selection, work(), &fresh, &mut history_rng)
                     .unwrap()
-                    .expect("the original founder-offline original is owed");
-                match send.submit().await {
-                    Ok(Some(receipt)) => {
-                        let next = recovered_row()
-                            .checkpoint_member_publication(receipt, &fresh, &mut history_rng)
-                            .unwrap();
-                        if next == ordinal + 1 {
-                            break;
+                else {
+                    panic!("the original founder-offline action was saved");
+                };
+                // ActionId identifies the semantic action. Compare the complete
+                // signed envelope too, including its original signature bytes.
+                let original_digest = blake3::hash(
+                    recovered_row()
+                        .read_member_dependency(&selection, channel, action, &fresh, &mut history_rng)
+                        .unwrap()
+                        .unwrap()
+                        .original_bytes(),
+                );
+                let send = async {
+                    loop {
+                        let send = recovered_row()
+                            .prepare_member_publication(&selection, fresh.clone(), &mut history_rng)
+                            .unwrap()
+                            .expect("the original founder-offline action is owed");
+                        match send.submit().await {
+                            Ok(Some(receipt)) => {
+                                let next = recovered_row()
+                                    .checkpoint_member_publication(receipt, &fresh, &mut history_rng)
+                                    .unwrap();
+                                if next == ordinal + 1 {
+                                    break;
+                                }
+                            }
+                            Err(catcoms_sync::SyncError::Publication(
+                                catcoms_rt::PublishOnceError::NoPeers,
+                            )) => {
+                                SystemClock.sleep(Duration::from_millis(20)).await;
+                            }
+                            other => panic!("the joined member did not submit the original: {other:?}"),
                         }
                     }
-                    Err(catcoms_sync::SyncError::Publication(
-                        catcoms_rt::PublishOnceError::NoPeers,
-                    )) => {
-                        SystemClock.sleep(Duration::from_millis(20)).await;
-                    }
-                    _ => panic!("expected the joined members' direct TCP publication"),
-                }
-            }
-        };
-        let receive = async {
-            while let Some(event) = third_receiver.next().await {
-                let NativeChatMemberGossipEvent::Frame(frame) = event else {
-                    continue;
                 };
-                let (original, status) = third_row()
-                    .receive_member_frame(&mut ledger, &frame, &fresh)
+                let receive = async {
+                    while let Some(event) = third_receiver.next().await {
+                        let NativeChatMemberGossipEvent::Frame(frame) = event else {
+                            continue;
+                        };
+                        let (original, status) = third_row()
+                            .receive_member_frame(&mut ledger, &frame, &fresh)
+                            .unwrap();
+                        if original.action_id_data() == action {
+                            assert_eq!(original.original_digest_for_test(), original_digest);
+                            assert_eq!(
+                                status,
+                                catcoms_replication::chat::V2OrdinaryReceiveStatus::Retained(
+                                    catcoms_replication::chat::ActionState::Valid
+                                )
+                            );
+                            assert!(third_row()
+                                .archive_received_member(&ledger, &original, &fresh, &mut third_rng)
+                                .unwrap()
+                                .is_some());
+                            return;
+                        }
+                    }
+                    panic!("the other joined member must receive the original");
+                };
+                tokio::time::timeout(Duration::from_secs(15), async {
+                    tokio::join!(send, receive)
+                })
+                .await
+                .expect("bounded direct publication while the founder was offline");
+                let create = draft.body.create().unwrap_or(action);
+                let projection = third_row()
+                    .archived_message_projection(
+                        &third_selection,
+                        channel,
+                        create,
+                        fresh.clone(),
+                        &mut third_rng,
+                    )
+                    .unwrap()
                     .unwrap();
-                if original.action_id_data() == action {
-                    assert_eq!(
-                        status,
-                        catcoms_replication::chat::V2OrdinaryReceiveStatus::Retained(
-                            catcoms_replication::chat::ActionState::Valid
-                        )
-                    );
-                    return;
-                }
+                assert!(projection
+                    .with_publication(|view| match (draft.body, view) {
+                        (
+                            Body::Create { text: expected, .. } | Body::Edit { text: expected, .. },
+                            GuardedProjection::Visible {
+                                create: target,
+                                selected,
+                                text,
+                                certainty: ProjectionCertainty::Provisional,
+                                ..
+                            },
+                        ) => *target == create && *selected == action && text == expected,
+                        (
+                            Body::Delete { .. },
+                            GuardedProjection::Deleted {
+                                create: target,
+                                delete,
+                                certainty: ProjectionCertainty::Provisional,
+                            },
+                        ) => *target == create && *delete == action,
+                        _ => false,
+                    })
+                    .unwrap());
+                assert_eq!(
+                    recovered_row()
+                        .lookup_saved_member(&selection, &draft, &fresh, &mut history_rng)
+                        .unwrap(),
+                    Some((action, ordinal)),
+                );
+                (action, ordinal)
+            };
+            let created = save_receive(V2MemberSignRequest { ..offline }).await;
+            let edit_body = Body::Edit {
+                create: created.0,
+                text: "The sender edited the same message while the founder was offline".into(),
+            };
+            let edit_parents = [created.0];
+            let edit = V2MemberSignRequest {
+                token: [0xc5; 32],
+                body: &edit_body,
+                parents: &edit_parents,
+                ..offline
+            };
+            let edited = save_receive(V2MemberSignRequest { ..edit }).await;
+            let delete_body = Body::Delete { create: created.0 };
+            let delete_parents = [edited.0];
+            let delete = V2MemberSignRequest {
+                token: [0xc6; 32],
+                body: &delete_body,
+                parents: &delete_parents,
+                ..offline
+            };
+            let deleted = save_receive(V2MemberSignRequest { ..delete }).await;
+            let recipient = third_row()
+                .inspect_registration(&invite_two, third_token, &fresh)
+                .unwrap()
+                .unwrap();
+            drop((third_receiver, ledger));
+            let retire = async |sources: &Owner| {
+                let mut retirement = sources.prepare_retirement().unwrap();
+                tokio::time::timeout(Duration::from_secs(8), async {
+                    while retirement.try_retire().unwrap()
+                        == crate::store::NativeTextSourceRetirementStatus::Pending
+                    {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("the original joined source and transport drained");
+            };
+            for sources in [&mounted_sources, &third] {
+                retire(sources).await;
             }
-            panic!("the other joined member must receive the original");
-        };
-        tokio::time::timeout(std::time::Duration::from_secs(15), async {
-            tokio::join!(send, receive)
-        })
-        .await
-        .expect("bounded direct publication while the founder was offline");
-        assert_eq!(
-            recovered_row()
-                .lookup_saved_member(&selection, &offline(), &fresh, &mut history_rng)
-                .unwrap(),
-            Some((action, ordinal)),
-        );
-        let mut retirement = mounted_sources.prepare_retirement().unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(8), async {
-            while retirement.try_retire().unwrap()
-                == crate::store::NativeTextSourceRetirementStatus::Pending
-            {
-                tokio::task::yield_now().await;
+            drop((mounted_sources, mounted_vault, third, third_vault));
+            let storage = crate::store::NativeTextJoinedStorage::open_for_native_startup(
+                dir.path(),
+                SECRET,
+                &mut history_rng,
+                current_policy(),
+            )
+            .unwrap();
+            assert_eq!(
+                storage.recovered_join_registration_data().unwrap(),
+                Some(registration)
+            );
+            let mut next = storage
+                .bind_recovered_native_runtime(
+                    rand_chacha::ChaCha20Rng::seed_from_u64(seed + 4),
+                    Box::new(catcoms_rt::SystemClock),
+                    &fresh,
+                )
+                .ok()
+                .unwrap();
+            assert_eq!(
+                next.complete_recovery(&fresh).unwrap(),
+                (expected, own_add, 2)
+            );
+            let (reopened_vault, reopened_sources) = next
+                .into_recovered_native_sources(
+                    (
+                        Arc::new(AtomicU64::new(7)),
+                        Arc::new(AtomicU64::new(7)),
+                        Arc::new(AtomicBool::new(false)),
+                    ),
+                    budget.clone(),
+                    &policy(),
+                    &fresh,
+                )
+                .unwrap();
+            let reopened_row =
+                || reopened_sources.capture_joined_selection(command(&reopened_vault, &budget));
+            let current = reopened_row().select_registered(&fresh).unwrap();
+            assert_eq!(
+                current.member_outbox_context_id_data(),
+                original_member_outbox
+            );
+            for (draft, identity) in [(offline, created), (edit, edited), (delete, deleted)] {
+                assert_eq!(
+                    reopened_row()
+                        .lookup_saved_member(&current, &draft, &fresh, &mut history_rng)
+                        .unwrap(),
+                    Some(identity)
+                );
             }
-        })
-        .await
-        .unwrap();
-        drop((retirement, mounted_sources, mounted_vault));
-        let storage = crate::store::NativeTextJoinedStorage::open_for_native_startup(
-            dir.path(),
-            SECRET,
-            &mut history_rng,
-            current_policy(),
-        )
-        .unwrap();
-        assert_eq!(
-            storage.recovered_join_registration_data().unwrap(),
-            Some(registration)
-        );
-        let mut next = storage
-            .bind_recovered_native_runtime(
-                rand_chacha::ChaCha20Rng::seed_from_u64(seed + 4),
-                Box::new(catcoms_rt::SystemClock),
-                &fresh,
-            )
-            .ok()
-            .unwrap();
-        assert_eq!(
-            next.complete_recovery(&fresh).unwrap(),
-            (expected, own_add, 2)
-        );
-        let (reopened_vault, reopened_sources) = next
-            .into_recovered_native_sources(
-                (
-                    Arc::new(AtomicU64::new(7)),
-                    Arc::new(AtomicU64::new(7)),
-                    Arc::new(AtomicBool::new(false)),
-                ),
-                budget.clone(),
-                &policy(),
-                &fresh,
+            drop(current);
+            retire(&reopened_sources).await;
+            drop((reopened_sources, reopened_vault));
+
+            let storage = crate::store::NativeTextJoinedStorage::open_for_native_startup(
+                third_dir.path(),
+                SECRET,
+                &mut third_rng,
+                current_policy(),
             )
             .unwrap();
-        let reopened_row =
-            || reopened_sources.capture_joined_selection(command(&reopened_vault, &budget));
-        let current = reopened_row().select_registered(&fresh).unwrap();
-        assert_eq!(
-            current.member_outbox_context_id_data(),
-            original_member_outbox
-        );
-        assert_eq!(
-            reopened_row()
-                .lookup_saved_member(&current, &offline(), &fresh, &mut history_rng)
-                .unwrap(),
-            Some((action, ordinal))
-        );
+            assert_eq!(
+                storage.recovered_join_registration_data().unwrap(),
+                Some(recipient)
+            );
+            let mut next = storage
+                .bind_recovered_native_runtime(third_rng.clone(), Box::new(SystemClock), &fresh)
+                .ok()
+                .unwrap();
+            assert_eq!(
+                next.complete_recovery(&fresh).unwrap(),
+                (third_head, third_own, third_epoch)
+            );
+            let (vault, sources) = next
+                .into_recovered_native_sources(
+                    (
+                        Arc::new(AtomicU64::new(7)),
+                        Arc::new(AtomicU64::new(7)),
+                        Arc::new(AtomicBool::new(false)),
+                    ),
+                    third_budget.clone(),
+                    &policy(),
+                    &fresh,
+                )
+                .unwrap();
+            let recipient_row = || sources.capture_joined_selection(command(&vault, &third_budget));
+            let current = recipient_row().select_registered(&fresh).unwrap();
+            let projection = recipient_row()
+                .archived_message_projection(
+                    &current,
+                    channel,
+                    created.0,
+                    fresh.clone(),
+                    &mut third_rng,
+                )
+                .unwrap()
+                .unwrap();
+            for original in [created.0, edited.0, deleted.0] {
+                assert!(projection.archived_includes(original));
+            }
+            assert!(projection.with_publication(|view| matches!(
+                view,
+                GuardedProjection::Deleted { create, delete, certainty: ProjectionCertainty::Provisional }
+                    if *create == created.0 && *delete == deleted.0
+            )).unwrap());
+            drop((projection, current));
+            retire(&sources).await;
+        }).await;
         return;
     }
     let (retire_receiver, signal) = tokio::sync::watch::channel(false);

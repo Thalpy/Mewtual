@@ -30,8 +30,10 @@ activation still returns `UNAVAILABLE`.
    founder restart and exact debt checkpoint through both hosted platforms.
    Preserve current authority checks and deadlines.
 2. Connect catch-up for entirely missed actions to the shared history and
-   admin audit. Extend the three-peer test to cover independent activity,
-   reconnection and recovery of edits and deletions across both member restarts.
+   admin audit. Extend the founder-offline test to cover independent activity
+   during disconnection and recovery on reconnection. The mounted Windows
+   test already covers connected Edit and Delete delivery and both member
+   restarts. See [founder-offline evidence](CHAT-FILES-VOICE-ACCEPTANCE.md#founder-offline-history-across-joined-restarts-26-november-2026).
 3. Complete cold governing work and Leave/rejoin. Preserve verified history and
    keep unproven late actions from removed members out of the ordinary view
    while retaining them for authorized review.

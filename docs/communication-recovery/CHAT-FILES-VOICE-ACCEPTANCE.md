@@ -1,5 +1,19 @@
 # Chat, files and voice implementation evidence
 
+## Founder-offline history across joined restarts (26 November 2026)
+
+The focused Windows run of the mounted regression in `01f74681` passed.
+The founder admitted two members and fully retired. One member then sent a
+Create, Edit and Delete over real loopback TCP. The recipient matched each
+full signed envelope against the sender's outbox and saved it to the
+selected archive. Guarded projection showed the edit and then the deletion.
+
+After both original sources drained, independent store reopens recovered
+the sender's three exact retry receipts and the recipient's three original
+action IDs. The recipient's archive still projected the deletion. This
+covers a graceful restart of both joined vaults. Missed-action catch-up,
+abrupt-crash recovery and physical network acceptance remain open.
+
 ## Native joined text and ordinary member transport (22 November 2026)
 
 Windows and Linux exercised native Join, local joined text save with the founder
