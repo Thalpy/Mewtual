@@ -250,7 +250,7 @@ impl Registration {
 mod tests {
     use super::*;
     use crate::{keypair_from_seed, MeshService, NativeTcpPreparation};
-    use catcoms_rt::{MeshTransport, PublishOnceError, PublishSubmission};
+    use catcoms_rt::{Clock, MeshTransport, PublishOnceError, PublishSubmission, SystemClock};
     use std::time::Duration;
 
     #[tokio::test]
@@ -301,7 +301,7 @@ mod tests {
                     {
                         Ok(PublishSubmission::Submitted) => return bytes,
                         Err(PublishOnceError::NoPeers) => {
-                            tokio::time::sleep(Duration::from_millis(20)).await
+                            SystemClock.sleep(Duration::from_millis(20)).await
                         }
                         other => panic!("unexpected gossip submission {other:?}"),
                     }

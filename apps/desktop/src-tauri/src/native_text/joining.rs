@@ -231,7 +231,7 @@ pub(super) async fn capture_with_retry<T: JoinCapture>(
         NativeTextSourceCommand,
     ) -> T,
 ) -> Result<T, String> {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    let deadline = SystemClock.monotonic_ms().saturating_add(2_000);
     loop {
         if account.is_cancelled() {
             return Err(listing::STALE.to_owned());
@@ -241,10 +241,10 @@ pub(super) async fn capture_with_retry<T: JoinCapture>(
             return Ok(original);
         }
         drop(original);
-        if tokio::time::Instant::now() >= deadline {
+        if SystemClock.monotonic_ms() >= deadline {
             return Err(busy.to_owned());
         }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        SystemClock.sleep(Duration::from_millis(25)).await;
     }
 }
 

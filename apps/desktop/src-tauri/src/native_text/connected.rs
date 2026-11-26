@@ -332,7 +332,7 @@ async fn start_dependencies<R: tauri::Runtime>(
         tokio::select! {
             biased;
             _ = startup_scope.cancelled() => return,
-            _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {},
+            _ = SystemClock.sleep(Duration::from_millis(25)) => {},
         }
     };
     let payment = source.clone();
@@ -384,7 +384,7 @@ async fn serve_joined_governing<R: tauri::Runtime>(app: &tauri::AppHandle<R>, so
         tokio::select! {
             biased;
             _ = scope.cancelled() => return,
-            _ = tokio::time::sleep(GOVERNING_RETRY) => {}
+            _ = SystemClock.sleep(GOVERNING_RETRY) => {}
         }
         let state = app.state::<AppState>();
         let Some(permit) = source.member_work.try_background() else {
@@ -426,7 +426,7 @@ async fn catch_up_governing<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
         tokio::select! {
             biased;
             _ = scope.cancelled() => return,
-            _ = tokio::time::sleep(GOVERNING_RETRY) => {}
+            _ = SystemClock.sleep(GOVERNING_RETRY) => {}
         }
         let state = app.state::<AppState>();
         if waiting.is_none() {
@@ -499,14 +499,14 @@ async fn drain_outbox<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source: &Arc
                 biased;
                 _ = scope.cancelled() => return,
                 _ = local.publication_wake.notified() => {},
-                _ = tokio::time::sleep(OUTBOX_RETRY - OUTBOX_COOLDOWN) => {},
+                _ = SystemClock.sleep(OUTBOX_RETRY - OUTBOX_COOLDOWN) => {},
             }
             // Give the renderer a chance to enqueue the history read it
             // commonly follows a newly saved receipt with.
             tokio::select! {
                 biased;
                 _ = scope.cancelled() => return,
-                _ = tokio::time::sleep(OUTBOX_COOLDOWN) => {},
+                _ = SystemClock.sleep(OUTBOX_COOLDOWN) => {},
             }
         }
         let state = app.state::<AppState>();
@@ -518,7 +518,7 @@ async fn drain_outbox<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source: &Arc
         tokio::select! {
             biased;
             _ = scope.cancelled() => return,
-            _ = tokio::time::sleep(OUTBOX_COOLDOWN) => {},
+            _ = SystemClock.sleep(OUTBOX_COOLDOWN) => {},
         }
     }
 }

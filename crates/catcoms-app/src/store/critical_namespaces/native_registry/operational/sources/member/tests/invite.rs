@@ -8,6 +8,8 @@ use crate::store::critical_namespaces::{
     ARCHIVE_BOOTSTRAP_ROOT,
 };
 use crate::store::NativeTextInviteRecovery;
+use catcoms_rt::{Clock, SystemClock};
+use std::time::Duration;
 
 #[derive(Debug)]
 struct DependencyTestScope(RequestCancellation);
@@ -844,7 +846,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         Err(catcoms_sync::SyncError::Publication(
                             catcoms_rt::PublishOnceError::NoPeers,
                         )) => {
-                            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                            SystemClock.sleep(Duration::from_millis(20)).await;
                         }
                         _ => panic!("expected the founder debt to reach the native mesh"),
                     }
@@ -934,7 +936,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     Err(catcoms_sync::SyncError::Publication(
                         catcoms_rt::PublishOnceError::NoPeers,
                     )) => {
-                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                        SystemClock.sleep(Duration::from_millis(20)).await;
                     }
                     _ => panic!("expected the reply to reach the founder mesh"),
                 }
@@ -1115,7 +1117,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         Err(catcoms_sync::SyncError::Publication(
                             catcoms_rt::PublishOnceError::NoPeers,
                         )) => {
-                            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                            SystemClock.sleep(Duration::from_millis(20)).await;
                         }
                         _ => panic!("expected the joined original to reach the founder mesh"),
                     }
@@ -2027,7 +2029,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     Err(catcoms_sync::SyncError::Publication(
                         catcoms_rt::PublishOnceError::NoPeers,
                     )) => {
-                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                        SystemClock.sleep(Duration::from_millis(20)).await;
                     }
                     _ => panic!("expected the joined members' direct TCP publication"),
                 }
@@ -2304,7 +2306,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 match transmission.submit().await {
                     Ok(Some(receipt)) => break receipt,
                     Err(catcoms_sync::SyncError::Publication(PublishOnceError::NoPeers)) => {
-                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                        SystemClock.sleep(Duration::from_millis(20)).await;
                     }
                     _ => panic!("expected one acknowledgement for the first original"),
                 }
@@ -2696,7 +2698,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         Ok(Some(accepted)) => break accepted,
                         Err(catcoms_sync::SyncError::Publication(
                             catcoms_rt::PublishOnceError::NoPeers,
-                        )) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+                        )) => SystemClock.sleep(Duration::from_millis(20)).await,
                         _ => panic!("expected the restarted founder to publish its original debt"),
                     }
                 };
@@ -2747,7 +2749,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         match probe.publish_once(reply_topic.clone(), packet.clone()).await {
                             Ok(catcoms_rt::PublishSubmission::Submitted) => break,
                             Err(catcoms_rt::PublishOnceError::NoPeers) => {
-                                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                                SystemClock.sleep(Duration::from_millis(20)).await;
                             }
                             _ => panic!("expected the TCP probe to carry the joined ciphertext"),
                         }
@@ -3022,7 +3024,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     Err(catcoms_sync::SyncError::Publication(
                         catcoms_rt::PublishOnceError::NoPeers,
                     )) => {
-                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                        SystemClock.sleep(Duration::from_millis(20)).await;
                     }
                     _ => panic!("expected the recovered founder's original driver acknowledgement"),
                 }

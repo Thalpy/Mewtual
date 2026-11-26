@@ -1565,7 +1565,7 @@ async fn native_text_expired_preview_reproves_the_original_pending_after_restart
     assert!(!occupied.is_capture_busy_cached());
     let warm = preview_request(&window, code.clone());
     let release = async {
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        SystemClock.sleep(Duration::from_millis(100)).await;
         drop(occupied);
     };
     tokio::join!(run(&queue), release);
@@ -1763,7 +1763,7 @@ async fn native_text_connected_join_retries_original_welcome_after_authenticated
     .await
     .expect("the original session's metadata work drained");
     let release = async {
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        SystemClock.sleep(Duration::from_millis(100)).await;
         drop(occupied);
     };
     tokio::join!(unlock_current(&app, &main, &queue), release);
@@ -1839,7 +1839,7 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     let join_task = tokio::spawn(joiner_queue.lock().unwrap().pop().unwrap());
     let initial_response = tokio::time::timeout(Duration::from_secs(30), async {
         let release = async {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            SystemClock.sleep(Duration::from_millis(100)).await;
             drop(occupied);
         };
         tokio::join!(original, release).0.unwrap()
@@ -1999,7 +1999,7 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
                     )).unwrap());
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(20)).await;
+                SystemClock.sleep(Duration::from_millis(20)).await;
             }
         }).await.expect("the automatic founder worker sent exact saved text to the joined receiver");
     }
@@ -2026,7 +2026,7 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
                     break;
                 }
             }
-            tokio::time::sleep(Duration::from_millis(35)).await;
+            SystemClock.sleep(Duration::from_millis(35)).await;
         }
         loop {
             let page = native_history_request(&joiner_window, &original, "0", None, 8);
@@ -2039,7 +2039,7 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
                     break;
                 }
             }
-            tokio::time::sleep(Duration::from_millis(35)).await;
+            SystemClock.sleep(Duration::from_millis(35)).await;
         }
     }).await.expect("the native founder received the member's original over TCP and the joined outbox checkpointed");
 
@@ -2365,7 +2365,7 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
                         break value;
                     }
                 }
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                SystemClock.sleep(Duration::from_millis(50)).await;
             }
         })
         .await
@@ -2423,7 +2423,7 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
             } else {
                 drop(permit);
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            SystemClock.sleep(Duration::from_millis(100)).await;
         }
     })
     .await
@@ -2474,7 +2474,7 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
                 }
                 Err(error) => last_refusal = format!("preparation reported {error:?}"),
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            SystemClock.sleep(Duration::from_millis(50)).await;
         }
     })
     .await;
@@ -2589,7 +2589,7 @@ async fn assert_joined_publication_stopped(
 ) {
     tokio::time::timeout(Duration::from_secs(3), async {
         while original.strong_count() != 0 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            SystemClock.sleep(Duration::from_millis(10)).await;
         }
     })
     .await

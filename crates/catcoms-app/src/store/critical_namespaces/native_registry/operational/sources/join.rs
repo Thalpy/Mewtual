@@ -33,7 +33,7 @@ use catcoms_replication::chat::owner_header::OwnerHeaderId;
 use catcoms_replication::chat::{owner_header::OwnerBodyId, owner_state::transition::ReplayMath};
 use catcoms_rt::{
     Clock, NativeChatKeyEnds, NativeChatKeyPurpose, NativeChatSourceClose, NativeChatUiCommand,
-    PeerId, RequestAuthority, RequestCancellation,
+    PeerId, RequestAuthority, RequestCancellation, SystemClock,
 };
 use catcoms_sync::{
     ClosedV2JoinedNode, NativeV2JoinKeyEntry, V2JoinedRuntimeInputs, V2PendingJoinContextData,
@@ -334,7 +334,7 @@ impl RequestAuthority for JoinEffect {
             tokio::select! {
                 _ = invocation.changed() => return,
                 _ = caller.cancelled() => return,
-                _ = tokio::time::sleep(Duration::from_millis(25)) => {},
+                _ = SystemClock.sleep(Duration::from_millis(25)) => {},
             }
         }
     }

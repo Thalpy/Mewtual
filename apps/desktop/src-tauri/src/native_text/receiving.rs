@@ -38,7 +38,7 @@ pub(super) async fn capture_founder_frame(
         tokio::select! {
             biased;
             _ = scope.cancelled() => return None,
-            _ = tokio::time::sleep(FOUNDER_CAPTURE_RETRY_DELAY) => {}
+            _ = SystemClock.sleep(FOUNDER_CAPTURE_RETRY_DELAY) => {}
         }
     }
     None
@@ -57,7 +57,7 @@ pub(super) async fn run_founder<R: tauri::Runtime>(
             tokio::select! {
                 biased;
                 _ = scope.cancelled() => return,
-                _ = tokio::time::sleep(REOPEN_DELAY) => {},
+                _ = SystemClock.sleep(REOPEN_DELAY) => {},
             }
             let local = source.member_work();
             let Some(permit) = local.try_background() else {
@@ -238,7 +238,7 @@ pub(super) async fn serve_founder_dependencies<R: tauri::Runtime>(
         tokio::select! {
             biased;
             _ = scope.cancelled() => return,
-            _ = tokio::time::sleep(REOPEN_DELAY) => {},
+            _ = SystemClock.sleep(REOPEN_DELAY) => {},
         }
         let state = app.state::<AppState>();
         let local = source.member_work();
@@ -311,7 +311,7 @@ pub(super) async fn run<R: tauri::Runtime>(
             tokio::select! {
                 biased;
                 _ = scope.cancelled() => break,
-                _ = tokio::time::sleep(REOPEN_DELAY) => {}
+                _ = SystemClock.sleep(REOPEN_DELAY) => {}
             }
             receiver = open(&state, source).await;
             continue;

@@ -18,8 +18,8 @@ use catcoms_replication::chat::{
     V2OrdinaryReceiveStatus, MAX_ACTION_BYTES,
 };
 use catcoms_rt::{
-    AuthorizedMeshPublication, CryptoRngCore, PublishSubmission, RequestAuthority,
-    RequestCancellation, Topic,
+    AuthorizedMeshPublication, Clock, CryptoRngCore, PublishSubmission, RequestAuthority,
+    RequestCancellation, SystemClock, Topic,
 };
 use catcoms_storage::pad::{self, OP_PAD_CEILING, OP_PAD_FLOOR, PAD_FOOTER_BYTES};
 use catcoms_wire::{Decoder, DocType, Encoder};
@@ -148,7 +148,7 @@ impl RequestAuthority for MemberTransportAuthority {
                     self.retired.store(true, Ordering::Release);
                     return;
                 },
-                _ = tokio::time::sleep(Duration::from_millis(25)) => {},
+                _ = SystemClock.sleep(Duration::from_millis(25)) => {},
             }
         }
     }

@@ -333,7 +333,10 @@ impl RequestAuthority for OriginalRoute {
 mod tests {
     use super::*;
     use crate::{keypair_from_seed, NativeTcpPreparation};
-    use catcoms_rt::{MeshTransport, PublishOnceError, PublishSubmission, Topic};
+    use catcoms_rt::{
+        Clock, MeshTransport, PublishOnceError, PublishSubmission, SystemClock, Topic,
+    };
+    use std::time::Duration;
     use tokio::sync::watch;
 
     #[tokio::test]
@@ -356,7 +359,7 @@ mod tests {
         assert!(source.capture_request(target).is_none());
         let (_ready, signal) = watch::channel(false);
         let scope = RequestCancellation::new(signal, None);
-        tokio::time::timeout(std::time::Duration::from_secs(16), async {
+        tokio::time::timeout(Duration::from_secs(16), async {
             let topic = Topic::new(vec![109; 32]);
             let (retire_frame, frame_signal) = watch::channel(false);
             let mut received = requester
@@ -395,7 +398,7 @@ mod tests {
                 {
                     Ok(PublishSubmission::Submitted) => break,
                     Err(PublishOnceError::NoPeers) => {
-                        tokio::time::sleep(std::time::Duration::from_millis(20)).await
+                        SystemClock.sleep(Duration::from_millis(20)).await
                     }
                     result => panic!("unexpected gossip submission {result:?}"),
                 }

@@ -450,7 +450,7 @@ async fn authenticate_mounted(
     secret: &[u8],
     generation: u64,
 ) -> Result<Option<NativeTextVaultAuthenticationCheck>, String> {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    let deadline = SystemClock.monotonic_ms().saturating_add(2_000);
     let work = loop {
         if state.ui_session_generation.load(Ordering::SeqCst) != generation
             || state.native_text.sources.is_closing_cached()
@@ -478,10 +478,10 @@ async fn authenticate_mounted(
         // A connected worker can still be returning its original metadata
         // read after the prior UI session closed. No key check has run yet.
         drop(work);
-        if tokio::time::Instant::now() >= deadline {
+        if SystemClock.monotonic_ms() >= deadline {
             return Err("Vault authentication is busy. Try again.".into());
         }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        SystemClock.sleep(Duration::from_millis(25)).await;
     };
     let secret = Zeroizing::new(secret.to_vec());
     tauri::async_runtime::spawn_blocking(move || work.verify(&secret))

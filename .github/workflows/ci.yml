@@ -78,6 +78,14 @@ jobs:
           name: chat-v2-mounted-restart-${{ matrix.os }}
           path: logs/chat-v2-mounted-restart/results.log
           if-no-files-found: error
+      - name: Ambient-dependency gate
+        if: ${{ !cancelled() && runner.os == 'Linux' }}
+        shell: bash
+        run: bash scripts/check-no-ambient.sh
+      - name: Store raw-fs gate (I-4)
+        if: ${{ !cancelled() && runner.os == 'Linux' }}
+        shell: bash
+        run: bash scripts/check-store-raw-fs.sh
       - name: Test
         # Keep the full workspace result after collecting independent failure output.
         if: ${{ !cancelled() && (steps.mounted_restart.outcome == 'success' || steps.mounted_restart.outcome == 'failure') }}
@@ -95,14 +103,6 @@ jobs:
         run: cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml -p wmi
         env:
           CARGO_TARGET_DIR: target
-      - name: Ambient-dependency gate
-        if: runner.os == 'Linux'
-        shell: bash
-        run: bash scripts/check-no-ambient.sh
-      - name: Store raw-fs gate (I-4)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: bash scripts/check-store-raw-fs.sh
 
   deny:
     name: cargo-deny (supply chain)
