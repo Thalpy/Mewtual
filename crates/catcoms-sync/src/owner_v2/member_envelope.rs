@@ -201,6 +201,21 @@ pub struct OpenedV2MemberEnvelopeData {
 }
 
 impl OpenedV2MemberEnvelopeData {
+    /// The caller authenticates the enclosing wire and binds this original
+    /// to the expected purpose and request before parsing the signed bytes.
+    pub(super) fn from_authenticated_original(
+        scope: &V2MemberEnvelopeScopeData,
+        admission: OwnerFactId,
+        original: &[u8],
+    ) -> Result<Self, SyncError> {
+        Ok(Self {
+            scope: *scope,
+            admission,
+            action: checked_action(original, scope, admission)?,
+            original: Zeroizing::new(original.to_vec()),
+        })
+    }
+
     pub(super) fn matches_scope_data(&self, scope: &V2MemberEnvelopeScopeData) -> bool {
         &self.scope == scope
     }
@@ -392,7 +407,7 @@ pub fn v2_member_envelope_topic_data(
     Ok(Topic::new(domain_hash(TOPIC, &base, scope).to_vec()))
 }
 
-fn checked_action(
+pub(super) fn checked_action(
     original: &[u8],
     scope: &V2MemberEnvelopeScopeData,
     admission: OwnerFactId,
@@ -487,13 +502,7 @@ pub fn open_v2_member_envelope_data(
     );
     let original = wire_data(input.get_bytes())?;
     wire_data(input.finish())?;
-    let action = checked_action(original, scope, admission)?;
-    Ok(OpenedV2MemberEnvelopeData {
-        scope: *scope,
-        admission,
-        action,
-        original: Zeroizing::new(original.to_vec()),
-    })
+    OpenedV2MemberEnvelopeData::from_authenticated_original(scope, admission, original)
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 //! One exact dependency request under the current group channel exporter.
 //! The connected route is bound into the request. Neither a request nor a
 //! response grants a current view, historical acceptance, or global absence.
+mod archive_relay;
 pub(super) mod history;
 
 catcoms_rt::redacted_debug! {
@@ -30,6 +31,10 @@ const REPLY_TAG: &[u8] = b"mewtual/chat/member-dependency-reply/v2\0";
 const REQUEST_KEY: &str = "mewtual/chat/member-dependency-request-key/v2";
 const REPLY_KEY: &str = "mewtual/chat/member-dependency-reply-key/v2";
 const EXACT_REQUEST: &str = "mewtual/chat/member-dependency-request-id/v2";
+const ARCHIVE_REQUEST_TAG: &[u8] = b"mewtual/chat/member-archive-fetch/v2\0";
+const ARCHIVE_REPLY_TAG: &[u8] = b"mewtual/chat/member-archive-answer/v2\0";
+const ARCHIVE_REQUEST_KEY: &str = "mewtual/chat/member-archive-fetch-key/v2";
+const ARCHIVE_REPLY_KEY: &str = "mewtual/chat/member-archive-answer-key/v2";
 const VERSION: u16 = 1;
 const OVERHEAD: usize = 4 + 2 + 4 + 24 + 4 + 16;
 const REQUEST_BODY: usize = 3 * 36;
@@ -40,6 +45,33 @@ const _: () =
     assert!(MAX_V2_DEPENDENCY_REQUEST_BYTES < catcoms_rt::CHAT_V2_DEPENDENCY_REQUEST_MAX_BYTES);
 const _: () =
     assert!(MAX_V2_DEPENDENCY_REPLY_BYTES <= catcoms_rt::CHAT_V2_DEPENDENCY_RESPONSE_MAX_BYTES);
+const _: () = assert!(ARCHIVE_REQUEST_TAG.len() <= REQUEST_TAG.len());
+const _: () = assert!(
+    ARCHIVE_REPLY_TAG.len() + OVERHEAD + 4 + archive_relay::MAX_PADDED_BYTES
+        <= MAX_V2_DEPENDENCY_REPLY_BYTES
+);
+
+#[derive(Clone, Copy)]
+enum DependencyPurpose {
+    OwnOriginal,
+    ArchiveRelay,
+}
+
+impl DependencyPurpose {
+    fn request(self) -> (&'static [u8], &'static str) {
+        match self {
+            Self::OwnOriginal => (REQUEST_TAG, REQUEST_KEY),
+            Self::ArchiveRelay => (ARCHIVE_REQUEST_TAG, ARCHIVE_REQUEST_KEY),
+        }
+    }
+
+    fn reply(self) -> (&'static [u8], &'static str) {
+        match self {
+            Self::OwnOriginal => (REPLY_TAG, REPLY_KEY),
+            Self::ArchiveRelay => (ARCHIVE_REPLY_TAG, ARCHIVE_REPLY_KEY),
+        }
+    }
+}
 
 /// The ordered, already authenticated connection endpoints expected by the
 /// current source. A peer ID here is routing data, not a member signer.
@@ -94,7 +126,10 @@ impl V2FounderMemberDependencyAccess<'_> {
         request: &PreparedV2MemberDependencyRequest,
         wire: &[u8],
     ) -> Result<Option<SelectedV2MemberEnvelope>, SyncError> {
-        if route.requester != self.local || !self.observation.is_current_cached() {
+        if route.requester != self.local
+            || request.is_archive_relay()
+            || !self.observation.is_current_cached()
+        {
             return Err(SyncError::JoinRejected);
         }
         let opened = request.open_reply(self.group, self.device, &self.scope, route, wire)?;
@@ -145,6 +180,7 @@ impl V2FounderMemberDependencyAccess<'_> {
         rng: &mut impl CryptoRngCore,
     ) -> Result<Vec<u8>, SyncError> {
         if route.provider != self.local
+            || request.is_archive_relay()
             || !self.observation.is_current_cached()
             || saved.is_some_and(|(admission, _)| {
                 admission != self.member.admission_data().admission_id()
@@ -165,6 +201,7 @@ impl V2FounderMemberDependencyAccess<'_> {
 }
 
 struct RequestBinding {
+    purpose: DependencyPurpose,
     scope: V2MemberEnvelopeScopeData,
     route: V2MemberDependencyRoute,
     action: ActionId,
@@ -186,16 +223,57 @@ impl PreparedV2MemberDependencyRequest {
         action: ActionId,
         rng: &mut impl CryptoRngCore,
     ) -> Result<Self, SyncError> {
+        Self::prepare_for(
+            group,
+            device,
+            scope,
+            route,
+            action,
+            DependencyPurpose::OwnOriginal,
+            rng,
+        )
+    }
+
+    pub(crate) fn prepare_archive_relay(
+        group: &ServerGroup,
+        device: &MlsDevice,
+        scope: V2MemberEnvelopeScopeData,
+        route: V2MemberDependencyRoute,
+        action: ActionId,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Self, SyncError> {
+        Self::prepare_for(
+            group,
+            device,
+            scope,
+            route,
+            action,
+            DependencyPurpose::ArchiveRelay,
+            rng,
+        )
+    }
+
+    fn prepare_for(
+        group: &ServerGroup,
+        device: &MlsDevice,
+        scope: V2MemberEnvelopeScopeData,
+        route: V2MemberDependencyRoute,
+        action: ActionId,
+        purpose: DependencyPurpose,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Self, SyncError> {
         require_route(route)?;
-        let key = member_exporter_key(group, device, &scope, REQUEST_KEY)?;
+        let (tag, domain) = purpose.request();
+        let key = member_exporter_key(group, device, &scope, domain)?;
         let mut body = Encoder::with_capacity(REQUEST_BODY);
         data(body.put_bytes(route.requester.as_bytes()))?;
         data(body.put_bytes(route.provider.as_bytes()))?;
         data(body.put_bytes(action.as_bytes()))?;
         let plain = Zeroizing::new(body.finish());
-        let wire = seal_frame(&key, REQUEST_TAG, &plain, rng)?;
+        let wire = seal_frame(&key, tag, &plain, rng)?;
         Ok(Self {
             binding: RequestBinding {
+                purpose,
                 scope,
                 route,
                 action,
@@ -209,6 +287,10 @@ impl PreparedV2MemberDependencyRequest {
         &self.wire
     }
 
+    pub(crate) fn is_archive_relay(&self) -> bool {
+        matches!(self.binding.purpose, DependencyPurpose::ArchiveRelay)
+    }
+
     /// Authenticate receipt under the same actual selected scope and original
     /// connection endpoints. Empty means this provider returned no original.
     pub fn open_reply(
@@ -220,7 +302,11 @@ impl PreparedV2MemberDependencyRequest {
         wire: &[u8],
     ) -> Result<Option<OpenedV2MemberEnvelopeData>, SyncError> {
         self.binding.require_selected(current, route)?;
-        let sealed = parse_frame(wire, REPLY_TAG, MAX_V2_DEPENDENCY_REPLY_BYTES)?;
+        let sealed = parse_frame(
+            wire,
+            self.binding.purpose.reply().0,
+            MAX_V2_DEPENDENCY_REPLY_BYTES,
+        )?;
         let key = self.binding.reply_key(group, device)?;
         let plain = open_frame(&key, sealed)?;
         let mut body = Decoder::new(&plain);
@@ -229,7 +315,12 @@ impl PreparedV2MemberDependencyRequest {
         if envelope.is_empty() {
             return Ok(None);
         }
-        let opened = open_v2_member_envelope_data(group, device, current, envelope)?;
+        let opened = match self.binding.purpose {
+            DependencyPurpose::OwnOriginal => {
+                open_v2_member_envelope_data(group, device, current, envelope)?
+            }
+            DependencyPurpose::ArchiveRelay => archive_relay::open_original(current, envelope)?,
+        };
         if opened.action_data().id() != self.binding.action {
             return Err(SyncError::Malformed);
         }
@@ -243,6 +334,15 @@ impl PreparedV2MemberDependencyRequest {
 pub struct OpenedV2MemberDependencyRequest(RequestBinding);
 
 impl OpenedV2MemberDependencyRequest {
+    /// Public dispatch hint only. The selected channel and route still have
+    /// to authenticate the request before the holder reads its archive.
+    pub fn recognizes_archive_relay(wire: &[u8]) -> bool {
+        wire.len() <= MAX_V2_DEPENDENCY_REQUEST_BYTES
+            && Decoder::new(wire)
+                .get_bytes()
+                .is_ok_and(|tag| tag == ARCHIVE_REQUEST_TAG)
+    }
+
     pub fn open(
         group: &ServerGroup,
         device: &MlsDevice,
@@ -250,9 +350,45 @@ impl OpenedV2MemberDependencyRequest {
         route: V2MemberDependencyRoute,
         wire: &[u8],
     ) -> Result<Self, SyncError> {
+        Self::open_for(
+            group,
+            device,
+            scope,
+            route,
+            wire,
+            DependencyPurpose::OwnOriginal,
+        )
+    }
+
+    pub(crate) fn open_archive_relay(
+        group: &ServerGroup,
+        device: &MlsDevice,
+        scope: V2MemberEnvelopeScopeData,
+        route: V2MemberDependencyRoute,
+        wire: &[u8],
+    ) -> Result<Self, SyncError> {
+        Self::open_for(
+            group,
+            device,
+            scope,
+            route,
+            wire,
+            DependencyPurpose::ArchiveRelay,
+        )
+    }
+
+    fn open_for(
+        group: &ServerGroup,
+        device: &MlsDevice,
+        scope: V2MemberEnvelopeScopeData,
+        route: V2MemberDependencyRoute,
+        wire: &[u8],
+        purpose: DependencyPurpose,
+    ) -> Result<Self, SyncError> {
         require_route(route)?;
-        let sealed = parse_frame(wire, REQUEST_TAG, MAX_V2_DEPENDENCY_REQUEST_BYTES)?;
-        let key = member_exporter_key(group, device, &scope, REQUEST_KEY)?;
+        let (tag, domain) = purpose.request();
+        let sealed = parse_frame(wire, tag, MAX_V2_DEPENDENCY_REQUEST_BYTES)?;
+        let key = member_exporter_key(group, device, &scope, domain)?;
         let plain = open_frame(&key, sealed)?;
         if plain.len() != REQUEST_BODY {
             return Err(SyncError::Malformed);
@@ -270,6 +406,7 @@ impl OpenedV2MemberDependencyRequest {
         );
         data(body.finish())?;
         Ok(Self(RequestBinding {
+            purpose,
             scope,
             route,
             action,
@@ -279,6 +416,10 @@ impl OpenedV2MemberDependencyRequest {
 
     pub fn action_id_data(&self) -> ActionId {
         self.0.action
+    }
+
+    pub(crate) fn is_archive_relay(&self) -> bool {
+        matches!(self.0.purpose, DependencyPurpose::ArchiveRelay)
     }
 
     /// Build a bounded answer for this exact request. The caller supplies the
@@ -292,8 +433,10 @@ impl OpenedV2MemberDependencyRequest {
         saved: Option<(OwnerFactId, &[u8])>,
         rng: &mut impl CryptoRngCore,
     ) -> Result<Vec<u8>, SyncError> {
+        if self.is_archive_relay() {
+            return Err(SyncError::Malformed);
+        }
         self.0.require_selected(current, route)?;
-        let key = self.0.reply_key(group, device)?;
         let envelope = if let Some((admission, original)) = saved {
             let action = SignedAction::decode(original).map_err(|_| SyncError::Malformed)?;
             if action.id() != self.0.action {
@@ -303,9 +446,51 @@ impl OpenedV2MemberDependencyRequest {
         } else {
             Vec::new()
         };
+        self.seal_payload(group, device, &envelope, rng)
+    }
+
+    pub(crate) fn seal_archive_reply(
+        &self,
+        group: &ServerGroup,
+        device: &MlsDevice,
+        current: &V2MemberEnvelopeScopeData,
+        route: V2MemberDependencyRoute,
+        saved: Option<(OwnerFactId, &[u8])>,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Vec<u8>, SyncError> {
+        if !self.is_archive_relay() {
+            return Err(SyncError::Malformed);
+        }
+        self.0.require_selected(current, route)?;
+        let envelope = saved
+            .map(|(admission, original)| {
+                archive_relay::encode_original(current, self.0.action, admission, original)
+            })
+            .transpose()?;
+        self.seal_payload(
+            group,
+            device,
+            envelope.as_deref().map_or(&[], Vec::as_slice),
+            rng,
+        )
+    }
+
+    fn seal_payload(
+        &self,
+        group: &ServerGroup,
+        device: &MlsDevice,
+        envelope: &[u8],
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Vec<u8>, SyncError> {
+        let key = self.0.reply_key(group, device)?;
         let mut body = Encoder::with_capacity(4 + envelope.len());
-        data(body.put_bytes(&envelope))?;
-        seal_frame(&key, REPLY_TAG, &Zeroizing::new(body.finish()), rng)
+        data(body.put_bytes(envelope))?;
+        seal_frame(
+            &key,
+            self.0.purpose.reply().0,
+            &Zeroizing::new(body.finish()),
+            rng,
+        )
     }
 }
 
@@ -326,7 +511,7 @@ impl RequestBinding {
         group: &ServerGroup,
         device: &MlsDevice,
     ) -> Result<Zeroizing<[u8; 32]>, SyncError> {
-        let base = member_exporter_key(group, device, &self.scope, REPLY_KEY)?;
+        let base = member_exporter_key(group, device, &self.scope, self.purpose.reply().1)?;
         Ok(Zeroizing::new(
             *blake3::keyed_hash(&base, &self.exact).as_bytes(),
         ))

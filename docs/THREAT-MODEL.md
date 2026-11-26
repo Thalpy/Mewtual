@@ -7,7 +7,11 @@ and original connection into admission and revocation. The service reads one
 paid window and excludes other channels, Admissions and Held originals.
 Replies authenticate only that request and offer no proof of global absence,
 authorization to write, or remote custody. The receiver verifies signed
-originals and dependencies before selecting an archive write. The writer
+originals and dependencies before selecting an archive write. Archive relay
+also requires an approved holder and the original author's still-open
+Admission matching the original signature and delegation. Exact relay
+requests read selected records without settling a pending archive write.
+Relay replies and own-outbox replies use separate domains. The writer
 checks each reachable ancestor against its exact selected local original and
 verified Admission. This keeps a new write from relying on memory-only
 proof or extending an earlier archive with a missing dependency. The walk

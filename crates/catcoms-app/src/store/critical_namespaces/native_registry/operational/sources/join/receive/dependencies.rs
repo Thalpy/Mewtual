@@ -6,6 +6,7 @@ catcoms_rt::redacted_debug! {
     NativeTextJoinedDependencyProvider;
 }
 
+use super::history_discovery::HistoryContactScope;
 use super::*;
 use crate::store::persistence::v2_member_transport::{
     LocalHistoryDependencyReplay, HISTORY_REPLAY_FEE,
@@ -17,14 +18,22 @@ use catcoms_net::{
 };
 use catcoms_rt::TransportError;
 use catcoms_sync::owner_v2::{
-    OpenedV2MemberHistoryRequest, PreparedV2MemberDependencyRequest, V2MemberDependencyRoute,
-    V2MemberPublicationObservation, MAX_V2_DEPENDENCY_REPLY_BYTES,
+    OpenedV2MemberDependencyRequest, OpenedV2MemberHistoryRequest,
+    PreparedV2MemberDependencyRequest, V2MemberDependencyRoute, V2MemberPublicationObservation,
+    MAX_V2_DEPENDENCY_REPLY_BYTES,
 };
 use join_tcp::DependencyCaptureRefusal;
 
 // Overlapping network buffers, nested sealed original and role-specific AEAD scratch.
 pub(super) const REPLY_FEE: usize = OPEN_FEE + 5 * MAX_V2_DEPENDENCY_REPLY_BYTES + 16 * 1024;
 const MAX_FRAME_DEPENDENCY_DEPTH: u8 = 4;
+
+#[derive(Clone, Copy)]
+pub(super) enum DependencyProvenance {
+    Direct,
+    ApprovedAuthor(OwnerBodyId),
+    ArchiveRelay,
+}
 
 /// One fixed ActionId and original live route, ready outside the metadata slot.
 pub struct NativeTextJoinedDependencyExchange {
@@ -34,7 +43,7 @@ pub struct NativeTextJoinedDependencyExchange {
     route: V2MemberDependencyRoute,
     request: PreparedV2MemberDependencyRequest,
     frame_depth: Option<u8>,
-    approved_author: Option<OwnerBodyId>,
+    provenance: DependencyProvenance,
     signal: RequestCancellation,
     invocation: watch::Sender<bool>,
 }
@@ -49,7 +58,7 @@ pub struct NativeTextJoinedDependencyResponse {
     request: PreparedV2MemberDependencyRequest,
     observation: NativeChatMemberDependencyObservation,
     frame_depth: Option<u8>,
-    approved_author: Option<OwnerBodyId>,
+    provenance: DependencyProvenance,
     signal: RequestCancellation,
     invocation: watch::Sender<bool>,
 }
@@ -129,7 +138,7 @@ impl NativeTextJoinedDependencyExchange {
             request: self.request,
             observation,
             frame_depth: self.frame_depth,
-            approved_author: self.approved_author,
+            provenance: self.provenance,
             signal: self.signal,
             invocation: self.invocation,
         })
@@ -205,7 +214,33 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             exchange,
             selection,
             (channel, action),
-            (None, None, None),
+            (None, None, DependencyProvenance::Direct),
+            caller,
+            rng,
+        )
+    }
+
+    /// Fetch a known exact ID from an approved connected archive holder. The
+    /// returned original can belong to a different current author.
+    pub fn prepare_archive_relay_exchange(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        channel: u128,
+        provider: PeerId,
+        action: ActionId,
+        caller: RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<NativeTextJoinedDependencyExchange, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        let exchange = self
+            .dependency_lane()?
+            .capture_request(provider)
+            .ok_or(Refusal::Unavailable)?;
+        self.prepare_dependency_on(
+            exchange,
+            selection,
+            (channel, action),
+            (None, None, DependencyProvenance::ArchiveRelay),
             caller,
             rng,
         )
@@ -246,7 +281,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             exchange.ok_or(Refusal::Unavailable)?,
             selection,
             (spec.realm.channel(), action),
-            (Some(depth), parent, None),
+            (Some(depth), parent, DependencyProvenance::Direct),
             caller,
             rng,
         )
@@ -257,10 +292,10 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         exchange: NativeChatMemberDependencyExchange,
         selection: &NativeTextJoinedRowSelection,
         (channel, action): (u128, ActionId),
-        (frame_depth, parent, approved_author): (
+        (frame_depth, parent, provenance): (
             Option<u8>,
             Option<&RequestCancellation>,
-            Option<OwnerBodyId>,
+            DependencyProvenance,
         ),
         caller: RequestCancellation,
         rng: &mut impl CryptoRngCore,
@@ -272,21 +307,40 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             provider,
         };
         let observation = exchange.observe_route();
-        let (request, observed, auth, fee) =
+        let (request, approval, observed, auth, fee) =
             self.with_member_receiver(selection, &caller, |source| {
                 if !observation.is_current_cached() {
                     return Err(Refusal::Stale);
                 }
+                let approval = if matches!(provenance, DependencyProvenance::ArchiveRelay) {
+                    Some(source.require_history_peer(selection, provider)?.1)
+                } else {
+                    None
+                };
                 let fee = source
                     .metadata
                     .reserve_join_node(REPLY_FEE)
                     .map_err(|_| Refusal::Busy)?;
-                let request = source
-                    .node
-                    .prepare_member_dependency_request(source.prefix, channel, route, action, rng)
-                    .map_err(|_| Refusal::Failed)?;
+                let request = if approval.is_some() {
+                    source.node.prepare_member_archive_relay_request(
+                        source.prefix,
+                        channel,
+                        route,
+                        action,
+                        rng,
+                    )
+                } else {
+                    source.node.prepare_member_dependency_request(
+                        source.prefix,
+                        channel,
+                        route,
+                        action,
+                        rng,
+                    )
+                }
+                .map_err(|_| Refusal::Failed)?;
                 let (observed, auth) = source.effect_data()?;
-                Ok((request, observed, auth, fee))
+                Ok((request, approval, observed, auth, fee))
             })?;
         if !observation.is_current_cached() {
             return Err(Refusal::Stale);
@@ -304,6 +358,11 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         } else {
             caller
         };
+        let caller = if let Some(approval) = approval {
+            HistoryContactScope::constrain(approval, caller)
+        } else {
+            caller
+        };
         let (signal, invocation) = self.dependency_signal(selection, caller, auth, observed);
         let signal = signal.retain_custody(Arc::new(JoinFramePayment { _fee: fee }));
         Ok(NativeTextJoinedDependencyExchange {
@@ -313,7 +372,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             route,
             request,
             frame_depth,
-            approved_author,
+            provenance,
             signal,
             invocation,
         })
@@ -348,11 +407,10 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                     &response.wire,
                 )
                 .map_err(|_| Refusal::Failed)?;
-            if response.approved_author.is_some_and(|author| {
-                opened.as_ref().is_some_and(|original| {
-                    original.admission_data().as_bytes() != author.as_bytes()
-                })
-            }) {
+            if matches!(response.provenance, DependencyProvenance::ApprovedAuthor(author)
+            if opened.as_ref().is_some_and(|original| {
+                original.admission_data().as_bytes() != author.as_bytes()
+            })) {
                 return Err(Refusal::Stale);
             }
             let NativeTextJoinedDependencyResponse {
@@ -392,7 +450,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
     ) -> Result<Option<NativeTextJoinedArchiveReplay>, V2MemberSaveRefusal> {
         use catcoms_replication::chat::ActionState;
         use V2MemberSaveRefusal as Refusal;
-        if response.approved_author.is_none() {
+        if matches!(response.provenance, DependencyProvenance::Direct) {
             return Err(Refusal::Stale);
         }
         let channel = response.channel;
@@ -600,8 +658,9 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         if OpenedV2MemberHistoryRequest::recognizes(wire) {
             return self.serve_history_request(selection, channel, request, caller, rng);
         }
+        let archive_relay = OpenedV2MemberDependencyRequest::recognizes_archive_relay(wire);
         let waiting = request.cancellation_authority();
-        let (reply, observed, auth, fee) =
+        let (reply, approval, observed, auth, fee) =
             self.with_member_receiver(selection, &caller, |source| {
                 if !waiting.authorized() {
                     return Err(Refusal::Cancelled);
@@ -611,35 +670,57 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                     requester,
                     provider: source.node.local_peer_data(),
                 };
+                let approval = if archive_relay {
+                    Some(source.require_history_peer(selection, requester)?.1)
+                } else {
+                    None
+                };
                 let fee = source
                     .metadata
                     .reserve_join_node(REPLY_FEE)
                     .map_err(|_| Refusal::Busy)?;
-                let original = source
-                    .node
-                    .open_member_dependency_request(source.prefix, channel, route, wire)
-                    .map_err(|_| Refusal::Failed)?;
-                let dependency = source.read_dependency(channel, original.action_id_data(), rng)?;
-                let saved = dependency
-                    .as_ref()
-                    .map(|saved| (saved.receipt().admission, saved.original_bytes()));
-                let reply = source
-                    .node
-                    .seal_member_dependency_reply(
-                        source.prefix,
-                        channel,
-                        route,
-                        &original,
-                        saved,
-                        rng,
-                    )
-                    .map_err(|_| Refusal::Failed)?;
+                let reply = if let Some(approval) = &approval {
+                    let query = source
+                        .node
+                        .open_member_archive_relay_request(source.prefix, channel, route, wire)
+                        .map_err(|_| Refusal::Failed)?;
+                    if approval.is_cancelled() || !waiting.authorized() || caller.is_cancelled() {
+                        return Err(Refusal::Cancelled);
+                    }
+                    source.serve_selected_archive_record(channel, route, &query, rng)?
+                } else {
+                    let original = source
+                        .node
+                        .open_member_dependency_request(source.prefix, channel, route, wire)
+                        .map_err(|_| Refusal::Failed)?;
+                    let dependency =
+                        source.read_dependency(channel, original.action_id_data(), rng)?;
+                    let saved = dependency
+                        .as_ref()
+                        .map(|saved| (saved.receipt().admission, saved.original_bytes()));
+                    source
+                        .node
+                        .seal_member_dependency_reply(
+                            source.prefix,
+                            channel,
+                            route,
+                            &original,
+                            saved,
+                            rng,
+                        )
+                        .map_err(|_| Refusal::Failed)?
+                };
                 let (observed, auth) = source.effect_data()?;
-                Ok((reply, observed, auth, fee))
+                Ok((reply, approval, observed, auth, fee))
             })?;
         if !waiting.authorized() {
             return Err(Refusal::Cancelled);
         }
+        let caller = if let Some(approval) = approval {
+            HistoryContactScope::constrain(approval, caller)
+        } else {
+            caller
+        };
         let (signal, invocation) = self.dependency_signal(selection, caller, auth, observed);
         request
             .respond(
@@ -687,6 +768,40 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
 }
 
 impl<R: CryptoRngCore> ReceiverSource<'_, R> {
+    fn serve_selected_archive_record(
+        &self,
+        channel: u128,
+        route: V2MemberDependencyRoute,
+        request: &OpenedV2MemberDependencyRequest,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Vec<u8>, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        let selected = if self
+            .store
+            .has_mounted_shared_history()
+            .map_err(|_| Refusal::Busy)?
+        {
+            self.store
+                .read_selected_shared_history_record(
+                    self.history_scope(channel),
+                    request.action_id_data(),
+                )
+                .map_err(|_| Refusal::Failed)?
+        } else {
+            None
+        };
+        let saved = selected.as_ref().map(|record| {
+            (
+                record.admission,
+                record.original.action(),
+                record.original.original_bytes(),
+            )
+        });
+        self.node
+            .seal_member_archive_relay_reply(self.prefix, channel, route, request, saved, rng)
+            .map_err(|_| Refusal::Failed)
+    }
+
     pub(super) fn effect_data(
         &self,
     ) -> Result<(V2MemberPublicationObservation, AuthenticationNegative), V2MemberSaveRefusal> {

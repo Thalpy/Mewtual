@@ -2,7 +2,8 @@
 //! Applying those originals still goes through exact dependency fetch and
 //! the signed-action receiver. Cursor progress alone never covers a write.
 use super::dependencies::{
-    NativeTextJoinedDependencyExchange, ReplyPayment, ScopeAuthority, REPLY_FEE,
+    DependencyProvenance, NativeTextJoinedDependencyExchange, ReplyPayment, ScopeAuthority,
+    REPLY_FEE,
 };
 use super::*;
 use crate::store::persistence::v2_member_outbox::{DispositionCode, MemberEntryStatus};
@@ -53,13 +54,13 @@ struct HistoryWireScope {
 
 catcoms_rt::redacted_debug! { HistoryContactScope; }
 
-struct HistoryContactScope {
+pub(super) struct HistoryContactScope {
     approval: RequestCancellation,
     caller: RequestCancellation,
 }
 
 impl HistoryContactScope {
-    fn constrain(
+    pub(super) fn constrain(
         approval: RequestCancellation,
         caller: RequestCancellation,
     ) -> RequestCancellation {
@@ -338,7 +339,11 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             exchange,
             selection,
             (page.query.channel, action),
-            (None, Some(&page.query.signal), Some(page.query.admission)),
+            (
+                None,
+                Some(&page.query.signal),
+                DependencyProvenance::ApprovedAuthor(page.query.admission),
+            ),
             caller,
             rng,
         )
@@ -429,7 +434,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
 }
 
 impl<R: CryptoRngCore> ReceiverSource<'_, R> {
-    fn require_history_peer(
+    pub(super) fn require_history_peer(
         &self,
         selection: &NativeTextJoinedRowSelection,
         peer: PeerId,

@@ -804,6 +804,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
         .join(format!("mo-{}", hex::encode(original_member_outbox)));
     let mut saved = None;
     let mut founder_archived = None;
+    let mut founder_archive_digest = None;
     let mut founder_reply = None;
     let mut founder_debt = None;
     if successor == Some(MountedSuccessor::MissedHistory) {
@@ -933,6 +934,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
             .unwrap()
             .is_some());
         founder_archived = Some(original.action_id_data());
+        founder_archive_digest = Some(original.original_digest_for_test());
         drop((receiver, ledger));
         let parent = original.action_id_data();
         let reply = catcoms_replication::chat::Body::Create {
@@ -2028,6 +2030,58 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
             };
             use catcoms_net::NativeChatMemberGossipEvent;
             use catcoms_replication::chat::{GuardedProjection, ProjectionCertainty};
+            if !missed_history {
+                let action = founder_archived.expect("the first joiner selected the founder original");
+                let digest = founder_archive_digest.unwrap();
+                assert!(third_row()
+                    .selected_archive_target_data(&third_selection, channel, action, &fresh)
+                    .unwrap().is_none());
+                let peer = local_transport.0;
+                let holder_contact = recovered_row().sign_member_contact(&selection, &fresh).unwrap();
+                third_row().prepare_member_contact(&third_selection, &holder_contact, host, fresh.clone())
+                    .unwrap().connect(&scheduler).await.unwrap();
+                let mut provider = recovered_row().attach_dependency_provider(&selection, fresh.clone()).unwrap();
+                let serve_relay = async |provider: &mut crate::store::NativeTextJoinedDependencyProvider,
+                                         rng: &mut catcoms_rt::OsCryptoRng| {
+                    let request = provider.next().await.expect("exact request on the holder connection");
+                    recovered_row().serve_dependency_request(&selection, channel, request, fresh.clone(), rng)
+                };
+                let fetch_relay = |rng: &mut rand_chacha::ChaCha20Rng| {
+                    third_row().prepare_archive_relay_exchange(
+                        &third_selection, channel, peer, action, fresh.clone(), rng,
+                    ).unwrap()
+                };
+                let denied = fetch_relay(&mut third_rng);
+                let (response, served) = tokio::time::timeout(
+                    catcoms_rt::REQUEST_TIMEOUT + Duration::from_secs(2),
+                    async { tokio::join!(denied.receive(), serve_relay(&mut provider, &mut history_rng)) },
+                ).await.unwrap();
+                assert_eq!(served, Err(V2MemberSaveRefusal::Stale));
+                assert!(response.is_err());
+                recovered_row().prepare_member_contact(&selection, &contact, host, fresh.clone())
+                    .unwrap().connect(&scheduler).await.unwrap();
+                let own = third_row().prepare_dependency_exchange(
+                    &third_selection, channel, peer, action, fresh.clone(), &mut third_rng,
+                ).unwrap();
+                let (response, served) = tokio::time::timeout(Duration::from_secs(10), async {
+                    tokio::join!(own.receive(), serve_relay(&mut provider, &mut history_rng))
+                }).await.unwrap();
+                served.unwrap();
+                assert!(third_row().open_dependency_response(
+                    &third_selection, response.unwrap(), &fresh,
+                ).unwrap().is_none());
+                let relay = fetch_relay(&mut third_rng);
+                let (response, served) = tokio::time::timeout(Duration::from_secs(10), async {
+                    tokio::join!(relay.receive(), serve_relay(&mut provider, &mut history_rng))
+                }).await.unwrap();
+                served.unwrap();
+                let mut replay = third_row().prepare_discovered_archive(
+                    &third_selection, response.unwrap(), fresh.clone(),
+                ).unwrap().unwrap();
+                assert_eq!(replay.original_digest_for_test(), digest);
+                assert!(third_row().advance_discovered_archive(&mut replay, &fresh, &mut third_rng).unwrap());
+                assert!(third_row().select_discovered_archive(&replay, &fresh, &mut third_rng).unwrap().is_some());
+            }
             let text = super::body("The existing member sent this after the founder stopped");
             let offline = V2MemberSignRequest {
                 token: [0xc4; 32],
@@ -2616,6 +2670,17 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     if *create == created.0 && *delete == deleted.0
             )).unwrap());
             drop((projection, current));
+            if !missed_history {
+                let action = founder_archived.unwrap();
+                let current = recipient_row().select_registered(&fresh).unwrap();
+                let projection = recipient_row().archived_message_projection(
+                    &current, channel, action, fresh.clone(), &mut third_rng,
+                ).unwrap().unwrap();
+                assert!(projection.with_publication(|view| matches!(
+                    view, GuardedProjection::Visible { create, selected, text, .. }
+                        if *create == action && *selected == action && text == "Original founder message over TCP"
+                )).unwrap());
+            }
             if let Some((deepest, _)) = chain.last() {
                 let current = recipient_row().select_registered(&fresh).unwrap();
                 let projection = recipient_row().archived_message_projection(

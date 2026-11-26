@@ -6,7 +6,11 @@ fetches each original on the exact dependency path and rechecks its signature
 and dependencies before archiving it. The desktop worker rotates bounded
 turns through approved contacts. Joined message reads use the guarded
 archive first, including when a delayed live notice concerns a recovered
-deletion. Archive relaying remains open.
+deletion. A joined receiver with a known ActionId can also fetch the signed
+original from a different approved archive holder. The holder's authenticated
+connection carries the reply, and the author's original signature and open
+Admission determine whether it can enter the archive. Automatic discovery
+of unknown IDs at archive holders remains open.
 [Chat V2 discovery flow](communication-recovery/CHAT-V2-ORDINARY-MEMBER-PATH.md#discovering-missed-originals-from-a-joined-member).
 
 Security prerequisite: an incoming subscription retries retained publication

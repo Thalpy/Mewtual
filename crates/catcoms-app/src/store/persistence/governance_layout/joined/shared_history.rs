@@ -225,6 +225,46 @@ impl ServerStore {
         })
     }
 
+    /// Serve only a selected record. Remote requests must never finish a
+    /// local in-flight save or recover a cold WAL to make an answer visible.
+    pub(in crate::store) fn read_selected_shared_history_record(
+        &self,
+        scope: SharedHistoryScope,
+        action: ActionId,
+    ) -> Result<Option<SavedSharedOriginal>, AppError> {
+        if scope.vault != self.chat_vault_domain()? {
+            return Err(denied());
+        }
+        self.validate_mounted_governance_layout()?;
+        let slot = self.shared_history_mount.try_lock().map_err(|_| denied())?;
+        let mounted = slot.as_ref().ok_or_else(denied)?;
+        mounted.require(self)?;
+        if mounted.pending.is_some() {
+            return Err(denied());
+        }
+        let policy = self.governance_layout_policy.as_ref().ok_or_else(denied)?;
+        let pool = &policy.current.archive.pending.pool;
+        let key = member_outbox_key(self)?;
+        let payment = pool.try_reserve(DISK_FEE)?;
+        let unmounted;
+        let disk = if let Some(disk) = &mounted.disk {
+            disk
+        } else {
+            unmounted = SharedHistoryDisk::from_held(
+                mounted.directory.try_clone()?,
+                scope,
+                SharedHistoryDiskQuota::native(),
+                pool.clone(),
+                &key,
+            )?;
+            &unmounted
+        };
+        disk.require_scope(scope)?;
+        let result = disk.read(&key, action, &self._session, payment)?;
+        mounted.require(self)?;
+        Ok(result)
+    }
+
     pub(in crate::store) fn shared_history_action_page(
         &self,
         scope: SharedHistoryScope,

@@ -210,6 +210,109 @@ fn member_envelope_uses_the_real_mls_group_and_exact_signed_original() {
     )
     .is_err());
 
+    // Alice can carry a copy of Bob's original in the archive protocol,
+    // but the same original cannot enter Alice's ordinary dependency reply.
+    let relay_route = V2MemberDependencyRoute {
+        requester: route.provider,
+        provider: route.requester,
+    };
+    let relay_request = PreparedV2MemberDependencyRequest::prepare_archive_relay(
+        &bob_group,
+        &bob,
+        scope,
+        relay_route,
+        action.id(),
+        &mut rng,
+    )
+    .unwrap();
+    assert!(OpenedV2MemberDependencyRequest::recognizes_archive_relay(
+        relay_request.wire_data()
+    ));
+    assert!(!OpenedV2MemberDependencyRequest::recognizes_archive_relay(
+        request.wire_data()
+    ));
+    assert!(OpenedV2MemberDependencyRequest::open(
+        &alice_group,
+        &alice,
+        scope,
+        relay_route,
+        relay_request.wire_data(),
+    )
+    .is_err());
+    assert!(OpenedV2MemberDependencyRequest::open_archive_relay(
+        &bob_group,
+        &bob,
+        scope,
+        route,
+        request.wire_data(),
+    )
+    .is_err());
+    let relay = OpenedV2MemberDependencyRequest::open_archive_relay(
+        &alice_group,
+        &alice,
+        scope,
+        relay_route,
+        relay_request.wire_data(),
+    )
+    .unwrap();
+    assert!(relay
+        .seal_reply(&alice_group, &alice, &scope, relay_route, None, &mut rng)
+        .is_err());
+    assert!(provider
+        .seal_archive_reply(&bob_group, &bob, &scope, route, None, &mut rng)
+        .is_err());
+    let relay_reply = relay
+        .seal_archive_reply(
+            &alice_group,
+            &alice,
+            &scope,
+            relay_route,
+            Some((admission, &original)),
+            &mut rng,
+        )
+        .unwrap();
+    assert!(relay_reply.len() <= MAX_V2_DEPENDENCY_REPLY_BYTES);
+    let relayed = relay_request
+        .open_reply(&bob_group, &bob, &scope, relay_route, &relay_reply)
+        .unwrap()
+        .unwrap();
+    assert_eq!(relayed.original_data(), original);
+    assert_eq!(relayed.admission_data(), admission);
+    assert_eq!(relayed.action_data().signer(), action.signer());
+    assert!(relay_request
+        .open_reply(&bob_group, &bob, &scope, relay_route, &answer)
+        .is_err());
+    assert!(request
+        .open_reply(&alice_group, &alice, &scope, route, &relay_reply)
+        .is_err());
+    let replay_request = PreparedV2MemberDependencyRequest::prepare_archive_relay(
+        &bob_group,
+        &bob,
+        scope,
+        relay_route,
+        action.id(),
+        &mut rng,
+    )
+    .unwrap();
+    assert!(replay_request
+        .open_reply(&bob_group, &bob, &scope, relay_route, &relay_reply)
+        .is_err());
+    let other_channel = V2MemberEnvelopeScopeData {
+        channel: 43,
+        ..scope
+    };
+    assert!(relay_request
+        .open_reply(&bob_group, &bob, &other_channel, relay_route, &relay_reply)
+        .is_err());
+    assert!(OpenedV2MemberDependencyRequest::open_archive_relay(
+        &alice_group,
+        &alice,
+        scope,
+        route,
+        relay_request.wire_data(),
+    )
+    .is_err());
+
     alice_group.remove_member(&alice, &bob.device_id()).unwrap();
     let current = V2MemberEnvelopeScopeData {
         epoch: alice_group.epoch(),
