@@ -350,6 +350,13 @@ async fn attach_joined_dependency_provider(
                             #[cfg(test)]
                             state.native_text.join_dependency_ingress_busy.notify_one();
                         }
+                        Err(Attach::TransportContended) => {
+                            #[cfg(test)]
+                            state
+                                .native_text
+                                .join_dependency_transport_busy
+                                .notify_one();
+                        }
                         Err(Attach::Member(
                             V2MemberSaveRefusal::Busy | V2MemberSaveRefusal::Cancelled,
                         )) => {}
@@ -722,6 +729,18 @@ async fn serve_dependencies<R: tauri::Runtime>(
         // Membership selection revokes the old scope and its queued replies.
         // Capture the current original row before registering a new provider.
         drop(provider);
+        #[cfg(test)]
+        {
+            let edge = state
+                .native_text
+                .join_dependency_reopen_edge
+                .lock()
+                .unwrap()
+                .take();
+            if let Some(edge) = edge {
+                edge.wait_once().await;
+            }
+        }
         let Some(current) = attach_joined_dependency_provider(&state, &source).await else {
             return;
         };

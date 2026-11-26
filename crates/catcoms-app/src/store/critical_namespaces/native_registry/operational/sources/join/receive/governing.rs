@@ -236,10 +236,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         caller: RequestCancellation,
     ) -> Result<NativeTextJoinedGoverningExchange, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
-        let tcp = self.original.tcp.upgrade().ok_or(Refusal::Unavailable)?;
-        let lane = tcp
-            .capture_member_dependencies()
-            .map_err(|_| Refusal::Unavailable)?;
+        let lane = self.dependency_lane()?;
         let (exchange, proof, observed, authentication, fee) =
             self.with_member_receiver(selection, &caller, |source| {
                 let replay = source

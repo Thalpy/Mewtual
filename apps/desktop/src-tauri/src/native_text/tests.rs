@@ -1613,7 +1613,14 @@ async fn native_text_joined_dependency_provider_reopens_after_selected_add() {
     let joined = found_value(joined.await.unwrap());
     let member_id = joined["server"].as_u64().unwrap();
     let member_state = member.state::<AppState>();
-    let _workers = assert_joined_connected_workers(&member_state, member_id).await;
+    let workers = assert_joined_connected_workers(&member_state, member_id).await;
+    let member_generation = member_state.ui_session_generation.load(Ordering::SeqCst);
+    let reopen = AdmissionBarrier::new();
+    *member_state
+        .native_text
+        .join_dependency_reopen_edge
+        .lock()
+        .unwrap() = Some(reopen.clone());
 
     let (notice, selected_add) = oneshot::channel();
     member.once_any("chat-v2-membership", move |event| {
@@ -1647,6 +1654,31 @@ async fn native_text_joined_dependency_provider_reopens_after_selected_add() {
             "server": joined["server"], "context": joined["context"], "removed": false,
         })
     );
+    timeout(Duration::from_secs(5), reopen.arrived.notified())
+        .await
+        .expect("the old dependency provider retired after the selected Add");
+    let (original, _, _, _) =
+        capture_joined_worker(&member_state, member_id, member_generation).await;
+    let (transport, release_transport) = BlockingIoBarrier::new();
+    let held = transport.clone();
+    let holder = tokio::task::spawn_blocking(move || {
+        original.hold_dependency_transport_for_test(|| held.wait_once())
+    });
+    timeout(Duration::from_secs(5), transport.arrived.notified())
+        .await
+        .expect("the original TCP transport capture mutex is held");
+    reopen.release.notify_one();
+    timeout(
+        Duration::from_secs(5),
+        member_state
+            .native_text
+            .join_dependency_transport_busy
+            .notified(),
+    )
+    .await
+    .expect("provider replacement reached the contended TCP capture");
+    drop(release_transport);
+    assert_eq!(holder.await.unwrap(), Some(()));
 
     let contact = membership_command_value(
         &member_window,
@@ -1730,8 +1762,16 @@ async fn native_text_joined_dependency_provider_reopens_after_selected_add() {
         }
     })
     .await
-    .expect("the joined worker serves a new dependency after applying the Add");
+    .expect("the joined worker serves the dependency after the TCP capture mutex is released");
     assert_eq!(recovered, action);
+    assert_eq!(
+        member_state.ui_session_generation.load(Ordering::SeqCst),
+        member_generation
+    );
+    assert!(Arc::ptr_eq(
+        &workers.upgrade().unwrap(),
+        &joined_work(&member_state, member_id).await
+    ));
     startup.release.notify_one();
     timeout(Duration::from_secs(15), new_task)
         .await

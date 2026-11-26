@@ -6,7 +6,7 @@ use catcoms_net::{
     NativeChatMemberIngress, NativeTcpPreparation,
 };
 use catcoms_rt::{MeshTransport, PeerId};
-use std::sync::Mutex;
+use std::sync::{Mutex, TryLockError};
 use zeroize::Zeroizing;
 
 #[derive(Default)]
@@ -25,6 +25,22 @@ struct Attempt {
     listener: Option<([u8; 38], u16)>,
     #[cfg(test)]
     peer_name: Option<String>,
+}
+
+impl Attempt {
+    fn member_dependencies(&self) -> Option<&NativeChatMemberDependencies> {
+        if matches!(self.state, State::Attached | State::Loaned) {
+            self.dependencies.as_ref()
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(super) enum DependencyCaptureRefusal {
+    Contended,
+    Unavailable,
 }
 
 enum State {
@@ -149,14 +165,26 @@ impl Transport {
 
     pub(super) fn capture_member_dependencies(
         &self,
-    ) -> Result<NativeChatMemberDependencies, AppError> {
+    ) -> Result<NativeChatMemberDependencies, DependencyCaptureRefusal> {
+        use DependencyCaptureRefusal as Refusal;
         self.attempt
             .try_lock()
-            .map_err(|_| refused())?
+            .map_err(|error| match error {
+                TryLockError::WouldBlock => Refusal::Contended,
+                TryLockError::Poisoned(_) => Refusal::Unavailable,
+            })?
             .as_ref()
-            .filter(|attempt| matches!(attempt.state, State::Attached | State::Loaned))
-            .and_then(|attempt| attempt.dependencies.clone())
-            .ok_or_else(refused)
+            .and_then(Attempt::member_dependencies)
+            .cloned()
+            .ok_or(Refusal::Unavailable)
+    }
+
+    #[cfg(feature = "native-chat-test-hooks")]
+    pub(super) fn hold_member_dependencies_for_test(&self, hold: impl FnOnce()) -> Option<()> {
+        let original = self.attempt.lock().ok()?;
+        let _lane = original.as_ref().and_then(Attempt::member_dependencies)?;
+        hold();
+        Some(())
     }
 
     pub(super) fn capture_attached_dial(&self) -> Result<MeshConnectionDial, AppError> {
@@ -194,8 +222,8 @@ impl Transport {
         let (service, drain) = {
             let mut slot = match self.attempt.try_lock() {
                 Ok(slot) => slot,
-                Err(std::sync::TryLockError::WouldBlock) => return Ok(false),
-                Err(std::sync::TryLockError::Poisoned(_)) => return Err(Error::Unknown),
+                Err(TryLockError::WouldBlock) => return Ok(false),
+                Err(TryLockError::Poisoned(_)) => return Err(Error::Unknown),
             };
             let Some(attempt) = slot.as_mut() else {
                 return Ok(true);

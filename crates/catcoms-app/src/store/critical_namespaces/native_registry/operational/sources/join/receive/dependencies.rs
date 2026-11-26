@@ -16,6 +16,7 @@ use catcoms_sync::owner_v2::{
     PreparedV2MemberDependencyRequest, V2MemberDependencyRoute, V2MemberPublicationObservation,
     MAX_V2_DEPENDENCY_REPLY_BYTES,
 };
+use join_tcp::DependencyCaptureRefusal;
 
 // Overlapping network buffers, nested sealed original and role-specific AEAD scratch.
 const REPLY_FEE: usize = OPEN_FEE + 5 * MAX_V2_DEPENDENCY_REPLY_BYTES + 16 * 1024;
@@ -56,7 +57,17 @@ pub struct NativeTextJoinedDependencyProvider {
 pub enum NativeTextJoinedDependencyAttachRefusal {
     Occupied,
     IngressContended,
+    TransportContended,
     Member(V2MemberSaveRefusal),
+}
+
+impl From<DependencyCaptureRefusal> for V2MemberSaveRefusal {
+    fn from(refusal: DependencyCaptureRefusal) -> Self {
+        match refusal {
+            DependencyCaptureRefusal::Contended => Self::Busy,
+            DependencyCaptureRefusal::Unavailable => Self::Unavailable,
+        }
+    }
 }
 
 impl From<V2MemberSaveRefusal> for NativeTextJoinedDependencyAttachRefusal {
@@ -348,7 +359,10 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
     ) -> Result<NativeTextJoinedDependencyProvider, NativeTextJoinedDependencyAttachRefusal> {
         use NativeTextJoinedDependencyAttachRefusal as Attach;
         use V2MemberSaveRefusal as Refusal;
-        let lane = self.dependency_lane()?;
+        let lane = self.dependency_lane().map_err(|refusal| match refusal {
+            DependencyCaptureRefusal::Contended => Attach::TransportContended,
+            DependencyCaptureRefusal::Unavailable => Attach::Member(Refusal::Unavailable),
+        })?;
         let (observed, auth, fee) = self.with_member_receiver(selection, &caller, |source| {
             let fee = source
                 .metadata
@@ -380,6 +394,15 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         // The network lock test must leave the metadata slot available.
         drop(self);
         lane.hold_ingress_for_test(hold)
+    }
+
+    #[cfg(feature = "native-chat-test-hooks")]
+    #[doc(hidden)]
+    pub fn hold_dependency_transport_for_test(self, hold: impl FnOnce()) -> Option<()> {
+        let original = self.original.tcp.upgrade()?;
+        // The TCP lock test must leave the metadata slot available.
+        drop(self);
+        original.hold_member_dependencies_for_test(hold)
     }
 
     pub fn serve_dependency_request(
@@ -447,13 +470,14 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             .map_err(|_| Refusal::Cancelled)
     }
 
-    fn dependency_lane(&self) -> Result<NativeChatMemberDependencies, V2MemberSaveRefusal> {
+    pub(super) fn dependency_lane(
+        &self,
+    ) -> Result<NativeChatMemberDependencies, DependencyCaptureRefusal> {
         self.original
             .tcp
             .upgrade()
-            .ok_or(V2MemberSaveRefusal::Unavailable)?
+            .ok_or(DependencyCaptureRefusal::Unavailable)?
             .capture_member_dependencies()
-            .map_err(|_| V2MemberSaveRefusal::Unavailable)
     }
 
     pub(super) fn dependency_signal(
