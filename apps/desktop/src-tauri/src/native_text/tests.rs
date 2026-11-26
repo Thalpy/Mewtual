@@ -754,13 +754,20 @@ async fn native_text_history_real_resolver_unwind_and_lost_observers_release_ori
     let path = root.path().join("vault");
     let (app, main, queue) = app(path.clone(), None, true);
     unlock_current(&app, &main, &queue).await;
+    let state = app.state::<AppState>();
+    let workers = AdmissionBarrier::new();
+    *state.native_text.founder_workers_edge.lock().unwrap() = Some(workers.clone());
     let found = found_request(&main, 1, "History");
     run(&queue).await;
     let found = found_value(found.await.unwrap());
+    // The drop probe checks the shared mutexes. Park the founder's unrelated
+    // connected workers so their independent traffic cannot trip that probe.
+    timeout(Duration::from_secs(5), workers.arrived.notified())
+        .await
+        .expect("the original founder workers are parked before taking the shared guards");
     let saved = native_send_request(&main, &found, 4, "Original");
     run(&queue).await;
     found_value(saved.await.unwrap());
-    let state = app.state::<AppState>();
     let watch = Arc::new(history::DropWatch {
         commit: state.ui_session_commit.clone(),
         store: state.store.clone(),
@@ -800,6 +807,7 @@ async fn native_text_history_real_resolver_unwind_and_lost_observers_release_ori
     );
     *state.native_text.history_drop_watch.lock().unwrap() = None;
     let close = register_vault_close(&state).await.unwrap();
+    workers.release.notify_one();
     timeout(
         Duration::from_secs(60),
         sources::close_server_rows(&state, &SystemClock),
@@ -4916,15 +4924,45 @@ async fn native_snapshot_foreign_origin_loss_can_be_acknowledged_without_writing
         .ui_state
         .install_target(other_state.native_text.ui_state.original_target().unwrap())
         .unwrap();
+    let blocked = close_request(&main, None, None);
+    run(&queue).await;
+    let blocked = snapshot_result(blocked.await.unwrap());
+    assert_eq!(blocked["deferred"], true);
+    assert_eq!(blocked["continuity_discardable"], false);
+    assert!(blocked["continuity_revision"].is_null());
+    assert_eq!(
+        blocked["history_error"],
+        "The original vault changed while closing."
+    );
+    drop(queue.lock().unwrap().pop());
+    assert!(old.await.is_err());
+
+    // Issue the revision through an actual IO failure on the original mount
+    // after its key drain succeeds. Preserve the previously saved ciphertext.
+    let foreign = state.store.lock().await.replace(original).unwrap();
+    let foreign_target = state
+        .native_text
+        .ui_state
+        .install_target(original_target.clone())
+        .unwrap();
+    let snapshot_path = path_a.join("ui-state.bin");
+    let parked = path_a.join("saved-ui-before-close.bin");
+    std::fs::rename(&snapshot_path, &parked).unwrap();
+    std::fs::create_dir(&snapshot_path).unwrap();
     let close = close_request(&main, None, None);
     run(&queue).await;
     let close = snapshot_result(close.await.unwrap());
     assert_eq!(close["deferred"], true);
     assert_eq!(close["continuity_discardable"], true);
     assert!(close["continuity_error"].is_string());
-    drop(queue.lock().unwrap().pop());
-    assert!(old.await.is_err());
-    let acknowledged = close_request(&main, None, close["continuity_revision"].as_str());
+    assert!(close["history_error"].is_null());
+    let revision = close["continuity_revision"].as_str().unwrap();
+    std::fs::remove_dir(&snapshot_path).unwrap();
+    std::fs::rename(&parked, &snapshot_path).unwrap();
+
+    let original = state.store.lock().await.replace(foreign).unwrap();
+    drop(state.native_text.ui_state.install_target(foreign_target));
+    let acknowledged = close_request(&main, None, Some(revision));
     run(&queue).await;
     let acknowledged = snapshot_result(acknowledged.await.unwrap());
     // The former snapshot-only close could finish here. With canonical
@@ -4940,7 +4978,7 @@ async fn native_snapshot_foreign_origin_loss_can_be_acknowledged_without_writing
             .native_text
             .ui_state
             .snapshots
-            .close_decision(close["continuity_revision"].as_str())
+            .close_decision(Some(revision))
             .acknowledged
     );
     assert!(state.native_text.sources.retains_original(&original));
@@ -4950,7 +4988,7 @@ async fn native_snapshot_foreign_origin_loss_can_be_acknowledged_without_writing
         assert!(!state.native_text.sources.retains_original(foreign));
         assert!(other_state.native_text.sources.retains_original(foreign));
     }
-    assert!(state.native_text.sources.is_closing_cached());
+    assert!(state.session_lock_requested.load(Ordering::SeqCst));
     assert_eq!(
         std::fs::read(path_a.join("ui-state.bin")).unwrap(),
         before_a
@@ -4963,7 +5001,7 @@ async fn native_snapshot_foreign_origin_loss_can_be_acknowledged_without_writing
     *other_state.store.lock().await = Some(foreign);
     drop(state.native_text.ui_state.install_target(original_target));
     // The same acknowledged close can now retire the actual original pair.
-    let retry = close_request(&main, None, close["continuity_revision"].as_str());
+    let retry = close_request(&main, None, Some(revision));
     run(&queue).await;
     let retried = snapshot_result(retry.await.unwrap());
     assert_eq!(retried["deferred"], false);

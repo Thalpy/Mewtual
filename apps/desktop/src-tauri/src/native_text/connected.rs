@@ -88,6 +88,14 @@ pub(super) async fn start_current<R: tauri::Runtime>(
                     biased;
                     _ = scope.cancelled() => {}
                     _ = async {
+                        #[cfg(test)]
+                        {
+                            let edge = app.state::<AppState>().native_text
+                                .founder_workers_edge.lock().unwrap().clone();
+                            if let Some(edge) = edge {
+                                edge.wait_once().await;
+                            }
+                        }
                         tokio::join!(
                             serve(&app, &source, requests),
                             drain_outbox(&app, &source),

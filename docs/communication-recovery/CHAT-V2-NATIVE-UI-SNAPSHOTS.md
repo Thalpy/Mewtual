@@ -57,10 +57,11 @@ retired outcomes remain owned outside the UI commit guard.
 Close similarly returns an opaque decimal revision for an actually attempted,
 ended failure. The UI echoes only the revision it displayed. A stale revision,
 new unattempted candidate, active IO, control/key failure or superseded request
-cannot authorize destruction. A confirmed screen-state loss may be acknowledged
-without granting any authority to a foreign mount. History/key cleanup cannot be
-discarded. An overloaded close resolves deferred/non-discardable; bridge rejection
-would incorrectly reach the frontend's emergency-destroy fallback.
+cannot authorize destruction. A key-drain failure defers the close without
+offering a new continuity revision. A previously issued revision stays tied to
+its original screen-state failure, and an acknowledged close still requires the
+original vault and Source pair. An overloaded close resolves as deferred and
+non-discardable so the frontend keeps the window open for a retry.
 
 ## Limits and pending validation
 

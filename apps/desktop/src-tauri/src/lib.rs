@@ -16906,7 +16906,7 @@ async fn close_vault_window_plan_token(
             continuity_error: snapshot.err().or_else(|| decision.result.err()),
             key_work_error: keys.err(),
         };
-        if let Some(notice) = decision.notice {
+        if let (None, Some(notice)) = (&outcome.key_work_error, decision.notice) {
             *receipt = Some((decision.revision, notice));
         }
         let may_destroy = outcome.key_work_error.is_none()
