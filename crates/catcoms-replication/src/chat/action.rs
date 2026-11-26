@@ -261,7 +261,9 @@ impl SignedAction {
     fn validate(&self) -> Result<(), ChatError> {
         validate_spec(&self.spec)
     }
-    pub(super) fn dependencies(&self) -> Vec<ActionId> {
+    /// Exact direct dependencies used by semantic replay, including the
+    /// reply parent and any implicit mutation target.
+    pub fn dependencies(&self) -> Vec<ActionId> {
         dependencies_spec(&self.spec)
     }
 }

@@ -1,5 +1,20 @@
 # Mewtual; Handover
 
+## 26 November 2026 — Require stored ancestry before archive selection
+
+A joined receiver checks the complete signed ancestry of each original
+before selecting its archive write. The check uses the same lookup order
+as cold replay, holds one paid original at a time and covers at most
+63 unique ancestors. An earlier archive with a missing ancestor can be
+read again once that ancestor is recovered.
+
+Two focused mounted Windows tests passed. The compatibility test seeded an
+earlier archive whose selected edit relied on a memory-only parent. A later
+deletion remained absent until the missing original was saved, then reopened
+with all its selected ancestors. The missed-history fixture also passed with
+the new selection guard. The root dependency audit and both repository
+static gates passed. Chat V2 stays disabled pending combined acceptance.
+
 ## 26 November 2026 — Resume local reply-chain recovery
 
 The joined worker parks one paid original and its verified ancestor traversal

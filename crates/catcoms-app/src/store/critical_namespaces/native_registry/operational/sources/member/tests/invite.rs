@@ -2054,6 +2054,9 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     .unwrap();
                 Some((receiver, ledger))
             };
+            let mut edit_waiting_for_archive = None;
+            let held_edit_token = [0xc5; 32];
+            let legacy_edit_token = [0xc7; 32];
             let mut save_receive = async |draft: V2MemberSignRequest<'_>| {
                 let work = || V2MemberSignRequest { ..draft };
                 assert_eq!(
@@ -2130,6 +2133,50 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                                     catcoms_replication::chat::ActionState::Valid
                                 )
                             );
+                            if draft.token == held_edit_token {
+                                // The receiver verified this edit while its
+                                // first archive selection was still absent.
+                                edit_waiting_for_archive = Some(original);
+                                return;
+                            }
+                            if draft.token == legacy_edit_token {
+                                // Seed the exact bytes an earlier writer would
+                                // have selected with a memory-only ancestor.
+                                third_row()
+                                    .select_legacy_archive_for_test(ledger, &original, &fresh, &mut third_rng)
+                                    .unwrap();
+                                return;
+                            }
+                            if let Some(edit) = edit_waiting_for_archive.take() {
+                                assert!(matches!(draft.body, Body::Delete { .. }));
+                                let immediate = draft.parents[0];
+                                let target = edit.projection_target_data();
+                                assert_eq!(
+                                    third_row().selected_archive_target_data(&third_selection, channel, immediate, &fresh),
+                                    Ok(Some(target)),
+                                    "the immediate parent is already selected in the inherited archive",
+                                );
+                                assert_eq!(
+                                    third_row().archive_received_member(ledger, &original, &fresh, &mut third_rng),
+                                    Err(V2MemberSaveRefusal::Unavailable),
+                                    "an otherwise valid deletion must wait for its durable edit ancestor",
+                                );
+                                assert_eq!(
+                                    third_row().selected_archive_target_data(&third_selection, channel, action, &fresh),
+                                    Ok(None),
+                                );
+                                assert!(third_row()
+                                    .archive_received_member(ledger, &edit, &fresh, &mut third_rng)
+                                    .unwrap().is_some());
+                                let projection = third_row().archived_message_projection(
+                                    &third_selection, channel, target, fresh.clone(), &mut third_rng,
+                                ).unwrap().unwrap();
+                                assert!(projection.with_publication(|view| matches!(
+                                    view,
+                                    GuardedProjection::Visible { selected, text, .. }
+                                        if *selected == immediate && text == "A later edit with the first edit as its parent"
+                                )).unwrap());
+                            }
                             assert!(third_row()
                                 .archive_received_member(ledger, &original, &fresh, &mut third_rng)
                                 .unwrap()
@@ -2145,6 +2192,12 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 .await
                 .expect("bounded direct publication while the founder was offline");
                 let create = draft.body.create().unwrap_or(action);
+                if draft.token == legacy_edit_token {
+                    assert!(third_row().archived_message_projection(
+                        &third_selection, channel, create, fresh.clone(), &mut third_rng,
+                    ).is_err());
+                    return (action, ordinal);
+                }
                 let projection = third_row()
                     .archived_message_projection(
                         &third_selection,
@@ -2155,10 +2208,14 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     )
                     .unwrap()
                     .unwrap();
+                if draft.token == held_edit_token {
+                    assert!(!projection.archived_includes(action));
+                    return (action, ordinal);
+                }
                 assert!(projection
                     .with_publication(|view| match (draft.body, view) {
                         (
-                            Body::Create { text: expected, .. } | Body::Edit { text: expected, .. },
+                            Body::Create { text: expected, .. },
                             GuardedProjection::Visible {
                                 create: target,
                                 selected,
@@ -2193,14 +2250,29 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
             };
             let edit_parents = [created.0];
             let edit = V2MemberSignRequest {
-                token: [0xc5; 32],
+                token: held_edit_token,
                 body: &edit_body,
                 parents: &edit_parents,
                 ..offline
             };
             let edited = save_receive(V2MemberSignRequest { ..edit }).await;
+            let selected_edit = if missed_history {
+                edited
+            } else {
+                let body = Body::Edit {
+                    create: created.0,
+                    text: "A later edit with the first edit as its parent".into(),
+                };
+                let parents = [edited.0];
+                save_receive(V2MemberSignRequest {
+                    token: legacy_edit_token,
+                    body: &body,
+                    parents: &parents,
+                    ..offline
+                }).await
+            };
             let delete_body = Body::Delete { create: created.0 };
-            let delete_parents = [edited.0];
+            let delete_parents = [selected_edit.0];
             let delete = V2MemberSignRequest {
                 token: [0xc6; 32],
                 body: &delete_body,
@@ -2463,7 +2535,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 )
                 .unwrap()
                 .unwrap();
-            for original in [created.0, edited.0, deleted.0] {
+            for original in [created.0, edited.0, selected_edit.0, deleted.0] {
                 assert!(projection.archived_includes(original));
             }
             assert!(projection.with_publication(|view| matches!(

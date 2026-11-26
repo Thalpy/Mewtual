@@ -747,19 +747,25 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             {
                 return Ok(None);
             }
-            let record = source.prepare_history_original(ledger, original, rng)?;
-            let selected = source
-                .store
-                .save_shared_history_record(
-                    source.history_scope(ledger.ledger.realm().channel()),
-                    record.action,
-                    record.manifest,
-                    &record.bundle,
-                    rng,
-                )
-                .map_err(|_| Refusal::Failed)?;
-            require_archivable(ledger, original)?;
-            Ok(Some(selected))
+            source.require_durable_archive_dependencies(ledger, original, caller, rng)?;
+            source
+                .select_history_original(ledger, original, caller, rng)
+                .map(Some)
+        })
+    }
+
+    /// Construct pre-guard archive bytes for the compatibility regression.
+    #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(in crate::store::critical_namespaces::native_registry) fn select_legacy_archive_for_test(
+        &self,
+        ledger: &NativeTextJoinedMemberLedger,
+        original: &NativeTextJoinedReceivedOriginal,
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<catcoms_storage::private_chat_page::PrivateChatPageId, V2MemberSaveRefusal> {
+        require_archivable(ledger, original)?;
+        self.with_member_receiver(&ledger.selection, caller, |source| {
+            source.select_history_original(ledger, original, caller, rng)
         })
     }
 
@@ -983,6 +989,112 @@ impl<R: CryptoRngCore> ReceiverSource<'_, R> {
             bundle,
             _fee: fee,
         })
+    }
+
+    fn select_history_original(
+        &self,
+        ledger: &NativeTextJoinedMemberLedger,
+        original: &NativeTextJoinedReceivedOriginal,
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<catcoms_storage::private_chat_page::PrivateChatPageId, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        let record = self.prepare_history_original(ledger, original, rng)?;
+        if caller.is_cancelled() {
+            return Err(Refusal::Cancelled);
+        }
+        let selected = self
+            .store
+            .save_shared_history_record(
+                self.history_scope(ledger.ledger.realm().channel()),
+                record.action,
+                record.manifest,
+                &record.bundle,
+                rng,
+            )
+            .map_err(|_| Refusal::Failed)?;
+        require_archivable(ledger, original)?;
+        Ok(selected)
+    }
+
+    /// A live ledger can verify an ancestor before its archive write starts.
+    /// Refuse a new selection that would rely on such memory-only evidence.
+    /// An older selected record can also have a missing ancestor, so walk
+    /// its whole closure against this exact, already verified ledger.
+    /// Cold replay opens the scoped archive first, then the selected own
+    /// outbox for dependencies outside the projected target. Keep that order.
+    fn require_durable_archive_dependencies(
+        &self,
+        ledger: &NativeTextJoinedMemberLedger,
+        original: &NativeTextJoinedReceivedOriginal,
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        let channel = ledger.ledger.realm().channel();
+        let scope = self.history_scope(channel);
+        let target = original.projection_target_data();
+        // This is synchronous local selection work. Pay for both bounded
+        // sets and the next parent list before inspecting any ancestor.
+        let _work = self
+            .metadata
+            .reserve_join_node(MAX_RECEIVED_ACTIONS * 256 + (MAX_PARENTS + 1) * 32)
+            .map_err(|_| Refusal::Busy)?;
+        let mut ancestors = original.opened.action_data().dependencies();
+        if ancestors.is_empty() {
+            return require_archivable(ledger, original);
+        }
+        let mut selected = std::collections::BTreeSet::from([original.action_id_data()]);
+        let mut pending = std::collections::BTreeSet::new();
+        loop {
+            for dependency in ancestors {
+                if !selected.contains(&dependency) && !pending.contains(&dependency) {
+                    if selected.len() + pending.len() == MAX_RECEIVED_ACTIONS {
+                        return Err(Refusal::Unavailable);
+                    }
+                    pending.insert(dependency);
+                }
+            }
+            let Some(dependency) = pending.pop_first() else {
+                break;
+            };
+            if caller.is_cancelled() || ledger.signal.is_cancelled() {
+                return Err(Refusal::Cancelled);
+            }
+            if !original.is_for_original_row_cached(&ledger.selection) {
+                return Err(Refusal::Stale);
+            }
+            let archived = self
+                .store
+                .read_shared_history_record(scope, dependency)
+                .map_err(|_| Refusal::Failed)?;
+            let own = if archived.is_none() && dependency != target {
+                self.read_dependency(channel, dependency, rng)?
+            } else {
+                None
+            };
+            let (signed, admission) = archived
+                .as_ref()
+                .map(|record| (record.original.action(), record.admission))
+                .or_else(|| {
+                    own.as_ref()
+                        .map(|saved| (saved.action(), saved.receipt().admission))
+                })
+                .ok_or(Refusal::Unavailable)?;
+            if signed.id() != dependency
+                || !ledger
+                    .ledger
+                    .matches_valid_ordinary_original(signed, admission)
+            {
+                return Err(Refusal::Stale);
+            }
+            selected.insert(dependency);
+            ancestors = signed.dependencies();
+        }
+        if caller.is_cancelled() {
+            return Err(Refusal::Cancelled);
+        }
+        require_archivable(ledger, original)
     }
 
     fn read_dependency(
