@@ -776,7 +776,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
     /// result is only target data for a fresh guarded projection, not new
     /// ingress or proof that another peer holds this record.
     pub fn selected_archive_target_data(
-        self,
+        &self,
         selection: &NativeTextJoinedRowSelection,
         channel: u128,
         action: ActionId,
