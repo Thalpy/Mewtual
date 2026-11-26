@@ -1,5 +1,6 @@
 <script lang="ts">
   import ChatAdminLedger from "./ChatAdminLedger.svelte";
+  import NativeTextAudit from "./NativeTextAudit.svelte";
   import type { LedgerReads } from "./chat-admin-ledger.ts";
   import { memberRole, identityForRoleLabel } from "./member-role.ts";
   import { invoke } from "@tauri-apps/api/core";
@@ -30743,6 +30744,12 @@
                 </li>
               {/each}
             </ul>
+            {#if snapshot.members.some((member) => member.you && member.founder)
+              && cur.context && activeServerId !== null && !locked && uiStateReady && !windowCloseInFlight}
+              {#key `${activeServerId}:${cur.context}:${cur.active}:${chatLedgerMount}`}
+                <NativeTextAudit server={activeServerId} channel={cur.active} context={cur.context} />
+              {/key}
+            {/if}
             {#if snapshot.members.some((member) => member.you && !member.founder)}
               <button type="button" class="ghost small" disabled={nativeContactBusy} onclick={() => void useNativeContact("share")}>Create my contact code</button>
               {#if nativeContactCode}

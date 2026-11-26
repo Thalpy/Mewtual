@@ -1293,6 +1293,19 @@ async fn command_value_after_busy(
     busy: &str,
     input: serde_json::Value,
 ) -> serde_json::Value {
+    match command_after_busy(window, queue, command, busy, input).await {
+        tauri::ipc::InvokeResponse::Ok(body) => body.deserialize().unwrap(),
+        tauri::ipc::InvokeResponse::Err(error) => panic!("{command} refused: {error:?}"),
+    }
+}
+
+async fn command_after_busy(
+    window: &tauri::WebviewWindow<MockRuntime>,
+    queue: &Queue,
+    command: &str,
+    busy: &str,
+    input: serde_json::Value,
+) -> tauri::ipc::InvokeResponse {
     // A transient admission refusal can precede scheduling or come from the
     // worker. Every retry uses the same original request data.
     let retry_until = SystemClock.monotonic_ms().saturating_add(5_000);
@@ -1303,13 +1316,12 @@ async fn command_value_after_busy(
             work.await;
         }
         match reply.await.unwrap() {
-            tauri::ipc::InvokeResponse::Ok(body) => return body.deserialize().unwrap(),
             tauri::ipc::InvokeResponse::Err(error)
                 if error.0.as_str() == Some(busy) && SystemClock.monotonic_ms() < retry_until =>
             {
                 SystemClock.sleep(Duration::from_millis(25)).await;
             }
-            tauri::ipc::InvokeResponse::Err(error) => panic!("{command} refused: {error:?}"),
+            result => return result,
         }
     }
 }
@@ -2508,14 +2520,16 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     run(&joiner_queue).await;
     assert_eq!(found_value(probe.await.unwrap()), empty_archive);
     let missing = hex::encode([249; 32]);
-    let probe = invite_command(
+    let probe = command_value_after_busy(
         &joiner_window,
+        &joiner_queue,
         "get_message_page",
+        history::BUSY,
         archive_request(&original, serde_json::json!({"archivedAction":missing})),
-    );
-    run(&joiner_queue).await;
+    )
+    .await;
     assert_eq!(
-        found_value(probe.await.unwrap()),
+        probe,
         serde_json::json!({"backend":"text-v2","scope":"received-archive","item":null})
     );
     let work = joined_work(&state, id).await;
@@ -2655,6 +2669,43 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
             "backend":"text-v2","scope":"received-archive",
             "item":{"action":member_action,"text":member_text,"certainty":"provisional"},
         })
+    );
+    let audit = |row: &serde_json::Value, target| {
+        archive_request(
+            row,
+            serde_json::json!({"auditAction":target,"auditAfter":null,"limit":8}),
+        )
+    };
+    let warm_audit = command_value_after_busy(
+        &founder_window,
+        &founder_queue,
+        "get_message_page",
+        history::BUSY,
+        audit(&found, None),
+    )
+    .await;
+    assert_eq!(warm_audit["scope"], "selected-shared-history-audit");
+    assert!(warm_audit["target"].is_null());
+    assert_eq!(warm_audit["items"].as_array().unwrap().len(), 1);
+    assert_eq!(warm_audit["items"][0]["action"], member_action);
+    assert_eq!(warm_audit["items"][0]["body"]["text"], member_text);
+    for field in ["signer", "admission", "original_digest"] {
+        assert_eq!(warm_audit["items"][0][field].as_str().unwrap().len(), 64);
+    }
+    let denied = command_after_busy(
+        &joiner_window,
+        &joiner_queue,
+        "get_message_page",
+        history::BUSY,
+        audit(&original, Some(member_action)),
+    )
+    .await;
+    let tauri::ipc::InvokeResponse::Err(error) = denied else {
+        panic!("a joined row returned the founder's retained records");
+    };
+    assert_eq!(
+        error.0,
+        "Only the server owner can inspect retained records."
     );
 
     // The saved native row can be reported after the actual founder retires.
@@ -2864,6 +2915,16 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     let archived = found_value(probe.await.unwrap());
     assert_eq!(archived["item"]["action"], member_action);
     assert_eq!(archived["item"]["text"], member_text);
+    let cold_audit = command_value_after_busy(
+        &founder_window,
+        &founder_queue,
+        "get_message_page",
+        history::BUSY,
+        audit(founder_row, Some(member_action)),
+    )
+    .await;
+    assert_eq!(cold_audit["target"], member_action);
+    assert_eq!(cold_audit["items"], warm_audit["items"]);
     let page = native_history_request(&founder_window, founder_row, "0", None, 8);
     run(&founder_queue).await;
     let own = found_value(page.await.unwrap());
@@ -3092,6 +3153,39 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
         .unwrap();
     assert_joined_publication_stopped(recovered_publication).await;
     drop(close);
+    // Changing only the original founder source must withhold the prepared
+    // audit even though the UI generation and table entry still match.
+    let edge = AdmissionBarrier::new();
+    *state.native_text.text_reply_edge.lock().unwrap() = Some(edge.clone());
+    let late = invite_command(
+        &founder_window,
+        "get_message_page",
+        audit(founder_row, Some(member_action)),
+    );
+    let task = tokio::spawn(founder_queue.lock().unwrap().pop().unwrap());
+    timeout(Duration::from_secs(10), edge.arrived.notified())
+        .await
+        .expect("an authorized audit held its exact records before native publication");
+    let generation = state.ui_session_generation.load(Ordering::SeqCst);
+    {
+        let table = state.servers.lock().await;
+        let row = table
+            .native(&founder_row["server"].as_u64().unwrap())
+            .unwrap();
+        row.data()
+            .selection
+            .founder()
+            .unwrap()
+            .close_original_cached();
+    }
+    edge.release.notify_one();
+    task.await.unwrap();
+    refused(late.await.unwrap());
+    assert_eq!(
+        state.ui_session_generation.load(Ordering::SeqCst),
+        generation
+    );
+    *state.native_text.text_reply_edge.lock().unwrap() = None;
     let close = register_vault_close(&state).await.unwrap();
     sources::close_server_rows(&state, &SystemClock)
         .await

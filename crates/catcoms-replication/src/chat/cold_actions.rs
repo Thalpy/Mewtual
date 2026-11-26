@@ -235,6 +235,7 @@ impl std::fmt::Debug for ActionPagesExpectation<'_> {
 pub struct AssembledActionOriginal {
     original: Zeroizing<Vec<u8>>,
     action: SignedAction,
+    digest: OriginalActionDigest,
 }
 impl std::fmt::Debug for AssembledActionOriginal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -248,6 +249,10 @@ impl AssembledActionOriginal {
     }
     pub fn action(&self) -> &SignedAction {
         &self.action
+    }
+    /// Digest of the exact signature-bearing bytes verified during assembly.
+    pub fn original_digest(&self) -> OriginalActionDigest {
+        self.digest
     }
 }
 
@@ -291,7 +296,11 @@ pub fn assemble_action(
     if action.id() != expected.action || action.spec().realm.group() != expected.group {
         return Err(ChatError::Scope);
     }
-    Ok(AssembledActionOriginal { original, action })
+    Ok(AssembledActionOriginal {
+        original,
+        action,
+        digest: expected.original,
+    })
 }
 fn original_hasher() -> blake3::Hasher {
     let mut h = blake3::Hasher::new();

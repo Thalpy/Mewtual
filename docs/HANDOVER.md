@@ -1,5 +1,24 @@
 # Mewtual; Handover
 
+## 26 November 2026 — Founder read of retained received history
+
+The founder can open Chat history from the Chat V2 Members panel. It
+lists originals in this device's selected received archive and shows
+the signed edits and deletions for an exact message. The same native
+authorization covers warm and restored founders. An unfinished archive
+write or corrupt selected record refuses the read without settling it.
+
+Focused Windows App tests passed for bounded original and revision
+pages, authenticated restart, corrupt selected records and an unfinished
+archive write. The full frontend suite passed with 3,948 tests and the
+additional compiled Svelte dialog test passed separately. The browser
+flow could not connect to the local browser debugger.
+
+The native warm/cold audit and final source retirement checks are
+pending. Audit covers selected received records on this device.
+It does not include the founder's own outbox or unproven late originals
+from removed members. Chat V2 remains disabled.
+
 ## 26 November 2026 — Fetch exact missing parents before the next archive page
 
 A verified archive-stage miss can steer the desktop to a specific missing

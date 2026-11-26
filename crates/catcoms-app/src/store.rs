@@ -133,8 +133,8 @@ pub use native_text_invite::{
 };
 pub use native_text_roster::{NativeTextRoster, NativeTextRosterMember};
 pub use persistence::v2_member_transport::{
-    NativeTextFounderDependencyExchange, NativeTextFounderDependencyResponse,
-    NativeTextFounderFrameOutcome, NativeTextFounderReceived,
+    NativeTextFounderAudit, NativeTextFounderDependencyExchange,
+    NativeTextFounderDependencyResponse, NativeTextFounderFrameOutcome, NativeTextFounderReceived,
 };
 mod owner_evidence;
 pub use chat_admission::{
