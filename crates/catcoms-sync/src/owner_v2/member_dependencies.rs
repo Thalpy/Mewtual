@@ -1,6 +1,7 @@
 //! One exact dependency request under the current group channel exporter.
 //! The connected route is bound into the request. Neither a request nor a
 //! response grants a current view, historical acceptance, or global absence.
+pub(super) mod archive_history;
 mod archive_relay;
 pub(super) mod history;
 

@@ -14,6 +14,8 @@ const PAGES_PER_SLICE: u8 = 4;
 const RETRY_MS: u64 = 5_000;
 const RESCAN_MS: u64 = 30_000;
 const REPLAY_MS: u64 = 15_000;
+const MAX_ARCHIVE_SWEEP_PAGES: u16 = 256;
+const MAX_ARCHIVE_CONTINUATION_FAILURES: u8 = 3;
 
 struct ParkedOriginal {
     action: ActionId,
@@ -23,21 +25,27 @@ struct ParkedOriginal {
 
 struct PeerSweep {
     peer: PeerId,
+    archive: bool,
     page: Option<Arc<NativeTextJoinedHistoryPage>>,
     next_entry: usize,
     deferred: bool,
     pages: u8,
+    total_pages: u16,
+    continuation_failures: u8,
     due: u64,
 }
 
 impl PeerSweep {
-    fn new(peer: PeerId) -> Self {
+    fn new(peer: PeerId, archive: bool) -> Self {
         Self {
             peer,
+            archive,
             page: None,
             next_entry: 0,
             deferred: false,
             pages: 0,
+            total_pages: 0,
+            continuation_failures: 0,
             due: 0,
         }
     }
@@ -47,6 +55,8 @@ impl PeerSweep {
         self.next_entry = 0;
         self.deferred = false;
         self.pages = 0;
+        self.total_pages = 0;
+        self.continuation_failures = 0;
         self.due = SystemClock.monotonic_ms().saturating_add(delay);
     }
 }
@@ -59,6 +69,7 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
     let mut peers: VecDeque<PeerSweep> = VecDeque::new();
     let mut pending_cursor = 0;
     let mut replay: Option<(PeerSweep, ParkedOriginal)> = None;
+    let mut catalogue_due = 0;
     loop {
         tokio::select! {
             biased;
@@ -78,9 +89,8 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
             } else if let Some(parked) = parked {
                 replay = Some((sweep, parked));
             }
-            // One paid continuation per row. It holds no native permit
-            // between turns and yields its peer as soon as replay settles.
-            continue;
+            // One paid continuation per row. Resume one batch and leave room
+            // for inventory and reconciliation work while it is parked.
         }
         if let Some(target) = reconcile_archive_change(&state, source, &mut pending_cursor).await {
             source.notify_received(app, &state, Some(target)).await;
@@ -89,9 +99,32 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
             continue;
         };
         peers.retain(|sweep| candidates.contains(&sweep.peer));
+        let now = SystemClock.monotonic_ms();
+        if !candidates.is_empty() && catalogue_due <= now {
+            let channel = source.channel();
+            let updated = with_row(&state, source, move |original, row, _, scope| {
+                original.maintain_archive_relay_catalogue(&row, channel, &scope)
+            })
+            .await;
+            let delay = if matches!(updated, Some(Ok(false))) {
+                0
+            } else {
+                RETRY_MS
+            };
+            catalogue_due = SystemClock.monotonic_ms().saturating_add(delay);
+        }
         for peer in candidates {
-            if !peers.iter().any(|sweep| sweep.peer == peer) {
-                peers.push_back(PeerSweep::new(peer));
+            for archive in [false, true] {
+                let parked = replay
+                    .as_ref()
+                    .is_some_and(|(sweep, _)| sweep.peer == peer && sweep.archive == archive);
+                if !parked
+                    && !peers
+                        .iter()
+                        .any(|sweep| sweep.peer == peer && sweep.archive == archive)
+                {
+                    peers.push_back(PeerSweep::new(peer, archive));
+                }
             }
         }
         let now = SystemClock.monotonic_ms();
@@ -100,7 +133,7 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
         };
         let mut sweep = peers.remove(index).expect("selected due history peer");
         let mut parked = None;
-        let _ = turn(&state, source, &mut sweep, &mut parked).await;
+        let _ = turn(&state, source, &mut sweep, replay.is_none(), &mut parked).await;
         if let Some(parked) = parked {
             replay = Some((sweep, parked));
         } else {
@@ -137,22 +170,30 @@ async fn turn(
     state: &AppState,
     source: &Arc<Source>,
     sweep: &mut PeerSweep,
+    allow_fetch: bool,
     parked: &mut Option<ParkedOriginal>,
 ) -> Option<()> {
     let page = sweep.page.clone();
     if let Some(page) = &page {
-        let Some(data) = page.data() else {
+        if !page.is_current_cached() {
             sweep.rescan_after(RETRY_MS);
             return None;
-        };
-        if let Some(entry) = data.entries().get(sweep.next_entry) {
-            let covered = fetch_entry(state, source, page.clone(), entry.action, parked).await?;
+        }
+        if let Some(action) = page.action_at(sweep.next_entry) {
+            if !allow_fetch {
+                return None;
+            }
+            let covered = fetch_entry(state, source, page.clone(), action, parked).await?;
             sweep.next_entry += 1;
             // Preserve the obligation to revisit the whole frozen sweep.
             // Later IDs and other authors can progress while a parent is absent.
             sweep.deferred |= !covered;
             return None;
         }
+    }
+    if sweep.archive && sweep.total_pages == MAX_ARCHIVE_SWEEP_PAGES {
+        sweep.rescan_after(if sweep.deferred { RETRY_MS } else { RESCAN_MS });
+        return None;
     }
     if sweep.pages == PAGES_PER_SLICE {
         // Bound continuous scans even for a member advertising an inflated
@@ -162,9 +203,13 @@ async fn turn(
         return None;
     }
     let peer = sweep.peer;
+    let archive = sweep.archive;
     let channel = source.channel();
     let request = with_row(state, source, move |original, row, _, scope| match page {
         Some(page) => original.prepare_history_continuation(&row, &page, scope, &mut OsCryptoRng),
+        None if archive => original
+            .prepare_archive_history_exchange(&row, channel, peer, scope, &mut OsCryptoRng)
+            .map(Some),
         None => original
             .prepare_history_exchange(&row, channel, peer, scope, &mut OsCryptoRng)
             .map(Some),
@@ -191,7 +236,21 @@ async fn turn(
         eprintln!("chat history worker page request stopped: {requested:?}");
         // Retain the exact earlier cursor on refused or lost replies. Slow
         // peers still yield their turn after each bounded network wait.
-        sweep.due = SystemClock.monotonic_ms().saturating_add(RETRY_MS);
+        if sweep.archive && sweep.page.is_some() {
+            sweep.continuation_failures += 1;
+            if sweep.continuation_failures == MAX_ARCHIVE_CONTINUATION_FAILURES {
+                // The holder may have expired the original sweep. After a
+                // few exact retries start again with a fresh first request.
+                sweep.rescan_after(RETRY_MS);
+                return None;
+            }
+        }
+        let delay = if sweep.archive && sweep.total_pages == 0 {
+            RESCAN_MS
+        } else {
+            RETRY_MS
+        };
+        sweep.due = SystemClock.monotonic_ms().saturating_add(delay);
         return None;
     };
     let page = with_row(state, source, move |original, row, _, scope| {
@@ -208,6 +267,8 @@ async fn turn(
             sweep.page = Some(Arc::new(page));
             sweep.next_entry = 0;
             sweep.pages += 1;
+            sweep.total_pages = sweep.total_pages.saturating_add(1);
+            sweep.continuation_failures = 0;
         }
         Err(V2MemberSaveRefusal::Busy) => {}
         Err(failure) => {
@@ -301,7 +362,7 @@ async fn resume_entry(
     }
     // Acquire both before moving the paid continuation. Contention must
     // preserve it while foreground history or signing uses this row.
-    let admitted = tokio::time::timeout(Duration::from_millis(remaining), async {
+    let admitted = tokio::time::timeout(Duration::from_millis(remaining).min(TURN), async {
         let permit = source.member_work.foreground(source.negative()).await?;
         let (original, _) = source.capture_joined(state).await?;
         Some((permit, original))
@@ -309,10 +370,11 @@ async fn resume_entry(
     .await;
     let (permit, original) = match admitted {
         Ok(value) => value?,
-        Err(_) => {
+        Err(_) if remaining <= TURN.as_millis() as u64 => {
             *parked = None;
             return Some((false, None));
         }
+        Err(_) => return None,
     };
     let mut work = parked.take()?;
     let source = source.clone();

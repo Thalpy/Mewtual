@@ -2070,7 +2070,23 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 assert!(third_row().open_dependency_response(
                     &third_selection, response.unwrap(), &fresh,
                 ).unwrap().is_none());
-                let relay = fetch_relay(&mut third_rng);
+                assert!((0..=256).any(|_| recovered_row()
+                    .maintain_archive_relay_catalogue(&selection, channel, &fresh)
+                    .unwrap()), "the bounded local index became available");
+                let inventory = third_row().prepare_archive_history_exchange(
+                    &third_selection, channel, peer, fresh.clone(), &mut third_rng,
+                ).unwrap();
+                let (page, served) = tokio::time::timeout(Duration::from_secs(10), async {
+                    tokio::join!(inventory.receive(), serve_relay(&mut provider, &mut history_rng))
+                }).await.unwrap();
+                served.unwrap();
+                let page = third_row().open_history_response(&third_selection, page.unwrap(), &fresh).unwrap();
+                assert!(page.data().is_none(), "archive offers must never look like the holder authored them");
+                let discovered = (0..8).filter_map(|index| page.action_at(index))
+                    .find(|offered| *offered == action).expect("the holder advertised the offline author's original");
+                let relay = third_row().prepare_discovered_original(
+                    &third_selection, &page, discovered, fresh.clone(), &mut third_rng,
+                ).unwrap();
                 let (response, served) = tokio::time::timeout(Duration::from_secs(10), async {
                     tokio::join!(relay.receive(), serve_relay(&mut provider, &mut history_rng))
                 }).await.unwrap();

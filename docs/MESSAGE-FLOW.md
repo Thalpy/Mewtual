@@ -9,8 +9,10 @@ archive first, including when a delayed live notice concerns a recovered
 deletion. A joined receiver with a known ActionId can also fetch the signed
 original from a different approved archive holder. The holder's authenticated
 connection carries the reply, and the author's original signature and open
-Admission determine whether it can enter the archive. Automatic discovery
-of unknown IDs at archive holders remains open.
+Admission determine whether it can enter the archive. The desktop can
+discover unknown IDs in a holder's bounded archive inventory and fetch each
+offered original on the same approved connection. It will revisit a deferred
+entry when the required ancestors are available.
 [Chat V2 discovery flow](communication-recovery/CHAT-V2-ORDINARY-MEMBER-PATH.md#discovering-missed-originals-from-a-joined-member).
 
 Security prerequisite: an incoming subscription retries retained publication

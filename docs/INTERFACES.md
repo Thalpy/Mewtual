@@ -15,6 +15,10 @@ connected dependency class. The holder and requester must both retain
 current contact approval. The reply carries the selected signed original
 and its author Admission. The own-outbox page and fetch contracts are
 unchanged.
+Archive pages use separate authenticated request and reply domains. They
+carry sorted ActionIds and an opaque continuation pinned to the original
+approved connection and scope. Page-derived exact requests keep that
+connection and approval. The native worker schedules both sweep types.
 [Request and cursor contract](communication-recovery/CHAT-V2-ORDINARY-MEMBER-PATH.md#discovering-missed-originals-from-a-joined-member).
 
 16 November Score/voice integration candidate: this branch combines the reviewed

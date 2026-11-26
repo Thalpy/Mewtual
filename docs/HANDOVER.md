@@ -1,5 +1,23 @@
 # Mewtual; Handover
 
+## 26 November 2026 — Discover missed IDs at a joined archive holder
+
+The joined desktop runs distinct own-outbox and archive sweeps through
+approved contacts. The holder builds an index locally and offers a bounded
+page from an eligible snapshot. The continuation follows the original
+approved peer connection incarnation. Exact fetch still verifies the
+original author and selects durable ancestry before publishing a change.
+
+Three focused Windows App tests passed. They covered a frozen cursor and
+its retry and replacement behavior, selected storage with a missing bundle,
+and a mounted three-peer TCP exchange in which the recipient found and
+saved an offline founder's exact original, then read it after reopening.
+The desktop's automatic offline-author revision regression is separate.
+The final review found no remaining blocker or high-severity finding.
+
+The worker still needs targeted fetches for missing ancestors, durable
+contact approvals, and broader acceptance. Chat V2 remains disabled.
+
 ## 26 November 2026 — Fetch exact originals through a joined archive holder
 
 A joined archive holder can serve an exact known ActionId over the existing

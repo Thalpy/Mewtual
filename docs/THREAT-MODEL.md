@@ -21,6 +21,14 @@ same original row and approval. Archive-first reads keep already deleted
 bodies from reappearing through delayed live notices.
 [Discovery contract](communication-recovery/CHAT-V2-ORDINARY-MEMBER-PATH.md#discovering-missed-originals-from-a-joined-member).
 
+A holder's archive page exposes eligible IDs to a reciprocally approved
+peer on the original authenticated connection. Its continuation gives no
+raw offset, author ID or unoffered ActionId. The cursor is replayable on
+the same sweep to tolerate reply loss. The source rechecks the exact
+selected files and the open Admission for each offered original. A fetched
+original can carry references in its signed content. Those references
+confer no authority on the referenced action.
+
 16 November Score/voice integration candidate: this branch combines the reviewed
 Score and voice admission history with the newer Chat/security and Studio save
 baseline. The entries below retain each branch's evidence; they do not establish

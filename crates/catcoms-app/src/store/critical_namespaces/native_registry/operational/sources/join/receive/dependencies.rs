@@ -18,7 +18,7 @@ use catcoms_net::{
 };
 use catcoms_rt::TransportError;
 use catcoms_sync::owner_v2::{
-    OpenedV2MemberDependencyRequest, OpenedV2MemberHistoryRequest,
+    OpenedV2ArchiveHistoryRequest, OpenedV2MemberDependencyRequest, OpenedV2MemberHistoryRequest,
     PreparedV2MemberDependencyRequest, V2MemberDependencyRoute, V2MemberPublicationObservation,
     MAX_V2_DEPENDENCY_REPLY_BYTES,
 };
@@ -657,6 +657,9 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         let (_, wire) = request.current_data().ok_or(Refusal::Cancelled)?;
         if OpenedV2MemberHistoryRequest::recognizes(wire) {
             return self.serve_history_request(selection, channel, request, caller, rng);
+        }
+        if OpenedV2ArchiveHistoryRequest::recognizes(wire) {
+            return self.serve_archive_history_request(selection, channel, request, caller, rng);
         }
         let archive_relay = OpenedV2MemberDependencyRequest::recognizes_archive_relay(wire);
         let waiting = request.cancellation_authority();

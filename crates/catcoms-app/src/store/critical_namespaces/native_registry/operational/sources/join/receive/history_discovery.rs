@@ -13,8 +13,9 @@ use catcoms_net::{
 };
 use catcoms_rt::{ConnectionLease, TransportError};
 use catcoms_sync::owner_v2::{
-    PreparedV2MemberHistoryRequest, V2MemberHistoryCursor, V2MemberHistoryEntry,
-    V2MemberHistoryPage, V2_MEMBER_HISTORY_PAGE_SPAN,
+    PreparedV2ArchiveHistoryRequest, PreparedV2MemberHistoryRequest, V2ArchiveHistoryCursor,
+    V2ArchiveHistoryPage, V2MemberHistoryCursor, V2MemberHistoryEntry, V2MemberHistoryPage,
+    V2_MEMBER_HISTORY_PAGE_SPAN,
 };
 
 catcoms_rt::redacted_debug! {
@@ -29,9 +30,58 @@ const PARKED_PAGE_FEE: usize = 8 * 1024;
 
 pub struct NativeTextJoinedHistoryExchange {
     transport: NativeChatMemberDependencyExchange,
-    request: PreparedV2MemberHistoryRequest,
+    request: HistoryRequest,
     source: HistoryQuery,
     wire_scope: HistoryWireScope,
+}
+
+enum HistoryCursor {
+    Own(V2MemberHistoryCursor),
+    Archive {
+        cursor: Option<V2ArchiveHistoryCursor>,
+        after: Option<ActionId>,
+    },
+}
+
+enum HistoryRequest {
+    Own(PreparedV2MemberHistoryRequest),
+    Archive(PreparedV2ArchiveHistoryRequest, Option<ActionId>),
+}
+
+impl HistoryRequest {
+    fn wire_data(&self) -> &[u8] {
+        match self {
+            Self::Own(request) => request.wire_data(),
+            Self::Archive(request, _) => request.wire_data(),
+        }
+    }
+}
+
+enum HistoryPage {
+    Own(V2MemberHistoryPage),
+    Archive {
+        page: V2ArchiveHistoryPage,
+        highest: Option<ActionId>,
+    },
+}
+
+impl HistoryPage {
+    fn contains(&self, action: ActionId) -> bool {
+        match self {
+            Self::Own(page) => page.entries().iter().any(|entry| entry.action == action),
+            Self::Archive { page, .. } => page.actions().binary_search(&action).is_ok(),
+        }
+    }
+
+    fn continuation(&self) -> Option<HistoryCursor> {
+        match self {
+            Self::Own(page) => page.continuation().map(HistoryCursor::Own),
+            Self::Archive { page, highest } => Some(HistoryCursor::Archive {
+                cursor: Some(page.continuation()?),
+                after: *highest,
+            }),
+        }
+    }
 }
 
 struct HistoryQuery {
@@ -97,7 +147,7 @@ impl HistoryQuery {
 /// One paid reply. Opening it requires the actual original native row again.
 pub struct NativeTextJoinedHistoryResponse {
     wire: bytes::Bytes,
-    request: PreparedV2MemberHistoryRequest,
+    request: HistoryRequest,
     source: HistoryQuery,
     wire_scope: HistoryWireScope,
 }
@@ -105,13 +155,30 @@ pub struct NativeTextJoinedHistoryResponse {
 /// Bounded hints from the original request. The caller keeps the same
 /// connection and row live while turning any ID into an exact fetch.
 pub struct NativeTextJoinedHistoryPage {
-    page: V2MemberHistoryPage,
+    page: HistoryPage,
     query: HistoryQuery,
 }
 
 impl NativeTextJoinedHistoryPage {
     pub fn data(&self) -> Option<&V2MemberHistoryPage> {
-        self.query.is_current(&self.query.row).then_some(&self.page)
+        match &self.page {
+            HistoryPage::Own(page) if self.is_current_cached() => Some(page),
+            _ => None,
+        }
+    }
+
+    pub fn is_current_cached(&self) -> bool {
+        self.query.is_current(&self.query.row)
+    }
+
+    pub fn action_at(&self, index: usize) -> Option<ActionId> {
+        if !self.is_current_cached() {
+            return None;
+        }
+        match &self.page {
+            HistoryPage::Own(page) => page.entries().get(index).map(|entry| entry.action),
+            HistoryPage::Archive { page, .. } => page.actions().get(index).copied(),
+        }
     }
 }
 
@@ -144,13 +211,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         caller: &RequestCancellation,
     ) -> Result<Option<ActionId>, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
-        if !page.query.is_current(selection)
-            || !page
-                .page
-                .entries()
-                .iter()
-                .any(|entry| entry.action == action)
-        {
+        if !page.query.is_current(selection) || !page.page.contains(action) {
             return Err(Refusal::Stale);
         }
         let selected = self.with_member_receiver(selection, caller, |source| {
@@ -168,8 +229,30 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             let Some(record) = record else {
                 return Ok(None);
             };
-            if record.admission.as_bytes() != page.query.admission.as_bytes() {
-                return Err(Refusal::Stale);
+            match page.page {
+                HistoryPage::Own(_)
+                    if record.admission.as_bytes() != page.query.admission.as_bytes() =>
+                {
+                    return Err(Refusal::Stale);
+                }
+                HistoryPage::Archive { .. } => {
+                    let verifier = source
+                        .prefix
+                        .selected_member_verifier()
+                        .map_err(|_| Refusal::Stale)?;
+                    verifier
+                        .observe_live_member(record.admission)
+                        .map_err(|_| Refusal::Stale)?;
+                    verifier
+                        .admission(record.admission)
+                        .and_then(|author| {
+                            author
+                                .admission_data()
+                                .matches_action_delegation(record.original.action())
+                        })
+                        .map_err(|_| Refusal::Stale)?;
+                }
+                HistoryPage::Own(_) => {}
             }
             Ok(Some(
                 record
@@ -199,7 +282,37 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
     ) -> Result<NativeTextJoinedHistoryExchange, V2MemberSaveRefusal> {
         self.prepare_history_page(
             selection,
-            (channel, provider, V2MemberHistoryCursor::first()),
+            (
+                channel,
+                provider,
+                HistoryCursor::Own(V2MemberHistoryCursor::first()),
+            ),
+            None,
+            caller,
+            rng,
+        )
+    }
+
+    /// Discover eligible originals in a connected holder's shared archive.
+    /// The separate own-outbox sweep retains its original wire contract.
+    pub fn prepare_archive_history_exchange(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        channel: u128,
+        provider: PeerId,
+        caller: RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<NativeTextJoinedHistoryExchange, V2MemberSaveRefusal> {
+        self.prepare_history_page(
+            selection,
+            (
+                channel,
+                provider,
+                HistoryCursor::Archive {
+                    cursor: None,
+                    after: None,
+                },
+            ),
             None,
             caller,
             rng,
@@ -234,7 +347,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
     fn prepare_history_page(
         self,
         selection: &NativeTextJoinedRowSelection,
-        (channel, provider, cursor): (u128, PeerId, V2MemberHistoryCursor),
+        (channel, provider, cursor): (u128, PeerId, HistoryCursor),
         previous: Option<&HistoryQuery>,
         caller: RequestCancellation,
         rng: &mut impl CryptoRngCore,
@@ -269,11 +382,19 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                     .metadata
                     .reserve_join_node(PARKED_PAGE_FEE)
                     .map_err(|_| Refusal::Busy)?;
-                let request = source
+                let access = source
                     .node
                     .member_history_access(source.prefix, channel)
-                    .and_then(|access| access.prepare_request(provider, cursor, rng))
                     .map_err(|_| Refusal::Failed)?;
+                let request = match cursor {
+                    HistoryCursor::Own(cursor) => access
+                        .prepare_request(provider, cursor, rng)
+                        .map(HistoryRequest::Own),
+                    HistoryCursor::Archive { cursor, after } => access
+                        .prepare_archive_page(provider, cursor, rng)
+                        .map(|request| HistoryRequest::Archive(request, after)),
+                }
+                .map_err(|_| Refusal::Failed)?;
                 let (observed, auth) = source.effect_data()?;
                 let parked = source
                     .node
@@ -316,13 +437,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         rng: &mut impl CryptoRngCore,
     ) -> Result<NativeTextJoinedDependencyExchange, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
-        if !page.query.is_current(selection)
-            || !page
-                .page
-                .entries()
-                .iter()
-                .any(|entry| entry.action == action)
-        {
+        if !page.query.is_current(selection) || !page.page.contains(action) {
             return Err(Refusal::Stale);
         }
         let exchange = self
@@ -342,7 +457,12 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             (
                 None,
                 Some(&page.query.signal),
-                DependencyProvenance::ApprovedAuthor(page.query.admission),
+                match page.page {
+                    HistoryPage::Own(_) => {
+                        DependencyProvenance::ApprovedAuthor(page.query.admission)
+                    }
+                    HistoryPage::Archive { .. } => DependencyProvenance::ArchiveRelay,
+                },
             ),
             caller,
             rng,
@@ -364,11 +484,29 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             if source.require_history_peer(selection, query.peer)?.0 != query.admission {
                 return Err(Refusal::Stale);
             }
-            source
+            let access = source
                 .node
                 .member_history_access(source.prefix, query.channel)
-                .and_then(|access| access.open_reply(query.peer, &response.request, &response.wire))
-                .map_err(|_| Refusal::Failed)
+                .map_err(|_| Refusal::Failed)?;
+            match &response.request {
+                HistoryRequest::Own(request) => access
+                    .open_reply(query.peer, request, &response.wire)
+                    .map(HistoryPage::Own)
+                    .map_err(|_| Refusal::Failed),
+                HistoryRequest::Archive(request, after) => {
+                    let page = access
+                        .open_archive_page_reply(query.peer, request, &response.wire)
+                        .map_err(|_| Refusal::Failed)?;
+                    if after
+                        .zip(page.actions().first())
+                        .is_some_and(|(previous, first)| *first <= previous)
+                    {
+                        return Err(Refusal::Failed);
+                    }
+                    let highest = page.actions().last().copied().or(*after);
+                    Ok(HistoryPage::Archive { page, highest })
+                }
+            }
         })?;
         if response.wire_scope.signal.is_cancelled() || !query.is_current(selection) {
             return Err(Refusal::Stale);

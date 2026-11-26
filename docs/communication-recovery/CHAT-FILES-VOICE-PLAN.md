@@ -36,6 +36,11 @@ activation still returns `UNAVAILABLE`.
    mounted App test resumes a nested reply across bounded local turns.
    Require exact ancestry across archive restart and larger partitions,
    and keep original records available to the authorized admin audit.
+   The stacked archive work now supports exact relay and unknown-ID discovery
+   through another approved joined member. Focused Windows App coverage includes
+   an offline original author, a holder and a distinct recipient on real TCP.
+   Targeted missing-parent fetches, cold approval reconnect and native offline
+   revision acceptance remain open.
    [Missed-history evidence](CHAT-FILES-VOICE-ACCEPTANCE.md#recovery-of-missed-own-outbox-originals-26-november-2026).
 3. Complete cold governing work and Leave/rejoin. Preserve verified history and
    keep unproven late actions from removed members out of the ordinary view

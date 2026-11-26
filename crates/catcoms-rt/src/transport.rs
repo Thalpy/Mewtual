@@ -544,6 +544,7 @@ pub struct Responder {
     pub(crate) _keepalive: Option<SharedRequestKeepalive>,
     lifetime: Arc<ReplyLifetime>,
     response_budget: Option<Arc<dyn ResponseBudget>>,
+    original_connection: Option<ConnectionLease>,
 }
 
 impl Responder {
@@ -664,6 +665,22 @@ impl Responder {
         !self.reply.is_closed() && self.lifetime.authorized()
     }
 
+    /// Attach the same transport lease that owns this request's ingress.
+    /// Dedicated native services can then bind continuations to that exact
+    /// connection. This lease grants no application authority by itself.
+    pub fn with_original_connection(mut self, connection: ConnectionLease) -> Self {
+        debug_assert!(self.original_connection.is_none());
+        self.original_connection = Some(connection);
+        self
+    }
+
+    pub fn original_connection(&self) -> Option<ConnectionLease> {
+        self.original_connection
+            .as_ref()
+            .filter(|connection| connection.is_live() && self.is_current())
+            .cloned()
+    }
+
     /// A bounded native lifetime for deferred reply-bearing work. A receiver drop revokes it
     /// synchronously, so a queued lower driver can refuse work without waiting for a forwarding
     /// task to propagate cancellation. It also follows the original ingress revocation.
@@ -696,6 +713,7 @@ impl Responder {
                 _keepalive: None,
                 lifetime: lifetime.clone(),
                 response_budget: None,
+                original_connection: None,
             },
             ResponderRx {
                 reply: rx,
@@ -721,6 +739,7 @@ impl Responder {
                 _keepalive: Some(keepalive.clone()),
                 lifetime: lifetime.clone(),
                 response_budget: Some(response_budget),
+                original_connection: None,
             },
             ResponderRx {
                 reply: receiver,

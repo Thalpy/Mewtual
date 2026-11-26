@@ -1628,6 +1628,74 @@ async fn native_text_joined_dependency_provider_reopens_after_selected_add() {
     let member_state = member.state::<AppState>();
     let workers = assert_joined_connected_workers(&member_state, member_id).await;
     let member_generation = member_state.ui_session_generation.load(Ordering::SeqCst);
+    // The eventual recipient is still outside the group. Only the existing
+    // joined member can select these publisher originals before the Add.
+    let offline = command_value_after_busy(
+        &main,
+        &founder_queue,
+        "send_message",
+        sending::BUSY,
+        serde_json::json!({"server": found["server"], "channel": found["channel"],
+            "expectedContext": found["context"], "retryToken": hex::encode([81; 32]),
+            "text": "From the later offline founder", "replyTo": null}),
+    )
+    .await;
+    assert_eq!(offline["disposition"], "saved-local");
+    let offline_message = offline["message_id"].as_str().unwrap().to_owned();
+    let offline_edited = command_value_after_busy(
+        &main,
+        &founder_queue,
+        "edit_message",
+        sending::BUSY,
+        serde_json::json!({"server": found["server"], "channel": found["channel"],
+            "expectedContext": found["context"], "retryToken": hex::encode([82; 32]),
+            "messageId": offline_message, "expectedRevision": offline_message,
+            "text": "Changed by the later offline founder"}),
+    )
+    .await;
+    assert_eq!(offline_edited["disposition"], "saved-local");
+    let offline_edit = offline_edited["message_id"].as_str().unwrap();
+    let offline_deleted = command_value_after_busy(
+        &main,
+        &founder_queue,
+        "delete_message",
+        sending::BUSY,
+        serde_json::json!({"server": found["server"], "channel": found["channel"],
+            "expectedContext": found["context"], "retryToken": hex::encode([83; 32]),
+            "messageId": offline_message, "expectedRevision": offline_edit}),
+    )
+    .await;
+    assert_eq!(offline_deleted["disposition"], "saved-local");
+    let action_id = |text| ActionId::from_bytes(membership::decode_exact_hex(text).unwrap());
+    let offline_id = action_id(&offline_message);
+    let offline_edit_id = action_id(offline_edit);
+    let offline_delete = action_id(offline_deleted["message_id"].as_str().unwrap());
+    timeout(Duration::from_secs(25), async {
+        loop {
+            let (prepared, selection, channel, scope) =
+                capture_joined_worker(&member_state, member_id, member_generation).await;
+            let covered = prepared
+                .archived_message_projection(
+                    &selection,
+                    channel,
+                    offline_id,
+                    scope,
+                    &mut OsCryptoRng,
+                )
+                .ok()
+                .flatten()
+                .is_some_and(|projection| {
+                    projection.archived_includes(offline_edit_id)
+                        && projection.archived_includes(offline_delete)
+                });
+            if covered {
+                break;
+            }
+            SystemClock.sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the holder selected the original founder revisions before the Add");
     let reopen = AdmissionBarrier::new();
     *member_state
         .native_text
@@ -1883,18 +1951,20 @@ async fn native_text_joined_dependency_provider_reopens_after_selected_add() {
     let expected_target = parent.to_owned();
     let expected_reply = reply_id.to_owned();
     let expected_deepest = deepest_reply.clone();
+    let expected_offline = offline_message.clone();
     let notice_listener = newcomer.listen_any("chat-v2-received", move |event| {
         let change: serde_json::Value = serde_json::from_str(event.payload()).unwrap();
         if change["context"] == expected_context
             && (change["action"] == expected_target
                 || change["action"] == expected_reply
-                || change["action"] == expected_deepest)
+                || change["action"] == expected_deepest
+                || change["action"] == expected_offline)
         {
             let _ = archive_notice.try_send(());
         }
     });
     // Let the ordinary joined workers start, but keep incoming gossip parked.
-    // Only the automatic history worker can cover both targets in the archive.
+    // Only the automatic history worker can cover these targets in the archive.
     let parked_live = AdmissionBarrier::new();
     *new_state
         .native_text
@@ -1936,14 +2006,22 @@ async fn native_text_joined_dependency_provider_reopens_after_selected_add() {
             let has_reply = prepared
                 .selected_archive_target_data(&selection, channel, reply, &scope)
                 .is_ok_and(|target| target == Some(reply));
-            if covered && has_reply {
+            let (prepared, selection, channel, scope) =
+                capture_joined_worker(&new_state, id, generation).await;
+            let has_relay = prepared
+                .archived_message_projection(&selection, channel, offline_id, scope, &mut OsCryptoRng)
+                .ok().flatten().is_some_and(|projection| {
+                    projection.archived_includes(offline_edit_id)
+                        && projection.archived_includes(offline_delete)
+                });
+            if covered && has_reply && has_relay {
                 break;
             }
         }
     })
     .await
     .expect(
-        "the automatic worker selects the missed deletion and nested replies before gossip runs",
+        "automatic history covers missed own-outbox and offline-author archive revisions before gossip",
     );
     newcomer.unlisten(notice_listener);
     let reply_view = command_value_after_busy(
