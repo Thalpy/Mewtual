@@ -213,12 +213,12 @@ impl SealedV2PendingJoinSource {
                     .get_bytes()
                     .map_err(malformed)?
                     .try_into()
-                    .map_err(malformed)?;
+                    .map_err(|_| SyncError::Malformed)?;
                 let admission = d
                     .get_bytes()
                     .map_err(malformed)?
                     .try_into()
-                    .map_err(malformed)?;
+                    .map_err(|_| SyncError::Malformed)?;
                 let epoch = d.get_u64().map_err(malformed)?;
                 let selected = (
                     OwnerHeaderId::from_bytes(head),

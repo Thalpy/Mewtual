@@ -395,8 +395,11 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     let pending =
         RecoveredV2PendingJoinSource::open(source, &keys, context, &fixture.invite, join_limits)
             .unwrap();
-    let wire = joiner.request_bytes_data().to_vec();
-    let request = V2JoinRequestPacketData::decode(&wire).unwrap();
+    let (nonce, ciphertext) = source.encrypted_parts();
+    let previous_source =
+        crate::SealedV2PendingJoinSource::from_encrypted_parts(*nonce, ciphertext).unwrap();
+    let previous_request = joiner.request_bytes_data().to_vec();
+    let request = V2JoinRequestPacketData::decode(&previous_request).unwrap();
     let request = request.founder_add_data();
     let genesis = node.genesis_data();
     let stale = catcoms_replication::chat::owner_state::transition::ReplayMath::from_genesis(
@@ -1132,16 +1135,29 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     let mut next_invite = Request::new(node, 97);
     let expiry = now + 60_000;
     next_invite.change_invite(node, |spec| spec.expires_at_ms = expiry);
-    let next_join = PreparedV2JoinRequest::prepare(
-        MlsDevice::generate().unwrap(),
-        &next_invite.invite.spec_data().anchor,
-        &next_invite.invite,
-        [98; 32],
-        now,
-        DirectJoinLimits::new(RAW, RAW, 256 * 1024).unwrap(),
-    )
-    .unwrap();
-    let packet = V2JoinRequestPacketData::decode(next_join.request_bytes_data()).unwrap();
+    let rejoining = Native::new();
+    let rejoining_source = rejoining.source.observe();
+    let mut device_cut = rejoining.cut(NativeChatKeyPurpose::JoinerDevice);
+    let mut device_ends = catcoms_rt::NativeChatKeyEnds::new();
+    let mut next_join = previous_source
+        .prepare_native_rejoin(
+            &keys,
+            crate::NativeV2RejoinInputs {
+                previous_invite: &fixture.invite,
+                previous_context: context,
+                previous_request: &previous_request,
+                previous_signer: retained_later.1.spec().subject,
+                previous_remove: (fingerprint.header, removed_id, fingerprint.epoch),
+                invite: &next_invite.invite,
+                token: [98; 32],
+                now_ms: now,
+                limits: join_limits,
+            },
+            crate::NativeV2JoinKeyEntry::new(&rejoining_source, &mut device_cut, &mut device_ends),
+        )
+        .unwrap();
+    let next_wire = next_join.request_bytes_data().to_vec();
+    let packet = V2JoinRequestPacketData::decode(&next_wire).unwrap();
     let next_request = packet.founder_add_data();
     let seed = &node.node.seed.body;
     let (policy, l0, file_key) = next_request.verify_recovered(original).unwrap();
@@ -1295,6 +1311,11 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
         ],
     )
     .unwrap();
+    let rejoin_wire = V2GoverningJoinDeliveryData::encode(
+        &response.encode_packet_data().unwrap(),
+        &with_ancestor,
+    )
+    .unwrap();
     let with_ancestor = V2GoverningJoinPrefixData::decode(&with_ancestor).unwrap();
     let accepted = &next_invite.invite.spec_data().anchor;
     let new_admission = (header.id(), selected_rejoin_admission);
@@ -1315,6 +1336,80 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
         response.binding.spec_data().add_header,
         *header.id().as_bytes()
     );
+    next_join
+        .validate_pinned_join_delivery_data(&rejoin_wire)
+        .unwrap();
+    assert!(next_join
+        .validate_first_join_delivery_data(&rejoin_wire)
+        .is_err());
+    let next_context = V2PendingJoinContextData {
+        original_pending: [116; 32],
+        ..context
+    };
+    let next_source = next_join
+        .seal_pending_source(&keys, next_context, &mut journal_rng)
+        .unwrap();
+    let next_pending = RecoveredV2PendingJoinSource::open(
+        next_source,
+        &keys,
+        next_context,
+        &next_invite.invite,
+        join_limits,
+    )
+    .unwrap();
+    next_pending
+        .validate_pinned_join_delivery_data(&rejoin_wire)
+        .unwrap();
+    let (_rejoin_cancel, signal) = tokio::sync::watch::channel(false);
+    let rejoin_caller = catcoms_rt::RequestCancellation::new(signal, None);
+    let wrong_native = other.source.observe();
+    let mut wrong_cut = other.cut(NativeChatKeyPurpose::JoinerWelcomeSdk);
+    let mut welcome_ends = catcoms_rt::NativeChatKeyEnds::new();
+    assert!(next_join
+        .finish_pinned_join_delivery(
+            &rejoin_wire,
+            Some(&rejoin_caller),
+            Some(crate::NativeV2JoinKeyEntry::new(
+                &wrong_native,
+                &mut wrong_cut,
+                &mut welcome_ends
+            )),
+        )
+        .is_err());
+    next_join.fund_warm_sdk_graph(payment()).unwrap();
+    let mut welcome_cut = rejoining.cut(NativeChatKeyPurpose::JoinerWelcomeSdk);
+    let next_completed = next_join
+        .finish_pinned_join_delivery(
+            &rejoin_wire,
+            Some(&rejoin_caller),
+            Some(crate::NativeV2JoinKeyEntry::new(
+                &rejoining_source,
+                &mut welcome_cut,
+                &mut welcome_ends,
+            )),
+        )
+        .unwrap();
+    assert_eq!(
+        next_completed.facts_data().signer_data(),
+        &retained_later.1.spec().subject
+    );
+    assert_eq!(
+        next_completed.facts_data().join_epoch_data(),
+        fingerprint.epoch + 1
+    );
+    let sealed_outcome = next_join
+        .seal_joined_outcome(&keys, next_context, &mut journal_rng)
+        .unwrap();
+    let cold_join = RecoveredV2JoinedOutcome::open(
+        sealed_outcome,
+        &keys,
+        &next_pending,
+        &rejoin_wire,
+        payment(),
+    )
+    .unwrap();
+    assert_eq!(cold_join.governing_head_data(), new_admission.0);
+    assert_eq!(cold_join.epoch_data(), fingerprint.epoch + 1);
     assert_eq!(
         *restored.raw_recovered_add_header_data().unwrap(),
         header_raw

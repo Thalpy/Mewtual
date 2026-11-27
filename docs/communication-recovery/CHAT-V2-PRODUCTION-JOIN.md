@@ -652,9 +652,10 @@ authorizing a new join.
 The isolated MLS donor opens the bounded original Pending provider under a
 new native device cut and creates a provider containing only its original
 signer. The next signed request uses a fresh invitation nonce, request
-token and KeyPackage. The old Welcome remains bound to its original private
-package. The current integration does not route this constructor from
-desktop commands.
+token and KeyPackage. The old Welcome remains bound to its original private package. The
+Windows Sync fixture completed the replacement Welcome with the new Native
+Source and restored its sealed Outcome. The desktop still needs the
+mounted rejoin route.
 
 The proposed critical namespace 9 and replacement index grammar are
 tested as data. Production readers still refuse that namespace. A complete

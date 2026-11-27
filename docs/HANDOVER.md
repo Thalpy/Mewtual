@@ -1,5 +1,29 @@
 # Mewtual; Handover
 
+## Same-device rejoin proof and cold removal
+
+Cold native recovery verifies the original selected Remove before reporting
+that the local device was removed. If the selector is missing, it preserves
+the records and refuses to open the original membership. The Windows native
+fixture checked both cases.
+
+The native rejoin request retains the old signer in a fresh MLS provider and
+generates a new KeyPackage. Its sealed Pending commits to the exact prior
+Remove, Admission and epoch. The warm Welcome, cold Outcome and joined
+prefix creation all check that the same Remove precedes the new Add. The
+Windows Sync fixture completed a real Add after Remove with the original
+signer, refused a different Native Source at the Welcome and restored the
+new sealed SDK outcome. The bare MLS regression refused the old Welcome
+with the replacement provider. Ordinary first-pin paths refuse rejoin
+Pending records.
+
+Namespace9 and the registry retire-and-append transition are still exercised
+only as data. The mounted namespace, per-incarnation journals and native
+replacement route remain open. The existing 20- and 50-writer ledger tests
+passed with reordered pages, restart and concurrent changes. Those are
+protocol simulations. The larger native topology and physical acceptance
+are still open.
+
 ## Recover a fully staged cold Add
 
 A returning founder can finish a fully written later Add that stopped before
