@@ -29,7 +29,7 @@ pub struct V2FounderInviteRequestData {
     pub public_routing_plan: [u8; 32],
 }
 impl V2FounderInviteRequestData {
-    fn validate(self) -> Result<(), SyncError> {
+    pub(super) fn validate(self) -> Result<(), SyncError> {
         if self.token == [0; 32]
             || self.public_routing_plan == [0; 32]
             || self.lifetime_ms == 0
@@ -58,6 +58,11 @@ enum Key {
     Raw,
 }
 
+pub(super) enum InviteOrigin {
+    Genesis(OriginalV2GenesisSeedObservation),
+    Recovered(std::sync::Weak<()>),
+}
+
 /// Same-operation owner, installed in Root before any Clock/RNG/key seam. No
 /// raw SDK, native issuer, setter, cloning or decoded pending adoption exists.
 /// Unknown entered seams remain sticky. Cached output is historical DATA even
@@ -65,7 +70,7 @@ enum Key {
 pub struct PreparedV2FounderInviteData {
     request: V2FounderInviteRequestData,
     installed_parent: Option<(u64, OwnerHeaderId)>,
-    original: OriginalV2GenesisSeedObservation,
+    original: InviteOrigin,
     native: NativeChatSourceObservation,
     draw: Draw,
     expires_at_ms: Option<u64>,
@@ -93,6 +98,48 @@ pub const FOUNDER_INVITE_DATA_BYTES: usize = 4 * std::mem::size_of::<PreparedV2F
     + 16 * 1024;
 
 impl PreparedV2FounderInviteData {
+    pub(super) fn captured(
+        request: V2FounderInviteRequestData,
+        installed_parent: Option<(u64, OwnerHeaderId)>,
+        original: InviteOrigin,
+        native: &NativeChatSourceObservation,
+    ) -> Self {
+        Self {
+            request,
+            installed_parent,
+            original,
+            native: native.clone(),
+            draw: Draw::Captured,
+            expires_at_ms: None,
+            nonce: None,
+            spec: None,
+            policy_bytes: None,
+            bytes: None,
+            key: Key::Unstarted,
+            attempts: 0,
+            raw: None,
+            signed: None,
+        }
+    }
+
+    pub(super) fn require_recovered(
+        &self,
+        parent: (u64, OwnerHeaderId),
+        lifetime: &std::sync::Arc<()>,
+        native: &NativeChatSourceObservation,
+    ) -> Result<(), SyncError> {
+        if self.installed_parent != Some(parent) || !self.native.same_original(native) {
+            return Err(unavailable());
+        }
+        match &self.original {
+            InviteOrigin::Recovered(original)
+                if original.ptr_eq(&std::sync::Arc::downgrade(lifetime)) =>
+            {
+                Ok(())
+            }
+            _ => Err(unavailable()),
+        }
+    }
     /// The exact Root-local request, not the random invite nonce or wire ID.
     pub fn request_data(&self) -> V2FounderInviteRequestData {
         self.request
@@ -174,7 +221,10 @@ impl<T, R> UnboundV2GenesisNode<T, R> {
         if prepared.installed_parent != expected {
             return Err(unavailable());
         }
-        prepared.original.require_same_seed_data(&self.seed)
+        match &prepared.original {
+            InviteOrigin::Genesis(original) => original.require_same_seed_data(&self.seed),
+            InviteOrigin::Recovered(_) => Err(unavailable()),
+        }
     }
 
     /// Stable original-lifetime negatives only. The full SDK graph, roster and
@@ -229,44 +279,56 @@ impl<T, R> UnboundV2GenesisNode<T, R> {
         }
         self.require_invite_stable_negative()?;
         let signer = self.seed.body.context.spec_data().signer;
-        let (spec, _) = prepared.unsigned_data()?;
+        prepared.sign_retained_device(&self.seed.body.device, signer, cut, ends)
+    }
+}
+
+impl PreparedV2FounderInviteData {
+    pub(super) fn sign_retained_device(
+        &mut self,
+        device: &MlsDevice,
+        signer: [u8; 32],
+        cut: &mut NativeChatPreparedKeyCut,
+        ends: &mut NativeChatKeyEnds,
+    ) -> Result<(), SyncError> {
+        if self.raw.is_some() {
+            return Ok(());
+        }
+        let (spec, _) = self.unsigned_data()?;
         if spec.inviter != signer
-            || !self.seed.body.device.retained_ed25519_key_matches(&signer)
-            || !matches!(prepared.key, Key::Unstarted | Key::KnownLocalRefusal)
+            || !device.retained_ed25519_key_matches(&signer)
+            || !matches!(self.key, Key::Unstarted | Key::KnownLocalRefusal)
         {
             return Err(unavailable());
         }
         // Only a fresh cut may enter. Even a known local refusal may have
         // partially charged UI custody; the owner must retire that old cut/End
         // outside writers and obtain actual fresh current authorization first.
-        cut.require_never_entered_data(&prepared.native, NativeChatKeyPurpose::JoinInvite)
+        cut.require_never_entered_data(&self.native, NativeChatKeyPurpose::JoinInvite)
             .map_err(|_| unavailable())?;
-        prepared.attempts = prepared.attempts.checked_add(1).ok_or_else(unavailable)?;
-        prepared.key = Key::Attempting; // before RT: a panic is not a refusal witness
+        self.attempts = self.attempts.checked_add(1).ok_or_else(unavailable)?;
+        self.key = Key::Attempting; // before RT: a panic is not a refusal witness
         #[cfg(test)]
         test_cut(TestCut::NativeAttempting);
-        match cut.enter(&prepared.native, NativeChatKeyPurpose::JoinInvite, ends) {
-            Ok(()) => prepared.key = Key::Entered,
+        match cut.enter(&self.native, NativeChatKeyPurpose::JoinInvite, ends) {
+            Ok(()) => self.key = Key::Entered,
             Err(NativeChatKeyRefusal::Busy | NativeChatKeyRefusal::Unavailable) => {
-                prepared.key = Key::KnownLocalRefusal;
+                self.key = Key::KnownLocalRefusal;
                 return Err(unavailable());
             }
             Err(_) => return Err(unavailable()),
         }
         #[cfg(test)]
         test_cut(TestCut::KeyEntered);
-        let raw = self
-            .seed
-            .body
-            .device
+        let raw = device
             .sign_retained_ed25519_bounded(
                 &signer,
-                prepared.bytes.as_deref().ok_or_else(unavailable)?,
+                self.bytes.as_deref().ok_or_else(unavailable)?,
                 MAX_JOIN_BINDING_BYTES,
             )
             .map_err(|_| unavailable())?;
-        prepared.raw = Some(raw); // before any late check or materializer
-        prepared.key = Key::Raw;
+        self.raw = Some(raw); // before any late check or materializer
+        self.key = Key::Raw;
         #[cfg(test)]
         test_cut(TestCut::RawCached);
         Ok(())
@@ -310,77 +372,100 @@ impl<T: MeshTransport, R: CryptoRngCore> UnboundV2GenesisNode<T, R> {
             self.require_invite_stable_negative()?;
         }
         if slot.is_none() {
-            *slot = Some(PreparedV2FounderInviteData {
+            *slot = Some(PreparedV2FounderInviteData::captured(
                 request,
                 installed_parent,
-                original: self.seed.observe_original_seed_data(),
-                native: native.clone(),
-                draw: Draw::Captured,
-                expires_at_ms: None,
-                nonce: None,
-                spec: None,
-                policy_bytes: None,
-                bytes: None,
-                key: Key::Unstarted,
-                attempts: 0,
-                raw: None,
-                signed: None,
-            });
+                InviteOrigin::Genesis(self.seed.observe_original_seed_data()),
+                native,
+            ));
         }
         let p = slot.as_mut().ok_or_else(unavailable)?;
-        if p.draw == Draw::Captured {
-            p.draw = Draw::ClockEntered;
+        let seed = &self.seed.body;
+        p.draw_and_encode(
+            &*self._parts.body._clock,
+            &mut self._parts.body._rng,
+            || {
+                let genesis = &seed.genesis;
+                let policy = seed
+                    .metadata
+                    .policy
+                    .as_ref()
+                    .ok_or_else(unavailable)?
+                    .encode();
+                let anchor = GenesisAnchorBindingData {
+                    group: genesis.profile.spec().group.clone(),
+                    founder: genesis.profile.spec().founder,
+                    profile: *genesis.profile.id().as_bytes(),
+                    admission: *genesis.admission.admission_id().as_bytes(),
+                    tenure: *genesis.profile.tenure().as_bytes(),
+                    header: *genesis.header.id().as_bytes(),
+                    state: *genesis.header.spec().state.as_bytes(),
+                };
+                Ok((anchor, policy))
+            },
+        )?;
+        if installed_parent.is_none() {
+            self.require_invite_source()?;
+        } else {
+            self.require_invite_stable_negative()?;
+        }
+        Ok(())
+    }
+}
+
+impl PreparedV2FounderInviteData {
+    pub(super) fn draw_and_encode(
+        &mut self,
+        clock: &dyn Clock,
+        rng: &mut impl CryptoRngCore,
+        metadata: impl FnOnce() -> Result<(GenesisAnchorBindingData, Vec<u8>), SyncError>,
+    ) -> Result<(), SyncError> {
+        if self.bytes.is_some() {
+            return Ok(());
+        }
+        if self.draw == Draw::Captured {
+            self.draw = Draw::ClockEntered;
             #[cfg(test)]
             test_cut(TestCut::ClockEntered);
-            let now = self._parts.body._clock.now_ms();
-            p.expires_at_ms = Some(
-                now.checked_add(request.lifetime_ms)
+            let now = clock.now_ms();
+            self.expires_at_ms = Some(
+                now.checked_add(self.request.lifetime_ms)
                     .ok_or_else(unavailable)?,
             );
-            p.draw = Draw::Timed;
+            self.draw = Draw::Timed;
         }
-        if p.draw == Draw::Timed {
-            p.draw = Draw::NonceEntered;
+        if self.draw == Draw::Timed {
+            self.draw = Draw::NonceEntered;
             #[cfg(test)]
             test_cut(TestCut::NonceEntered);
             let mut nonce = [0; 16];
-            self._parts.body._rng.fill_bytes(&mut nonce);
-            p.nonce = Some(nonce);
-            p.draw = Draw::Drawn;
+            rng.fill_bytes(&mut nonce);
+            self.nonce = Some(nonce);
+            self.draw = Draw::Drawn;
         }
-        if p.draw != Draw::Drawn {
+        if self.draw != Draw::Drawn {
             return Err(unavailable()); // unknown Clock/RNG entry cannot redraw
         }
-        if p.spec.is_none() {
-            let s = &self.seed.body;
-            let g = &s.genesis;
-            let policy_bytes = s.metadata.policy.as_ref().ok_or_else(unavailable)?.encode();
+        if self.spec.is_none() {
+            let (anchor, policy_bytes) = metadata()?;
             if policy_bytes.is_empty() || policy_bytes.capacity() > MAX_JOIN_BINDING_BYTES {
                 return Err(unavailable());
             }
             let spec = InviteBindingSpecData {
-                anchor: GenesisAnchorBindingData {
-                    group: g.profile.spec().group.clone(),
-                    founder: g.profile.spec().founder,
-                    profile: *g.profile.id().as_bytes(),
-                    admission: *g.admission.admission_id().as_bytes(),
-                    tenure: *g.profile.tenure().as_bytes(),
-                    header: *g.header.id().as_bytes(),
-                    state: *g.header.spec().state.as_bytes(),
-                },
-                inviter: s.context.spec_data().signer,
-                nonce: p.nonce.ok_or_else(unavailable)?,
-                expires_at_ms: p.expires_at_ms.ok_or_else(unavailable)?,
+                inviter: anchor.founder,
+                anchor,
+                nonce: self.nonce.ok_or_else(unavailable)?,
+                expires_at_ms: self.expires_at_ms.ok_or_else(unavailable)?,
                 policy: JoinPayloadKindData::Policy
                     .commitment_data(&policy_bytes)
                     .map_err(|_| unavailable())?,
-                public_routing_plan: request.public_routing_plan,
+                public_routing_plan: self.request.public_routing_plan,
             };
-            p.policy_bytes = Some(policy_bytes);
-            p.spec = Some(spec);
+            self.policy_bytes = Some(policy_bytes);
+            self.spec = Some(spec);
         }
-        p.bytes = Some(
-            p.spec
+        self.bytes = Some(
+            self.spec
                 .as_ref()
                 .ok_or_else(unavailable)?
                 .signing_bytes_data()
@@ -388,11 +473,6 @@ impl<T: MeshTransport, R: CryptoRngCore> UnboundV2GenesisNode<T, R> {
         );
         #[cfg(test)]
         test_cut(TestCut::Prepared);
-        if installed_parent.is_none() {
-            self.require_invite_source()?;
-        } else {
-            self.require_invite_stable_negative()?;
-        }
         Ok(())
     }
 }

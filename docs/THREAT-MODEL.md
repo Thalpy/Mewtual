@@ -7259,3 +7259,11 @@ renew unknown Clock/RNG/key entry. This supplies no SavedInvite/current Add or
 publication authority. Durable KeyAttempt/cold no-resign, persistent quotas and
 covering journal/IO admission remain unfinished. Chat V2 stays OFF.
 [Detailed limits](communication-recovery/CHAT-V2-INVITE-ISSUER.md).
+
+The subsequent cold issuer checks a covered Add or Remove, the exact original
+pin and encrypted Head, and the restored founder's native JoinInvite cut.
+If any journal file exists, all three exact records must authenticate and
+link to one another before publication. A restart never retries the signer
+after an incomplete attempt. The desktop keeps the original runtime loan
+until the final row, vault and UI session checks. Fresh cold membership
+admission still requires a separate governed Add.

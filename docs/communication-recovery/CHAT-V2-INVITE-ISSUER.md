@@ -28,11 +28,11 @@ checked around IO; no caller path, context digest or signing callback enters.
 This initial profile reserves **one object and 8 KiB per context**, separately
 from Head1 counters. Its authenticated format fixes both limits. It never
 replaces, evicts or deletes the object, and refuses another token/settings.
-The original native-only warm Host owns the affine initialization opportunity;
-there is no cold/library adopting constructor. Missing after creation,
-malformed/unknown/torn quota or format and replacement directories/files are
-errors. A cold recovery consumer must require the existing journal and cannot
-interpret absence as an empty quota or recreate that initialization opportunity.
+The original warm Host owns its initialization opportunity. A restored native
+founder can start a journal at a covered Add or Remove when all three exact
+names are absent. A complete set can be authenticated and synced after a
+restart. The issuer refuses and preserves incomplete sets and changed files.
+Read-only inspection and library callers have no initialization capability.
 Wider history/retention needs a separately versioned producer.
 
 The Host pays a named independent memory invoice before allocating the journal.
@@ -40,7 +40,7 @@ Its actual pages/file handles drain before the retained vault physical-work
 lease. All reads/writes stay inside the same synchronous RuntimeLoan, so no
 detached writer or global text-lane registration is introduced. AEAD candidate
 preparation and its RNG run outside Current/Root writers. The candidate is
-cached before create/write; the same warm owner can complete only its own
+cached before create/write. The same owner can complete only its own
 exact partial prefix. Unknown create entry is held. File and directory barriers
 and exact identity/byte checks precede covered unsigned success.
 
@@ -74,6 +74,15 @@ no second prefix/domain is minted. Before and after the retained draw it
 checks the live founder Admission, genesis MLS epoch/header, same selected G1
 head, original source and actual mounted4 files under the already-held Root.
 Plain native3, GovernanceOpening and cold/repaired owners cannot prepare here.
+
+The separate cold path borrows the restored closed MLS graph and checks its
+founder Admission and selected Add or Remove. It decodes the original policy
+and checks the held TCP reservation against the live transport identity.
+It uses the same journal format, original pin and genesis commitments, and
+the exact selected encrypted Head. The same runtime may continue its own
+work. After a restart, publication reuses the authenticated raw signature
+and syncs the three held files and their directory before returning the
+same packet.
 
 One independently paid Host slot retains the exact request and Sync plan.
 Ordinary member preparation continues on the same verifier.
@@ -158,21 +167,18 @@ routes for this packet profile. Its scope is authenticated metadata.
 
 ## Remaining publication and admission
 
-The gated desktop mint publishes the first covered invite while holding the
+The gated desktop mint publishes the covered invite while holding the
 original founder runtime loan. The resolver checks the authenticated window,
 vault, original row, session generation and expiry. Exact retries give the same
-first packet. Issuing another invitation for that context requires a versioned
-retention policy. Desktop join still needs its native runtime installation and
-contact selection.
-Cold operational restore must supply its own exact Current and original source
-proofs before it can use the read-only recovery step below. Broader writers
-need per-context serialization, and a versioned retention policy is required
-for more than one invitation per context.
+packet at the same selected parent. A versioned retention policy is required
+to issue another invitation for that parent. A cold founder can produce the
+packet after a covered Add or Remove. Its listener still needs the fresh
+governed Add path to admit that invitation. A founder reopened before the
+first Add has no cold issuer.
 
 Add must independently recheck current inviter/policy/public plan, expiry,
 nonce use and exact signed JoinRequest/KeyPackage. Saved issuance cannot stand
-in for present admission. Joined pin/source custody, governing archive,
-multi-member installation, shared transport/projection, restart authoring and
+in for present admission. Cold Add, rejoin in an existing member vault, and
 multi-peer acceptance remain open.
 
 ## Read-only journal recovery

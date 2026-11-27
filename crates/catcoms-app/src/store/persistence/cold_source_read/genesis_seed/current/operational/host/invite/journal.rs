@@ -2,11 +2,12 @@
 //!
 //! One persistent intent is retained per selected parent. A torn or unknown
 //! object blocks further work on that parent;
-//! only the same warm owner may finish its own exact partially written frame.
+//! only the issuing runtime may finish its own exact partially written frame.
 //! The signing stages use separate immutable files under the same held directory.
 use super::*;
 use crate::store::critical_namespaces::current_layout::V2TextCurrentGroupGuard;
 use crate::store::persistence::v2_text::TextHeadIdData;
+use crate::store::ServerStore;
 use catcoms_crypto::{seal, unseal};
 use catcoms_replication::chat::join_bindings::InviteBindingSpecData;
 use catcoms_storage::kept::{session_at, session_id, SessionAt, SessionId};
@@ -21,7 +22,6 @@ use zeroize::Zeroizing;
 const NAME: &str = "invite.intent.v1";
 const TAG: &[u8] = b"mewtual/private-chat/invite-intent/v1\0";
 const KEY_DOMAIN: &str = "mewtual/private-chat/invite-intent-key/v1";
-const CONTEXT_DOMAIN: &[u8] = b"mewtual/private-chat/invite-context/v1\0";
 const SELECTED_CONTEXT_DOMAIN: &str = "mewtual/private-chat/invite-context-selected/v2";
 const MAX_NAME: usize = "invite.attempt.v2.".len() + 64;
 const OBJECTS: u32 = 1;
@@ -97,10 +97,11 @@ impl Intent {
     }
 }
 
-/// Private affine IO owner inside the SAME synchronous RuntimeLoan. Its sole
-/// constructor is used by the native original's Host, never a cold/library
-/// adopter. Native Source retirement waits for the loan. Actual Current4 and
-/// the selected G1/member parent are proved around each use by the caller.
+/// Private affine IO owner inside the same synchronous RuntimeLoan. A
+/// recovered native founder may own fresh work on the checked selected
+/// parent. Only the issuing runtime may finish one of its own partial files.
+/// Native Source retirement waits for the loan, and the caller checks the
+/// exact selected parent around each write.
 /// Files drain before the original vault's physical-work lease.
 #[derive(Default)]
 pub(super) struct InviteIntentJournal {
@@ -130,37 +131,32 @@ fn require_pages((path, file, id): &Pages) -> Result<(), AppError> {
 
 fn original_context(guard: &V2TextCurrentGroupGuard<'_, '_>) -> Result<[u8; 32], AppError> {
     let (expected, genesis, nonce) = guard.original_genesis_context_data()?;
-    let encoded =
-        crate::store::critical_namespaces::archive_bootstrap::founder_codec::encode_context(
-            &expected.context,
-        )?;
-    let mut h = blake3::Hasher::new();
-    h.update(CONTEXT_DOMAIN);
-    h.update(&(encoded.len() as u64).to_be_bytes());
-    h.update(&encoded);
-    h.update(blake3::hash(genesis).as_bytes());
-    h.update(&nonce);
-    h.update(blake3::hash(guard.original_pin_data().2).as_bytes());
-    Ok(*h.finalize().as_bytes())
+    crate::store::persistence::v2_text::invite_base_context(
+        &expected.context,
+        genesis,
+        nonce,
+        guard.original_pin_data().2,
+    )
 }
 
 fn bound_context(
     guard: &V2TextCurrentGroupGuard<'_, '_>,
     parent: Option<TextHeadIdData>,
 ) -> Result<[u8; 32], AppError> {
-    let genesis = original_context(guard)?;
-    if let Some(parent) = parent {
-        let mut hash = blake3::Hasher::new_derive_key(SELECTED_CONTEXT_DOMAIN);
-        hash.update(&genesis);
-        hash.update(parent.as_bytes());
-        Ok(*hash.finalize().as_bytes())
-    } else {
-        Ok(genesis)
-    }
+    Ok(selected_context(original_context(guard)?, parent))
 }
 
-fn open_pages(guard: &V2TextCurrentGroupGuard<'_, '_>) -> Result<Pages, AppError> {
-    let (target, _, _) = guard.target_directory_data();
+fn selected_context(genesis: [u8; 32], parent: Option<TextHeadIdData>) -> [u8; 32] {
+    let Some(parent) = parent else {
+        return genesis;
+    };
+    let mut hash = blake3::Hasher::new_derive_key(SELECTED_CONTEXT_DOMAIN);
+    hash.update(&genesis);
+    hash.update(parent.as_bytes());
+    *hash.finalize().as_bytes()
+}
+
+fn open_pages(target: &Path) -> Result<Pages, AppError> {
     if target.as_os_str().len() + 1 + "text.pages".len() + 1 + MAX_NAME > MAX_PATH {
         return Err(refused());
     }
@@ -265,13 +261,40 @@ impl InviteIntentJournal {
         &mut self,
         guard: &crate::store::critical_namespaces::current_layout::V2TextCurrentGroupGuard<'_, '_>,
     ) -> Result<(), AppError> {
-        let context = bound_context(guard, self.parent)?;
+        self.bind_selected(
+            guard.store(),
+            guard.target_directory_data().0,
+            bound_context(guard, self.parent)?,
+        )
+    }
+
+    pub(super) fn bind_cold(
+        &mut self,
+        guard: &crate::store::persistence::v2_text::ColdInviteParent<'_>,
+    ) -> Result<(), AppError> {
+        let (parent, base) = guard.context_data();
+        if self.parent != Some(parent) {
+            return Err(refused());
+        }
+        self.bind_selected(
+            guard.store(),
+            guard.target(),
+            selected_context(base, self.parent),
+        )
+    }
+
+    fn bind_selected(
+        &mut self,
+        store: &ServerStore,
+        target: &Path,
+        context: [u8; 32],
+    ) -> Result<(), AppError> {
         if self.context.is_some_and(|original| original != context) {
             return Err(refused());
         }
         if self.pages.is_none() {
-            let lease = guard.store()._session.retain_for_physical_work();
-            self.pages = Some(open_pages(guard)?);
+            let lease = store._session.retain_for_physical_work();
+            self.pages = Some(open_pages(target)?);
             self.context = Some(context);
             self._lease = Some(lease);
         }
@@ -286,8 +309,8 @@ impl InviteIntentJournal {
     }
     /// Exact token lookup BEFORE the retained node's Clock/RNG. Missing after
     /// creation, malformed quota/format, foreign MAC/context and torn files are
-    /// errors, never empty usage. Absence can initialize only this unique warm
-    /// original, before it has entered its one create; no cold adopter exists.
+    /// errors. The warm caller can initialize before its one create. The cold
+    /// caller must classify all three names together before using lookup_bound.
     pub(super) fn lookup(
         &mut self,
         guard: &crate::store::critical_namespaces::current_layout::V2TextCurrentGroupGuard<'_, '_>,
@@ -295,6 +318,15 @@ impl InviteIntentJournal {
         route: &[u8],
     ) -> Result<Option<([u8; 32], u64)>, AppError> {
         self.bind(guard)?;
+        self.lookup_bound(guard.store(), request, route)
+    }
+
+    pub(super) fn lookup_bound(
+        &mut self,
+        store: &ServerStore,
+        request: V2FounderInviteRequestData,
+        route: &[u8],
+    ) -> Result<Option<([u8; 32], u64)>, AppError> {
         if let Some(intent) = &self.intent {
             let result = intent.result(request, route)?;
             if !self.covered && !self.loaded {
@@ -337,7 +369,7 @@ impl InviteIntentJournal {
         let mut file = file;
         let frame = read(&mut file)?;
         named(&path, &file, id)?;
-        let key = Self::key(guard.store())?;
+        let key = Self::key(store)?;
         let plain = Zeroizing::new(unseal(&key, &crate::store::unframe(&frame)?)?);
         let intent = decode(&plain, self.context.ok_or_else(refused)?)?;
         intent.result(request, route)?;
@@ -400,6 +432,15 @@ impl InviteIntentJournal {
         preimage: &[u8],
     ) -> Result<([u8; 32], u64), AppError> {
         self.bind(guard)?;
+        self.cover_bound(request, route, preimage)
+    }
+
+    pub(super) fn cover_bound(
+        &mut self,
+        request: V2FounderInviteRequestData,
+        route: &[u8],
+        preimage: &[u8],
+    ) -> Result<([u8; 32], u64), AppError> {
         let intent = self.intent.as_ref().ok_or_else(refused)?;
         let result = intent.result(request, route)?;
         if intent.preimage != preimage {

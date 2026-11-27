@@ -1,5 +1,21 @@
 # Mewtual; Handover
 
+## 27 November 2026 — Save invitations at a restored founder's selected parent
+
+The disabled native Chat V2 founder restored after a covered Add or Remove
+uses its original policy, TCP reservation and verified native signing key to
+save an invitation. The same exact packet can be reissued after a restart.
+Torn, orphaned and foreign journal data are refused and preserved.
+
+The Windows App all-features compile check and both focused native tests
+passed. The mounted regression covered a real Remove, exact cold replay
+after another process restart and refusal with the torn signature and its
+companion files preserved. The native parser test also passed.
+
+The cold listener still needs a fresh governed Add before another member can
+use this invitation. Rejoin in the removed member's original vault, the
+combined suites and physical acceptance remain open. Chat V2 stays disabled.
+
 ## 26 November 2026 — Founder read of retained received history
 
 The founder can open Chat history from the Chat V2 Members panel. It

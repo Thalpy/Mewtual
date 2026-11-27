@@ -211,6 +211,27 @@ impl<T: MeshTransport, R: CryptoRngCore> member::NativeTextMemberJob<T, R> {
             .map_err(|_| Error::Unavailable)?;
         let inner = &mut self.inner;
         let body = inner.loan.body.as_mut().ok_or(Error::Unavailable)?;
+        if let Some(founder) = body.recovered_founder.as_mut() {
+            let InviteOperation::Save = operation else {
+                return Err(Error::Unavailable);
+            };
+            let result = founder.save_recovered_invite(
+                token,
+                lifetime_ms,
+                &mut inner.keys,
+                (
+                    body.clock.as_deref().ok_or(Error::Unavailable)?,
+                    body.rng.as_mut().ok_or(Error::Unavailable)?,
+                ),
+                negative,
+            );
+            inner.loan.recorded = true;
+            if negative.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            inner.require_current().map_err(|_| Error::Unavailable)?;
+            return result.map(InviteResult::Saved).map_err(|_| Error::Failed);
+        }
         let driver = body.driver.as_mut().ok_or(Error::Unavailable)?;
         let binding = driver.binding_data().ok_or(Error::Unavailable)?;
         let route = body

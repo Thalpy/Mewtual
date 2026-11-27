@@ -13,8 +13,10 @@ use catcoms_sync::owner_v2::{
 #[cfg(all(test, any(windows, target_os = "linux")))]
 mod governed_add_tests;
 mod journal;
+mod recovered;
 use super::governed_add::PendingGovernedAdd;
 use journal::{InviteIntentJournal, InviteRecoveryRead, InviteSigningJournal};
+pub(in crate::store) use recovered::RecoveredFounderInvite;
 
 #[cfg(test)]
 std::thread_local! {
