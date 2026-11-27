@@ -27,8 +27,17 @@ replacements of the selector and Stage, rejected a late conflict, reused
 the complete cold Stage without another draw, and preserved a partial Stage.
 JOIN rewrites now preserve the existing shared-history descriptor and the
 new rejoin descriptor byte for byte. The registry replacement format is
-tested as data. Durable catalog selection, the mounted namespace,
-per-incarnation journals and the desktop replacement route remain open.
+tested as data. When the exact ID9 catalog is already selected, native cold
+startup can recover only the verified retired A1. It refuses a conflicting
+JOIN stage, native index WAL or declaration seed. The writer selects and
+syncs the same Stage under Current, while rechecking the original native
+index, pin, Welcome and selected Remove. The old mount cannot issue new
+membership. It must release its files before the cold opener can take over.
+The Windows TCP fixture passed with the production rename, same-file retry,
+retained vault lock and terminal-only cold reopen. Deterministic faults during
+the file and directory sync calls remain untested. Per-incarnation journals,
+replacement registry selection and the desktop
+replacement route remain open.
 The existing 20- and 50-writer ledger tests passed with reordered pages,
 restart and concurrent changes. Those are
 protocol simulations. The larger native topology and physical acceptance

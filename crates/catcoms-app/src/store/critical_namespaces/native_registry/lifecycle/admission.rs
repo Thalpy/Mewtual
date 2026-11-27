@@ -37,6 +37,7 @@ pub(in crate::store) struct Handler {
     payment: Arc<Payment>,
     joined_pin_layout: bool,
     shared_history_layout: Opening,
+    rejoin_startup: bool,
 }
 impl Handler {
     pub(in crate::store::critical_namespaces::native_registry) fn payment_tail(
@@ -77,6 +78,7 @@ impl Handler {
             payment,
             joined_pin_layout: false,
             shared_history_layout: Opening::Disabled,
+            rejoin_startup: false,
         })
     }
     pub(in crate::store::critical_namespaces::native_registry) fn with_joined_pin_layout(
@@ -97,6 +99,19 @@ impl Handler {
         self.joined_pin_layout = true;
         self.shared_history_layout = opening;
         self
+    }
+
+    /// Only the original private native startup dispatch uses this grammar.
+    /// A selected rejoin catalog still needs an independently proven retired A1.
+    pub(in crate::store::critical_namespaces::native_registry) fn with_rejoin_startup(
+        mut self,
+    ) -> Self {
+        self.rejoin_startup = true;
+        self.with_shared_history_layout(Opening::Optional)
+    }
+
+    pub(in crate::store) fn accepts_rejoin_startup(&self) -> bool {
+        self.rejoin_startup
     }
 
     pub(in crate::store) fn shared_history_opening(&self) -> Opening {

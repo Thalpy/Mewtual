@@ -662,14 +662,19 @@ original TCP actor drains. It holds the original mount, file identities
 and reservation through retries. Staging writes only the private rejoin
 candidate. A cold retired owner can authenticate and reuse the complete
 candidate, and a partial file is preserved for recovery. Global JOIN Stage
-must stay absent. The selected catalog remains unchanged until the later
-durable switch and same-vault mount. Ordinary readers refuse a selected
-namespace 9. No replacement key entry can use the staged candidate.
-Production rejoin must durably select it before the new native key cut,
-hold the exact original files through selection, and verify that the new
-admission descends from the exact selected removal. The registry
-successor retains the old row and its original receipt, and selects only
-one active new row. Saved outbox originals are preserved. Pending work
+must stay absent. Selection checks the original Remove and file roles,
+renames the exact private Stage into Current, then syncs the selected
+file and original vault directory. Repeating an uncertain selection
+requires the same held file at Current and the same A1 records.
+Ordinary readers refuse a selected namespace 9. Native startup accepts
+the selected catalog only with an authenticated retired row while the
+replacement journals are absent. The original mount retires before that
+cold open. Neither step grants replacement key custody.
+
+Production rejoin still needs a new native key cut and covered per-
+incarnation journals. The new admission must descend from the exact
+selected removal. The registry successor must retain the old row and its
+original receipt and select exactly one new active row. Saved outbox originals are preserved. Pending work
 under the retired admission keeps its original scope. Physical deployment,
 crash recovery and same-vault activation remain open.
 

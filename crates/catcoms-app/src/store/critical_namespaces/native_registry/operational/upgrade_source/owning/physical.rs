@@ -347,6 +347,22 @@ impl Physical {
         prepared.require_original(store)
     }
 
+    /// Classification only. Subsequent A1 recovery still rechecks the
+    /// exact selected physical files before exposing anything.
+    pub(super) fn rejoin_catalog_selected(&self) -> Result<bool, AppError> {
+        let store = self.current()?.checked_store()?;
+        let catalog = store
+            .pending_join_catalog
+            .try_lock()
+            .map_err(|_| refused())?;
+        Ok(catalog
+            .as_ref()
+            .ok_or_else(refused)?
+            .current
+            .rejoin_payload_digest
+            .is_some())
+    }
+
     pub(super) fn stage_retired_rejoin_catalog(
         &self,
         prepared: &mut crate::store::persistence::governance_layout::joined::rejoin::RejoinCatalogPreparation,
@@ -355,6 +371,16 @@ impl Physical {
         cell.require_idle()?;
         self.handler.require_idle_cached()?;
         prepared.stage_catalog(self.current()?.checked_store()?)
+    }
+
+    pub(super) fn select_retired_rejoin_catalog(
+        &self,
+        prepared: &mut crate::store::persistence::governance_layout::joined::rejoin::RejoinCatalogPreparation,
+    ) -> Result<(), AppError> {
+        let cell = self.cell.try_lock().map_err(|_| refused())?;
+        cell.require_idle()?;
+        self.handler.require_idle_cached()?;
+        prepared.select_catalog(self.current()?.checked_store()?)
     }
 
     fn with_registered_native_join<T>(

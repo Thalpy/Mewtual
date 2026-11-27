@@ -60,14 +60,39 @@ pub(in crate::store) struct RejoinCatalogPreparation {
     removal: SelectedRejoinRemoval,
     stage: Option<CreatedStage>,
     complete_stage: bool,
+    selection_started: bool,
     // The actual vault session outlives the original File, both frames
     // and the directory handle, even if their retired owner closes.
     _lease: catcoms_storage::VaultPhysicalWorkLease,
     _fee: CatalogReadReservation,
 }
 
+/// Closed substitution of the catalog role for a terminal-only reproof.
+/// The same complete Stage must now hold Current, and all other A1 files
+/// still use their original observers.
+pub(in crate::store) struct SelectedRejoinCatalog<'a> {
+    preparation: &'a RejoinCatalogPreparation,
+}
+
+impl SelectedRejoinCatalog<'_> {
+    pub(in crate::store) fn require_replaced_current(
+        &self,
+        store: &ServerStore,
+        original_identity: SessionId,
+        original_bytes: &[u8],
+    ) -> Result<(), AppError> {
+        let prepared = self.preparation;
+        if session_id(&prepared.original.0).map_err(io)? != original_identity
+            || prepared.original.1.as_slice() != original_bytes
+        {
+            return Err(denied());
+        }
+        prepared.require_selected_file(store)
+    }
+}
+
 impl RejoinCatalogPreparation {
-    fn require_catalog_files(&self, store: &ServerStore) -> Result<(), AppError> {
+    fn require_catalog_base(&self, store: &ServerStore) -> Result<(), AppError> {
         if !std::sync::Arc::ptr_eq(&self.mount, &store.registry_mount()) {
             return Err(denied());
         }
@@ -78,6 +103,11 @@ impl RejoinCatalogPreparation {
             false,
             critical_namespaces::Slot::Stage.name(),
         )?)?;
+        Ok(())
+    }
+
+    fn require_catalog_files(&self, store: &ServerStore) -> Result<(), AppError> {
+        self.require_catalog_base(store)?;
         let from = fixed(store, false, REJOIN_STAGE)?;
         let to = fixed(store, false, critical_namespaces::Slot::Current.name())?;
         if let Some(stage) = self.stage.as_ref() {
@@ -126,6 +156,53 @@ impl RejoinCatalogPreparation {
         )?;
         self.complete_stage = true;
         Ok(())
+    }
+
+    fn require_selected_file(&self, store: &ServerStore) -> Result<(), AppError> {
+        if !self.selection_started || !self.complete_stage {
+            return Err(denied());
+        }
+        self.require_catalog_base(store)?;
+        absent(&fixed(store, false, REJOIN_STAGE)?)?;
+        exact_retained(
+            &fixed(store, false, critical_namespaces::Slot::Current.name())?,
+            self.stage.as_ref().ok_or_else(denied)?,
+            &self.candidate,
+        )
+    }
+
+    fn require_selected(&self, store: &ServerStore) -> Result<(), AppError> {
+        let selected = SelectedRejoinCatalog { preparation: self };
+        self.native
+            .inventory
+            .require_after_rejoin(store, &selected)?;
+        store.require_recovered_removal_after_rejoin(self.registration, self.removal, &selected)?;
+        self.native.inventory.require_after_rejoin(store, &selected)
+    }
+
+    /// The only writer for the fully authenticated candidate. After a
+    /// rename the retired A1 cache stays closed. A retry covers the same
+    /// held file and original parent directory before returning success.
+    pub(in crate::store) fn select_catalog(&mut self, store: &ServerStore) -> Result<(), AppError> {
+        if !self.selection_started {
+            self.stage_catalog(store)?;
+        }
+        match self.require_original(store) {
+            Ok(()) => {
+                let stage = fixed(store, false, REJOIN_STAGE)?;
+                let current = fixed(store, false, critical_namespaces::Slot::Current.name())?;
+                // Record the possible handoff before the syscall. A refused
+                // or ambiguous return keeps both exact original file loans.
+                self.selection_started = true;
+                install_catalog_stage(&stage, &current).map_err(io)?;
+            }
+            Err(error) if !self.selection_started => return Err(error),
+            Err(_) => {}
+        }
+        self.require_selected(store)?;
+        sync_selected_catalog(&self.stage.as_ref().ok_or_else(denied)?.file).map_err(io)?;
+        self.native.inventory.sync_rejoin_catalog_parent(store)?;
+        self.require_selected(store)
     }
 
     pub(in crate::store) fn require_original(&self, store: &ServerStore) -> Result<(), AppError> {
@@ -205,6 +282,7 @@ impl ServerStore {
             registration,
             removal,
             complete_stage: stage.is_some(),
+            selection_started: false,
             stage,
             _lease: self._session.retain_for_physical_work(),
             _fee: fee,

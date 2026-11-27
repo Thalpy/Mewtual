@@ -97,6 +97,8 @@ declare -A allowed=(
   ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade.rs|advance_upgrade|fs::rename(&stage, &current).map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade.rs|advance_upgrade|selected.file.sync_all().map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade.rs|advance_upgrade|fs::remove_file(&seed).map_err(io)?;']=1
+  # The rejoin writer covers the original hold on the vault parent after renaming Current.
+  ['crates/catcoms-app/src/store/persistence/native_registry/lifecycle/upgrade.rs|sync_rejoin_catalog_parent|self.base.vault.file.sync_all().map_err(io)?;']=1
   # First-torn3 requires an affine proof for THIS inventory, mutually valid old2
   # outputs and independently authenticated Current. Empty fence is covered
   # before seed unlink; an authenticated ordinary JOIN Stage is left untouched.

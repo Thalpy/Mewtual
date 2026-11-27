@@ -1836,6 +1836,80 @@ async fn native_text_membership_removal_reopen(join_after_restart: bool, repair_
         assert_eq!(std::fs::read(&catalog).unwrap(), before);
         drop(retired);
         wait_for_original_vault().await;
+
+        // Select the same complete Stage through the production writer.
+        // The old mount retains only its historical proof after the rename.
+        std::fs::write(&stage, &bytes).unwrap();
+        let mut retired = open_retired();
+        timeout(Duration::from_secs(10), async {
+            while !retired.stage_rejoin_catalog(&mut NeverRng).unwrap() {
+                SystemClock.sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let conflict = member_path.join("chat-critical-namespaces.replace.tmp");
+        std::fs::write(&conflict, b"unresolved competing catalog").unwrap();
+        assert!(retired.select_rejoin_catalog(&mut NeverRng).is_err());
+        assert_eq!(std::fs::read(&catalog).unwrap(), before);
+        assert_eq!(std::fs::read(&stage).unwrap(), bytes);
+        std::fs::remove_file(conflict).unwrap();
+
+        assert!(retired.select_rejoin_catalog(&mut NeverRng).unwrap());
+        assert!(retired.select_rejoin_catalog(&mut NeverRng).unwrap());
+        assert_eq!(std::fs::read(&catalog).unwrap(), bytes);
+        assert!(!stage.exists());
+        assert!(
+            retired.removal_data().is_err(),
+            "the old Current lost custody"
+        );
+        assert!(matches!(
+            catcoms_storage::vault::acquire_vault_session(&member_path),
+            Err(catcoms_storage::StorageError::VaultBusy)
+        ));
+        drop(retired);
+        wait_for_original_vault().await;
+
+        for relative in [
+            "chat-critical-namespaces.replace.tmp",
+            "chat-critical-namespaces.native-registry.seed",
+            "chat-critical-namespaces.native-index3.seed",
+            "chat-owner-v2/native-registry.stage",
+        ] {
+            let conflict = member_path.join(relative);
+            assert!(conflict.parent().unwrap().is_dir());
+            assert!(!conflict.exists());
+            std::fs::write(&conflict, b"unresolved original work").unwrap();
+            let result = NativeTextJoinedStorage::open_for_native_startup(
+                &member_path,
+                SECRET.as_bytes(),
+                &mut NeverRng,
+                boot::current_policy().unwrap(),
+            );
+            assert!(result.is_err(), "ID9 must refuse {relative}");
+            assert_eq!(
+                std::fs::read(&conflict).unwrap(),
+                b"unresolved original work"
+            );
+            assert_eq!(std::fs::read(&catalog).unwrap(), bytes);
+            std::fs::remove_file(conflict).unwrap();
+        }
+        let reopened = open_retired();
+        timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(data) = reopened.removal_data().unwrap() {
+                    assert_eq!(data, proof);
+                    break;
+                }
+                SystemClock.sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cold startup replays the original terminal A1 beneath ID9");
+        assert_eq!(std::fs::read(&catalog).unwrap(), bytes);
+        assert!(!stage.exists());
+        drop(reopened);
+        wait_for_original_vault().await;
     }
 
     // The selected Remove is already on disk. A different application

@@ -136,6 +136,27 @@ pub(in crate::store) fn verify_framed_declaration(
     verify_declaration(&old, &new, domain)
 }
 
+/// Inspect an authenticated frame for the old-reader fence before an
+/// ordinary recovery branch can process any unrelated temporary names.
+pub(super) fn has_rejoin_descriptor(
+    key: &[u8; 32],
+    frame: &[u8],
+    domain: &[u8; 32],
+) -> Result<bool, AppError> {
+    let plain = open_framed_catalog(key, frame)?;
+    let envelope = super::catalog_envelope::parse(
+        &plain,
+        domain,
+        super::catalog_envelope::MAX_ENVELOPE_PLAIN,
+    )?;
+    for index in 0..envelope.count {
+        if envelope.entry(index)?.id == ID {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn open_framed_catalog(key: &[u8; 32], frame: &[u8]) -> Result<Zeroizing<Vec<u8>>, AppError> {
     if !(41..=catalog::MAX_CATALOG_FRAMED).contains(&frame.len()) {
         return Err(refused());
