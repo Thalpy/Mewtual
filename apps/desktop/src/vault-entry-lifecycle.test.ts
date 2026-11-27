@@ -28,7 +28,8 @@ function entry(initialNativeGeneration = 6n) {
   return new Function("NativeVaultLockCoordinator", "rows", "initialNativeGeneration", "decodeRestoredChatSession", `
     let locked = true, unlocking = false, unlockAttempt = 0, windowCloseInFlight = false;
     let uiStateLoadGeneration = 0, uiStateReady = false, vaultExists = true, error = "",uiSessionRetired=false;
-    let chatBackend=null,startTab="join",nativeOriginals=[],nativeCursor=null,nativeHistoryLoading=false,nativeHistoryLoaded=false,nativeHistoryError=null,nativeHistoryRevision=0,nativeRetryGeneration=null;
+    let chatBackend=null,nativeRejoinRequired=false,startTab="join",nativeOriginals=[],nativeCursor=null,nativeHistoryLoading=false,nativeHistoryLoaded=false,nativeHistoryError=null,nativeHistoryRevision=0,nativeRetryGeneration=null;
+    let rejoinInvite="",rejoinHost="",rejoinNotice="",rejoinBusy=false,rejoinRestart=false;
     const studioExit={begin:()=>({current:()=>true})};
     let passphrase = "first secret", revealPassphrase = true, unlockMethod = "sigil";
     let sigilStrokes = [1], sigilDrawing = [2], sigilColors = [], sigilEmojis = [3], sigilWord = "private", melodySeq = [4];

@@ -28,7 +28,7 @@ use crate::store::persistence::governance_layout::joined::{
         RejoinIndexInputs, RejoinIndexRecovery, RejoinPendingOwner, RejoinPrefixInputs,
         RejoinReceivedInput, RejoinReceivedOwner, RejoinWelcomeKeyEntry, RejoinWelcomeOwners,
     },
-    AcceptedFirstJoin, JoinedPendingIo, JoinedPinOpening,
+    AcceptedFirstJoin, JoinedPendingIo, JoinedPinOpening, JoinedRuntimeInputs,
 };
 use crate::store::persistence::native_registry::lifecycle::upgrade::{UpgradeInventory, UpgradeIo};
 use crate::store::{ServerStore, V2CurrentLayoutStore};
@@ -487,6 +487,13 @@ impl Store {
         self.physical.require_registered_native_join(data)
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn has_recovered_terminal_candidate(
+        &self,
+        data: crate::store::NativeTextJoinedRegistrationData,
+    ) -> Result<bool, AppError> {
+        self.physical.has_recovered_terminal_candidate(data)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn require_recovered_native_join_removal(
         &self,
         data: crate::store::NativeTextJoinedRegistrationData,
@@ -494,6 +501,17 @@ impl Store {
     ) -> Result<(), AppError> {
         self.physical
             .require_recovered_native_join_removal(data, removal)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn require_fresh_rejoin_invite(
+        &self,
+        data: crate::store::NativeTextJoinedRegistrationData,
+        removal: catcoms_sync::SelectedRejoinRemoval,
+        invite: &catcoms_replication::chat::join_bindings::SignedInviteBindingData,
+        now_ms: u64,
+    ) -> Result<(), AppError> {
+        self.physical
+            .require_fresh_rejoin_invite(data, removal, invite, now_ms)
     }
 
     pub(in crate::store::critical_namespaces::native_registry) fn prepare_retired_rejoin_catalog(
@@ -525,6 +543,7 @@ impl Store {
         self.physical.rejoin_catalog_selected()
     }
 
+    #[cfg(any(test, feature = "native-chat-test-hooks"))]
     pub(in crate::store::critical_namespaces::native_registry) fn stage_retired_rejoin_catalog(
         &self,
         prepared: &mut crate::store::persistence::governance_layout::joined::rejoin::RejoinCatalogPreparation,
@@ -662,11 +681,45 @@ impl Store {
             .recover_rejoin_index(original, sources, caller, rng, require_current)
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn has_rejoin_index(
+        &self,
+    ) -> Result<bool, AppError> {
+        self.physical.has_rejoin_index()
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn has_rejoin_evidence(
+        &self,
+    ) -> Result<bool, AppError> {
+        self.physical.has_rejoin_evidence()
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn recover_installed_rejoin(
+        &self,
+        registration: crate::store::NativeTextJoinedRegistrationData,
+        removal: catcoms_sync::SelectedRejoinRemoval,
+        negative: &catcoms_rt::RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Option<crate::store::NativeTextJoinedRegistrationData>, AppError> {
+        self.physical
+            .recover_installed_rejoin(registration, removal, negative, rng)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn attach_recovered_rejoin<
+        R: CryptoRngCore,
+    >(
+        &self,
+        inputs: &mut Option<JoinedRuntimeInputs<catcoms_net::MeshService, R>>,
+        output: &mut Option<catcoms_sync::ClosedV2JoinedNode<catcoms_net::MeshService, R>>,
+    ) -> Result<(), AppError> {
+        self.physical.attach_recovered_rejoin(inputs, output)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn select_retired_rejoin_catalog(
         &self,
         prepared: &mut crate::store::persistence::governance_layout::joined::rejoin::RejoinCatalogPreparation,
+        admit: &impl Fn() -> Result<(), AppError>,
     ) -> Result<(), AppError> {
-        self.physical.select_retired_rejoin_catalog(prepared)
+        self.physical.select_retired_rejoin_catalog(prepared, admit)
     }
 
     pub(in crate::store::critical_namespaces::native_registry) fn prepare_recovered_native_join_tcp(

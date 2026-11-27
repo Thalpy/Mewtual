@@ -97,7 +97,53 @@ the intent only from held, authenticated Attempt and Pending files,
 then rechecks the same parents and UI generation before returning.
 An existing successor with a missing parent denies recovery before
 any replacement prefix is written. The covered Index4 receipt grants
-no live membership.
+no live membership. Authenticated startup can use the private held
+Index4 owner with its exact files, closed SDK graph and selected Core
+prefix. When a replacement selector is present, or the authenticated
+local journal indicates possible self-removal, startup verifies the
+original removal in isolation without an A1 network listener. The
+journal hint supplies no membership authority. A surviving selector
+whose body is missing refuses before the old listener can start.
+A2 gets its own native row, transport, source and governing context.
+An older catalog with surviving rejoin records cannot issue an active
+A1, idle or founder owner. This check detects partial rollback that
+leaves those records. A coherent rollback of the whole vault is
+outside this proof.
+
+Before the first rejoin catalog write, the retired owner authenticates
+the new invite against the sealed original donor. The old nonce, a
+different anchor or policy, and an expired fresh invite refuse. The
+same UI generation and invocation must separately admit the Stage
+write and the rename. A warm response after a possible rename requires
+an authenticated cold confirmation. It cannot publish an active row.
+
+Recovered terminal A1 can open a native retired session after the same
+vault's passphrase is verified. Its checked authorization is separate
+from the ordinary UI fence. It grants no chat row, ordinary media
+activation or legacy Store access. Native resume compares the exact
+mounted owner and generation before replying. The same native lock
+invalidates both gates, and close waits for any original retired
+physical reader before dropping the vault.
+
+The main-window rejoin command requires the exact retired authorization
+and an explicitly approved numeric host. An admitted disk phase lends
+the original affine vault to a blocking worker and parks its exact return
+in a paid slot, including on unwind. Lock fences the generation before
+it waits for older file custody. The network phase restores the Store
+first and uses only the original cancellable TCP exchange. Irreversible
+close also waits for that operation and its actual TCP actor. The full
+network wait observes the original cancelled scope even before enqueue.
+A pre-ID9 Current with later rejoin journals cannot replace their bound
+catalog ciphertext. The command reports expiry only for a verified
+invite without a saved request. A live row requires cold activation.
+
+A warm retired writer can discard only its own held exact unentered
+Attempt or SDK Attempt, with every subsequent role absent. It covers
+the unlink on the held original parent and proves the name absent
+before reuse. Cold ambiguous entry preserves the files. A successful
+key operation can finish its own Pending or Outcome under its actual
+retained entry permit after revocation. The old caller receives no
+receipt and cannot start transport, prefix selection or publication.
 
 Cold founder startup can complete a fully staged later Add only after vault
 authentication and replay under the original pin. It retains and rechecks

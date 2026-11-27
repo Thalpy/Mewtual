@@ -4,6 +4,9 @@ use super::*;
 use crate::store::critical_namespaces::native_registry::PreparedNativeRejoinIndex;
 use crate::store::NativeTextJoinedRegistryRowData;
 
+mod installed;
+pub(in crate::store) use installed::InstalledRejoin;
+
 const INDEX: &str = "chat-critical-namespaces.rejoin-native-index.bin";
 const INDEX_TAG: &str = "catcoms/chat-v2/rejoin-native-index/v1";
 const INDEX_FRAME: usize = 40 + 2 + 3 * 36 + 4 + MAX_INDEX_FRAME;

@@ -21,6 +21,7 @@ mod joining;
 mod listing;
 mod membership;
 mod receiving;
+mod rejoin;
 pub(super) mod retirement;
 mod sending;
 pub(super) mod sources;
@@ -36,6 +37,14 @@ pub(super) struct Registry {
     pub(super) selected: bool,
     inflight: Arc<Semaphore>,
     bootstrap: Arc<StdMutex<Option<boot::Bootstrap>>>,
+    retired_authorized: Arc<AtomicU64>,
+    retired_lock_requested: Arc<AtomicBool>,
+    rejoin_files: rejoin::files::Lane,
+    rejoin_operation: Arc<boot_lifetime::Control>,
+    #[cfg(test)]
+    rejoin_file_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
+    #[cfg(test)]
+    rejoin_network_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
     ui_budget: NativeUiInvocationBudget,
     history_budget: NativeTextHistoryResponseBudget,
     listing: listing::Policy,
@@ -142,10 +151,23 @@ impl Default for Registry {
                 .expect("fixed history response policy"),
         )
         .expect("fixed history response capacity");
+        let rejoin_operation = boot_lifetime::Control::new(
+            ui_budget
+                .prepare()
+                .expect("rejoin operation control payment"),
+        );
         Self {
             selected: false,
             inflight: Arc::new(Semaphore::new(1)),
             bootstrap: Arc::new(StdMutex::new(Some(boot::Bootstrap::Fresh))),
+            retired_authorized: Arc::new(AtomicU64::new(0)),
+            retired_lock_requested: Arc::new(AtomicBool::new(true)),
+            rejoin_files: rejoin::files::Lane::default(),
+            rejoin_operation,
+            #[cfg(test)]
+            rejoin_file_edge: StdMutex::new(None),
+            #[cfg(test)]
+            rejoin_network_edge: StdMutex::new(None),
             ui_budget,
             history_budget,
             listing: listing::Policy::default(),
@@ -231,6 +253,36 @@ impl Default for Registry {
             ticket_edge: StdMutex::new(None),
         }
     }
+}
+
+impl Registry {
+    pub(super) fn lock_retired_ui(&self) {
+        self.retired_lock_requested.store(true, Ordering::SeqCst);
+    }
+}
+
+pub(super) fn retired_ui_current(state: &AppState, generation: u64) -> bool {
+    !state
+        .native_text
+        .retired_lock_requested
+        .load(Ordering::SeqCst)
+        && state.native_text.retired_authorized.load(Ordering::SeqCst) == generation
+        && state.ui_session_generation.load(Ordering::SeqCst) == generation
+        && !state.native_text.sources.is_closing_cached()
+}
+
+fn startup_atoms(state: &AppState) -> boot::Atoms {
+    (
+        (
+            state.ui_session_generation.clone(),
+            state.ui_authorized_generation.clone(),
+            state.session_lock_requested.clone(),
+        ),
+        (
+            state.native_text.retired_authorized.clone(),
+            state.native_text.retired_lock_requested.clone(),
+        ),
+    )
 }
 
 struct Captured {
@@ -325,6 +377,9 @@ fn router<R: tauri::Runtime>(
         }
         if enabled && invoke.message.command() == "join_server" {
             return joining::route(invoke, &spawn);
+        }
+        if enabled && rejoin::handles(invoke.message.command()) {
+            return rejoin::route(invoke, &spawn);
         }
         if enabled && invoke.message.command() == "mint_invite_fresh" {
             return invite_mint::route(invoke, &spawn);
@@ -425,8 +480,15 @@ fn router<R: tauri::Runtime>(
             let mut original_error = false;
             let mut result = match execute(&state, &captured, directory, &mut notice).await {
                 Ok(authentication) => {
-                    connected::start_current(&app, &state, captured.generation, &authentication)
+                    if !authentication.is_retired_mount_data() {
+                        connected::start_current(
+                            &app,
+                            &state,
+                            captured.generation,
+                            &authentication,
+                        )
                         .await;
+                    }
                     match state
                         .native_text
                         .listing
@@ -513,8 +575,14 @@ async fn authenticate_mounted(
         let work = {
             let guard = state.store.lock().await;
             match guard.as_ref() {
+                None if state.native_text.rejoin_files.has_loan()? => {
+                    return Err("Rejoin is still saving its work. Try again.".into());
+                }
                 None => return Ok(None),
                 Some(MountedVault::TextV2(vault)) => vault.prepare_native_authentication(credit),
+                Some(MountedVault::TextV2Retired(vault)) => {
+                    vault.prepare_native_authentication(credit)
+                }
                 Some(MountedVault::Legacy(_)) => {
                     return Err("This vault is using the existing chat backend.".into());
                 }
@@ -587,11 +655,7 @@ async fn execute(
             slot.take().ok_or("Vault startup is already running.")?
         };
         let secret = captured.secret.clone();
-        let atoms = (
-            state.ui_session_generation.clone(),
-            state.ui_authorized_generation.clone(),
-            state.session_lock_requested.clone(),
-        );
+        let atoms = startup_atoms(state);
         let budget = state.native_text.ui_budget.clone();
         let source_policy = state.native_text.sources.policy();
         let row = boot::NativeRowBudget::capture(state).await;
@@ -636,7 +700,11 @@ async fn execute(
         }
         let mut install_error = None;
         // Own a losing whole pair OUTSIDE Store/controller even on unwind.
-        let mut ready = output.plan.as_mut().unwrap().take_ready();
+        let (mut ready, mut retired) = match output.plan.as_mut().unwrap().take_ready() {
+            Some(boot::StartupReady::Active(ready)) => (Some(ready), None),
+            Some(boot::StartupReady::Retired(retired)) => (None, Some(retired)),
+            None => (None, None),
+        };
         {
             let mut store = state.store.lock().await;
             // Pair-install admission linearizes at these final checks while
@@ -656,6 +724,16 @@ async fn execute(
                     ) {
                         install_error = Some(error.to_string());
                     }
+                } else if retired.is_some() {
+                    let table = state.servers.lock().await;
+                    if let Err(error) = state.native_text.sources.install_retired(
+                        &mut store,
+                        &table,
+                        &mut retired,
+                        &captured.lifetime,
+                    ) {
+                        install_error = Some(error.to_string());
+                    }
                 }
             } else {
                 install_error = Some("Unlock was superseded. Try again.".into());
@@ -663,7 +741,10 @@ async fn execute(
         }
         // Retain an uninstalled pair in the original canonical plan. This move
         // and any destructor are outside Store/controller, including failure.
-        if let Some(ready) = ready {
+        if let Some(ready) = ready
+            .map(boot::StartupReady::Active)
+            .or_else(|| retired.map(boot::StartupReady::Retired))
+        {
             *output.plan.as_mut().unwrap() = boot::Bootstrap::Ready(ready);
         }
         {
@@ -693,19 +774,66 @@ async fn execute(
     if let Some(edge) = &state.native_text.final_edge {
         edge.wait_once().await;
     }
-    finalize_unlock_session_with_voice_checked(
-        state,
-        captured.generation,
-        false,
-        &ticket,
-        || !state.native_text.sources.is_closing_cached() && authentication.is_live_cached(),
-        Some(authentication.clone()),
-        Some(notice),
-    )
-    .await?;
+    if authentication.is_retired_mount_data() {
+        authorize_retired(state, captured.generation, &authentication).await?;
+    } else {
+        finalize_unlock_session_with_voice_checked(
+            state,
+            captured.generation,
+            false,
+            &ticket,
+            || !state.native_text.sources.is_closing_cached() && authentication.is_live_cached(),
+            Some(authentication.clone()),
+            Some(notice),
+        )
+        .await?;
+    }
     // Preserve THIS actual authenticated association through listing/reply.
     // Looking up a later canonical target could adopt a replacement mount.
     Ok(authentication)
+}
+
+async fn authorize_retired(
+    state: &AppState,
+    generation: u64,
+    authentication: &Arc<NativeTextVaultAuthenticationCheck>,
+) -> Result<(), String> {
+    state.native_text.preludes.wait_idle().await;
+    retirement::older_than(state, generation).await?;
+    let target = state.native_text.ui_state.canonical_target(authentication);
+    let _retired_target;
+    let _commit = state.ui_session_commit.lock().await;
+    let store = state.store.lock().await;
+    let current = || {
+        state.native_text.preludes.is_idle_cached()
+            && !state.native_text.sources.is_closing_cached()
+            && state.ui_session_generation.load(Ordering::SeqCst) == generation
+            && matches!(
+                store.as_ref(),
+                Some(MountedVault::TextV2Retired(vault))
+                    if vault.matches_native_authentication_cached(authentication)
+            )
+    };
+    if !current() {
+        return Err(listing::STALE.into());
+    }
+    _retired_target = state.native_text.ui_state.install_target(target);
+    // The recovery permit has a separate authorizer. General chat,
+    // preferences, media and legacy commands keep the ordinary UI fence.
+    state.session_lock_requested.store(true, Ordering::SeqCst);
+    state
+        .native_text
+        .retired_authorized
+        .store(generation, Ordering::SeqCst);
+    state
+        .native_text
+        .retired_lock_requested
+        .store(false, Ordering::SeqCst);
+    if !current() || !retired_ui_current(state, generation) {
+        state.native_text.lock_retired_ui();
+        return Err(listing::STALE.into());
+    }
+    Ok(())
 }
 
 /// Actual returned bootstrap ownership precedes its file-work End, including

@@ -87,10 +87,25 @@ fn native_rejoin_request_uses_only_the_original_signer_and_a_fresh_package() {
             &vault_key,
             input(&a2_invite, [79; 32]),
             NativeV2JoinKeyEntry::new(&original, &mut cut, &mut ends),
+            || true,
         ),
         Err(NativeV2RejoinFailure::BeforeDeviceEntry(_))
     ));
     native.reauthenticate();
+    let mut cancelled = native.cut(NativeChatKeyPurpose::JoinerDevice);
+    let mut cancelled_ends = catcoms_rt::NativeChatKeyEnds::new();
+    assert!(matches!(
+        saved.prepare_native_rejoin_classified(
+            &vault_key,
+            input(&a2_invite, [79; 32]),
+            NativeV2JoinKeyEntry::new(&original, &mut cancelled, &mut cancelled_ends),
+            || false,
+        ),
+        Err(NativeV2RejoinFailure::BeforeDeviceEntry(_))
+    ));
+    assert!(
+        !cancelled_ends.holds_admitted_purpose_data(&original, NativeChatKeyPurpose::JoinerDevice)
+    );
     let mut failing = native.cut(NativeChatKeyPurpose::JoinerDevice);
     let mut failed_ends = catcoms_rt::NativeChatKeyEnds::new();
     assert!(matches!(
@@ -98,6 +113,7 @@ fn native_rejoin_request_uses_only_the_original_signer_and_a_fresh_package() {
             &[200; 32],
             input(&a2_invite, [79; 32]),
             NativeV2JoinKeyEntry::new(&original, &mut failing, &mut failed_ends),
+            || true,
         ),
         Err(NativeV2RejoinFailure::AfterDeviceEntry(_))
     ));

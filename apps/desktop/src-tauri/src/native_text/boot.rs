@@ -5,8 +5,8 @@ use catcoms_app::store::{
     ArchiveBootstrapCatalogPolicy, CanonicalFilenameInventoryPolicy, CriticalCatalogReadPool,
     NativeIndexPolicy, NativeIndexStore, NativeIndexUpgrade, NativeRegistryInstallation,
     NativeRegistryPolicy, NativeRegistryStore, NativeTextGovernanceUpgrade,
-    NativeTextJoinedStorage, NativeTextJoinedVaultUpgrade, NativeTextVaultUpgrade,
-    V2CurrentLayoutPolicy, V2MemberOutboxPolicy,
+    NativeTextJoinedRecovery, NativeTextJoinedStorage, NativeTextJoinedVaultUpgrade,
+    NativeTextVaultUpgrade, V2CurrentLayoutPolicy, V2MemberOutboxPolicy,
 };
 
 pub(super) enum Bootstrap {
@@ -19,13 +19,21 @@ pub(super) enum Bootstrap {
     Upgrading3(Box<NativeTextVaultUpgrade>),
     Governing(Box<NativeTextGovernanceUpgrade>),
     Joining(Box<NativeTextJoinedVaultUpgrade>),
-    Ready(super::sources::ReadyBundle),
+    Ready(StartupReady),
     Mounted,
     /// This process lost its original warm continuation during preparation.
     Failed,
 }
 
-type Atoms = (Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicBool>);
+pub(super) enum StartupReady {
+    Active(super::sources::ReadyBundle),
+    Retired(super::sources::ReadyRetired),
+}
+
+pub(super) type Atoms = (
+    (Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicBool>),
+    (Arc<AtomicU64>, Arc<AtomicBool>),
+);
 pub(super) struct NativeRowBudget {
     budget: NativeUiInvocationBudget,
     instance: u64,
@@ -69,7 +77,7 @@ impl Bootstrap {
         &mut self,
         directory: &Path,
         secret: &[u8],
-        atoms: Atoms,
+        (atoms, retired_atoms): Atoms,
         budget: NativeUiInvocationBudget,
         source_policy: catcoms_app::store::NativeTextSourcePolicy,
         row: NativeRowBudget,
@@ -125,6 +133,7 @@ impl Bootstrap {
                                     .into_native_vault_without_registered_row(atoms, budget)
                                     .map_err(|_| EXISTING)?;
                                 super::sources::ReadyBundle::new(vault, &source_policy)
+                                    .map(StartupReady::Active)
                             }
                             1 => {
                                 let (_owner, signal) = tokio::sync::watch::channel(false);
@@ -163,21 +172,17 @@ impl Bootstrap {
                                         &display,
                                         &row.budget,
                                         row.instance,
-                                    );
-                                }
-                                let runtime = storage
-                                    .bind_recovered_native_runtime(
-                                        rng,
-                                        Box::new(SystemClock),
-                                        &negative,
                                     )
-                                    .map_err(|_| EXISTING)?;
-                                let (vault, sources) = runtime
-                                    .into_recovered_native_sources(
-                                        atoms,
+                                    .map(StartupReady::Active);
+                                }
+                                let recovered = storage
+                                    .into_native_startup_membership(
+                                        (atoms, Some(retired_atoms)),
                                         budget.clone(),
                                         &source_policy,
                                         &negative,
+                                        (rng, Box::new(SystemClock)),
+                                        (OsCryptoRng, Box::new(SystemClock)),
                                     )
                                     .map_err(|error| match error {
                                         catcoms_app::AppError::ChatV2MembershipRemoved => {
@@ -185,14 +190,23 @@ impl Bootstrap {
                                         }
                                         _ => EXISTING,
                                     })?;
-                                super::sources::ReadyBundle::recovered(
-                                    vault,
-                                    sources,
-                                    secret,
-                                    &budget,
-                                    &row.budget,
-                                    row.instance,
-                                )
+                                match recovered {
+                                    NativeTextJoinedRecovery::Active(vault, sources) => {
+                                        super::sources::ReadyBundle::recovered(
+                                            vault,
+                                            sources,
+                                            secret,
+                                            &budget,
+                                            &row.budget,
+                                            row.instance,
+                                        )
+                                        .map(StartupReady::Active)
+                                    }
+                                    NativeTextJoinedRecovery::Removed(vault) => {
+                                        super::sources::ReadyRetired::new(vault, secret, &budget)
+                                            .map(StartupReady::Retired)
+                                    }
+                                }
                             }
                             _ => Err(EXISTING.into()),
                         }
@@ -302,10 +316,9 @@ impl Bootstrap {
                     }
                     match (*original).into_vault() {
                         Ok(owner) => {
-                            *self = Self::Ready(super::sources::ReadyBundle::new(
-                                owner,
-                                &source_policy,
-                            )?)
+                            *self = Self::Ready(StartupReady::Active(
+                                super::sources::ReadyBundle::new(owner, &source_policy)?,
+                            ))
                         }
                         Err(original) => {
                             #[cfg(test)]
@@ -328,7 +341,7 @@ impl Bootstrap {
         }
     }
 
-    pub(super) fn take_ready(&mut self) -> Option<super::sources::ReadyBundle> {
+    pub(super) fn take_ready(&mut self) -> Option<StartupReady> {
         match std::mem::replace(self, Self::Mounted) {
             Self::Ready(owner) => Some(owner),
             other => {

@@ -1155,7 +1155,15 @@ impl UiSessionGate<'_> {
         }
         // Preserve the existing resumable -> actual store lock order and repeat the atomic
         // fence AFTER both awaits. A lock request can arrive while either mutex is busy.
-        if *self.resumable.lock().await && self.store.lock().await.is_some() && !self.is_closed() {
+        if *self.resumable.lock().await
+            && self
+                .store
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|vault| !matches!(vault, MountedVault::TextV2Retired(_)))
+            && !self.is_closed()
+        {
             Ok(())
         } else {
             Err("the vault is locked".into())
@@ -16203,9 +16211,9 @@ async fn authenticate_mounted_store(
         // mounted native owner must remain intact until its checked cold and
         // authenticated re-entry paths exist. It is never permission to try an
         // old opener against the same mount or restore its old flat registry.
-        Some(MountedVault::TextV2(_)) => Err(catcoms_app::AppError::Invalid(
-            "Chat V2 vault opening is not enabled yet.".into(),
-        )),
+        Some(MountedVault::TextV2(_) | MountedVault::TextV2Retired(_)) => Err(
+            catcoms_app::AppError::Invalid("Chat V2 vault opening is not enabled yet.".into()),
+        ),
     }
 }
 
@@ -17163,6 +17171,7 @@ fn register_ui_lock_request(state: &AppState) -> u64 {
         .fetch_add(1, Ordering::SeqCst)
         .wrapping_add(1);
     state.session_lock_requested.store(true, Ordering::SeqCst);
+    state.native_text.lock_retired_ui();
     keep_session::revoke(state);
     state.admin_chat_ledger.retire();
     generation

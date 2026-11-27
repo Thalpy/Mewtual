@@ -39,6 +39,7 @@ pub(super) enum IndexOwner {
 pub struct NativeTextVaultAuthentication {
     work: Option<super::upgrade_source::owning::MetadataWork>,
     can_retry_capture: bool,
+    retired_mount: bool,
     host: catcoms_rt::NativeChatUiMountObservation,
     expected: NativeUiInvocationBudget,
     // LAST: all original metadata/custody retires before this independent fee.
@@ -50,9 +51,26 @@ pub struct NativeTextVaultAuthentication {
 pub struct NativeTextVaultAuthenticationCheck {
     host: catcoms_rt::NativeChatUiMountObservation,
     physical: super::upgrade_source::owning::AuthenticationNegative,
+    retired_mount: bool,
     _credit: NativeUiInvocationMetadata,
 }
 impl NativeTextVaultAuthentication {
+    pub(super) fn capture(
+        ui: &UiAdmissionOwner,
+        index: Option<&super::upgrade_source::owning::Store>,
+        retired_mount: bool,
+        credit: NativeUiInvocationMetadata,
+    ) -> Self {
+        Self {
+            work: index.and_then(super::upgrade_source::owning::Store::capture_metadata_work),
+            can_retry_capture: index.is_some(),
+            retired_mount,
+            host: ui.observe_mount(),
+            expected: ui.invocation_budget(),
+            credit,
+        }
+    }
+
     /// The canonical metadata reader is occupied. This reports only a
     /// transient capture refusal and never checks or accepts a secret.
     pub fn is_capture_busy_cached(&self) -> bool {
@@ -79,6 +97,7 @@ impl NativeTextVaultAuthentication {
         let check = NativeTextVaultAuthenticationCheck {
             host: self.host,
             physical,
+            retired_mount: self.retired_mount,
             _credit: self.credit,
         };
         // No guard surrounds this destructor. SlotAck releases only after any
@@ -99,10 +118,23 @@ impl NativeTextVaultAuthenticationCheck {
     pub(super) fn matches_ui_mount(&self, host: &catcoms_rt::NativeChatUiMountObservation) -> bool {
         self.is_live_cached() && self.host.same_original(host)
     }
+
+    pub(super) fn original_ui_mount(
+        &self,
+        host: &catcoms_rt::NativeChatUiMountObservation,
+    ) -> bool {
+        self.host.same_original(host)
+    }
+
+    /// This label chooses the restricted native session and grants no
+    /// rejoin, archive or row authority.
+    pub fn is_retired_mount_data(&self) -> bool {
+        self.retired_mount
+    }
     /// Cached identity/negative check against the ACTUAL mounted facade. This
     /// allocates no identity and cannot substitute a replacement by directory.
     pub fn is_for_original_vault(&self, vault: &NativeTextVault) -> bool {
-        self.matches_ui_mount(&vault.observe_ui_mount())
+        !self.retired_mount && self.matches_ui_mount(&vault.observe_ui_mount())
     }
     /// Cached original negatives only, not proof of UI authorization. This
     /// reads atomics and cannot drop a temporarily upgraded revoking owner.
@@ -262,17 +294,11 @@ impl NativeTextVault {
         &self,
         credit: NativeUiInvocationMetadata,
     ) -> NativeTextVaultAuthentication {
-        let (work, can_retry_capture) = match &self.index {
-            IndexOwner::Version3(index) => (index.capture_metadata_work(), true),
-            IndexOwner::Version2(_) => (None, false),
+        let index = match &self.index {
+            IndexOwner::Version3(index) => Some(index),
+            IndexOwner::Version2(_) => None,
         };
-        NativeTextVaultAuthentication {
-            work,
-            can_retry_capture,
-            host: self.ui.observe_mount(),
-            expected: self.ui.invocation_budget(),
-            credit,
-        }
+        NativeTextVaultAuthentication::capture(&self.ui, index, false, credit)
     }
 
     pub(super) fn observe_ui_mount(&self) -> catcoms_rt::NativeChatUiMountObservation {

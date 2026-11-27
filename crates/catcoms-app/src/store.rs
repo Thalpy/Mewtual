@@ -5793,6 +5793,11 @@ pub struct ServerStore {
         std::sync::Mutex<Option<persistence::governance_layout::joined::ColdJoinedSelection>>,
     joined_pin_index:
         std::sync::Mutex<Option<persistence::governance_layout::joined::SelectedPinIndex>>,
+    // Only the authenticated retired native opener can install this
+    // replacement owner. It shares the Store but uses distinct private files.
+    installed_rejoin: std::sync::Mutex<
+        Option<Box<persistence::governance_layout::joined::rejoin::InstalledRejoin>>,
+    >,
     shared_history_mount: std::sync::Mutex<
         Option<persistence::governance_layout::joined::shared_history::SelectedSharedHistory>,
     >,
@@ -6051,6 +6056,7 @@ impl ServerStore {
             governance_layout: Default::default(),
             joined_pin_selection: Default::default(),
             joined_pin_index: Default::default(),
+            installed_rejoin: Default::default(),
             shared_history_mount: Default::default(),
             member_outbox_layout: Default::default(),
             member_outbox_mount: Default::default(),

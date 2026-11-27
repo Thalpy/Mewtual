@@ -6,10 +6,11 @@ use catcoms_rt::RequestCancellation;
 use catcoms_sync::{RecoveredV2JoinedOutcome, SealedV2JoinedOutcome, V2JoinDeliveryData};
 
 mod prefix;
-pub use prefix::{NativeTextRejoinIndexReceipt, NativeTextRejoinPrefixReceipt};
 pub(in crate::store) use prefix::{
-    RejoinIndexInputs, RejoinIndexOwner, RejoinIndexRecovery, RejoinPrefixInputs, RejoinPrefixOwner,
+    InstalledRejoin, RejoinIndexInputs, RejoinIndexOwner, RejoinIndexRecovery, RejoinPrefixInputs,
+    RejoinPrefixOwner,
 };
+pub use prefix::{NativeTextRejoinIndexReceipt, NativeTextRejoinPrefixReceipt};
 
 const SDK_ATTEMPT: &str = "chat-critical-namespaces.rejoin-welcome-attempt.bin";
 const OUTCOME: &str = "chat-critical-namespaces.rejoin-outcome.bin";
@@ -110,9 +111,40 @@ pub(in crate::store) struct RejoinWelcomeOwner {
     outcome: Option<JournalFrame>,
     receipt: Option<NativeTextRejoinOutcomeReceipt>,
     covered: bool,
+    retirement: UnenteredAttempt,
     pending_cookie: std::sync::Arc<()>,
     _lease: catcoms_storage::VaultPhysicalWorkLease,
     fee: CatalogReadReservation,
+}
+
+impl RejoinWelcomeOwner {
+    fn can_retire_unentered(&self) -> bool {
+        self.outcome.is_none()
+            && self.receipt.is_none()
+            && self.recovered.is_none()
+            && !self.covered
+            && self.warm.as_ref().is_some_and(|warm| {
+                !warm.entered && warm.receipt.is_none() && !warm.request.welcome_entered_data()
+            })
+    }
+
+    fn retire_unentered(
+        &mut self,
+        store: &ServerStore,
+        inventory: &UpgradeInventory,
+        (entry, outcome): (&Path, &Path),
+    ) -> Result<(), AppError> {
+        if !self.can_retire_unentered() {
+            return Err(denied());
+        }
+        absent(outcome)?;
+        prefix::require_unstarted(store)?;
+        let Held::Stage(file) = &mut self.entry.held else {
+            return Err(denied());
+        };
+        self.retirement
+            .retire((entry, &self.entry.frame, file), store, inventory)
+    }
 }
 
 fn entry_plain(
@@ -264,17 +296,29 @@ impl ServerStore {
             ),
             (files[1].1, &received.frame),
         )?;
-        let require = || {
-            require_current()?;
+        let require_files = || {
             require_held_rejoin_files(paths, files)?;
             self.require_recovered_joined_removal(registration, removal)?;
             absent(&fixed(self, false, REJOIN_STAGE)?)?;
             inventory.require(self)?;
-            received.require(&received_path)?;
+            received.require(&received_path)
+        };
+        let require = || {
+            require_current()?;
+            require_files()?;
             require_current()
         };
         let entry_path = fixed(self, false, SDK_ATTEMPT)?;
         let outcome_path = fixed(self, false, OUTCOME)?;
+        let names = (entry_path.as_path(), outcome_path.as_path());
+        if let Some(original) = slot.as_mut() {
+            if original.retirement != UnenteredAttempt::Writing {
+                require_files()?;
+                original.retire_unentered(self, inventory, names)?;
+                *slot = None;
+                require_current()?;
+            }
+        }
         if slot.is_none() {
             let fee = pool.try_reserve(OUTCOME_WORK)?;
             let (entry, outcome, warm) = if let Some(entry) = read(&entry_path, ATTEMPT_MAX)? {
@@ -321,6 +365,7 @@ impl ServerStore {
                 outcome,
                 receipt: None,
                 covered: false,
+                retirement: UnenteredAttempt::Writing,
                 pending_cookie: pending.cookie().clone(),
                 _lease: self._session.retain_for_physical_work(),
                 fee,
@@ -337,7 +382,15 @@ impl ServerStore {
         original_welcome.entry.cover(&entry_path)?;
         inventory.sync_rejoin_catalog_parent(self)?;
         original_welcome.entry.require(&entry_path)?;
-        require()?;
+        require_files()?;
+        if let Err(error) = require_current() {
+            if original_welcome.can_retire_unentered() {
+                original_welcome.retire_unentered(self, inventory, names)?;
+                *slot = None;
+            }
+            return Err(error);
+        }
+        let mut welcome_entered = false;
         if original_welcome.outcome.is_none() {
             absent(&outcome_path)?;
             prefix::require_unstarted(self)?;
@@ -359,9 +412,13 @@ impl ServerStore {
                 }
                 let delivery_data = V2JoinDeliveryData::decode(delivery).map_err(|_| denied())?;
                 let ((_, header), _) = delivery_data.proof_data().map_err(|_| denied())?;
-                require()?;
+                require_files()?;
                 original_welcome.entry.require(&entry_path)?;
-                require_current()?;
+                if let Err(error) = require_current() {
+                    original_welcome.retire_unentered(self, inventory, names)?;
+                    *slot = None;
+                    return Err(error);
+                }
                 warm.entered = true;
                 let completion = warm
                     .request
@@ -377,6 +434,10 @@ impl ServerStore {
                     .map(|candidate| candidate.facts_data().join_epoch_data());
                 match completion {
                     Ok(epoch) => {
+                        welcome_entered = native.ends.holds_admitted_purpose_data(
+                            native.source,
+                            NativeChatKeyPurpose::JoinerWelcomeSdk,
+                        );
                         warm.receipt = Some(NativeTextRejoinOutcomeReceipt {
                             request_digest: original.receipt.request_digest,
                             header,
@@ -387,12 +448,21 @@ impl ServerStore {
                         // Only normal return can prove a pre-entry refusal.
                         // After an unwind the sticky original remains held.
                         warm.entered = warm.request.welcome_entered_data();
+                        if !warm.entered && require_current().is_err() {
+                            require_files()?;
+                            original_welcome.retire_unentered(self, inventory, names)?;
+                            *slot = None;
+                        }
                         return Err(denied());
                     }
                 }
             }
             let receipt = warm.receipt.ok_or_else(denied)?;
-            require()?;
+            if welcome_entered {
+                require_files()?;
+            } else {
+                require()?;
+            }
             original_welcome.entry.require(&entry_path)?;
             absent(&outcome_path)?;
             let snapshot = warm
@@ -436,15 +506,22 @@ impl ServerStore {
             original_welcome.receipt = Some(receipt);
             original_welcome.recovered = Some(Box::new(graph));
         }
-        require()?;
+        let require_cover = if welcome_entered {
+            &require_files as &dyn Fn() -> Result<(), AppError>
+        } else {
+            &require
+        };
+        // Only an actual SDK entry can finish this exact bounded outcome
+        // after revocation. A stale caller cannot start prefix or publication.
+        require_cover()?;
         original_welcome.entry.require(&entry_path)?;
         outcome.cover(&outcome_path)?;
         inventory.sync_rejoin_catalog_parent(self)?;
-        require()?;
+        require_cover()?;
         original_welcome.entry.require(&entry_path)?;
         outcome.require(&outcome_path)?;
-        require_current()?;
         original_welcome.covered = true;
+        require_current()?;
         Ok(NativeTextRejoinWelcomeStatus::Covered(receipt))
     }
 }

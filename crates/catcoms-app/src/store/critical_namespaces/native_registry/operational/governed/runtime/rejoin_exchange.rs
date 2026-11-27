@@ -76,7 +76,7 @@ impl NativeTextRemovedJoinedVault {
         token: [u8; 32],
         caller: RequestCancellation,
     ) -> Result<Option<NativeTextRejoinExchange>, AppError> {
-        if !self.tcp_drain.is_drained() {
+        if !self.transport.is_drained() {
             return Ok(None);
         }
         self.ui.require_capture(&ui)?;
@@ -154,7 +154,7 @@ impl NativeTextRemovedJoinedVault {
         caller: &RequestCancellation,
         rng: &mut impl CryptoRngCore,
     ) -> Result<NativeTextRejoinWelcomeStatus, AppError> {
-        if !self.tcp_drain.is_drained() {
+        if !self.transport.is_drained() {
             return Ok(NativeTextRejoinWelcomeStatus::WaitingForTransport);
         }
         let command = self.ui.require_capture(ui)?;
@@ -189,7 +189,7 @@ impl NativeTextRemovedJoinedVault {
         caller: &RequestCancellation,
         rng: &mut impl CryptoRngCore,
     ) -> Result<NativeTextRejoinWelcomeStatus, AppError> {
-        if !self.tcp_drain.is_drained() {
+        if !self.transport.is_drained() {
             return Ok(NativeTextRejoinWelcomeStatus::WaitingForTransport);
         }
         self.ui.require_capture(ui)?;
@@ -232,7 +232,7 @@ impl NativeTextRemovedJoinedVault {
         caller: &RequestCancellation,
         rng: &mut impl CryptoRngCore,
     ) -> Result<Option<NativeTextRejoinPrefixReceipt>, AppError> {
-        if !self.tcp_drain.is_drained() {
+        if !self.transport.is_drained() {
             return Ok(None);
         }
         self.ui.require_capture(ui)?;
@@ -266,7 +266,7 @@ impl NativeTextRemovedJoinedVault {
         caller: &RequestCancellation,
         rng: &mut impl CryptoRngCore,
     ) -> Result<Option<NativeTextRejoinIndexReceipt>, AppError> {
-        if !self.tcp_drain.is_drained() {
+        if !self.transport.is_drained() {
             return Ok(None);
         }
         self.ui.require_capture(ui)?;
@@ -303,7 +303,7 @@ impl NativeTextRemovedJoinedVault {
         caller: &RequestCancellation,
         rng: &mut impl CryptoRngCore,
     ) -> Result<Option<NativeTextRejoinIndexReceipt>, AppError> {
-        if !self.tcp_drain.is_drained() {
+        if !self.transport.is_drained() {
             return Ok(None);
         }
         self.ui.require_capture(ui)?;
@@ -341,7 +341,7 @@ impl NativeTextRemovedJoinedVault {
         caller: &RequestCancellation,
         rng: &mut impl CryptoRngCore,
     ) -> Result<Option<NativeTextRejoinReceivedReceipt>, AppError> {
-        if !self.tcp_drain.is_drained() {
+        if !self.transport.is_drained() {
             return Ok(None);
         }
         self.ui.require_capture(ui)?;

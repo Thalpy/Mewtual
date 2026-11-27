@@ -50,7 +50,7 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
     let uiStateSaveChain = Promise.resolve(), uiStateSaveFailed = false, uiStateFailureToast = 0;
     let pendingSends = {}, recoveredSendDrafts = {}, nativeTextIntents = {}, pendingSendErrors = {}, pendingSendResolution = null, uiContinuityVersion = 1;
     let retryingPendingSends = false, pendingManagerOpen = false, sending = false;
-    let chatBackend = "legacy", nativeOriginals = [], nativeCursor = null, nativeHistoryLoading = false, nativeHistoryLoaded = false, nativeHistoryError = null, nativeHistoryRevision = 0, nativeRetryGeneration = null, viewGeneration = 1;
+    let chatBackend = "legacy", nativeRejoinRequired = false, nativeOriginals = [], nativeCursor = null, nativeHistoryLoading = false, nativeHistoryLoaded = false, nativeHistoryError = null, nativeHistoryRevision = 0, nativeRetryGeneration = null, viewGeneration = 1;
     let nativePages = [], nativeHistoryCalls = [];
     let nativeOwnMessages = {}, nativeOwnLoading = false, nativeOwnPages = [], nativeOwnCalls = [];
     let nativeReceived = [], nativeReceivedScope = null, nativeReceivedRevision = 0;

@@ -179,6 +179,13 @@ impl Snapshots {
         } else {
             None
         };
+        // Recovery has only an empty native row table. Its temporary
+        // renderer view must never replace the saved chat screen state.
+        let json = json.filter(|_| {
+            !target
+                .as_ref()
+                .is_some_and(|target| target.is_retired_mount_data())
+        });
         let source = (authorized && json.is_some()).then(|| self.revision());
         let value = match (authorized, json) {
             (true, Some(json)) if json.len() > MAX_UI_STATE_BYTES => Captured::Failed(Arc::new(
