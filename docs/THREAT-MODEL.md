@@ -30,7 +30,13 @@ proof or extending an earlier archive with a missing dependency. The walk
 checks at most 63 paid originals separately. A parked page
 releases its old UI invocation and full wire fee. Fresh effects recheck the
 same original row and approval. Archive-first reads keep already deleted
-bodies from reappearing through delayed live notices.
+bodies from reappearing through delayed live notices. A typed full-ledger
+result allows one replacement of the transient receive cache on the same
+mounted row. The worker drops the old paid ledger before admitting the
+replacement, rechecks the caller and original carrier, and retries the
+same input once. Replay can restore only previously selected signed local
+evidence, within its existing work bounds. An older unmounted layout
+cannot use this replacement path.
 Mounted rows render only the selected archive. A notice without text marks
 an affected Create dirty even when the corresponding write is uncertain.
 The original row confirms exact selection or clean absence before

@@ -1,5 +1,21 @@
 # Mewtual; Handover
 
+## Continue receiving when a paid history cache fills
+
+The native receiver can replace one full hot ledger and retry the same
+original on its current mounted row. It replays missing causal evidence
+from the local selected archive before requesting it again over the
+network. Warm and cold founders and joined members use the same limit
+classification. A stale caller or carrier and other resource errors
+still refuse, and an unmounted source keeps its existing behavior.
+
+The focused Windows checks covered the typed Core limit, 68 incoming
+Creates in one stable epoch followed by an exact Delete of an older
+Create, and a joined replacement ledger recovering both a Create and its
+earlier Edit through real TCP delivery and local archive replay. The
+native workspace compiled. A full rollover after cold founder restart,
+long target histories, total archive retention and final acceptance are open.
+
 ## Display received messages after archive selection
 
 A mounted Text Chat V2 receiver stages incoming signed originals in its
@@ -14,9 +30,9 @@ Warm and reopened founders now reconcile one exact debt per background
 turn using the original mounted row. The write may have completed after
 the carrier disconnected. An unresolved or damaged WAL is preserved.
 
-The current hot receive budget and archive retention still need capacity
-work. An interruption before a recoverable write still depends on signed
-redelivery. This checkpoint leaves Text Chat V2 disabled by default.
+Archive retention still needs capacity work. An interruption before a
+recoverable write still depends on signed redelivery. This checkpoint
+leaves Text Chat V2 disabled by default.
 
 ## Reply to an original saved before membership changes
 

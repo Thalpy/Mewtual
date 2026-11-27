@@ -64,7 +64,7 @@ impl RequestAuthority for IngressScope {
 pub struct NativeTextColdFounderSource {
     ingress: Option<replies::Owner>,
     governing_ingress: Option<replies::Owner>,
-    received: Option<receiving::Ledger>,
+    received: Option<crate::store::persistence::v2_member_transport::FounderReceiveLedger>,
     member: Option<Box<crate::store::persistence::RecoveredMemberLane>>,
     invite: crate::store::persistence::RecoveredFounderInvite,
     actor: Option<super::super::join_tcp::Loan>,

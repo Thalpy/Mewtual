@@ -113,6 +113,16 @@ fn mounted_founder_never_projects_an_uncertain_received_create() {
 }
 
 #[test]
+fn mounted_founder_archive_keeps_receiving_past_one_full_ledger() {
+    run_mounted_successor(MountedSuccessor::ReceiveCapacity);
+}
+
+#[test]
+fn mounted_joined_replacement_ledger_restores_both_selected_parents() {
+    run_mounted_successor(MountedSuccessor::JoinedLedgerReplay);
+}
+
+#[test]
 fn mounted_native_remove_retires_the_exact_joined_row_and_preserves_the_survivor() {
     run_mounted_successor(MountedSuccessor::Remove);
 }
@@ -140,6 +150,8 @@ enum MountedSuccessor {
     MissedHistory,
     Remove,
     UnsettledCreate,
+    ReceiveCapacity,
+    JoinedLedgerReplay,
 }
 
 #[test]
@@ -432,6 +444,8 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
         (false, Some(MountedSuccessor::Remove)) => 0xe790,
         (false, Some(MountedSuccessor::MissedHistory)) => 0xe7a0,
         (false, Some(MountedSuccessor::UnsettledCreate)) => 0xe7b0,
+        (false, Some(MountedSuccessor::ReceiveCapacity)) => 0xe7d0,
+        (false, Some(MountedSuccessor::JoinedLedgerReplay)) => 0xe7e0,
     };
     let founder_dir = tempfile::tempdir().unwrap();
     let (founder, founder_budget) = selected_joined(founder_dir.path());
@@ -954,6 +968,116 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
             .is_some());
         founder_archived = Some(original.action_id_data());
         founder_archive_digest = Some(original.original_digest_for_test());
+        if successor == Some(MountedSuccessor::JoinedLedgerReplay) {
+            let mut send = async |draft: V2MemberSignRequest<'_>| {
+                assert_eq!(
+                    founder_capture()
+                        .finish()
+                        .unwrap()
+                        .prepare_member_save(V2MemberSignRequest { ..draft }, &fresh)
+                        .unwrap(),
+                    V2MemberSaveOutcome::Ready,
+                );
+                let pending = founder_capture().finish_admission(draft.token).unwrap();
+                let (custody, _) = super::admission::custody(&commit, &fresh).await;
+                assert_eq!(
+                    pending.try_admit(custody).unwrap().run(),
+                    MemberSaveJobReport::SavedLocal
+                );
+                let publication = founder_capture()
+                    .prepare_founder_member_publication(fresh.clone())
+                    .unwrap()
+                    .unwrap();
+                let receipt = publication.submit().await.unwrap().unwrap();
+                let original = tokio::time::timeout(Duration::from_secs(12), async {
+                    while let Some(event) = receiver.next().await {
+                        if let NativeChatMemberGossipEvent::Frame(frame) = event {
+                            return inspect()
+                                .open_member_frame(&view, channel, &frame, &fresh)
+                                .unwrap();
+                        }
+                    }
+                    panic!("the founder must deliver this exact original");
+                })
+                .await
+                .unwrap();
+                founder_capture()
+                    .checkpoint_founder_member_publication(receipt, &fresh)
+                    .unwrap();
+                original
+            };
+            let create = original.action_id_data();
+            let text = Body::Edit {
+                create,
+                text: "Earlier selected edit".into(),
+            };
+            let other = send(V2MemberSignRequest {
+                body: &text,
+                token: [0xfa; 32],
+                parents: &[create],
+                dependencies: &[original.signing_dependency_for_test()],
+                ..founder_request()
+            })
+            .await;
+            assert_eq!(
+                inspect()
+                    .stage_received_member(&mut ledger, &other, &fresh)
+                    .unwrap(),
+                V2OrdinaryReceiveStatus::Retained(ActionState::Valid),
+            );
+            assert!(inspect()
+                .archive_received_member(&ledger, &other, &fresh, &mut rng)
+                .unwrap()
+                .is_some());
+            let mut parents = [create, other.action_id_data()];
+            parents.sort_unstable();
+            let dependencies = [
+                original.signing_dependency_for_test(),
+                other.signing_dependency_for_test(),
+            ];
+            let body = Body::Edit {
+                create,
+                text: "Edit after replacing the receive cache".into(),
+            };
+            let child = send(V2MemberSignRequest {
+                body: &body,
+                token: [0xfb; 32],
+                parents: &parents,
+                dependencies: &dependencies,
+                ..founder_request()
+            })
+            .await;
+            drop(ledger);
+            let mut replacement = inspect()
+                .prepare_member_ledger(&view, channel, fresh.clone())
+                .unwrap();
+            assert_eq!(
+                inspect()
+                    .stage_received_member(&mut replacement, &child, &fresh)
+                    .unwrap(),
+                V2OrdinaryReceiveStatus::WaitingForDependencies(parents.to_vec()),
+            );
+            assert_eq!(
+                inspect()
+                    .stage_received_member_with_history(&mut replacement, &child, &fresh, &mut rng)
+                    .unwrap(),
+                V2OrdinaryReceiveStatus::Retained(ActionState::Valid),
+            );
+            assert!(inspect()
+                .archive_received_member(&replacement, &child, &fresh, &mut rng)
+                .unwrap()
+                .is_some());
+            let projected = inspect()
+                .archived_message_projection(&view, channel, create, fresh.clone(), &mut rng)
+                .unwrap()
+                .unwrap();
+            assert!(projected.with_publication(|view| matches!(
+                view,
+                catcoms_replication::chat::GuardedProjection::Visible { selected, text, .. }
+                    if *selected == child.action_id_data() && text == "Edit after replacing the receive cache"
+            )).unwrap());
+            return;
+        }
         if successor == Some(MountedSuccessor::OfflineDelivery) {
             let create = original.action_id_data();
             let edit = Body::Edit {
@@ -1157,6 +1281,133 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 .unwrap(),
             1
         );
+        if successor == Some(MountedSuccessor::ReceiveCapacity) {
+            use catcoms_replication::chat::GuardedProjection;
+            let mut rotations = 0;
+            for count in 1..=69_u8 {
+                let body = if count == 69 {
+                    Body::Delete { create: reply_id }
+                } else {
+                    Body::Create {
+                        text: format!("message after long stable traffic {count}"),
+                        reply_to: None,
+                    }
+                };
+                let parents = if count == 69 {
+                    std::slice::from_ref(&reply_id)
+                } else {
+                    &[]
+                };
+                let mut token = [0xe4; 32];
+                token[0] = count;
+                let draft = V2MemberSignRequest {
+                    token,
+                    channel,
+                    body: &body,
+                    parents,
+                    dependencies: &[],
+                };
+                let mut attempts = 0;
+                loop {
+                    attempts += 1;
+                    match inspect().prepare_member_save(
+                        &view,
+                        V2MemberSignRequest { ..draft },
+                        &fresh,
+                        &mut rng,
+                    ) {
+                        Ok(V2MemberSaveOutcome::Ready) => break,
+                        // The durable own revision scan yields between paid
+                        // pages when checking the old Create for the Delete.
+                        Err(V2MemberSaveRefusal::Busy) if attempts < 16 => {
+                            tokio::task::yield_now().await
+                        }
+                        other => panic!("the same original request {count} refused: {other:?}"),
+                    }
+                }
+                let mut prepared = Some(
+                    inspect()
+                        .finish_member_admission(view.clone(), token, &fresh)
+                        .unwrap(),
+                );
+                let job = NativeTextJoinedMemberFinalPreparation::try_admit_member_save(
+                    &mut prepared,
+                    &fresh,
+                    MemberSaveNativeAdmission::new((), fresh.clone()),
+                )
+                .unwrap();
+                assert_eq!(job.run(), MemberSaveJobReport::SavedLocal);
+                let (action, ordinal) = inspect()
+                    .lookup_saved_member(&view, &draft, &fresh, &mut rng)
+                    .unwrap()
+                    .unwrap();
+                let publication = inspect()
+                    .prepare_member_publication(&view, fresh.clone(), &mut rng)
+                    .unwrap()
+                    .unwrap();
+                let completed = publication.submit().await.unwrap().unwrap();
+                tokio::time::timeout(Duration::from_secs(12), async {
+                    while let Some(event) = founder_receiver.next().await {
+                        let NativeChatMemberGossipEvent::Frame(frame) = event else {
+                            continue;
+                        };
+                        let apply = || {
+                            founder_capture().receive_founder_member(
+                                &founder_receiver,
+                                &frame,
+                                &TestArchiveAdmission,
+                            )
+                        };
+                        let selected = match apply() {
+                            Err(V2MemberSaveRefusal::ReceiveCapacity) => {
+                                rotations += 1;
+                                apply()
+                            }
+                            result => result,
+                        }
+                        .unwrap()
+                        .unwrap();
+                        if selected.action == action {
+                            assert_eq!(selected.archived, Some(true));
+                            return;
+                        }
+                    }
+                    panic!("original {count} did not reach the stable founder row");
+                })
+                .await
+                .unwrap();
+                assert_eq!(
+                    inspect()
+                        .checkpoint_member_publication(completed, &fresh, &mut rng)
+                        .unwrap(),
+                    ordinal + 1,
+                );
+                if count == 68 {
+                    let original = founder_capture()
+                        .read_founder_target_projection(channel, action, &fresh)
+                        .unwrap()
+                        .unwrap();
+                    assert!(original.with_publication(|view| matches!(
+                        view, GuardedProjection::Visible { create, text, .. }
+                            if *create == action && text == "message after long stable traffic 68"
+                    )).unwrap());
+                }
+                if count == 69 {
+                    let deleted = founder_capture()
+                        .read_founder_target_projection(channel, reply_id, &fresh)
+                        .unwrap()
+                        .unwrap();
+                    assert!(deleted
+                        .with_publication(|view| matches!(
+                            view, GuardedProjection::Deleted { create, delete, .. }
+                                if *create == reply_id && *delete == action
+                        ))
+                        .unwrap());
+                }
+            }
+            assert_eq!(rotations, 1);
+            return;
+        }
         drop((founder_receiver, projected, parent_projection));
         assert!(founder_capture()
             .read_founder_member_projection(channel, reply_id, &fresh)

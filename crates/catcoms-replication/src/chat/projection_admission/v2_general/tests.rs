@@ -388,6 +388,63 @@ fn install(
 }
 
 #[test]
+fn ordinary_receive_reports_only_the_exact_ledger_admission_limit() {
+    let mut fixture = Fixture::new();
+    let signer = DeviceKeypair::from_seed(&[90; 32]);
+    let admission = fixture.add(&signer, 20);
+    let first = create(&signer, &admission, 1);
+    let next = create(&signer, &admission, 2);
+    let cache = || {
+        let mut ledger = ChatLedger::new(
+            Realm::new(GROUP, 42).unwrap(),
+            LedgerLimits {
+                max_actions: 1,
+                max_action_bytes: MAX_ACTION_BYTES,
+            },
+        )
+        .unwrap();
+        let mut view = ledger
+            .begin_projection_view_in(&fixture.group_view)
+            .unwrap();
+        assert!(view.try_ready());
+        (ledger, view)
+    };
+    let stage = |ledger: &mut ChatLedger, view: &ProjectionView, action: &SignedAction| {
+        fixture
+            .verifier
+            .stage_provisional_from_ledger(ledger, view, action, &admission, 64)
+    };
+    let (mut ledger, view) = cache();
+    assert_eq!(
+        stage(&mut ledger, &view, &first),
+        Ok(V2OrdinaryReceiveStatus::Retained(ActionState::Valid))
+    );
+    assert_eq!(
+        stage(&mut ledger, &view, &next),
+        Err(ChatError::LedgerCapacity)
+    );
+    assert_eq!(ledger.action(first.id()), Some(&first));
+    assert!(ledger.action(next.id()).is_none());
+    drop((view, ledger));
+
+    let (mut replacement, view) = cache();
+    assert_eq!(
+        stage(&mut replacement, &view, &next),
+        Ok(V2OrdinaryReceiveStatus::Retained(ActionState::Valid))
+    );
+    drop(view);
+    let (mut foreign, foreign_view) = cache();
+    assert_eq!(
+        stage(&mut foreign, &foreign_view, &first),
+        Ok(V2OrdinaryReceiveStatus::Retained(ActionState::Valid))
+    );
+    // A view cannot substitute for the underlying ledger or its scope.
+    let (other, view) = cache();
+    assert_eq!(stage(&mut foreign, &view, &next), Err(ChatError::Scope));
+    drop(other);
+}
+
+#[test]
 fn ordinary_receiver_waits_for_exact_valid_dependencies_then_projects() {
     let mut f = Fixture::new();
     let original = DeviceKeypair::from_seed(&[90; 32]);

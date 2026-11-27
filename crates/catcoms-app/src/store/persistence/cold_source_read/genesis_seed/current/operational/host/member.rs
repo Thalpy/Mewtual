@@ -75,7 +75,7 @@ use catcoms_sync::{ClosedV2JoinedNode, PreparedV2JoinedPrefix};
 use std::collections::VecDeque;
 mod receive;
 mod recovered;
-use receive::FounderReceivedLedger;
+use crate::store::persistence::v2_member_transport::FounderReceiveLedger;
 pub(in crate::store) use recovered::{RecoveredMemberLane, RecoveredMemberSource};
 
 /// Bounded live channel views per lane. Refuse beyond it; a view with a live Plan is never
@@ -584,7 +584,7 @@ struct MemberChannel {
 pub(super) struct V2MemberLane {
     requests: MemberRequests,
     channels: Vec<MemberChannel>,
-    received: Option<FounderReceivedLedger>,
+    received: Option<FounderReceiveLedger>,
     pub(super) retired_history: Vec<catcoms_replication::chat::V2FrozenAdmission>,
     verifier: Option<V2GeneralPrefixVerifier>,
     bound: Option<BoundV2TextFounderAnchor>,

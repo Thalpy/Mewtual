@@ -311,9 +311,9 @@ write postpones that target while the local row rechecks its exact selector,
 including after the original connection ends. A staged live mutation supplies
 dependency knowledge without publishing a new body before archive selection.
 On authenticated absence the attempted write releases its slot. An approved
-author's next history sweep can retry it. Joined message reads prefer the
-guarded archive and fall back to the hot ledger on authenticated archive
-absence. IPC output retains the row permit until publication, and the renderer
+author's next history sweep can retry it. Joined message reads use the
+guarded archive when mounted. Only unmounted layouts can read from the
+hot ledger. IPC output retains the row permit until publication, and the renderer
 invalidates older in-flight bodies. Normal conversation navigation and full
 invalidation request one guarded received-history page after active chat work
 finishes. One physical page read remains in flight across view changes.

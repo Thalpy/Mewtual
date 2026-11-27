@@ -176,6 +176,9 @@ pub enum AppError {
     /// archive change finally has room. No live mutation was admitted.
     #[error("Chat V2 archive is busy")]
     ChatV2ArchiveBusy,
+    /// Original mounted receiver released a paid hot ledger at capacity.
+    #[error("Chat V2 receive ledger reached capacity")]
+    ChatV2ReceiveCapacity,
     /// A product-layer validation error (e.g. an over-large avatar).
     #[error("{0}")]
     Invalid(String),

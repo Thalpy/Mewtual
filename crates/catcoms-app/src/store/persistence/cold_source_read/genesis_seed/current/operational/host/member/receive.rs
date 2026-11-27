@@ -2,24 +2,16 @@
 use super::*;
 use crate::store::persistence::v2_member_transport::{
     first_founder_missing, prepare_founder_dependency_exchange, prepare_founder_dependency_reply,
-    project_founder_member, FounderReceiveOperation, FounderReceiveOutcome, FounderReceiveSession,
-    NativeTextFounderAudit, NativeTextFounderFrameOutcome, NativeTextFounderReceived,
-    FOUNDER_DEPENDENCY_REPLY_FEE, FOUNDER_RECEIVE_ACTIONS as ACTION_LIMIT,
-    FOUNDER_RECEIVE_BYTES as ACTION_BYTES, FOUNDER_RECEIVE_LEDGER_FEE as LEDGER_FEE,
-    FOUNDER_RECEIVE_WORK as WORK_LIMIT,
+    project_founder_member, FounderReceiveOperation, FounderReceiveOutcome, NativeTextFounderAudit,
+    NativeTextFounderFrameOutcome, NativeTextFounderReceived, FOUNDER_DEPENDENCY_REPLY_FEE,
+    FOUNDER_RECEIVE_ACTIONS as ACTION_LIMIT, FOUNDER_RECEIVE_BYTES as ACTION_BYTES,
+    FOUNDER_RECEIVE_LEDGER_FEE as LEDGER_FEE, FOUNDER_RECEIVE_WORK as WORK_LIMIT,
 };
 use crate::store::persistence::v2_shared_history::SharedHistoryActionQuery;
 use catcoms_replication::chat::{ActionState, V2OrdinaryReceiveStatus};
 
 mod archive;
 use archive::FounderHistory;
-
-pub(super) struct FounderReceivedLedger {
-    view: ProjectionView,
-    ledger: ChatLedger,
-    session: FounderReceiveSession,
-    _fee: CatalogReadReservation,
-}
 
 impl V2MemberLane {
     fn read_live_projection(
@@ -155,47 +147,18 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     .owner
                     .open_governed_member_frame(store, verifier, channel, topic, data)
                     .map_err(|_| Refusal::Failed)?;
-                if lane
-                    .received
-                    .as_ref()
-                    .is_some_and(|ledger| ledger.session.signal.is_cancelled())
-                {
-                    lane.received = None;
-                }
-                if lane.received.is_none() {
-                    let fee = pool.try_reserve(LEDGER_FEE).map_err(|_| Refusal::Busy)?;
-                    let realm = Realm::new(&lane.group, channel).map_err(|_| Refusal::Failed)?;
-                    let mut ledger = ChatLedger::new(
-                        realm,
-                        LedgerLimits {
-                            max_actions: ACTION_LIMIT,
-                            max_action_bytes: ACTION_BYTES,
-                        },
-                    )
-                    .map_err(|_| Refusal::Failed)?;
-                    let mut view = lane
-                        .domain
-                        .begin_channel_view(&mut ledger)
-                        .map_err(|_| Refusal::Unavailable)?;
-                    if !view.try_ready() {
-                        return Err(Refusal::Busy);
-                    }
-                    lane.received = Some(FounderReceivedLedger {
-                        ledger,
-                        view,
-                        session: session.clone(),
-                        _fee: fee,
-                    });
-                }
                 let outbox = lane.outbox_context();
-                let received = lane
-                    .received
-                    .as_mut()
-                    .filter(|ledger| {
-                        Arc::ptr_eq(&ledger.session.identity, &session.identity)
-                            && ledger.ledger.realm().channel() == channel
-                    })
-                    .ok_or(Refusal::Stale)?;
+                let received = FounderReceiveLedger::capture(
+                    &mut lane.received,
+                    session,
+                    (&lane.group, channel),
+                    || pool.try_reserve(LEDGER_FEE).map_err(|_| Refusal::Busy),
+                    |ledger| {
+                        lane.domain
+                            .begin_channel_view(ledger)
+                            .map_err(|_| Refusal::Unavailable)
+                    },
+                )?;
                 if session.signal.is_cancelled() || frame.current_data().is_none() {
                     return Err(Refusal::Stale);
                 }
@@ -231,7 +194,15 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                         history.saved(&mount, &key, id, rng)
                     },
                     &mut require_current,
-                )?;
+                );
+                if status == Err(Refusal::ReceiveCapacity) {
+                    require_current()?;
+                    // Mounted chat only. Drop both cache and payment before
+                    // the caller reoffers this exact frame or reply.
+                    lane.received = None;
+                    return Err(Refusal::ReceiveCapacity);
+                }
+                let status = status?;
                 if let (Some(carrier), Some(id)) = (carrier, first_founder_missing(&status)) {
                     require_current()?;
                     let fee = pool
@@ -287,14 +258,17 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     ));
                 };
                 let outbox = lane.outbox_context();
-                let received = lane
-                    .received
-                    .as_mut()
-                    .filter(|ledger| {
-                        Arc::ptr_eq(&ledger.session.identity, &session.identity)
-                            && ledger.ledger.realm().channel() == channel
-                    })
-                    .ok_or(Refusal::Stale)?;
+                let received = FounderReceiveLedger::capture(
+                    &mut lane.received,
+                    session,
+                    (&lane.group, channel),
+                    || pool.try_reserve(LEDGER_FEE).map_err(|_| Refusal::Busy),
+                    |ledger| {
+                        lane.domain
+                            .begin_channel_view(ledger)
+                            .map_err(|_| Refusal::Unavailable)
+                    },
+                )?;
                 let history = FounderHistory::new(
                     store,
                     verifier,
@@ -324,7 +298,15 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                         history.saved(&mount, &key, id, rng)
                     },
                     &mut require_current,
-                )?;
+                );
+                if status == Err(Refusal::ReceiveCapacity) {
+                    require_current()?;
+                    // Mounted chat only. Drop both cache and payment before
+                    // the caller reoffers this exact frame or reply.
+                    lane.received = None;
+                    return Err(Refusal::ReceiveCapacity);
+                }
+                let status = status?;
                 if let (Some(carrier), Some(id)) = (carrier, first_founder_missing(&status)) {
                     require_current()?;
                     let fee = pool

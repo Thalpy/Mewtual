@@ -139,6 +139,9 @@ pub enum V2MemberSaveRefusal {
     /// A running job holds this context, or a logical payment is not available right now.
     /// Retry later; nothing was lost.
     Busy,
+    /// An authenticated ordinary ingress or dependency filled its paid
+    /// receive ledger. This is independent of archive and outbox quotas.
+    ReceiveCapacity,
     /// The Store retains ANOTHER request's exact original for this context (presealed or
     /// unresolved). Finish that token first (retry it with its own persisted request DATA);
     /// one request per context at a time. `token` names it so a composer can resume it.

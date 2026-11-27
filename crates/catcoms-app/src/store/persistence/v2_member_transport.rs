@@ -24,8 +24,9 @@ use catcoms_net::{
 };
 use catcoms_replication::chat::{
     cold_actions::AssembledActionOriginal, owner_facts::OwnerFactId, ActionId, ActionState,
-    ChatLedger, GuardedMessageProjection, ProjectionView, SignedAction, V2FrozenAdmission,
-    V2GeneralPrefixVerifier, V2LocalArchiveOriginal, V2OrdinaryReceiveStatus, MAX_PARENTS,
+    ChatLedger, GuardedMessageProjection, LedgerLimits, ProjectionView, Realm, SignedAction,
+    V2FrozenAdmission, V2GeneralPrefixVerifier, V2LocalArchiveOriginal, V2OrdinaryReceiveStatus,
+    MAX_PARENTS,
 };
 use catcoms_rt::{CryptoRngCore, RequestCancellation, Topic, TransportError};
 use catcoms_sync::owner_v2::{
@@ -245,6 +246,16 @@ pub(in crate::store) fn prepare_founder_dependency_reply<R: CryptoRngCore>(
     })
 }
 
+/// Distinguish a replaceable receive ledger from view or storage refusals.
+pub(in crate::store) fn receive_ledger_refusal(
+    error: catcoms_replication::chat::ChatError,
+) -> Refusal {
+    match error {
+        catcoms_replication::chat::ChatError::LedgerCapacity => Refusal::ReceiveCapacity,
+        _ => Refusal::Failed,
+    }
+}
+
 /// Reserve exact archive debt before staging in a mounted archive. A
 /// legacy layout can still project directly. Missing dependencies are
 /// retried with the original row's bounded locally saved causal slice.
@@ -281,7 +292,7 @@ pub(in crate::store) fn project_founder_member(
                     FOUNDER_RECEIVE_WORK,
                     !mounted,
                 )
-                .map_err(|_| Refusal::Failed)?;
+                .map_err(receive_ledger_refusal)?;
             observe(&status);
             Ok(status)
         };
@@ -299,6 +310,13 @@ pub(in crate::store) fn project_founder_member(
         }
         require_current()?;
         Ok(status)
+    })
+    .map_err(|error| {
+        if !mounted && error == Refusal::ReceiveCapacity {
+            Refusal::Failed
+        } else {
+            error
+        }
     })
 }
 
@@ -667,7 +685,7 @@ fn replay_local_member_original(
                 work,
             )
             .map(Some)
-            .map_err(|_| Refusal::Failed);
+            .map_err(receive_ledger_refusal);
     }
     if !store
         .has_mounted_shared_history()
@@ -697,7 +715,7 @@ fn replay_local_member_original(
     verifier
         .replay_locally_selected_ancestor(ledger, view, selected, retired, work)
         .map(Some)
-        .map_err(|_| Refusal::Failed)
+        .map_err(receive_ledger_refusal)
 }
 
 /// Exact unfinished local ancestor traversal for a single paid staging ledger.
@@ -928,6 +946,63 @@ pub trait FounderArchiveAdmission {
 
     /// Release a newly reserved slot before any effect or archive write.
     fn release_unstarted(&self, action: ActionId, target: ActionId);
+}
+
+/// One reusable cache, bound to its original subscription and channel.
+/// Open a replacement only after the stopped or full cache is dropped.
+pub(in crate::store) struct FounderReceiveLedger {
+    pub(in crate::store) view: ProjectionView,
+    pub(in crate::store) ledger: ChatLedger,
+    pub(in crate::store) session: FounderReceiveSession,
+    _fee: CatalogReadReservation,
+}
+
+impl FounderReceiveLedger {
+    pub(in crate::store) fn capture<'a>(
+        slot: &'a mut Option<Self>,
+        session: &FounderReceiveSession,
+        (group, channel): (&[u8], u128),
+        reserve: impl FnOnce() -> Result<CatalogReadReservation, Refusal>,
+        begin: impl FnOnce(&mut ChatLedger) -> Result<ProjectionView, Refusal>,
+    ) -> Result<&'a mut Self, Refusal> {
+        if session.signal.is_cancelled() {
+            return Err(Refusal::Stale);
+        }
+        if slot
+            .as_ref()
+            .is_some_and(|cache| cache.session.signal.is_cancelled())
+        {
+            *slot = None;
+        }
+        if slot.is_none() {
+            let fee = reserve()?;
+            let realm = Realm::new(group, channel).map_err(|_| Refusal::Failed)?;
+            let mut ledger = ChatLedger::new(
+                realm,
+                LedgerLimits {
+                    max_actions: FOUNDER_RECEIVE_ACTIONS,
+                    max_action_bytes: FOUNDER_RECEIVE_BYTES,
+                },
+            )
+            .map_err(|_| Refusal::Failed)?;
+            let mut view = begin(&mut ledger)?;
+            if !view.try_ready() {
+                return Err(Refusal::Busy);
+            }
+            *slot = Some(Self {
+                view,
+                ledger,
+                session: session.clone(),
+                _fee: fee,
+            });
+        }
+        slot.as_mut()
+            .filter(|cache| {
+                Arc::ptr_eq(&cache.session.identity, &session.identity)
+                    && cache.ledger.realm().channel() == channel
+            })
+            .ok_or(Refusal::Stale)
+    }
 }
 
 pub(in crate::store) enum FounderReceiveOperation<'a> {

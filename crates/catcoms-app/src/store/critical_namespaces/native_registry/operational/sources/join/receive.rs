@@ -10,7 +10,9 @@ catcoms_rt::redacted_debug! {
 
 use super::*;
 use crate::store::persistence::v2_member_outbox::{member_outbox_key, MemberSavedOriginal};
-use crate::store::persistence::v2_member_transport::replay_local_member_dependencies;
+use crate::store::persistence::v2_member_transport::{
+    receive_ledger_refusal, replay_local_member_dependencies,
+};
 use crate::store::persistence::v2_shared_history::{
     PreparedSharedHistoryRecord, SharedHistoryActionPage, SharedHistoryActionQuery,
     SharedHistoryMessageSelection, SharedHistoryProjectionLease, SharedHistoryReplay,
@@ -133,6 +135,16 @@ impl ReceiveOrigin {
 }
 
 impl NativeTextJoinedReceivedOriginal {
+    #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(in crate::store::critical_namespaces::native_registry) fn signing_dependency_for_test(
+        &self,
+    ) -> crate::store::V2MemberDependency<'_> {
+        crate::store::V2MemberDependency {
+            action: self.opened.action_data(),
+            admission: self.opened.admission_data(),
+        }
+    }
+
     pub fn is_for_original_row_cached(&self, selection: &NativeTextJoinedRowSelection) -> bool {
         self.selection.same_original(selection)
             && selection.is_current_cached()
@@ -664,7 +676,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         original: &NativeTextJoinedReceivedOriginal,
         caller: &RequestCancellation,
     ) -> Result<V2OrdinaryReceiveStatus, V2MemberSaveRefusal> {
-        self.apply_received_member(ledger, original, caller, true)
+        self.apply_received_member(ledger, original, caller, (true, None))
     }
 
     /// Validate a live mutation and retain it as causal evidence without
@@ -675,7 +687,19 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         original: &NativeTextJoinedReceivedOriginal,
         caller: &RequestCancellation,
     ) -> Result<V2OrdinaryReceiveStatus, V2MemberSaveRefusal> {
-        self.apply_received_member(ledger, original, caller, false)
+        self.apply_received_member(ledger, original, caller, (false, None))
+    }
+
+    /// Stage an original and replay every currently missing local ancestor.
+    /// A prior cache rotation can make formerly Valid parents missing too.
+    pub fn stage_received_member_with_history(
+        &self,
+        ledger: &mut NativeTextJoinedMemberLedger,
+        original: &NativeTextJoinedReceivedOriginal,
+        caller: &RequestCancellation,
+        rng: &mut R,
+    ) -> Result<V2OrdinaryReceiveStatus, V2MemberSaveRefusal> {
+        self.apply_received_member(ledger, original, caller, (false, Some(rng)))
     }
 
     /// Apply one exact frame on the same paid mounted row. Waiting children
@@ -702,7 +726,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         ledger: &mut NativeTextJoinedMemberLedger,
         original: &NativeTextJoinedReceivedOriginal,
         caller: &RequestCancellation,
-        publish: bool,
+        (publish, replay): (bool, Option<&mut R>),
     ) -> Result<V2OrdinaryReceiveStatus, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
         if ledger.signal.is_cancelled() || !original.is_for_original_row_cached(&ledger.selection) {
@@ -723,22 +747,66 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 .retired_history_data()
                 .iter()
                 .collect::<Vec<_>>();
-            original
-                .opened
-                .apply_with_local_ancestry(
-                    (verifier, &retired),
-                    (&mut ledger.ledger, &ledger.view),
-                    RECEIVE_WORK,
-                    publish,
-                )
-                .map_err(|_| Refusal::Failed)
+            let view = &ledger.view;
+            let apply = |working: &mut ChatLedger| {
+                original
+                    .opened
+                    .apply_with_local_ancestry(
+                        (verifier, &retired),
+                        (working, view),
+                        RECEIVE_WORK,
+                        publish,
+                    )
+                    .map_err(receive_ledger_refusal)
+            };
+            let status = apply(&mut ledger.ledger)?;
+            let (Some(rng), V2OrdinaryReceiveStatus::WaitingForDependencies(missing)) =
+                (replay, &status)
+            else {
+                return Ok(status);
+            };
+            let channel = ledger.ledger.realm().channel();
+            let require = || {
+                if caller.is_cancelled()
+                    || ledger.signal.is_cancelled()
+                    || !original.is_for_original_row_cached(&ledger.selection)
+                {
+                    return Err(Refusal::Cancelled);
+                }
+                Ok(())
+            };
+            replay_local_member_dependencies(
+                missing,
+                (verifier, &retired, &mut ledger.ledger, view),
+                RECEIVE_WORK,
+                (source.store, source.history_scope(channel)),
+                |id| source.read_dependency(channel, id, rng),
+                require,
+            )?;
+            require()?;
+            apply(&mut ledger.ledger)
+        })
+    }
+
+    /// Prove the original row will still read bodies from its selected archive
+    /// after the local receive ledger is discarded.
+    pub fn mounted_receive_archive(
+        &self,
+        selection: &NativeTextJoinedRowSelection,
+        caller: &RequestCancellation,
+    ) -> Result<bool, V2MemberSaveRefusal> {
+        self.with_member_receiver(selection, caller, |source| {
+            source
+                .store
+                .has_mounted_shared_history()
+                .map_err(|_| V2MemberSaveRefusal::Unavailable)
         })
     }
 
     /// Restore a bounded causal slice from the original row's local receipts
     /// and selected archive. Replay supplies historical dependencies only.
     pub fn replay_saved_member_dependency(
-        self,
+        &self,
         ledger: &mut NativeTextJoinedMemberLedger,
         action: ActionId,
         caller: &RequestCancellation,

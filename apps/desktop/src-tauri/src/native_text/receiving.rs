@@ -179,6 +179,7 @@ async fn run_founder_receive<I: Send + 'static>(
         .monotonic_ms()
         .saturating_add(FOUNDER_RECEIVE_RETRY_MS);
     let mut scope = source.negative();
+    let mut rotated = false;
     loop {
         let Some((permit, preparation)) = capture_founder_frame(state, source).await else {
             return Some((receiver, input, Err(V2MemberSaveRefusal::Busy)));
@@ -196,6 +197,15 @@ async fn run_founder_receive<I: Send + 'static>(
         .ok()?;
         receiver = next_receiver;
         input = next_input;
+        // App retires only a mounted cache at exact import capacity. The
+        // original frame or response and its carrier stay with this task.
+        if matches!(result, Err(V2MemberSaveRefusal::ReceiveCapacity))
+            && !rotated
+            && !scope.is_cancelled()
+        {
+            rotated = true;
+            continue;
+        }
         if !matches!(result, Err(V2MemberSaveRefusal::Busy))
             || SystemClock.monotonic_ms() >= deadline
         {
@@ -465,11 +475,10 @@ async fn receive<R: tauri::Runtime>(
     let channel = source.channel();
     let Some((original, status)) = with_row(state, source, move |selected, row, local, scope| {
         let mut slot = local.received.lock().ok()?;
-        let ledger = slot.as_deref_mut()?;
         let original = selected
             .open_member_frame(&row, channel, &frame, &scope)
             .ok()?;
-        let status = apply_original(&selected, ledger, &original, local, &scope)?;
+        let status = apply_original(&selected, &row, &mut slot, &original, local, &scope, true)?;
         Some((original, status))
     })
     .await
@@ -477,6 +486,7 @@ async fn receive<R: tauri::Runtime>(
         return None;
     };
     let original = Arc::new(original);
+    let status = retry_after_rollover(state, source, &original, status).await?;
     match status {
         JoinedApply::Ordinary(V2OrdinaryReceiveStatus::WaitingForDependencies(missing)) => {
             recover_dependencies(app, state, source, &original, missing).await;
@@ -586,16 +596,9 @@ async fn recover_dependency(
     child: &Arc<NativeTextJoinedReceivedOriginal>,
     action: ActionId,
 ) -> Option<Arc<NativeTextJoinedReceivedOriginal>> {
-    let local_result = with_row(state, source, move |selected, _, local, scope| {
-        let mut slot = local.received.lock().ok()?;
-        selected
-            .replay_saved_member_dependency(slot.as_deref_mut()?, action, &scope, &mut OsCryptoRng)
-            .ok()
-    })
-    .await;
-    // Consult the carrier when this exact original is absent from selected
-    // local storage. A local refusal leaves the child waiting.
-    if !matches!(local_result, Some(None)) {
+    // Consult the carrier only after an exact miss. The same trusted child
+    // stays held through any local cache rotation and replay.
+    if replay_local_dependency(state, source, child, action).await != Some(false) {
         return None;
     }
     let original = child.clone();
@@ -619,9 +622,52 @@ async fn recover_dependency(
     .map(Arc::new)
 }
 
+async fn replay_local_dependency(
+    state: &AppState,
+    source: &Arc<Source>,
+    child: &Arc<NativeTextJoinedReceivedOriginal>,
+    action: ActionId,
+) -> Option<bool> {
+    for may_rotate in [true, false] {
+        let child = child.clone();
+        let outcome = with_row(state, source, move |selected, row, local, scope| {
+            let mut slot = local.received.lock().ok()?;
+            if !child.is_for_original_row_cached(&row) {
+                return None;
+            }
+            let result = selected.replay_saved_member_dependency(
+                slot.as_deref_mut()?,
+                action,
+                &scope,
+                &mut OsCryptoRng,
+            );
+            if result == Err(V2MemberSaveRefusal::ReceiveCapacity) && may_rotate {
+                if !selected.mounted_receive_archive(&row, &scope).ok()?
+                    || !child.is_for_original_row_cached(&row)
+                    || scope.is_cancelled()
+                {
+                    return None;
+                }
+                *slot = None;
+            }
+            Some(result)
+        })
+        .await?;
+        if outcome == Err(V2MemberSaveRefusal::ReceiveCapacity) && may_rotate {
+            if !prepare_ledger(state, source).await {
+                return None;
+            }
+            continue;
+        }
+        return outcome.ok().map(|original| original.is_some());
+    }
+    None
+}
+
 enum JoinedApply {
     Ordinary(V2OrdinaryReceiveStatus),
     ArchiveUnconfirmed,
+    RetryAfterRollover,
 }
 
 impl JoinedApply {
@@ -642,30 +688,69 @@ async fn apply_and_archive(
     source: &Arc<Source>,
     original: Arc<NativeTextJoinedReceivedOriginal>,
 ) -> Option<JoinedApply> {
-    with_row(state, source, move |selected, _, local, scope| {
+    let status = apply_to_current_ledger(state, source, original.clone(), true).await?;
+    retry_after_rollover(state, source, &original, status).await
+}
+
+async fn retry_after_rollover(
+    state: &AppState,
+    source: &Arc<Source>,
+    original: &Arc<NativeTextJoinedReceivedOriginal>,
+    status: JoinedApply,
+) -> Option<JoinedApply> {
+    if !matches!(status, JoinedApply::RetryAfterRollover) {
+        return Some(status);
+    }
+    if !prepare_ledger(state, source).await {
+        return None;
+    }
+    apply_to_current_ledger(state, source, original.clone(), false).await
+}
+
+async fn apply_to_current_ledger(
+    state: &AppState,
+    source: &Arc<Source>,
+    original: Arc<NativeTextJoinedReceivedOriginal>,
+    may_rotate: bool,
+) -> Option<JoinedApply> {
+    with_row(state, source, move |selected, row, local, scope| {
         let mut slot = local.received.lock().ok()?;
-        let ledger = slot.as_deref_mut()?;
-        apply_original(&selected, ledger, &original, local, &scope)
+        apply_original(
+            &selected, &row, &mut slot, &original, local, &scope, may_rotate,
+        )
     })
     .await
 }
 
 fn apply_original(
     selected: &NativeTextJoinedSelectionPreparation<OsCryptoRng>,
-    ledger: &mut NativeTextJoinedMemberLedger,
+    row: &NativeTextJoinedRowSelection,
+    slot: &mut Option<Box<NativeTextJoinedMemberLedger>>,
     original: &NativeTextJoinedReceivedOriginal,
     local: &server_table::NativeMemberWork,
     scope: &RequestCancellation,
+    may_rotate: bool,
 ) -> Option<JoinedApply> {
+    let ledger = slot.as_deref_mut()?;
     let action = original.action_id_data();
     let target = original.projection_target_data();
     let newly_reserved = local.reserve_archive_change(action, target)?;
-    let status = selected.stage_received_member(ledger, original, scope).ok();
-    if status != Some(V2OrdinaryReceiveStatus::Retained(ActionState::Valid)) {
+    let status =
+        selected.stage_received_member_with_history(ledger, original, scope, &mut OsCryptoRng);
+    if status != Ok(V2OrdinaryReceiveStatus::Retained(ActionState::Valid)) {
         if newly_reserved {
             local.settle_archive_change(action, target);
         }
-        return status.map(JoinedApply::Ordinary);
+        if status == Err(V2MemberSaveRefusal::ReceiveCapacity)
+            && may_rotate
+            && selected.mounted_receive_archive(row, scope).ok()?
+            && original.is_for_original_row_cached(row)
+            && !scope.is_cancelled()
+        {
+            *slot = None;
+            return Some(JoinedApply::RetryAfterRollover);
+        }
+        return status.ok().map(JoinedApply::Ordinary);
     }
     match selected.archive_received_member(ledger, original, scope, &mut OsCryptoRng) {
         Ok(None) => {
@@ -678,7 +763,7 @@ fn apply_original(
         }
         Ok(Some(_)) => {
             local.settle_archive_change(action, target);
-            status.map(JoinedApply::Ordinary)
+            status.ok().map(JoinedApply::Ordinary)
         }
         Err(_) => Some(JoinedApply::ArchiveUnconfirmed),
     }

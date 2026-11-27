@@ -493,6 +493,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberJob<T, R> {
             run_recovered_receive(founder, channel, operation, caller, rng).map_err(|failure| {
                 match failure {
                     AppError::ChatV2ArchiveBusy => Refusal::Busy,
+                    AppError::ChatV2ReceiveCapacity => Refusal::ReceiveCapacity,
                     _ => Refusal::Failed,
                 }
             })

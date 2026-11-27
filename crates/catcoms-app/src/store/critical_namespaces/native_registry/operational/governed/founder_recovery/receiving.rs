@@ -9,9 +9,9 @@ use crate::store::persistence::native_registry::network::NetworkDependency;
 use crate::store::persistence::v2_member_transport::{
     archive_founder_member, first_founder_missing, prepare_founder_dependency_exchange,
     prepare_founder_dependency_reply, project_founder_member, FounderDependencyReply,
-    FounderReceiveSession, NativeTextFounderDependencyResponse, NativeTextFounderFrameOutcome,
-    FOUNDER_DEPENDENCY_REPLY_FEE, FOUNDER_RECEIVE_ACTIONS, FOUNDER_RECEIVE_BYTES,
-    FOUNDER_RECEIVE_LEDGER_FEE, FOUNDER_RECEIVE_WORK,
+    FounderReceiveLedger, FounderReceiveSession, NativeTextFounderDependencyResponse,
+    NativeTextFounderFrameOutcome, FOUNDER_DEPENDENCY_REPLY_FEE, FOUNDER_RECEIVE_LEDGER_FEE,
+    FOUNDER_RECEIVE_WORK,
 };
 use crate::store::{
     NativeTextFounderReceived, NativeTextJoinedMemberProjection, V2MemberSaveRefusal,
@@ -21,15 +21,20 @@ use catcoms_net::{
     NativeChatMemberGossip, NativeChatMemberGossipError, NativeChatMemberGossipEvent,
     NativeChatMemberIngress,
 };
-use catcoms_replication::chat::{
-    ActionId, ActionState, ChatLedger, LedgerLimits, ProjectionView, Realm,
-    V2OrdinaryReceiveStatus, MAX_ACTION_BYTES,
-};
+use catcoms_replication::chat::{ActionId, ActionState, V2OrdinaryReceiveStatus, MAX_ACTION_BYTES};
 use catcoms_rt::Topic;
 use catcoms_sync::owner_v2::{V2MemberPublicationObservation, MAX_V2_MEMBER_TRANSPORT_BYTES};
 
 const INGRESS_FEE: usize = 2 * MAX_V2_MEMBER_TRANSPORT_BYTES + 8192;
 const FRAME_FEE: usize = 5 * MAX_V2_MEMBER_TRANSPORT_BYTES + 4096;
+
+fn receive_refusal(failure: V2MemberSaveRefusal) -> AppError {
+    match failure {
+        V2MemberSaveRefusal::Busy => AppError::ChatV2ArchiveBusy,
+        V2MemberSaveRefusal::ReceiveCapacity => AppError::ChatV2ReceiveCapacity,
+        _ => refused(),
+    }
+}
 
 #[derive(Debug)]
 struct ProjectionScope {
@@ -98,13 +103,6 @@ impl NativeTextColdFounderMemberReceiver {
     pub async fn next(&mut self) -> Option<NativeChatMemberGossipEvent> {
         self.receiver.next().await
     }
-}
-
-pub(super) struct Ledger {
-    view: ProjectionView,
-    ledger: ChatLedger,
-    session: FounderReceiveSession,
-    _fee: CatalogReadReservation,
 }
 
 impl NativeTextColdFounderSource {
@@ -252,50 +250,25 @@ impl NativeTextColdFounderSource {
         let (mount, _payment) = self.work.recovered_founder_resources(FRAME_FEE)?;
         let (topic, _, wire) = frame.current_data().ok_or_else(refused)?;
         let original = sdk.open_member_envelope(verifier, channel, topic, wire, mount)?;
-        if self
-            .received
-            .as_ref()
-            .is_some_and(|ledger| ledger.session.signal.is_cancelled())
-        {
-            self.received = None;
-        }
-        if self.received.is_none() {
-            let (_, fee) = self
-                .work
-                .recovered_founder_resources(FOUNDER_RECEIVE_LEDGER_FEE)?;
-            let realm = Realm::new(&scope.group, channel).map_err(|_| refused())?;
-            let mut ledger = ChatLedger::new(
-                realm,
-                LedgerLimits {
-                    max_actions: FOUNDER_RECEIVE_ACTIONS,
-                    max_action_bytes: FOUNDER_RECEIVE_BYTES,
-                },
-            )
-            .map_err(|_| refused())?;
-            let mut view = ledger
-                .begin_projection_view_in(group)
-                .map_err(|_| refused())?;
-            if !view.try_ready() {
-                return Err(refused());
-            }
-            self.received = Some(Ledger {
-                view,
-                ledger,
-                session: session.clone(),
-                _fee: fee,
-            });
-        }
         let selection = &self.selection;
         let source = &self.source;
         let work = &self.work;
-        let ledger = self
-            .received
-            .as_mut()
-            .filter(|ledger| {
-                Arc::ptr_eq(&ledger.session.identity, &session.identity)
-                    && ledger.ledger.realm().channel() == channel
-            })
-            .ok_or_else(refused)?;
+        let ledger = FounderReceiveLedger::capture(
+            &mut self.received,
+            session,
+            (&scope.group, channel),
+            || {
+                work.recovered_founder_resources(FOUNDER_RECEIVE_LEDGER_FEE)
+                    .map(|(_, fee)| fee)
+                    .map_err(|_| V2MemberSaveRefusal::Busy)
+            },
+            |ledger| {
+                ledger
+                    .begin_projection_view_in(group)
+                    .map_err(|_| V2MemberSaveRefusal::Unavailable)
+            },
+        )
+        .map_err(receive_refusal)?;
         let check_lifetime = || {
             if session.signal.is_cancelled() || frame.current_data().is_none() {
                 return Err(refused());
@@ -315,11 +288,13 @@ impl NativeTextColdFounderSource {
                 },
                 || check_lifetime().map_err(|_| V2MemberSaveRefusal::Stale),
             )
-            .map_err(|failure| match failure {
-                V2MemberSaveRefusal::Busy => AppError::ChatV2ArchiveBusy,
-                _ => refused(),
-            })
-        })?;
+            .map_err(receive_refusal)
+        });
+        if matches!(status, Err(AppError::ChatV2ReceiveCapacity)) {
+            check_lifetime()?;
+            self.received = None;
+        }
+        let status = status?;
         if let (Some(carrier), Some(id)) = (carrier, first_founder_missing(&status)) {
             check_lifetime()?;
             let (mount, fee) = self
@@ -409,7 +384,7 @@ impl NativeTextColdFounderSource {
         require_response()?;
         self.restore_first_add(&session.signal)?;
         let scope = self.history_scope(channel)?;
-        let (verifier, _) = self.governed.as_ref().ok_or_else(refused)?.member_parts()?;
+        let (verifier, group) = self.governed.as_ref().ok_or_else(refused)?.member_parts()?;
         let sdk = self.sdk.as_ref().ok_or_else(refused)?;
         let (mount, _fee) = self.work.recovered_founder_resources(FRAME_FEE)?;
         let access = sdk.select_member_dependency_access(verifier, channel, self.local.0, mount)?;
@@ -421,17 +396,25 @@ impl NativeTextColdFounderSource {
             .as_ref()
             .ok_or_else(refused)?
             .retired_member_history()?;
-        let ledger = self
-            .received
-            .as_mut()
-            .filter(|ledger| {
-                Arc::ptr_eq(&ledger.session.identity, &session.identity)
-                    && ledger.ledger.realm().channel() == channel
-            })
-            .ok_or_else(refused)?;
         let selection = &self.selection;
         let source = &self.source;
         let work = &self.work;
+        let ledger = FounderReceiveLedger::capture(
+            &mut self.received,
+            session,
+            (&scope.group, channel),
+            || {
+                work.recovered_founder_resources(FOUNDER_RECEIVE_LEDGER_FEE)
+                    .map(|(_, fee)| fee)
+                    .map_err(|_| V2MemberSaveRefusal::Busy)
+            },
+            |ledger| {
+                ledger
+                    .begin_projection_view_in(group)
+                    .map_err(|_| V2MemberSaveRefusal::Unavailable)
+            },
+        )
+        .map_err(receive_refusal)?;
         let status = work.with_recovered_founder_store(selection, source, |store| {
             project_founder_member(
                 &original,
@@ -449,11 +432,14 @@ impl NativeTextColdFounderSource {
                         .map_err(|_| V2MemberSaveRefusal::Stale)
                 },
             )
-            .map_err(|failure| match failure {
-                V2MemberSaveRefusal::Busy => AppError::ChatV2ArchiveBusy,
-                _ => refused(),
-            })
-        })?;
+            .map_err(receive_refusal)
+        });
+        if matches!(status, Err(AppError::ChatV2ReceiveCapacity)) {
+            require_response()?;
+            work.require_recovered_founder_source(selection, source)?;
+            self.received = None;
+        }
+        let status = status?;
         if let (Some(carrier), Some(id)) = (carrier, first_founder_missing(&status)) {
             require_response()?;
             let (mount, fee) = work.recovered_founder_resources(FOUNDER_DEPENDENCY_REPLY_FEE)?;

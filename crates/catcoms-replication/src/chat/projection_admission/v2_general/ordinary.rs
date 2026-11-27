@@ -269,7 +269,12 @@ impl V2GeneralPrefixVerifier {
             Some(original) if original == action => {}
             Some(_) => return Err(ChatError::AuthorityConflict),
             None => {
-                ledger.import(action.clone())?;
+                // Only this owned ledger allowance is safely replaceable.
+                // View exhaustion and other capacity refusals remain distinct.
+                ledger.import(action.clone()).map_err(|error| match error {
+                    ChatError::Capacity => ChatError::LedgerCapacity,
+                    error => error,
+                })?;
             }
         }
         ledger.authorize(id, verified)?;

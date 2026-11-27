@@ -110,6 +110,9 @@ pub enum ChatError {
     AuthorityConflict,
     #[error("typed chat retained capacity is full")]
     Capacity,
+    /// An ordinary action or its ancestor could not fit in this ledger.
+    #[error("the ordinary chat receive ledger is full")]
+    LedgerCapacity,
     #[error("typed chat dependency or target is invalid")]
     Dependency,
     #[error("typed chat action is not authorized")]
