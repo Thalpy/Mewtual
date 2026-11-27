@@ -4,7 +4,6 @@ use crate::store::persistence::v2_member_transport::{
     first_founder_missing, prepare_founder_dependency_exchange, prepare_founder_dependency_reply,
     project_founder_member, FounderReceiveOperation, FounderReceiveOutcome, NativeTextFounderAudit,
     NativeTextFounderFrameOutcome, NativeTextFounderReceived, FOUNDER_DEPENDENCY_REPLY_FEE,
-    FOUNDER_RECEIVE_ACTIONS as ACTION_LIMIT, FOUNDER_RECEIVE_BYTES as ACTION_BYTES,
     FOUNDER_RECEIVE_LEDGER_FEE as LEDGER_FEE, FOUNDER_RECEIVE_WORK as WORK_LIMIT,
 };
 use crate::store::persistence::v2_shared_history::SharedHistoryActionQuery;

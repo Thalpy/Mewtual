@@ -121,6 +121,19 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
     assert_eq!(saved.original.original_bytes(), first.encode());
     drop(saved);
 
+    let occupied = pay();
+    assert!(matches!(
+        disk.target_snapshot(&KEY, expected.action, &session, pay()),
+        Err(AppError::ChatV2ArchiveBusy)
+    ));
+    drop(occupied);
+    let snapshot = disk
+        .target_snapshot(&KEY, expected.action, &session, pay())
+        .unwrap();
+    assert_eq!(snapshot.actions, vec![expected.action]);
+    snapshot.observation.with_publication(|| ()).unwrap();
+    drop(snapshot);
+
     let second = original(&scope, 20);
     let (selected, bundle) = encode(&scope, &second, admission, &mut rng);
     let selector = disk.seal_selector(&KEY, selected, None, &mut rng).unwrap();
@@ -129,6 +142,10 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
     let wal_name = disk.directory.child(WAL_NAME);
     let mut original_wal = ensure_exact_held(&wal_name, &wal).unwrap();
     disk.directory.sync().unwrap();
+    assert!(matches!(
+        disk.target_snapshot(&KEY, expected.action, &session, pay()),
+        Err(AppError::Invalid(_))
+    ));
     let parked = disk.directory.child("parked-original");
     std::fs::rename(&wal_name, &parked).unwrap();
     std::fs::write(&wal_name, &wal[..]).unwrap();

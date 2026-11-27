@@ -36,7 +36,12 @@ mounted row. The worker drops the old paid ledger before admitting the
 replacement, rechecks the caller and original carrier, and retries the
 same input once. Replay can restore only previously selected signed local
 evidence, within its existing work bounds. An older unmounted layout
-cannot use this replacement path.
+cannot use this replacement path. A mounted projection uses the archive's
+full selected target snapshot, opens each exact signed original, and
+retains its observation until publication. Replay has a bound for the
+selected archive and a separate 64-original bound for local outbox
+ancestors. Each distinct original takes an allowance before retention.
+A failed read cannot release partial text.
 Mounted rows render only the selected archive. A notice without text marks
 an affected Create dirty even when the corresponding write is uncertain.
 The original row confirms exact selection or clean absence before

@@ -16,7 +16,8 @@ use crate::store::persistence::v2_member_transport::{
 use crate::store::persistence::v2_shared_history::{
     PreparedSharedHistoryRecord, SharedHistoryActionPage, SharedHistoryActionQuery,
     SharedHistoryMessageSelection, SharedHistoryProjectionLease, SharedHistoryReplay,
-    SharedHistoryScope, ARCHIVED_PROJECTION_WORK, SHARED_HISTORY_RECORD_FEE,
+    SharedHistoryReplayCredit, SharedHistoryScope, ARCHIVED_LEDGER_LIMITS,
+    ARCHIVED_PROJECTION_WORK, SHARED_HISTORY_RECORD_FEE,
 };
 use crate::store::ServerStore;
 use catcoms_net::{
@@ -403,6 +404,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         caller: RequestCancellation,
         rng: &mut impl CryptoRngCore,
     ) -> Result<(bool, Option<NativeTextJoinedMemberProjection>), V2MemberSaveRefusal> {
+        let mut replay = SharedHistoryReplayCredit::default();
         let (ledger, (mounted, selected)) = self
             .prepare_member_ledger_with(
                 selection,
@@ -418,7 +420,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                         return Ok((false, None));
                     }
                     source
-                        .replay_archived_message(ledger, view, create, &caller, rng)
+                        .replay_archived_message(ledger, view, create, &caller, &mut replay, rng)
                         .map(|selected| (true, selected))
                 },
             )?
@@ -450,6 +452,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                     _ledger: ledger.ledger,
                     _invocation: Some(ledger._invocation),
                     _fee: ledger._fee,
+                    _replay: replay,
                 }),
             )),
         ))
@@ -615,14 +618,14 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                     .map_err(|_| Refusal::Unavailable)?;
                 let group_data = &verifier.replay_data().profile().spec().group;
                 let realm = Realm::new(group_data, channel).map_err(|_| Refusal::Failed)?;
-                let mut ledger = ChatLedger::new(
-                    realm,
-                    LedgerLimits {
+                let limits = match mode {
+                    ReceiverView::Live => LedgerLimits {
                         max_actions: MAX_RECEIVED_ACTIONS,
                         max_action_bytes: MAX_RECEIVED_BYTES,
                     },
-                )
-                .map_err(|_| Refusal::Failed)?;
+                    ReceiverView::LocalArchive => ARCHIVED_LEDGER_LIMITS,
+                };
+                let mut ledger = ChatLedger::new(realm, limits).map_err(|_| Refusal::Failed)?;
                 let mut view = match mode {
                     ReceiverView::Live => ledger.begin_projection_view_in(group),
                     ReceiverView::LocalArchive => {
@@ -1070,6 +1073,7 @@ impl<R: CryptoRngCore> ReceiverSource<'_, R> {
         view: &ProjectionView,
         create: ActionId,
         caller: &RequestCancellation,
+        credit: &mut SharedHistoryReplayCredit,
         rng: &mut impl CryptoRngCore,
     ) -> Result<Option<SharedHistoryMessageSelection>, V2MemberSaveRefusal> {
         let channel = ledger.realm().channel();
@@ -1087,6 +1091,7 @@ impl<R: CryptoRngCore> ReceiverSource<'_, R> {
             view,
             create,
             self.prefix.retired_history_data(),
+            credit,
             |action| self.read_dependency(channel, action, rng),
         )
     }

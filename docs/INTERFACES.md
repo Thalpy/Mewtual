@@ -1,5 +1,10 @@
 # Mewtual; Interfaces & Hooks Schema
 
+Native Chat V2 selected-message reads accept a Create ID and resolve its
+complete current archive snapshot. The body is withheld if the snapshot
+is incomplete, damaged or stale. Temporary resource pressure can be
+retried. Audit and discovery continuations remain paged.
+
 Chat V2 history discovery uses the existing connected dependency class with
 its own authenticated page format. The joined-source methods prepare a page
 request, open its exact response, and fetch an offered ID on the same lease.

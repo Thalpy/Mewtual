@@ -161,7 +161,13 @@ impl ServerStore {
             return Err(denied());
         }
         self.validate_mounted_governance_layout()?;
-        let mut slot = self.shared_history_mount.try_lock().map_err(|_| denied())?;
+        let mut slot = self
+            .shared_history_mount
+            .try_lock()
+            .map_err(|error| match error {
+                std::sync::TryLockError::WouldBlock => AppError::ChatV2ArchiveBusy,
+                std::sync::TryLockError::Poisoned(_) => denied(),
+            })?;
         let mounted = slot.as_mut().ok_or_else(denied)?;
         mounted.require(self)?;
         let policy = self.governance_layout_policy.as_ref().ok_or_else(denied)?;
@@ -175,7 +181,10 @@ impl ServerStore {
                 pool.clone(),
                 &key,
             )?;
-            disk.recover(&key, &self._session, pool.try_reserve(DISK_FEE)?)?;
+            let paid = pool
+                .try_reserve(DISK_FEE)
+                .map_err(|_| AppError::ChatV2ArchiveBusy)?;
+            disk.recover(&key, &self._session, paid)?;
             mounted.require(self)?;
             mounted.disk = Some(disk);
         }
@@ -191,7 +200,8 @@ impl ServerStore {
             &mut mounted.pending,
             &mut mounted.relay_index,
             &key,
-            pool.try_reserve(DISK_FEE)?,
+            pool.try_reserve(DISK_FEE)
+                .map_err(|_| AppError::ChatV2ArchiveBusy)?,
         )?;
         mounted.require(self)?;
         Ok(result)
@@ -392,6 +402,19 @@ impl ServerStore {
         let result = perform(disk, mounted.relay_index.as_ref(), &key, pool)?;
         mounted.require(self)?;
         Ok(result)
+    }
+
+    pub(in crate::store) fn shared_history_target_snapshot(
+        &self,
+        scope: SharedHistoryScope,
+        create: ActionId,
+    ) -> Result<crate::store::persistence::v2_shared_history::SharedHistoryTargetSnapshot, AppError>
+    {
+        // Install the same original disk owner and keep the local page
+        // recovery policy. A temporary disk cannot observe later writes.
+        self.with_shared_history(scope, |disk, _, _, key, payment| {
+            disk.target_snapshot(key, create, &self._session, payment)
+        })
     }
 
     pub(in crate::store) fn shared_history_action_page(
