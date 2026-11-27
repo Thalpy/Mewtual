@@ -107,6 +107,7 @@ pub(super) struct Parsed<'a> {
     // choosing the writer's historical default would relabel index2 as1.
     pub(super) native_registry_version: Option<u32>,
     pub(super) shared_history_payload: Option<&'a [u8]>,
+    pub(super) rejoin_payload: Option<&'a [u8]>,
 }
 
 /// Fixed, inert classification retained after dropping a complete plaintext. Digest equality
@@ -133,6 +134,7 @@ pub(in crate::store) struct Summary {
     pub(super) joined_pin_payload_digest: Option<[u8; 32]>,
     pub(super) native_registry_payload_digest: Option<[u8; 32]>,
     pub(super) shared_history_payload_digest: Option<[u8; 32]>,
+    pub(super) rejoin_payload_digest: Option<[u8; 32]>,
 }
 impl Parsed<'_> {
     pub(super) fn summary(&self, framed: [u8; 32]) -> Summary {
@@ -167,6 +169,9 @@ impl Parsed<'_> {
                 .map(|bytes| *blake3::hash(bytes).as_bytes()),
             shared_history_payload_digest: self
                 .shared_history_payload
+                .map(|bytes| *blake3::hash(bytes).as_bytes()),
+            rejoin_payload_digest: self
+                .rejoin_payload
                 .map(|bytes| *blake3::hash(bytes).as_bytes()),
         }
     }
@@ -209,6 +214,7 @@ struct SupportedLayout {
     joined_pin: bool,
     native_registry: Option<u32>,
     shared_history: bool,
+    rejoin: bool,
 }
 impl SupportedLayout {
     const PENDING_ONLY: Self = Self {
@@ -220,6 +226,7 @@ impl SupportedLayout {
         joined_pin: false,
         native_registry: None,
         shared_history: false,
+        rejoin: false,
     };
     const ARCHIVE_BOOTSTRAP: Self = Self {
         archive: true,
@@ -382,6 +389,32 @@ pub(super) fn parse_joined_history_family<'a>(
         },
     )?;
     if parsed.joined_pin_payload.is_none() || parsed.native_registry_payload.is_none() {
+        return Err(refused());
+    }
+    Ok(parsed)
+}
+
+/// The closed ID9 grammar. Normal openers remain on their original family;
+/// the retired-vault declaration can authenticate its prepared successor.
+pub(super) fn parse_rejoin_native_registry_layout<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+    executing: bool,
+) -> Result<Parsed<'a>, AppError> {
+    let parsed = parse_known(
+        plain,
+        domain,
+        SupportedLayout {
+            joined_pin: true,
+            shared_history: true,
+            rejoin: true,
+            ..SupportedLayout::GOVERNANCE_LAYOUT
+                .executing(executing)
+                .member_outbox(true)
+                .native_registry(Some(3))
+        },
+    )?;
+    if parsed.rejoin_payload.is_none() {
         return Err(refused());
     }
     Ok(parsed)
@@ -558,6 +591,7 @@ fn parse_known<'a>(
             native_registry_payload: None,
             native_registry_version: None,
             shared_history_payload: None,
+            rejoin_payload: None,
         });
     }
     let mut rows = std::array::from_fn(|_| None);
@@ -575,6 +609,7 @@ fn parse_known<'a>(
     let mut native_registry_payload = None;
     let mut native_registry_version = None;
     let mut shared_history_payload = None;
+    let mut rejoin_payload = None;
     for index in 0..envelope.count {
         let entry = envelope.entry(index)?;
         match entry.id {
@@ -698,6 +733,21 @@ fn parse_known<'a>(
                 )?;
                 shared_history_payload = Some(entry.payload);
             }
+            super::rejoin_namespace::ID
+                if layout.rejoin && entry.version == super::rejoin_namespace::VERSION =>
+            {
+                super::rejoin_namespace::verify_selected_descriptor(
+                    entry.payload,
+                    current_layout.ok_or_else(refused)?,
+                    (
+                        current_payload.ok_or_else(refused)?,
+                        joined_pin_payload.ok_or_else(refused)?,
+                        native_registry_payload.ok_or_else(refused)?,
+                        shared_history_payload.ok_or_else(refused)?,
+                    ),
+                )?;
+                rejoin_payload = Some(entry.payload);
+            }
             _ => return Err(refused()),
         }
     }
@@ -720,6 +770,7 @@ fn parse_known<'a>(
         native_registry_payload,
         native_registry_version,
         shared_history_payload,
+        rejoin_payload,
     })
 }
 
@@ -909,6 +960,7 @@ pub(super) fn successor(current: &Summary, next: &Summary) -> Result<(), AppErro
     if current.native_registry_payload_digest != next.native_registry_payload_digest
         || current.joined_pin_payload_digest != next.joined_pin_payload_digest
         || current.shared_history_payload_digest != next.shared_history_payload_digest
+        || current.rejoin_payload_digest != next.rejoin_payload_digest
     {
         return Err(refused());
     }

@@ -64,6 +64,13 @@ fn same_vault_rejoin_index_keeps_each_original_birth_and_only_the_latest_active(
     require_rejoin_successor(&a1, &a2, frame, &evict_a1).unwrap();
     assert!(a2.encoded_length().is_err());
     assert!(a1.successor_data(&a2, frame).is_err());
+    let bytes = a2.encode_rejoin_data().unwrap();
+    assert!(Index::decode_data(&bytes, a1.capability).is_err());
+    assert!(Index::decode_rejoin_data(&a1.encode_data().unwrap(), a1.capability).is_err());
+    let reopened = Index::decode_rejoin_data(&bytes, a1.capability).unwrap();
+    assert!(reopened == a2);
+    assert!(Index::decode_rejoin_data(&bytes[..bytes.len() - 1], a1.capability).is_err());
+    require_rejoin_successor(&a1, &reopened, frame, &evict_a1).unwrap();
     assert!(matches!(
         a2.lookup_data([70; 32], [71; 32]).unwrap().unwrap().backend,
         Backend::RetiredJoined { .. }

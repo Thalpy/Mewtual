@@ -657,11 +657,13 @@ Windows Sync fixture completed the replacement Welcome with the new Native
 Source and restored its sealed Outcome. The desktop still needs the
 mounted rejoin route.
 
-The proposed critical namespace 9 and replacement index grammar are
-tested as data. Production readers still refuse that namespace. A complete
-implementation must durably select its catalog entry before the new native
-key cut, hold the exact A1 files through selection, and verify that the
-new admission descends from the exact selected Remove of A1. The registry
+The retired owner prepares one authenticated namespace 9 catalog after its
+original TCP actor drains. It holds the original mount, file identities
+and reservation through retries. File names and contents are unchanged
+during preparation. Ordinary readers still refuse the new namespace.
+Production rejoin must durably select it before the new native key cut,
+hold the exact original files through selection, and verify that the new
+admission descends from the exact selected removal. The registry
 successor retains the old row and its original receipt, and selects only
 one active new row. Saved outbox originals are preserved. Pending work
 under the retired admission keeps its original scope. Physical deployment,

@@ -496,7 +496,7 @@ impl RecoveredWelcome {
         store: &ServerStore,
         context: V2PendingJoinContextData,
         node: &mut catcoms_sync::ClosedV2JoinedNode<T, R>,
-    ) -> Result<Option<(OwnerHeaderId, u64)>, AppError> {
+    ) -> Result<Option<catcoms_sync::SelectedRejoinRemoval>, AppError> {
         self.require(store)?;
         let outcome = self.outcome.as_mut().ok_or_else(denied)?;
         let selected = Arc::get_mut(&mut outcome.selection).ok_or_else(denied)?;
@@ -533,6 +533,21 @@ impl RecoveredWelcome {
             caller,
             rng,
         )
+    }
+
+    pub(super) fn require_recovered_removal(
+        &self,
+        store: &ServerStore,
+        context: V2PendingJoinContextData,
+        expected: catcoms_sync::SelectedRejoinRemoval,
+    ) -> Result<(), AppError> {
+        self.require(store)?;
+        self.outcome
+            .as_ref()
+            .ok_or_else(denied)?
+            .member_adds
+            .require_recovered_removal(store, context, expected)?;
+        self.require(store)
     }
 
     pub(super) fn require_member_adds(&self) -> Result<(), AppError> {

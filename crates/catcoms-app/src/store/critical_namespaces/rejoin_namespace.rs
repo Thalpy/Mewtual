@@ -2,7 +2,7 @@
 //! An exact catalog insertion sets the old-reader fence before any A2 key
 //! work. These codecs do not settle a mount or authorize a rejoin.
 use super::{
-    archive_current_namespace_codec::CurrentLayoutData, catalog_declaration, catalog_envelope,
+    archive_current_namespace_codec::CurrentLayoutData, catalog_declaration,
     pending_join_codec as catalog, refused,
 };
 use crate::AppError;
@@ -10,7 +10,7 @@ use catcoms_wire::{Decoder, Encoder};
 use zeroize::Zeroizing;
 
 pub(super) const ID: u32 = 9;
-const VERSION: u32 = 1;
+pub(super) const VERSION: u32 = 1;
 const TAG: &[u8] = b"catcoms/private-chat-v2-same-vault-rejoin/v1\0";
 const BYTES: usize = 4 + TAG.len() + 2 + 6 * 36;
 
@@ -49,6 +49,14 @@ fn encode(fields: [[u8; 32]; 6]) -> Result<Zeroizing<Vec<u8>>, AppError> {
         encoder.put_bytes(&field).map_err(invalid)?;
     }
     Ok(Zeroizing::new(encoder.finish()))
+}
+
+pub(super) fn verify_selected_descriptor(
+    raw: &[u8],
+    layout: CurrentLayoutData,
+    leaves: (&[u8], &[u8], &[u8], &[u8]),
+) -> Result<(), AppError> {
+    require_exact(raw, fields(layout, leaves))
 }
 
 fn require_exact(raw: &[u8], fields: [[u8; 32]; 6]) -> Result<(), AppError> {
@@ -95,12 +103,47 @@ pub(super) fn verify_declaration(
 ) -> Result<(), AppError> {
     let prior = catalog::parse_shared_history_native_registry_layout(original, domain, true)?;
     catalog_declaration::validate_insert_pair_data(original, declaration, domain, ID, VERSION)?;
-    let next = catalog_envelope::parse(declaration, domain, catalog::MAX_CATALOG_PLAIN)?;
-    let entry = next.entry(next.count.checked_sub(1).ok_or_else(refused)?)?;
-    if entry.id != ID || entry.version != VERSION {
+    let next = catalog::parse_rejoin_native_registry_layout(declaration, domain, true)?;
+    require_exact(next.rejoin_payload.ok_or_else(refused)?, expected(&prior)?)
+}
+
+/// Seal the one catalog successor. No rejoin output is admissible before
+/// its actual named selection and parent directory have been covered.
+pub(in crate::store) fn prepare_framed_declaration(
+    key: &[u8; 32],
+    original: &[u8],
+    domain: &[u8; 32],
+    rng: &mut dyn catcoms_rt::CryptoRngCore,
+) -> Result<Zeroizing<Vec<u8>>, AppError> {
+    let plain = open_framed_catalog(key, original)?;
+    let next = prepare_declaration(&plain, domain)?;
+    Ok(Zeroizing::new(crate::store::frame(&catcoms_crypto::seal(
+        key, &next, rng,
+    )?)))
+}
+
+/// An authenticated full Stage can finish the same Catalog-only declaration
+/// from its original named parent. A partial or unrelated frame grants no
+/// authority to settle either name.
+pub(in crate::store) fn verify_framed_declaration(
+    key: &[u8; 32],
+    original: &[u8],
+    candidate: &[u8],
+    domain: &[u8; 32],
+) -> Result<(), AppError> {
+    let old = open_framed_catalog(key, original)?;
+    let new = open_framed_catalog(key, candidate)?;
+    verify_declaration(&old, &new, domain)
+}
+
+fn open_framed_catalog(key: &[u8; 32], frame: &[u8]) -> Result<Zeroizing<Vec<u8>>, AppError> {
+    if !(41..=catalog::MAX_CATALOG_FRAMED).contains(&frame.len()) {
         return Err(refused());
     }
-    require_exact(entry.payload, expected(&prior)?)
+    Ok(Zeroizing::new(catcoms_crypto::unseal(
+        key,
+        &crate::store::unframe(frame)?,
+    )?))
 }
 
 #[cfg(test)]

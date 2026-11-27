@@ -1691,6 +1691,102 @@ async fn native_text_membership_removal_reopen(join_after_restart: bool, repair_
         serde_json::json!("This device was removed from this Chat V2 server."),
     );
 
+    if !join_after_restart {
+        use catcoms_app::store::{NativeTextJoinedRecovery, NativeTextJoinedStorage};
+        wait_for_original_vault().await;
+        let catalog = member_path.join("chat-critical-namespaces.bin");
+        let before = std::fs::read(&catalog).unwrap();
+        let mut rng = OsCryptoRng;
+        let registry = Registry::default();
+        let storage = NativeTextJoinedStorage::open_for_native_startup(
+            &member_path,
+            SECRET.as_bytes(),
+            &mut rng,
+            boot::current_policy().unwrap(),
+        )
+        .unwrap();
+        let (_lifetime, signal) = tokio::sync::watch::channel(false);
+        let negative = catcoms_rt::RequestCancellation::new(signal, None);
+        let runtime = storage
+            .bind_recovered_native_runtime(OsCryptoRng, Box::new(SystemClock), &negative)
+            .map_err(|(_, error)| error)
+            .unwrap();
+        let NativeTextJoinedRecovery::Removed(mut retired) = runtime
+            .into_recovered_joined_membership(
+                (
+                    Arc::new(AtomicU64::new(1)),
+                    Arc::new(AtomicU64::new(0)),
+                    Arc::new(AtomicBool::new(false)),
+                ),
+                registry.ui_budget.clone(),
+                &registry.sources.policy(),
+                &negative,
+            )
+            .unwrap()
+        else {
+            panic!("a proven terminal row must retain retired storage only");
+        };
+        timeout(Duration::from_secs(10), async {
+            while !retired.prepare_rejoin_catalog(&mut rng).unwrap() {
+                SystemClock.sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the original transport drains before rejoin preparation");
+        struct NeverRng;
+        impl rand_core::RngCore for NeverRng {
+            fn next_u32(&mut self) -> u32 {
+                panic!("retired catalog retry drew randomness")
+            }
+            fn next_u64(&mut self) -> u64 {
+                panic!("retired catalog retry drew randomness")
+            }
+            fn fill_bytes(&mut self, _: &mut [u8]) {
+                panic!("retired catalog retry drew randomness")
+            }
+            fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), rand_core::Error> {
+                panic!("retired catalog retry drew randomness")
+            }
+        }
+        impl rand_core::CryptoRng for NeverRng {}
+        let proof = retired.removal_data().unwrap().unwrap();
+        assert_eq!(proof.2, 2);
+        assert_eq!(std::fs::read(&catalog).unwrap(), before);
+        assert!(!member_path
+            .join("chat-critical-namespaces.replace.tmp")
+            .exists());
+
+        let selector_bytes = std::fs::read(&selector).unwrap();
+        let selector_backup = selector.with_extension("original-retired-owner-test");
+        std::fs::rename(&selector, &selector_backup).unwrap();
+        std::fs::write(&selector, &selector_bytes).unwrap();
+        assert!(
+            retired.removal_data().is_err(),
+            "equal bytes cannot replace the same held selector"
+        );
+        assert!(retired.prepare_rejoin_catalog(&mut NeverRng).is_err());
+        std::fs::remove_file(&selector).unwrap();
+        std::fs::rename(&selector_backup, &selector).unwrap();
+
+        let file_name = selector.file_name().unwrap().to_str().unwrap();
+        let fork = file_name
+            .replace("joined-member-selected", "joined-member-header")
+            .replace(".2.bin", ".2.conflict.bin");
+        let fork = member_path.join(fork);
+        std::fs::write(&fork, b"unresolved late record").unwrap();
+        assert!(
+            retired.removal_data().is_err(),
+            "late governing evidence suspends the old proof"
+        );
+        assert_eq!(std::fs::read(&fork).unwrap(), b"unresolved late record");
+        std::fs::remove_file(fork).unwrap();
+        assert_eq!(retired.removal_data().unwrap(), Some(proof));
+        assert!(retired.prepare_rejoin_catalog(&mut NeverRng).unwrap());
+        assert_eq!(std::fs::read(&catalog).unwrap(), before);
+        drop(retired);
+        wait_for_original_vault().await;
+    }
+
     // The selected Remove is already on disk. A different application
     // instance must use the original founder identity to mint its next invite.
     let founder_state = founder.state::<AppState>();

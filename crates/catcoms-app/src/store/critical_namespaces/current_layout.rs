@@ -715,7 +715,7 @@ impl V2CurrentLayoutStore {
             crate::store::persistence::governance_layout::joined::JoinedRuntimeInputs<T, R>,
         >,
         output: &mut Option<catcoms_sync::ClosedV2JoinedNode<T, R>>,
-    ) -> Result<(), AppError> {
+    ) -> Result<Option<catcoms_sync::SelectedRejoinRemoval>, AppError> {
         self.checked_store()?;
         self.store.attach_recovered_joined_node(inputs, output)
     }

@@ -30,7 +30,9 @@ pub use founder_recovery::{
     NativeTextColdFounderPublication, NativeTextColdFounderPublicationReceipt,
     NativeTextColdFounderSource,
 };
-pub use runtime::NativeTextJoinedRuntime;
+pub use runtime::{
+    NativeTextJoinedRecovery, NativeTextJoinedRuntime, NativeTextRemovedJoinedVault,
+};
 use std::sync::atomic::{AtomicBool, AtomicU64};
 
 pub(in crate::store::critical_namespaces::native_registry) const JOIN_PROTOCOL: ProtocolId =

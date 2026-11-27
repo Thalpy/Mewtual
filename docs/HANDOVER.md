@@ -17,9 +17,15 @@ new sealed SDK outcome. The bare MLS regression refused the old Welcome
 with the replacement provider. Ordinary first-pin paths refuse rejoin
 Pending records.
 
-Namespace9 and the registry retire-and-append transition are still exercised
-only as data. The mounted namespace, per-incarnation journals and native
-replacement route remain open. The existing 20- and 50-writer ledger tests
+The retired vault keeps the original file owner and waits for its actual
+TCP actor to retire before preparing the exact namespace9 catalog. It retains
+one paid candidate, with no file writes or replacement keys at preparation.
+The Windows native case rejects an equal-byte selector replacement and a late
+conflict file. Reusing the original files permits the same preparation.
+JOIN rewrites now preserve the existing shared-history descriptor and the
+new rejoin descriptor byte for byte. The registry replacement format is
+tested as data. Durable catalog selection, the mounted namespace,
+per-incarnation journals and the desktop replacement route remain open. The existing 20- and 50-writer ledger tests
 passed with reordered pages, restart and concurrent changes. Those are
 protocol simulations. The larger native topology and physical acceptance
 are still open.

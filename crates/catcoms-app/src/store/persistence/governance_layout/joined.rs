@@ -24,6 +24,7 @@ pub(in crate::store) enum JoinedPinOpening {
     NativeWithoutRow,
 }
 mod pending;
+pub(in crate::store) mod rejoin;
 pub(in crate::store) mod shared_history;
 pub(in crate::store) use pending::{
     AcceptedFirstJoin, AcceptedJoinTransport, JoinedPendingIo, JoinedRegistrationDependency,

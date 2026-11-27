@@ -16,6 +16,7 @@ pub(super) struct MemberAdds {
     covered: Vec<Covered>,
     pending: Option<Pending>,
     evicted: bool,
+    recovered_removal: Option<catcoms_sync::SelectedRejoinRemoval>,
     first: Option<HeaderWitness>,
     fork: Option<HeaderWitness>,
 }
@@ -26,6 +27,7 @@ struct Covered {
     parent: (OwnerHeaderId, u64),
     fetch_verifier: [u8; 32],
     selection: Option<SelectionRecord>,
+    witness: Option<HeaderWitness>,
     _fee: CatalogReadReservation,
 }
 
@@ -100,6 +102,40 @@ impl MemberAdds {
             if let Some(selection) = &covered.selection {
                 selection.require_current()?;
             }
+        }
+        Ok(())
+    }
+
+    /// Reprove the exact selected terminal cut while retaining the old
+    /// chain. A new fork or future transition cannot silently coexist
+    /// with this handoff to the rejoin writer.
+    pub(super) fn require_recovered_removal(
+        &self,
+        store: &ServerStore,
+        context: V2PendingJoinContextData,
+        expected: catcoms_sync::SelectedRejoinRemoval,
+    ) -> Result<(), AppError> {
+        if self.recovered_removal != Some(expected)
+            || !self.evicted
+            || self.pending.is_some()
+            || self.first.is_some()
+            || self.fork.is_some()
+            || self
+                .covered
+                .last()
+                .is_none_or(|value| value.selection.is_none())
+        {
+            return Err(denied());
+        }
+        self.require_original()?;
+        for entry in &self.covered {
+            let epoch = entry.parent.1.checked_add(1).ok_or_else(denied)?;
+            header_witness::require_covered_names(store, context, epoch, entry.witness.as_ref())?;
+        }
+        for epoch in expected.2.checked_add(1).ok_or_else(denied)?..=MAX_EPOCH {
+            absent(&path(store, context, epoch)?)?;
+            absent(&selection_path(store, context, epoch)?)?;
+            header_witness::require_covered_names(store, context, epoch, None)?;
         }
         Ok(())
     }
@@ -269,7 +305,7 @@ impl MemberAdds {
         pending.selection.require_current()?;
         require_live()?;
         let retired = install_transition(core, node, &mut pending.candidate, selected)?;
-        self.first = None;
+        let witness = self.first.take();
         self.evicted = retired.terminal_data().is_some();
         let pending = self
             .pending
@@ -284,6 +320,7 @@ impl MemberAdds {
             parent: fetch.parent_data(),
             fetch_verifier: fetch.verifier_data(),
             selection: Some(pending.selection),
+            witness,
             _fee: pending.fee,
         });
         Ok(retired)
@@ -296,13 +333,13 @@ impl MemberAdds {
         welcome: &[u8],
         core: &mut PreparedV2JoinedPrefix,
         node: &mut ClosedV2JoinedNode<T, R>,
-    ) -> Result<Option<(OwnerHeaderId, u64)>, AppError> {
+    ) -> Result<Option<catcoms_sync::SelectedRejoinRemoval>, AppError> {
         self.require_current()?;
         store.validate_mounted_governance_layout()?;
         let key = Zeroizing::new(store.keys.db_key()?);
         let mut missing = false;
         let mut removed = None;
-        let (_, _, epoch) = node.selected_join_data()?;
+        let (_, own, epoch) = node.selected_join_data()?;
         for expected_epoch in epoch.checked_add(1).ok_or_else(denied)?..=MAX_EPOCH {
             let path = path(store, context, expected_epoch)?;
             let selection_path = selection_path(store, context, expected_epoch)?;
@@ -384,6 +421,7 @@ impl MemberAdds {
                 parent: fetch.parent_data(),
                 fetch_verifier: fetch.verifier_data(),
                 selection,
+                witness: first,
                 _fee: fee,
             });
             drop(retired);
@@ -395,7 +433,10 @@ impl MemberAdds {
             self.require_original()?;
             store.validate_mounted_governance_layout()?;
             self.require_original()?;
-            return Ok(Some(terminal));
+            let original = (terminal.0, own, terminal.1);
+            self.recovered_removal = Some(original);
+            self.require_recovered_removal(store, context, original)?;
+            return Ok(Some(original));
         }
         self.require_current()?;
         Ok(None)
