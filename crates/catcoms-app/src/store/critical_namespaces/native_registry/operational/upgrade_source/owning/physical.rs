@@ -303,9 +303,34 @@ impl Physical {
         crate::store::persistence::governance_layout::joined::rejoin::RejoinCatalogPreparation,
         AppError,
     > {
-        self.with_registered_native_join(data, |store| {
-            store.prepare_retired_rejoin_catalog(data, removal, rng)
-        })
+        let cell = self.cell.try_lock().map_err(|_| refused())?;
+        cell.require_idle()?;
+        self.handler.require_idle_cached()?;
+        if !self.handler.uses_joined_pin_layout() {
+            return Err(refused());
+        }
+        let store = self.current()?.checked_store()?;
+        // The handler funds the original classification. When its checked
+        // fixed leaves survive the call, retain a separate scoped invoice.
+        let pool = &store
+            .governance_layout_policy
+            .as_ref()
+            .ok_or_else(refused)?
+            .current
+            .archive
+            .pending
+            .pool;
+        let inventory =
+            UpgradeInventory::capture(store, self.handler.debit(), self.handler.pool())?;
+        super::super::super::super::lifecycle::preparation::require_registered_native_join(
+            store, &inventory, data,
+        )?;
+        if store.recovered_join_registration_data()? != Some(data) {
+            return Err(refused());
+        }
+        use crate::store::persistence::governance_layout::joined::rejoin::RetainedNativeRejoinInventory;
+        let original = RetainedNativeRejoinInventory::retain(inventory, pool)?;
+        store.prepare_retired_rejoin_catalog(data, removal, original, rng)
     }
 
     pub(super) fn require_original_rejoin_catalog(
@@ -314,10 +339,22 @@ impl Physical {
         removal: catcoms_sync::SelectedRejoinRemoval,
         prepared: &crate::store::persistence::governance_layout::joined::rejoin::RejoinCatalogPreparation,
     ) -> Result<(), AppError> {
-        self.with_registered_native_join(data, |store| {
-            store.require_recovered_joined_removal(data, removal)?;
-            prepared.require_original(store)
-        })
+        let cell = self.cell.try_lock().map_err(|_| refused())?;
+        cell.require_idle()?;
+        self.handler.require_idle_cached()?;
+        let store = self.current()?.checked_store()?;
+        store.require_recovered_joined_removal(data, removal)?;
+        prepared.require_original(store)
+    }
+
+    pub(super) fn stage_retired_rejoin_catalog(
+        &self,
+        prepared: &mut crate::store::persistence::governance_layout::joined::rejoin::RejoinCatalogPreparation,
+    ) -> Result<(), AppError> {
+        let cell = self.cell.try_lock().map_err(|_| refused())?;
+        cell.require_idle()?;
+        self.handler.require_idle_cached()?;
+        prepared.stage_catalog(self.current()?.checked_store()?)
     }
 
     fn with_registered_native_join<T>(

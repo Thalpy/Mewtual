@@ -659,8 +659,12 @@ mounted rejoin route.
 
 The retired owner prepares one authenticated namespace 9 catalog after its
 original TCP actor drains. It holds the original mount, file identities
-and reservation through retries. File names and contents are unchanged
-during preparation. Ordinary readers still refuse the new namespace.
+and reservation through retries. Staging writes only the private rejoin
+candidate. A cold retired owner can authenticate and reuse the complete
+candidate, and a partial file is preserved for recovery. Global JOIN Stage
+must stay absent. The selected catalog remains unchanged until the later
+durable switch and same-vault mount. Ordinary readers refuse a selected
+namespace 9. No replacement key entry can use the staged candidate.
 Production rejoin must durably select it before the new native key cut,
 hold the exact original files through selection, and verify that the new
 admission descends from the exact selected removal. The registry

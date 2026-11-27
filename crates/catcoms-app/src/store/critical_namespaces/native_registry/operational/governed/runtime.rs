@@ -100,6 +100,18 @@ impl NativeTextRemovedJoinedVault {
         }
         Ok(true)
     }
+
+    /// Cover a local rejoin catalog candidate on disk. Current, the selected
+    /// membership and the native index remain unchanged. The next opener can
+    /// authenticate and reuse this exact complete candidate.
+    pub fn stage_rejoin_catalog(&mut self, rng: &mut dyn CryptoRngCore) -> Result<bool, AppError> {
+        if !self.prepare_rejoin_catalog(rng)? {
+            return Ok(false);
+        }
+        let prepared = self.rejoin_catalog.as_mut().ok_or_else(refused)?;
+        self.index.stage_retired_rejoin_catalog(prepared)?;
+        Ok(true)
+    }
 }
 
 impl NativeTextJoinedStorage {

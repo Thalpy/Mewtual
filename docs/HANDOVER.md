@@ -19,14 +19,18 @@ Pending records.
 
 The retired vault keeps the original file owner and waits for its actual
 TCP actor to retire before preparing the exact namespace9 catalog. It retains
-one paid candidate, with no file writes or replacement keys at preparation.
-The Windows native case rejects an equal-byte selector replacement and a late
-conflict file. Reusing the original files permits the same preparation.
+one paid candidate. An explicit staging step writes and syncs that candidate
+under a private fixed name. The selected catalog stays unchanged. A cold
+retired owner can reuse the same candidate after authenticating it against
+the original Current. The Windows native fixture rejected equal-byte
+replacements of the selector and Stage, rejected a late conflict, reused
+the complete cold Stage without another draw, and preserved a partial Stage.
 JOIN rewrites now preserve the existing shared-history descriptor and the
 new rejoin descriptor byte for byte. The registry replacement format is
 tested as data. Durable catalog selection, the mounted namespace,
-per-incarnation journals and the desktop replacement route remain open. The existing 20- and 50-writer ledger tests
-passed with reordered pages, restart and concurrent changes. Those are
+per-incarnation journals and the desktop replacement route remain open.
+The existing 20- and 50-writer ledger tests passed with reordered pages,
+restart and concurrent changes. Those are
 protocol simulations. The larger native topology and physical acceptance
 are still open.
 

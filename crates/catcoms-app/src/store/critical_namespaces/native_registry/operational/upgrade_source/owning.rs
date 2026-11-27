@@ -514,6 +514,13 @@ impl Store {
             .require_original_rejoin_catalog(data, removal, prepared)
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn stage_retired_rejoin_catalog(
+        &self,
+        prepared: &mut crate::store::persistence::governance_layout::joined::rejoin::RejoinCatalogPreparation,
+    ) -> Result<(), AppError> {
+        self.physical.stage_retired_rejoin_catalog(prepared)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn prepare_recovered_native_join_tcp(
         &self,
         data: &crate::store::NativeTextJoinedRegistrationData,
