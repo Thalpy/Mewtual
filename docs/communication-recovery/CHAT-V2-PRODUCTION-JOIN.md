@@ -686,8 +686,10 @@ row and selects one replacement row. Native startup attaches the exact
 replacement and replays its subsequent governing history. Saved outbox
 originals keep their original scopes. Terminal A1 can also be recovered
 before a replacement index exists without binding the old port.
-Starting rejoin from the renderer,
-further same-device successors and physical acceptance remain open.
+Native unlock and resume retain that authenticated mount as a
+recovery-only session with no active rows. Starting rejoin from that
+session, further same-device successors and physical acceptance remain
+open.
 
 Selecting the rejoin catalog for a new invite checks the original
 retired vault, the signed anchor and policy, a new nonce, invite

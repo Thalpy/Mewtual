@@ -33,14 +33,26 @@ impl NativeTextVault {
             facade::IndexOwner::Version3(index) => Some(index.observe_closed_work()),
             facade::IndexOwner::Version2(_) => None,
         };
-        NativeTextWorkRetirementPreparation {
+        NativeTextWorkRetirementPreparation::from_original(
             original,
-            expected: self.ui_invocation_budget(),
+            self.ui_invocation_budget(),
             credit,
-        }
+        )
     }
 }
 impl NativeTextWorkRetirementPreparation {
+    pub(super) fn from_original(
+        original: Option<WorkDrain>,
+        expected: NativeUiInvocationBudget,
+        credit: NativeUiInvocationMetadata,
+    ) -> Self {
+        Self {
+            original,
+            expected,
+            credit,
+        }
+    }
+
     /// Validate the actual original caller debit only OUTSIDE native/Root
     /// guards. Refusal returns the whole capture and its original payment.
     pub fn finish(self) -> Result<NativeTextWorkRetirement, Box<Self>> {

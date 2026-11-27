@@ -117,6 +117,14 @@ same UI generation and invocation must separately admit the Stage
 write and the rename. A warm response after a possible rename requires
 an authenticated cold confirmation. It cannot publish an active row.
 
+Recovered terminal A1 can open a native retired session after the same
+vault's passphrase is verified. Its checked authorization is separate
+from the ordinary UI fence. It grants no chat row, ordinary media
+activation or legacy Store access. Native resume compares the exact
+mounted owner and generation before replying. The same native lock
+invalidates both gates, and close waits for any original retired
+physical reader before dropping the vault.
+
 Cold founder startup can complete a fully staged later Add only after vault
 authentication and replay under the original pin. It retains and rechecks
 the named parent, archive, stage and each journal record against their
