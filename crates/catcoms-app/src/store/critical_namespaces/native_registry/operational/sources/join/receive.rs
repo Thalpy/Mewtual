@@ -39,6 +39,7 @@ mod contact_recovery;
 mod dependencies;
 mod governing;
 mod history_discovery;
+mod removed_review;
 pub(super) use archive_discovery::ArchiveRelayState;
 pub use contact_recovery::NativeTextJoinedSavedContactApprovals;
 pub use dependencies::{

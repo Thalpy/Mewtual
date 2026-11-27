@@ -189,13 +189,7 @@ impl V2JoinedMemberHistoryAccess<'_> {
             provider: self.local,
         };
         let key = request.0.reply_key(self, route)?;
-        let mut body = Encoder::with_capacity(MAX_REPLY - OVERHEAD - REPLY_TAG.len());
-        body.put_u8(page.actions.len() as u8);
-        for action in &page.actions {
-            data(body.put_bytes(action.as_bytes()))?;
-        }
-        put_cursor(&mut body, page.next)?;
-        seal_frame(&key, REPLY_TAG, &Zeroizing::new(body.finish()), rng)
+        seal_frame(&key, REPLY_TAG, &encode_page(page)?, rng)
     }
 
     pub fn open_archive_page_reply(
@@ -210,34 +204,52 @@ impl V2JoinedMemberHistoryAccess<'_> {
         };
         let frame = parse_frame(wire, REPLY_TAG, MAX_REPLY)?;
         let key = request.binding.reply_key(self, route)?;
-        let plain = open_frame(&key, frame)?;
-        let mut body = Decoder::new(&plain);
-        let count = usize::from(data(body.get_u8())?);
-        if count > V2_ARCHIVE_HISTORY_PAGE_SIZE {
-            return Err(SyncError::Malformed);
-        }
-        let mut actions = Vec::with_capacity(count);
-        for _ in 0..count {
-            actions.push(ActionId::from_bytes(
-                data(body.get_bytes())?
-                    .try_into()
-                    .map_err(|_| SyncError::Malformed)?,
-            ));
-        }
-        let next = get_cursor(&mut body)?;
-        data(body.finish())?;
-        let page = V2ArchiveHistoryPage::new(actions, next)?;
+        let page = decode_page(&open_frame(&key, frame)?)?;
         request.binding.require_progress(&page)?;
         Ok(page)
     }
 }
 
-fn put_cursor(body: &mut Encoder, cursor: Option<V2ArchiveHistoryCursor>) -> Result<(), SyncError> {
+pub(super) fn encode_page(page: &V2ArchiveHistoryPage) -> Result<Zeroizing<Vec<u8>>, SyncError> {
+    let mut body = Encoder::with_capacity(MAX_REPLY - OVERHEAD - REPLY_TAG.len());
+    body.put_u8(page.actions.len() as u8);
+    for action in &page.actions {
+        data(body.put_bytes(action.as_bytes()))?;
+    }
+    put_cursor(&mut body, page.next)?;
+    Ok(Zeroizing::new(body.finish()))
+}
+
+pub(super) fn decode_page(plain: &[u8]) -> Result<V2ArchiveHistoryPage, SyncError> {
+    let mut body = Decoder::new(plain);
+    let count = usize::from(data(body.get_u8())?);
+    if count > V2_ARCHIVE_HISTORY_PAGE_SIZE {
+        return Err(SyncError::Malformed);
+    }
+    let mut actions = Vec::with_capacity(count);
+    for _ in 0..count {
+        actions.push(ActionId::from_bytes(
+            data(body.get_bytes())?
+                .try_into()
+                .map_err(|_| SyncError::Malformed)?,
+        ));
+    }
+    let next = get_cursor(&mut body)?;
+    data(body.finish())?;
+    V2ArchiveHistoryPage::new(actions, next)
+}
+
+pub(super) fn put_cursor(
+    body: &mut Encoder,
+    cursor: Option<V2ArchiveHistoryCursor>,
+) -> Result<(), SyncError> {
     data(body.put_bytes(cursor.as_ref().map_or(&[][..], |cursor| cursor.as_bytes())))?;
     Ok(())
 }
 
-fn get_cursor(body: &mut Decoder<'_>) -> Result<Option<V2ArchiveHistoryCursor>, SyncError> {
+pub(super) fn get_cursor(
+    body: &mut Decoder<'_>,
+) -> Result<Option<V2ArchiveHistoryCursor>, SyncError> {
     let bytes = data(body.get_bytes())?;
     if bytes.is_empty() {
         return Ok(None);

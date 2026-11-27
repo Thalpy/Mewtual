@@ -427,6 +427,34 @@ impl V2GeneralPrefixVerifier {
         Self::ordinary_authorization_temporary_layout_bytes() + 2 * crate::chat::MAX_ACTION_BYTES
     }
 
+    /// The exact selected Remove on this verifier, available to bind a
+    /// founder review request before reading any proposed original.
+    pub fn removed_review_coordinates(
+        &self,
+        author: &V2FrozenAdmission,
+    ) -> Result<(OwnerHeaderId, u64), ChatError> {
+        self.live()?;
+        self.require_admission(&author.admission)?;
+        if !author.admission.core.life.closed.load(Ordering::Acquire) {
+            return Err(ChatError::Authority);
+        }
+        Ok(author.removal)
+    }
+
+    /// Check the holder's exact retained Create against its selected frozen
+    /// author. The founder still checks dependencies and absence separately.
+    pub fn require_removed_review_create(
+        &self,
+        author: &V2FrozenAdmission,
+        action: &SignedAction,
+    ) -> Result<(), ChatError> {
+        self.removed_review_coordinates(author)?;
+        if !matches!(action.spec().body, Body::Create { .. }) {
+            return Err(ChatError::Permission);
+        }
+        author.admission.core.body.matches_action_delegation(action)
+    }
+
     /// Verify historical authority for withholding this exact Create or
     /// reply. The caller still decides whether independently verified
     /// inclusion or existing selected bytes already keep it in history.
@@ -448,17 +476,9 @@ impl V2GeneralPrefixVerifier {
             return Err(ChatError::Permission);
         };
         self.require_receiver_ledger(ledger, view, &action)?;
-        self.require_admission(&author.admission)?;
-        if !author.admission.core.life.closed.load(Ordering::Acquire) {
-            return Err(ChatError::Authority);
-        }
         // Authenticate the claimed sender before reporting missing parents.
         // A forged action must never nominate work for a later holder.
-        author
-            .admission
-            .core
-            .body
-            .matches_action_delegation(&action)?;
+        self.require_removed_review_create(author, &action)?;
         let checked = self.ledger_dependencies(
             ledger,
             &action,

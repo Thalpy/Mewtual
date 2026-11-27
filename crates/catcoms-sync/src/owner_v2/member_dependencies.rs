@@ -4,6 +4,7 @@
 pub(super) mod archive_history;
 mod archive_relay;
 pub(super) mod history;
+pub(super) mod removed_review;
 
 catcoms_rt::redacted_debug! {
     V2FounderMemberDependencyAccess<'_>;

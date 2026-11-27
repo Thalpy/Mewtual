@@ -46,6 +46,22 @@ row. Restart can finish the same authenticated claim after a cut.
 First-session founder provisioning, approved-holder delivery, signed
 decisions and the admin timeline remain open.
 
+The joined holder has a dedicated review request on the connected
+dependency lane. It accepts the original founder from its signed invite
+and checks the current founder Admission and exact selected Remove.
+Local archive maintenance groups selected records by former Admission.
+The holder reads at most one page of eight for the requested Admission,
+checks the original signed Creates and issues an opaque fetch token.
+
+The token keeps its first offered IDs. A retry can omit an unavailable
+record and still advance the same sweep. It cannot grant access to a
+new ID under that token. A fetch requires the original connection,
+the same selected scope, the exact offer and a fresh strict read of
+the selected original. The reply carries the exact signed bytes for
+founder review. Ordinary catch-up retains its current-member gates.
+Founder-side approval, issuing the requests, and retaining their
+results are still pending.
+
 29 October clarification: current desktop new-message sends use a separate save-before-export
 transaction with a persisted retry identity. The accepted-in-memory boundary below still applies
 to received history and low-level legacy mutation APIs. The integrated desktop edit/delete path
