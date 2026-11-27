@@ -14,9 +14,11 @@ Warm and reopened founders now reconcile one exact debt per background
 turn using the original mounted row. The write may have completed after
 the carrier disconnected. An unresolved or damaged WAL is preserved.
 
-The current hot receive budget and archive retention still need capacity
-work. An interruption before a recoverable write still depends on signed
-redelivery. This checkpoint leaves Text Chat V2 disabled by default.
+Windows passed the native interrupted Delete, exact debt reconciliation
+and alternate-member recovery cases on the integrated branch. Two App
+TCP cases also passed, including an interrupted Create. This checkpoint
+keeps the existing hot receive and archive retention limits. An
+interruption before a recoverable write still requires signed redelivery.
 
 ## Reply to an original saved before membership changes
 
