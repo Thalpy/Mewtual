@@ -519,7 +519,7 @@ async fn turn(
     let page = with_row_until(
         state,
         source,
-        parked_deadline,
+        Some(local_turn_deadline()),
         move |original, row, _, scope| original.open_history_response(&row, reply, &scope),
     )
     .await?;
