@@ -1,5 +1,19 @@
 # Mewtual; Handover
 
+## Cover the signed initial history for a replacement membership
+
+The retired vault matches the exact closed Welcome with the selected
+replacement Add and covers its signed initial history. A warm retry retains
+the Core preparation if file work refuses after Sync has issued it. A cold
+opener reconstructs the same history from its exact closed Outcome and
+covered delivery. The new record is bound to the five original journals and
+the old terminal membership.
+
+The Windows native test passed warm cover, cold recovery without key
+generation, equal-byte file replacement refusal and preservation of a partial
+history record. The receipt identifies the prepared replacement. Index4
+selection, live source attachment and the renderer command remain open.
+
 ## Cover the closed Welcome for a replacement membership
 
 The retired vault verifies the saved delivery and restores its exact

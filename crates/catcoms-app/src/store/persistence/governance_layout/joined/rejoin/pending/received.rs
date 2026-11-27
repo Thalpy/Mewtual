@@ -2,9 +2,12 @@
 use super::*;
 
 mod welcome;
-pub use welcome::{NativeTextRejoinOutcomeReceipt, NativeTextRejoinWelcomeStatus};
+pub use welcome::{
+    NativeTextRejoinOutcomeReceipt, NativeTextRejoinPrefixReceipt, NativeTextRejoinWelcomeStatus,
+};
 pub(in crate::store) use welcome::{
-    RejoinWelcomeKeyEntry, RejoinWelcomeOwner, RejoinWelcomeOwners,
+    RejoinPrefixInputs, RejoinPrefixOwner, RejoinWelcomeKeyEntry, RejoinWelcomeOwner,
+    RejoinWelcomeOwners,
 };
 
 const RECEIVED: &str = "chat-critical-namespaces.rejoin-received.bin";

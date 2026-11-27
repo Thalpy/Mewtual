@@ -510,6 +510,25 @@ impl Physical {
         })
     }
 
+    pub(super) fn cover_rejoin_prefix(
+        &self,
+        original: (
+            crate::store::NativeTextJoinedRegistrationData,
+            catcoms_sync::SelectedRejoinRemoval,
+        ),
+        sources: RejoinPrefixInputs<'_>,
+        invite: (&crate::store::NativeTextInvitePacketData<'_>, [u8; 32]),
+        rng: &mut impl CryptoRngCore,
+        require_current: impl Fn() -> Result<(), AppError>,
+    ) -> Result<crate::store::NativeTextRejoinPrefixReceipt, AppError> {
+        if !self.rejoin_catalog_selected()? {
+            return Err(refused());
+        }
+        self.with_registered_native_join_inventory(original.0, |store, inventory| {
+            store.cover_rejoin_prefix(inventory, original, sources, invite, rng, require_current)
+        })
+    }
+
     fn with_registered_native_join<T>(
         &self,
         data: crate::store::NativeTextJoinedRegistrationData,
