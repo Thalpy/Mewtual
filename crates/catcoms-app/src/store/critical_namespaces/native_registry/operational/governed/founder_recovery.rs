@@ -13,6 +13,7 @@ use catcoms_rt::PeerId;
 use catcoms_sync::owner_v2::PreparedV2FounderRecoveredAdd;
 use tokio::sync::watch;
 
+mod add;
 mod authoring;
 mod history;
 mod invite;
@@ -69,6 +70,8 @@ pub struct NativeTextColdFounderSource {
     actor: Option<super::super::join_tcp::Loan>,
     tcp: Option<Arc<super::super::join_tcp::Transport>>,
     sdk: Option<PreparedV2FounderRecoveredAdd>,
+    // The cold writer pays for the Sync pending scaffold until it drains.
+    add: Option<Box<crate::store::persistence::v2_text::PreparedColdGovernedAdd>>,
     governed: Option<Box<HeldColdFounderAdd>>,
     genesis_sdk: Option<Box<crate::store::persistence::RetainedPromotedGenesisSdk>>,
     genesis: Option<Box<HeldColdFounderGenesis>>,
@@ -110,6 +113,7 @@ impl NativeTextJoinedStorage {
                     received: None,
                     member: None,
                     invite: Default::default(),
+                    add: None,
                     actor: None,
                     tcp: None,
                     sdk: None,

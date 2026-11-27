@@ -247,7 +247,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
             let response = job.run_join_request(&packet, [add, header, welcome], &work)?;
             response.encode_delivery_data().map_err(|_| Error::Failed)?
         } else {
-            job.run_recovered_join_response(body, &work)?
+            job.run_recovered_join_response(body, [add, header, welcome], &work)?
         };
         if work.is_cancelled() {
             return Err(Error::Cancelled);
@@ -299,22 +299,29 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberJob<T, R> {
     fn run_recovered_join_response(
         mut self,
         request: &[u8],
+        cuts: [catcoms_rt::NativeChatPreparedKeyCut; 3],
         caller: &RequestCancellation,
     ) -> Result<Vec<u8>, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Error;
         self.inner.require_current().map_err(|_| Error::Cancelled)?;
-        let founder = self
-            .inner
-            .loan
-            .body
-            .as_mut()
-            .and_then(|body| body.recovered_founder.as_mut())
-            .ok_or(Error::Unavailable)?;
+        let packet =
+            catcoms_sync::V2JoinRequestPacketData::decode(request).map_err(|_| Error::Failed)?;
+        let inner = &mut self.inner;
+        let body = inner.loan.body.as_mut().ok_or(Error::Unavailable)?;
+        let founder = body.recovered_founder.as_mut().ok_or(Error::Unavailable)?;
         let response = founder
-            .encode_recovered_join_delivery(request, caller)
+            .handle_recovered_join(
+                &packet,
+                (&mut inner.keys, cuts),
+                (
+                    body.clock.as_deref().ok_or(Error::Unavailable)?,
+                    body.rng.as_mut().ok_or(Error::Unavailable)?,
+                ),
+                caller,
+            )
             .map_err(|_| Error::Failed);
-        self.inner.loan.recorded = true;
-        self.inner.require_current().map_err(|_| Error::Cancelled)?;
+        inner.loan.recorded = true;
+        inner.require_current().map_err(|_| Error::Cancelled)?;
         response
     }
 }

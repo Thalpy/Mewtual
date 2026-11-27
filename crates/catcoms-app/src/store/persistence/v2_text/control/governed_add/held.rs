@@ -96,8 +96,8 @@ pub(in crate::store) use header_read::{
     GovernedAddHeaderRecoveryState, GovernedAddWelcomeRecoveryState,
 };
 mod writer;
-pub(in crate::store) use writer::PreparedGovernedAddFence;
 pub(in crate::store) use writer::PreparedGovernedRemoveFence;
+pub(in crate::store) use writer::{PreparedColdGovernedAdd, PreparedGovernedAddFence};
 
 /// An actual bounded, read-only File capture, tied to the exact selected
 /// parent through its read-resource association. All file and path custody

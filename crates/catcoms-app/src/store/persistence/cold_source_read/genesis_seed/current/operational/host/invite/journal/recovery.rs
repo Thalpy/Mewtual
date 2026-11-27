@@ -97,6 +97,7 @@ impl<'a> InviteRecoveryRead<'a> {
     pub(in super::super) fn capture_cold(
         &mut self,
         guard: &ColdInviteParent<'_>,
+        for_cover: bool,
     ) -> Result<(), AppError> {
         let (parent, base) = guard.context_data();
         if !std::ptr::eq(self.store, guard.store())
@@ -107,7 +108,7 @@ impl<'a> InviteRecoveryRead<'a> {
         }
         self.context = Some(selected_context(base, self.parent));
         self.pages = Some(open_pages(guard.target())?);
-        self.capture_slots(true)?;
+        self.capture_slots(for_cover)?;
         if self.intent.is_none() && (self.attempt.is_some() || self.raw.is_some()) {
             return Err(refused());
         }
@@ -222,6 +223,31 @@ impl<'a> InviteRecoveryRead<'a> {
             self.pages.as_ref().ok_or_else(refused)?;
             return Ok(None);
         }
+        let (intent, signed) = self.recover_cold_original(route, source)?;
+        intent.result(request, route)?;
+        signed.map(Some).ok_or_else(refused)
+    }
+
+    /// A received JoinRequest must carry the exact covered signature for
+    /// this selected physical parent. The original issuer token stays local.
+    pub(in super::super) fn require_cold_join_invite(
+        &self,
+        route: &[u8],
+        source: &OpenedBootstrapSourceData,
+        offered: &SignedInviteBindingData,
+    ) -> Result<(), AppError> {
+        let (_, signed) = self.recover_cold_original(route, source)?;
+        if signed.is_none_or(|original| original.encode() != offered.encode()) {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
+    fn recover_cold_original(
+        &self,
+        route: &[u8],
+        source: &OpenedBootstrapSourceData,
+    ) -> Result<(Intent, Option<SignedInviteBindingData>), AppError> {
         let original = source.genesis_public_data();
         let genesis = InviteGenesis {
             context: original.context_data(),
@@ -229,9 +255,7 @@ impl<'a> InviteRecoveryRead<'a> {
             admission: original.admission_data(),
             header: original.header_data(),
         };
-        let (intent, signed) = self.recover(route, genesis)?;
-        intent.result(request, route)?;
-        signed.map(Some).ok_or_else(refused)
+        self.recover(route, genesis)
     }
 
     fn recover(

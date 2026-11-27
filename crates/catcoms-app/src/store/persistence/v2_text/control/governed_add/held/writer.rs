@@ -12,7 +12,9 @@ pub(in crate::store) use removal::PreparedGovernedRemoveFence;
 use std::fs::OpenOptions;
 use std::io::Write;
 
+mod cold;
 mod header;
+pub(in crate::store) use cold::PreparedColdGovernedAdd;
 
 /// File custody is cached immediately after creation and survives errors or
 /// interruption. Retrying this owner can append only its own verified prefix.
@@ -53,7 +55,21 @@ impl PreparedSmallControl {
         maximum: usize,
         guard: &V2TextCurrentGroupGuard<'_, '_>,
     ) -> Result<(), AppError> {
-        let (target, directory, id) = guard.target_directory_data();
+        self.cover_named(path, maximum, guard.target_directory_data())?;
+        guard.validate_source_only()
+    }
+
+    // The owning writer has already proved this original directory and
+    // its admission. This is only the mechanics of one immutable stage.
+    fn cover_named(
+        &mut self,
+        path: &Path,
+        maximum: usize,
+        (target, directory, id): (&Path, &std::fs::File, catcoms_storage::kept::SessionId),
+    ) -> Result<(), AppError> {
+        if path.parent() != Some(target) {
+            return Err(refused());
+        }
         if !self.covered {
             ensure_original(
                 path,
@@ -72,8 +88,7 @@ impl PreparedSmallControl {
             )?;
             self.covered = true;
         }
-        self.require_covered(path)?;
-        guard.validate_source_only()
+        self.require_covered(path)
     }
 
     fn require_covered(&mut self, path: &Path) -> Result<(), AppError> {
@@ -101,7 +116,24 @@ fn select_governed_head(
     current: &mut OpenedTextControl,
     entered: &mut bool,
 ) -> Result<(), AppError> {
-    let (target, directory, id) = guard.target_directory_data();
+    select_named_head(
+        guard.target_directory_data(),
+        stage,
+        head_path,
+        current,
+        entered,
+        || guard.validate_source_only(),
+    )
+}
+
+fn select_named_head(
+    (target, directory, id): (&Path, &std::fs::File, catcoms_storage::kept::SessionId),
+    stage: &Path,
+    head_path: &Path,
+    current: &mut OpenedTextControl,
+    entered: &mut bool,
+    require_authority: impl FnOnce() -> Result<(), AppError>,
+) -> Result<(), AppError> {
     if stage.parent() != Some(target) || head_path != fixed_child(target, "head.bin")?.as_path() {
         return Err(refused());
     }
@@ -109,7 +141,8 @@ fn select_governed_head(
         target, directory, id,
     )?;
     require_exact_held(head_path, current)?;
-    guard.validate_source_only()?;
+    require_authority()?;
+    require_exact_held(head_path, current)?;
     *entered = true;
     fs::rename(stage, head_path).map_err(io)
 }

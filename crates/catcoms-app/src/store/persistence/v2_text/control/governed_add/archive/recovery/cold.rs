@@ -107,6 +107,61 @@ struct OpenedColdFounderOrigin {
     plain: Zeroizing<Vec<u8>>,
 }
 
+/// Physical writer scope for the exact recovered parent. It carries the
+/// already-held archive Root, never a warm Current owner or a file path
+/// supplied by the request. The owning Add separately checks its records.
+pub(in crate::store::persistence::v2_text) struct ColdGovernedWriteScope<'a> {
+    store: &'a ServerStore,
+    source: &'a RetainedBootstrapSourceData,
+    root: &'a crate::store::critical_namespaces::archive_bootstrap::MountedRoot,
+    native: &'a catcoms_rt::RequestCancellation,
+    parent: (TextContextIdData, TextHeadIdData),
+}
+
+impl ColdGovernedWriteScope<'_> {
+    pub(in crate::store::persistence::v2_text) fn directory_data(
+        &self,
+    ) -> (&Path, &File, SessionId) {
+        self.source.original_target_data()
+    }
+
+    pub(in crate::store::persistence::v2_text) fn require_current(
+        &self,
+        parent: (TextContextIdData, TextHeadIdData),
+    ) -> Result<(), AppError> {
+        if self.native.is_cancelled()
+            || parent != self.parent
+            || !self
+                .store
+                .current_layout_policy
+                .as_ref()
+                .and_then(|policy| policy.native_registry.as_ref())
+                .is_some_and(|handler| handler.is_governed())
+        {
+            return Err(refused());
+        }
+        self.source
+            .validate_under_archive_root(self.store, self.root)?;
+        self.store
+            .validate_mounted_current_layout_under_archive_root(self.root)?;
+        self.store
+            .validate_mounted_governance_layout_under_archive_root(self.root)?;
+        let (target, directory, id) = self.directory_data();
+        require_directory_name(target, directory, id)?;
+        self.require_live_cached(parent)
+    }
+
+    pub(in crate::store::persistence::v2_text) fn require_live_cached(
+        &self,
+        parent: (TextContextIdData, TextHeadIdData),
+    ) -> Result<(), AppError> {
+        if self.native.is_cancelled() || parent != self.parent {
+            return Err(refused());
+        }
+        self.source.require_original_negative(self.store)
+    }
+}
+
 /// The original selected promoted genesis before any governing Add admission.
 /// This proof cannot restore a successor or authorize a new SDK operation.
 pub(in crate::store) struct HeldColdFounderGenesis {
@@ -354,6 +409,125 @@ impl<'a> ColdInviteParent<'a> {
 }
 
 impl HeldColdFounderAdd {
+    /// Borrow the same physical parent for an owned successor's file work.
+    /// The ordinary reader still requires absent successor stages. Here the
+    /// actual writer must check every existing stage and downstream absence.
+    pub(in crate::store::persistence::v2_text) fn with_cold_governed_writer(
+        &mut self,
+        store: &ServerStore,
+        source: &RetainedBootstrapSourceData,
+        caller: &catcoms_rt::RequestCancellation,
+        write: impl FnOnce(
+            &ColdGovernedWriteScope<'_>,
+            &mut dyn FnMut() -> Result<(), AppError>,
+        ) -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
+        if self.core.is_none() || caller.is_cancelled() {
+            return Err(refused());
+        }
+        self.files.origin.original.require_same_original(source)?;
+        let parent = (
+            self.files.selected.transition.context,
+            TextHeadIdData::of_data(&self.files.head.frame),
+        );
+        let root = store.archive_bootstrap_root.lock().map_err(|_| refused())?;
+        let scope = ColdGovernedWriteScope {
+            store,
+            source,
+            root: root.as_ref().ok_or_else(refused)?,
+            native: caller,
+            parent,
+        };
+        // Finish real Root/source/layout waits before the final held names
+        // and contents. A mutation while a layout waits cannot reach a key.
+        let mut require_parent = || {
+            scope.require_current(parent)?;
+            self.recovered.require_predecessors(source)?;
+            self.files.origin.require_named_files(source)?;
+            self.files.require_named_parent(source)?;
+            scope.require_live_cached(parent)
+        };
+        require_parent()?;
+        write(&scope, &mut require_parent)
+    }
+
+    /// Read or advance the one owned selector under the original Root. The
+    /// owner must prove the exact held parent or its own already-entered child.
+    /// Unlike a normal read, this tolerates an owned late rename result.
+    pub(in crate::store::persistence::v2_text) fn with_cold_governed_selection<T>(
+        &mut self,
+        store: &ServerStore,
+        source: &RetainedBootstrapSourceData,
+        caller: &catcoms_rt::RequestCancellation,
+        select: impl FnOnce(
+            &ColdGovernedWriteScope<'_>,
+            &mut OpenedTextControl,
+            &mut V2GeneralPrefixVerifier,
+            &mut dyn FnMut() -> Result<(), AppError>,
+        ) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        self.files.origin.original.require_same_original(source)?;
+        self.recovered.require_predecessors(source)?;
+        let parent = (
+            self.files.selected.transition.context,
+            TextHeadIdData::of_data(&self.files.head.frame),
+        );
+        let core = self.core.as_mut().ok_or_else(refused)?;
+        let result;
+        {
+            let root = store.archive_bootstrap_root.lock().map_err(|_| refused())?;
+            let scope = ColdGovernedWriteScope {
+                store,
+                source,
+                root: root.as_ref().ok_or_else(refused)?,
+                native: caller,
+                parent,
+            };
+            scope.require_current(parent)?;
+            let mut require_parent_archive = || {
+                scope.require_current(parent)?;
+                self.recovered.require_predecessors(source)?;
+                self.files.origin.require_named_files(source)?;
+                require_exact_held(&self.files.archive_path, &mut self.files.archive)?;
+                scope.require_live_cached(parent)
+            };
+            require_parent_archive()?;
+            result = select(
+                &scope,
+                &mut self.files.head,
+                &mut core.verifier,
+                &mut require_parent_archive,
+            );
+        }
+        result
+    }
+
+    /// Refresh only the physical archive authority after the original
+    /// verifier and SDK installed the same durable successor. Moving the
+    /// exact live Core keeps the founder's bound Admission identity.
+    pub(in crate::store) fn refresh_selected_add(
+        &mut self,
+        store: &ServerStore,
+        source: &RetainedBootstrapSourceData,
+        pin: [u8; 32],
+        head: TextHeadIdData,
+        installed: V2InstalledFounderAddData,
+    ) -> Result<Self, AppError> {
+        let core = self.core.as_ref().ok_or_else(refused)?;
+        let replay = core.verifier.replay_data();
+        if replay.header().id() != installed.header
+            || replay.header().spec().state != installed.state
+            || replay.mls_epoch_data() != installed.epoch
+        {
+            return Err(refused());
+        }
+        let mut next = Self::capture(store, source, pin)?;
+        next.require_installed_parent(source, head, installed)?;
+        next.require_current(store, source)?;
+        next.core = self.core.take();
+        Ok(next)
+    }
+
     /// Use the existing cold-selected proof without borrowing a warm Current
     /// writer. The native owning loan stays outside these physical checks.
     pub(in crate::store) fn with_checked_invite_parent<T>(
@@ -366,16 +540,29 @@ impl HeldColdFounderAdd {
             &mut dyn FnMut() -> Result<(), AppError>,
         ) -> Result<T, AppError>,
     ) -> Result<T, AppError> {
-        let binding = ColdInviteParent {
-            store,
-            target: source.original_target_data().0,
-            parent: TextHeadIdData::of_data(&self.files.head.frame),
-            context: self.files.origin.invite_context,
-        };
+        let binding = self.invite_parent_coordinates(store, source)?;
         self.with_checked_member_parts(store, source, |verifier, _, require| {
             let result = perform(&binding, verifier, require)?;
             require()?;
             Ok(result)
+        })
+    }
+
+    /// Labels for checking a read-only invitation against this exact parent.
+    /// Data only. The caller still needs the scope's original physical
+    /// writer, or a checked current parent, before using it for key entry.
+    pub(in crate::store) fn invite_parent_coordinates<'a>(
+        &self,
+        store: &'a ServerStore,
+        source: &'a RetainedBootstrapSourceData,
+    ) -> Result<ColdInviteParent<'a>, AppError> {
+        self.files.origin.original.require_same_original(source)?;
+        source.require_original_negative(store)?;
+        Ok(ColdInviteParent {
+            store,
+            target: source.original_target_data().0,
+            parent: TextHeadIdData::of_data(&self.files.head.frame),
+            context: self.files.origin.invite_context,
         })
     }
 
@@ -468,6 +655,18 @@ impl HeldColdFounderAdd {
             }
             ColdRecoveredArchive::Later(chain) => chain.encode_successor_proof(genesis, next),
         }
+    }
+
+    /// Derivation changes only the original verifier's paid candidate slot.
+    /// The selector independently proves files and native authority.
+    pub(in crate::store) fn derive_add_selection(
+        &mut self,
+        sdk: &PreparedV2FounderRecoveredAdd,
+        source: &RetainedBootstrapSourceData,
+    ) -> Result<catcoms_replication::chat::V2GeneralCandidate, AppError> {
+        self.files.origin.original.require_same_original(source)?;
+        let core = &mut self.core.as_mut().ok_or_else(refused)?.verifier;
+        Ok(sdk.derive_recovered_add_selection_data(core, source.data())?)
     }
 
     pub(in crate::store) fn member_parts(
@@ -911,23 +1110,33 @@ impl ColdFounderFiles {
         source: &RetainedBootstrapSourceData,
     ) -> Result<(OwnerHeaderId, u64), AppError> {
         self.origin.require_current(store, source)?;
+        self.require_named_parent(source)?;
+        let (target, directory, id) = source.original_target_data();
+        require_successor_stages_absent(target, TextHeadIdData::of_data(&self.head.frame))?;
+        require_directory_name(target, directory, id)?;
+        source.require_original_negative(store)?;
+        Ok((
+            self.selected.transition.header,
+            self.selected.transition.epoch,
+        ))
+    }
+
+    fn require_named_parent(
+        &mut self,
+        source: &RetainedBootstrapSourceData,
+    ) -> Result<(), AppError> {
         let (target, directory, id) = source.original_target_data();
         require_directory_name(target, directory, id)?;
         require_exact_held(&self.archive_path, &mut self.archive)?;
         require_exact_held(&fixed_child(target, "head.bin")?, &mut self.head)?;
         require_stages_absent(target)?;
-        require_successor_stages_absent(target, TextHeadIdData::of_data(&self.head.frame))?;
         require_directory_name(target, directory, id)?;
         require_directory_name(
             &self.origin.group,
             &self.origin.directory,
             self.origin.directory_id,
         )?;
-        source.require_original_negative(store)?;
-        Ok((
-            self.selected.transition.header,
-            self.selected.transition.epoch,
-        ))
+        Ok(())
     }
 }
 
@@ -940,6 +1149,14 @@ impl ColdFounderOrigin {
         self.original.require_same_original(source)?;
         source.validate_original(store)?;
         store.validate_mounted_current_layout()?;
+        self.require_named_files(source)?;
+        source.require_original_negative(store)
+    }
+
+    fn require_named_files(
+        &mut self,
+        source: &RetainedBootstrapSourceData,
+    ) -> Result<(), AppError> {
         let (target, directory, id) = source.original_target_data();
         require_directory_name(target, directory, id)?;
         require_directory_name(&self.group, &self.directory, self.directory_id)?;
@@ -948,7 +1165,7 @@ impl ColdFounderOrigin {
         require_stages_absent(target)?;
         require_directory_name(target, directory, id)?;
         require_directory_name(&self.group, &self.directory, self.directory_id)?;
-        source.require_original_negative(store)
+        Ok(())
     }
 }
 

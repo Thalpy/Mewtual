@@ -57,6 +57,13 @@ impl RecoveredMemberLane {
         self.context
     }
 
+    pub(in crate::store) fn require_quiescent_for_add(&self) -> Result<(), AppError> {
+        if self.requests.request.is_some() {
+            return Err(refused());
+        }
+        self.save_source.require_open_idle()
+    }
+
     pub(in crate::store) fn close_and_drained(&self) -> bool {
         self.save_source.close();
         self.save_source.drained()

@@ -26,6 +26,7 @@ mod chain;
 mod cold;
 #[cfg(all(test, any(windows, target_os = "linux")))]
 mod held;
+pub(in crate::store::persistence::v2_text) use cold::ColdGovernedWriteScope;
 pub(in crate::store) use cold::{ColdInviteParent, HeldColdFounderAdd, HeldColdFounderGenesis};
 #[cfg(all(test, any(windows, target_os = "linux")))]
 pub(in crate::store) use held::HeldGovernedArchiveRead;

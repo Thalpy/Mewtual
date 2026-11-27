@@ -1,5 +1,26 @@
 # Mewtual; Handover
 
+## Fresh Add on a recovered founder
+
+The native listener can answer a fresh signed invitation after recovering a
+selected Add or Remove. The original runtime retains the exact request and
+its paid journal, covers each native key stage, and selects matching durable
+MLS and Core state before it releases a Welcome. A lost response can use the
+selected archive. The writer rejects a different request while its original
+transaction is pending. It uses the existing encrypted Add and Head format.
+
+The initial Windows native test passed a real TCP Add after a selected
+Remove and two founder restarts, then confirmed the new Admission after
+another restart. Review identified lock placement, final file checks and
+payment tail defects. The corrected version runs the SDK outside Root and
+rechecks the actual invitation, journal and selector at the key and commit
+boundaries. The focused native test and race coverage on the corrected
+version are pending.
+
+Recovery of a crash before complete Head selection and rejoin in the same
+member vault remain open. Chat V2 stays disabled.
+
+
 ## 27 November 2026 — Prepare a real Add on the recovered founder graph
 
 The recovered founder can stage one private MLS Add in Sync using its
