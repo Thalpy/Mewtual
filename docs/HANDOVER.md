@@ -15,6 +15,18 @@ and an exact retry without new entropy. It also checked that an
 authentication proof cannot authorize a different reopen. The renderer
 has no command for this writer yet. Chat V2 remains disabled.
 
+## Retain the authenticated retired vault at native unlock
+
+Native unlock and resume can return a recovery session for a proved
+terminal A1. Its native row table is empty, and ordinary IPC stays
+locked. The retired mount has a separate permit bound to the same
+native lock generation. It retains the original physical owner until
+close drains its readers. The renderer opens a recovery screen without
+loading or saving the ordinary chat screen state.
+
+The renderer rejoin command and replacement transition still need to
+use this restricted session. Chat V2 remains disabled.
+
 ## Continue receiving when a paid history cache fills
 
 The native receiver can replace one full hot ledger and retry the same

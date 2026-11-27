@@ -27,6 +27,13 @@ test("native session retains two exact contexts without coercing channel integer
   assert.ok(Object.isFrozen(parsed.servers[0]));
   assert.notEqual(parsed.servers, native.servers);
 });
+test("removed membership opens a distinct recovery session with zero live rows", () => {
+  const retired = { backend: "text-v2", servers: [], recovery: "removed" };
+  assert.deepEqual(decodeRestoredChatSession(retired), retired);
+  for (const patch of [{ servers: [row] }, { recovery: true }, { backend: "legacy" }, { unexpected: 1 }]) {
+    assert.throws(() => decodeRestoredChatSession({ ...retired, ...patch }));
+  }
+});
 test("session decoder rejects mixed modes, future fields and guessed defaults", () => {
   for (const value of [[row], { servers: [] }, { backend: "legacy", servers: [] }, { backend: "future", servers: [] },
     { backend: "text-v2", servers: [], ignored: true }, { backend: "text-v2", servers: [row, row] },

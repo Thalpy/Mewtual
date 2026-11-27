@@ -105,6 +105,36 @@ impl Drop for NativeTextRemovedJoinedVault {
 }
 
 impl NativeTextRemovedJoinedVault {
+    /// Verify the passphrase for this exact retired physical mount.
+    /// Finish outside native guards. No ordinary Source is captured.
+    pub fn prepare_native_authentication(
+        &self,
+        credit: crate::store::NativeUiInvocationMetadata,
+    ) -> crate::store::NativeTextVaultAuthentication {
+        crate::store::NativeTextVaultAuthentication::capture(
+            &self.ui,
+            Some(&self.index),
+            true,
+            credit,
+        )
+    }
+
+    pub fn matches_native_authentication_cached(
+        &self,
+        check: &crate::store::NativeTextVaultAuthenticationCheck,
+    ) -> bool {
+        check.is_retired_mount_data() && check.matches_ui_mount(&self.ui.observe_mount())
+    }
+
+    /// Close must reclaim the exact owner even if its physical catalog
+    /// changed. This correlates custody and does not authenticate a caller.
+    pub fn matches_native_original_mount_cached(
+        &self,
+        check: &crate::store::NativeTextVaultAuthenticationCheck,
+    ) -> bool {
+        check.original_ui_mount(&self.ui.observe_mount())
+    }
+
     fn from_recovered_removal(
         index: upgrade_source::owning::Store,
         (registration, removal, transport): (
@@ -133,25 +163,6 @@ impl NativeTextRemovedJoinedVault {
             rejoin_prefix: None,
             rejoin_index: None,
         })
-    }
-
-    /// Authenticate this original retired mount without attaching a
-    /// transport, handing out a current row or entering a device key.
-    /// Finish the paid metadata work outside any native guards.
-    pub fn prepare_native_authentication(
-        &self,
-        credit: crate::store::NativeUiInvocationMetadata,
-    ) -> crate::store::NativeTextVaultAuthentication {
-        crate::store::NativeTextVaultAuthentication::capture(&self.ui, Some(&self.index), credit)
-    }
-
-    /// Check the exact retired mount. A live native facade, old active row
-    /// or different reopen's authentication cannot supply this match.
-    pub fn matches_native_authentication_cached(
-        &self,
-        check: &crate::store::NativeTextVaultAuthenticationCheck,
-    ) -> bool {
-        check.matches_ui_mount(&self.ui.observe_mount())
     }
 
     /// Capture the original retired vault's paid UI generation. The
@@ -227,6 +238,29 @@ impl NativeTextRemovedJoinedVault {
             });
         }
         Ok(true)
+    }
+
+    /// Release closed UI-generation bookkeeping after the actual batch
+    /// drained. Drop the returned custody outside native guards.
+    pub fn collect_retired_ui(&self) -> Result<crate::store::NativeTextUiGarbage, AppError> {
+        self.ui.collect_drained()
+    }
+
+    /// Fence and observe the original paid physical readers before native
+    /// close can release this retired mount. Native drains admitted UI/key
+    /// work independently before taking this cached close observation.
+    pub fn capture_work_retirement(
+        &self,
+        credit: crate::store::NativeUiInvocationMetadata,
+    ) -> crate::store::NativeTextWorkRetirementPreparation {
+        self.ui.close_first();
+        self.key_source.close();
+        self.index.close_admission();
+        crate::store::NativeTextWorkRetirementPreparation::from_original(
+            Some(self.index.observe_closed_work()),
+            self.ui.invocation_budget(),
+            credit,
+        )
     }
 
     /// Recheck the exact registry, original Welcome files and selected
@@ -770,9 +804,14 @@ impl NativeTextJoinedStorage {
         ),
         AppError,
     > {
-        match self
-            .into_native_startup_membership(session, ui_budget, policy, negative, first, active)?
-        {
+        match self.into_native_startup_membership(
+            (session, None),
+            ui_budget,
+            policy,
+            negative,
+            first,
+            active,
+        )? {
             NativeTextJoinedRecovery::Active(vault, sources) => Ok((vault, sources)),
             NativeTextJoinedRecovery::Removed(_) => Err(AppError::ChatV2MembershipRemoved),
         }
@@ -783,7 +822,7 @@ impl NativeTextJoinedStorage {
     /// vault without a Source. Partial rejoin data cannot reopen active A1.
     pub fn into_native_startup_membership<R: CryptoRngCore>(
         mut self,
-        session: (Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicBool>),
+        (session, retired_ui): StartupUiAtoms,
         ui_budget: crate::store::NativeUiInvocationBudget,
         policy: &crate::store::NativeTextSourcePolicy,
         negative: &RequestCancellation,
@@ -841,10 +880,12 @@ impl NativeTextJoinedStorage {
             return Err(refused());
         }
         if !indexed_rejoin {
+            let (generation, authorized, requested) = session;
+            let (authorized, requested) = retired_ui.unwrap_or((authorized, requested));
             let retired = NativeTextRemovedJoinedVault::from_recovered_removal(
                 self.index,
                 (first, removal, RetiredTransport::NeverStarted),
-                session,
+                (generation, authorized, requested),
                 ui_budget,
             )?;
             if negative.is_cancelled() {
@@ -865,6 +906,11 @@ impl NativeTextJoinedStorage {
         )
     }
 }
+type StartupUiAtoms = (
+    (Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicBool>),
+    Option<(Arc<AtomicU64>, Arc<AtomicBool>)>,
+);
+
 type NativeRejoinSession<'a> = (
     (Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicBool>),
     crate::store::NativeUiInvocationBudget,

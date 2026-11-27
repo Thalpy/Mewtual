@@ -2070,16 +2070,76 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
             .to_string();
         let reply = invoke(&main, &generation, SECRET);
         run(&queue).await;
-        let tauri::ipc::InvokeResponse::Err(error) = reply.await.unwrap() else {
-            panic!("a closed original Admission must not acquire a native row");
-        };
-        assert!(state.store.lock().await.is_none());
-        error.0
+        match reply.await.unwrap() {
+            tauri::ipc::InvokeResponse::Err(error) => {
+                assert!(state.store.lock().await.is_none());
+                error.0
+            }
+            accepted @ tauri::ipc::InvokeResponse::Ok(_) => {
+                assert!(matches!(
+                    state.store.lock().await.as_ref(),
+                    Some(MountedVault::TextV2Retired(_))
+                ));
+                assert!(state.servers.lock().await.is_empty());
+                let data = found_value(accepted);
+                assert!(ui_session_closed(&state));
+                assert!(require_unlocked_session(&state).await.is_err());
+                let post = invite_command(&main, "send_message", serde_json::json!({}));
+                assert!(matches!(
+                    post.await.unwrap(),
+                    tauri::ipc::InvokeResponse::Err(_)
+                ));
+                let resume = invite_command(&main, "resume_session", serde_json::json!({}));
+                run(&queue).await;
+                assert_eq!(found_value(resume.await.unwrap()), data);
+                let lock = invite_command(
+                    &main,
+                    "lock_session",
+                    serde_json::json!({"unexpected": true}),
+                );
+                run(&queue).await;
+                let lock = found_value(lock.await.unwrap());
+                assert!(lock["continuity_error"].is_null());
+                let resume = invite_command(&main, "resume_session", serde_json::json!({}));
+                assert_eq!(found_value(resume.await.unwrap()), serde_json::Value::Null);
+                let generation = lock["generation"].as_str().unwrap();
+                let wrong = invoke(&main, generation, "wrong retired secret");
+                run(&queue).await;
+                assert!(matches!(
+                    wrong.await.unwrap(),
+                    tauri::ipc::InvokeResponse::Err(_)
+                ));
+                let reopen = invoke(&main, generation, SECRET);
+                run(&queue).await;
+                assert_eq!(found_value(reopen.await.unwrap()), data);
+                let credit = state.native_text.ui_budget.prepare().unwrap();
+                let authentication_work = {
+                    let store = state.store.lock().await;
+                    let Some(MountedVault::TextV2Retired(vault)) = store.as_ref() else {
+                        panic!("the recovery session keeps its original affinity");
+                    };
+                    vault.prepare_native_authentication(credit)
+                };
+                let close = register_vault_close(&state).await.unwrap();
+                let (result, ()) =
+                    tokio::join!(sources::close_server_rows(&state, &SystemClock), async {
+                        timeout(
+                            Duration::from_secs(5),
+                            state.native_text.source_work_waiting.notified(),
+                        )
+                        .await
+                        .expect("close waits for the retired mount's actual authentication work");
+                        drop(authentication_work);
+                    },);
+                result.unwrap();
+                drop(close);
+                assert!(state.store.lock().await.is_none());
+                data
+            }
+        }
     };
-    assert_eq!(
-        removed_response(member_path.clone()).await,
-        serde_json::json!("This device was removed from this Chat V2 server."),
-    );
+    let retired_reply = serde_json::json!({"backend":"text-v2","servers":[],"recovery":"removed"});
+    assert_eq!(removed_response(member_path.clone()).await, retired_reply,);
     let wait_for_original_vault = || async {
         timeout(Duration::from_secs(5), async {
             loop {
@@ -2136,10 +2196,7 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
     assert!(parked_body.is_file() && selector.is_file() && !body.exists());
     std::fs::rename(parked_body, body).unwrap();
     wait_for_original_vault().await;
-    assert_eq!(
-        removed_response(member_path.clone()).await,
-        serde_json::json!("This device was removed from this Chat V2 server."),
-    );
+    assert_eq!(removed_response(member_path.clone()).await, retired_reply,);
 
     if !join_after_restart {
         use catcoms_app::store::{NativeTextJoinedRecovery, NativeTextJoinedStorage};
@@ -2180,7 +2237,7 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
                     .expect("an unrelated listener can own the retired A1 port");
                 storage
                     .into_native_startup_membership(
-                        atoms,
+                        (atoms, None),
                         registry.ui_budget.clone(),
                         &registry.sources.policy(),
                         &negative,
@@ -5567,11 +5624,7 @@ async fn native_text_sources_real_boot_envelope_unpolled_and_unwind_drop_files_b
             .advance(
                 &path,
                 SECRET.as_bytes(),
-                (
-                    state.ui_session_generation.clone(),
-                    state.ui_authorized_generation.clone(),
-                    state.session_lock_requested.clone(),
-                ),
+                startup_atoms(&state),
                 state.native_text.ui_budget.clone(),
                 state.native_text.sources.policy(),
                 boot::NativeRowBudget::capture(&state).await,

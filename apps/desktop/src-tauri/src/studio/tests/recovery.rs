@@ -45,7 +45,7 @@ async fn native_recovery_export_conversion_holds_fences_and_suppresses_a_late_lo
             .as_mut()
             .and_then(|vault| match vault {
                 MountedVault::Legacy(store) => Some(store.as_mut()),
-                MountedVault::TextV2(_) => None,
+                MountedVault::TextV2(_) | MountedVault::TextV2Retired(_) => None,
             })
             .unwrap()
             .update_epoch_recovery(

@@ -10,6 +10,19 @@ pub(super) const STALE: &str = "The chat session changed. Unlock again.";
 const CREDITS: usize = 8;
 const BODY_CAP: usize = 16 * 1024;
 
+fn authorization_is_current(
+    state: &AppState,
+    generation: u64,
+    target: &NativeTextVaultAuthenticationCheck,
+) -> bool {
+    if target.is_retired_mount_data() {
+        retired_ui_current(state, generation)
+    } else {
+        !ui_session_closed(state)
+            && state.ui_session_generation.load(Ordering::SeqCst) == generation
+    }
+}
+
 pub(super) struct Policy {
     slots: Arc<Semaphore>,
 }
@@ -85,15 +98,14 @@ impl Output {
         store: &Option<MountedVault>,
         table: &server_table::ServerTable,
     ) -> bool {
-        if ui_session_closed(state)
-            || state.ui_session_generation.load(Ordering::SeqCst) != self.generation
+        if !authorization_is_current(state, self.generation, &self.target)
             || self.account.is_cancelled()
             || state.native_text.sources.is_closing_cached()
             || !store
                 .as_ref()
-                .and_then(MountedVault::as_text_v2)
-                .is_some_and(|vault| self.target.is_for_original_vault(vault))
+                .is_some_and(|vault| vault.matches_text_v2_authentication(&self.target))
             || table.len() != self.rows.len()
+            || (self.target.is_retired_mount_data() && !table.is_empty())
         {
             return false;
         }
@@ -120,7 +132,13 @@ pub(super) async fn snapshot(
     target: Arc<NativeTextVaultAuthenticationCheck>,
     payment: Arc<Payment>,
 ) -> Result<Output, String> {
-    let account = keep_session::current(state, generation).ok_or(STALE)?;
+    let retired = target.is_retired_mount_data();
+    let account = if retired {
+        keep_session::current_retired(state, generation)
+    } else {
+        keep_session::current(state, generation)
+    }
+    .ok_or(STALE)?;
     let mut names = [Some(Names::prepared()), Some(Names::prepared())];
     let mut output = Output {
         target,
@@ -133,18 +151,23 @@ pub(super) async fn snapshot(
         _payment: payment,
     };
     let captured = {
-        let _commit = require_ui_session_generation(state, generation).await?;
+        let _commit = if retired {
+            state.ui_session_commit.lock().await
+        } else {
+            require_ui_session_generation(state, generation).await?
+        };
         let store = state.store.lock().await;
         let table = state.servers.lock().await;
         (|| {
-            if state.native_text.sources.is_closing_cached()
+            if !authorization_is_current(state, generation, &output.target)
+                || state.native_text.sources.is_closing_cached()
                 || output.account.is_cancelled()
                 || !store
                     .as_ref()
-                    .and_then(MountedVault::as_text_v2)
-                    .is_some_and(|vault| output.target.is_for_original_vault(vault))
+                    .is_some_and(|vault| vault.matches_text_v2_authentication(&output.target))
                 || table.len() > server_table::NATIVE_ROWS
                 || table.native_iter().count() != table.len()
+                || (output.target.is_retired_mount_data() && !table.is_empty())
             {
                 return Err(STALE);
             }
@@ -198,6 +221,7 @@ pub(super) async fn snapshot(
         &Envelope {
             backend: "text-v2",
             servers: rows,
+            recovery: output.target.is_retired_mount_data().then_some("removed"),
         },
         BODY_CAP,
     )?);
@@ -256,6 +280,8 @@ struct Record<'a> {
 struct Envelope<'a> {
     backend: &'static str,
     servers: Vec<Record<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery: Option<&'static str>,
 }
 
 fn parse(payload: &InvokeBody) -> Result<(), &'static str> {
@@ -293,7 +319,7 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
         let state = app.state::<AppState>();
         let generation = state.ui_session_generation.load(Ordering::SeqCst);
         // Locked resume stays null, independently of whether the vault has rows.
-        if ui_session_closed(&state) {
+        if ui_session_closed(&state) && !retired_ui_current(&state, generation) {
             return Ok(None);
         }
         if state.native_text.sources.is_closing_cached() {
@@ -343,13 +369,11 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
         let _commit = state.ui_session_commit.lock().await;
         let store = state.store.lock().await;
         let table = state.servers.lock().await;
-        let current = state.ui_session_generation.load(Ordering::SeqCst) == captured.generation
-            && !ui_session_closed(&state)
+        let current = authorization_is_current(&state, captured.generation, &captured.target)
             && !state.native_text.sources.is_closing_cached()
             && store
                 .as_ref()
-                .and_then(MountedVault::as_text_v2)
-                .is_some_and(|vault| captured.target.is_for_original_vault(vault));
+                .is_some_and(|vault| vault.matches_text_v2_authentication(&captured.target));
         match &mut result {
             Ok(output) if current && output.current(&state, &store, &table) => resolver.resolve(
                 tauri::ipc::InvokeResponseBody::Json(output.body.take().unwrap()),
@@ -410,6 +434,7 @@ mod tests {
             &Envelope {
                 backend: "text-v2",
                 servers: records,
+                recovery: None,
             },
             BODY_CAP,
         )

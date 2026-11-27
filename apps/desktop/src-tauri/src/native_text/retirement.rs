@@ -339,8 +339,10 @@ pub(super) async fn older_with_spawn(
     let bypass = {
         let store = state.store.lock().await;
         let mut active = control.active.lock().map_err(|_| UNAVAILABLE)?;
-        if store.as_ref().and_then(MountedVault::as_text_v2).is_none()
-            && active.as_ref().is_none_or(|job| job.is_finished_cached())
+        if !matches!(
+            store.as_ref(),
+            Some(MountedVault::TextV2(_) | MountedVault::TextV2Retired(_))
+        ) && active.as_ref().is_none_or(|job| job.is_finished_cached())
         {
             old = active.take();
             true
@@ -385,17 +387,22 @@ pub(super) async fn older_with_spawn(
             // wait(); another mount can never clear this barrier by being empty.
             if let Some(job) = active.as_ref().filter(|job| !job.is_finished_cached()) {
                 Step::Waiting(job.clone())
-            } else if let Some(vault) = store.as_ref().and_then(MountedVault::as_text_v2) {
+            } else if let Some(vault @ (MountedVault::TextV2(_) | MountedVault::TextV2Retired(_))) =
+                store.as_ref()
+            {
                 let through = generation.checked_sub(1).ok_or(UNAVAILABLE)?;
-                add_cleanup = state
-                    .native_text
-                    .sources
-                    .capture_ui_add_retirement(&store)?;
-                original = Some(
-                    vault
-                        .begin_ui_retirement(through)
-                        .map_err(|_| UNAVAILABLE)?,
-                );
+                let retired = match vault {
+                    MountedVault::TextV2(vault) => {
+                        add_cleanup = state
+                            .native_text
+                            .sources
+                            .capture_ui_add_retirement(&store)?;
+                        vault.begin_ui_retirement(through)
+                    }
+                    MountedVault::TextV2Retired(vault) => vault.begin_rejoin_ui_retirement(through),
+                    MountedVault::Legacy(_) => unreachable!("matched native physical owner"),
+                };
+                original = Some(retired.map_err(|_| UNAVAILABLE)?);
                 match original.as_ref().expect("captured above").state() {
                     NativeTextUiRetirementState::Started => {
                         let job = candidate.take().expect("one independently paid candidate");
@@ -418,7 +425,14 @@ pub(super) async fn older_with_spawn(
                     // refund/reconstruct a foreign/abandoned close capability.
                     NativeTextUiRetirementState::AlreadyRetiring => return Err(UNAVAILABLE.into()),
                     NativeTextUiRetirementState::KeyWorkDrained => {
-                        garbage = Some(vault.collect_retired_ui().map_err(|_| UNAVAILABLE)?);
+                        let collected = match vault {
+                            MountedVault::TextV2(vault) => vault.collect_retired_ui(),
+                            MountedVault::TextV2Retired(vault) => vault.collect_retired_ui(),
+                            MountedVault::Legacy(_) => {
+                                unreachable!("matched native physical owner")
+                            }
+                        };
+                        garbage = Some(collected.map_err(|_| UNAVAILABLE)?);
                         previous = active.take();
                         Step::Drained
                     }

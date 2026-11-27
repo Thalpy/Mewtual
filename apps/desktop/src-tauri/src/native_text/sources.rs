@@ -3,7 +3,7 @@
 use super::*;
 use catcoms_app::store::{
     ArchiveFounderPolicy, CriticalCatalogReadPool, FreshV2TextFounderPolicy, GenesisSeedBudget,
-    NativeTextSourcePolicy, NativeTextSourceRetirementPreparation,
+    NativeTextRemovedJoinedVault, NativeTextSourcePolicy, NativeTextSourceRetirementPreparation,
     NativeTextSourceRetirementStatus, NativeTextSources, NativeTextUiAddRetirement,
     NativeTextVault, NativeTextWorkRetirementPreparation, NativeUiInvocationMetadata,
     V2TextHostPolicy,
@@ -13,7 +13,11 @@ use catcoms_sync::owner_v2::FounderSnapshotLimits;
 type Sources = NativeTextSources<catcoms_net::MeshService, OsCryptoRng>;
 pub(super) type UiAddRetirement = NativeTextUiAddRetirement<catcoms_net::MeshService, OsCryptoRng>;
 type Retirement = NativeTextSourceRetirementPreparation<catcoms_net::MeshService, OsCryptoRng>;
-type RemovedPair = (Option<Sources>, Option<MountedVault>);
+type RemovedPair = (
+    Option<Sources>,
+    Option<Arc<NativeTextVaultAuthenticationCheck>>,
+    Option<MountedVault>,
+);
 
 /// Only this private constructor pairs a facade with the Sources issued by
 /// that SAME value. Neither field can come from renderer DATA or a raw Store.
@@ -21,6 +25,31 @@ pub(super) struct ReadyBundle {
     row: Option<server_table::PreparedNativeRow>,
     sources: Sources,
     vault: NativeTextVault,
+}
+
+/// One authenticated retired mount with no active ordinary Source.
+pub(super) struct ReadyRetired {
+    vault: Box<NativeTextRemovedJoinedVault>,
+    authentication: Arc<NativeTextVaultAuthenticationCheck>,
+}
+
+impl ReadyRetired {
+    pub(super) fn new(
+        vault: NativeTextRemovedJoinedVault,
+        secret: &[u8],
+        budget: &NativeUiInvocationBudget,
+    ) -> Result<Self, String> {
+        const FAILED: &str = "Could not unlock the removed membership.";
+        let credit = budget.prepare().map_err(|_| FAILED)?;
+        let authentication = vault
+            .prepare_native_authentication(credit)
+            .verify(secret)
+            .map_err(|_| FAILED)?;
+        Ok(Self {
+            vault: Box::new(vault),
+            authentication: Arc::new(authentication),
+        })
+    }
 }
 impl ReadyBundle {
     pub(super) fn recovered_founder(
@@ -132,6 +161,7 @@ enum Phase {
 struct Record {
     phase: Phase,
     sources: Option<Sources>,
+    retired: Option<Arc<NativeTextVaultAuthenticationCheck>>,
     ever_installed: bool,
 }
 pub(super) struct Controller {
@@ -341,6 +371,7 @@ impl Controller {
             record: StdMutex::new(Record {
                 phase: Phase::Booting,
                 sources: None,
+                retired: None,
                 ever_installed: false,
             }),
             boot: boot_lifetime::Control::new(metadata),
@@ -374,6 +405,7 @@ impl Controller {
             || self.boot.is_closed_cached()
             || record.phase != Phase::Booting
             || record.sources.is_some()
+            || record.retired.is_some()
             || store.is_some()
             || ready.is_none()
         {
@@ -392,6 +424,43 @@ impl Controller {
             ready.take().expect("validated original ready pair");
         record.sources = Some(sources);
         *store = Some(MountedVault::TextV2(vault));
+        record.ever_installed = true;
+        record.phase = Phase::Live;
+        Ok(())
+    }
+
+    pub(super) fn install_retired(
+        &self,
+        store: &mut Option<MountedVault>,
+        table: &server_table::ServerTable,
+        ready: &mut Option<ReadyRetired>,
+        original: &Arc<boot_lifetime::Control>,
+    ) -> Result<(), &'static str> {
+        let mut record = self
+            .record
+            .try_lock()
+            .map_err(|_| "Chat setup is busy. Try again.")?;
+        if !self.boot.same_original(original)
+            || self.boot.is_closed_cached()
+            || record.phase != Phase::Booting
+            || record.sources.is_some()
+            || record.retired.is_some()
+            || store.is_some()
+            || !table.is_empty()
+            || ready.as_ref().is_none_or(|original| {
+                !original
+                    .vault
+                    .matches_native_authentication_cached(&original.authentication)
+            })
+        {
+            return Err("Vault startup was superseded.");
+        }
+        let ReadyRetired {
+            vault,
+            authentication,
+        } = ready.take().expect("validated retired mount");
+        record.retired = Some(authentication);
+        *store = Some(MountedVault::TextV2Retired(vault));
         record.ever_installed = true;
         record.phase = Phase::Live;
         Ok(())
@@ -426,7 +495,7 @@ impl Controller {
         record.require_pair(store)?;
         match &record.sources {
             Some(original) => Ok(Some(original.capture_retirement())),
-            None if !record.ever_installed => Ok(None), // typed never-installed original
+            None if !record.ever_installed || record.retired.is_some() => Ok(None),
             None => Err("The original chat owner is unavailable."),
         }
     }
@@ -446,10 +515,15 @@ impl Controller {
         if record.phase != Phase::Closing {
             return Err("Chat is not ready to finish closing.");
         }
-        Ok(store
-            .as_ref()
-            .and_then(MountedVault::as_text_v2)
-            .map(|vault| vault.capture_work_retirement(credit.take().expect("paid outside guard"))))
+        Ok(match store.as_ref() {
+            Some(MountedVault::TextV2(vault)) => {
+                Some(vault.capture_work_retirement(credit.take().expect("paid outside guard")))
+            }
+            Some(MountedVault::TextV2Retired(vault)) => {
+                Some(vault.capture_work_retirement(credit.take().expect("paid outside guard")))
+            }
+            _ => None,
+        })
     }
     /// After original Root source/work proofs, caller moves this actual owner
     /// out alongside the SAME Store facade, then drops both outside guards.
@@ -463,12 +537,13 @@ impl Controller {
         }
         record.require_pair(store)?;
         record.phase = Phase::Disposing;
-        Ok((record.sources.take(), store.take()))
+        Ok((record.sources.take(), record.retired.take(), store.take()))
     }
     /// Actual outside-guard destructors must have returned before this call.
     pub(super) fn disposed(&self) {
         let mut record = self.record.lock().unwrap_or_else(|e| e.into_inner());
-        if record.phase == Phase::Disposing && record.sources.is_none() {
+        if record.phase == Phase::Disposing && record.sources.is_none() && record.retired.is_none()
+        {
             record.phase = Phase::Disposed;
         }
     }
@@ -478,7 +553,7 @@ impl Controller {
             .try_lock()
             .map_err(|_| "Chat is still closing. Try again.")?;
         if record.phase == Phase::Disposed {
-            if record.sources.is_some() || store.is_some() {
+            if record.sources.is_some() || record.retired.is_some() || store.is_some() {
                 return Err("The original vault changed while closing.");
             }
             return Ok(true);
@@ -491,13 +566,19 @@ impl Record {
     /// Check before any capture or owner move, under Store -> controller.
     /// A foreign or missing facade never clears an earlier owner's obligation.
     fn require_pair(&self, store: &Option<MountedVault>) -> Result<(), &'static str> {
-        match (&self.sources, store) {
-            (Some(sources), Some(MountedVault::TextV2(vault)))
+        match (&self.sources, &self.retired, store) {
+            (Some(sources), None, Some(MountedVault::TextV2(vault)))
                 if self.ever_installed && sources.is_from_original_vault_cached(vault) =>
             {
                 Ok(())
             }
-            (None, None) if !self.ever_installed => Ok(()),
+            (None, Some(authentication), Some(MountedVault::TextV2Retired(vault)))
+                if self.ever_installed
+                    && vault.matches_native_original_mount_cached(authentication) =>
+            {
+                Ok(())
+            }
+            (None, None, None) if !self.ever_installed => Ok(()),
             _ => Err("The original vault changed while closing."),
         }
     }
@@ -637,7 +718,7 @@ pub(crate) async fn close(state: &AppState, clock: &dyn catcoms_rt::Clock) -> Re
         #[cfg(not(test))]
         drain.wait().await;
     }
-    let (sources, vault) = {
+    let (sources, retired, vault) = {
         let mut store = state.store.lock().await;
         controller.take_pair(&mut store)?
     };
@@ -645,6 +726,7 @@ pub(crate) async fn close(state: &AppState, clock: &dyn catcoms_rt::Clock) -> Re
     // whole owner under Store/controller/UI/prelude's internal mutexes.
     drop(sources);
     drop(vault);
+    drop(retired);
     controller.disposed(); // actual destructors have returned
     Ok(())
 }
