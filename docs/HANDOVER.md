@@ -1,5 +1,27 @@
 # Mewtual; Handover
 
+## 26 November 2026 — Restore approved joined contacts after reopening
+
+The disabled native Chat V2 joined row can remember a signed contact for
+its current covered Header and epoch. A verified outbound connection can
+retain its approved numeric address. Passive consent waits for the same
+authenticated peer to connect. Forget cancels saved approvals and prevents
+earlier Remember requests from restoring them.
+
+Two focused Windows App tests passed. The mounted three-peer TCP test
+retired and reopened both joined peers, verified passive and outbound
+restoration, fetched an archive inventory with the restored approvals,
+and rejected a Remember proof after Forget. The fault cases covered
+a nonregular approval file and a truncated authenticated record.
+The focused renderer and command-policy checks passed, as did Svelte
+checking and the production renderer build. Native desktop automation
+and cross-platform suite evidence are pending.
+
+Each consent record is scoped to the original joined row and current
+Header. A change of governing state requires fresh contact consent.
+This does not cover governed rejoin or physical network acceptance.
+Chat V2 remains disabled.
+
 ## 27 November 2026 — Keep paid history replay moving
 
 The joined worker advances a paid original in short local slices before

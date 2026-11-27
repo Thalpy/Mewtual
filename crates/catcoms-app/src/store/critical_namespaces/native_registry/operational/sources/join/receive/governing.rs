@@ -7,6 +7,7 @@ catcoms_rt::redacted_debug! {
 }
 
 use super::dependencies::{ReplyPayment, ScopeAuthority};
+use super::history_discovery::HistoryContactScope;
 use super::*;
 use crate::store::critical_namespaces::native_registry::operational::governed::JOIN_PROTOCOL;
 use catcoms_net::{NativeChatMemberDependencyExchange, NativeChatMemberDependencyObservation};
@@ -237,14 +238,14 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
     ) -> Result<NativeTextJoinedGoverningExchange, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
         let lane = self.dependency_lane()?;
-        let (exchange, proof, observed, authentication, fee) =
-            self.with_member_receiver(selection, &caller, |source| {
+        let (exchange, approval, proof, observed, authentication, fee) = self
+            .with_member_receiver(selection, &caller, |source| {
                 let replay = source
                     .prefix
                     .selected_member_verifier()
                     .map_err(|_| Refusal::Unavailable)?
                     .replay_data();
-                let exchange = selection
+                let (exchange, approval) = selection
                     .governing_connection(&lane, source.founder, replay)
                     .ok_or(Refusal::Unavailable)?;
                 let fee = source
@@ -263,8 +264,12 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                     .metadata
                     .authentication_negative()
                     .map_err(|_| Refusal::Unavailable)?;
-                Ok((exchange, proof, observed, authentication, fee))
+                Ok((exchange, approval, proof, observed, authentication, fee))
             })?;
+        let caller = match approval {
+            Some(approval) => HistoryContactScope::constrain(approval, caller),
+            None => caller,
+        };
         let (invocation, live) = watch::channel(false);
         let authority = Arc::new(JoinEffect {
             scope: self.original.scope,

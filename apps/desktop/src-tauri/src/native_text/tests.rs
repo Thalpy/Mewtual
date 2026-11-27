@@ -1781,7 +1781,7 @@ async fn native_text_joined_dependency_provider_reopens_after_selected_add() {
         "connect_native_chat_contact",
         membership::BUSY,
         serde_json::json!({"server": new_row["server"], "expectedContext": new_row["context"],
-            "contact": contact, "approvedHost": "127.0.0.1"}),
+            "contact": contact, "approvedHost": "127.0.0.1", "remember": true}),
     )
     .await;
     assert!(connect.is_null());
@@ -1880,7 +1880,7 @@ async fn native_text_joined_dependency_provider_reopens_after_selected_add() {
         "connect_native_chat_contact",
         membership::BUSY,
         serde_json::json!({"server": joined["server"], "expectedContext": joined["context"],
-            "contact": reverse_contact, "approvedHost": "127.0.0.1"}),
+            "contact": reverse_contact, "approvedHost": "127.0.0.1", "remember": true}),
     )
     .await;
     let deleted = command_value_after_busy(
@@ -2131,6 +2131,14 @@ async fn native_text_joined_dependency_provider_reopens_after_selected_add() {
     )
     .await;
     assert!(carried_view["item"].is_null());
+    let forgotten = command_value_after_busy(
+        &new_window,
+        &new_queue,
+        "forget_native_chat_contacts",
+        membership::BUSY,
+        serde_json::json!({"server": new_row["server"], "expectedContext": new_row["context"]}),
+    ).await;
+    assert!(forgotten.is_null());
     parked_live.release.notify_one();
     for state in [&member_state, &new_state] {
         let _close = register_vault_close(state).await.unwrap();

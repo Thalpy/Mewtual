@@ -420,7 +420,11 @@ with its own request until the driver finishes. A paid inventory reply waits
 for the original local row under the bounded replay window, so an exact
 write's local permit does not trigger a duplicate network request.
 
-Automatic discovery currently requires reciprocal approved contacts on the
-installed rows. Restoring those approvals and their connections after a
-cold restart is separate work. The existing one-channel archive, limits
-and eligibility for original authors still apply.
+Automatic discovery requires reciprocal approved contacts on the installed
+rows. **Remember this contact** saves that approval for this device. A
+restored row rebuilds it from the exact registered Profile, current Header,
+epoch, and member Admission. It dials a saved numeric address only when an
+earlier outbound connection to that address authenticated the expected peer.
+A passive saved contact can be approved once that peer connects. Forgetting
+saved contacts closes the restored approvals and retires pending reconnects.
+The existing archive limits and original author requirements still apply.

@@ -1,5 +1,6 @@
 //! Inspect and remove exact published admissions through the native row.
 use super::*;
+use catcoms_app::store::NativeTextJoinedContactConsent;
 use catcoms_replication::chat::owner_header::OwnerBodyId;
 use catcoms_sync::V2_MEMBER_CONTACT_BYTES;
 use std::net::IpAddr;
@@ -12,17 +13,20 @@ pub(super) const COMMANDS: &[&str] = &[
     "remove_native_chat_member",
     "share_native_chat_contact",
     "connect_native_chat_contact",
+    "forget_native_chat_contacts",
 ];
 const LIST: &str = COMMANDS[0];
 const REMOVE: &str = COMMANDS[1];
 const SHARE: &str = COMMANDS[2];
 const CONNECT: &str = COMMANDS[3];
+const FORGET: &str = COMMANDS[4];
 
 enum Operation {
     List,
     Remove(OwnerBodyId),
     Share,
-    Connect([u8; V2_MEMBER_CONTACT_BYTES], IpAddr),
+    Connect([u8; V2_MEMBER_CONTACT_BYTES], IpAddr, bool),
+    Forget,
 }
 
 pub(super) fn handles(command: &str) -> bool {
@@ -69,10 +73,20 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
             server_table::NativeSelection::Founder(_)
         );
         if (!founder && matches!(operation, Operation::Remove(_)))
-            || (founder && matches!(operation, Operation::Share | Operation::Connect(..)))
+            || (founder
+                && matches!(
+                    operation,
+                    Operation::Share | Operation::Connect(..) | Operation::Forget
+                ))
         {
             return Err(FAILED);
         }
+        let consent = match (&operation, &row.data().selection) {
+            (Operation::Connect(_, _, true), server_table::NativeSelection::Joined(selection)) => {
+                Some(selection.capture_contact_consent().map_err(|_| BUSY)?)
+            }
+            _ => None,
+        };
         let source = connected::Source::for_installed(
             generation,
             &target,
@@ -81,9 +95,9 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
             &mut source_payment,
         )
         .ok_or(listing::STALE)?;
-        Ok((source, operation, founder, permit))
+        Ok((source, operation, founder, consent, permit))
     })();
-    let (source, operation, founder, permit) = match captured {
+    let (source, operation, founder, consent, permit) = match captured {
         Ok(value) => value,
         Err(error) => {
             invoke.resolver.reject(error);
@@ -95,7 +109,7 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
     spawn(Box::pin(async move {
         let _permit = permit;
         let state = app.state::<AppState>();
-        let result = perform(&state, &source, operation, founder).await;
+        let result = perform(&state, &source, operation, founder, consent).await;
         let result = result.and_then(|body| {
             let _commit = state.ui_session_commit.try_lock().map_err(|_| BUSY)?;
             let store = state.store.try_lock().map_err(|_| BUSY)?;
@@ -120,6 +134,7 @@ async fn perform(
     source: &connected::Source,
     operation: Operation,
     founder: bool,
+    consent: Option<NativeTextJoinedContactConsent>,
 ) -> Result<(String, Option<catcoms_app::store::NativeTextRoster>), &'static str> {
     let negative = source.negative();
     let local = source
@@ -146,7 +161,7 @@ async fn perform(
         .map_err(|_| FAILED)?;
     }
     let (prepared, selection) = source.capture_joined(state).await.ok_or(listing::STALE)?;
-    if let Operation::Connect(raw, host) = operation {
+    if let Operation::Connect(raw, host, remember) = operation {
         let attempt = tauri::async_runtime::spawn_blocking(move || {
             let _local = local;
             prepared
@@ -155,10 +170,45 @@ async fn perform(
         })
         .await
         .map_err(|_| FAILED)??;
-        attempt
-            .connect(&state.endpoint_dials)
+        if remember {
+            let proof = attempt
+                .connect_for_contact_approval(&state.endpoint_dials, consent.ok_or(listing::STALE)?)
+                .await
+                .map_err(|_| FAILED)?;
+            let caller = source.negative();
+            let local = source
+                .member_work()
+                .foreground(caller.clone())
+                .await
+                .ok_or(listing::STALE)?;
+            let (prepared, selection) = source.capture_joined(state).await.ok_or(listing::STALE)?;
+            let commit = contact_commit(state, source, &caller)?;
+            tauri::async_runtime::spawn_blocking(move || {
+                let (_local, _commit) = (local, commit);
+                prepared
+                    .remember_member_contact(&selection, raw, proof, &caller, &mut OsCryptoRng)
+                    .map_err(refusal)
+            })
             .await
-            .map_err(|_| FAILED)?;
+            .map_err(|_| FAILED)??;
+        } else {
+            attempt
+                .connect(&state.endpoint_dials)
+                .await
+                .map_err(|_| FAILED)?;
+        }
+        return Ok(("null".into(), None));
+    }
+    if matches!(operation, Operation::Forget) {
+        let commit = contact_commit(state, source, &negative)?;
+        tauri::async_runtime::spawn_blocking(move || {
+            let (_local, _commit) = (local, commit);
+            prepared
+                .forget_member_contact_approvals(&selection, &negative, &mut OsCryptoRng)
+                .map_err(refusal)
+        })
+        .await
+        .map_err(|_| FAILED)??;
         return Ok(("null".into(), None));
     }
     tauri::async_runtime::spawn_blocking(move || {
@@ -183,6 +233,28 @@ async fn perform(
     })
     .await
     .map_err(|_| FAILED)?
+}
+
+fn contact_commit(
+    state: &AppState,
+    source: &connected::Source,
+    caller: &RequestCancellation,
+) -> Result<tokio::sync::OwnedMutexGuard<()>, &'static str> {
+    // The row permit is already held. Never wait on the UI fence in this
+    // order. A successful guard covers the entire physical save.
+    let commit = state
+        .ui_session_commit
+        .clone()
+        .try_lock_owned()
+        .map_err(|_| BUSY)?;
+    if state.ui_session_generation.load(Ordering::SeqCst) != source.generation_data()
+        || ui_session_closed(state)
+        || state.native_text.sources.is_closing_cached()
+        || caller.is_cancelled()
+    {
+        return Err(listing::STALE);
+    }
+    Ok(commit)
 }
 
 fn refusal(error: catcoms_app::store::V2MemberSaveRefusal) -> &'static str {
@@ -239,7 +311,7 @@ fn parse(command: &str, body: &InvokeBody) -> Result<(u64, [u8; 32], Operation),
     let operation = match command {
         LIST if fields.len() == 2 => Operation::List,
         SHARE if fields.len() == 2 => Operation::Share,
-        CONNECT if fields.len() == 4 => {
+        CONNECT if (4..=5).contains(&fields.len()) => {
             let contact = fields
                 .get("contact")
                 .and_then(serde_json::Value::as_str)
@@ -253,8 +325,17 @@ fn parse(command: &str, body: &InvokeBody) -> Result<(u64, [u8; 32], Operation),
             if host.is_unspecified() || host.is_multicast() {
                 return Err(FAILED);
             }
-            Operation::Connect(decode_exact_hex(contact)?, host)
+            let remember = if fields.len() == 5 {
+                fields
+                    .get("remember")
+                    .and_then(serde_json::Value::as_bool)
+                    .ok_or(FAILED)?
+            } else {
+                false
+            };
+            Operation::Connect(decode_exact_hex(contact)?, host, remember)
         }
+        FORGET if fields.len() == 2 => Operation::Forget,
         REMOVE if fields.len() == 3 => {
             let label = fields
                 .get("expectedAdmission")
@@ -331,8 +412,24 @@ mod tests {
                     "server": 1, "contact": &contact, "approvedHost": "127.0.0.1",
                 }))
             ),
-            Ok((1, context, Operation::Connect(_, _))) if context == original_context
+            Ok((1, context, Operation::Connect(_, _, false))) if context == original_context
         ));
+        assert!(matches!(
+            parse(
+                CONNECT,
+                &body(serde_json::json!({
+                    "server": 1, "contact": &contact, "approvedHost": "127.0.0.1", "remember": true,
+                }))
+            ),
+            Ok((1, context, Operation::Connect(_, _, true))) if context == original_context
+        ));
+        assert!(parse(
+            CONNECT,
+            &body(serde_json::json!({
+                "server": 1, "contact": &contact, "approvedHost": "127.0.0.1", "remember": "true",
+            }))
+        )
+        .is_err());
         for host in ["0.0.0.0", "localhost", "ff01::1", "::"] {
             assert!(parse(
                 CONNECT,

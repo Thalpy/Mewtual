@@ -1421,6 +1421,11 @@ enum Command {
         permit: Option<catcoms_rt::BoxedDialPermit>,
         reply: Option<oneshot::Sender<catcoms_rt::DialSubmission>>,
     },
+    CheckAuthenticatedDirectRoute {
+        peer: PeerId,
+        address: String,
+        reply: oneshot::Sender<Option<catcoms_rt::ConnectionLease>>,
+    },
     /// A reciprocal-repair batch whose direct routes must all terminate at `peer`.
     /// Validation happens inside the actor, immediately before the ordinary dial gate, so an
     /// alternate caller cannot separate a checked peer id from a substituted address.
@@ -4628,6 +4633,20 @@ impl Actor {
                     let _ = reply.send(outcome);
                 }
             }
+            Command::CheckAuthenticatedDirectRoute {
+                peer,
+                address,
+                reply,
+            } => {
+                let connected = self
+                    .authenticated_routes
+                    .values()
+                    .any(|route| route.peer == peer && route.address == address);
+                let lease = connected
+                    .then(|| connection_leases::current(&self.connection_leases.table, peer))
+                    .flatten();
+                let _ = reply.send(lease);
+            }
             Command::DialPeerBatch {
                 peer,
                 addrs,
@@ -5902,6 +5921,30 @@ impl MeshConnectionDial {
     pub fn connection_lease(&self, peer: PeerId) -> Option<catcoms_rt::ConnectionLease> {
         let leases = self.leases.upgrade()?;
         connection_leases::current(&leases, peer)
+    }
+
+    /// Prove only the requested canonical numeric route. An authenticated
+    /// inbound lease alone cannot prove a reusable address to dial.
+    pub async fn authenticated_direct_route(
+        &self,
+        peer: PeerId,
+        address: &str,
+    ) -> Result<Option<catcoms_rt::ConnectionLease>, TransportError> {
+        if address.len() > 256 {
+            return Err(TransportError::InvalidDialBatch);
+        }
+        let commands = self.commands.upgrade().ok_or(TransportError::Closed)?;
+        let (reply, answer) = oneshot::channel();
+        commands
+            .send(Command::CheckAuthenticatedDirectRoute {
+                peer,
+                address: address.to_owned(),
+                reply,
+            })
+            .await
+            .map_err(|_| TransportError::Closed)?;
+        drop(commands);
+        answer.await.map_err(|_| TransportError::Closed)
     }
 
     pub async fn dial_permit(

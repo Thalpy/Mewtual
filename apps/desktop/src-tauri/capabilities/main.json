@@ -198,6 +198,7 @@
     "allow-remove-native-chat-member",
     "allow-share-native-chat-contact",
     "allow-connect-native-chat-contact",
+    "allow-forget-native-chat-contacts",
     "allow-revoke-device",
 
     "allow-change-vault-secret",

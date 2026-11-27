@@ -20,7 +20,8 @@ pub use invite::NativeTextInvitePublication;
 mod join;
 pub use join::{
     NativeTextJoinedArchiveDependency, NativeTextJoinedArchiveReplay,
-    NativeTextJoinedArchivedActions, NativeTextJoinedDelivery,
+    NativeTextJoinedArchivedActions, NativeTextJoinedContactApprovalProof,
+    NativeTextJoinedContactConsent, NativeTextJoinedDelivery,
     NativeTextJoinedDependencyAttachRefusal, NativeTextJoinedDependencyExchange,
     NativeTextJoinedDependencyProvider, NativeTextJoinedDependencyResponse,
     NativeTextJoinedExchange, NativeTextJoinedGoverningExchange, NativeTextJoinedGoverningIncoming,
@@ -32,7 +33,7 @@ pub use join::{
     NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
     NativeTextJoinedMemberSaveJob, NativeTextJoinedReceivedOriginal, NativeTextJoinedReconnect,
     NativeTextJoinedRequestPreparation, NativeTextJoinedRowSelection,
-    NativeTextJoinedSelectionPreparation,
+    NativeTextJoinedSavedContactApprovals, NativeTextJoinedSelectionPreparation,
 };
 mod member;
 mod network;
