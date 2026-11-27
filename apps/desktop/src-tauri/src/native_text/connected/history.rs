@@ -25,11 +25,54 @@ const MAX_ARCHIVE_ANCESTORS: usize = 8;
 const MAX_ARCHIVE_ANCESTRY_REQUESTS: u8 = 24;
 const ARCHIVE_ANCESTRY_MS: u64 = 45_000;
 const EXACT_ENTRY_MS: u64 = 15_000;
+const MAX_EXACT_TURNS_BEFORE_DISCOVERY: u8 = 2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HistoryTurn {
+    Exact,
+    Discovery,
+}
+
+/// Prefer progress on authenticated inventory already in hand, keeping FIFO
+/// within both classes. A cold, slow inventory cannot take every turn ahead
+/// of exact work, and exact work cannot starve discovery of another contact.
+fn select_due_turn(
+    due: impl Iterator<Item = Option<HistoryTurn>>,
+    exact_turns: &mut u8,
+) -> Option<usize> {
+    let mut exact = None;
+    let mut discovery = None;
+    for (index, turn) in due.enumerate() {
+        match turn {
+            Some(HistoryTurn::Exact) => {
+                exact.get_or_insert(index);
+            }
+            Some(HistoryTurn::Discovery) => {
+                discovery.get_or_insert(index);
+            }
+            None => {}
+        }
+        if exact.is_some() && discovery.is_some() {
+            break;
+        }
+    }
+    match (exact, discovery) {
+        (Some(exact), Some(_)) if *exact_turns < MAX_EXACT_TURNS_BEFORE_DISCOVERY => {
+            *exact_turns += 1;
+            Some(exact)
+        }
+        (exact, discovery) => {
+            *exact_turns = 0;
+            discovery.or(exact)
+        }
+    }
+}
 
 struct ParkedOriginal {
     action: ActionId,
     work: ParkedWork,
     deadline: u64,
+    first_slice_ready: bool,
 }
 
 /// One paid lane either holds the exact wire response pending local
@@ -149,6 +192,20 @@ impl PeerSweep {
         }
     }
 
+    fn due_turn(&self, now: u64) -> Option<HistoryTurn> {
+        (self.due <= now).then(|| {
+            if self
+                .page
+                .as_ref()
+                .is_some_and(|page| page.action_at(self.next_entry).is_some())
+            {
+                HistoryTurn::Exact
+            } else {
+                HistoryTurn::Discovery
+            }
+        })
+    }
+
     fn rescan_after(&mut self, delay: u64) {
         self.page = None;
         self.next_entry = 0;
@@ -217,11 +274,24 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
     let mut replay: Option<(PeerSweep, ParkedOriginal)> = None;
     let mut catalogue_due = 0;
     let mut peer_due = 0;
+    let mut exact_turns = 0;
+    let mut peer_turn_finished = false;
     loop {
-        // A checked original gets a short local turn while its selected
-        // route is still live. A stalled admission still waits at most TURN
-        // and a peer without outstanding originals uses the regular pace.
-        let delay = if replay.is_some() { REPLAY_TURN } else { TURN };
+        let first_slice = replay
+            .as_mut()
+            .is_some_and(|(_, original)| std::mem::take(&mut original.first_slice_ready));
+        let peer_just_finished = std::mem::take(&mut peer_turn_finished);
+        let delay = if first_slice || (peer_just_finished && SystemClock.monotonic_ms() >= peer_due)
+        {
+            // A newly authenticated original can start one bounded replay
+            // slice immediately. A completed slow peer turn already used
+            // its pacing interval. Neither shortcut spins on an idle row.
+            Duration::ZERO
+        } else if replay.is_some() {
+            REPLAY_TURN
+        } else {
+            TURN
+        };
         tokio::select! {
             biased;
             _ = scope.cancelled() => return,
@@ -313,7 +383,10 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
             }
         }
         let now = SystemClock.monotonic_ms();
-        let Some(index) = peers.iter().position(|sweep| sweep.due <= now) else {
+        let Some(index) = select_due_turn(
+            peers.iter().map(|sweep| sweep.due_turn(now)),
+            &mut exact_turns,
+        ) else {
             continue;
         };
         // Local replay can wake early without increasing peer request cadence.
@@ -325,6 +398,7 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
             replay = Some((sweep, parked));
         } else {
             peers.push_back(sweep);
+            peer_turn_finished = true;
         }
     }
 }
@@ -679,6 +753,7 @@ async fn fetch_entry(
             expected: planned.expected,
         },
         deadline: ancestry_deadline.map_or(deadline, |earlier| earlier.min(deadline)),
+        first_slice_ready: false,
     });
     #[cfg(test)]
     if let Some(probe) = probe {
@@ -771,6 +846,7 @@ async fn resume_entry(
             // The wire buffer retires now. The stage owns a negative of that
             // exact route and the invocation needed until archive selection.
             work.work = ParkedWork::Replay(Box::new(replay));
+            work.first_slice_ready = true;
             return (work, None);
         }
         let ParkedWork::Replay(replay) = &mut work.work else {
@@ -888,4 +964,40 @@ async fn with_row_until<T: Send + 'static>(
     .await
     .ok()
     .flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ready_exact_history_has_bounded_preference_over_inventory() {
+        use HistoryTurn::{Discovery, Exact};
+        let mut consecutive = 0;
+        let mut queued = VecDeque::from([
+            ("sleeping", None),
+            ("D1", Some(Discovery)),
+            ("A", Some(Exact)),
+            ("B", Some(Exact)),
+            ("D2", Some(Discovery)),
+        ]);
+        for expected in ["A", "B", "D1", "A", "B", "D2"] {
+            let index = select_due_turn(queued.iter().map(|(_, turn)| *turn), &mut consecutive)
+                .expect("one ready history sweep");
+            let selected = queued.remove(index).expect("index in queue");
+            assert_eq!(selected.0, expected);
+            queued.push_back(selected);
+        }
+        assert_eq!(consecutive, 0);
+        assert_eq!(
+            select_due_turn([None, Some(Exact)].into_iter(), &mut consecutive),
+            Some(1)
+        );
+        assert_eq!(consecutive, 0);
+        assert_eq!(
+            select_due_turn([None, Some(Discovery)].into_iter(), &mut consecutive),
+            Some(1)
+        );
+        assert_eq!(select_due_turn([None].into_iter(), &mut consecutive), None);
+    }
 }
