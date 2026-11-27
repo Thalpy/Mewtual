@@ -34,6 +34,19 @@ Archive retention still needs capacity work. An interruption before a
 recoverable write still depends on signed redelivery. This checkpoint
 leaves Text Chat V2 disabled by default.
 
+## Replay dense revisions from the selected archive
+
+The archive renderer now uses the same bounded dependency stack as
+incoming history recovery. A queued ActionId occupies one slot, and a
+verified predecessor uses no extra read. The renderer still requires
+the complete saved target and rechecks the archive revision when
+returning the body.
+
+The Windows App fixture passed 24 signed revisions over TCP. It
+displayed the exact winning Edit, selected the final Delete, and
+refused publication from the earlier view. Targets beyond the
+existing replay or storage bounds still need additional work.
+
 ## Reply to an original saved before membership changes
 
 A current member can reply to an exact original it verified and saved
