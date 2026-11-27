@@ -11,7 +11,10 @@ use catcoms_sync::{
     MAX_V2_GOVERNING_JOIN_STEPS, MAX_V2_JOIN_REQUEST_PACKET_BYTES,
 };
 use selected_head::GovernedHeadKind;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+
+const PREDECESSOR_READ_BYTES: usize = 8192;
 
 /// Small held identity per immutable predecessor. Ciphertext and SDK buffers
 /// are released after each read. The selected head and its own archive have
@@ -20,6 +23,8 @@ struct Predecessor {
     head: [u8; selected_head::FRAME_LEN],
     id: ArchiveHeadId,
     kind: GovernedHeadKind,
+    bytes: usize,
+    digest: blake3::Hash,
     file: OpenedTextControl,
 }
 
@@ -61,7 +66,8 @@ pub(super) struct RecoveredArchiveChain {
 impl RecoveredArchiveChain {
     pub(super) const fn invoice_bytes() -> usize {
         use catcoms_replication::chat::owner_state::transition::REPLAY_MATH_PRIVATE_INVOICE;
-        4 * (MAX_BYTES + 1)
+        PREDECESSOR_READ_BYTES
+            + 4 * (MAX_BYTES + 1)
             + 4 * MAX_V2_GOVERNING_JOIN_PREFIX_BYTES
             + 2 * REPLAY_MATH_PRIVATE_INVOICE
             + 4 * std::mem::size_of::<Self>()
@@ -170,6 +176,13 @@ impl RecoveredArchiveChain {
             )?;
         }
         Ok(())
+    }
+
+    /// Re-read the original held inodes under their exact names and compare
+    /// the already authenticated bytes. Only one bounded scratch buffer is
+    /// live even when a long governing history precedes the selected Head.
+    pub(super) fn require_predecessor_contents(&self, directory: &Path) -> Result<(), AppError> {
+        require_exact_predecessors(directory, &self.predecessors)
     }
 
     pub(super) fn public_steps(&self) -> impl Iterator<Item = &PublicStep> {
@@ -328,17 +341,32 @@ impl RecoveredArchiveChain {
     }
 }
 
-/// A held file can change in place. A classified request uses the same
-/// archive commitments verified during capture, with one paid scratch buffer
-/// and no retained extra predecessor bodies.
+/// Use the captured length and ciphertext digest, with an EOF probe on
+/// the exact inode. This works under the final physical guard without
+/// allocating another archive-sized buffer or repeating MLS decoding.
 fn require_exact_predecessors(
     directory: &Path,
     predecessors: &[Predecessor],
 ) -> Result<(), AppError> {
-    let mut buffer = Some(Zeroizing::new(Vec::with_capacity(MAX_BYTES + 1)));
+    let mut buffer = [0; PREDECESSOR_READ_BYTES];
     for predecessor in predecessors {
-        let mut archive = predecessor.reread(directory, &mut buffer)?;
-        buffer = Some(std::mem::take(&mut archive.frame));
+        let path = archive_child(directory, predecessor.id.as_bytes())?;
+        require_named(&path, &predecessor.file)?;
+        let mut file = &predecessor.file.file;
+        file.seek(SeekFrom::Start(0)).map_err(io)?;
+        let mut remaining = predecessor.bytes;
+        let mut digest = blake3::Hasher::new();
+        while remaining > 0 {
+            let take = remaining.min(buffer.len());
+            file.read_exact(&mut buffer[..take]).map_err(io)?;
+            digest.update(&buffer[..take]);
+            remaining -= take;
+        }
+        if file.read(&mut buffer[..1]).map_err(io)? != 0 || digest.finalize() != predecessor.digest
+        {
+            return Err(refused());
+        }
+        require_named(&path, &predecessor.file)?;
     }
     Ok(())
 }
@@ -374,11 +402,15 @@ fn capture_predecessors(
             }
             None
         };
+        let bytes = file.frame.len();
+        let digest = blake3::hash(&file.frame);
         *buffer = Some(std::mem::take(&mut file.frame));
         predecessors.push(Predecessor {
             head,
             id: prior.archive,
             kind: prior.kind,
+            bytes,
+            digest,
             file,
         });
         if predecessors.len() >= count {
