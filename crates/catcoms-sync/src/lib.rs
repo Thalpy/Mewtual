@@ -90,8 +90,8 @@ pub use prepared_direct_join::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use prepared_direct_join::{
-    ClosedV2JoinedNode, CompletedV2JoinCandidate, NativeV2JoinKeyEntry, NativeV2RejoinInputs,
-    PreparedV2JoinRequest, PreparedV2JoinedAdd, PreparedV2JoinedEviction,
+    ClosedV2JoinedNode, CompletedV2JoinCandidate, NativeV2JoinKeyEntry, NativeV2RejoinFailure,
+    NativeV2RejoinInputs, PreparedV2JoinRequest, PreparedV2JoinedAdd, PreparedV2JoinedEviction,
     PreparedV2JoinedMembership, PreparedV2JoinedPrefix, RecoveredV2JoinedOutcome,
     RecoveredV2PendingJoinSource, RetiredV2JoinedAdd, RetiredV2JoinedEviction,
     SealedV2JoinedOutcome, SealedV2PendingJoinSource, SelectedRejoinRemoval, V2AdmissionStepData,

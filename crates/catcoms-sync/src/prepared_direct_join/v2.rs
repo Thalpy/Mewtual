@@ -16,9 +16,9 @@ mod governing_prefix;
 mod pending_source;
 mod received_add;
 pub use pending_source::{
-    NativeV2RejoinInputs, RecoveredV2JoinedOutcome, RecoveredV2PendingJoinSource,
-    SealedV2JoinedOutcome, SealedV2PendingJoinSource, SelectedRejoinRemoval,
-    V2PendingJoinContextData,
+    NativeV2RejoinFailure, NativeV2RejoinInputs, RecoveredV2JoinedOutcome,
+    RecoveredV2PendingJoinSource, SealedV2JoinedOutcome, SealedV2PendingJoinSource,
+    SelectedRejoinRemoval, V2PendingJoinContextData,
 };
 pub use received_add::{
     V2MemberAddFrameData, V2MemberAddRequestData, V2MemberTransitionFrameData,

@@ -13,6 +13,10 @@ use catcoms_sync::SelectedRejoinRemoval;
 // no A2 output may be created until Current itself carries the ID9 fence.
 const REJOIN_STAGE: &str = "chat-critical-namespaces.rejoin.stage";
 
+mod pending;
+pub use pending::NativeTextRejoinPendingReceipt;
+pub(in crate::store) use pending::{RejoinKeyEntry, WarmRejoinPending};
+
 /// The exact native inventory can outlive the handler scratch that checked
 /// A1. Its buffers and files always retire before its dedicated invoice.
 pub(in crate::store) struct RetainedNativeRejoinInventory {
@@ -222,6 +226,57 @@ impl RejoinCatalogPreparation {
 }
 
 impl ServerStore {
+    /// Reprove and cover the catalog in a fresh retired mount. This fingerprint
+    /// is historical data for the A2 journal, never admission to the key.
+    pub(in crate::store) fn cover_selected_rejoin_catalog(
+        &self,
+        registration: NativeTextJoinedRegistrationData,
+        removal: SelectedRejoinRemoval,
+        inventory: &UpgradeInventory,
+    ) -> Result<[u8; 32], AppError> {
+        inventory.require(self)?;
+        self.require_recovered_joined_removal(registration, removal)?;
+        absent(&fixed(self, false, REJOIN_STAGE)?)?;
+        let digest = {
+            let slot = self.joined_pin_index.try_lock().map_err(|_| denied())?;
+            let index = slot.as_ref().ok_or_else(denied)?;
+            index.require(self)?;
+            let catalog = index.cold_catalog.as_ref().ok_or_else(denied)?;
+            let (file, recorded) = &catalog.current;
+            let identity = session_id(file).map_err(io)?;
+            if inventory.catalog_identity() != identity
+                || inventory.catalog() != recorded.as_slice()
+            {
+                return Err(denied());
+            }
+            let policy = self.governance_layout_policy.as_ref().ok_or_else(denied)?;
+            let _fee = policy.current.archive.pending.pool.try_reserve(
+                3 * critical_namespaces::pending_join_codec::MAX_CATALOG_FRAMED + 16 * 1024,
+            )?;
+            let key = Zeroizing::new(self.keys.db_key()?);
+            let digest = rejoin_namespace::selected_frame_digest(
+                &key,
+                recorded,
+                &self.chat_vault_domain()?,
+            )?;
+            let selected = fixed(self, false, critical_namespaces::Slot::Current.name())?;
+            let (writable, opened) = open_exact_write(&selected, WriteMode::Existing)?;
+            if opened != identity {
+                return Err(denied());
+            }
+            exact_held(&selected, &writable, identity, recorded)?;
+            sync_selected_catalog(&writable).map_err(io)?;
+            inventory.sync_rejoin_catalog_parent(self)?;
+            exact_held(&selected, &writable, identity, recorded)?;
+            index.require(self)?;
+            digest
+        };
+        self.require_recovered_joined_removal(registration, removal)?;
+        absent(&fixed(self, false, REJOIN_STAGE)?)?;
+        inventory.require(self)?;
+        Ok(digest)
+    }
+
     pub(in crate::store) fn prepare_retired_rejoin_catalog(
         &self,
         registration: NativeTextJoinedRegistrationData,

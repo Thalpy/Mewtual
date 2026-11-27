@@ -1,6 +1,7 @@
 //! Seal the original private KeyPackage provider under the exact joined pin.
 catcoms_rt::redacted_debug! {
     NativeV2RejoinInputs<'_>;
+    NativeV2RejoinFailure;
     V2PendingJoinContextData;
     SealedV2PendingJoinSource;
     RecoveredV2PendingJoinSource;
@@ -59,9 +60,26 @@ fn require_removal_coordinates(removed: SelectedRejoinRemoval) -> Result<(), Syn
     Ok(())
 }
 
-/// Coordinates supplied by the mounted rejoin owner after proving that
-/// the original Admission was removed. Its storage and membership evidence
-/// must stay current until the new Pending is durable.
+/// A returned failure identifies whether this attempt entered the device
+/// primitive. Lower layers can spend an admission cut without SDK entry.
+pub enum NativeV2RejoinFailure {
+    /// The device primitive was never called. A new authorized cut may retry.
+    BeforeDeviceEntry(SyncError),
+    /// Key entry was admitted. Do not draw another original for this intent.
+    AfterDeviceEntry(SyncError),
+}
+
+impl NativeV2RejoinFailure {
+    fn into_sync_error(self) -> SyncError {
+        match self {
+            Self::BeforeDeviceEntry(error) | Self::AfterDeviceEntry(error) => error,
+        }
+    }
+}
+
+/// Coordinates supplied by the mounted owner after proving the original
+/// Admission's removal. Its selected evidence must stay current until the
+/// new Pending is durable.
 pub struct NativeV2RejoinInputs<'a> {
     pub previous_invite: &'a SignedInviteBindingData,
     pub previous_context: V2PendingJoinContextData,
@@ -133,8 +151,22 @@ impl SealedV2PendingJoinSource {
         &self,
         key: &[u8; 32],
         input: NativeV2RejoinInputs<'_>,
-        mut native: NativeV2JoinKeyEntry<'_>,
+        native: NativeV2JoinKeyEntry<'_>,
     ) -> Result<PreparedV2JoinRequest, SyncError> {
+        self.prepare_native_rejoin_classified(key, input, native)
+            .map_err(NativeV2RejoinFailure::into_sync_error)
+    }
+
+    /// A returned refusal before device entry is distinct from any error
+    /// after admitting the SDK. In particular RT may spend a cut while a UI
+    /// lock wins its final admission check, with no device call performed.
+    pub fn prepare_native_rejoin_classified(
+        &self,
+        key: &[u8; 32],
+        input: NativeV2RejoinInputs<'_>,
+        mut native: NativeV2JoinKeyEntry<'_>,
+    ) -> Result<PreparedV2JoinRequest, NativeV2RejoinFailure> {
+        use NativeV2RejoinFailure::{AfterDeviceEntry, BeforeDeviceEntry};
         let NativeV2RejoinInputs {
             previous_invite,
             previous_context,
@@ -146,11 +178,12 @@ impl SealedV2PendingJoinSource {
             now_ms,
             limits,
         } = input;
-        previous_context.validate()?;
-        require_removal_coordinates(previous_remove)?;
+        previous_context.validate().map_err(BeforeDeviceEntry)?;
+        require_removal_coordinates(previous_remove).map_err(BeforeDeviceEntry)?;
         let old = previous_invite.spec_data();
-        require_first_invite(&old.anchor, invite, token, now_ms)?;
-        let packet = V2JoinRequestPacketData::decode(previous_request)?;
+        require_first_invite(&old.anchor, invite, token, now_ms).map_err(BeforeDeviceEntry)?;
+        let packet =
+            V2JoinRequestPacketData::decode(previous_request).map_err(BeforeDeviceEntry)?;
         let old_request = packet.request.spec_data();
         if packet.invite.encode() != previous_invite.encode()
             || previous_request.len() > limits.exchange
@@ -159,13 +192,17 @@ impl SealedV2PendingJoinSource {
             || old.nonce == invite.spec_data().nonce
             || old.policy != invite.spec_data().policy
         {
-            return Err(SyncError::JoinRejected);
+            return Err(BeforeDeviceEntry(SyncError::JoinRejected));
         }
 
-        native.enter(NativeChatKeyPurpose::JoinerDevice)?;
-        let original = self.decode_source(key, previous_context, previous_invite, limits)?;
+        native
+            .enter(NativeChatKeyPurpose::JoinerDevice)
+            .map_err(BeforeDeviceEntry)?;
+        let original = self
+            .decode_source(key, previous_context, previous_invite, limits)
+            .map_err(AfterDeviceEntry)?;
         if original.request_bytes_data() != previous_request {
-            return Err(SyncError::JoinRejected);
+            return Err(AfterDeviceEntry(SyncError::JoinRejected));
         }
         // The caller funds the bounded decrypt/restore overlap and the
         // named 32 KiB one-signer SDK challenge before issuing the cut.
@@ -173,10 +210,12 @@ impl SealedV2PendingJoinSource {
             &original.master,
             &previous_signer,
             (limits.provider, limits.backing),
-        )?;
+        )
+        .map_err(|error| AfterDeviceEntry(error.into()))?;
         drop(original);
         let mut request =
-            PreparedV2JoinRequest::prepare(isolated, &old.anchor, invite, token, now_ms, limits)?;
+            PreparedV2JoinRequest::prepare(isolated, &old.anchor, invite, token, now_ms, limits)
+                .map_err(AfterDeviceEntry)?;
         request.native_origin = Some(native.original.clone());
         request.rejoin_remove = Some(previous_remove);
         Ok(request)

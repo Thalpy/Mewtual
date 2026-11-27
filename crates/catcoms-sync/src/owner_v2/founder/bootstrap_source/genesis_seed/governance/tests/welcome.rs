@@ -10,7 +10,7 @@ async fn v2_join_request_and_welcome_complete_with_actual_add() {
 #[test]
 fn native_rejoin_request_uses_only_the_original_signer_and_a_fresh_package() {
     use crate::{
-        DirectJoinLimits, NativeV2JoinKeyEntry, PreparedV2JoinRequest,
+        DirectJoinLimits, NativeV2JoinKeyEntry, NativeV2RejoinFailure, PreparedV2JoinRequest,
         RecoveredV2PendingJoinSource, SealedV2PendingJoinSource, V2JoinRequestPacketData,
     };
     use rand_core::SeedableRng;
@@ -63,7 +63,7 @@ fn native_rejoin_request_uses_only_the_original_signer_and_a_fresh_package() {
         now_ms: NOW,
         limits,
     };
-    let native = Native::new();
+    let mut native = Native::new();
     let original = native.source.observe();
     let mut cut = native.cut(NativeChatKeyPurpose::JoinerDevice);
     let mut ends = catcoms_rt::NativeChatKeyEnds::new();
@@ -81,6 +81,27 @@ fn native_rejoin_request_uses_only_the_original_signer_and_a_fresh_package() {
             NativeV2JoinKeyEntry::new(&original, &mut cut, &mut ends),
         )
         .is_err());
+    native.generation.store(8, SeqCst);
+    assert!(matches!(
+        saved.prepare_native_rejoin_classified(
+            &vault_key,
+            input(&a2_invite, [79; 32]),
+            NativeV2JoinKeyEntry::new(&original, &mut cut, &mut ends),
+        ),
+        Err(NativeV2RejoinFailure::BeforeDeviceEntry(_))
+    ));
+    native.reauthenticate();
+    let mut failing = native.cut(NativeChatKeyPurpose::JoinerDevice);
+    let mut failed_ends = catcoms_rt::NativeChatKeyEnds::new();
+    assert!(matches!(
+        saved.prepare_native_rejoin_classified(
+            &[200; 32],
+            input(&a2_invite, [79; 32]),
+            NativeV2JoinKeyEntry::new(&original, &mut failing, &mut failed_ends),
+        ),
+        Err(NativeV2RejoinFailure::AfterDeviceEntry(_))
+    ));
+    let mut cut = native.cut(NativeChatKeyPurpose::JoinerDevice);
     let mut a2 = saved
         .prepare_native_rejoin(
             &vault_key,

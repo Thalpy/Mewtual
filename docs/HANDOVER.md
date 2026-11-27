@@ -1,5 +1,28 @@
 # Mewtual; Handover
 
+## Save the exact second membership request
+
+A newly opened retired vault covers the selected ID9 catalog again before
+it can admit the replacement device operation. A separate UI generation
+and key source bind the operation to that vault. Its attempt and Pending
+files bind the original Remove, same device signer, stable pin, original
+vault and exact fresh invitation. The Pending keeps the newly generated
+KeyPackage and transport reservation. The existing pin and A1 registration
+stay in place.
+
+A complete journal returns the same request digest and context after a
+restart, including an exact expired retry. It draws no randomness on that
+path. Warm retries require the original file handles and keep the original
+memory reservation. An ambiguous cold attempt or partial Pending is
+preserved. A returned refusal before actual device entry can retry from
+a current UI generation. Errors after entry retain the attempt.
+
+The Windows fixture passed real first membership, selected removal and
+warm and cold rejoin Pending recovery using a new invite. The new native
+backend returns historical receipts. The renderer command, A2 transport,
+Welcome and outcome files, Index4 activation and real multi-device
+acceptance are still open.
+
 ## Same-device rejoin proof and cold removal
 
 Cold native recovery verifies the original selected Remove before reporting

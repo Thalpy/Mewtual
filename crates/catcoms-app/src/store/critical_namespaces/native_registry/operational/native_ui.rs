@@ -19,7 +19,9 @@ const GENERATIONS: usize = 32;
 pub(super) const INVOCATION_BYTES: usize = 4096;
 const HOST_BYTES: usize = 4096;
 const REGISTRY_BYTES: usize = 16 * 1024;
-const MINIMUM_CAPACITY: usize = 2 * GENERATIONS * INVOCATION_BYTES + HOST_BYTES + REGISTRY_BYTES;
+const RETIRED_SOURCE_BYTES: usize = 4096;
+const MINIMUM_CAPACITY: usize =
+    2 * GENERATIONS * INVOCATION_BYTES + HOST_BYTES + REGISTRY_BYTES + RETIRED_SOURCE_BYTES;
 
 /// Trusted process policy; cloning a policy grants no command or native access.
 /// Each invocation reserves its OWN candidate payment before borrowing a vault.
@@ -147,6 +149,17 @@ impl UiAdmissionOwner {
     pub(super) fn invocation_budget(&self) -> NativeUiInvocationBudget {
         self.registry.budget.clone()
     }
+    /// The already authenticated retired owner can hold a distinct source
+    /// for a later rejoin cut. It cannot reuse the old joined source.
+    pub(super) fn retired_key_source(&self) -> Result<catcoms_rt::NativeChatSourceOwner, AppError> {
+        let fee = Fee::reserve(&self.registry.budget.pool, RETIRED_SOURCE_BYTES)?;
+        catcoms_rt::NativeChatSourceOwner::for_trusted_authenticated_mount(
+            &self.binding.observe_mount(),
+            fee,
+        )
+        .map_err(|_| refused())
+    }
+
     pub(super) fn observe_mount(&self) -> catcoms_rt::NativeChatUiMountObservation {
         self.binding.observe_mount()
     }

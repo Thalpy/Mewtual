@@ -836,6 +836,29 @@ impl ServerStore {
         self.require_recovered_request(selected).map(|_| ())
     }
 
+    /// Lend only the old sealed donor inside the authenticated retired
+    /// owner. It cannot restore a live A1 graph.
+    pub(super) fn with_rejoin_donor<T>(
+        &self,
+        registration: NativeTextJoinedRegistrationData,
+        perform: impl FnOnce(CurrentLayoutData, &[u8]) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        self.validate_mounted_governance_layout()?;
+        let slot = self.joined_pin_index.try_lock().map_err(|_| denied())?;
+        let selected = slot.as_ref().ok_or_else(denied)?;
+        selected.require(self)?;
+        let original = selected.pending.as_ref().ok_or_else(denied)?;
+        let (_, context) = original._pending.pending_data();
+        if context != registration.context {
+            return Err(denied());
+        }
+        let layout = CurrentLayoutData {
+            vault: context.vault,
+            root: context.root,
+        };
+        perform(layout, &original.original.1)
+    }
+
     pub(in crate::store) fn require_recovered_joined_removal(
         &self,
         registration: NativeTextJoinedRegistrationData,

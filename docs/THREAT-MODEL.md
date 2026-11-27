@@ -61,9 +61,15 @@ the old device signer and a fresh KeyPackage. Welcome validation replays
 the pinned prefix through the selected new Add and checks that the old
 Remove occurs in that prefix. The same check runs before restoring a
 sealed outcome. Ordinary first-pin paths refuse the new Pending format.
-The desktop still lacks the mounted rejoin owner that proves the original
-Remove selected on disk, preserves the old files and admits the replacement
-row. The retained coordinates alone grant no membership or write authority.
+The retired native vault covers ID9 and reproves the original native
+registry, pin, Pending, Welcome and terminal Remove before replacement
+device entry. Its separate current UI generation grants one cut to reuse
+the signer in a fresh provider. An authenticated attempt precedes that
+cut. The covered Pending binds the exact same attempt, original removal
+and private provider. Cold incomplete work remains on disk and does not
+redraw a KeyPackage. The renderer and replacement row installation still
+need their own paths. The retained coordinates grant no membership or
+message write authority.
 
 Cold joined-contact recovery begins with explicit local recurring consent.
 The saved contact is tenant-bound and epoch-bound, and the current signed
