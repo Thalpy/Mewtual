@@ -1,19 +1,19 @@
-//! Rejoin index DATA while the physical namespace and A2 writer are staged
-//! separately. A syntactic successor cannot prove either membership event.
+//! Check the exact Index4 successor for a rejoin. The private writer proves
+//! the selected Remove and replacement Add separately.
 use super::*;
 
 /// The production caller must obtain these observations from its original
 /// selected A1 row and a separately replayed, physically selected Remove.
 /// This type is DATA for checking a candidate, never removal authority.
-struct RemovalData {
-    row_id: u64,
-    row_identity: [u8; 32],
-    own_admission: [u8; 32],
-    header: [u8; 32],
-    epoch: u64,
+pub(in crate::store::critical_namespaces::native_registry::lifecycle) struct RemovalData {
+    pub(in crate::store::critical_namespaces::native_registry::lifecycle) row_id: u64,
+    pub(in crate::store::critical_namespaces::native_registry::lifecycle) row_identity: [u8; 32],
+    pub(in crate::store::critical_namespaces::native_registry::lifecycle) own_admission: [u8; 32],
+    pub(in crate::store::critical_namespaces::native_registry::lifecycle) header: [u8; 32],
+    pub(in crate::store::critical_namespaces::native_registry::lifecycle) epoch: u64,
 }
 
-fn require_rejoin_successor(
+pub(in crate::store::critical_namespaces::native_registry::lifecycle) fn require_rejoin_successor(
     selected: &Index,
     candidate: &Index,
     frame: [u8; 32],
@@ -85,6 +85,7 @@ fn require_rejoin_successor(
             || binding.own_add == active.own_add
             || birth.request == added_birth.request
             || old.name != added.name
+            || old.is_dm != added.is_dm
             || binding.local_display != active.local_display
         {
             return Err(refused());
@@ -97,5 +98,6 @@ fn require_rejoin_successor(
     Ok(())
 }
 
+#[cfg(test)]
 #[path = "tests/rejoin.rs"]
 mod tests;

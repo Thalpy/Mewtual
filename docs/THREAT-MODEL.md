@@ -68,7 +68,15 @@ the replacement Admission. It binds the signed history to the held
 Attempt, Pending, Received, SDK Attempt and Outcome. The prefix is
 covered before its Core transition can finish. Its receipt is data and
 cannot authorize native installation. A cold retry replays the original
-inputs and refuses a torn or different prefix record.
+inputs and refuses a torn or different prefix record. Index4 can then
+cover one successor retaining the exact terminal A1 row and a distinct
+A2 row. The writer binds the original Index3 frame and private prefix
+within the original checked native cell. Cold recovery reconstructs
+the intent only from held, authenticated Attempt and Pending files,
+then rechecks the same parents and UI generation before returning.
+An existing successor with a missing parent denies recovery before
+any replacement prefix is written. The covered Index4 receipt grants
+no live membership.
 
 Cold founder startup can complete a fully staged later Add only after vault
 authentication and replay under the original pin. It retains and rechecks

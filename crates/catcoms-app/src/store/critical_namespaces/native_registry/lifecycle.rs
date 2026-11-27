@@ -16,10 +16,12 @@ mod metadata;
 mod migration;
 pub(super) mod network;
 pub(super) mod preparation;
+mod rejoin_install;
 pub(in crate::store) use preparation::{
     verify_governance_native, verify_joined_pin_parent, verify_shared_history_parent,
     VerifiedGovernanceNative,
 };
+pub(in crate::store) use rejoin_install::PreparedNativeRejoinIndex;
 
 /// Finish only the actual constructor-private native opening observation.
 /// Caller keeps any new declaration witness overlapping these same files
