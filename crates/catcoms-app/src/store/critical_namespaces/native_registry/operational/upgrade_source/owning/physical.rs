@@ -291,6 +291,15 @@ impl Physical {
         self.with_registered_native_join(data, |_, _| Ok(()))
     }
 
+    pub(super) fn has_recovered_terminal_candidate(
+        &self,
+        data: crate::store::NativeTextJoinedRegistrationData,
+    ) -> Result<bool, AppError> {
+        self.with_registered_native_join(data, |store, _| {
+            store.has_recovered_terminal_candidate(data)
+        })
+    }
+
     pub(super) fn require_recovered_native_join_removal(
         &self,
         data: crate::store::NativeTextJoinedRegistrationData,

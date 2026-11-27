@@ -5,13 +5,13 @@ use catcoms_mls::persist::{
     text_current_add::TextCurrentAddLimits, TextCurrentSdkGraphReservation,
     TextCurrentSdkRestoreAdmission, TextCurrentSdkRestoreLimits,
 };
-use catcoms_replication::chat::owner_header::OwnerHeaderId;
 use catcoms_replication::chat::{
     cold_selected_history::{encode_selected_history_node_page, SelectedHistoryNodePage},
     owner_state::transition::REPLAY_MATH_PRIVATE_INVOICE,
     ProjectionGroup, ProjectionGroupView, V2GeneralPrefixVerifier, V2HostSelectionExpectation,
     V2ProjectionOrigin,
 };
+use catcoms_replication::chat::{owner_facts::OwnerFactId, owner_header::OwnerHeaderId};
 use catcoms_sync::{
     PreparedV2JoinedPrefix, RecoveredV2JoinedOutcome, V2JoinDeliveryData, V2PendingJoinContextData,
 };
@@ -505,6 +505,24 @@ impl RecoveredWelcome {
         )?;
         self.require(store)?;
         Ok(frame)
+    }
+
+    pub(super) fn has_terminal_candidate(
+        &self,
+        store: &ServerStore,
+        context: V2PendingJoinContextData,
+        original: (OwnerFactId, u64),
+    ) -> Result<bool, AppError> {
+        self.require(store)?;
+        let outcome = self.outcome.as_ref().ok_or_else(denied)?;
+        let terminal = member_add::MemberAdds::has_terminal_candidate(
+            store,
+            context,
+            &outcome.file.1,
+            original,
+        )?;
+        self.require(store)?;
+        Ok(terminal)
     }
 
     pub(super) fn recover_member_adds<

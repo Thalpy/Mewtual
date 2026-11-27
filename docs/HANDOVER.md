@@ -120,6 +120,11 @@ The replacement uses its own reserved transport, registered row, closed
 Welcome and later governing journal. The per-vault outbox and received
 history remain available under their existing scope.
 
+Before a replacement is selected, verified terminal A1 also replays in
+isolation. A bounded journal check routes the one saved Welcome graph
+to isolated replay or to the continuing A1 transport. Native unlock
+still reports the terminal result. It has no renderer rejoin action.
+
 The Windows native fixture reopens with the old port occupied, verifies
 that only the replacement row is present, exchanges real messages with
 the founder and observes a later selected Remove. It also refuses the

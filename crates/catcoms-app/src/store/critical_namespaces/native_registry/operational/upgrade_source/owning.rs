@@ -487,6 +487,13 @@ impl Store {
         self.physical.require_registered_native_join(data)
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn has_recovered_terminal_candidate(
+        &self,
+        data: crate::store::NativeTextJoinedRegistrationData,
+    ) -> Result<bool, AppError> {
+        self.physical.has_recovered_terminal_candidate(data)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn require_recovered_native_join_removal(
         &self,
         data: crate::store::NativeTextJoinedRegistrationData,
