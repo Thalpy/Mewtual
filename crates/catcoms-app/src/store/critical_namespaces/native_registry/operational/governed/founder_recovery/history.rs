@@ -12,12 +12,30 @@ use crate::store::persistence::v2_shared_history::{
     SharedHistoryActionQuery, SharedHistoryProjectionLease, SharedHistoryReplay, SharedHistoryScope,
 };
 use crate::store::{
-    NativeTextJoinedArchivedActions, NativeTextJoinedMemberProjection, ServerStore,
-    V2MemberSaveRefusal, V2MemberSignRequest,
+    NativeTextFounderAudit, NativeTextJoinedArchivedActions, NativeTextJoinedMemberProjection,
+    ServerStore, V2MemberSaveRefusal, V2MemberSignRequest,
 };
 use catcoms_replication::chat::{ActionId, ChatLedger, LedgerLimits, Realm, MAX_ACTION_BYTES};
 
 impl NativeTextColdFounderSource {
+    pub(in crate::store::critical_namespaces::native_registry) fn selected_history_audit(
+        &mut self,
+        channel: u128,
+        query: SharedHistoryActionQuery,
+        caller: &RequestCancellation,
+    ) -> Result<NativeTextFounderAudit, AppError> {
+        let (_, observation, _fee) = self.prepare_member_subscription(channel, caller)?;
+        let signal = observation.constrain(caller.clone());
+        let scope = self.history_scope(channel)?;
+        let page =
+            self.work
+                .with_recovered_founder_store(&self.selection, &self.source, |store| {
+                    store.selected_shared_history_audit_page(scope, query, &signal)
+                })?;
+        self.require_recovered_checkpoint(&signal)?;
+        Ok(NativeTextFounderAudit::new(page, signal))
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn governed_roster(
         &mut self,
         caller: &RequestCancellation,

@@ -11,12 +11,14 @@ use crate::store::persistence::v2_member_outbox::{
 };
 use crate::store::persistence::v2_shared_history::{
     disk::{
-        PreparedSharedHistorySave, SavedSharedOriginal, SelectedHistoryRecord, SharedHistoryDisk,
-        SharedHistoryDiskQuota, SharedHistoryRelayIndex, DISK_FEE, RELAY_INDEX_FEE,
+        PreparedSharedHistorySave, SavedSharedOriginal, SelectedHistoryRecord,
+        SelectedSharedHistoryAuditPage, SharedHistoryDisk, SharedHistoryDiskQuota,
+        SharedHistoryRelayIndex, DISK_FEE, RELAY_INDEX_FEE,
     },
     ArchiveRelayEntry, SharedHistoryActionPage, SharedHistoryActionQuery, SharedHistoryScope,
 };
 use catcoms_replication::chat::{ActionId, SignedAction};
+use catcoms_rt::RequestCancellation;
 use catcoms_storage::private_chat_page::PrivateChatPageId;
 
 pub(in crate::store) const MARKER_NAME: &str = "chat-critical-namespaces.shared-history.marker";
@@ -357,6 +359,23 @@ impl ServerStore {
     ) -> Result<SharedHistoryActionPage, AppError> {
         self.with_shared_history(scope, |disk, _, _, key, payment| {
             disk.action_page(key, query, &self._session, payment)
+        })
+    }
+
+    /// Read-only access for the original founder's audit. A pending save
+    /// remains the responsibility of the local writer or recovery owner.
+    pub(in crate::store) fn selected_shared_history_audit_page(
+        &self,
+        scope: SharedHistoryScope,
+        query: SharedHistoryActionQuery,
+        caller: &RequestCancellation,
+    ) -> Result<Option<SelectedSharedHistoryAuditPage>, AppError> {
+        if !self.has_mounted_shared_history()? {
+            return Ok(None);
+        }
+        self.with_selected_shared_history(scope, |disk, _, key, _| {
+            disk.selected_audit_page(key, query, &self._session, caller)
+                .map(Some)
         })
     }
 

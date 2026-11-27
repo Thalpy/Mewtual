@@ -1,5 +1,32 @@
 # Mewtual; Handover
 
+## 26 November 2026 — Founder read of retained received history
+
+The founder can open Chat history from the Chat V2 Members panel. It
+lists originals in this device's selected received archive and shows
+the signed edits and deletions for an exact message. The same native
+authorization covers warm and restored founders. An unfinished archive
+write or corrupt selected record refuses the read without settling it.
+
+The same dialog can show originals saved on this device, including edits,
+deletions, and their local send disposition. It uses the existing
+channel-scoped history reader and keeps the first page's finite endpoint.
+The focused renderer tests, Svelte check and production build pass.
+
+Focused Windows App tests passed for bounded original and revision
+pages, authenticated restart, corrupt selected records and an unfinished
+archive write. The full frontend suite passed with 3,948 tests and the
+additional compiled Svelte dialog test passed separately. The browser
+flow could not connect to the local browser debugger.
+
+The native audit request parser passed. The first mounted run stopped
+before its audit assertions when an existing archive read received a
+transient Busy before scheduling. The fixture now retries that exact
+read. The warm/cold audit and final source retirement checks are
+pending. Audit covers selected received records on this device.
+It does not include the founder's own outbox or unproven late originals
+from removed members. Chat V2 remains disabled.
+
 ## 26 November 2026 — Restore approved joined contacts after reopening
 
 The disabled native Chat V2 joined row can remember a signed contact for

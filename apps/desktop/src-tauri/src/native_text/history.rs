@@ -3,7 +3,7 @@
 //! installed objects before resolving an invocation.
 use super::*;
 use catcoms_app::store::{
-    NativeTextHistoryResponseCredit, NativeTextJoinedMemberProjection,
+    NativeTextFounderAudit, NativeTextHistoryResponseCredit, NativeTextJoinedMemberProjection,
     NativeTextJoinedRowSelection, NativeTextJoinedSelectionPreparation,
     NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus, NativeTextMemberPreparation,
     V2MemberSaveRefusal,
@@ -46,6 +46,11 @@ enum ReadRequest {
     Own(OwnRead),
     Live(ActionId),
     Archived(ArchiveRead),
+    Audit {
+        target: Option<ActionId>,
+        after: Option<ActionId>,
+        limit: usize,
+    },
 }
 #[derive(Clone, Copy)]
 enum OwnRead {
@@ -102,6 +107,8 @@ fn parse(payload: &InvokeBody) -> Result<Read, &'static str> {
                     | "receivedAction"
                     | "archivedAction"
                     | "archiveAfter"
+                    | "auditAction"
+                    | "auditAfter"
                     | "trace"
             )
         })
@@ -148,6 +155,32 @@ fn parse(payload: &InvokeBody) -> Result<Read, &'static str> {
             .map(|n| n as usize)
             .ok_or("Invalid history page size.")
     };
+    if object.contains_key("auditAction") || object.contains_key("auditAfter") {
+        if object.len() != 6 {
+            return Err("Invalid audit request.");
+        }
+        let canonical_action = |value: &str| {
+            if value.len() != 64 || value.bytes().any(|byte| byte.is_ascii_uppercase()) {
+                return Err("Invalid audit message.");
+            }
+            action_id(value)
+        };
+        let nullable_action = |key| match object.get(key) {
+            Some(serde_json::Value::Null) => Ok(None),
+            Some(serde_json::Value::String(value)) => canonical_action(value).map(Some),
+            _ => Err("Invalid audit request."),
+        };
+        return Ok(Read {
+            server,
+            channel,
+            context,
+            request: ReadRequest::Audit {
+                target: nullable_action("auditAction")?,
+                after: nullable_action("auditAfter")?,
+                limit: limit()?,
+            },
+        });
+    }
     let own = object.contains_key("start") || object.contains_key("endExclusive");
     let request = match (
         object.contains_key("receivedAction"),
@@ -304,11 +337,20 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
                 .await
                 .map(Response::Saved),
             ReadRequest::Archived(read) => execute_archive(&state, &invocation, read).await,
+            ReadRequest::Audit {
+                target,
+                after,
+                limit,
+            } => execute_audit(&state, &invocation, target, after, limit)
+                .await
+                .map(Response::Audit),
         };
         #[cfg(test)]
         {
             let edge = state.native_text.text_reply_edge.lock().unwrap().clone();
-            if let Some(edge) = edge {
+            let audit_succeeded = !matches!(invocation.read.request, ReadRequest::Audit { .. })
+                || matches!(&result, Ok(Response::Audit(_)));
+            if let Some(edge) = edge.filter(|_| audit_succeeded) {
                 edge.wait_once().await;
             }
         }
@@ -326,6 +368,10 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
                 Ok(Response::ArchivePage(output)) => {
                     resolver.resolve(InvokeResponseBody::Json(output.body.take().unwrap()))
                 }
+                Ok(Response::Audit(output)) if output.audit.is_current_cached() => {
+                    resolver.resolve(InvokeResponseBody::Json(output.body.take().unwrap()))
+                }
+                Ok(Response::Audit(_)) => resolver.reject(STALE),
                 Err(error) => resolver.reject(&*error),
             }
         }
@@ -421,6 +467,13 @@ enum Response {
     Saved(Output),
     Received(ReceivedOutput),
     ArchivePage(ArchivePageOutput),
+    Audit(AuditOutput),
+}
+
+struct AuditOutput {
+    audit: NativeTextFounderAudit,
+    body: Option<String>,
+    _payment: Arc<Payment>,
 }
 
 struct ArchivePageOutput {
@@ -621,6 +674,47 @@ async fn execute_archive(
     .await
     .map_err(|_| STALE.to_owned())?
 }
+
+async fn execute_audit(
+    state: &AppState,
+    call: &Invocation,
+    target: Option<ActionId>,
+    after: Option<ActionId>,
+    limit: usize,
+) -> Result<AuditOutput, String> {
+    if call.selection.founder().is_none() {
+        return Err("Only the server owner can inspect retained records.".into());
+    }
+    let scope = call.scope.clone();
+    let local = call
+        .member_work
+        .foreground(scope.clone())
+        .await
+        .ok_or(STALE)?;
+    let Preparation::Founder(original) = capture(state, call).await? else {
+        return Err(STALE.into());
+    };
+    let channel = call.read.channel;
+    let payment = call.payment.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _local = local;
+        let audit = original
+            .audit_founder_history(channel, target, after, limit, &scope)
+            .map_err(|failure| match failure {
+                V2MemberSaveRefusal::Busy => BUSY,
+                V2MemberSaveRefusal::Cancelled | V2MemberSaveRefusal::Stale => STALE,
+                _ => "The retained records could not be verified. Try again.",
+            })?;
+        let body = serialize_audit(&audit, target)?;
+        Ok(AuditOutput {
+            audit,
+            body: Some(body),
+            _payment: payment,
+        })
+    })
+    .await
+    .map_err(|_| STALE.to_owned())?
+}
 impl Work {
     fn run(self) -> Result<Output, String> {
         let page = match (self.preparation, self.read) {
@@ -796,7 +890,19 @@ fn record<'a>(
     ordinal: u64,
     status: NativeTextMemberHistoryStatus,
 ) -> Record<'a> {
-    let body = match &action.spec().body {
+    Record {
+        ordinal: ordinal.to_string(),
+        action: hex::encode(action.id().as_bytes()),
+        signer: hex::encode(action.signer()),
+        channel: action.spec().realm.channel().to_string(),
+        presented_ms: action.spec().presented_ms.to_string(),
+        status: status_data(status),
+        body: action_body(action),
+    }
+}
+
+fn action_body(action: &SignedAction) -> BodyData<'_> {
+    match &action.spec().body {
         Body::Create { text, reply_to } => BodyData::Create {
             text,
             reply_to: reply_to.map(|id| hex::encode(id.as_bytes())),
@@ -811,16 +917,69 @@ fn record<'a>(
         Body::Join { create } => BodyData::Join {
             create: hex::encode(create.as_bytes()),
         },
-    };
-    Record {
-        ordinal: ordinal.to_string(),
-        action: hex::encode(action.id().as_bytes()),
-        signer: hex::encode(action.signer()),
-        channel: action.spec().realm.channel().to_string(),
-        presented_ms: action.spec().presented_ms.to_string(),
-        status: status_data(status),
-        body,
     }
+}
+
+#[derive(Serialize)]
+struct AuditRecord<'a> {
+    action: String,
+    signer: String,
+    admission: String,
+    original_digest: String,
+    presented_ms: String,
+    parents: Vec<String>,
+    body: BodyData<'a>,
+}
+
+#[derive(Serialize)]
+struct AuditPage<'a> {
+    backend: &'static str,
+    scope: &'static str,
+    target: Option<String>,
+    next: Option<String>,
+    items: Option<Vec<AuditRecord<'a>>>,
+}
+
+fn serialize_audit(
+    audit: &NativeTextFounderAudit,
+    target: Option<ActionId>,
+) -> Result<String, String> {
+    audit
+        .with_records(|records, next| {
+            let items = records.map(|records| {
+                records
+                    .iter()
+                    .map(|(admission, original)| {
+                        let action = original.action();
+                        AuditRecord {
+                            action: hex::encode(action.id().as_bytes()),
+                            signer: hex::encode(action.signer()),
+                            admission: hex::encode(admission.as_bytes()),
+                            original_digest: hex::encode(original.original_digest().as_bytes()),
+                            presented_ms: action.spec().presented_ms.to_string(),
+                            parents: action
+                                .spec()
+                                .parents
+                                .iter()
+                                .map(|id| hex::encode(id.as_bytes()))
+                                .collect(),
+                            body: action_body(action),
+                        }
+                    })
+                    .collect()
+            });
+            encode(
+                &AuditPage {
+                    backend: "text-v2",
+                    scope: "selected-shared-history-audit",
+                    target: target.map(|id| hex::encode(id.as_bytes())),
+                    next: next.map(|id| hex::encode(id.as_bytes())),
+                    items,
+                },
+                SERIALIZED_LIMIT,
+            )
+        })
+        .map_err(|_| STALE.to_owned())?
 }
 
 #[derive(Serialize)]
@@ -947,6 +1106,40 @@ const _: () =
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn audit_requests_are_disjoint_and_require_canonical_cursors() {
+        let action = hex::encode([0xab; 32]);
+        let valid = serde_json::json!({
+            "server": 1, "channel": "2", "expectedContext": hex::encode([3; 32]),
+            "auditAction": action, "auditAfter": null, "limit": 8,
+        });
+        let action_id = ActionId::from_bytes([0xab; 32]);
+        assert!(matches!(
+            parse(&InvokeBody::Json(valid.clone())).unwrap().request,
+            ReadRequest::Audit { target: Some(target), after: None, limit: 8 } if target == action_id
+        ));
+        let mut list = valid.clone();
+        list["auditAction"] = serde_json::Value::Null;
+        assert!(matches!(
+            parse(&InvokeBody::Json(list)).unwrap().request,
+            ReadRequest::Audit {
+                target: None,
+                after: None,
+                limit: 8
+            }
+        ));
+        for (field, invalid) in [
+            ("archiveAfter", serde_json::Value::Null),
+            ("ownAction", serde_json::json!(action)),
+            ("auditAfter", serde_json::json!(action.to_uppercase())),
+            ("limit", serde_json::json!(9)),
+        ] {
+            let mut request = valid.clone();
+            request[field] = invalid;
+            assert!(parse(&InvokeBody::Json(request)).is_err());
+        }
+    }
+
     #[test]
     fn history_cursor_is_lossless_canonical_and_bounded() {
         assert_eq!(decimal("18446744073709551615"), Ok(u64::MAX));

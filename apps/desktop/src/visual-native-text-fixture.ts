@@ -1,4 +1,4 @@
-import type { NativeOriginal, NativeOwnRevision, NativeReceived } from "./native-text-history.ts";
+import type { NativeAuditRecord, NativeOriginal, NativeOwnRevision, NativeReceived } from "./native-text-history.ts";
 
 /** Development-only IPC data for the actual Native Text App route. This models
  * local saves and a recovered projection. A new fixture owns a
@@ -12,6 +12,13 @@ export function createVisualNativeTextFixture(empty = false) {
     text: "A message recovered after reconnecting.",
     certainty: "provisional",
   };
+  const auditRecords: NativeAuditRecord[] = archived ? [
+    { action: archived.action, signer: "d2".repeat(32), admission: "b4".repeat(32), original_digest: "e1".repeat(32),
+      presented_ms: "1787227201000", parents: [], body: { kind: "create", text: archived.text, reply_to: null } },
+    { action: "d4".repeat(32), signer: "d2".repeat(32), admission: "b4".repeat(32), original_digest: "e2".repeat(32),
+      presented_ms: "1787227201001", parents: [archived.action],
+      body: { kind: "edit", create: archived.action, text: "A retained edit from the same device." } },
+  ] : [];
   const rows: NativeOriginal[] = empty ? [] : [
     { ordinal: "0", action: "b1".repeat(32), signer: "c1".repeat(32), channel: "1", presented_ms: "1787227200000", status: "pending",
       body: { kind: "create", text: "A message saved on this device.", reply_to: null } },
@@ -29,6 +36,11 @@ export function createVisualNativeTextFixture(empty = false) {
     if (command === "resume_session") return result(structuredClone({ backend: "text-v2", servers }));
     if (command === "get_ui_state") return result(ui);
     if (command === "save_ui_state") { ui = String(args.json); return result(null); }
+    if (command === "get_native_chat_members" && args.server === 1 && args.expectedContext === server.context && servers.length) {
+      return result({ canRemove: false, members: [
+        { admission: "b3".repeat(32), identity: "c1".repeat(32), fingerprint: "c1c1c1c1", you: true, founder: true },
+      ] });
+    }
     if (command === "found_server") {
       if (servers.length && servers[0].context !== args.requestId) throw new Error("Native Text visual fixture already has a group");
       server.context=String(args.requestId);server.name=String(args.serverName);server.display_name=String(args.displayName);
@@ -38,6 +50,13 @@ export function createVisualNativeTextFixture(empty = false) {
     if (["get_message_page", "send_message", "edit_message", "delete_message"].includes(command)) {
       if (args.server !== 1 || args.channel !== "1" || args.expectedContext !== server.context || !servers.length) throw new Error("Unknown Native Text fixture conversation");
       if (command === "get_message_page") {
+        if ("auditAction" in args) {
+          if (args.limit !== 8 || args.auditAfter !== null || (args.auditAction !== null && args.auditAction !== archived?.action)) {
+            throw new Error("Invalid Native Text fixture audit request");
+          }
+          return result({ backend: "text-v2", scope: "selected-shared-history-audit", target: args.auditAction,
+            next: null, items: structuredClone(args.auditAction === null ? auditRecords.slice(0, 1) : auditRecords) });
+        }
         if (typeof args.ownAction === "string") {
           return result({ backend: "text-v2", scope: "own-message-revision", action: args.ownAction, scanning: false, item: revisions.get(args.ownAction) ?? null });
         }
