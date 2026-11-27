@@ -153,18 +153,21 @@ impl SealedV2PendingJoinSource {
         input: NativeV2RejoinInputs<'_>,
         native: NativeV2JoinKeyEntry<'_>,
     ) -> Result<PreparedV2JoinRequest, SyncError> {
-        self.prepare_native_rejoin_classified(key, input, native)
+        self.prepare_native_rejoin_classified(key, input, native, || true)
             .map_err(NativeV2RejoinFailure::into_sync_error)
     }
 
     /// A returned refusal before device entry is distinct from any error
     /// after admitting the SDK. In particular RT may spend a cut while a UI
     /// lock wins its final admission check, with no device call performed.
+    /// The original caller may also revoke this specific operation up to
+    /// the device cut. That negative does not replace native authentication.
     pub fn prepare_native_rejoin_classified(
         &self,
         key: &[u8; 32],
         input: NativeV2RejoinInputs<'_>,
         mut native: NativeV2JoinKeyEntry<'_>,
+        caller_current: impl FnOnce() -> bool,
     ) -> Result<PreparedV2JoinRequest, NativeV2RejoinFailure> {
         use NativeV2RejoinFailure::{AfterDeviceEntry, BeforeDeviceEntry};
         let NativeV2RejoinInputs {
@@ -195,6 +198,9 @@ impl SealedV2PendingJoinSource {
             return Err(BeforeDeviceEntry(SyncError::JoinRejected));
         }
 
+        if !caller_current() {
+            return Err(BeforeDeviceEntry(SyncError::JoinRejected));
+        }
         native
             .enter(NativeChatKeyPurpose::JoinerDevice)
             .map_err(BeforeDeviceEntry)?;

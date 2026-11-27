@@ -125,6 +125,26 @@ mounted owner and generation before replying. The same native lock
 invalidates both gates, and close waits for any original retired
 physical reader before dropping the vault.
 
+The main-window rejoin command requires the exact retired authorization
+and an explicitly approved numeric host. An admitted disk phase lends
+the original affine vault to a blocking worker and parks its exact return
+in a paid slot, including on unwind. Lock fences the generation before
+it waits for older file custody. The network phase restores the Store
+first and uses only the original cancellable TCP exchange. Irreversible
+close also waits for that operation and its actual TCP actor. The full
+network wait observes the original cancelled scope even before enqueue.
+A pre-ID9 Current with later rejoin journals cannot replace their bound
+catalog ciphertext. The command reports expiry only for a verified
+invite without a saved request. A live row requires cold activation.
+
+A warm retired writer can discard only its own held exact unentered
+Attempt or SDK Attempt, with every subsequent role absent. It covers
+the unlink on the held original parent and proves the name absent
+before reuse. Cold ambiguous entry preserves the files. A successful
+key operation can finish its own Pending or Outcome under its actual
+retained entry permit after revocation. The old caller receives no
+receipt and cannot start transport, prefix selection or publication.
+
 Cold founder startup can complete a fully staged later Add only after vault
 authentication and replay under the original pin. It retains and rechecks
 the named parent, archive, stage and each journal record against their

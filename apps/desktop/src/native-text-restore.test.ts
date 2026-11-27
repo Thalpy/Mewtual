@@ -49,6 +49,29 @@ test("actual removed-vault restore makes no chat or continuity request", () => {
   });
 });
 
+test("the actual rejoin form scopes the approved host and discards a late checkpoint after lock", async () => {
+  const gate = deferred();
+  const calls: unknown[] = [];
+  const fixture = new Function("gate", "calls", `
+    let locked=false,nativeRejoinRequired=true,windowCloseInFlight=false,uiStateLoadGeneration=1;
+    let rejoinInvite="  aabb  ",rejoinHost=" 127.0.0.1 ",rejoinBusy=false,rejoinRestart=false,rejoinNotice="";
+    const invoke=(command,payload)=>{calls.push([command,payload]);return gate.promise;};
+    ${production("submitNativeRejoin")}
+    ${production("resetNativeRejoin")}
+    return {submit:submitNativeRejoin,lock(){locked=true;uiStateLoadGeneration++;resetNativeRejoin();},
+      state:()=>({rejoinInvite,rejoinHost,rejoinBusy,rejoinRestart,rejoinNotice})};
+  `)(gate, calls);
+  const active = fixture.submit();
+  await fixture.submit();
+  assert.deepEqual(calls, [["rejoin_server", { inviteHex: "aabb", approvedHost: "127.0.0.1" }]]);
+  fixture.lock();
+  gate.resolve({ step: "restart-to-activate" });
+  await active;
+  assert.deepEqual(fixture.state(), {
+    rejoinInvite: "", rejoinHost: "", rejoinBusy: false, rejoinRestart: false, rejoinNotice: "",
+  });
+});
+
 test("actual Native startup actions and keyboard navigation cannot enter Legacy joining or DMs",async()=>{
  const f=new Function(`let chatBackend="text-v2",startTab="found";
    ${["join","applyJoinReply","newDm","addFriend","openNewDm","openAddFriend","enterDmHome","openInbox","startTabArrows","addChannel","channelMenu"].map(production).join("\n")}

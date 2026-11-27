@@ -332,6 +332,11 @@ pub(super) async fn older_with_spawn(
     generation: u64,
     spawn: impl Fn(Task),
 ) -> Result<(), String> {
+    state
+        .native_text
+        .rejoin_files
+        .wait_before(state, Some(generation))
+        .await?;
     let control = &state.native_text.retirement;
     // Preserve Legacy's existing lock path, including its concurrency behavior.
     // A pending old native drain still remains a GLOBAL resource barrier.

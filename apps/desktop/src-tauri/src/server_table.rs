@@ -412,7 +412,6 @@ impl ServerTable {
     pub(super) fn len(&self) -> usize {
         self.rows.len()
     }
-    #[cfg(test)]
     pub(super) fn is_empty(&self) -> bool {
         self.rows.is_empty()
     }

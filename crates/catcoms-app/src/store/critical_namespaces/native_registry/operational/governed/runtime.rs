@@ -240,6 +240,20 @@ impl NativeTextRemovedJoinedVault {
         Ok(true)
     }
 
+    /// Classify the exact current catalog without entering a key, selecting a
+    /// row or accepting a renderer-supplied snapshot.
+    pub fn rejoin_catalog_is_selected(&self) -> Result<bool, AppError> {
+        if self
+            .rejoin_catalog
+            .as_ref()
+            .is_some_and(|candidate| candidate.selection_started_cached())
+        {
+            return Err(AppError::ChatV2RejoinCatalogReopen);
+        }
+        self.removal_data()?.ok_or_else(refused)?;
+        self.index.rejoin_catalog_selected()
+    }
+
     /// Release closed UI-generation bookkeeping after the actual batch
     /// drained. Drop the returned custody outside native guards.
     pub fn collect_retired_ui(&self) -> Result<crate::store::NativeTextUiGarbage, AppError> {
@@ -261,6 +275,17 @@ impl NativeTextRemovedJoinedVault {
             self.ui.invocation_budget(),
             credit,
         )
+    }
+
+    /// Loan only a retirement observation of the exact replacement TCP
+    /// owner. Native fences the invocation and waits outside native guards.
+    pub fn capture_rejoin_transport_retirement(
+        &self,
+    ) -> Option<NativeTextRejoinTransportRetirement> {
+        self.rejoin_tcp
+            .as_ref()
+            .cloned()
+            .map(NativeTextRejoinTransportRetirement)
     }
 
     /// Recheck the exact registry, original Welcome files and selected
@@ -381,6 +406,16 @@ impl NativeTextRemovedJoinedVault {
         self.index
             .select_retired_rejoin_catalog(prepared, &|| Ok(()))?;
         Ok(true)
+    }
+}
+
+pub struct NativeTextRejoinTransportRetirement(Arc<join_tcp::Transport>);
+catcoms_rt::redacted_debug! { NativeTextRejoinTransportRetirement; }
+
+impl NativeTextRejoinTransportRetirement {
+    /// True only when the original reservation and actor have both drained.
+    pub fn try_retire(&self) -> Result<bool, crate::store::NativeTextSourceRetirementRefusal> {
+        self.0.try_retire()
     }
 }
 

@@ -14,6 +14,9 @@ use catcoms_sync::SelectedRejoinRemoval;
 const REJOIN_STAGE: &str = "chat-critical-namespaces.rejoin.stage";
 
 mod pending;
+pub(super) fn require_no_rejoin_journals(store: &ServerStore) -> Result<(), AppError> {
+    pending::require_unstarted(store)
+}
 pub(in crate::store) use pending::{
     InstalledRejoin, PreparedRejoinTransport, RejoinIndexInputs, RejoinIndexOwner,
     RejoinIndexRecovery, RejoinKeyEntry, RejoinPendingOwner, RejoinPrefixInputs, RejoinPrefixOwner,
@@ -119,7 +122,9 @@ impl RejoinCatalogPreparation {
             false,
             critical_namespaces::Slot::Stage.name(),
         )?)?;
-        Ok(())
+        // All later records bind the selected encrypted catalog. An older
+        // Current cannot authorize replacing a lost ID9 with different bytes.
+        require_no_rejoin_journals(store)
     }
 
     fn require_catalog_files(&self, store: &ServerStore) -> Result<(), AppError> {
@@ -308,6 +313,7 @@ impl ServerStore {
         native: RetainedNativeRejoinInventory,
         rng: &mut dyn CryptoRngCore,
     ) -> Result<RejoinCatalogPreparation, AppError> {
+        require_no_rejoin_journals(self)?;
         self.require_recovered_joined_removal(registration, removal)?;
         let policy = self.governance_layout_policy.as_ref().ok_or_else(denied)?;
         policy.require_persistent_capacity()?;

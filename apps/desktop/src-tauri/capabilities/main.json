@@ -186,6 +186,7 @@
     "allow-found-server",
     "allow-preview-invite",
     "allow-join-server",
+    "allow-rejoin-server",
     "allow-apply-join-reply",
     "allow-leave-server",
     "allow-get-invite",

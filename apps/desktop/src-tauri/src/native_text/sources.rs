@@ -627,6 +627,7 @@ pub(crate) async fn close(state: &AppState, clock: &dyn catcoms_rt::Clock) -> Re
     // All callers of this function have admitted irreversible whole-close.
     // Even the first fallible cached lookup must leave that fence published.
     controller.boot.close();
+    state.native_text.rejoin_operation.close();
     {
         let store = state.store.lock().await;
         if controller.is_disposed(&store)? {
@@ -637,6 +638,12 @@ pub(crate) async fn close(state: &AppState, clock: &dyn catcoms_rt::Clock) -> Re
     // Do NOT join vault_mount or unlock's finalizer: the caller retains the
     // close prelude which that finalizer may await. Only actual file work ends.
     controller.boot.wait().await;
+    state.native_text.rejoin_operation.wait().await;
+    state
+        .native_text
+        .rejoin_files
+        .wait_before(state, None)
+        .await?;
     let bootstrap = {
         let mut slot = state
             .native_text
@@ -677,6 +684,28 @@ pub(crate) async fn close(state: &AppState, clock: &dyn catcoms_rt::Clock) -> Re
         }
         // Every actual cell/key pin must leave before final paired removal.
         drop(worker);
+    }
+    let retired_tcp = {
+        let store = state.store.lock().await;
+        match store.as_ref() {
+            Some(MountedVault::TextV2Retired(vault)) => vault.capture_rejoin_transport_retirement(),
+            _ => None,
+        }
+    };
+    if let Some(mut owner) = retired_tcp {
+        loop {
+            let (original, result) = tauri::async_runtime::spawn_blocking(move || {
+                let result = owner.try_retire();
+                (owner, result)
+            })
+            .await
+            .map_err(|_| "Rejoin shutdown was interrupted. Try closing again.")?;
+            owner = original;
+            if result.map_err(|_| "Rejoin transport could not finish closing.")? {
+                break;
+            }
+            clock.sleep(Duration::from_millis(20)).await;
+        }
     }
     let mut credit = Some(
         state

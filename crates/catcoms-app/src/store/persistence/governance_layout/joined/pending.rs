@@ -908,9 +908,7 @@ impl ServerStore {
         invite: &SignedInviteBindingData,
         now_ms: u64,
     ) -> Result<(), AppError> {
-        if invite.expired_at_data(now_ms) {
-            return Err(denied());
-        }
+        super::rejoin::require_no_rejoin_journals(self)?;
         self.require_recovered_joined_removal(registration, removal)?;
         let policy = self.governance_layout_policy.as_ref().ok_or_else(denied)?;
         let _fee = policy
@@ -929,7 +927,11 @@ impl ServerStore {
                 invite,
             )
         })?;
-        self.require_recovered_joined_removal(registration, removal)
+        self.require_recovered_joined_removal(registration, removal)?;
+        if invite.expired_at_data(now_ms) {
+            return Err(AppError::ChatV2RejoinNeedsFreshInvite);
+        }
+        Ok(())
     }
 
     pub(in crate::store) fn require_recovered_joined_removal(

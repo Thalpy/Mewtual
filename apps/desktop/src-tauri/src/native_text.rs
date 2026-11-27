@@ -21,6 +21,7 @@ mod joining;
 mod listing;
 mod membership;
 mod receiving;
+mod rejoin;
 pub(super) mod retirement;
 mod sending;
 pub(super) mod sources;
@@ -38,6 +39,12 @@ pub(super) struct Registry {
     bootstrap: Arc<StdMutex<Option<boot::Bootstrap>>>,
     retired_authorized: Arc<AtomicU64>,
     retired_lock_requested: Arc<AtomicBool>,
+    rejoin_files: rejoin::files::Lane,
+    rejoin_operation: Arc<boot_lifetime::Control>,
+    #[cfg(test)]
+    rejoin_file_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
+    #[cfg(test)]
+    rejoin_network_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
     ui_budget: NativeUiInvocationBudget,
     history_budget: NativeTextHistoryResponseBudget,
     listing: listing::Policy,
@@ -144,12 +151,23 @@ impl Default for Registry {
                 .expect("fixed history response policy"),
         )
         .expect("fixed history response capacity");
+        let rejoin_operation = boot_lifetime::Control::new(
+            ui_budget
+                .prepare()
+                .expect("rejoin operation control payment"),
+        );
         Self {
             selected: false,
             inflight: Arc::new(Semaphore::new(1)),
             bootstrap: Arc::new(StdMutex::new(Some(boot::Bootstrap::Fresh))),
             retired_authorized: Arc::new(AtomicU64::new(0)),
             retired_lock_requested: Arc::new(AtomicBool::new(true)),
+            rejoin_files: rejoin::files::Lane::default(),
+            rejoin_operation,
+            #[cfg(test)]
+            rejoin_file_edge: StdMutex::new(None),
+            #[cfg(test)]
+            rejoin_network_edge: StdMutex::new(None),
             ui_budget,
             history_budget,
             listing: listing::Policy::default(),
@@ -360,6 +378,9 @@ fn router<R: tauri::Runtime>(
         if enabled && invoke.message.command() == "join_server" {
             return joining::route(invoke, &spawn);
         }
+        if enabled && rejoin::handles(invoke.message.command()) {
+            return rejoin::route(invoke, &spawn);
+        }
         if enabled && invoke.message.command() == "mint_invite_fresh" {
             return invite_mint::route(invoke, &spawn);
         }
@@ -554,6 +575,9 @@ async fn authenticate_mounted(
         let work = {
             let guard = state.store.lock().await;
             match guard.as_ref() {
+                None if state.native_text.rejoin_files.has_loan()? => {
+                    return Err("Rejoin is still saving its work. Try again.".into());
+                }
                 None => return Ok(None),
                 Some(MountedVault::TextV2(vault)) => vault.prepare_native_authentication(credit),
                 Some(MountedVault::TextV2Retired(vault)) => {

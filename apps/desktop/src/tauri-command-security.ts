@@ -108,7 +108,7 @@ export const TAURI_COMMAND_GROUPS = {
   server_lifecycle_and_membership: {
     boundary: "Signed invites, bounded pre-join reply dialing, group membership and role-changing operations; protocol checks are authoritative.",
     commands: [
-      "found_server", "preview_invite", "join_server", "apply_join_reply", "leave_server", "get_invite", "mint_invite_fresh",
+      "found_server", "preview_invite", "join_server", "rejoin_server", "apply_join_reply", "leave_server", "get_invite", "mint_invite_fresh",
       "set_admin", "remove_member", "revoke_device",
       // Native removal binds the exact current admission. Direct contact uses a
       // member-signed offer and the numeric host explicitly approved in the UI.
