@@ -61,6 +61,10 @@ pub use member_dependencies::history::{
     OpenedV2MemberHistoryRequest, PreparedV2MemberHistoryRequest, V2JoinedMemberHistoryAccess,
     V2MemberHistoryCursor, V2MemberHistoryEntry, V2MemberHistoryPage, V2_MEMBER_HISTORY_PAGE_SPAN,
 };
+pub use member_dependencies::removed_review::{
+    OpenedV2RemovedReviewRequest, PreparedV2RemovedReviewRequest, V2RemovedReviewOriginal,
+    V2RemovedReviewPage, V2RemovedReviewQuery, V2RemovedReviewTarget,
+};
 pub use member_dependencies::{
     OpenedV2MemberDependencyRequest, PreparedV2MemberDependencyRequest,
     V2FounderMemberDependencyAccess, V2MemberDependencyRoute, MAX_V2_DEPENDENCY_REPLY_BYTES,

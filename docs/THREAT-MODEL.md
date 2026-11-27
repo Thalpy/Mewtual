@@ -86,6 +86,16 @@ review outputs. The unauthenticated outer length classifies torn
 scratch writes. It grants no authority to select a catalog. Complete
 claims with invalid authentication are preserved.
 
+A joined holder serves removed-member review only to the authenticated
+transport peer from the pinned founder's original invite. It also
+verifies the current Founder Admission and the exact historical
+Removal in the chosen channel scope. Group exporter encryption and
+a caller's metadata alone do not authorize review service. The
+bounded inventory is built by local maintenance per former Admission.
+The first offered IDs stay fixed for the life of the connection and
+sweep. A retrieval must reprove the exact selected Create from an
+unchanged offer. Remote review never performs ordinary archive recovery.
+
 A holder's archive page exposes eligible IDs to a reciprocally approved
 peer on the original authenticated connection. Its continuation gives no
 raw offset, author ID or unoffered ActionId. The cursor is replayable on

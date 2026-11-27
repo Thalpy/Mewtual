@@ -3,6 +3,7 @@
 
 use super::dependencies::{ReplyPayment, ScopeAuthority, REPLY_FEE};
 use super::history_discovery::HistoryContactScope;
+use super::removed_review::ReviewRelayState;
 use super::*;
 use crate::store::persistence::v2_shared_history::{ArchiveRelayEntry, MAX_SHARED_HISTORY_RECORDS};
 use catcoms_net::NativeChatMemberDependencyIncoming;
@@ -15,13 +16,13 @@ use zeroize::Zeroizing;
 
 const CATALOGUE_FEE: usize = MAX_SHARED_HISTORY_RECORDS * size_of::<ArchiveRelayEntry>() + 8192;
 const CATALOGUE_REFRESH_MS: u64 = 20_000;
-const CURSOR_IDLE_MS: u64 = 300_000;
+pub(super) const CURSOR_IDLE_MS: u64 = 300_000;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct RelayScope {
-    head: OwnerHeaderId,
-    epoch: u64,
-    channel: u128,
+pub(super) struct RelayScope {
+    pub(super) head: OwnerHeaderId,
+    pub(super) epoch: u64,
+    pub(super) channel: u128,
 }
 
 struct ArchiveCatalogue {
@@ -64,6 +65,7 @@ pub(in crate::store::critical_namespaces::native_registry::operational::sources:
 {
     catalogue: Option<Arc<ArchiveCatalogue>>,
     sweeps: [Option<RelaySweep>; MAX_APPROVED_MEMBER_PEERS],
+    pub(super) review: ReviewRelayState,
 }
 
 struct RelayRequest {
@@ -312,7 +314,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
 }
 
 impl<R: CryptoRngCore> ReceiverSource<'_, R> {
-    fn relay_scope(&self, channel: u128) -> Result<RelayScope, V2MemberSaveRefusal> {
+    pub(super) fn relay_scope(&self, channel: u128) -> Result<RelayScope, V2MemberSaveRefusal> {
         let (head, _, epoch) = self
             .node
             .selected_join_data()
@@ -347,6 +349,7 @@ impl<R: CryptoRngCore> ReceiverSource<'_, R> {
                 .try_lock()
                 .map_err(|_| Refusal::Busy)?;
             relay.expire(scope, now);
+            relay.review.expire(scope, now);
             if relay.catalogue.as_ref().is_some_and(|value| {
                 value.scope == scope && now.saturating_sub(value.created_ms) < CATALOGUE_REFRESH_MS
             }) {
@@ -369,12 +372,32 @@ impl<R: CryptoRngCore> ReceiverSource<'_, R> {
             .metadata
             .reserve_join_node(CATALOGUE_FEE)
             .map_err(|_| Refusal::Busy)?;
+        let mut review = self
+            .metadata
+            .reserve_join_node(CATALOGUE_FEE)
+            .ok()
+            .map(|fee| (Vec::with_capacity(MAX_SHARED_HISTORY_RECORDS), fee));
+        let mut retired_admissions = Vec::new();
+        if review.is_some() {
+            retired_admissions.extend(
+                self.prefix
+                    .retired_history_data()
+                    .iter()
+                    .filter(|author| verifier.removed_review_coordinates(author).is_ok())
+                    .map(|author| author.admission_id_data()),
+            );
+            retired_admissions.sort_unstable();
+        }
         let mut entries = Vec::with_capacity(MAX_SHARED_HISTORY_RECORDS);
         if !self
             .store
             .inspect_shared_history_relay_index(archive, |entry| {
                 if verifier.observe_live_member(entry.admission).is_ok() {
                     entries.push(entry);
+                } else if let Some((retired, _)) = &mut review {
+                    if retired_admissions.binary_search(&entry.admission).is_ok() {
+                        retired.push(entry);
+                    }
                 }
             })
             .map_err(|_| Refusal::Failed)?
@@ -395,6 +418,9 @@ impl<R: CryptoRngCore> ReceiverSource<'_, R> {
             created_ms: now,
             _fee: fee,
         }));
+        if let Some((entries, fee)) = review {
+            relay.review.replace_catalogue(entries, scope, fee);
+        }
         Ok(true)
     }
 }
