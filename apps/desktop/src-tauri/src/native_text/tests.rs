@@ -2036,43 +2036,62 @@ async fn native_text_joined_dependency_provider_reopens_after_selected_add() {
         (offline_delete, offline_id),
     ];
     let mut progress = [false; 4];
-    timeout(Duration::from_millis(recovery_deadline.saturating_sub(SystemClock.monotonic_ms())), async {
-        // Inspect only the affected target after an invalidation. An infrequent
-        // fallback covers coalesced notices without queuing reads ahead of writes.
-        loop {
-            let affected = tokio::select! {
-                notice = notices.recv() => {
-                    Some(notice.expect("the archive invalidation listener must stay installed"))
-                }
-                _ = SystemClock.sleep(Duration::from_secs(4)) => None,
-            };
-            for (index, ((signed, target), covered)) in expected.iter().zip(&mut progress).enumerate() {
-                if *covered || affected.is_some_and(|value| value != index.min(2)) {
-                    continue;
-                }
-                let permit = newcomer_work
-                    .foreground(newcomer_scope.clone())
+    let recovery = timeout(
+        Duration::from_millis(recovery_deadline.saturating_sub(SystemClock.monotonic_ms())),
+        async {
+            // Inspect only the affected target after an invalidation. An infrequent
+            // fallback covers coalesced notices without queuing reads ahead of writes.
+            loop {
+                let affected = tokio::select! {
+                    notice = notices.recv() => {
+                        Some(notice.expect("the archive invalidation listener must stay installed"))
+                    }
+                    _ = SystemClock.sleep(Duration::from_secs(4)) => None,
+                };
+                for (index, ((signed, target), covered)) in
+                    expected.iter().zip(&mut progress).enumerate()
+                {
+                    if *covered || affected.is_some_and(|value| value != index.min(2)) {
+                        continue;
+                    }
+                    let permit = newcomer_work
+                        .foreground(newcomer_scope.clone())
+                        .await
+                        .expect("the selected receiver must remain live");
+                    let (prepared, selection, channel, scope) =
+                        capture_joined_worker(&new_state, id, generation).await;
+                    let (signed, target) = (*signed, *target);
+                    *covered = tauri::async_runtime::spawn_blocking(move || {
+                        let _permit = permit;
+                        prepared
+                            .selected_archive_target_data(&selection, channel, signed, &scope)
+                            .is_ok_and(|selected| selected == Some(target))
+                    })
                     .await
-                    .expect("the selected receiver must remain live");
-                let (prepared, selection, channel, scope) =
-                    capture_joined_worker(&new_state, id, generation).await;
-                let (signed, target) = (*signed, *target);
-                *covered = tauri::async_runtime::spawn_blocking(move || {
-                    let _permit = permit;
-                    prepared.selected_archive_target_data(&selection, channel, signed, &scope)
-                        .is_ok_and(|selected| selected == Some(target))
-                }).await.unwrap();
+                    .unwrap();
+                }
+                if progress.iter().all(|covered| *covered) {
+                    break;
+                }
             }
-            if progress.iter().all(|covered| *covered) {
-                break;
-            }
+        },
+    )
+    .await;
+    if recovery.is_err() {
+        parked_live.release.notify_one();
+        for state in [&member_state, &new_state] {
+            let _ = timeout(Duration::from_secs(15), async {
+                if let Ok(_close) = register_vault_close(state).await {
+                    let _ = sources::close_server_rows(state, &SystemClock).await;
+                }
+            })
+            .await;
         }
-    })
-    .await
-    .unwrap_or_else(|_| panic!(
-        "automatic history before gossip: own Delete {}, deepest reply {}, carried Edit {}, carried Delete {}",
-        progress[0], progress[1], progress[2], progress[3],
-    ));
+        panic!(
+            "automatic history before gossip: own Delete {}, deepest reply {}, carried Edit {}, carried Delete {}",
+            progress[0], progress[1], progress[2], progress[3],
+        );
+    }
     assert_eq!(
         paid_reply.attempts.load(Ordering::SeqCst),
         original_attempts,
