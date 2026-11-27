@@ -209,6 +209,7 @@ impl NativeTextColdFounderSource {
         &mut self,
         receiver: &NativeTextColdFounderMemberReceiver,
         frame: &NativeChatMemberFrame,
+        admit_mutation: &dyn crate::store::FounderArchiveAdmission,
         rng: &mut impl CryptoRngCore,
     ) -> Result<Option<NativeTextFounderReceived>, AppError> {
         if !Arc::ptr_eq(&receiver.original, &self.selection.network)
@@ -217,7 +218,13 @@ impl NativeTextColdFounderSource {
             return Err(refused());
         }
         Ok(self
-            .receive_selected_member_frame(receiver.channel, &receiver.session, frame, None, rng)?
+            .receive_selected_member_frame(
+                receiver.channel,
+                &receiver.session,
+                frame,
+                (None, admit_mutation),
+                rng,
+            )?
             .retained())
     }
 
@@ -226,7 +233,10 @@ impl NativeTextColdFounderSource {
         channel: u128,
         session: &FounderReceiveSession,
         frame: &NativeChatMemberFrame,
-        carrier: Option<NativeChatMemberDependencyExchange>,
+        (carrier, admit_mutation): (
+            Option<NativeChatMemberDependencyExchange>,
+            &dyn crate::store::FounderArchiveAdmission,
+        ),
         rng: &mut impl CryptoRngCore,
     ) -> Result<NativeTextFounderFrameOutcome, AppError> {
         let ingress = self.runtime_ingress()?.1;
@@ -296,14 +306,17 @@ impl NativeTextColdFounderSource {
                 verifier,
                 &mut ledger.ledger,
                 &ledger.view,
-                (store, scope),
+                (store, scope, admit_mutation),
                 |id| {
                     let context = history::outbox_context(selection, source);
                     history::saved_dependency(store, context, source, scope, id, rng)
                 },
                 || check_lifetime().map_err(|_| V2MemberSaveRefusal::Stale),
             )
-            .map_err(|_| refused())
+            .map_err(|failure| match failure {
+                V2MemberSaveRefusal::Busy => AppError::ChatV2ArchiveBusy,
+                _ => refused(),
+            })
         })?;
         if let (Some(carrier), Some(id)) = (carrier, first_founder_missing(&status)) {
             check_lifetime()?;
@@ -329,17 +342,39 @@ impl NativeTextColdFounderSource {
             return Ok(NativeTextFounderFrameOutcome::Unresolved);
         }
         self.restore_first_add(&session.signal)?;
+        let ledger = self
+            .received
+            .as_ref()
+            .filter(|ledger| Arc::ptr_eq(&ledger.session.identity, &session.identity))
+            .ok_or_else(refused)?;
         let governed = self.governed.as_mut().ok_or_else(refused)?;
         let archived = self
             .work
             .with_recovered_founder_store(&self.selection, &self.source, |store| {
-                archive_founder_member(store, scope, &original, rng, || {
-                    if session.signal.is_cancelled() || frame.current_data().is_none() {
-                        return Err(refused());
-                    }
-                    governed.require_current(store, &self.source)?;
-                    Ok(())
-                })
+                archive_founder_member(
+                    (store, scope),
+                    &original,
+                    &ledger.ledger,
+                    rng,
+                    |dependency, rng| {
+                        let context = history::outbox_context(&self.selection, &self.source);
+                        history::saved_dependency(
+                            store,
+                            context,
+                            &self.source,
+                            scope,
+                            dependency,
+                            rng,
+                        )
+                    },
+                    || {
+                        if session.signal.is_cancelled() || frame.current_data().is_none() {
+                            return Err(refused());
+                        }
+                        governed.require_current(store, &self.source)?;
+                        Ok(())
+                    },
+                )
             })
             .unwrap_or(Some(false));
         self.restore_first_add(&session.signal)?;
@@ -356,7 +391,10 @@ impl NativeTextColdFounderSource {
         channel: u128,
         session: &FounderReceiveSession,
         response: &NativeTextFounderDependencyResponse,
-        carrier: Option<NativeChatMemberDependencyExchange>,
+        (carrier, admit_mutation): (
+            Option<NativeChatMemberDependencyExchange>,
+            &dyn crate::store::FounderArchiveAdmission,
+        ),
         rng: &mut impl CryptoRngCore,
     ) -> Result<NativeTextFounderFrameOutcome, AppError> {
         let require_response = || response.require_current(session).map_err(|_| refused());
@@ -387,7 +425,7 @@ impl NativeTextColdFounderSource {
                 verifier,
                 &mut ledger.ledger,
                 &ledger.view,
-                (store, scope),
+                (store, scope, admit_mutation),
                 |id| {
                     let context = history::outbox_context(selection, source);
                     history::saved_dependency(store, context, source, scope, id, rng)
@@ -398,7 +436,10 @@ impl NativeTextColdFounderSource {
                         .map_err(|_| V2MemberSaveRefusal::Stale)
                 },
             )
-            .map_err(|_| refused())
+            .map_err(|failure| match failure {
+                V2MemberSaveRefusal::Busy => AppError::ChatV2ArchiveBusy,
+                _ => refused(),
+            })
         })?;
         if let (Some(carrier), Some(id)) = (carrier, first_founder_missing(&status)) {
             require_response()?;
@@ -422,15 +463,37 @@ impl NativeTextColdFounderSource {
             return Ok(NativeTextFounderFrameOutcome::Unresolved);
         }
         self.restore_first_add(&session.signal)?;
+        let ledger = self
+            .received
+            .as_ref()
+            .filter(|ledger| Arc::ptr_eq(&ledger.session.identity, &session.identity))
+            .ok_or_else(refused)?;
         let governed = self.governed.as_mut().ok_or_else(refused)?;
         let archived =
             self.work
                 .with_recovered_founder_store(&self.selection, &self.source, |store| {
-                    archive_founder_member(store, scope, &original, rng, || {
-                        require_response()?;
-                        governed.require_current(store, &self.source)?;
-                        Ok(())
-                    })
+                    archive_founder_member(
+                        (store, scope),
+                        &original,
+                        &ledger.ledger,
+                        rng,
+                        |dependency, rng| {
+                            let context = history::outbox_context(&self.selection, &self.source);
+                            history::saved_dependency(
+                                store,
+                                context,
+                                &self.source,
+                                scope,
+                                dependency,
+                                rng,
+                            )
+                        },
+                        || {
+                            require_response()?;
+                            governed.require_current(store, &self.source)?;
+                            Ok(())
+                        },
+                    )
                 })?;
         require_response()?;
         self.restore_first_add(&session.signal)?;

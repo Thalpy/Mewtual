@@ -1525,6 +1525,7 @@ async fn native_text_cold_founder_finishes_a_complete_staged_add() {
 
 struct RetainedRemovalHistory {
     visible: serde_json::Value,
+    selected_edit: serde_json::Value,
     deleted: serde_json::Value,
     deleted_audit: serde_json::Value,
 }
@@ -1600,6 +1601,7 @@ async fn archive_originals_before_removal(
     ),
 ) -> RetainedRemovalHistory {
     let mut targets = Vec::with_capacity(2);
+    let mut selected_edit = serde_json::Value::Null;
     let mut deleted_audit = serde_json::Value::Null;
     for (token, mutation, edited) in [
         (51, "edit_message", Some("edited before removal")),
@@ -1657,12 +1659,15 @@ async fn archive_originals_before_removal(
         .expect("the founder selected the exact TCP Create and revision before Remove");
         if edited.is_none() {
             deleted_audit = records;
+        } else {
+            selected_edit = revision["message_id"].clone();
         }
         targets.push(action);
     }
     let [visible, deleted] = targets.try_into().unwrap();
     let history = RetainedRemovalHistory {
         visible,
+        selected_edit,
         deleted,
         deleted_audit,
     };
@@ -1742,6 +1747,49 @@ async fn native_text_membership_removal_reopen(join_after_restart: bool, repair_
     } else {
         None
     };
+    if let Some(history) = &retained_history {
+        use catcoms_replication::chat::ActionId;
+        let selected = |value: &serde_json::Value| {
+            ActionId::from_bytes(membership::decode_exact_hex(value.as_str().unwrap()).unwrap())
+        };
+        let target = selected(&history.visible);
+        let edit = selected(&history.selected_edit);
+        let unresolved = ActionId::from_bytes([235; 32]);
+        let state = founder.state::<AppState>();
+        let work = state
+            .servers
+            .lock()
+            .await
+            .native(&found["server"].as_u64().unwrap())
+            .unwrap()
+            .data()
+            .member_work
+            .clone();
+        assert_eq!(work.reserve_archive_change(edit, target), Some(true));
+        assert_eq!(work.reserve_archive_change(unresolved, target), Some(true));
+        let incomplete = command_after_busy(
+            &main,
+            &founder_queue,
+            "get_message_page",
+            history::BUSY,
+            removal_history_args(
+                &found,
+                serde_json::json!({"receivedAction":history.visible}),
+            ),
+        )
+        .await;
+        let tauri::ipc::InvokeResponse::Err(error) = incomplete else {
+            panic!("one selected revision must not hide another unresolved revision");
+        };
+        assert_eq!(error.0, "A received change is waiting to be saved.");
+        let outstanding = work.unsettled_archive_changes(target).unwrap();
+        assert_eq!(
+            outstanding.into_iter().flatten().collect::<Vec<_>>(),
+            vec![unresolved]
+        );
+        work.settle_archive_change(unresolved, target);
+    }
+
     let (notice, selected_eviction) = oneshot::channel();
     member.once_any("chat-v2-membership", move |event| {
         let notice_data: serde_json::Value = serde_json::from_str(event.payload()).unwrap();
@@ -3245,9 +3293,9 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     let delete = catcoms_replication::chat::ActionId::from_bytes([247; 32]);
     {
         let _permit = work.foreground(scope.clone()).await.unwrap();
-        work.note_archive_change(edit, target, false);
-        work.note_archive_change(delete, target, false);
-        work.note_archive_change(edit, target, true);
+        assert_eq!(work.reserve_archive_change(edit, target), Some(true));
+        assert_eq!(work.reserve_archive_change(delete, target), Some(true));
+        work.settle_archive_change(edit, target);
     }
     let probe = command_after_busy(
         &joiner_window,
@@ -3263,7 +3311,7 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     assert_eq!(error.0, "A received change is waiting to be saved.");
     {
         let _permit = work.foreground(scope).await.unwrap();
-        work.note_archive_change(delete, target, true);
+        work.settle_archive_change(delete, target);
     }
     drop(work);
     let probe = command_value_after_busy(

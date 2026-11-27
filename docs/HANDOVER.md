@@ -16,8 +16,17 @@ sender, then repeated those checks after reopening the vault.
 
 The joined reader needs a separate mounted restart result for this case.
 Remote removed-member originals still need their own historical acceptance
-evidence. Founder mutation tracking and the bound on a single target's
-archive replay remain open. Chat V2 stays disabled.
+evidence. Founder reception now reserves mutation capacity before
+projection, and both warm and recovered founders check the exact durable
+ancestor set before writing an archive record. A targeted refresh can retire
+one confirmed revision while another unresolved revision still blocks that
+message. A newly reserved slot is released when the original never gains a
+visible effect. The focused reservation test passed on Windows. Twelve
+focused App archive tests and three Windows native tests passed before the
+final reservation policy test. The live ledger and per-target archive
+replay bounds remain open. So do the 2,048-record and 256 MiB archive
+ceilings and independent founder replay of an unsaved received original.
+Chat V2 stays disabled.
 
 ## Same-device rejoin proof and cold removal
 

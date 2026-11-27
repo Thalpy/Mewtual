@@ -115,7 +115,12 @@ async fn run_founder_receive<I: Send + 'static>(
     source: &Source,
     mut receiver: FounderReceiver,
     mut input: I,
-    run: impl Fn(FounderPreparation, &FounderReceiver, &I) -> FounderReceiveResult
+    run: impl Fn(
+            FounderPreparation,
+            &FounderReceiver,
+            &I,
+            &server_table::NativeMemberWork,
+        ) -> FounderReceiveResult
         + Copy
         + Send
         + 'static,
@@ -131,7 +136,7 @@ async fn run_founder_receive<I: Send + 'static>(
         let local = source.member_work().clone();
         let (next_receiver, next_input, result) = tauri::async_runtime::spawn_blocking(move || {
             let _permit = permit;
-            let result = run(preparation, &receiver, &input);
+            let result = run(preparation, &receiver, &input, &local);
             if let Ok(NativeTextFounderFrameOutcome::Retained(receipt)) = &result {
                 note_founder_archive_change(&local, receipt);
             }
@@ -175,12 +180,12 @@ async fn receive_founder_frame(
             source,
             receiver,
             frame,
-            move |prepared, receiver, frame| {
+            move |prepared, receiver, frame, local| {
                 if remaining > 0 {
-                    prepared.receive_founder_member_with_recovery(receiver, frame)
+                    prepared.receive_founder_member_with_recovery(receiver, frame, local)
                 } else {
                     prepared
-                        .receive_founder_member(receiver, frame)
+                        .receive_founder_member(receiver, frame, local)
                         .map(|received| {
                             received.map_or(
                                 NativeTextFounderFrameOutcome::Unresolved,
@@ -242,8 +247,9 @@ async fn recover_founder_chain(
             source,
             receiver,
             response,
-            move |prepared, receiver, response| {
-                prepared.recover_founder_dependency_with_followup(receiver, response, may_follow)
+            move |prepared, receiver, response, local| {
+                prepared
+                    .recover_founder_dependency_with_followup(receiver, response, may_follow, local)
             },
         )
         .await?;
@@ -264,10 +270,8 @@ fn note_founder_archive_change(
     local: &server_table::NativeMemberWork,
     receipt: &NativeTextFounderReceived,
 ) {
-    if receipt.action != receipt.projection_target {
-        if let Some(settled) = receipt.archived {
-            local.note_archive_change(receipt.action, receipt.projection_target, settled);
-        }
+    if receipt.action != receipt.projection_target && receipt.archived != Some(false) {
+        local.settle_archive_change(receipt.action, receipt.projection_target);
     }
 }
 
@@ -583,7 +587,7 @@ fn apply_original(
     .ok();
     if status != Some(V2OrdinaryReceiveStatus::Retained(ActionState::Valid)) {
         if admitted == Some(true) {
-            local.note_archive_change(action, target, true);
+            local.settle_archive_change(action, target);
         }
         return status;
     }
@@ -592,12 +596,12 @@ fn apply_original(
             Ok(None) if mutation => {
                 // Old mounts without the archive keep their existing live
                 // view. Mounted archives alone publish selected mutations.
-                local.note_archive_change(action, target, true);
+                local.settle_archive_change(action, target);
                 return selected
                     .project_received_member(ledger, original, scope)
                     .ok();
             }
-            Ok(_) => local.note_archive_change(action, target, true),
+            Ok(_) => local.settle_archive_change(action, target),
             Err(_) => {}
         }
     }

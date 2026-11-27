@@ -108,8 +108,6 @@ const MAX_NATIVE_NAME_BYTES: usize = 256;
 #[derive(Default)]
 struct ArchiveChanges {
     unsettled: [Option<ArchiveChange>; MAX_UNSETTLED_ARCHIVE_CHANGES],
-    // Older founder ingress has no pre-write admission yet.
-    overflow: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -144,7 +142,7 @@ impl NativeMemberWork {
         self.local.clone().try_lock_owned().ok()
     }
 
-    /// Admit an exact write before changing a joined live view or archive.
+    /// Admit an exact archive write before a live mutation can change the view.
     /// The caller holds the original row's local work permit.
     pub(super) fn reserve_archive_change(
         &self,
@@ -197,24 +195,8 @@ impl NativeMemberWork {
         None
     }
 
-    pub(super) fn note_archive_change(&self, action: ActionId, target: ActionId, selected: bool) {
-        let Ok(mut changes) = self.archive_changes.lock() else {
-            return;
-        };
-        if let Some(existing) = changes.unsettled.iter_mut().find(|item| {
-            item.as_ref()
-                .is_some_and(|change| change.action == action && change.target == target)
-        }) {
-            if selected {
-                *existing = None;
-            }
-        } else if !selected {
-            if let Some(empty) = changes.unsettled.iter_mut().find(|item| item.is_none()) {
-                *empty = Some(ArchiveChange { action, target });
-            } else {
-                changes.overflow = true;
-            }
-        }
+    pub(super) fn settle_archive_change(&self, action: ActionId, target: ActionId) {
+        let _ = self.reconcile_archive_change(ArchiveChange { action, target }, Some(target));
     }
 
     pub(super) fn unsettled_archive_changes(
@@ -222,14 +204,21 @@ impl NativeMemberWork {
         target: ActionId,
     ) -> Option<[Option<ActionId>; MAX_UNSETTLED_ARCHIVE_CHANGES]> {
         let changes = self.archive_changes.lock().ok()?;
-        if changes.overflow {
-            return None;
-        }
         Some(changes.unsettled.map(|entry| {
             entry
                 .filter(|change| change.target == target)
                 .map(|change| change.action)
         }))
+    }
+}
+
+impl catcoms_app::store::FounderArchiveAdmission for NativeMemberWork {
+    fn reserve(&self, action: ActionId, target: ActionId) -> Option<bool> {
+        self.reserve_archive_change(action, target)
+    }
+
+    fn release_unstarted(&self, action: ActionId, target: ActionId) {
+        self.settle_archive_change(action, target);
     }
 }
 

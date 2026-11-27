@@ -602,20 +602,23 @@ fn read_archived_target(
         V2MemberSaveRefusal::Busy => BUSY.to_owned(),
         _ => "Saved received messages could not be read. Try again.".to_owned(),
     })?;
-    // Only the exact mutation in the selected archive settles a failed write.
-    if unsettled.iter().flatten().any(|change| {
-        !projection
+    // A selected change can retire its exact slot while other changes
+    // still block this target. Never retire unresolved debt by association.
+    let mut incomplete = false;
+    for change in unsettled.into_iter().flatten() {
+        if projection
             .as_ref()
-            .is_some_and(|original| original.archived_includes(*change))
-    }) {
-        return Err(INCOMPLETE.into());
-    }
-    // The joined worker rechecks selection and emits invalidation independent
-    // of this IPC result, which the renderer can cancel or ignore.
-    if founder {
-        for change in unsettled.into_iter().flatten() {
-            local.note_archive_change(change, action, true);
+            .is_some_and(|original| original.archived_includes(change))
+        {
+            if founder {
+                local.settle_archive_change(change, action);
+            }
+        } else {
+            incomplete = true;
         }
+    }
+    if incomplete {
+        return Err(INCOMPLETE.into());
     }
     Ok(projection)
 }

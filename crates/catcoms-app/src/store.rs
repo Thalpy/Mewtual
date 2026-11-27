@@ -609,6 +609,7 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
     })
 }
 
+pub use persistence::v2_member_transport::FounderArchiveAdmission;
 /// Every physical persistence write lives here, and nothing else does.
 ///
 /// This module exists for one reason: Rust privacy cannot express "visible to `store` but not
@@ -638,6 +639,7 @@ pub use persistence::{
     V2MemberDependency, V2MemberSaveOutcome, V2MemberSaveRefusal, V2MemberSignRequest,
     V2TextHostPolicy,
 };
+
 mod persistence {
     use super::*;
     /// One existing fixed object's held handle and bounded sealed frame. This is raw DATA;
