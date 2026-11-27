@@ -40,6 +40,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod repair;
+
 const ABSENT: [&str; 4] = [
     "head.stage",
     "text.seed.stage.v1",
@@ -72,6 +74,16 @@ impl ColdRecoveredArchive {
             Self::First(first) => Some(first.admission.admission_id()),
             Self::Later(chain) => chain.journal.selected_admission(),
         }
+    }
+
+    fn require_predecessor_contents(
+        &self,
+        source: &RetainedBootstrapSourceData,
+    ) -> Result<(), AppError> {
+        if let Self::Later(chain) = self {
+            chain.require_predecessor_contents(source.original_target_data().0)?;
+        }
+        Ok(())
     }
 
     fn require_predecessors(&self, source: &RetainedBootstrapSourceData) -> Result<(), AppError> {
@@ -442,7 +454,7 @@ impl HeldColdFounderAdd {
         // and contents. A mutation while a layout waits cannot reach a key.
         let mut require_parent = || {
             scope.require_current(parent)?;
-            self.recovered.require_predecessors(source)?;
+            self.recovered.require_predecessor_contents(source)?;
             self.files.origin.require_named_files(source)?;
             self.files.require_named_parent(source)?;
             scope.require_live_cached(parent)
@@ -467,7 +479,7 @@ impl HeldColdFounderAdd {
         ) -> Result<T, AppError>,
     ) -> Result<T, AppError> {
         self.files.origin.original.require_same_original(source)?;
-        self.recovered.require_predecessors(source)?;
+        self.recovered.require_predecessor_contents(source)?;
         let parent = (
             self.files.selected.transition.context,
             TextHeadIdData::of_data(&self.files.head.frame),
@@ -486,7 +498,7 @@ impl HeldColdFounderAdd {
             scope.require_current(parent)?;
             let mut require_parent_archive = || {
                 scope.require_current(parent)?;
-                self.recovered.require_predecessors(source)?;
+                self.recovered.require_predecessor_contents(source)?;
                 self.files.origin.require_named_files(source)?;
                 require_exact_held(&self.files.archive_path, &mut self.files.archive)?;
                 scope.require_live_cached(parent)

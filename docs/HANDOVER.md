@@ -1,5 +1,20 @@
 # Mewtual; Handover
 
+## Recover a fully staged cold Add
+
+A returning founder can finish a fully written later Add that stopped before
+the Head rename. Recovery checks the exact authenticated parent, staged child
+and all referenced journal files, restores the paired MLS and Core state, and
+covers the existing files before activation. An already named later Add is
+also synced before activation. Missing or conflicting records stay on disk
+and block startup. Epoch-zero recovery and early incomplete transactions
+remain open.
+
+The Windows native TCP regression passed. It reconstructs the pre-rename
+cut from a real accepted Add and verifies that removal of one required
+record blocks startup without changing the staged or selected bytes. Restoring
+that record allows startup to select the exact new Head and roster.
+
 ## Fresh Add on a recovered founder
 
 The native listener can answer a fresh signed invitation after recovering a
@@ -14,11 +29,15 @@ Remove and two founder restarts, then confirmed the new Admission after
 another restart. Review identified lock placement, final file checks and
 payment tail defects. The corrected version runs the SDK outside Root and
 rechecks the actual invitation, journal and selector at the key and commit
-boundaries. The focused native test and race coverage on the corrected
-version are pending.
+boundaries. The previous combined run reproduced a cold invitation that
+reported registry contention as a data error. The cold invite now asks
+for the same request again only when the actual registry cell is held.
+The Windows combined run then passed both the cold invitation replay and
+the alternate-provider case. The latter recovered the deepest reply and
+the offline author's edit and deletion within its original 45-second bound.
+The full frontend suite passed all 3,949 tests.
 
-Recovery of a crash before complete Head selection and rejoin in the same
-member vault remain open. Chat V2 stays disabled.
+Rejoin in the same member vault remains open. Chat V2 stays disabled.
 
 
 ## 27 November 2026 — Prepare a real Add on the recovered founder graph
@@ -66,6 +85,11 @@ lists originals in this device's selected received archive and shows
 the signed edits and deletions for an exact message. The same native
 authorization covers warm and restored founders. An unfinished archive
 write or corrupt selected record refuses the read without settling it.
+
+The same dialog can show originals saved on this device, including edits,
+deletions, and their local send disposition. It uses the existing
+channel-scoped history reader and keeps the first page's finite endpoint.
+The focused renderer tests, Svelte check and production build pass.
 
 Focused Windows App tests passed for bounded original and revision
 pages, authenticated restart, corrupt selected records and an unfinished

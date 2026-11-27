@@ -24,6 +24,31 @@ use std::{
     time::Duration,
 };
 
+#[test]
+fn cold_founder_registry_contention_is_retryable_and_poison_refuses() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xef43);
+    let owner = mounted(dir.path(), &mut rng);
+    let physical = &owner.physical;
+    let held = physical.cell.lock().unwrap();
+    assert!(matches!(
+        physical.recovered_cold_founder(),
+        Err(AppError::ChatV2RegistryBusy)
+    ));
+    drop(held);
+    // The same read runs normally after the original holder leaves.
+    assert!(physical.recovered_cold_founder().unwrap().is_none());
+
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        let _held = physical.cell.lock().unwrap();
+        panic!("poison the real registry cell");
+    }));
+    assert!(matches!(
+        physical.recovered_cold_founder(),
+        Err(AppError::Invalid(_))
+    ));
+}
+
 type WorkSlotHook = Option<(bool, Box<dyn FnOnce()>)>;
 thread_local! {
     static BEFORE_WORK_SLOT: std::cell::RefCell<WorkSlotHook> = const {std::cell::RefCell::new(None)};

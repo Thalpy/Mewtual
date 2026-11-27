@@ -45,6 +45,16 @@ verifying its child and checking the selected local stores. An original
 page, approval and connection bound the request. Chains have a fixed
 deadline, attempt cap and depth cap.
 
+Cold founder startup can complete a fully staged later Add only after vault
+authentication and replay under the original pin. It retains and rechecks
+the named parent, archive, stage and each journal record against their
+authenticated bytes. It restores the closed MLS result and its matching
+Core prefix before selecting the exact staged Head. Recovery draws no new
+keys and issues no Welcome or live Source before durable selection. Missing,
+replaced or conflicting journal files refuse startup and are preserved.
+Early torn journal recovery and the first Add remain outside this recovery
+path.
+
 Cold joined-contact recovery begins with explicit local recurring consent.
 The saved contact is tenant-bound and epoch-bound, and the current signed
 Admission and expected peer must authenticate again. An outbound route to

@@ -351,9 +351,14 @@ The warm native writer covers a later Add under stage names bound to the exact
 selected predecessor. It writes the newer archive and selector after checking
 the original predecessor's physical files and the signed invitation journal.
 The writer releases the complete signed Welcome after the new selector is
-covered and the original Core and SDK are installed. An interrupted later
-transaction blocks cold activation at its old Head. Existing members still
-need native delivery and durable installation of the successor Commit.
+covered and the original Core and SDK are installed. Cold startup can finish
+a fully stored later Add with a staged Head. The authenticated original
+parent, named journal and child archive must agree. The host restores the
+same closed MLS state before re-covering and selecting those files. A later
+Add already named by Head is synced before activation. A partial or
+conflicting journal is preserved and refuses startup. Existing members use
+the separately authorized delivery and durable installation of the successor
+Commit.
 
 The closed founder SDK can be reopened from a later Add snapshot using the
 complete governing prefix and the original bootstrap genesis. It checks the

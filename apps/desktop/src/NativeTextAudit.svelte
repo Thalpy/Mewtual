@@ -1,7 +1,9 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
-  import { readNativeAudit, type NativeAuditPage } from "./native-text-history.ts";
+  import {
+    readNativeAudit, readNativeOriginalPage, type NativeAuditPage, type NativeOriginalPage,
+  } from "./native-text-history.ts";
 
   let { server, channel, context }: { server: number; channel: string; context: string } = $props();
   let dialog: HTMLDialogElement;
@@ -9,6 +11,9 @@
   let after = $state<string | null>(null);
   let listAfter: string | null = null;
   let page = $state<NativeAuditPage | null>(null);
+  let localPage = $state<NativeOriginalPage | null>(null);
+  let localCursor = $state<{ next: string; end: string | null }>({ next: "0", end: null });
+  let view = $state<"received" | "local">("received");
   let loading = $state(false);
   let failure = $state("");
   let request = 0;
@@ -16,6 +21,8 @@
   async function load(action: string | null, cursor: string | null) {
     const original = ++request;
     const current = () => original === request && dialog.open;
+    view = "received";
+    localPage = null;
     target = action;
     after = cursor;
     page = null;
@@ -31,9 +38,29 @@
     }
   }
 
+  async function loadLocal(cursor: { next: string; end: string | null } = { next: "0", end: null }) {
+    const original = ++request;
+    const current = () => original === request && dialog.open;
+    view = "local";
+    localCursor = cursor;
+    page = null;
+    localPage = null;
+    loading = true;
+    failure = "";
+    try {
+      const result = await readNativeOriginalPage(invoke, { server, channel, context }, current, cursor);
+      if (current()) localPage = result;
+    } catch {
+      if (current()) failure = "Could not read messages saved on this device. Try again.";
+    } finally {
+      if (current()) loading = false;
+    }
+  }
+
   function clear() {
     request++;
     page = null;
+    localPage = null;
     loading = false;
     failure = "";
   }
@@ -41,6 +68,7 @@
   onDestroy(clear);
 
   const labels = { create: "Original message", edit: "Edit", delete: "Deletion", join: "Combined revisions" };
+  const localStatus = { pending: "Saved here", submitted: "Submitted", held: "Held on this device" };
 </script>
 
 <button type="button" class="ghost small" onclick={() => {
@@ -48,23 +76,58 @@
   void load(null, null);
 }}>Chat history</button>
 
-<dialog bind:this={dialog} onclose={clear} aria-labelledby="native-audit-title">
+<dialog bind:this={dialog} onclose={() => { if (!dialog.open) clear(); }} aria-labelledby="native-audit-title">
   <header>
     <h2 id="native-audit-title">Chat history</h2>
     <button type="button" class="ghost small" onclick={() => { clear(); dialog.close(); }}>Close</button>
   </header>
-  <p>Messages and changes saved in this server’s received history on this device.</p>
-  {#if after}<p>Return to the first page to include any new entries.</p>{/if}
-  {#if target}
+  <div class="history-sources" role="group" aria-label="History source">
+    <button type="button" class="ghost small" aria-pressed={view === "received"} onclick={() => void load(null, null)}>Received history</button>
+    <button type="button" class="ghost small" aria-pressed={view === "local"} onclick={() => void loadLocal()}>Saved on this device</button>
+  </div>
+  {#if view === "received" && target}
     <button type="button" class="ghost small" onclick={() => void load(null, listAfter)}>Back to messages</button>
-    <p>Entries are grouped by message. They may appear out of order.</p>
   {/if}
   <div aria-busy={loading}>
     {#if loading}
       <p role="status">Loading history…</p>
     {:else if failure}
       <p role="status">{failure}</p>
-      <button type="button" class="ghost small" onclick={() => void load(target, after)}>Retry</button>
+      <button type="button" class="ghost small" onclick={() => {
+        if (view === "local") void loadLocal(localCursor);
+        else void load(target, after);
+      }}>Retry</button>
+    {:else if view === "local" && localPage}
+      {#if localPage.items.length === 0}
+        <p>No originals saved on this device on this page.</p>
+      {:else}
+        <ul>
+          {#each localPage.items as entry (entry.action)}
+            <li>
+              <strong>{labels[entry.body.kind]}</strong>
+              <span class="disposition">{localStatus[entry.status]}</span>
+              {#if "text" in entry.body}<p class="message">{entry.body.text}</p>{/if}
+              <details>
+                <summary>Saved record details</summary>
+                <dl>
+                  <dt>Device key</dt><dd>{entry.signer}</dd>
+                  <dt>Message action</dt><dd>{entry.action}</dd>
+                  {#if entry.body.kind !== "create"}
+                    <dt>Original message</dt><dd>{entry.body.create}</dd>
+                  {/if}
+                </dl>
+              </details>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+      {#if localPage.next !== localPage.end_exclusive}
+        {@const cursor = { next: localPage.next, end: localPage.end_exclusive }}
+        <button type="button" class="ghost small" onclick={() => void loadLocal(cursor)}>Next page</button>
+      {/if}
+      {#if localCursor.next !== "0"}
+        <button type="button" class="ghost small" onclick={() => void loadLocal()}>First page</button>
+      {/if}
     {:else if page?.items === null}
       <p>No received history is available on this device.</p>
     {:else if page?.items?.length === 0}
@@ -123,6 +186,9 @@
   dialog::backdrop { background: #100d17b3; }
   header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
   h2 { margin: 0; }
+  .history-sources { display: flex; flex-wrap: wrap; gap: .4rem; margin: .8rem 0; }
+  .history-sources [aria-pressed="true"] { border-color: var(--accent, #729ccf); }
+  .disposition { margin-inline-start: .6rem; }
   ul { list-style: none; margin: 1rem 0; padding: 0; }
   li { padding: .7rem 0; border-top: 1px solid var(--line, #3b3746); }
   .message { white-space: pre-wrap; overflow-wrap: anywhere; }

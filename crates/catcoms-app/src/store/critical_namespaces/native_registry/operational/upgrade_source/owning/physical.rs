@@ -197,7 +197,13 @@ impl Physical {
     pub(super) fn recovered_cold_founder(
         &self,
     ) -> Result<Option<network::ColdFounderSelection>, AppError> {
-        let cell = self.cell.try_lock().map_err(|_| refused())?;
+        // A registry listing or another metadata reader can temporarily
+        // hold the cell. Keep this nonblocking and distinguish contention
+        // from poison or an incomplete transaction on disk.
+        let cell = self.cell.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::WouldBlock => AppError::ChatV2RegistryBusy,
+            std::sync::TryLockError::Poisoned(_) => refused(),
+        })?;
         cell.require_idle()?;
         self.handler.require()?;
         self.handler.require_idle_cached()?;
