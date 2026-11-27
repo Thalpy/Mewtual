@@ -14,6 +14,19 @@ the original network scope without joining it. Close drains the real
 replacement TCP listener. Later same-device successors, automatic
 restart and final acceptance remain open. Chat V2 stays disabled.
 
+## Finish or retire an interrupted rejoin key operation
+
+The warm retired writer can retire its own exact Attempt when
+cancelled before irreversible device or Welcome entry. It rechecks
+the held name and bytes, absence of all later roles, and directory
+sync. A cold ambiguous Attempt still holds the original files.
+
+The same successful key operation may save its exact Pending or
+Outcome after cancellation. It sends no stale receipt and advances
+no later phase. Native TCP fixtures covered cancellation on both
+sides of both key entries and a genuinely ambiguous cold Welcome.
+Chat V2 remains disabled.
+
 ## Authenticate the retired rejoin catalog writer
 
 Retired-vault authentication binds the same physical mount and
