@@ -1,5 +1,19 @@
 # Mewtual; Handover
 
+## Encrypted storage for removed-member hold cases
+
+A verified founder vault can open a selected review namespace with the
+original marker and directory. A case keeps the first exact signed
+Create and its Remove proof coordinates under a key specific to the
+vault and channel. A complete stage can finish the same partial final
+file. A torn stage holds its own case and counts against the quota.
+
+The storage entry keeps the ordinary archive locked across the clean
+absence check and hold selection. An independently selected original
+keeps its place in history. The production declaration recovery,
+approved-holder delivery, signed decisions and the admin view remain
+open. This checkpoint does not turn on Chat V2.
+
 ## Rejoin from the retired native session
 
 The rejoin form passes a signed invite and the numeric IP that the user

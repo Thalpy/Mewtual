@@ -67,6 +67,15 @@ ancestor read while peer and audit reads still refuse. An ambiguous or
 same-original WAL defers the local read. Local verification cannot make
 an unproven late post from a removed member eligible for delivery.
 
+Founder review storage has its own scope-derived encryption and names.
+Native startup requires the original founder source and held marker
+before it accepts that selected namespace. A surviving rejoin journal
+refuses this mount. A scoped directory and first covered case stay
+bound to their original files on warm retry. The host holds the
+ordinary archive gate during absence and selection. A corrupt or
+unfinished ordinary record cannot grant that absence. None of these
+storage checks issues an approval or an ordinary history effect.
+
 A holder's archive page exposes eligible IDs to a reciprocally approved
 peer on the original authenticated connection. Its continuation gives no
 raw offset, author ID or unoffered ActionId. The cursor is replayable on

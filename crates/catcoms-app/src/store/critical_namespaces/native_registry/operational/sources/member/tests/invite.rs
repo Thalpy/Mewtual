@@ -6124,6 +6124,20 @@ async fn review_hold_native_open_requires_a_real_founder_and_the_held_marker() {
             let mounted = mounted.unwrap();
             let store = mounted.actual_store_for_test().unwrap();
             assert!(store.has_mounted_review_hold().unwrap());
+            let scope = crate::store::persistence::v2_shared_history::SharedHistoryScope {
+                vault: domain,
+                group: [71; 16],
+                profile: catcoms_replication::chat::owner_facts::OwnerFactId::from_bytes([72; 32]),
+                tenure: catcoms_replication::chat::owner_header::OwnerTenureId::from_bytes(
+                    [73; 32],
+                ),
+                creation: [74; 32],
+                channel: 75,
+            };
+            let directory = store.review_hold_partition_for_test(scope).unwrap();
+            std::fs::rename(&directory, directory.with_extension("parked")).unwrap();
+            std::fs::create_dir(&directory).unwrap();
+            assert!(store.review_hold_partition_for_test(scope).is_err());
             let parked = marker_path.with_extension("parked");
             std::fs::rename(&marker_path, &parked).unwrap();
             std::fs::write(&marker_path, marker).unwrap();
