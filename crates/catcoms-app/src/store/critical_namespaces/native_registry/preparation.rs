@@ -73,6 +73,12 @@ impl NativeRegistryHandler {
         executing: bool,
     ) -> Result<super::super::pending_join_codec::Parsed<'a>, AppError> {
         use super::super::{pending_join_codec as grammar, shared_history_namespace::Opening};
+        if self
+            .lifecycle()
+            .is_some_and(|handler| handler.accepts_rejoin_startup())
+        {
+            return grammar::parse_native_rejoin_startup(plain, domain, executing);
+        }
         match self.shared_history_opening() {
             Opening::Optional => {
                 return grammar::parse_joined_history_family(plain, domain, executing)

@@ -24,7 +24,7 @@ use catcoms_net::{
 };
 use catcoms_replication::chat::{
     cold_actions::AssembledActionOriginal, owner_facts::OwnerFactId, ActionId, ActionState,
-    ChatLedger, GuardedMessageProjection, ProjectionView, V2GeneralPrefixVerifier,
+    ChatLedger, GuardedMessageProjection, ProjectionView, SignedAction, V2GeneralPrefixVerifier,
     V2OrdinaryReceiveStatus, MAX_PARENTS,
 };
 use catcoms_rt::{CryptoRngCore, RequestCancellation, Topic, TransportError};
@@ -33,7 +33,7 @@ use catcoms_sync::owner_v2::{
     V2FounderMemberDependencyAccess, V2MemberDependencyRoute, V2MemberPublicationObservation,
     MAX_V2_DEPENDENCY_REPLY_BYTES, MAX_V2_MEMBER_TRANSPORT_BYTES,
 };
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 pub(in crate::store) const FOUNDER_RECEIVE_ACTIONS: usize = 64;
 pub(in crate::store) const FOUNDER_RECEIVE_BYTES: usize = 1024 * 1024;
@@ -243,40 +243,151 @@ pub(in crate::store) fn prepare_founder_dependency_reply<R: CryptoRngCore>(
     })
 }
 
-/// Project a live envelope, then retry with its bounded locally saved causal
-/// slice. The storage owner chooses which originals can be lent.
+/// Reserve exact archive debt before the real ledger can admit a mutation.
+/// Creates can project immediately. A missing dependency retries with the
+/// bounded locally saved causal slice supplied by the storage owner.
 pub(in crate::store) fn project_founder_member(
     original: &SelectedV2MemberEnvelope,
     verifier: &V2GeneralPrefixVerifier,
     ledger: &mut ChatLedger,
     view: &ProjectionView,
-    archive: (&ServerStore, SharedHistoryScope),
+    (store, scope, admit_mutation): (
+        &ServerStore,
+        SharedHistoryScope,
+        &dyn FounderArchiveAdmission,
+    ),
     mut saved_dependency: impl FnMut(ActionId) -> Result<Option<MemberSavedOriginal>, Refusal>,
     mut require_current: impl FnMut() -> Result<(), Refusal>,
 ) -> Result<V2OrdinaryReceiveStatus, Refusal> {
     require_current()?;
-    let mut status = original
-        .project_from_ledger(verifier, ledger, view, FOUNDER_RECEIVE_WORK)
-        .map_err(|_| Refusal::Failed)?;
-    if let V2OrdinaryReceiveStatus::WaitingForDependencies(missing) = &status {
-        if missing.len() > FOUNDER_RECOVERY_BREADTH {
+    with_founder_archive_reservation(
+        original.action_data().id(),
+        original.action_data().spec().body.create(),
+        admit_mutation,
+        |observe| {
+            let mut project = |ledger: &mut ChatLedger| -> Result<_, Refusal> {
+                let status = original
+                    .project_from_ledger(verifier, ledger, view, FOUNDER_RECEIVE_WORK)
+                    .map_err(|_| Refusal::Failed)?;
+                observe(&status);
+                Ok(status)
+            };
+            let mut status = project(&mut *ledger)?;
+            if let V2OrdinaryReceiveStatus::WaitingForDependencies(missing) = &status {
+                if missing.len() > FOUNDER_RECOVERY_BREADTH {
+                    require_current()?;
+                    return Ok(status);
+                }
+                replay_local_member_dependencies(
+                    missing,
+                    (verifier, ledger, view),
+                    FOUNDER_RECEIVE_WORK,
+                    (store, scope),
+                    &mut saved_dependency,
+                    &mut require_current,
+                )?;
+                status = project(&mut *ledger)?;
+            }
             require_current()?;
-            return Ok(status);
+            Ok(status)
+        },
+    )
+}
+
+fn with_founder_archive_reservation(
+    action: ActionId,
+    target: Option<ActionId>,
+    admit: &dyn FounderArchiveAdmission,
+    project: impl FnOnce(
+        &mut dyn FnMut(&V2OrdinaryReceiveStatus),
+    ) -> Result<V2OrdinaryReceiveStatus, Refusal>,
+) -> Result<V2OrdinaryReceiveStatus, Refusal> {
+    // Even a semantic import can become a dependency. Reserve before
+    // making the first ledger change.
+    let mut projected = false;
+    let newly_reserved = target
+        .map(|target| admit.reserve(action, target).ok_or(Refusal::Busy))
+        .transpose()?;
+    let result = project(&mut |status| {
+        projected |= matches!(
+            status,
+            V2OrdinaryReceiveStatus::Retained(ActionState::Valid)
+        );
+    });
+    if let Some(target) = target {
+        if newly_reserved == Some(true) && !projected {
+            // Pending or invalid originals may be retained without a live
+            // effect. Keep debt if projection preceded a cancellation.
+            admit.release_unstarted(action, target);
         }
-        replay_local_member_dependencies(
-            missing,
-            (verifier, ledger, view),
-            FOUNDER_RECEIVE_WORK,
-            archive,
-            &mut saved_dependency,
-            &mut require_current,
-        )?;
-        status = original
-            .project_from_ledger(verifier, ledger, view, FOUNDER_RECEIVE_WORK)
-            .map_err(|_| Refusal::Failed)?;
     }
-    require_current()?;
-    Ok(status)
+    result
+}
+
+#[cfg(test)]
+mod archive_reservation_tests {
+    use super::*;
+    use catcoms_replication::chat::ChatError;
+    use std::cell::Cell;
+
+    struct Reservation {
+        admits: Option<bool>,
+        released: Cell<Option<(ActionId, ActionId)>>,
+    }
+
+    impl FounderArchiveAdmission for Reservation {
+        fn reserve(&self, _: ActionId, _: ActionId) -> Option<bool> {
+            self.admits
+        }
+
+        fn release_unstarted(&self, action: ActionId, target: ActionId) {
+            assert!(self.released.replace(Some((action, target))).is_none());
+        }
+    }
+
+    #[test]
+    fn founder_archive_reservation_tracks_the_visible_effect() {
+        let action = ActionId::from_bytes([1; 32]);
+        let target = ActionId::from_bytes([2; 32]);
+
+        for (admits, projected, release) in [
+            (Some(true), false, true),
+            (Some(true), true, false),
+            (Some(false), false, false),
+        ] {
+            let reservation = Reservation {
+                admits,
+                released: Cell::new(None),
+            };
+            let result =
+                with_founder_archive_reservation(action, Some(target), &reservation, |observe| {
+                    let state = if projected {
+                        ActionState::Valid
+                    } else {
+                        ActionState::Invalid(ChatError::Dependency)
+                    };
+                    observe(&V2OrdinaryReceiveStatus::Retained(state));
+                    Err(Refusal::Cancelled)
+                });
+            assert_eq!(result, Err(Refusal::Cancelled));
+            assert_eq!(
+                reservation.released.get(),
+                release.then_some((action, target))
+            );
+        }
+
+        let full = Reservation {
+            admits: None,
+            released: Cell::new(None),
+        };
+        assert_eq!(
+            with_founder_archive_reservation(action, Some(target), &full, |_| {
+                panic!("a capacity refusal must not change the ledger")
+            }),
+            Err(Refusal::Busy)
+        );
+        assert_eq!(full.released.get(), None);
+    }
 }
 
 pub(in crate::store) fn first_founder_missing(
@@ -478,12 +589,74 @@ impl LocalHistoryDependencyReplay {
     }
 }
 
-pub(in crate::store) fn archive_founder_member(
-    store: &ServerStore,
-    scope: SharedHistoryScope,
+pub(in crate::store) const fn archive_ancestry_fee(limit: usize) -> usize {
+    limit * 256 + (MAX_PARENTS + 1) * 32
+}
+
+/// Verify the complete bounded closure against the exact originals already
+/// selected in the local archive or own outbox. The caller also verifies
+/// the original row and pays for both sets before entering the walk.
+pub(in crate::store) fn require_durable_archive_dependencies(
+    ledger: &ChatLedger,
+    original: &SignedAction,
+    (store, scope): (&ServerStore, SharedHistoryScope),
+    limit: usize,
+    mut read_own: impl FnMut(ActionId) -> Result<Option<MemberSavedOriginal>, Refusal>,
+    mut require_current: impl FnMut() -> Result<(), Refusal>,
+) -> Result<(), Refusal> {
+    let action = original.id();
+    let target = original.spec().body.create().unwrap_or(action);
+    let mut ancestors = original.dependencies();
+    if ancestors.is_empty() {
+        return require_current();
+    }
+    let mut selected = BTreeSet::from([action]);
+    let mut pending = BTreeSet::new();
+    loop {
+        for dependency in ancestors {
+            if !selected.contains(&dependency) && !pending.contains(&dependency) {
+                if selected.len() + pending.len() >= limit {
+                    return Err(Refusal::Unavailable);
+                }
+                pending.insert(dependency);
+            }
+        }
+        let Some(dependency) = pending.pop_first() else {
+            break;
+        };
+        require_current()?;
+        let archived = store
+            .read_shared_history_record(scope, dependency)
+            .map_err(|_| Refusal::Failed)?;
+        let own = if archived.is_none() && dependency != target {
+            read_own(dependency)?
+        } else {
+            None
+        };
+        let (signed, admission) = archived
+            .as_ref()
+            .map(|record| (record.original.action(), record.admission))
+            .or_else(|| {
+                own.as_ref()
+                    .map(|record| (record.action(), record.receipt().admission))
+            })
+            .ok_or(Refusal::Unavailable)?;
+        if signed.id() != dependency || !ledger.matches_valid_ordinary_original(signed, admission) {
+            return Err(Refusal::Stale);
+        }
+        selected.insert(dependency);
+        ancestors = signed.dependencies();
+    }
+    require_current()
+}
+
+pub(in crate::store) fn archive_founder_member<R: CryptoRngCore>(
+    (store, scope): (&ServerStore, SharedHistoryScope),
     original: &SelectedV2MemberEnvelope,
-    rng: &mut impl CryptoRngCore,
-    require_current: impl FnOnce() -> Result<(), AppError>,
+    ledger: &ChatLedger,
+    rng: &mut R,
+    mut read_own: impl FnMut(ActionId, &mut R) -> Result<Option<MemberSavedOriginal>, Refusal>,
+    mut require_current: impl FnMut() -> Result<(), AppError>,
 ) -> Result<Option<bool>, AppError> {
     if !store.has_mounted_shared_history()? {
         return Ok(None);
@@ -494,7 +667,16 @@ pub(in crate::store) fn archive_founder_member(
         .ok_or_else(refused)?
         .pending
         .pool
-        .try_reserve(SHARED_HISTORY_RECORD_FEE)?;
+        .try_reserve(SHARED_HISTORY_RECORD_FEE + archive_ancestry_fee(FOUNDER_RECEIVE_ACTIONS))?;
+    require_durable_archive_dependencies(
+        ledger,
+        original.action_data(),
+        (store, scope),
+        FOUNDER_RECEIVE_ACTIONS,
+        |dependency| read_own(dependency, rng),
+        || require_current().map_err(|_| Refusal::Stale),
+    )
+    .map_err(|_| refused())?;
     let key = member_outbox_key(store)?;
     let record = PreparedSharedHistoryRecord::prepare(
         &scope,
@@ -535,17 +717,30 @@ pub(in crate::store) struct FounderReceiveSession {
     pub(in crate::store) signal: RequestCancellation,
 }
 
+/// Local native bookkeeping for one actual authenticated received mutation.
+/// It supplies capacity only. Signature, selected member and scope checks
+/// remain the responsibility of the original receive owner.
+pub trait FounderArchiveAdmission {
+    /// Some(true) reserves a new exact slot. Some(false) finds the same one.
+    fn reserve(&self, action: ActionId, target: ActionId) -> Option<bool>;
+
+    /// Release a newly reserved slot before any effect or archive write.
+    fn release_unstarted(&self, action: ActionId, target: ActionId);
+}
+
 pub(in crate::store) enum FounderReceiveOperation<'a> {
     Subscription,
     Frame(
         &'a NativeChatMemberFrame,
         &'a FounderReceiveSession,
         Option<NativeChatMemberDependencyExchange>,
+        &'a dyn FounderArchiveAdmission,
     ),
     Recover(
         &'a NativeTextFounderDependencyResponse,
         &'a FounderReceiveSession,
         Option<NativeChatMemberDependencyExchange>,
+        &'a dyn FounderArchiveAdmission,
     ),
     Dependency(&'a NativeChatMemberDependencyIncoming),
     Read(ActionId),
