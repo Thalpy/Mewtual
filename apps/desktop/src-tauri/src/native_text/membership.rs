@@ -412,8 +412,24 @@ mod tests {
                     "server": 1, "contact": &contact, "approvedHost": "127.0.0.1",
                 }))
             ),
-            Ok((1, context, Operation::Connect(_, _))) if context == original_context
+            Ok((1, context, Operation::Connect(_, _, false))) if context == original_context
         ));
+        assert!(matches!(
+            parse(
+                CONNECT,
+                &body(serde_json::json!({
+                    "server": 1, "contact": &contact, "approvedHost": "127.0.0.1", "remember": true,
+                }))
+            ),
+            Ok((1, context, Operation::Connect(_, _, true))) if context == original_context
+        ));
+        assert!(parse(
+            CONNECT,
+            &body(serde_json::json!({
+                "server": 1, "contact": &contact, "approvedHost": "127.0.0.1", "remember": "true",
+            }))
+        )
+        .is_err());
         for host in ["0.0.0.0", "localhost", "ff01::1", "::"] {
             assert!(parse(
                 CONNECT,
