@@ -407,6 +407,13 @@ the holder's author Admission. The worker allows eight nested parents and
 24 attempts across a 45-second chain. A refusal or exhausted chain
 defers that item while other pages and peers progress.
 
+The native worker gives authenticated pages already in hand up to two
+contested exact turns before the oldest due discovery or continuation.
+Own-outbox and archive entries share the same order. An authenticated reply
+starts its first bounded local replay slice promptly, while later slices
+and idle work yield at the regular rates. Peer requests keep their existing
+500 ms spacing and the same per-request, replay and ancestry deadlines.
+
 Automatic discovery currently requires reciprocal approved contacts on the
 installed rows. Restoring those approvals and their connections after a
 cold restart is separate work. The existing one-channel archive, limits
