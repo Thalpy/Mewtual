@@ -311,6 +311,13 @@ pub struct V2FrozenAdmission {
 }
 
 impl V2FrozenAdmission {
+    /// Address this exact retired incarnation. Same-key membership after
+    /// rejoin has a different Admission. Verification still requires the
+    /// original checked cut and this verifier's selected prefix.
+    pub fn admission_id_data(&self) -> crate::chat::owner_facts::OwnerFactId {
+        self.admission.admission_data().admission_id()
+    }
+
     /// Conservative custody charge for the cut and the full retired Admission
     /// allocation. The active verifier is free to refill its slots after removal.
     pub const fn retained_layout_bytes() -> usize {

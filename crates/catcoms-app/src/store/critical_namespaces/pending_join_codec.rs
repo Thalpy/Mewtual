@@ -108,6 +108,7 @@ pub(super) struct Parsed<'a> {
     pub(super) native_registry_version: Option<u32>,
     pub(super) shared_history_payload: Option<&'a [u8]>,
     pub(super) rejoin_payload: Option<&'a [u8]>,
+    pub(super) review_hold_payload: Option<&'a [u8]>,
 }
 
 /// Fixed, inert classification retained after dropping a complete plaintext. Digest equality
@@ -135,6 +136,7 @@ pub(in crate::store) struct Summary {
     pub(super) native_registry_payload_digest: Option<[u8; 32]>,
     pub(super) shared_history_payload_digest: Option<[u8; 32]>,
     pub(super) rejoin_payload_digest: Option<[u8; 32]>,
+    pub(super) review_hold_payload_digest: Option<[u8; 32]>,
 }
 impl Parsed<'_> {
     pub(super) fn summary(&self, framed: [u8; 32]) -> Summary {
@@ -172,6 +174,9 @@ impl Parsed<'_> {
                 .map(|bytes| *blake3::hash(bytes).as_bytes()),
             rejoin_payload_digest: self
                 .rejoin_payload
+                .map(|bytes| *blake3::hash(bytes).as_bytes()),
+            review_hold_payload_digest: self
+                .review_hold_payload
                 .map(|bytes| *blake3::hash(bytes).as_bytes()),
         }
     }
@@ -215,6 +220,7 @@ struct SupportedLayout {
     native_registry: Option<u32>,
     shared_history: bool,
     rejoin: bool,
+    review_hold: bool,
 }
 impl SupportedLayout {
     const PENDING_ONLY: Self = Self {
@@ -227,6 +233,7 @@ impl SupportedLayout {
         native_registry: None,
         shared_history: false,
         rejoin: false,
+        review_hold: false,
     };
     const ARCHIVE_BOOTSTRAP: Self = Self {
         archive: true,
@@ -376,7 +383,7 @@ pub(super) fn parse_joined_history_family<'a>(
     domain: &[u8; 32],
     executing: bool,
 ) -> Result<Parsed<'a>, AppError> {
-    parse_joined_archive_family(plain, domain, executing, false)
+    parse_joined_archive_family(plain, domain, executing, false, false)
 }
 
 pub(super) fn parse_native_rejoin_startup<'a>(
@@ -384,7 +391,17 @@ pub(super) fn parse_native_rejoin_startup<'a>(
     domain: &[u8; 32],
     executing: bool,
 ) -> Result<Parsed<'a>, AppError> {
-    parse_joined_archive_family(plain, domain, executing, true)
+    parse_joined_archive_family(plain, domain, executing, true, false)
+}
+
+/// Native startup has handlers for independent ID9 and ID10 layouts.
+/// The two capabilities cannot appear together.
+pub(super) fn parse_native_review_startup<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+    executing: bool,
+) -> Result<Parsed<'a>, AppError> {
+    parse_joined_archive_family(plain, domain, executing, true, true)
 }
 
 fn parse_joined_archive_family<'a>(
@@ -392,6 +409,7 @@ fn parse_joined_archive_family<'a>(
     domain: &[u8; 32],
     executing: bool,
     rejoin: bool,
+    review_hold: bool,
 ) -> Result<Parsed<'a>, AppError> {
     let parsed = parse_known(
         plain,
@@ -400,6 +418,7 @@ fn parse_joined_archive_family<'a>(
             joined_pin: true,
             shared_history: true,
             rejoin,
+            review_hold,
             ..SupportedLayout::GOVERNANCE_LAYOUT
                 .executing(executing)
                 .member_outbox(true)
@@ -407,6 +426,33 @@ fn parse_joined_archive_family<'a>(
         },
     )?;
     if parsed.joined_pin_payload.is_none() || parsed.native_registry_payload.is_none() {
+        return Err(refused());
+    }
+    Ok(parsed)
+}
+
+/// The explicit founder review-storage grammar. It matches the selected
+/// shared-history base and keeps ID9 unsupported. A physical caller must
+/// verify the original founder row and held marker before mounting it.
+pub(super) fn parse_review_hold_family<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+    executing: bool,
+) -> Result<Parsed<'a>, AppError> {
+    let parsed = parse_known(
+        plain,
+        domain,
+        SupportedLayout {
+            joined_pin: true,
+            shared_history: true,
+            review_hold: true,
+            ..SupportedLayout::GOVERNANCE_LAYOUT
+                .executing(executing)
+                .member_outbox(true)
+                .native_registry(Some(3))
+        },
+    )?;
+    if parsed.shared_history_payload.is_none() {
         return Err(refused());
     }
     Ok(parsed)
@@ -598,6 +644,7 @@ fn parse_known<'a>(
             native_registry_version: None,
             shared_history_payload: None,
             rejoin_payload: None,
+            review_hold_payload: None,
         });
     }
     let mut rows = std::array::from_fn(|_| None);
@@ -616,6 +663,7 @@ fn parse_known<'a>(
     let mut native_registry_version = None;
     let mut shared_history_payload = None;
     let mut rejoin_payload = None;
+    let mut review_hold_payload = None;
     for index in 0..envelope.count {
         let entry = envelope.entry(index)?;
         match entry.id {
@@ -754,6 +802,21 @@ fn parse_known<'a>(
                 )?;
                 rejoin_payload = Some(entry.payload);
             }
+            super::review_hold_namespace::ID
+                if layout.review_hold && entry.version == super::review_hold_namespace::VERSION =>
+            {
+                // A2 Pending binds the entire selected ID9 ciphertext.
+                // Never authorize this catalog format alongside it.
+                if rejoin_payload.is_some() {
+                    return Err(refused());
+                }
+                super::review_hold_namespace::verify_descriptor(
+                    entry.payload,
+                    current_layout.ok_or_else(refused)?,
+                    shared_history_payload.ok_or_else(refused)?,
+                )?;
+                review_hold_payload = Some(entry.payload);
+            }
             _ => return Err(refused()),
         }
     }
@@ -777,6 +840,7 @@ fn parse_known<'a>(
         native_registry_version,
         shared_history_payload,
         rejoin_payload,
+        review_hold_payload,
     })
 }
 
@@ -967,6 +1031,7 @@ pub(super) fn successor(current: &Summary, next: &Summary) -> Result<(), AppErro
         || current.joined_pin_payload_digest != next.joined_pin_payload_digest
         || current.shared_history_payload_digest != next.shared_history_payload_digest
         || current.rejoin_payload_digest != next.rejoin_payload_digest
+        || current.review_hold_payload_digest != next.review_hold_payload_digest
     {
         return Err(refused());
     }

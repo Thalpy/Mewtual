@@ -119,7 +119,7 @@ pub(in crate::store::persistence) fn observe(path: &Path) -> Result<Presence, Ap
 }
 
 /// Observe the namespace directory name itself.
-pub(super) fn observe_directory(path: &Path) -> Result<Presence, AppError> {
+pub(in crate::store::persistence) fn observe_directory(path: &Path) -> Result<Presence, AppError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
             Ok(Presence::Present)

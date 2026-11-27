@@ -6014,3 +6014,96 @@ async fn native_runtime_invite_cancelled_or_closed_source_never_returns_prepared
         Err(V2MemberSaveRefusal::Unavailable)
     );
 }
+
+#[tokio::test]
+async fn review_hold_native_open_requires_a_real_founder_and_the_held_marker() {
+    use super::super::super::tests::selected_joined;
+    use crate::store::critical_namespaces::{
+        native_registry::preparation::tests::{current_policy, SECRET},
+        pending_join_codec as grammar, review_hold_namespace as review, Slot,
+    };
+    use crate::store::persistence::governance_layout::joined::review_hold::{
+        DIRECTORY_NAME, MARKER_NAME,
+    };
+    use crate::store::NativeTextJoinedStorage;
+    use rand_core::SeedableRng;
+
+    let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(0x1410);
+    for founder in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let (vault, budget) = selected_joined(root.path());
+        if founder {
+            let (sources, row) = active(&vault, &budget, 0x1411);
+            let mut retirement = sources.prepare_retirement().unwrap();
+            tokio::time::timeout(Duration::from_secs(8), async {
+                while retirement.try_retire().unwrap()
+                    == crate::store::NativeTextSourceRetirementStatus::Pending
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            drop((retirement, row, sources));
+        }
+        drop((vault, budget));
+        let ordinary = NativeTextJoinedStorage::open_for_native_startup(
+            root.path(),
+            SECRET,
+            &mut rng,
+            current_policy(),
+        )
+        .unwrap();
+        let store = ordinary.actual_store_for_test().unwrap();
+        let key = zeroize::Zeroizing::new(store.keys.db_key().unwrap());
+        let domain = store.chat_vault_domain().unwrap();
+        drop(ordinary);
+
+        // Emulate an already selected, authenticated declaration. The
+        // production declaration writer and its power-cut recovery have
+        // independent obligations outside this read-only opener fixture.
+        let current = root.path().join(Slot::Current.name());
+        let raw = std::fs::read(&current).unwrap();
+        let prior = zeroize::Zeroizing::new(
+            catcoms_crypto::unseal(&key, &crate::store::unframe(&raw).unwrap()).unwrap(),
+        );
+        let layout = review::prepare_declaration(&prior, &domain).unwrap();
+        let parsed = grammar::parse_review_hold_family(&layout, &domain, true).unwrap();
+        let marker = review::marker_data(&key, parsed.review_hold_payload.unwrap()).unwrap();
+        let selected = crate::store::frame(&catcoms_crypto::seal(&key, &layout, &mut rng).unwrap());
+        let marker_path = root.path().join(MARKER_NAME);
+        std::fs::write(&current, &selected).unwrap();
+        std::fs::create_dir(root.path().join(DIRECTORY_NAME)).unwrap();
+        assert!(NativeTextJoinedStorage::open_for_native_startup(
+            root.path(),
+            SECRET,
+            &mut rng,
+            current_policy(),
+        )
+        .is_err());
+
+        std::fs::write(&marker_path, marker).unwrap();
+        let mounted = NativeTextJoinedStorage::open_for_native_startup(
+            root.path(),
+            SECRET,
+            &mut rng,
+            current_policy(),
+        );
+        if founder {
+            let mounted = mounted.unwrap();
+            let store = mounted.actual_store_for_test().unwrap();
+            assert!(store.has_mounted_review_hold().unwrap());
+            let parked = marker_path.with_extension("parked");
+            std::fs::rename(&marker_path, &parked).unwrap();
+            std::fs::write(&marker_path, marker).unwrap();
+            assert!(store.has_mounted_review_hold().is_err());
+        } else {
+            assert!(
+                mounted.is_err(),
+                "a catalog and marker cannot create a founder"
+            );
+        }
+        assert_eq!(std::fs::read(&current).unwrap(), selected);
+        assert_eq!(std::fs::read(&marker_path).unwrap(), marker);
+    }
+}

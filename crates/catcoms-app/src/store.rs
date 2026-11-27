@@ -673,6 +673,7 @@ mod persistence {
     /// Chat V2 ordinary-member durable outbox; independent of the founder `v2_text` journal.
     pub(in crate::store) mod v2_member_outbox;
     pub(in crate::store) mod v2_member_transport;
+    mod v2_review_hold;
     pub(in crate::store) mod v2_shared_history;
     pub(in crate::store) mod v2_text;
     pub(in crate::store) use cold_source_read::v2_genesis_activation;
@@ -5796,6 +5797,9 @@ pub struct ServerStore {
     shared_history_mount: std::sync::Mutex<
         Option<persistence::governance_layout::joined::shared_history::SelectedSharedHistory>,
     >,
+    review_hold_mount: std::sync::Mutex<
+        Option<persistence::governance_layout::joined::review_hold::SelectedReviewHold>,
+    >,
     // Namespace5 marker + held member-outbox parent, installed only by the concrete configured
     // handler. Its presence is mount DATA, never a member-source or save permission.
     member_outbox_layout: std::sync::Mutex<
@@ -6052,6 +6056,7 @@ impl ServerStore {
             joined_pin_selection: Default::default(),
             joined_pin_index: Default::default(),
             shared_history_mount: Default::default(),
+            review_hold_mount: Default::default(),
             member_outbox_layout: Default::default(),
             member_outbox_mount: Default::default(),
             current_layout: Default::default(),

@@ -194,6 +194,10 @@ impl Physical {
             .recovered_join_registration_data()
     }
 
+    pub(super) fn has_mounted_review_hold(&self) -> Result<bool, AppError> {
+        self.current()?.checked_store()?.has_mounted_review_hold()
+    }
+
     pub(super) fn recovered_cold_founder(
         &self,
     ) -> Result<Option<network::ColdFounderSelection>, AppError> {

@@ -70,7 +70,7 @@ pub(in crate::store) struct SharedHistoryScope {
 }
 
 impl SharedHistoryScope {
-    fn id(&self) -> [u8; 32] {
+    pub(in crate::store::persistence) fn id(&self) -> [u8; 32] {
         let mut hash = blake3::Hasher::new_derive_key(SCOPE_DOMAIN);
         hash.update(&self.vault);
         hash.update(&self.group);

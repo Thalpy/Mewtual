@@ -228,16 +228,20 @@ impl NativeTextJoinedStorage {
         rng: &mut impl CryptoRngCore,
         current: crate::store::V2CurrentLayoutPolicy,
     ) -> Result<Self, AppError> {
+        let index = upgrade_source::owning::Store::open_native_startup(
+            directory,
+            secret,
+            rng,
+            current,
+            Self::opening_policy()?,
+        )?;
+        // A catalog cannot turn an empty or joined registry into a founder.
+        // The original saved row, pinned source and reservation must agree.
+        index.require_review_hold_founder()?;
         Ok(Self {
             pending: None,
             recovered_tcp: None,
-            index: upgrade_source::owning::Store::open_native_startup(
-                directory,
-                secret,
-                rng,
-                current,
-                Self::opening_policy()?,
-            )?,
+            index,
         })
     }
 

@@ -115,7 +115,10 @@ impl ServerStore {
         opened.validate_original(self)?;
         let key = Zeroizing::new(self.keys.db_key()?);
         let plain = Zeroizing::new(unseal(&key, &unframe(&declaration.prepared.candidate)?)?);
-        let (layout, descriptor) = self.parse_joined_catalog_descriptors(&plain)?;
+        let (layout, descriptor, review) = self.parse_joined_catalog_descriptors(&plain)?;
+        if review.is_some() {
+            return Err(denied());
+        }
         let descriptor = descriptor.ok_or_else(denied)?;
         let mounted = SelectedSharedHistory::capture(self, descriptor, layout, &key)?;
         let expected_marker = declaration.marker.as_ref().ok_or_else(denied)?;
@@ -347,7 +350,7 @@ impl ServerStore {
         })
     }
 
-    fn with_selected_shared_history<T>(
+    pub(super) fn with_selected_shared_history<T>(
         &self,
         scope: SharedHistoryScope,
         local_ancestor: Option<ActionId>,

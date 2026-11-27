@@ -186,6 +186,7 @@ fn summary(
         native_registry_payload_digest: None,
         shared_history_payload_digest: None,
         rejoin_payload_digest: None,
+        review_hold_payload_digest: None,
     }
 }
 fn original_metadata(n: u8, active: bool) -> codec::Metadata {

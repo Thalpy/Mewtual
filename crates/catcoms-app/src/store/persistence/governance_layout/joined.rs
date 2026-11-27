@@ -25,6 +25,7 @@ pub(in crate::store) enum JoinedPinOpening {
 }
 mod pending;
 pub(in crate::store) mod rejoin;
+pub(in crate::store) mod review_hold;
 pub(in crate::store) mod shared_history;
 pub(in crate::store) use pending::{
     AcceptedFirstJoin, AcceptedJoinTransport, JoinedPendingIo, JoinedRegistrationDependency,
@@ -69,6 +70,7 @@ pub(in crate::store) struct ColdJoinedSelection {
     original_leaves: Option<(OpenedArchiveObject, VerifiedGovernanceNative)>,
     index: SelectedPinIndex,
     shared_history: Option<shared_history::SelectedSharedHistory>,
+    review_hold: Option<review_hold::SelectedReviewHold>,
     _fee: CatalogReadReservation,
 }
 
@@ -181,6 +183,9 @@ impl ColdJoinedSelection {
         if let Some(shared) = &self.shared_history {
             shared.require(store)?;
         }
+        if let Some(review) = &self.review_hold {
+            review.require(store)?;
+        }
         if let Some(((marker, bytes), native)) = &self.original_leaves {
             native.require(store)?;
             exact_held(
@@ -271,20 +276,27 @@ impl ServerStore {
         let key = Zeroizing::new(self.keys.db_key()?);
         let directory = inventory.directory;
         let opening = self.shared_history_opening();
-        let shared_history = if opening != Opening::Disabled
+        let (shared_history, review_hold) = if opening != Opening::Disabled
             && inventory.seed.is_none()
             && inventory.stage.is_none()
         {
             let plain = Zeroizing::new(unseal(&key, &unframe(&raw)?)?);
-            let (layout, descriptor) = self.parse_joined_catalog_descriptors(&plain)?;
-            descriptor
+            let (layout, descriptor, review) = self.parse_joined_catalog_descriptors(&plain)?;
+            let history = descriptor
                 .map(|descriptor| {
                     shared_history::SelectedSharedHistory::capture(self, descriptor, layout, &key)
                 })
-                .transpose()?
+                .transpose()?;
+            let review = review
+                .map(|descriptor| review_hold::SelectedReviewHold::capture(self, &key, descriptor))
+                .transpose()?;
+            (history, review)
         } else {
-            None
+            (None, None)
         };
+        if review_hold.is_none() {
+            review_hold::require_absent(self)?;
+        }
         if shared_history.is_none() {
             if opening == Opening::Required {
                 return Err(denied());
@@ -485,6 +497,9 @@ impl ServerStore {
             };
             (current, raw, None, index)
         };
+        if review_hold.is_some() && (!index.index.is_empty() || index.pending.is_some()) {
+            return Err(denied());
+        }
         let value = ColdJoinedSelection {
             current,
             bytes,
@@ -492,6 +507,7 @@ impl ServerStore {
             original_leaves,
             index,
             shared_history,
+            review_hold,
             _fee: fee,
         };
         value.require(self)?;
@@ -601,12 +617,22 @@ impl ServerStore {
         selected.index.require(self)?;
         let mut index = self.joined_pin_index.lock().map_err(|_| denied())?;
         let mut shared = self.shared_history_mount.lock().map_err(|_| denied())?;
-        if index.is_some() || shared.is_some() {
+        let mut review = self.review_hold_mount.lock().map_err(|_| denied())?;
+        if index.is_some() || shared.is_some() || review.is_some() {
             return Err(denied());
         }
+        *review = selected.review_hold;
         *shared = selected.shared_history;
         *index = Some(selected.index);
         Ok(())
+    }
+
+    pub(in crate::store) fn has_mounted_review_hold(&self) -> Result<bool, AppError> {
+        let review = self.review_hold_mount.try_lock().map_err(|_| denied())?;
+        if let Some(owner) = review.as_ref() {
+            owner.require(self)?;
+        }
+        Ok(review.is_some())
     }
 
     pub(in crate::store) fn require_mounted_shared_history(&self) -> Result<(), AppError> {

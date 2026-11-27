@@ -77,7 +77,7 @@ impl NativeRegistryHandler {
             .lifecycle()
             .is_some_and(|handler| handler.accepts_rejoin_startup())
         {
-            return grammar::parse_native_rejoin_startup(plain, domain, executing);
+            return grammar::parse_native_review_startup(plain, domain, executing);
         }
         match self.shared_history_opening() {
             Opening::Optional => {

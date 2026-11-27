@@ -396,3 +396,46 @@ fn shared_history_seed_retains_exact_catalogs_marker_and_pin_index() {
     .is_err());
     assert!(history::validate_marker(&key, layout, b"foreign descriptor", opened.marker).is_err());
 }
+
+#[test]
+fn review_hold_namespace_preserves_the_exact_base_and_refuses_id9() {
+    use crate::store::critical_namespaces::{
+        rejoin_namespace as rejoin, review_hold_namespace as review,
+        shared_history_namespace as history,
+    };
+    let (joined, _) = joined_catalog();
+    assert!(review::prepare_declaration(&joined, &VAULT).is_err());
+    let prior = history::prepare_declaration(&joined, &VAULT).unwrap();
+    let candidate = review::prepare_declaration(&prior, &VAULT).unwrap();
+    review::verify_declaration(&prior, &candidate, &VAULT).unwrap();
+    assert!(grammar::parse_native_rejoin_startup(&candidate, &VAULT, true).is_err());
+    assert!(review::prepare_declaration(&candidate, &VAULT).is_err());
+    assert!(review::verify_declaration(&prior, &candidate, &[0x93; 32]).is_err());
+    assert!(review::verify_declaration(&joined, &candidate, &VAULT).is_err());
+
+    let parsed = grammar::parse_review_hold_family(&candidate, &VAULT, true).unwrap();
+    let descriptor = parsed.review_hold_payload.unwrap();
+    let marker = review::marker_data(&[1; 32], descriptor).unwrap();
+    assert_ne!(marker, review::marker_data(&[2; 32], descriptor).unwrap());
+    assert!(review::marker_data(&[1; 32], &descriptor[..31]).is_err());
+    let a2 = rejoin::prepare_declaration(&prior, &VAULT).unwrap();
+    assert!(review::prepare_declaration(&a2, &VAULT).is_err());
+    let mixed = catalog_declaration::insert_entry_data(
+        &a2,
+        &VAULT,
+        review::ID,
+        review::VERSION,
+        descriptor,
+    )
+    .unwrap();
+    assert!(grammar::parse_review_hold_family(&mixed, &VAULT, true).is_err());
+
+    let mut changed = descriptor.to_vec();
+    changed[0] ^= 1;
+    for (version, bytes) in [(2, descriptor), (review::VERSION, changed.as_slice())] {
+        let malformed =
+            catalog_declaration::insert_entry_data(&prior, &VAULT, review::ID, version, bytes)
+                .unwrap();
+        assert!(review::verify_declaration(&prior, &malformed, &VAULT).is_err());
+    }
+}
