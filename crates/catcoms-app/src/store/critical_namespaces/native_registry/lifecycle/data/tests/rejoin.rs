@@ -102,6 +102,10 @@ fn same_vault_rejoin_index_rejects_foreign_or_resurrected_memberships() {
     a2.rows[0].name.push('!');
     assert!(require_rejoin_successor(&a1, &a2, frame, &proof).is_err());
     a2.rows[0].name.pop();
+    let index = a2.rows.len() - 1;
+    a2.rows[index].is_dm = !a2.rows[index].is_dm;
+    assert!(require_rejoin_successor(&a1, &a2, frame, &proof).is_err());
+    a2.rows[index].is_dm = !a2.rows[index].is_dm;
 
     let Backend::Joined { binding, .. } = &mut a2.rows.last_mut().unwrap().backend else {
         unreachable!();

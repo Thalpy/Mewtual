@@ -1731,6 +1731,11 @@ async fn native_text_rejoin_prefix_matches_the_closed_replacement_and_reopens_ex
     native_text_membership_removal_reopen(MembershipAfterRemove::RejoinPrefix).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_rejoin_index_recovers_saved_invite_and_preserves_original_membership() {
+    native_text_membership_removal_reopen(MembershipAfterRemove::RejoinIndex).await;
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MembershipAfterRemove {
     Retired,
@@ -1740,6 +1745,7 @@ enum MembershipAfterRemove {
     RejoinReceived,
     RejoinWelcome,
     RejoinPrefix,
+    RejoinIndex,
 }
 
 async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) {
@@ -2352,6 +2358,7 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
                 | MembershipAfterRemove::RejoinReceived
                 | MembershipAfterRemove::RejoinWelcome
                 | MembershipAfterRemove::RejoinPrefix
+                | MembershipAfterRemove::RejoinIndex
         ) {
             let admit = |owner: &catcoms_app::store::NativeTextRemovedJoinedVault, generation| {
                 let mut prepared = owner
@@ -2451,7 +2458,9 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
                 );
                 let welcome = if matches!(
                     scenario,
-                    MembershipAfterRemove::RejoinWelcome | MembershipAfterRemove::RejoinPrefix
+                    MembershipAfterRemove::RejoinWelcome
+                        | MembershipAfterRemove::RejoinPrefix
+                        | MembershipAfterRemove::RejoinIndex
                 ) {
                     let NativeTextRejoinWelcomeStatus::Covered(result) = reopened
                         .cover_rejoin_welcome(&local_ui, invitation, &caller, &mut OsCryptoRng)
@@ -2474,7 +2483,10 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
                 };
                 let prefix_path =
                     member_path.join("chat-critical-namespaces.rejoin-initial-prefix.bin");
-                let covered_prefix = if scenario == MembershipAfterRemove::RejoinPrefix {
+                let covered_prefix = if matches!(
+                    scenario,
+                    MembershipAfterRemove::RejoinPrefix | MembershipAfterRemove::RejoinIndex,
+                ) {
                     let result = reopened
                         .cover_rejoin_prefix(&local_ui, invitation, &caller, &mut OsCryptoRng)
                         .unwrap()
@@ -2502,6 +2514,42 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
                 } else {
                     None
                 };
+                let index_path =
+                    member_path.join("chat-critical-namespaces.rejoin-native-index.bin");
+                let covered_index = if scenario == MembershipAfterRemove::RejoinIndex {
+                    let installed = reopened
+                        .cover_rejoin_index(&local_ui, invitation, &caller, &mut OsCryptoRng)
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(
+                        installed.prefix_fingerprint,
+                        covered_prefix.as_ref().unwrap().0.history_fingerprint,
+                    );
+                    let retired_id = joined["server"]
+                        .as_u64()
+                        .or_else(|| joined["server"].as_str()?.parse().ok())
+                        .expect("the original join returns a numeric native row");
+                    assert!(installed.row.id > retired_id);
+                    let raw = std::fs::read(&index_path).unwrap();
+                    let held = index_path.with_extension("held-index-for-test");
+                    std::fs::rename(&index_path, &held).unwrap();
+                    std::fs::write(&index_path, &raw).unwrap();
+                    assert!(reopened
+                        .cover_rejoin_index(&local_ui, invitation, &caller, &mut NeverRng)
+                        .is_err());
+                    std::fs::remove_file(&index_path).unwrap();
+                    std::fs::rename(&held, &index_path).unwrap();
+                    assert_eq!(
+                        reopened
+                            .cover_rejoin_index(&local_ui, invitation, &caller, &mut NeverRng)
+                            .unwrap(),
+                        Some(installed),
+                    );
+                    assert_eq!(reopened.removal_data().unwrap(), Some(proof));
+                    Some((installed, raw))
+                } else {
+                    None
+                };
                 drop((local_ui, ui, candidate, reopened));
                 wait_for_original_vault().await;
 
@@ -2518,6 +2566,40 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
                     .finish()
                     .unwrap();
                 let ui = cold.admit_rejoin_ui(&mut capture).unwrap();
+                if let Some((expected, raw)) = covered_index {
+                    let half = &raw[..raw.len() / 2];
+                    std::fs::write(&index_path, half).unwrap();
+                    assert!(cold
+                        .recover_rejoin_index(&ui, &caller, &mut NeverRng)
+                        .is_err());
+                    assert_eq!(std::fs::read(&index_path).unwrap(), half);
+                    std::fs::write(&index_path, &raw).unwrap();
+
+                    let prefix = prefix_path.with_extension("held-prefix-for-test");
+                    std::fs::rename(&prefix_path, &prefix).unwrap();
+                    assert!(cold
+                        .recover_rejoin_index(&ui, &caller, &mut NeverRng)
+                        .is_err());
+                    assert!(!prefix_path.exists());
+                    assert_eq!(std::fs::read(&index_path).unwrap(), raw);
+                    std::fs::rename(&prefix, &prefix_path).unwrap();
+
+                    assert_eq!(
+                        cold.recover_rejoin_index(&ui, &caller, &mut NeverRng)
+                            .unwrap(),
+                        Some(expected),
+                    );
+                    assert_eq!(
+                        cold.recover_rejoin_index(&ui, &caller, &mut NeverRng)
+                            .unwrap(),
+                        Some(expected),
+                    );
+                    assert_eq!(cold.removal_data().unwrap(), Some(proof));
+                    assert_eq!(std::fs::read(&index_path).unwrap(), raw);
+                    drop((ui, capture, cold));
+                    wait_for_original_vault().await;
+                    return;
+                }
                 let replay = cold
                     .cover_rejoin_pending(
                         &ui,

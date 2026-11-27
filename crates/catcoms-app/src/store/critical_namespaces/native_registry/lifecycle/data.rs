@@ -500,7 +500,6 @@ impl Index {
     }
 }
 
-#[cfg(test)]
-mod rejoin;
+pub(super) mod rejoin;
 #[cfg(test)]
 mod tests;

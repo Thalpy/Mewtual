@@ -6,8 +6,10 @@ use catcoms_rt::RequestCancellation;
 use catcoms_sync::{RecoveredV2JoinedOutcome, SealedV2JoinedOutcome, V2JoinDeliveryData};
 
 mod prefix;
-pub use prefix::NativeTextRejoinPrefixReceipt;
-pub(in crate::store) use prefix::{RejoinPrefixInputs, RejoinPrefixOwner};
+pub use prefix::{NativeTextRejoinIndexReceipt, NativeTextRejoinPrefixReceipt};
+pub(in crate::store) use prefix::{
+    RejoinIndexInputs, RejoinIndexOwner, RejoinIndexRecovery, RejoinPrefixInputs, RejoinPrefixOwner,
+};
 
 const SDK_ATTEMPT: &str = "chat-critical-namespaces.rejoin-welcome-attempt.bin";
 const OUTCOME: &str = "chat-critical-namespaces.rejoin-outcome.bin";

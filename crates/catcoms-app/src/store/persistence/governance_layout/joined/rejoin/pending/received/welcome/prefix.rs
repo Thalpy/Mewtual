@@ -6,6 +6,10 @@ use catcoms_replication::chat::{
     cold_selected_history::MAX_SELECTED_HISTORY_NODE_PAGE_BYTES, V2HostSelectionExpectation,
 };
 
+mod index;
+pub use index::NativeTextRejoinIndexReceipt;
+pub(in crate::store) use index::{RejoinIndexInputs, RejoinIndexOwner, RejoinIndexRecovery};
+
 const PREFIX: &str = "chat-critical-namespaces.rejoin-initial-prefix.bin";
 const PREFIX_TAG: &str = "catcoms/chat-v2/rejoin-initial-prefix/v1";
 const MAX_PREFIX: usize = 40 + 2 + 3 * 36 + 8 + 4 + MAX_SELECTED_HISTORY_NODE_PAGE_BYTES;
@@ -20,7 +24,8 @@ pub struct NativeTextRejoinPrefixReceipt {
 catcoms_rt::redacted_debug! { NativeTextRejoinPrefixReceipt; }
 
 pub(super) fn require_unstarted(store: &ServerStore) -> Result<(), AppError> {
-    absent(&fixed(store, false, PREFIX)?)
+    absent(&fixed(store, false, PREFIX)?)?;
+    index::require_unstarted(store)
 }
 
 pub(in crate::store) struct RejoinPrefixOwner {
@@ -67,6 +72,25 @@ impl ServerStore {
         (pending, received, welcome, slot): RejoinPrefixInputs<'_>,
         (invite, token): (&NativeTextInvitePacketData<'_>, [u8; 32]),
         rng: &mut impl CryptoRngCore,
+        require_current: impl Fn() -> Result<(), AppError>,
+    ) -> Result<NativeTextRejoinPrefixReceipt, AppError> {
+        self.select_rejoin_prefix(
+            inventory,
+            (registration, removal),
+            (pending, received, welcome, slot),
+            (invite, token),
+            Some(rng),
+            require_current,
+        )
+    }
+
+    fn select_rejoin_prefix(
+        &self,
+        inventory: &UpgradeInventory,
+        (registration, removal): (NativeTextJoinedRegistrationData, SelectedRejoinRemoval),
+        (pending, received, welcome, slot): RejoinPrefixInputs<'_>,
+        (invite, token): (&NativeTextInvitePacketData<'_>, [u8; 32]),
+        rng: Option<&mut impl CryptoRngCore>,
         require_current: impl Fn() -> Result<(), AppError>,
     ) -> Result<NativeTextRejoinPrefixReceipt, AppError> {
         require_current()?;
@@ -152,6 +176,14 @@ impl ServerStore {
         let bind = *hash.finalize().as_bytes();
         if slot.is_none() {
             let fee = pool.try_reserve(PREFIX_WORK)?;
+            // A cold missing parent cannot be regenerated under a chosen
+            // registry successor, even if the signed history could be replayed.
+            if read(&prefix_path, MAX_PREFIX)?.is_none() {
+                if rng.is_none() {
+                    return Err(denied());
+                }
+                index::require_unstarted(self)?;
+            }
             let core = if let Some(warm) = welcome.warm.as_mut() {
                 JoinedCore::prepare(self, &registration.group, delivery, |view, origin| {
                     warm.request
@@ -190,6 +222,7 @@ impl ServerStore {
         if !pending.matches_cookie(&prefix.pending_cookie) || prefix.bind != bind {
             return Err(denied());
         }
+        let existing_only = rng.is_none();
         if prefix.frame.is_none() {
             let history = prefix.core.encode_initial_history(&binding.context.vault)?;
             let expected =
@@ -201,13 +234,19 @@ impl ServerStore {
                 JournalFrame::selected(original)
             } else {
                 require()?;
+                // A registry record without its original prefix is ambiguous.
+                index::require_unstarted(self)?;
                 absent(&prefix_path)?;
+                let rng = rng.ok_or_else(denied)?;
                 JournalFrame::staged(seal_frame(&key, PREFIX_TAG, &expected, rng)?)
             };
             prefix.frame = Some(original);
         }
         let frame = prefix.frame.as_mut().ok_or_else(denied)?;
         require()?;
+        if existing_only {
+            frame.require(&prefix_path)?;
+        }
         frame.cover(&prefix_path)?;
         inventory.sync_rejoin_catalog_parent(self)?;
         require()?;

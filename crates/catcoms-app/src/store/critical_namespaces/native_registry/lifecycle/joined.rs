@@ -73,7 +73,7 @@ impl Register {
     }
 }
 
-fn binding(
+pub(super) fn binding(
     original: NativeTextJoinedRegistrationData,
     display: Option<String>,
 ) -> ([u8; 32], Backend) {
